@@ -64,7 +64,7 @@ class Config:
     max_actions_per_tick: int = 3
     implement_test_retries: int = 1
     agent_timeout_seconds: int = 3600
-    test_timeout_seconds: int = 1800
+    test_timeout_seconds: int = 3600
     blocked_labels: tuple = ('bloccata',)
     priority_labels: tuple = ('prerequisito',)
     protected_paths: tuple = ('.github/',)

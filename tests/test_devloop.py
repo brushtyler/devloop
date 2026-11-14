@@ -1118,6 +1118,28 @@ class CredentialIsolationTests(unittest.TestCase):
         self.assertEqual(env['GIT_CONFIG_COUNT'], '2')
         self.assertEqual({(env[f'GIT_CONFIG_KEY_{i}'], env[f'GIT_CONFIG_VALUE_{i}']) for i in (0, 1)},
                          {('credential.helper', ''), ('http.extraHeader', '')})
+        self.assertEqual(env['DEVLOOP_APP_KEY_DIR'], '/state/gh/no-app-keys')
+
+    def test_agents_find_no_github_app_key(self):
+        # AGENTS.md tells interactive agents to publish with scripts/agent-token.py; agents that
+        # devloop launches must not, since the dispatcher does every GitHub write. The keys sit
+        # where the config says, readable by the same system user.
+        import tomllib
+        data = tomllib.loads(config.DEFAULT_CONFIG.read_text())
+        with tempfile.TemporaryDirectory() as tmp:
+            key = Path(tmp) / 'x-agent.2026-11-14.private-key.pem'
+            key.write_text('key')
+            key.chmod(0o600)
+            cfg = config.parse_config(dict(data, apps={'key_dir': tmp,
+                                                       'claude': {'app_id': 1, 'slug': 'x-agent'}}))
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop('DEVLOOP_APP_KEY_DIR', None)
+                self.assertEqual(apps.Identities.from_config(cfg).apps['claude'].login,
+                                 'x-agent[bot]')
+                env = agents.isolated_env(Path(tmp) / 'gh', dict(os.environ))
+            with mock.patch.dict(os.environ, env, clear=True), \
+                    self.assertRaisesRegex(FileNotFoundError, 'no private key for x-agent'):
+                apps.Identities.from_config(cfg)
 
     def test_isolated_git_cannot_reach_a_remote_or_ask_for_credentials(self):
         # Codex review of #70: an askpass inherited from an IDE answered for git, and a
