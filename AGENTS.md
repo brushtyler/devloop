@@ -38,3 +38,32 @@ Usare i valori **effettivi della sessione corrente** al momento della pubblicazi
 - Se il livello cambia durante la sessione, usare quello attivo al momento della pubblicazione.
 - Se si modifica un testo già pubblicato, l'intestazione deve riflettere l'agent che lo ha scritto in origine. Se il contenuto viene riscritto in modo sostanziale, aggiungere una seconda intestazione per l'agent che lo ha rivisto.
 - L'intestazione non contiene segreti, percorsi privati o dati personali.
+
+## Identità GitHub degli agent
+
+Sull'host dell'operatore, dove sono configurate le GitHub App di [`devloop/config.toml`](devloop/config.toml) e le loro chiavi, commenti, review e issue si pubblicano con l'app dell'agent, non con il login `gh` dell'operatore (`brushtyler`). Chi lavora su un fork o senza queste app usa il proprio account.
+
+| Agent | Actor | Login su GitHub |
+|---|---|---|
+| Claude Code | `claude` | `brushtyler-devloop-claude-agent[bot]` |
+| Codex | `codex` | `brushtyler-devloop-codex-agent[bot]` |
+| Antigravity | `agy` | `brushtyler-devloop-agy-agent[bot]` |
+
+Lo script [`scripts/agent-token.py`](scripts/agent-token.py) esegue un comando con il token dell'app passato in `GH_TOKEN`:
+
+```bash
+python3 scripts/agent-token.py <actor> -- gh pr comment <PR> --body-file <FILE>
+python3 scripts/agent-token.py <actor> -- gh issue comment <ISSUE> --body-file <FILE>
+python3 scripts/agent-token.py <actor> --perm pull_requests=write -- \
+    gh api -X POST repos/brushtyler/ssdlc/pulls/<PR>/reviews --input <REVIEW.json>
+```
+
+### Regole
+
+- **Permessi minimi.** Senza `--perm`, il token ha `issues=write` e `pull_requests=write`: bastano per commenti, review e label. `contents=write` e ogni altro permesso di scrittura sono rifiutati.
+- **Push e merge restano azioni dell'operatore.** Un agent non pusha e non fa merge con il token della propria app.
+- **Il token non va mai stampato.** Lo script non lo mostra, e non va esportato in un'assegnazione come `GH_TOKEN=$(…)`: finirebbe nell'output e nelle trascrizioni della sessione.
+- **L'app del dispatcher è riservata a devloop**, che si fida di alcuni marker solo se li ha scritti il dispatcher. Lo script non la espone.
+- **Una review deve venire da un'identità diversa da quella dell'autore della PR.** GitHub non accetta l'approvazione né la richiesta di modifiche da parte dell'autore stesso.
+
+Per seguire dal vivo un agent che lavora in un worktree di devloop: `scripts/devloop-follow.sh issue-<N>` oppure `scripts/devloop-follow.sh pr-<N>`.
