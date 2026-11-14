@@ -44,6 +44,8 @@ class ReviewFixTests(unittest.TestCase):
             repair = json.loads(prompt.split('\nREPAIR CONTEXT:\n')[1])
             excerpts = [c.get('log_excerpt', '') for row in repair['history'] for c in row['checks']]
             self.assertNotIn('successful check output', ''.join(excerpts))
+            self.assertTrue(any(excerpts))
+            excerpts += [c.get('log_excerpt', '') for c in repair['checks']]
             self.assertLessEqual(sum(map(len, excerpts)), 24000)
 
     def test_clean_native_worktree_before_journal_initialization_can_resume(self):

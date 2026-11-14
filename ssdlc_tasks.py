@@ -1494,6 +1494,11 @@ class TaskScheduler:
             result['candidate_proof'] = references
         if history:
             result.update(history[-1])
+            if corrective is None:
+                # Keep cumulative excerpts once, in history. Repeating the last
+                # log in the latest-check summary would double its prompt debit.
+                result['checks'] = [{k: v for k, v in check.items() if k != 'log_excerpt'}
+                                    for check in history[-1]['checks']]
         for key, pattern in (('txn_id', r'[A-Za-z0-9_-]{1,64}'),
                              ('phase', r'code_review|qa|appsec'),
                              ('reviewed_commit', r'[a-f0-9]{40,64}')):
