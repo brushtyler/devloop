@@ -71,8 +71,10 @@ class CompatibilityTests(RepositoryTests):
             args = dict(repo=str(self.repo), ticket='OLD', goal='g', tier='L')
             for method in (supervisor.start, supervisor.resume):
                 result = method(args)
-                self.assertEqual(result['status_reason'], 'legacy_not_executable')
-                self.assertEqual(supervisor.exit_code(result), 23)
+                self.assertEqual(result['status_reason'],
+                                 'initialization_not_ready' if self.state.get('task_engine_v1') else 'legacy_not_executable')
+                self.assertEqual(supervisor.exit_code(result),
+                                 14 if self.state.get('task_engine_v1') else 23)
                 self.assertEqual(before, self.snapshot())
 
     def test_schema_invalid_registered_inputs_are_refused_before_mutation(self):

@@ -28,6 +28,15 @@ from ssdlc_catalogues import CatalogueError, heading_anchors, requirement_catalo
 SCHEMA_DIR = Path(__file__).resolve().parent / 'schemas'
 PROTECTED = {'.git', '.ssdlc', '.agents', '.codex', '.aws'}
 
+CORRECTIVE_PROTECTED_NAMES = {'ssdlc_controller.py', 'ssdlc_gate_reports.py', 'ssdlc_quality.py',
+                              'quality-contract.json', 'orchestrator.py', 'ssdlc_gate_protocol.py',
+                              'ssdlc_candidates.py'}
+
+
+def _corrective_protected_path(name):
+    return (Path(name).name in CORRECTIVE_PROTECTED_NAMES
+            or name.startswith('scripts/gate') or 'quality-contract' in name)
+
 
 class TaskError(RuntimeError):
     """An execution or recovery condition requiring explicit handling."""
@@ -120,7 +129,7 @@ def file_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def redact_sensitive(value):
+def redact_sensitive(value, *, credentials=True):
     """Share deterministic redaction across prompt and console boundaries."""
     secrets = sorted({v for k, v in os.environ.items()
                       if re.search(r'KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL', k, re.I)
@@ -130,14 +139,16 @@ def redact_sensitive(value):
                       '[REDACTED]', text, flags=re.S)
         for secret in secrets:
             text = text.replace(secret, '[REDACTED]')
-        return re.sub(r'(?<![A-Za-z0-9])(?:sk-[A-Za-z0-9_-]+|ghp_[A-Za-z0-9]+|AKIA[A-Z0-9]+|Bearer\s+[A-Za-z0-9._~+/-]+=*)',
-                      '[REDACTED]', text, flags=re.I)
+        if not credentials:
+            return text
+        return re.sub(r'(?<![A-Za-z0-9_])(?:sk-[A-Za-z0-9_-]{20,}|(?:ghp_|ghs_|gho_|ghu_|ghr_|github_pat_)[A-Za-z0-9_]{20,}|AKIA[A-Z0-9]{16}|Bearer\s+[A-Za-z0-9._~+/-]{20,}=*)(?![A-Za-z0-9_])',
+                      '[REDACTED]', text)
     if isinstance(value, str):
         return scrub(value)
     if isinstance(value, list):
-        return [redact_sensitive(v) for v in value]
+        return [redact_sensitive(v, credentials=credentials) for v in value]
     if isinstance(value, dict):
-        return {scrub(k): redact_sensitive(v) for k, v in value.items()}
+        return {scrub(k): redact_sensitive(v, credentials=credentials) for k, v in value.items()}
     return value
 
 
@@ -1430,7 +1441,8 @@ class TaskScheduler:
         check_ids.update(c['check_id'] for t in self.plan['tasks']
                          for c in t.get('verification', {}).get('checks', []))
         history = []
-        for failure in failures:
+        excerpt_budget = 24000
+        for failure in reversed(failures):
             checks = []
             for check in failure.get('checks', []):
                 if (check.get('check_id') not in check_ids
@@ -1460,7 +1472,10 @@ class TaskScheduler:
                     path = confined(self.directory, ref, protect=False)
                     if not path.is_file() or file_hash(path) != item['sha256']:
                         raise TaskError('Repair verification evidence changed or disappeared')
-                    item['log_excerpt'] = self._scrub_prompt(path.read_text())[:2000]
+                    if check['exit_code'] or check['empty_suite']:
+                        limit = min(2000 if corrective is not None else 6000, excerpt_budget)
+                        item['log_excerpt'] = diagnostic_excerpt(path.read_text(), limit)
+                        excerpt_budget -= len(item['log_excerpt'])
                 checks.append(item)
             omitted += len(set(failure) - {'attempt', 'category', 'checks'})
             history.append(dict(attempt=failure['attempt'], category='CHECK_FAILURE', checks=checks))
@@ -1473,6 +1488,7 @@ class TaskScheduler:
                             ('record_ref', 'record_sha256', 'log_ref', 'log_sha256'))):
                 references.append({key: proof[key] for key in
                     ('check_id', 'record_ref', 'record_sha256', 'log_ref', 'log_sha256')})
+        history.reverse()
         result = dict(findings=findings, history=history, omitted_count=omitted)
         if references:
             result['candidate_proof'] = references
@@ -1641,9 +1657,9 @@ class TaskScheduler:
     def _developer_prompt(self, task, record, corrective=None):
         repair = self._repair_context(record, corrective, task=task)
         encoded = json.dumps(repair, indent=2)
-        if len(encoded) > 12000:
+        if corrective is not None and len(encoded) > 12000:
             raise TaskError("Corrective context exceeds 12000 characters")
-        return self._scrub_prompt(('Implement only this task, reusing project conventions. Do not commit, change Git metadata, '
+        return redact_sensitive(('Implement only this task, reusing project conventions. Do not commit, change Git metadata, '
                   'or modify protected SSDLC artifacts. Stay within target_files. '
                   'Finish all source and test edits before starting verification. Do not edit files while '
                   'a test command is running; the suite checks controller integrity and concurrent edits invalidate it. '
@@ -1660,11 +1676,17 @@ class TaskScheduler:
                   + json.dumps(self.quality, indent=2) + '\nAPPROVED CONTEXT:\n'
                   + json.dumps(self.context, indent=2) + '\nDEPENDENCY CHECKPOINTS:\n'
                   + json.dumps({dep: self.state['tasks'][dep]['commit'] for dep in task['depends_on']})
-                  + '\nREPAIR CONTEXT:\n' + encoded))
+                  + '\nREPAIR CONTEXT:\n' + encoded), credentials=False)
 
     @staticmethod
     def _assert_prompt_bound(prompt):
         context = prompt.split('\nREPAIR CONTEXT:\n', 1)[-1]
+        try:
+            ordinary = 'txn_id' not in (json.loads(context) or {})
+        except (ValueError, TypeError):
+            ordinary = False
+        if ordinary:
+            return
         if len(context) > 12000:
             raise TaskError('Corrective context exceeds 12000 characters')
         assert len(context) <= 12000
@@ -1795,6 +1817,10 @@ class TaskScheduler:
         self._assert_tree()
         if self._protected() != record['protected_snapshot'] or self._ignored() != self.state['ignored_paths']:
             raise TaskError('Authoritative source metadata changed before candidate adoption')
+        if record.get('repairs') and (
+                set(receipt['issues']) & {'protected_path', 'protected_metadata'}
+                or any(_corrective_protected_path(name) for name in receipt['entries'])):
+            raise DevelopmentBlocked('PROTECTED_PATH', 'Captured corrective candidate modifies protected paths')
         if receipt['issues'] == ['scope_required']:
             raise DevelopmentBlocked('SCOPE_REQUIRED', 'scope_required: captured candidate exceeds the approved manifest')
         store.adopt(self.wt, receipt, self._changed())
@@ -1888,12 +1914,8 @@ class TaskScheduler:
         record['producer'] = {k: v for k, v in result.items() if k != 'output'}
         self._assert_tree()
         changed = self._changed()
-        forbidden = {'ssdlc_controller.py', 'ssdlc_gate_reports.py', 'ssdlc_quality.py',
-                     'quality-contract.json', 'orchestrator.py', 'ssdlc_gate_protocol.py',
-                     'ssdlc_candidates.py'}
-        protected_change = (self._protected() != record['protected_snapshot'] or any(
-            Path(name).name in forbidden or name.startswith('scripts/gate')
-            or 'quality-contract' in name for name in changed))
+        protected_change = (self._protected() != record['protected_snapshot'] or
+                            any(_corrective_protected_path(name) for name in changed))
         scope_change = (not set(changed) <= set(task['target_files'])
                         or developer_blocker(result['output']) == 'SCOPE_REQUIRED')
         if strict_scope and (protected_change or scope_change):
@@ -2217,6 +2239,8 @@ class TaskScheduler:
                         if exc.category in ('LIMIT_REACHED', 'OUTCOME_UNCERTAIN', 'GIT_LOCK_UNOWNED'):
                             raise
                         step('REPAIR_BLOCKED', root=tid, category=exc.category)
+                        if exc.category == 'PROTECTED_PATH':
+                            raise TaskError('protected_path_modified') from exc
                         if exc.category == 'SCOPE_REQUIRED':
                             raise TaskError('scope_changed') from exc
                         raise TaskError('repair_failed') from exc
@@ -2259,6 +2283,9 @@ class TaskScheduler:
             repair = self._repair_context(record)
             if record.get('failed_attempts', [])[record.get('failed_floor', 0):]:
                 self._restore_candidate(task, record)
+            prompt = self._developer_prompt(task, record, corrective)
+            if corrective is not None:
+                self._assert_prompt_bound(prompt)
             record['attempts'] += 1
             attempt = record['attempts']
             record.update(status='RUNNING', start_commit=state['expected_head'], checks=[],
@@ -2273,7 +2300,6 @@ class TaskScheduler:
             else:
                 self._save('TASK_STARTED')
             attempt_dir = self._attempt_directory(task, record)
-            prompt = self._developer_prompt(task, record, corrective)
             _print_redacted(f"[task-dev] {task['task_id']} attempt {attempt}/{self.max_attempts}: "
                   + (f"repairing archived attempt {repair['attempt']}" if repair else 'implementing from verified checkpoint'))
             if self.isolate_candidates:

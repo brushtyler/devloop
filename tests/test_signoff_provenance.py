@@ -27,7 +27,7 @@ class SignoffProvenanceTests(unittest.TestCase):
         with patch.object(o,'SSDLCOrchestrator',side_effect=AssertionError('constructor')) as ctor:
             ctor.PHASE_ORDER=['00-recon','03-dev']
             with contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(o._foreground_main(['approve','OLD','--repo',str(f.repo)]),23)
+                self.assertEqual(o._foreground_main(['approve','OLD','--repo',str(f.repo)]),25)
         self.assertEqual(before,f.snapshot())
 
     def test_full_native_provenance_admits_approval(self):

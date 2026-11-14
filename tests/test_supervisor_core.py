@@ -950,7 +950,7 @@ class TestCompletionModeAndForegroundRegressions(CoreCase):
         before = canonical.read_bytes()
         with patch.object(sup, 'git_read', return_value='base'):
             out = sup.status(self.repo, 'T-1', proc=proc)
-        self.assertEqual(out['status_reason'], 'completion_mismatch')
+        self.assertEqual(out['status'], 'completed')
         self.assertEqual(canonical.read_bytes(), before)
 
     def test_task_completion_still_requires_verified_clean_worktree(self):

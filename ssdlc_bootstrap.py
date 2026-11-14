@@ -1,4 +1,7 @@
 """Read-only, explicitly requested greenfield eligibility and registered policy."""
+import configparser
+import shlex
+import tomllib
 import copy
 import fnmatch
 import json
@@ -98,7 +101,10 @@ def decide(repo, base_commit, profile, *, run_id='-'):
     try:
         validate_document('bootstrap-profile', profile)
         policy_hash = policy_sha256(profile['profile_id'])
-        if git(repo, 'rev-list', '--count', 'HEAD') != '1' or git(repo, 'rev-parse', 'HEAD') != base_commit:
+        if (git(repo, 'rev-parse', '--is-shallow-repository') == 'true'
+                or git(repo, 'rev-list', '--count', 'HEAD') != '1'
+                or git(repo, 'rev-list', '--max-parents=0', 'HEAD') != base_commit
+                or git(repo, 'rev-parse', 'HEAD') != base_commit):
             raise BootstrapError('not_initial_commit')
         if git(repo, 'status', '--porcelain') or git(repo, 'ls-files', '-o', '--exclude-standard'):
             raise BootstrapError('dirty_tree')
@@ -109,13 +115,29 @@ def decide(repo, base_commit, profile, *, run_id='-'):
             raise BootstrapError('policy_conflict')
         from orchestrator import _discover_checks
         paths = git(repo, 'ls-files', '-z').split('\x00')
-        patterns = ('test_*.py', '*_test.*', '*.test.*', '*.spec.*')
-        if _discover_checks(repo) or any(fnmatch.fnmatch(Path(p).name, pattern) for p in paths for pattern in patterns):
+        patterns = ['test*.py', '*_test.*', '*.test.*', '*.spec.*', '*Test.java', '*Tests.java', '*_spec.rb']
+        # Honour pytest's configured discovery names without executing target code.
+        for name, section in [('pytest.ini', 'pytest'), ('.pytest.ini', 'pytest'),
+                              ('tox.ini', 'pytest'), ('setup.cfg', 'tool:pytest')]:
+            path = repo / name
+            if path.is_file():
+                config = configparser.ConfigParser(interpolation=None)
+                config.read_string(path.read_text())
+                if config.has_option(section, 'python_files'):
+                    patterns.extend(shlex.split(config.get(section, 'python_files')))
+        pyproject = repo / 'pyproject.toml'
+        if pyproject.is_file():
+            values = tomllib.loads(pyproject.read_text()).get('tool', {}).get('pytest', {}).get('ini_options', {}).get('python_files', [])
+            patterns.extend(shlex.split(values) if isinstance(values, str) else values)
+        discovered = _discover_checks(repo)
+        if any(c['kind'] == 'test' for c in discovered) or any(fnmatch.fnmatch(Path(p).name, pattern) for p in paths for pattern in patterns):
             raise BootstrapError('existing_tests')
+        if discovered:
+            raise BootstrapError('policy_conflict')
         result = dict(profile_id=profile['profile_id'], profile_sha256=digest(profile),
                       policy_sha256=policy_hash, initial_commit=base_commit, initial_tree=tree,
                       window_tasks=1, baseline_status='absent')
-    except PlanError as exc:
+    except (PlanError, OSError, ValueError, TypeError, AttributeError, configparser.Error) as exc:
         code = exc.code if isinstance(exc, BootstrapError) else 'profile_invalid'
         raise _ineligible(code, run_id) from None
     COUNTERS['bootstrap_eligible'] += 1
@@ -125,7 +147,7 @@ def decide(repo, base_commit, profile, *, run_id='-'):
 
 def positive_test_count(stdout, stderr):
     """Use the final runner summary, excluding tests reported as skipped."""
-    text = stdout + '\n' + stderr
+    text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', stdout + '\n' + stderr)
     patterns = (
         ('unittest', r'(?m)^Ran (\d{1,12}) tests?\b'),
         ('pytest', r'(?m)^\s*=*\s*(\d{1,12}) passed\b'),
@@ -133,6 +155,9 @@ def positive_test_count(stdout, stderr):
         ('tap', r'(?m)^# tests (\d{1,12})\b'),
         ('mocha', r'(?m)^\s*(\d{1,12}) passing\b'),
         ('pytest', r'(?m)^collected (0) items?\b'),
+        ('cargo', r'(?m)^test result: ok\. (\d{1,12}) passed;[^\r\n]*'),
+        ('maven', r'(?m)^(?:\[INFO\]\s*)?Tests run: (\d{1,12}), Failures: \d+, Errors: \d+, Skipped: \d+[^\r\n]*'),
+        ('rspec', r'(?m)^\s*(\d{1,12}) examples?, \d+ failures?[^\r\n]*'),
     )
     counts = [(match.start(), int(match.group(1)), kind, match.end()) for kind, pattern in patterns
               for match in re.finditer(pattern, text)]
@@ -140,12 +165,36 @@ def positive_test_count(stdout, stderr):
     if empty and (not counts or max(empty) > max(row[0] for row in counts)):
         return 0
     if not counts:
+        # go test -json identifies individual executed tests, even when no
+        # package summary contains a test count. Ignore package-only passes.
+        events = []
+        for line in text.splitlines():
+            if not line.startswith('{'):
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict) and 'Action' in row and 'Package' in row:
+                events.append(row)
+        if events:
+            return sum(e.get('Action') == 'pass' and bool(e.get('Test')) for e in events)
         return None
     position, total, kind, end = max(counts, key=lambda item: item[0])
     tail = text[end:]
+    if kind == 'cargo':
+        return sum(n for _, n, k, _ in counts if k == 'cargo')
+    if kind in ('maven', 'rspec'):
+        pattern = (r'(?:Failures: |Errors: |Skipped: )(\d+)' if kind == 'maven'
+                   else r'(\d+) (?:pending|failures?)')
+        excluded = sum(int(m.group(1)) for m in re.finditer(pattern, text[position:end]))
+        return max(0, total - excluded)
     if kind == 'unittest':
-        skipped = re.search(r'(?m)^(?:OK|FAILED)\s*\([^\r\n)]*\bskipped=(\d{1,12})\b', tail)
-        return max(0, total - int(skipped.group(1))) if skipped else total
+        summary = re.search(r'(?m)^(?:OK|FAILED)\s*\(([^\r\n)]*)\)', tail)
+        excluded = sum(int(m.group(1)) for m in re.finditer(
+            r'\b(?:skipped|expected failures|failures|errors|unexpected successes)=(\d{1,12})\b',
+            summary.group(1) if summary else ''))
+        return max(0, total - excluded)
     if kind == 'jest':
         summary = text[position:end]
         passed = re.search(r'\b(\d{1,12}) passed\b', summary)

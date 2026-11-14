@@ -33,7 +33,7 @@ class RepairPromptTests(RepositoryTests):
         def verify(*args):
             nonlocal count
             count += 1
-            return ('Ran 1 test\n' + secret + ' sk-logsecret ghp_logsecret Bearer abcdefghijkl\n' + 'x' * 4000,
+            return ('Ran 1 test\n' + secret + ' sk-logsecret01234567890123456789 ghp_logsecret01234567890123456789 Bearer abcdefghijkl01234567890123456789\n' + 'x' * 4000,
                     '', 1 if count == 1 else 0)
         self.engine.verifier = verify
         original_prompt = self.engine._developer_prompt
@@ -46,7 +46,7 @@ class RepairPromptTests(RepositoryTests):
         self.assertEqual(len(self.prompts), 2)
         for prompt in self.prompts:
             for forbidden in (secret, 'scenario-private', 'rationale-private', 'developer-output-private',
-                              'raw-failure-private', 'sk-logsecret', 'ghp_logsecret', 'Bearer abcdefghijkl'):
+                              'raw-failure-private', 'sk-logsecret01234567890123456789', 'ghp_logsecret01234567890123456789', 'Bearer abcdefghijkl01234567890123456789'):
                 self.assertNotIn(forbidden, prompt)
         context = json.loads(self.prompts[-1].split('\nREPAIR CONTEXT:\n')[1])
         self.assertEqual(context['txn_id'], 'txn')
@@ -103,6 +103,8 @@ class RepairPromptTests(RepositoryTests):
             self.engine.repair(self.plan['tasks'], ['T1'], {'findings': [finding]},
                                txn_id='large', on_step=lambda *a: None)
         self.assertEqual(self.prompts, [])
+        self.assertEqual(self.engine.journal.peek()['tasks']['T1']['attempts'], 1)
+        self.assertEqual(self.engine.journal.peek()['tasks']['T1']['status'], 'INVALIDATED')
         with self.assertRaisesRegex(TaskError, '12000'):
             self.engine._assert_prompt_bound('prefix\nREPAIR CONTEXT:\n' + 'x' * 12001)
 

@@ -337,7 +337,9 @@ class RecoveryEdgeTests(executor_fixtures.ExecutorFixture):
 
 
 for _point in ('invalidate.after_intent_before_call', 'repair.after_task_started',
-               'revalidate.after_task_started', 'gates.after_completed_before_rerun'):
+               'revalidate.after_task_started', 'txn.after_final_preflight_passed',
+               'publish.after_archive_old', 'publish.after_archive_new',
+               'gates.after_completed_before_rerun'):
     for _budget in (False, True):
         def case(self, point=_point, budget=_budget):
             self.interruption(point, budget)

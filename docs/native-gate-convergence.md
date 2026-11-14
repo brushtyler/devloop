@@ -168,10 +168,14 @@ exit-zero command such as `true` is not test evidence and cannot seal a passing
 baseline. Silent lint/type checks remain valid when their exit code passes.
 
 Recognized summaries include Python unittest/pytest, Jest/Vitest, Node TAP and
-Mocha. An unrecognized test summary blocks until the runner emits a supported
+Mocha, Cargo, Maven and RSpec. New direct `go test` checks are captured with
+`-json` so individual passed test events can prove a nonempty suite; the supplied
+project policy is not rewritten. Existing sealed argv remain unchanged. Cargo
+counts include its unit/integration/doc-test summaries, even if the final doc-test
+suite is empty. An unrecognized test summary blocks until the runner emits a supported
 count; it is not guessed to be a passing nonempty suite. The final recognized
 summary takes precedence over earlier or nested examples.
-Skipped tests do not provide positive proof. An all-skipped unittest, Jest/Vitest
+Skipped tests and unittest `expectedFailure` outcomes do not provide positive proof. An all-skipped unittest, Jest/Vitest
 or TAP suite blocks even when its process exits zero; mixed suites must report
 at least one executed test. A total without an executed/passed breakdown is not
 accepted as a Jest/Vitest passing count.

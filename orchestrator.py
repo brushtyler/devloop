@@ -435,15 +435,55 @@ def execution_compatibility(repo_root, ticket, command):
                 journal, sequence, _ = TaskJournal._replay(data[:data.rfind(b'\n') + 1])
                 if not journal or sequence < 1 or journal.get('inputs_sha256') != digest(dict(plan=plan, quality=quality, context=build_task_context(root))):
                     raise PlanError('Unsealed task inputs')
-                if command == 'approve' and (state.get('status') != 'AWAITING_SUPERVISOR_SIGNOFF' or
-                        not journal.get('tasks') or any(t.get('status') != 'COMPLETED' for t in journal['tasks'].values()) or
-                        not state.get('task_verified_head') or state['task_verified_head'] != journal.get('expected_head')):
-                    raise PlanError('Incomplete task approval')
                 if command == 'approve':
-                    verify_signoff_evidence(repo, root, state)
+                    try:
+                        if (state.get('status') != 'AWAITING_SUPERVISOR_SIGNOFF' or
+                                not journal.get('tasks') or any(t.get('status') != 'COMPLETED' for t in journal['tasks'].values()) or
+                                not state.get('task_verified_head') or state['task_verified_head'] != journal.get('expected_head')):
+                            raise PlanError('Incomplete task approval')
+                        verify_signoff_evidence(repo, root, state)
+                    except TaskError:
+                        return dict(ok=False, cls='sealed_task', code='approval_not_ready',
+                                    reason='final_candidate_approval_unverified')
                 return dict(ok=True, cls='sealed_task', code='compatible', reason='compatible')
             except (OSError, ValueError, KeyError, TypeError, AttributeError, TaskError):
                 pass
+        # The native engine may stop after creating its clean worktree but
+        # before INITIALIZED. Admit only exact registered inputs and a clean
+        # base checkpoint; this never converts unmarked historical authority.
+        if state.get('task_engine_v1') is True and command in {'run', 'start'} and (root / 'worktree').exists():
+            try:
+                wt = root / 'worktree'
+                task_dir = root / '03-dev/tasks'
+                if (wt.is_symlink() or not (wt / '.git').is_file() or (wt / '.git').is_symlink()
+                        or (root / '03-dev').is_symlink() or task_dir.is_symlink()
+                        or (root / '03-dev/implementation.diff').exists()):
+                    raise PlanError('Unexpected pre-initialization artifacts')
+                if task_dir.exists():
+                    for child in task_dir.iterdir():
+                        if child.is_symlink() or child.name not in {'task-journal.jsonl', 'scheduler.lock'} or child.read_bytes():
+                            raise PlanError('Execution journal already started')
+                quality = registered('00-recon/quality-contract.json')
+                plan = registered('02-design/plan.json')
+                validate_document('quality-contract', quality)
+                validate_document('plan', plan)
+                for name in CONTEXT_NAMES:
+                    if name in state.get('artifacts', {}) or (root / name).exists():
+                        data = read(name)
+                        if hashlib.sha256(data).hexdigest() != state.get('artifacts', {}).get(name, {}).get('sha256'):
+                            raise PlanError('Changed context')
+                base = state['base_commit']
+                common = Path(_resume_git(wt, 'rev-parse', '--git-common-dir'))
+                if ((wt / common).resolve() != (repo / '.git').resolve()
+                        or plan['ticket_id'] != ticket or plan['base_commit'] != base or quality['base_commit'] != base
+                        or _resume_git(wt, 'rev-parse', 'HEAD') != base
+                        or _resume_git(wt, 'status', '--porcelain')
+                        or _resume_git(repo, 'rev-parse', 'HEAD') != base
+                        or _resume_git(repo, 'status', '--porcelain')):
+                    raise PlanError('Initial task checkpoint changed')
+                return dict(ok=True, cls='initializing_task', code='compatible', reason='journal_not_initialized')
+            except (OSError, ValueError, KeyError, TypeError, TaskError, subprocess.SubprocessError):
+                return dict(ok=False, cls='task', code='initialization_not_ready', reason='initial_checkpoint_unverified')
         if (state.get('task_engine_v1') is True and
                 not any((root / name).exists() or (root / name).is_symlink() for name in
                         ('worktree', '03-dev/tasks', '03-dev/implementation.diff')) and
@@ -505,6 +545,8 @@ def startup_preflight(repo_root, ticket, command, args=None):
         except PlanError:
             return dict(ok=False, cls='legacy', code='legacy_not_executable', reason='invalid_persisted_contract')
     phase = args.get('from_phase') if isinstance(args, dict) else getattr(args, 'from_phase', None)
+    if result['cls'] == 'initializing_task' and phase != '03-dev':
+        return dict(ok=False, cls='task', code='initialization_not_ready', reason='resume_from_03_dev_required')
     if result['cls'] == 'pre_execution' and command in {'run', 'start'} and phase not in {None, '00-recon'}:
         result = dict(ok=False, cls='legacy', code='legacy_not_executable', reason='execution_not_started')
     if result['ok'] and result['cls'] in {'new_run', 'pre_execution'}:
@@ -2473,7 +2515,11 @@ class SSDLCOrchestrator:
         except RecoveryStop as exc:
             self._mark_open_txn_interrupted('budget_interrupted' if exc.category == 'LIMIT_REACHED' else 'uncertain_dispatch')
             raise
-        except (TaskError, bounce.BounceError, OSError, ValueError, KeyError, TypeError):
+        except (TaskError, bounce.BounceError, OSError, ValueError, KeyError, TypeError) as exc:
+            if getattr(exc, 'category', None) == 'LIMIT_REACHED':
+                self._mark_open_txn_interrupted('budget_interrupted')
+                self._corrective_stage('interrupted', preview, txn_id, reason='budget_interrupted')
+                raise
             self._corrective_stage('refused', preview, txn_id, reason='evidence_mutated')
             raise corrective.CorrectiveError('evidence_mutated') from None
 
@@ -2897,7 +2943,8 @@ class SSDLCOrchestrator:
         state = journal.load()
         if state['status'] in ('COMPLETED', 'APPROVED'):
             return state
-        if not state.get('publish_intent') and state.get('status') != 'REVALIDATED':
+        if not state.get('publish_intent') and not (state.get('status') == 'REVALIDATED' or
+                state.get('status') == 'INTERRUPTED' and state.get('resume_status') == 'REVALIDATED'):
             raise corrective.CorrectiveError('txn_record_conflict')
         def safe(ref):
             try:
@@ -3026,6 +3073,10 @@ class SSDLCOrchestrator:
             contract['bootstrap'] = binding
         contract['positive_test_count_required'] = True
         for check in contract["checks"]:
+            if (check.get('kind') == 'test' and len(check['argv']) >= 2
+                    and Path(check['argv'][0]).name == 'go' and check['argv'][1] == 'test'
+                    and '-json' not in check['argv']):
+                check['argv'].insert(2, '-json')
             if check.get("required"):
                 check["candidate_proof"] = True
         if sum(c.get("required", False) and c.get("candidate_proof", False) for c in contract["checks"]) > candidate_reports.MAX_CANDIDATE_CHECKS:
@@ -3641,6 +3692,10 @@ class SSDLCOrchestrator:
             limits.require_capacity('03-dev', '03-dev')
         history_authority = limits._load(repair=False)[0]['binding'].get('historical_capture_bindings_sha256') if limits is not None else None
         saved_scheduler = TaskJournal(self.dir_dev / 'tasks').peek()
+        if (saved_scheduler is not None and not saved_scheduler.get('candidate_isolation')
+                and any(t['status'] != 'COMPLETED' for t in saved_scheduler['tasks'].values())):
+            raise DevelopmentBlocked('ENVIRONMENT_BLOCKED',
+                'Pre-isolation execution requires explicit controller migration; new developer dispatch is refused')
         scheduler = TaskScheduler(
             wt, self.dir_dev / "tasks", plan, quality, context, develop,
             verify, guard, verification_budget, dispatch_budget=dispatch_budget,
@@ -5381,7 +5436,9 @@ To **REJECT** and record feedback (free text authorizes no repair):
             self.record_gate("BUDGET_CAP_GATE", False, msg)
             self.state["status"] = "HALTED_BUDGET_EXCEEDED"
             self._save_state()
-            raise TaskError(msg)
+            error = TaskError(msg)
+            error.category = 'LIMIT_REACHED'
+            raise error
 
     @_bounded_entrypoint
     @_bootstrap_run_invocation
@@ -5481,6 +5538,8 @@ To **REJECT** and record feedback (free text authorizes no repair):
 
         if start_idx <= self.PHASE_ORDER.index("05b-appsec"):
             first_attempt = recovered['next_gate_attempt'] if recovered else 1
+            if first_attempt > max_retries:
+                raise corrective.CorrectiveError('gate_attempts_exhausted')
             for attempt in range(first_attempt, max_retries + 1):
                 if recovered and attempt > self._corrective_limits()['gate_round_ceiling']:
                     raise corrective.CorrectiveError('gate_attempts_exhausted')
@@ -5853,8 +5912,13 @@ def _foreground_main(argv=None) -> int:
                 logging.getLogger(__name__).warning('legacy-refusal run=%s txn=- preview=- tasks=- command=%s', _stage_log_field(args.ticket), _stage_log_field(command))
                 print(legacy_message(args.ticket), file=sys.stderr)
             else:
-                print(check['code'], file=sys.stderr)
-            return 24 if check['code'] == 'bootstrap_ineligible' else 23
+                message = check['code']
+                if check['code'] in {'bootstrap_ineligible', 'initialization_not_ready'}:
+                    message += ': ' + check['reason']
+                    if check['reason'] == 'interrupted':
+                        message += '; first-invocation exemption is spent; retained evidence is unchanged'
+                print(message, file=sys.stderr)
+            return 24 if check['code'] == 'bootstrap_ineligible' else 25 if check['code'] == 'approval_not_ready' else 23
     repo_path = Path(getattr(args, 'repo', '.')).resolve()
     if args.subcommand in {"run", "start", "plan", "design"} and getattr(args, "limits_profile", None):
         from ssdlc_recovery import LimitsStore
@@ -6001,7 +6065,7 @@ def main(argv=None) -> int:
             LEGACY_COUNTERS['legacy_refusals'] += 1
             logging.getLogger(__name__).warning('legacy-refusal run=%s txn=- preview=- tasks=- command=%s', _stage_log_field(word_value('--ticket')), _stage_log_field(words[0]))
             print(legacy_message(word_value('--ticket')), file=sys.stderr)
-        return 24 if check['code'] == 'bootstrap_ineligible' else 23
+        return 24 if check['code'] == 'bootstrap_ineligible' else 25 if check['code'] == 'approval_not_ready' else 23
     code, exc_type = 1, None
     try:
         if not _supervised_preflight():

@@ -174,7 +174,7 @@ With an explicit quality contract that opts in with `candidate_proof`, determini
 
 ### Approval
 
-Approval requires passing global gates, a clean checkpoint and an unchanged, clean target. Both CLI admission and the merge entry point reverify the latest registered Review, QA and AppSec rosters, complete evaluator records and source-bound approvals. A ready status or summary alone grants no merge authority; incomplete, rejected, changed or stale evidence blocks. Approval then fast-forwards to the verified SHA and preserves the evidence.
+Approval requires passing global gates, a clean checkpoint and an unchanged, clean target. Both CLI admission and the merge entry point reverify the latest registered Review, QA and AppSec rosters, complete evaluator records and source-bound approvals. A ready status or summary alone grants no merge authority; incomplete, rejected, changed or stale evidence blocks. A sealed task run with missing or invalid final approvals is refused as `approval_not_ready` (exit 25), without counting a legacy refusal. Approval then fast-forwards to the verified SHA and preserves the evidence.
 
 ## Current limits
 
@@ -226,9 +226,11 @@ Use one full run through the first checkpoint; phase-only preparation does not
 leave a renewable exemption for a later command. After `PROVEN`, normal strict
 resume remains supported. Missing run state with existing execution evidence is
 refused as historical corruption instead of being treated as a fresh ticket.
-Existing tests, dirty trees or later commits are ineligible (exit 24). Without an
+Existing tests, dirty trees, shallow clones or later commits are ineligible (exit 24). Discovery includes unittest `test*.py`, configured pytest filename patterns and common Java/Ruby test filenames; malformed discovery inputs return `profile_invalid`, and a conflicting lint-only policy returns `policy_conflict`. Without an
 explicit profile, strict baseline rules apply. Protected paths and task checks
-remain enforced throughout.
+remain enforced throughout. The refusal includes the bootstrap reason and, for an
+interrupted exemption, explains that the first-invocation window is spent. Safe
+pre-development bootstrap resumption is tracked separately in [#72](https://github.com/brushtyler/ssdlc/issues/72).
 
 The offline suite executes these CLI/configuration behaviors through real entry
 points with fake providers and sandbox commands:
@@ -237,9 +239,17 @@ points with fake providers and sandbox commands:
 python3 -m unittest discover -s tests -p test_unified_integration.py
 ```
 
+A non-bootstrap native run interrupted after creating its clean worktree but
+before initializing its journal can resume from `03-dev` after read-only validation
+of registered inputs, repository ownership and the unchanged base checkpoint.
+Unmarked historical runs gain no such authority. Pre-isolation task journals
+remain readable and completed histories can be verified; pending/failed execution
+requires explicit controller migration before any new developer dispatch.
+
 Run exits: **0** means the requested pipeline command completed (signoff remains
 separate); **23** refuses a legacy/non-executable startup, with a new-run command;
-**24** refuses bootstrap eligibility/profile validation; **2** is invalid CLI usage.
+**24** refuses bootstrap eligibility/profile validation; **25** refuses unverified
+final-candidate approval on a sealed task run; **2** is invalid CLI usage.
 Pipeline execution errors fail nonzero; they do not imply successful signoff.
 Preview's separate **0/10/20** outcomes are described above.
 

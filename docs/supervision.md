@@ -92,3 +92,9 @@ Upstream approvals, sealed artifact hashes and baseline compatibility still appl
 - Containers are stopped by full ID, and only after both exact `ssdlc.run_id` and `ssdlc.project` labels have been verified. Other projects, ticket-only matches and recycled PIDs are excluded.
 - Repeating `cancel` reconciles containers left behind by a crash. A hard deadline triggers the same scoped cleanup.
 - Cleaning up a run that has already ended preserves its outcome. `cancellation_state=done` records that cleanup finished, while the exit code still reflects the run outcome.
+
+Completed historical supervisor runs with an explicit legacy execution mode
+retain their observed completion result without requiring a task checkpoint.
+This read-only observation never authorizes legacy execution or approval. A
+repository path alias is resolved before examining the historical run; symlinked
+control evidence remains refused.

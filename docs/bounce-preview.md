@@ -72,3 +72,18 @@ a reserve is an allocation, not an observed charge. Transaction-local and
 environment limits can tighten that authority, never increase it. Existing narrower
 transaction ceilings remain binding. Provider accounting and live-unknown cost
 coverage remain separate work; this change does not add billing units.
+
+Corrective publication can resume after cancel/budget interruption between the
+final preflight acknowledgment and publication intent, including interrupted
+archive writes. The recorded `REVALIDATED` authority is verified against the
+unchanged journal and candidate before publishing; no repair or final preflight
+is repeated. Lowering the gate ceiling below a recovered next attempt stops
+explicitly as `gate_attempts_exhausted`. Budget stops retain `budget_interrupted`
+instead of being reported as mutated evidence.
+
+Ordinary task repairs retain cumulative head-and-tail excerpts of failed checks
+(up to 6,000 characters per log and 24,000 overall, newest failures first). The
+12,000-character corrective-context limit applies to corrective transactions and
+is checked before reserving a developer attempt. Approved task instructions and
+paths are preserved; pattern-based credential redaction applies to diagnostics,
+while exact environment secrets and private-key material are scrubbed throughout.

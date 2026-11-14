@@ -47,6 +47,9 @@ class ExecutorFixture(gate_fixtures.GateFixture):
             'SSDLC_MAX_DEV_RETRIES': '4', 'SSDLC_BUDGET_CAP_USD': '0', 'T12_SECRET_TOKEN': 'secret-never-in-prompts'})
         self.environment.start()
         self.addCleanup(self.environment.stop)
+        # Corrective integration must exercise the same isolated dispatch as
+        # production. Pre-isolation journals are observation-only.
+        self.enable_native()
 
     def enable_native(self):
         self.checkpoint['candidate_isolation'] = 1

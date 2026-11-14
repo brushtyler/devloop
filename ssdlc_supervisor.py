@@ -977,7 +977,7 @@ def start(args, clock=None, fault=None):
                 return public(existing, 'already_running', 'already_running')
     check = compatibility(a, build_project_env(a['repo'], os.environ))
     if not check['ok']:
-        if check['code'] in {'legacy_not_executable', 'no_such_run', 'bootstrap_ineligible'}:
+        if check['code'] in {'legacy_not_executable', 'no_such_run', 'bootstrap_ineligible', 'initialization_not_ready'}:
             return public({}, 'unsupported', check['code'])
         return refusal(store)
     store.fault.hit('lock.before_acquire')
@@ -1089,7 +1089,7 @@ def resume(args, clock=None, fault=None):
     # Unsupported historical/bootstrap inputs must be refused before reading
     # supervisor state, which need not exist for such tickets.
     check = compatibility(a, build_project_env(a['repo'], os.environ))
-    if not check['ok'] and check['code'] in {'legacy_not_executable', 'no_such_run', 'bootstrap_ineligible'}:
+    if not check['ok'] and check['code'] in {'legacy_not_executable', 'no_such_run', 'bootstrap_ineligible', 'initialization_not_ready'}:
         return public({}, 'unsupported', check['code'])
     store = RunStore(a['repo'], a['ticket'], a.get('run_id'), clock, fault)
     old = store.read() if store.run_id else store.current()
@@ -1100,7 +1100,7 @@ def resume(args, clock=None, fault=None):
         recover_preparation(a['repo'], a['ticket'])
     check = compatibility(a, build_project_env(a['repo'], os.environ))
     if not check['ok']:
-        if check['code'] in {'legacy_not_executable', 'no_such_run', 'bootstrap_ineligible'}:
+        if check['code'] in {'legacy_not_executable', 'no_such_run', 'bootstrap_ineligible', 'initialization_not_ready'}:
             return public({}, 'unsupported', check['code'])
         return refusal(store)
     candidate = new_record(a, store)
@@ -1117,7 +1117,7 @@ def resume(args, clock=None, fault=None):
 
 def historical_status(repo, ticket):
     """Expose a bounded public historical view without supervisor persistence."""
-    root = canonical_root(repo, ticket)
+    root = canonical_root(Path(repo).resolve(), ticket)
     path = root / 'state.json'
     if path.is_symlink() or any(parent.is_symlink() for parent in path.parents):
         return None
@@ -2042,6 +2042,10 @@ def completion(store, d, state):
     if kind == 'run':
         if state.get('status') != 'AWAITING_SUPERVISOR_SIGNOFF':
             return False
+        # Observation of an already completed legacy run grants no execution.
+        if (d['authorized'].get('task_mode') is False
+                and not state.get('task_breakdown') and not state.get('task_engine_v1')):
+            return True
         worktree = pinned_root(repo, store.ticket, d, observe=True) / 'worktree'
         return (worktree.is_dir() and bool(state.get('task_verified_head')) and
                 git_read(worktree, 'rev-parse', 'HEAD') == state['task_verified_head'] and
