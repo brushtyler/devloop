@@ -154,6 +154,151 @@ def discard(ticket, identity, *, writers_quiescent, namespace="continuations"):
         return record
 
 
+def _atomic_bytes(path, data):
+    import tempfile
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix='.' + path.name, dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(data); stream.flush(); os.fsync(stream.fileno())
+        os.replace(name, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try: os.fsync(directory)
+        finally: os.close(directory)
+    finally:
+        if os.path.exists(name): os.unlink(name)
+
+
+def _inventory_diff(before, after):
+    """Existing source must stay stable; scratch additions are listed, not refused."""
+    return {'modified': sorted(p for p in before if p in after and after[p] != before[p]),
+            'deleted': sorted(p for p in before if p not in after),
+            'added': sorted(p for p in after if p not in before)}
+
+
+def _inspect(read, errors, key):
+    """Post-run reads may fail on verifier damage; record the failure as evidence."""
+    from ssdlc_candidates import CandidateError
+    try:
+        return read()
+    except CandidateError as exc:
+        errors[key] = str(exc)
+    except OSError as exc:
+        # strerror only: the message must not carry host paths.
+        errors[key] = type(exc).__name__ + ': ' + (exc.strerror or 'unreadable')
+    return None
+
+
+def _metadata_diff(worker, before, errors):
+    """Diff checkout metadata against its pre-run identity; empty means unchanged.
+
+    Unreadable or deleted metadata counts as changed: the failure goes to
+    ``errors``, the failed reads to ``inspection_failed`` and the readable part
+    of the comparison to the diff. A failed read alone is never "unchanged",
+    even when HEAD and tree are still readable and equal.
+    """
+    from ssdlc_candidates import _git, git_metadata
+    directory = Path(worker) / '.git'
+    after = _inspect(lambda: git_metadata(worker), errors, 'metadata')
+    if after is None and not os.path.lexists(directory):
+        after = {}  # deleted metadata: every recorded file is gone
+    identity = {'head': None, 'tree': None}
+    if directory.is_dir() and not directory.is_symlink():
+        identity['head'] = _inspect(lambda: _git(worker, 'rev-parse', 'HEAD'), errors, 'head')
+        identity['tree'] = _inspect(lambda: _git(worker, 'write-tree'), errors, 'tree')
+    diff = {} if after is None else _inventory_diff(before['metadata'], after)
+    changed = {key: {'before': before[key], 'after': identity[key]} for key in identity
+               if identity[key] != before[key]}
+    if changed:
+        diff['identity'] = changed
+    failed = [key for key in ('metadata', 'head', 'tree') if key in errors]
+    if failed:
+        diff['inspection_failed'] = failed
+    return diff if any(diff.values()) else {}
+
+
+def run_baseline_check(verifier, check, worker, cwd, runtime, log_ref, preparation):
+    """Run one baseline check and record it durably before any outcome decision.
+
+    The sanitized log is written under the generation runtime at ``log_ref``;
+    exit code, duration, classification and, for mutations, the source and
+    metadata diffs are written to ``baseline/<check_id>.json`` inside the
+    preparation. Both are archived by native discard. Post-run inspections that
+    fail on verifier damage are recorded as mutations, never raised past the
+    evidence. The caller decides only from the returned record.
+    """
+    import subprocess
+    import time
+    from ssdlc_candidates import git_identity, inventory
+    from ssdlc_tasks import redact_sensitive, test_suite_is_empty
+    before, metadata = inventory(worker), git_identity(worker)
+    started = time.monotonic()
+    try:
+        out, err, code = verifier(check['argv'], cwd, check['timeout_sec'], worker)
+        timed_out = False
+    except subprocess.TimeoutExpired as exc:
+        # Keep partial output as evidence; a timeout never counts as a pass.
+        out, err = exc.output or '', exc.stderr or ''
+        out = out.decode('utf-8', errors='replace') if isinstance(out, bytes) else out
+        err = err.decode('utf-8', errors='replace') if isinstance(err, bytes) else err
+        err += f'\nVerification timeout: {exc}'
+        code, timed_out = 124, True
+    duration = round(time.monotonic() - started, 3)
+    log = confined(runtime, log_ref, protect=False)
+    # Same boundary as check logs: host-isolated output, plus credential redaction.
+    # Written before any post-run inspection, which the verifier may have broken.
+    _atomic_bytes(log, redact_sensitive(out + '\n' + err).encode())
+    log_sha256 = file_hash(log)
+    errors = {}
+    after = _inspect(lambda: inventory(worker), errors, 'source')
+    diff = None if after is None else _inventory_diff(before, after)
+    metadata_diff = _metadata_diff(worker, metadata, errors)
+    metadata_changed = bool(metadata_diff)
+    empty = not timed_out and test_suite_is_empty(out, err)
+    if diff is None or diff['modified'] or diff['deleted']:
+        classification = 'SOURCE_CHANGED'
+    elif metadata_changed:
+        classification = 'METADATA_CHANGED'
+    elif timed_out:
+        classification = 'TIMEOUT'
+    elif code:
+        classification = 'FAILED'
+    elif empty:
+        classification = 'EMPTY_SUITE'
+    else:
+        classification = 'PASSED'
+    record = {'schema_version': 1, 'check_id': check['check_id'], 'exit_code': code,
+              'empty_suite': empty, 'duration_sec': duration, 'classification': classification,
+              'log_ref': log_ref, 'log_sha256': log_sha256, 'metadata_changed': metadata_changed}
+    if diff is not None and (classification == 'SOURCE_CHANGED' or diff['added']):
+        record['inventory_diff'] = diff
+    if metadata_diff:
+        record['metadata_diff'] = metadata_diff
+    if errors:
+        record['inspection_errors'] = errors
+    record_ref = 'baseline/' + check['check_id'] + '.json'
+    atomic_json(Path(preparation) / record_ref, record)
+    record['record_ref'], record['record_sha256'] = record_ref, file_hash(Path(preparation) / record_ref)
+    return record
+
+
+def record_baseline_refusal(ticket, identity, preparation, record, message, *, namespace="continuations"):
+    """Persist the refusal linked to its recorded evidence, then let the caller raise."""
+    refusal = {'schema_version': 1, 'transition_id': identity, 'namespace': namespace,
+               'reason': record['classification'], 'message': message, 'check_id': record['check_id'],
+               'exit_code': record['exit_code'], 'duration_sec': record['duration_sec'],
+               'log': {'root': 'runtime', 'ref': record['log_ref'], 'sha256': record['log_sha256']},
+               'check_record': {'root': 'preparation', 'ref': record['record_ref'], 'sha256': record['record_sha256']},
+               'generation_selected': False, 'model_dispatches': 0}
+    for key in ('inventory_diff', 'metadata_diff', 'inspection_errors'):
+        if key in record:
+            refusal[key] = record[key]
+    path = Path(preparation) / 'refusal.json'
+    atomic_json(path, refusal)
+    update(ticket, identity, namespace=namespace, refusal_ref='refusal.json', refusal_sha256=file_hash(path))
+    return refusal
+
+
 def docker_quiescent(record):
     """Observe only mount ownership; never signal unrelated containers."""
     import subprocess

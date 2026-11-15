@@ -190,7 +190,7 @@ def _prepare_generation(source_root, ticket_root, repo, *, task_id, plan, qualit
     newer source and calls that a rebase.
     """
     from ssdlc_amendments import validate_amendment
-    from ssdlc_candidates import CandidateStore, checkout, git_identity, git_metadata, inventory, signature, _path
+    from ssdlc_candidates import CandidateStore, checkout, git_identity, inventory, signature, _path
     from ssdlc_tasks import PROTECTED
     source_root, ticket_root, repo = map(Path, (source_root, ticket_root, repo))
     source = inspect_source(source_root)
@@ -258,30 +258,24 @@ def _prepare_generation(source_root, ticket_root, repo, *, task_id, plan, qualit
     fault('worktree_created')
     validate_document('quality-contract', quality)
     validate_document('plan', plan)
+    from ssdlc_preparations import record_baseline_refusal, run_baseline_check
+    refusals = {'SOURCE_CHANGED': 'Baseline verification changed source',
+                'METADATA_CHANGED': 'Baseline verification changed checkout metadata'}
     for check in quality['checks']:
         worker = preparation / ('baseline-' + check['check_id'])
         checkout(repo, worker, plan['base_commit'])
-        before = inventory(worker)
-        metadata = git_identity(worker)
         cwd = confined(worker, check['cwd'])
         if not cwd.is_dir():
             raise TransitionError('Baseline cwd does not exist')
-        out, err, code = verifier(check['argv'], cwd, check['timeout_sec'], worker)
-        if inventory(worker) != before:
-            # Scratch additions are disposable; existing source must be stable.
-            after = inventory(worker)
-            if any(after.get(p) != entry for p, entry in before.items()):
-                raise TransitionError('Baseline verification changed source')
-        if git_metadata(worker) != metadata['metadata'] or git_identity(worker) != metadata:
-            raise TransitionError('Baseline verification changed checkout metadata')
-        if code or test_suite_is_empty(out, err):
-            raise TransitionError('New-base baseline failed; generation remains unselected')
+        # Record first, then refuse (A4.1): a refusal keeps its own evidence.
         ref = f"00-recon/baseline/continuation-{check['check_id']}.log"
-        log = runtime / ref
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(out + '\n' + err)
-        quality['baseline'].append({'check_id': check['check_id'], 'exit_code': code,
-                                    'log_ref': ref, 'sha256': file_hash(log)})
+        result = run_baseline_check(verifier, check, worker, cwd, runtime, ref, preparation)
+        if result['classification'] != 'PASSED':
+            message = refusals.get(result['classification'], 'New-base baseline failed; generation remains unselected')
+            record_baseline_refusal(ticket_root, identity, preparation, result, message)
+            raise TransitionError(message)
+        quality['baseline'].append({'check_id': check['check_id'], 'exit_code': result['exit_code'],
+                                    'log_ref': ref, 'sha256': result['log_sha256']})
     validator = TaskPlanValidator(repo, context['01-po/requirements.md'], quality, runtime)
     amendment = validate_amendment(source['plan'], plan, json.dumps(review['report']), validator.validate,
                                    validator.requirement_catalogue['required_ids'], quality,
