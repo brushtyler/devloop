@@ -236,7 +236,7 @@ class SyntheticT12RegressionTests(GateFixture):
     (repair roots and revalidation tasks) is fixed.
     """
 
-    def stage(self, update):
+    def stage(self, update, expectation=None, tail='# T3 successor\n'):
         wt = self.orch.worktree_dir
         (wt / 'tests').mkdir()
         (wt / 'tests/__init__.py').write_text('')
@@ -246,14 +246,16 @@ class SyntheticT12RegressionTests(GateFixture):
         (wt / 'app.py').write_text('value = 2\n')
         git(wt, 'commit', '-am', 'T2 producer changes behavior')
         # The successor touches its test; only the updated variant replaces it.
-        (wt / TEST_PATH).write_text((REPLACED if update else PREPARATORY) + '# T3 successor\n')
-        git(wt, 'commit', '-am', 'T3 successor')
+        (wt / TEST_PATH).write_text((REPLACED if update else PREPARATORY) + tail)
+        git(wt, 'commit', '--allow-empty', '-am', 'T3 successor')
         head = git(wt, 'rev-parse', 'HEAD')
         self.orch.state['task_verified_head'] = head
         path = self.orch.dir_dev / 'implementation.diff'
         path.write_text(git(wt, 'diff', '--binary', self.base, 'HEAD') + '\n')
         self.orch.record_artifact('03-dev/implementation.diff', path)
         self.plan = transitional_plan(self)
+        if expectation is not None:
+            self.plan['transitional_expectations'][0]['expectation'] = expectation
         atomic_json(self.orch.dir_design / 'plan.json', self.plan)
         self.orch.record_artifact('02-design/plan.json', self.orch.dir_design / 'plan.json')
         self.orch._save_state()
@@ -287,6 +289,17 @@ class SyntheticT12RegressionTests(GateFixture):
         self.assertEqual(preview, dict(status='blocked', execution_authorized=False,
                                        blockers=[{'code': 'contradictory_evidence'}]))
         self.assertFalse((self.orch.ssdlc_root / 'bounce-preview').exists())
+
+    def test_expectation_with_trailing_newline_at_end_of_file_bounces(self):
+        # The expectation includes its newline and is the test's last line: the
+        # blob must be compared without stripping that newline.
+        self.assertTrue(PREPARATORY.endswith(EXPECTATION + '\n'))
+        self.stage(update=False, expectation=EXPECTATION + '\n', tail='')
+        self.validator('AC-1: Correct behavior\nSEC-1: Secure behavior\n').validate(self.plan)
+        self.assertTrue(self.run_review()[0][0])
+        value = self.read()
+        self.assertEqual(value['status'], 'blocked')
+        self.assertEqual(value['blockers'], [{'code': 'contradictory_evidence'}])
 
     def test_removed_test_is_contradictory_evidence(self):
         self.stage(update=True)

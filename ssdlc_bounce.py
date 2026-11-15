@@ -420,15 +420,16 @@ def verify_transitional_expectations(worktree, head, plan):
     The plan says each successor replaces its expectation before the gates run.
     If the reviewed commit still contains the exact expectation text, or lost
     the test, the evidence contradicts the plan. This is a literal check, not
-    proof that the replacement is semantically equivalent.
+    proof that the replacement is semantically equivalent. The blob is compared
+    as raw bytes, so trailing newlines and line endings are not normalized.
     """
-    from ssdlc_tasks import git
+    import subprocess
     for item in plan.get('transitional_expectations', []):
-        try:
-            text = git(worktree, 'show', f'{head}:{item["test_path"]}')
-        except TaskError:
-            raise BounceError('contradictory_evidence') from None
-        if item['expectation'] in text:
+        proc = subprocess.run(['git', 'cat-file', 'blob', f'{head}:{item["test_path"]}'],
+                              cwd=worktree, capture_output=True, stdin=subprocess.DEVNULL)
+        if proc.returncode:
+            raise BounceError('contradictory_evidence')
+        if item['expectation'].encode() in proc.stdout:
             raise BounceError('contradictory_evidence')
 
 
