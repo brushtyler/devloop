@@ -143,6 +143,23 @@ class RunTestsEquivalenceTests(unittest.TestCase):
         self.assertNotEqual(serial.returncode, 0)
         self.assertNotEqual(parallel.returncode, 0, parallel.stdout)
 
+    def test_a_local_module_shadowing_the_runner_imports_is_seen_by_the_tests(self):
+        # Codex review of #75, round 5: the worker imported json before the project root was on
+        # sys.path, so a root json.py broke the serial discover but not the worker.
+        root = self.project({
+            'json.py': 'BROKEN = True\n',
+            'tests/test_uses_json.py': '''
+                import unittest
+                class T(unittest.TestCase):
+                    def test_loads(self):
+                        import json
+                        self.assertEqual(json.loads('42'), 42)
+            ''',
+        })
+        serial, parallel = self.both(root)
+        self.assertNotEqual(serial.returncode, 0)
+        self.assertNotEqual(parallel.returncode, 0, parallel.stdout)
+
     def test_no_tests_is_not_a_success(self):
         # Codex review of #75, round 3: like `python3 -m unittest`, running nothing exits with 5.
         root = self.project({'tests/test_empty.py': 'import unittest\n'})

@@ -27,6 +27,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DURATIONS = ROOT / '.ssdlc' / 'test-durations.json'
+WORKER_BOOT = 'import runpy, sys; sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name="__main__")'
 
 
 def discover():
@@ -124,8 +125,11 @@ def main(argv):
         def collect(k):
             results, log = Path(tmp) / f'w{k}.jsonl', Path(tmp) / f'w{k}.log'
             with open(log, 'w') as fh:
-                code = subprocess.run([sys.executable, __file__, '--worker', ','.join(map(str, bins[k])),
-                                       '--results', str(results), '--inventory', expected],
+                # `python3 -c` puts the working directory first on sys.path before any import, as
+                # `python3 -m unittest` does: the worker's own imports resolve like the tests'.
+                code = subprocess.run([sys.executable, '-c', WORKER_BOOT, __file__, '--worker',
+                                       ','.join(map(str, bins[k])), '--results', str(results),
+                                       '--inventory', expected],
                                       cwd=ROOT, stdout=fh, stderr=subprocess.STDOUT).returncode
             done = [json.loads(line) for line in results.read_text().splitlines()] if results.exists() else []
             with lock:
