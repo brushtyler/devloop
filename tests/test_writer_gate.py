@@ -233,15 +233,15 @@ class CrashAndMetadataTests(GateCase):
         self.addCleanup(gate.close)
         reused = dict(me, start_ticks=me['start_ticks'] + 1)  # same PID, another process life
         wg._register(gate, 'writer', reused)
-        wg._register(gate, 'uncovered', reused)
         wg._register(gate, 'writer', dict(me, boot_id='another-boot'))
         wg._register(gate, 'writer', me)  # live identity, but no kernel lock
         wg._register(gate, 'host', reused)  # session PID now names another process life
+        wg._register(gate, 'host', dict(me, boot_id='another-boot'))
         self.assertFalse(wg.is_live(reused))
         with transition(str(self.ticket)) as proof:
             found = holders(proof._gate)
             self.assertEqual(len(found['stale_records']), 4)
-            self.assertEqual((found['uncovered'], found['host_sessions']), ([], []))
+            self.assertEqual(found['host_sessions'], [])
             self.assertEqual([h['registered'] for h in found['kernel']], [True])  # only the proof's own flock
         # A forged receipt is not ownership either.
         with writer(str(self.ticket), 'gen-1', self.read) as lease:
@@ -424,18 +424,52 @@ class HostWriterTests(GateCase):
             with self.assertRaises(GateError) as raised:
                 run_host(lease, ['sh', '-c', 'sleep 60 >/dev/null 2>&1 & exit 0'])
             self.assertEqual(raised.exception.code, 'uncovered_execution')
+        session = self.host_session()
         refused = self.assert_refused('uncovered_execution')
-        self.assertIn('escaped a writer lease', refused.detail)
-        records = [json.loads(p.read_text()) for p in (self.ticket / wg.REGISTRY_NAME).glob('u-*.json')]
-        self.assertEqual(len(records), 1)
-        survivor = records[0]['identity']
+        self.assertIn(f'host command session {session["pid"]}', refused.detail)
+        [survivor] = wg._session_members(session['pid'], session)
         os.kill(survivor['pid'], signal.SIGKILL)
-        deadline = time.monotonic() + 15
-        while wg.is_live(survivor) and time.monotonic() < deadline:
-            time.sleep(0.05)
-        self.assertFalse(wg.is_live(survivor))
+        self.wait_gone(survivor)
         with transition(str(self.ticket)) as proof:
             proof.check()
+
+    def test_session_record_covers_writers_started_by_a_survivor(self):
+        go, spawned = self.ticket.parent / 'go', self.ticket.parent / 'grandchild'
+        # The survivor waits until the lease is gone, starts a writer in the same
+        # session and exits: nothing daemonizes or leaves the session.
+        survivor = ('(while [ ! -e "$1" ]; do sleep 0.05; done; sleep 60 & echo $! > "$2.tmp"; '
+                    'mv "$2.tmp" "$2") </dev/null >/dev/null 2>&1 & exit 0')
+        with writer(str(self.ticket), 'gen-1', self.read) as lease:
+            with self.assertRaises(GateError) as raised:
+                run_host(lease, ['sh', '-c', survivor, 'sh', str(go), str(spawned)])
+            self.assertEqual(raised.exception.code, 'uncovered_execution')
+        session = self.host_session()
+        first = wg._session_members(session['pid'], session)  # the survivor and its polling sleep
+        self.assertTrue(first)
+        for member in first:
+            self.addCleanup(lambda m=member: wg.is_live(m) and os.kill(m['pid'], signal.SIGKILL))
+        self.assert_refused('uncovered_execution')
+        go.touch()
+        deadline = time.monotonic() + 15
+        while not spawned.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        grandchild = wg.process_identity(int(spawned.read_text()))[0]
+        self.addCleanup(lambda: wg.is_live(grandchild) and os.kill(grandchild['pid'], signal.SIGKILL))
+        for member in first:
+            self.wait_gone(member)
+        self.assertTrue(wg.is_live(grandchild))
+        self.assertEqual(wg._session_members(session['pid'], session), [grandchild])
+        refused = self.assert_refused('uncovered_execution')
+        self.assertIn(f'host command session {session["pid"]}', refused.detail)
+        os.kill(grandchild['pid'], signal.SIGKILL)
+        self.wait_gone(grandchild)
+        with transition(str(self.ticket)) as proof:
+            proof.check()
+            self.assertEqual(holders(proof._gate)['host_sessions'], [])
+
+    def host_session(self):
+        [record] = [json.loads(p.read_text()) for p in (self.ticket / wg.REGISTRY_NAME).glob('h-*.json')]
+        return record['identity']
 
     def wait_gone(self, identity):
         deadline = time.monotonic() + 15

@@ -137,17 +137,21 @@ path, and the commands of local mode) run through `run_host(lease, argv)`:
   that waits for one line on its stdin pipe, which only the controller writes after the
   record is durable, and then `exec`s the command. If the controller dies or the
   registration fails first, the barrier reads EOF and exits without executing anything;
-- after the command exits, any live process left in its session is recorded as
-  uncovered, and only then is the `host` record removed.
+- after the command exits, the `host` record is removed only if its session is empty.
+  If any process is left in the session, the record stays and `run_host` refuses with
+  `uncovered_execution`.
 
-If the controller is killed (even with `SIGKILL`) while the command runs, the `host`
-record stays. It refuses automatic fencing as long as any process of that session is
-alive, so the command is covered for its whole life, not only for the controller's.
+The `host` record covers the whole session, not the processes observed at one moment:
+a survivor that starts a new writer in the same session and then exits keeps the
+session alive, and the record keeps refusing automatic fencing until the last member
+is gone. If the controller is killed (even with `SIGKILL`) while the command runs, the
+`host` record stays too, so the command is covered for its whole life, not only for the
+controller's.
 A session keeps its leader's PID allocated while any member lives; a record whose PID
 now names another process life describes an empty session and is ignored as stale.
 
-A transition refuses automatic fencing (`uncovered_execution`) while a `host` session
-or an uncovered process is alive, and whenever a caller's coverage probe reports an execution tree not
+A transition refuses automatic fencing (`uncovered_execution`) while a recorded `host`
+session has a live member, and whenever a caller's coverage probe reports an execution tree not
 covered by the gate, for example a role container. Trusted host commands must not
 daemonize out of their session: Git must run with `gc.autoDetach=false` and
 `maintenance.autoDetach=false`.
@@ -173,10 +177,9 @@ or a transition:
 - a record left by a killed writer, or a record whose PID now belongs to another
   process, is reported as stale and ignored;
 - a record of a live process that does not hold the lock admits nothing;
-- only a live `uncovered` record (a host descendant that escaped its lease) or a live
-  `host` record (a host command session whose controller may be gone) refuses
-  automatic fencing, and only while that exact process, or a process of that exact
-  session, is alive.
+- only a live `host` record (a host command session whose controller is gone, or that
+  outlived its command) refuses automatic fencing, and only while a process of that
+  exact session is alive.
 
 Contention is logged by the `ssdlc_writer_gate` logger with the kernel holders from
 `/proc/locks`.

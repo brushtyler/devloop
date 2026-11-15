@@ -301,7 +301,7 @@ def open_gate(ticket_root, expected_identity=None):
 
 # ---------------------------------------------------------------------------
 # Diagnostic registry: records identities, never grants or denies anything by
-# itself. Only live ``uncovered`` identities refuse automatic fencing.
+# itself. Only a live ``host`` session refuses automatic fencing.
 
 def _registry(gate):
     with contextlib.suppress(FileExistsError):
@@ -353,7 +353,7 @@ def _records(gate):
                     os.close(fd)
             except (OSError, ValueError):
                 record = None
-            if not isinstance(record, dict) or record.get('role') not in {'writer', 'uncovered', 'host'}:
+            if not isinstance(record, dict) or record.get('role') not in {'writer', 'host'}:
                 LOG.warning('writer-gate ignored malformed registry record ticket=%s name=%s', gate.ticket_root, name)
                 continue
             identity = record.get('identity')
@@ -403,7 +403,6 @@ def holders(gate):
         kernel.append(dict(held, identity=identity, registered=registered))
     stale = [r['name'] for r in records if not r['live']]
     return dict(kernel=kernel, stale_records=stale,
-                uncovered=[r['identity'] for r in records if r['role'] == 'uncovered' and r['live']],
                 host_sessions=[r['identity'] for r in records if r['role'] == 'host' and r['live']])
 
 
@@ -523,10 +522,8 @@ class TransitionProof:
 
 def _uncovered(gate, coverage):
     records = _records(gate)
-    reasons = [f'host process {r["identity"]["pid"]} escaped a writer lease'
-               for r in records if r['role'] == 'uncovered' and r['live']]
-    reasons += [f'host command session {r["identity"]["pid"]} outlived its controller\'s writer lease'
-                for r in records if r['role'] == 'host' and r['live']]
+    reasons = [f'host command session {r["identity"]["pid"]} is still alive outside a writer lease'
+               for r in records if r['role'] == 'host' and r['live']]
     for probe in coverage:
         try:
             reason = probe()
@@ -674,13 +671,13 @@ def run_host(lease, argv, *, cwd=None, env=None, input=None, timeout=None, captu
         raise
     finally:
         survivors = _session_members(child.pid, leader)
-        for identity in survivors:
-            _register(lease._gate, 'uncovered', identity, leader=leader)
         if survivors:
-            LOG.warning('writer-gate host command left live descendants ticket=%s pids=%s',
-                        lease.ticket_root, [s['pid'] for s in survivors])
-        # Only once every survivor is recorded does the session record go away.
-        _unregister(lease._gate, record)
+            # The session record stays: it covers whatever the survivors start later in
+            # the same session, and goes stale only once the whole session is empty.
+            LOG.warning('writer-gate host command left live descendants ticket=%s session=%s pids=%s',
+                        lease.ticket_root, child.pid, [s['pid'] for s in survivors])
+        else:
+            _unregister(lease._gate, record)
     if survivors:
         raise GateError('uncovered_execution',
                         f'host command left {len(survivors)} live descendants outside the writer lease')
