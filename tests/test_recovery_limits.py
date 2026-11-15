@@ -16,7 +16,11 @@ def policy(**overrides):
          'wall_seconds': 1000, 'role_invocations': {'03-dev': 3, '02-design-arch': 5},
          'phase_invocations': {'03-dev': 3, '02-design': 5}, 'transport_retries': 2,
          'design_diagnoses': 1, 'metered_usd': 10, 'cli_estimate_usd': 10,
-         'development_attempts': 2, 'design_rounds': 5, 'invocation_timeout_seconds': 30}
+         'development_attempts': 2, 'design_rounds': 5, 'invocation_timeout_seconds': 30,
+         # Issue #43: codex and agy report no dollar cost, so the profile declares how they are bounded.
+         'live_unknown_usage': {engine: {'model': 'unmetered_quota',
+                                         'reason': 'Offline fixture: subscription CLI bounded by invocation caps'}
+                                for engine in ('codex', 'agy')}}
     p.update(overrides)
     return p
 

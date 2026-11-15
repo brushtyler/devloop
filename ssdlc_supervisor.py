@@ -1168,9 +1168,29 @@ def status(repo, ticket, run_id=None, proc=None, env=None, clock=None):
         return public({}, 'unsupported', 'unsupported_platform')
     store = RunStore(repo, ticket, run_id)
     try:
-        return observed_status(store, store.read() if run_id else store.current(), proc, env, clock)
+        result = observed_status(store, store.read() if run_id else store.current(), proc, env, clock)
     except FileNotFoundError:
-        return (historical_status(repo, ticket) if run_id is None else None) or public({}, 'blocked', 'run_not_found')
+        result = (historical_status(repo, ticket) if run_id is None else None) or public({}, 'blocked', 'run_not_found')
+    coverage = limits_coverage(repo, ticket)
+    if coverage is not None:
+        result['limits_coverage'] = coverage
+    return result
+
+
+def limits_coverage(repo, ticket):
+    """Read-only per-engine dollar-cap coverage of the frozen I2 accounting, if any."""
+    from ssdlc_tasks import TaskError
+    try:
+        root = canonical_root(Path(repo).resolve(), ticket)
+        if not (root / 'limits/policy.json').exists():
+            return None
+    except (SupervisorIntegrityError, OSError, ValueError):
+        return None  # No resolvable bounded accounting; status reports integrity itself.
+    try:
+        from ssdlc_recovery import LimitsStore
+        return LimitsStore(root).coverage_report()
+    except (SupervisorIntegrityError, TaskError, OSError, ValueError, KeyError, TypeError):
+        return dict(status='unavailable')
 
 
 def boot(args):
@@ -2177,6 +2197,8 @@ def human_status(result):
             f"recovery={json.dumps(result.get('recovery', {}), sort_keys=True)}\n" +
             f"checks={json.dumps(result.get('preflight'), sort_keys=True)}\n" +
             f"classification={json.dumps(result.get('classification'), sort_keys=True)}\n" +
+            (f"limits_coverage={json.dumps(result['limits_coverage'], sort_keys=True)}\n"
+             if 'limits_coverage' in result else '') +
             f"next_action: {result['next_action']}")
 
 

@@ -255,8 +255,9 @@ def _supervised_dispatch(fn):
             raise
         else:
             if limits is not None and prepaid is None:
-                from ssdlc_recovery import observed_usage
-                limits.finish(reservation, 'returned', observed_usage(engine, fn.__name__, result))
+                from ssdlc_recovery import observed_tokens, observed_usage
+                limits.finish(reservation, 'returned', observed_usage(engine, fn.__name__, result),
+                              observed_tokens(engine, fn.__name__, result))
             _supervision_fault('dispatch.after_engine_before_finished')
             _supervision_event('dispatch_finished', dispatch_id=dispatch_id, outcome='returned')
             return result
@@ -5303,6 +5304,33 @@ class SSDLCOrchestrator:
                 for tid, row in sorted(tasks.items()) if row.get('completion_confirmation')]
         return ('\nProducer completion disclosures:\n\n' + '\n'.join(rows) + '\n') if rows else ''
 
+    def _limits_coverage_disclosure(self):
+        """Per-engine dollar-cap coverage of the frozen I2 accounting; tokens are never priced."""
+        if not (self.ssdlc_root / 'limits/policy.json').exists():
+            return ''
+        from ssdlc_recovery import LimitsStore
+        try:
+            report = LimitsStore(self.ssdlc_root).coverage_report()
+        except (TaskError, OSError, ValueError, KeyError, TypeError):
+            return '\nDollar-cap coverage: **unavailable** (frozen limits accounting could not be read).\n'
+        rows = []
+        for engine, e in sorted(report['engines'].items()):
+            tokens = e['reported_tokens']
+            rows.append(f"| `{engine}` | {e['invocations']} | {e['observed_cost']} | {e['reserved']} | "
+                        f"{e['unmetered_quota']} | {e['uncovered']} | {e['historical_reserve']} | "
+                        f"{tokens['input_tokens'] if tokens['input_tokens'] is not None else 'not reported'} / "
+                        f"{tokens['output_tokens'] if tokens['output_tokens'] is not None else 'not reported'} | "
+                        f"**{e['dollar_caps_cover']}** |")
+        uncovered = ', '.join(f"`{u['invocation_id']}`" + (' (admitted legacy)' if u['legacy_admitted'] else '')
+                              for u in report['uncovered_invocations']) or 'none'
+        scope = 'all invocations' if report['dollar_caps_cover_all_invocations'] else 'only part of the invocations'
+        return ('\nDollar-cap coverage (frozen I2 limits): the dollar caps cover **' + scope + '**. '
+                'Reported tokens are unauthenticated telemetry and are never converted to dollars.\n\n'
+                '| Engine | Calls | Observed cost | Reserved | Unmetered (quota) | Not covered | Historical reserve | '
+                'Reported tokens in / out | Dollar caps cover |\n'
+                '| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n' + '\n'.join(rows) +
+                '\n\nNot covered live invocations: ' + uncovered + '\n')
+
     @_supervised_phase('08-supervisor')
     def compile_evidence_pack(self, ready_for_signoff: bool) -> Path:
         print(f"\n==> [{self.project_id} | Phase 8: 08-supervisor] Compiling SHA-256 Evidence Pack for Human Supervisor...")
@@ -5328,7 +5356,7 @@ class SSDLCOrchestrator:
                 f"`{item.get('trace_user','')}` | **{item.get('status','unknown')}** | {duration_text} | {cost_text} |"
             )
 
-        completion_disclosures = self._completion_disclosures()
+        completion_disclosures = self._completion_disclosures() + self._limits_coverage_disclosure()
         canonical_ticket = self.repo_root / '.ssdlc' / self.ticket_id
         if (canonical_ticket / 'feedback/authority.json').exists():
             from ssdlc_feedback import FeedbackStore
@@ -6191,6 +6219,9 @@ def main(argv=None) -> int:
     if words and words[0].startswith('feedback-profile-'):
         from ssdlc_feedback_admission import main as admission_main
         return admission_main(words)
+    if words and words[0].startswith('usage-profile-'):
+        from ssdlc_usage_admission import main as usage_admission_main
+        return usage_admission_main(words)
     if words and words[0].startswith('feedback-'):
         from ssdlc_feedback import main as feedback_main
         return feedback_main(words)

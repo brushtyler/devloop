@@ -13,6 +13,27 @@ STOPS = {
     'ENVIRONMENT_DIAGNOSIS': 'transient_environment_provider',
 }
 
+COST_KINDS = ('metered_usd', 'cli_estimate_usd')
+# Engines whose adapters can report a dollar value. Any other engine never
+# reports one, so dispatching it needs an explicit live unknown-usage model.
+REPORTED_COST = {'claude': 'cli_estimate_usd', 'openrouter': 'metered_usd'}
+RESERVE, UNMETERED = 'reserve_per_invocation', 'unmetered_quota'
+
+
+def validate_live_usage(policy):
+    """Declared live unknown-usage rules are explicit and finite; absent is not zero."""
+    for rule in policy.get('live_unknown_usage', {}).values():
+        if not rule['reason'].strip():
+            raise ValueError('Live unknown-usage rule needs a reason')
+        if rule['model'] == RESERVE and not all(math.isfinite(rule[kind]) and rule[kind] > 0 for kind in COST_KINDS):
+            raise ValueError('Nonfinite live unknown-usage reserve')
+
+
+def uncovered(row):
+    """A live call that may have spent dollars, reported none and had no declared model."""
+    return (row.get('status') in ('returned', 'terminated') and 'usage_model' not in row
+            and all(row.get('usage', {}).get(kind) is None for kind in COST_KINDS))
+
 
 def validate_feedback_profile(policy):
     if 'feedback_workflow' in policy:
@@ -91,7 +112,8 @@ class LimitsStore:
         validate_feedback_profile(policy)
         if not all(math.isfinite(policy[k]) for k in ('metered_usd', 'cli_estimate_usd')):
             raise ValueError('Nonfinite limit')
-        envelope = {'policy': policy, 'binding': binding}
+        validate_live_usage(policy)
+        envelope ={'policy': policy, 'binding': binding}
         with ticket_lock(self.root / 'limits/limits.lock'):
             marker, recorded, _ = bounded_mode(self.root)
             expected = {'kind': 'bounded-i2', 'policy_sha256': digest(envelope)}
@@ -145,12 +167,15 @@ class LimitsStore:
         try:
             validate_document('recovery-limits', envelope['policy'])
             validate_feedback_profile(envelope['policy'])
+            validate_live_usage(envelope['policy'])
             state = self.journal.load() if repair else self.journal.peek()
-        except (TaskError, KeyError, TypeError, ValueError):
+        except (TaskError, KeyError, TypeError, ValueError, AttributeError):
             raise DevelopmentBlocked('INTEGRITY', 'Frozen limits policy/journal integrity failed') from None
         if (not isinstance(state, dict) or state.get('policy_sha256') != digest(envelope)
                 or expected is not None and envelope != expected):
             raise DevelopmentBlocked('INTEGRITY', 'Frozen limits/binding changed; explicit transition required')
+        if state.get('legacy_uncovered_invocations') != envelope.get('binding', {}).get('legacy_uncovered_invocations'):
+            raise DevelopmentBlocked('INTEGRITY', 'Admitted legacy uncovered invocations differ from their authorization')
         marker, recorded, ticket_state = bounded_mode(self.root)
         expected_mode = {'kind': 'bounded-i2', 'policy_sha256': digest(envelope)}
         if (marker is not None or recorded is not None) and (
@@ -196,27 +221,90 @@ class LimitsStore:
                 if any(type(reserve.get(kind)) not in (int, float) or not math.isfinite(reserve[kind])
                        or reserve[kind] <= 0 for kind in ('metered_usd', 'cli_estimate_usd')):
                     raise RecoveryStop('LIMIT_REACHED', 'Unknown historical usage has no conservative dollar reserve')
-        def consumed(kind):
-            return sum((row.get('usage', {}).get(kind) or 0) + row.get('conservative_usage', {}).get(kind, 0)
-                       for row in rows)
+        exempt = set(state.get('legacy_uncovered_invocations') or ())
+        if any(uncovered(row) and identity not in exempt for identity, row in state['invocations'].items()):
+            raise RecoveryStop('LIMIT_REACHED', 'Live invocation reported no dollar cost and its engine has no '
+                               'declared live unknown-usage model; unknown is not counted as zero')
+        self._check_dollars(state, policy, rows)
+
+    def _check_dollars(self, state, policy, rows, *, reserving=False):
+        """Existing rows exhaust a cap at equality; a new reserve may only fill it."""
+        exceeded = (lambda total, cap: total > cap) if reserving else (lambda total, cap: total >= cap)
         combined = state.get('combined_reported_usd_cap')
-        combined_total = self.accounted_total(state, policy)
-        if combined is not None and combined_total >= combined:
-            raise RecoveryStop('LIMIT_REACHED', 'Legacy combined reported-cost cap exhausted')
-        for kind, cap in [('metered_usd', 'metered_usd'), ('cli_estimate_usd', 'cli_estimate_usd')]:
-            total = consumed(kind)
-            if total >= policy[cap]:
-                raise RecoveryStop('LIMIT_REACHED', 'Frozen ' + kind + ' cap exhausted')
+        if combined is not None and exceeded(sum(self._combined_charge(row, policy) for row in rows), combined):
+            raise RecoveryStop('LIMIT_REACHED', 'Live unknown-usage reserve would exceed the legacy combined '
+                               'reported-cost cap' if reserving else 'Legacy combined reported-cost cap exhausted')
+        for kind in COST_KINDS:
+            if exceeded(sum(self._kind_charge(row, kind) for row in rows), policy[kind]):
+                raise RecoveryStop('LIMIT_REACHED', ('Live unknown-usage reserve would exceed the frozen ' + kind + ' cap')
+                                   if reserving else 'Frozen ' + kind + ' cap exhausted')
+
+    @staticmethod
+    def _kind_charge(row, kind):
+        observed = row.get('usage', {}).get(kind) or 0
+        reserve = row.get('conservative_usage', {}).get(kind, 0)
+        if row.get('usage_model') == RESERVE:
+            # The pre-dispatch reserve stays charged; an observation can only raise it.
+            return max(observed, reserve)
+        return observed + reserve
+
+    @staticmethod
+    def _combined_charge(row, policy):
+        known = sum(value for value in row.get('usage', {}).values() if value is not None)
+        reserves = row.get('conservative_usage', {}).values()
+        if row.get('usage_model') == RESERVE:
+            # One live invocation belongs to one cost kind (exclusive_cost_kind_v1).
+            return max(known, max(reserves, default=0))
+        return known + (max(reserves, default=0) if policy.get('unknown_usage_reserve_model') == 'exclusive_cost_kind_v1'
+                        else sum(reserves))
 
     @staticmethod
     def accounted_total(state, policy):
         """Known usage plus the frozen reserve model; unknown observations stay null."""
-        rows = list(state['invocations'].values())
-        known = sum(value for row in rows for value in row.get('usage', {}).values() if value is not None)
-        reserves = (max(row.get('conservative_usage', {}).values(), default=0)
-                    if policy.get('unknown_usage_reserve_model') == 'exclusive_cost_kind_v1'
-                    else sum(row.get('conservative_usage', {}).values()) for row in rows)
-        return known + sum(reserves)
+        return sum(LimitsStore._combined_charge(row, policy) for row in state['invocations'].values())
+
+    @staticmethod
+    def coverage(envelope, state):
+        """Per-engine view of which calls the dollar caps cover. Tokens are never priced."""
+        exempt = set(state.get('legacy_uncovered_invocations') or ())
+        engines, uncovered_ids = {}, []
+        for identity, row in sorted(state['invocations'].items()):
+            entry = engines.setdefault(row.get('engine') or 'unknown', dict(
+                invocations=0, observed_cost=0, reserved=0, unmetered_quota=0, uncovered=0,
+                historical_reserve=0, in_flight=0, not_dispatched=0,
+                reported_tokens=dict(input_tokens=None, output_tokens=None)))
+            entry['invocations'] += 1
+            if any(row.get('usage', {}).get(kind) is not None for kind in COST_KINDS):
+                entry['observed_cost'] += 1
+            if row.get('usage_model') == RESERVE:
+                entry['reserved'] += 1
+            elif row.get('usage_model') == UNMETERED:
+                entry['unmetered_quota'] += 1
+            elif uncovered(row):
+                entry['uncovered'] += 1
+                uncovered_ids.append(dict(invocation_id=identity, engine=row.get('engine'),
+                                          legacy_admitted=identity in exempt))
+            elif row.get('status') == 'historical' and row.get('conservative_usage'):
+                entry['historical_reserve'] += 1
+            elif row.get('status') in ('reserved', 'uncertain'):
+                entry['in_flight'] += 1
+            elif row.get('status') == 'not_dispatched':
+                entry['not_dispatched'] += 1
+            for key, value in (row.get('reported_tokens') or {}).items():
+                if value is not None:
+                    entry['reported_tokens'][key] = (entry['reported_tokens'][key] or 0) + value
+        for entry in engines.values():
+            outside = entry['unmetered_quota'] + entry['uncovered']
+            entry['dollar_caps_cover'] = 'all' if not outside else 'none' if outside == entry['invocations'] else 'partial'
+        declared = envelope['policy'].get('live_unknown_usage', {})
+        return dict(engines=engines, uncovered_invocations=uncovered_ids,
+                    declared_models={engine: rule['model'] for engine, rule in sorted(declared.items())},
+                    dollar_caps_cover_all_invocations=all(e['dollar_caps_cover'] == 'all' for e in engines.values()),
+                    tokens_priced=False)
+
+    def coverage_report(self):
+        envelope, state = self._load(repair=False)
+        return self.coverage(envelope, state)
 
     def guard_entrypoint(self, name):
         envelope, _ = self._load(repair=False)
@@ -255,27 +343,45 @@ class LimitsStore:
                     or sum(v['role'] == role for v in invocations) >= p['role_invocations'][role]
                     or sum(v['phase'] == phase for v in invocations) >= p['phase_invocations'][phase]):
                 raise RecoveryStop('LIMIT_REACHED', 'Frozen invocation allowance exhausted')
+            rule = p.get('live_unknown_usage', {}).get(engine)
+            if rule is None and engine not in REPORTED_COST:
+                raise RecoveryStop('LIMIT_REACHED', 'Engine reports no dollar cost and the profile declares no live '
+                                   'unknown-usage model; dispatch refused before launch')
+            row = {'role': role, 'phase': phase, 'engine': engine, 'status': 'reserved',
+                   'usage': {'metered_usd': None, 'cli_estimate_usd': None}}
+            if rule is not None:
+                row['usage_model'] = rule['model']
+            if rule is not None and rule['model'] == RESERVE:
+                row['conservative_usage'] = {kind: rule[kind] for kind in COST_KINDS}
+                self._check_dollars(state, p, [*invocations, row], reserving=True)
             identity = uuid.uuid4().hex
-            state['invocations'][identity] = {'role': role, 'phase': phase, 'engine': engine, 'status': 'reserved',
-                'usage': {'metered_usd': None, 'cli_estimate_usd': None}}
+            state['invocations'][identity] = row
             self.journal.append('INVOCATION_RESERVED', state)
             return identity
 
-    def finish(self, identity, status, usage=None):
+    def finish(self, identity, status, usage=None, tokens=None):
         if status not in ('returned', 'terminated', 'uncertain', 'not_dispatched'):
             raise ValueError('Invalid invocation outcome')
         usage = usage or {'metered_usd': None, 'cli_estimate_usd': None}
         if set(usage) != {'metered_usd', 'cli_estimate_usd'} or any(
                 x is not None and (type(x) not in (float, int) or not math.isfinite(x) or x < 0) for x in usage.values()):
             raise ValueError('Invalid usage observation')
+        if tokens is not None and (not isinstance(tokens, dict) or set(tokens) != {'input_tokens', 'output_tokens'}
+                                   or any(x is not None and (type(x) is not int or x < 0) for x in tokens.values())):
+            raise ValueError('Invalid token telemetry')
+        # Reported tokens are unauthenticated telemetry, kept apart from dollars.
+        reported = dict(tokens) if tokens is not None and any(x is not None for x in tokens.values()) else None
         with ticket_lock(self.root / 'limits/limits.lock'):
             _, state = self._load()
             old = state['invocations'][identity]
             if old['status'] not in ('reserved',):
-                if old['status'] == status and old['usage'] == usage:
+                if (old['status'] == status and old['usage'] == usage
+                        and (tokens is None or old.get('reported_tokens') == reported)):
                     return
                 raise RecoveryStop('OUTCOME_UNCERTAIN', 'Conflicting invocation reconciliation')
             old.update(status=status, usage=usage)
+            if reported is not None:
+                old['reported_tokens'] = reported
             self.journal.append('INVOCATION_RECONCILED', state)
 
     def transport(self, identity, code, *, non_dispatch_proven, jitter):
@@ -358,6 +464,19 @@ def observed_usage(engine, function, result):
         if len(result) > index and type(result[index]) in (float, int) and result[index] > 0:
             usage['metered_usd'] = result[index]
     return usage
+
+
+def observed_tokens(engine, function, result):
+    """Token counts the adapter reported; the controller never converts them to dollars."""
+    tokens = {'input_tokens': None, 'output_tokens': None}
+    if not isinstance(result, tuple) or engine not in REPORTED_COST:
+        return tokens
+    index = 3 if function == 'run_claude' else 2
+    for key, offset in (('input_tokens', 0), ('output_tokens', 1)):
+        value = result[index + offset] if len(result) > index + offset else None
+        if type(value) is int and value > 0:
+            tokens[key] = value
+    return tokens
 
 
 def inspect_design_sources(repo, names):

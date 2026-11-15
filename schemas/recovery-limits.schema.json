@@ -105,6 +105,22 @@
       ],
       "description": "Opt-in: an unknown invocation belongs to one cost kind. Each kind cap reserves its full allowance; the combined cap reserves the maximum once, not their sum. Absent retains additive legacy semantics."
     },
+    "live_unknown_usage": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "enum": [
+          "claude",
+          "codex",
+          "agy",
+          "openrouter"
+        ]
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/live_usage_model"
+      },
+      "description": "Explicit per-engine rule for live invocations that report no dollar cost. Absent is not zero: an engine that never reports cost is refused before launch, and a returned live row with null usage blocks the next dispatch."
+    },
     "feedback_delegation": {
       "type": "object",
       "additionalProperties": false,
@@ -297,6 +313,58 @@
     }
   },
   "$defs": {
+    "live_usage_reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1600,
+      "pattern": "\\S"
+    },
+    "live_usage_model": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "model",
+            "metered_usd",
+            "cli_estimate_usd",
+            "reason"
+          ],
+          "properties": {
+            "model": {
+              "const": "reserve_per_invocation"
+            },
+            "metered_usd": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "cli_estimate_usd": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "reason": {
+              "$ref": "#/$defs/live_usage_reason"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "model",
+            "reason"
+          ],
+          "properties": {
+            "model": {
+              "const": "unmetered_quota"
+            },
+            "reason": {
+              "$ref": "#/$defs/live_usage_reason"
+            }
+          }
+        }
+      ]
+    },
     "caps": {
       "type": "object",
       "minProperties": 1,

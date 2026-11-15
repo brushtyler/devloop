@@ -35,7 +35,8 @@ class FundedFeedbackRoleTests(unittest.TestCase):
         self.row = f.authorized()
         self.guard_calls = []
         self.roles = FundedFeedbackRoles(f.store, self.limits, guard=lambda: self.guard_calls.append('guard'))
-        self.metadata = records.a('planner')
+        # A real engine: issue #43 refuses an engine without reported cost or a declared model.
+        self.metadata = dict(records.a('planner'), engine='codex')
         self.calls = []
         self.response = dict(response={'route': 'INCONCLUSIVE'},
                              usage={'metered_usd': None, 'cli_estimate_usd': None})
