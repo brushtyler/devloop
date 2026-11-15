@@ -110,7 +110,7 @@ class GitHub:
     def open_prs(self):
         prs = self._json('pr', 'list', '-R', self.repo, '--state', 'open', '--limit', '200',
                          '--json', 'number,title,body,labels,headRefName,headRefOid,author,'
-                                   'isCrossRepository')
+                                   'isCrossRepository,mergeable,mergeStateStatus')
         return [dict(raw, author={'login': author_login(raw.get('author'))}) for raw in prs]
 
     def pr_comments(self, number):
@@ -172,6 +172,20 @@ class GitHub:
     def ensure_label(self, name, color, description):
         self._gh('label', 'create', name, '-R', self.repo, '--color', color,
                  '--description', description, '--force')
+
+
+def merge_state(mergeable, merge_state_status):
+    """``conflict``, ``unknown`` or ``clean`` from a PR's ``mergeable`` and ``mergeStateStatus``.
+
+    A conflict is ``mergeable`` CONFLICTING (``false`` in REST) or the state DIRTY. While GitHub
+    is still computing (UNKNOWN, or a missing value) the state is ``unknown``, not a conflict.
+    Other states (BLOCKED, BEHIND, UNSTABLE, ...) concern checks and rules, not conflicts.
+    """
+    if mergeable in ('CONFLICTING', False) or merge_state_status == 'DIRTY':
+        return 'conflict'
+    if mergeable in ('UNKNOWN', None) or merge_state_status in ('UNKNOWN', None):
+        return 'unknown'
+    return 'clean'
 
 
 def _status_bucket(state):
