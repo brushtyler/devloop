@@ -270,6 +270,28 @@ class AgentCommandTests(unittest.TestCase):
             self.assertTrue(ctx.exception.log.exists())
             self.assertIn('(CLI v2.1.322)', runner.header(agent))
 
+    def test_failed_version_lookup_is_retried(self):
+        replies = [OSError('claude is updating'),
+                   subprocess.TimeoutExpired('claude', 60),
+                   SimpleNamespace(returncode=1, stdout='', stderr='not found'),
+                   SimpleNamespace(returncode=0, stdout='2.1.325 (Claude Code)', stderr='')]
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv)
+            reply = replies.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = agents.AgentRunner(tmp, 10, run=fake_run)
+            agent = CFG.agent('claude')
+            for _ in range(3):
+                self.assertIn('(CLI non noto)', runner.header(agent))
+            self.assertIn('(CLI v2.1.325)', runner.header(agent))
+            self.assertIn('(CLI v2.1.325)', runner.header(agent))
+        self.assertEqual(len(calls), 4)  # a known version stays cached
+
     def test_runner_reports_timeouts(self):
         def fake_run(argv, **kw):
             raise subprocess.TimeoutExpired(argv, 1)

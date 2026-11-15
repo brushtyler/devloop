@@ -104,13 +104,17 @@ class AgentRunner:
         self._versions = {}
 
     def version(self, agent):
-        if agent.key not in self._versions:
-            try:
-                done = self._run(list(agent.version_cmd), capture_output=True, text=True, timeout=60)
-                self._versions[agent.key] = parse_version(done.stdout + done.stderr)
-            except (OSError, subprocess.SubprocessError):
-                self._versions[agent.key] = None
-        return self._versions[agent.key]
+        """The CLI version, cached once known; a failed lookup is retried on the next call."""
+        if agent.key in self._versions:
+            return self._versions[agent.key]
+        try:
+            done = self._run(list(agent.version_cmd), capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        version = parse_version(done.stdout + done.stderr)
+        if version:
+            self._versions[agent.key] = version
+        return version
 
     def header(self, agent):
         return header(agent.display_name, self.version(agent), agent.model_label, agent.effort)
