@@ -130,7 +130,11 @@ its path and SHA-256. The record contains:
 - `inputs`: the SHA-256 of each input involved (plan, review, reason, runtime
   identity, controller snapshot, any extra capability input, and, after
   inspection, the source files, parent selector and computed subject). Input
-  values are not copied.
+  values are not copied. Each source file that inspection read before it
+  refused or returned appears as `file:<ticket-relative path>` with the hash of
+  its bytes, so the rejected journal or state stays identifiable after it is
+  repaired. A missing, symlinked or unreadable file is recorded with
+  `sha256: null` and its `state`.
 
 A refusal raised before the generation is registered gets a `REFUSED` receipt.
 It owns no runtime, worktree, branch or pending fence, so it does not block a

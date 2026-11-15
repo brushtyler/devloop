@@ -170,9 +170,9 @@ class ScopeAmendmentTests(unittest.TestCase):
         return receipt, json.loads(path.read_text())
 
     def only_preparation(self):
-        """The single preparation carrying a refusal; the fixture's own import has none."""
-        identities = [p.stem for p in (self.ticket / 'execution/preparations').glob('*.json')
-                      if 'refusal_ref' in json.loads(p.read_text())]
+        """The single undiscarded preparation carrying a refusal; the fixture's own import has none."""
+        records = [json.loads(p.read_text()) for p in (self.ticket / 'execution/preparations').glob('*.json')]
+        identities = [r['transition_id'] for r in records if 'refusal_ref' in r and r['status'] != 'ABORTED']
         self.assertEqual(len(identities), 1)
         return identities[0]
 
@@ -205,16 +205,40 @@ class ScopeAmendmentTests(unittest.TestCase):
         self.assertEqual(json.loads(archived.read_text()), refusal)
         self.assertFalse((self.ticket / 'execution' / ('prepared-' + identity)).exists())
 
-    def test_inspect_refusal_is_recorded_without_source_inputs(self):
+    def test_inspect_refusal_records_the_rejected_source_files(self):
+        import hashlib
+        from ssdlc_preparations import discard
         journal = self.root / '03-dev/tasks/task-journal.jsonl'
-        journal.write_bytes(journal.read_bytes() + b'{')
-        with self.assertRaisesRegex(TaskError, 'Interrupted journal tail'):
+        ref = 'file:' + journal.relative_to(self.ticket).as_posix()
+        original = journal.read_bytes()
+        recorded = []
+        for tail in (b'{', b'{"event"'):
+            journal.write_bytes(original + tail)
+            with self.assertRaisesRegex(TaskError, 'Interrupted journal tail'):
+                self.stage()
+            identity = self.only_preparation()
+            receipt, refusal = self.refusal(identity)
+            self.assertEqual((receipt['status'], refusal['stage'], refusal['code']), ('REFUSED', 'inspect', 'inspect'))
+            self.assertEqual(refusal['message'], 'Interrupted journal tail requires reconciliation')
+            self.assertTrue({'plan', 'review', 'reason', 'runtime_identity', 'controller_snapshot',
+                             'file:execution/active.json'} <= set(refusal['inputs']))
+            self.assertEqual(refusal['inputs']['runtime_identity'], {'sha256': digest(self.identity)})
+            # The exact rejected journal bytes stay identifiable after the journal is repaired.
+            self.assertEqual(refusal['inputs'][ref], {'sha256': hashlib.sha256(original + tail).hexdigest()})
+            self.assertNotIn(str(self.ticket), json.dumps(refusal))
+            recorded.append(refusal['inputs'][ref])
+            discard(self.ticket, identity, namespace='execution', writers_quiescent=lambda _: True)
+        self.assertNotEqual(recorded[0], recorded[1])
+
+    def test_inspect_refusal_records_a_missing_source_file(self):
+        journal = self.root / '03-dev/tasks/task-journal.jsonl'
+        journal.unlink()
+        with self.assertRaises(TaskError):
             self.stage()
-        receipt, refusal = self.refusal(self.only_preparation())
-        self.assertEqual((receipt['status'], refusal['stage'], refusal['code']), ('REFUSED', 'inspect', 'inspect'))
-        self.assertEqual(refusal['message'], 'Interrupted journal tail requires reconciliation')
-        self.assertEqual(set(refusal['inputs']), {'plan', 'review', 'reason', 'runtime_identity', 'controller_snapshot'})
-        self.assertEqual(refusal['inputs']['runtime_identity'], {'sha256': digest(self.identity)})
+        _, refusal = self.refusal(self.only_preparation())
+        self.assertEqual(refusal['stage'], 'inspect')
+        self.assertEqual(refusal['inputs']['file:' + journal.relative_to(self.ticket).as_posix()],
+                         {'sha256': None, 'state': 'missing'})
 
     def test_prepare_refusals_are_recorded_before_and_after_registration(self):
         self.identity['environment'] = {'image_id': 'different'}

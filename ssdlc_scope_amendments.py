@@ -66,6 +66,39 @@ def _input_hashes(values):
     return hashes
 
 
+def _observe(observed, ticket, path):
+    """Record a source file inspect is about to read, keyed by its ticket-relative ref.
+
+    The bytes are hashed, never copied. A missing, symlinked or unreadable file
+    is recorded with that state, so a refusal still names what was rejected.
+    """
+    if observed is None:
+        return
+    try:
+        relative = Path(path).relative_to(ticket)
+    except ValueError:
+        relative = None
+    if relative is None or '..' in relative.parts:
+        observed['file:<unsafe>/' + Path(path).name] = {'sha256': None, 'state': 'unsafe_path'}
+        return
+    current, linked = ticket, False
+    try:
+        for part in relative.parts:
+            current = current / part
+            linked = linked or current.is_symlink()
+        if linked:
+            entry = {'sha256': None, 'state': 'symlink'}
+        elif not Path(path).exists():
+            entry = {'sha256': None, 'state': 'missing'}
+        elif not Path(path).is_file():
+            entry = {'sha256': None, 'state': 'not_a_file'}
+        else:
+            entry = {'sha256': file_hash(Path(path))}
+    except OSError:
+        entry = {'sha256': None, 'state': 'unreadable'}
+    observed['file:' + relative.as_posix()] = entry
+
+
 def _record_refusal(ticket, repo, progress, exc, inputs):
     """Persist why prepare refused in the preparation; the caller re-raises.
 
@@ -84,9 +117,12 @@ def _record_refusal(ticket, repo, progress, exc, inputs):
         involved.update(source_files=source['files'], parent_selector=source['parent_selector'])
     if 'subject' in progress:
         involved['subject'] = progress['subject']
+    hashes = _input_hashes(involved)
+    # Source files inspect read before it refused or returned, with their state.
+    hashes.update(copy.deepcopy(progress.get('observed', {})))
     refusal = {'schema_version': 1, 'transition_id': identity, 'namespace': 'execution',
                'stage': progress['stage'], 'code': refusal_code(exc), 'error_type': type(exc).__name__,
-               'message': _refusal_message(exc, ticket, repo), 'inputs': _input_hashes(involved),
+               'message': _refusal_message(exc, ticket, repo), 'inputs': hashes,
                'generation_selected': False, 'model_dispatches': 0}
     if source is not None:
         refusal['source_generation'] = source['projection']['transition_id']
@@ -114,18 +150,29 @@ def _git_read(root, *args):
     return git(root, '--no-optional-locks', '-c', 'core.fsmonitor=false', *args)
 
 
-def inspect(ticket, *, allow_host_hints=False, verification_repair=False):
-    """Inspect the selected stopped generation; no repairing loads or writers."""
+def inspect(ticket, *, allow_host_hints=False, verification_repair=False, observed=None):
+    """Inspect the selected stopped generation; no repairing loads or writers.
+
+    ``observed``, when given, collects the ref and hash of each source file
+    before it is read, so a refusal can still identify the rejected inputs.
+    """
     from ssdlc_candidates import CandidateStore, inventory
     ticket = _ticket(ticket)
     _ticket(ticket / 'execution')
+    observe = lambda path: _observe(observed, ticket, path)
+    observe(ticket / 'execution/active.json')
     store = TransitionStore(ticket / 'execution')
     projection = store.load()
     _ticket(ticket / 'execution-runtimes' / projection['transition_id'])
+    runtime = ticket / 'execution-runtimes' / projection['transition_id']
+    for ref in ('generation.json', 'limits/policy.json', 'limits/task-journal.jsonl', 'state.json'):
+        observe(runtime / ref)
     root = _selected_execution_root(ticket, projection)
     outer = _read(root, 'state.json')
     if outer.get('status') not in {'FAILED', 'ESCALATED_TO_SUPERVISOR'}:
         raise TransitionError('Scope amendment requires a stopped failed task run')
+    for ref in ('03-dev/tasks/task-journal.jsonl', '02-design/plan.json', '00-recon/quality-contract.json', *CONTEXT):
+        observe(root / ref)
     raw = _regular(root, '03-dev/tasks/task-journal.jsonl').read_bytes()
     if not raw.endswith(b'\n'):
         raise TransitionError('Interrupted journal tail requires reconciliation')
@@ -167,6 +214,7 @@ def inspect(ticket, *, allow_host_hints=False, verification_repair=False):
     if _git_read(worktree, 'status', '--porcelain') or _git_read(worktree, 'rev-parse', 'HEAD') != state['expected_head']:
         raise TransitionError('Source checkpoint is dirty or moved')
     for meta in outer['artifacts'].values():
+        observe(root / meta['path'])
         if file_hash(_regular(root, meta['path'])) != meta['sha256']:
             raise TransitionError('Registered source evidence changed')
     old = TaskScheduler(worktree, root / '03-dev/tasks', plan, quality, context, None, None,
@@ -325,7 +373,8 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
     with _refusals_recorded(ticket, repo, held_locks, inputs) as progress:
         source = inspect(ticket, allow_host_hints=(review is not None or delegation is not None
                          or profile_update is not None or repair_return is not None),
-                         verification_repair=verification_repair is not None)
+                         verification_repair=verification_repair is not None,
+                         observed=progress.setdefault('observed', {}))
         progress.update(source=source, stage='prepare')
         with transition_lock(source['root'] / '03-dev/tasks/scheduler.lock', held_locks):
             guard()
