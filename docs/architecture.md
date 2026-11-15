@@ -89,3 +89,39 @@ Every intermediate artifact is registered with a SHA-256 hash and checked on rec
 - **Coverage is partial.** Ignored Git files, unreferenced partial logs and artifacts outside the evidence inventory are not covered.
 - **Strict parsing of model output** does not establish model honesty or eliminate prompt injection.
 - **Locks** coordinate SSDLC processes. They do not stop arbitrary writers, and `source_fenced` in recovery authorizations remains an operator attestation (see [#45](https://github.com/brushtyler/ssdlc/issues/45)).
+
+### Task journal: guarantees and threat model
+
+`task-journal.jsonl` is a hash chain. Each event stores its `sequence`, the SHA-256 of the previous event (`previous`) and its own SHA-256 (`sha256`), computed over the canonical JSON of the event without a key. Loading the journal replays the whole chain and refuses recovery if any link is wrong. The chain provides **integrity checks, not authenticated provenance**: it shows that the journal is internally consistent, not who wrote it. The SHA-256 values are not signatures.
+
+**Trust boundary.** The chain is meaningful only while untrusted code cannot write the ticket directory. In Docker mode, role containers mount the project read-only; the read-write mounts are `.ssdlc/.runtime`, the ticket worktree and its own Git metadata. Verification containers hide `.ssdlc` behind an empty tmpfs. The journal, plan, contracts and other control artifacts under `.ssdlc/<ticket>/` are therefore outside the reach of developer agents and checks. The boundary does not hold in `local` execution mode, if a run makes the repository root itself writable, or against anyone with write access to the ticket directory on the host: the operator account, the controller process and other host processes running as that user.
+
+What the chain detects, as long as the attacker does not recompute it:
+
+| Change to the journal | Result on load |
+| --- | --- |
+| Editing an event without updating its `sha256` | refused |
+| Editing an event and its `sha256`, but not the next event's `previous` | refused |
+| Deleting, reordering or duplicating an event in the middle | refused (`sequence`/`previous` mismatch) |
+| Inserting an event copied from another journal | refused |
+| An incomplete last line (crash during append) | truncated to the last complete event; the tail is archived as `interrupted-tail-<sha256>.bin` |
+| Editing only `tasks-state.json` | ignored: the snapshot is rebuilt from the journal |
+| Deleting the journal while the snapshot remains | refused |
+
+What the chain alone does **not** detect:
+
+- **Whole-log rewrite.** Anyone who can write the file can produce a different history with a recomputed, valid chain. No secret is involved.
+- **Truncation.** Removing complete events from the end leaves a valid shorter chain.
+- **Rollback and replay.** Restoring an older copy of the journal, or the journal of another run, yields a valid chain.
+
+These need an **independent trust anchor**: a journal head (`sequence`, `sha256`) recorded before the change, stored where the attacker cannot rewrite it, and compared later. Some host records already store a head: bounce previews and corrective transactions refuse to continue if the journal moved or no longer contains the recorded head. These records live in the same ticket directory, though. They detect inconsistent edits and SSDLC's own concurrent changes, not a coordinated rewrite of the journal and its anchors by the same host user. Whatever an evidence pack or sign-off reports about the journal has the same limits.
+
+#### Stronger provenance: evaluation
+
+SSDLC does not implement authenticated provenance today. If a deployment needs it, the options are, from simplest:
+
+1. **External checkpoint.** At phase boundaries and at sign-off, publish the journal head to a store that the host user cannot rewrite: an append-only or write-once store, a transparency log, or a comment posted by a separate identity. Later verification compares the local chain with the published heads. This detects rewrite, truncation and rollback before the last published checkpoint, but not changes after it.
+2. **Keyed MAC (for example HMAC-SHA-256).** It helps only if the key is held by a service the controller cannot read. A key the controller can read can be used by anyone who controls the controller.
+3. **Digital signature over checkpoints.** A signing service or hardware token signs the head; anyone with the public key can verify. It adds identity to option 1, but it is only as strong as the custody of the private key.
+
+For options 2 and 3, the key must stay outside every developer and test sandbox. It must never be placed in the project, the ticket directory, `.ssdlc/.runtime` (mounted read-write in role containers), environment variables passed to containers, or the toolkit directory. Even then, a signature shows that the signer approved a head; it does not prove that the events are true. Signed checkpoints must still be combined with the controls above. Adopting one of these options is a product decision and is not part of the current task engine.

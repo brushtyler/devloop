@@ -546,19 +546,24 @@ class TaskJournal:
 
     @staticmethod
     def _replay(data: bytes) -> tuple[dict | None, int, str]:
-        """Verify the hash chain and return its last state and append position."""
+        """Verify the hash chain and return its last state and append position.
+
+        The chain is unkeyed: it detects inconsistent edits, not a rewrite of the
+        whole journal, dropped trailing events or a rollback to an older copy.
+        Those need a head recorded outside the writer's reach (docs/architecture.md).
+        """
         state = None
         sequence, previous = 0, ''
         for line in data.splitlines():
             try:
                 event = json.loads(line)
-                signature = event.pop('sha256')
-                if (signature != digest(event) or event['sequence'] != sequence + 1
+                event_sha256 = event.pop('sha256')
+                if (event_sha256 != digest(event) or event['sequence'] != sequence + 1
                         or event['previous'] != previous):
                     raise ValueError('broken hash chain')
             except (ValueError, KeyError, TypeError) as exc:
                 raise TaskError('Corrupt task journal; refusing recovery') from exc
-            sequence, previous = event['sequence'], signature
+            sequence, previous = event['sequence'], event_sha256
             state = event['state']
         return state, sequence, previous
 
@@ -593,14 +598,14 @@ class TaskJournal:
 
     def append(self, kind: str, state: dict) -> None:
         event = {'sequence': self.sequence + 1, 'previous': self.previous, 'event': kind, 'state': state}
-        signature = digest(event)
-        event['sha256'] = signature
+        event_sha256 = digest(event)
+        event['sha256'] = event_sha256
         with self.path.open('ab') as stream:
             stream.write((json.dumps(event, sort_keys=True) + '\n').encode())
             stream.flush()
             os.fsync(stream.fileno())
         self.sequence += 1
-        self.previous = signature
+        self.previous = event_sha256
         atomic_json(self.snapshot, state)
 
 
