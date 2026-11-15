@@ -31,7 +31,9 @@ Keep requests, cap sources, proposals, authorizations and runtimes private.
    original recoverable. Each fresh baseline check is recorded before its outcome
    is decided: the redacted output in `00-recon/baseline/reconciliation-<check>.log`
    of the staged runtime, and exit code, duration, classification and (for
-   mutations) the inventory diff in `execution/prepared-<id>/baseline/<check>.json`.
+   mutations) the source inventory or checkout metadata diff in
+   `execution/prepared-<id>/baseline/<check>.json`. Deleted or unreadable
+   metadata is recorded as a metadata mutation with its read error.
    A failed, empty, timed-out or mutating baseline also writes
    `prepared-<id>/refusal.json`, which links those records by SHA-256 and is
    recorded in the preparation receipt. `continuation-limits-discard` archives

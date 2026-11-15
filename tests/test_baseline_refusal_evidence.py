@@ -5,6 +5,7 @@ must be diagnosable from what the single verifier run left behind.
 """
 import json
 import os
+import shutil
 import subprocess
 import unittest
 from unittest.mock import patch
@@ -39,8 +40,53 @@ def timing_out(argv, cwd, timeout, workspace):
     raise subprocess.TimeoutExpired(argv, timeout, output=b'partial output before timeout', stderr=b'')
 
 
+def config_changing(argv, cwd, timeout, workspace):
+    with (workspace / '.git' / 'config').open('a') as stream:
+        stream.write('[core]\n\tfsmonitor = true\n')
+    return 'Ran 1 test\nOK', 'config stderr', 0
+
+
+def metadata_deleting(argv, cwd, timeout, workspace):
+    shutil.rmtree(workspace / '.git')
+    return 'Ran 1 test\nOK', 'deleted metadata stderr', 0
+
+
+def index_corrupting(argv, cwd, timeout, workspace):
+    (workspace / '.git' / 'index').write_bytes(b'not a git index')
+    return 'Ran 1 test\nOK', 'corrupt index stderr', 0
+
+
+def config_only(test, diff, errors):
+    test.assertEqual((diff['modified'], diff['deleted'], diff['added']), (['config'], [], []))
+    test.assertNotIn('identity', diff)
+    test.assertEqual(errors, {})
+
+
+def metadata_gone(test, diff, errors):
+    test.assertIn('HEAD', diff['deleted'])
+    test.assertIn('config', diff['deleted'])
+    test.assertEqual(diff['identity']['head']['after'], None)
+    test.assertIn('metadata', errors)
+
+
+def index_unreadable(test, diff, errors):
+    # git_metadata binds the index through the tree only: write-tree must fail.
+    test.assertEqual(diff['identity']['tree']['after'], None)
+    test.assertNotIn('head', diff['identity'])
+    test.assertEqual(set(errors), {'tree'})
+
+
 SCENARIOS = {'failed': (failing, 'FAILED'), 'empty': (empty, 'EMPTY_SUITE'),
-             'mutation': (mutating, 'SOURCE_CHANGED'), 'timeout': (timing_out, 'TIMEOUT')}
+             'mutation': (mutating, 'SOURCE_CHANGED'), 'timeout': (timing_out, 'TIMEOUT'),
+             'config': (config_changing, 'METADATA_CHANGED'),
+             'metadata_deleted': (metadata_deleting, 'METADATA_CHANGED'),
+             'index_corrupt': (index_corrupting, 'METADATA_CHANGED')}
+METADATA_EXPECTATIONS = {'config': config_only, 'metadata_deleted': metadata_gone, 'index_corrupt': index_unreadable}
+OUTPUTS = {'failed': ['Traceback: assertion in test_app', 'FAILED (failures=1)', '[REDACTED]'],
+           'empty': ['NO TESTS RAN'], 'mutation': ['mutation stderr'],
+           'timeout': ['partial output before timeout', 'Verification timeout'],
+           'config': ['config stderr'], 'metadata_deleted': ['deleted metadata stderr'],
+           'index_corrupt': ['corrupt index stderr']}
 
 
 class BaselineEvidenceMixin:
@@ -54,7 +100,7 @@ class BaselineEvidenceMixin:
             return verifier(*args)
         return wrapper, calls
 
-    def assert_refusal_evidence(self, identity, classification, calls, verifier_output=None):
+    def assert_refusal_evidence(self, identity, classification, calls, verifier_output=None, metadata=None):
         self.assertEqual(len(calls), 1, 'refusal must not need a second verifier run')
         receipt = json.loads(receipt_path(self.target, identity, self.namespace).read_text())
         self.assertEqual(receipt['status'], 'REJECTED')
@@ -89,6 +135,14 @@ class BaselineEvidenceMixin:
             self.assertEqual((diff['modified'], diff['deleted'], diff['added']), (['app.py'], [], ['scratch.tmp']))
         else:
             self.assertNotIn('inventory_diff', refusal)
+        if classification == 'METADATA_CHANGED':
+            self.assertTrue(record['metadata_changed'])
+            self.assertEqual(refusal['metadata_diff'], record['metadata_diff'])
+            self.assertEqual(refusal.get('inspection_errors', {}), record.get('inspection_errors', {}))
+            metadata(self, refusal['metadata_diff'], refusal.get('inspection_errors', {}))
+        else:
+            self.assertFalse(record['metadata_changed'])
+            self.assertNotIn('metadata_diff', refusal)
         self.assertFalse((self.target / self.namespace / 'active.json').exists())
         return receipt, refusal
 
@@ -108,12 +162,10 @@ class ContinuationBaselineEvidenceTests(BaselineEvidenceMixin, ContinuationTests
     namespace = 'continuations'
     log_name = 'continuation-' + CHECK + '.log'
     messages = {'failed': 'baseline failed', 'empty': 'baseline failed', 'timeout': 'baseline failed',
-                'mutation': 'changed source'}
+                'mutation': 'changed source', 'config': 'changed checkout metadata',
+                'metadata_deleted': 'changed checkout metadata', 'index_corrupt': 'changed checkout metadata'}
 
     def test_refused_baseline_keeps_log_record_and_refusal(self):
-        outputs = {'failed': ['Traceback: assertion in test_app', 'FAILED (failures=1)', '[REDACTED]'],
-                   'empty': ['NO TESTS RAN'], 'mutation': ['mutation stderr'],
-                   'timeout': ['partial output before timeout', 'Verification timeout']}
         for name, (verifier, classification) in SCENARIOS.items():
             with self.subTest(name=name), patch.dict(os.environ, {'SSDLC_TEST_TOKEN': SECRET}):
                 wrapped, calls = self.counted(verifier)
@@ -121,7 +173,8 @@ class ContinuationBaselineEvidenceTests(BaselineEvidenceMixin, ContinuationTests
                     self.prepare(verifier=wrapped)
                 ids = unfinished(self.target)
                 self.assertEqual(len(ids), 1)
-                _, refusal = self.assert_refusal_evidence(ids[0], classification, calls, outputs[name])
+                _, refusal = self.assert_refusal_evidence(ids[0], classification, calls, OUTPUTS[name],
+                                                          METADATA_EXPECTATIONS.get(name))
                 self.assert_discard_archives(ids[0], refusal)
 
     def test_passing_baseline_records_evidence_without_refusal(self):
@@ -140,13 +193,15 @@ class ReconciliationBaselineEvidenceTests(BaselineEvidenceMixin, ReconciliationT
         for name, (verifier, classification) in SCENARIOS.items():
             with self.subTest(name=name), patch.dict(os.environ, {'SSDLC_TEST_TOKEN': SECRET}):
                 wrapped, calls = self.counted(verifier)
-                expected = (TransitionError, 'mutated source') if name == 'mutation' else (RecoveryStop, 'baseline failed')
+                expected = ((TransitionError, 'mutated source/metadata') if classification.endswith('_CHANGED')
+                            else (RecoveryStop, 'baseline failed'))
                 with self.assertRaisesRegex(*expected):
                     prepare(self.target, self.repo, self.request, runtime_identity=self.identity,
                             controller_snapshot=self.controller, verifier=wrapped)
                 ids = unfinished(self.target, namespace='execution')
                 self.assertEqual(len(ids), 1)
-                _, refusal = self.assert_refusal_evidence(ids[0], classification, calls)
+                _, refusal = self.assert_refusal_evidence(ids[0], classification, calls, OUTPUTS[name],
+                                                          METADATA_EXPECTATIONS.get(name))
                 self.assert_discard_archives(ids[0], refusal)
         self.select(self.stage())
 

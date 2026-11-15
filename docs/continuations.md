@@ -72,8 +72,12 @@ Keep all input/proposal/runtime files private; they can contain prompts and logs
    timeout, missing launchers/cwd or source/metadata mutation refuse preparation.
    Each baseline check is recorded before its outcome is decided: the redacted
    output goes to `00-recon/baseline/continuation-<check>.log` in the runtime,
-   and exit code, duration, classification and (for mutations) the inventory
-   diff go to `continuations/prepared-<id>/baseline/<check>.json`, both hashed.
+   and exit code, duration, classification and (for mutations) the source
+   inventory diff or the checkout metadata diff go to
+   `continuations/prepared-<id>/baseline/<check>.json`, both hashed. The log is
+   written before the post-run inspections: metadata the verifier deleted or
+   left unreadable (for example a corrupt index) is recorded as a metadata
+   mutation with its read error, not lost.
    A baseline refusal also writes `prepared-<id>/refusal.json`, linked to those
    records by path and SHA-256 and recorded in the preparation receipt, so the
    reason is readable without running the check again. `continuation-discard`
