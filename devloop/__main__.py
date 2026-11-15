@@ -1,4 +1,4 @@
-"""devloop command line: python3 -m devloop {setup,status,apps,tick,run,cleanup}."""
+"""devloop command line: python3 -m devloop {setup,status,apps,tick,run,cleanup,follow}."""
 
 import argparse
 import fcntl
@@ -8,6 +8,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from . import activity, follow
 from .agents import AgentRunner, isolated_env
 from .apps import DISPATCHER, Identities
 from .config import ConfigError, load_config
@@ -63,9 +64,11 @@ def build(args):
     gh_config.mkdir(parents=True, exist_ok=True)
     agent_env = agent_environment(cfg, gh_config)
     ws = Workspace(root, cfg.state_dir, cfg.base_branch, test_env=agent_env)
-    runner = AgentRunner(state / 'logs', cfg.agent_timeout_seconds, env=agent_env)
+    current = activity.Activity(state)
+    runner = AgentRunner(state / 'logs', cfg.agent_timeout_seconds, env=agent_env,
+                         on_turn=lambda agent, prompt: current.turn(agent.key, prompt))
     dispatcher = Dispatcher(cfg, identities.github(DISPATCHER), ws, runner, log=log,
-                            identities=identities)
+                            identities=identities, activity=current)
     return cfg, state, dispatcher
 
 
@@ -74,14 +77,32 @@ def main(argv=None):
     parser.add_argument('--config', help='TOML config (default: devloop/config.toml)')
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('setup', help='create or update the agent:* labels')
-    sub.add_parser('status', help='show devloop PRs, ready issues and the planned actions')
+    sub.add_parser('status', help='show the running action, devloop PRs, ready issues and the '
+                                  'planned actions')
     sub.add_parser('apps', help='check the GitHub App of each actor and its installation')
     tick = sub.add_parser('tick', help='plan and run one round of actions')
     tick.add_argument('--dry-run', action='store_true', help='only print the planned actions')
     run = sub.add_parser('run', help='tick forever')
     run.add_argument('--interval', type=int, default=600, help='seconds between ticks')
     sub.add_parser('cleanup', help='remove devloop worktrees left by failed steps')
+    follow_cmd = sub.add_parser('follow', help='follow live the agent working in a devloop worktree')
+    follow_cmd.add_argument('target', help='the worktree: issue-<N> (implementer) or pr-<N> '
+                                           '(reviewer or fixer)')
     args = parser.parse_args(argv)
+
+    if args.command == 'follow':
+        # Local files only: no GitHub identities needed.
+        if not follow.NAME.fullmatch(args.target):
+            sys.exit(f'devloop: follow needs issue-<N> or pr-<N>, not {args.target!r}')
+        try:
+            cfg = load_config(args.config)
+        except ConfigError as exc:
+            sys.exit(f'devloop: invalid config: {exc}')
+        worktree = main_checkout() / cfg.state_dir / 'worktrees' / args.target
+        try:
+            sys.exit(follow.follow(worktree))
+        except KeyboardInterrupt:
+            sys.exit(0)
 
     try:
         cfg, state, dispatcher = build(args)
@@ -112,6 +133,7 @@ def main(argv=None):
             sys.exit(1)
         return
     if args.command == 'status':
+        log(activity.describe(state) or 'no action running')
         snap = dispatcher.snapshot()
         for pr in snap.prs:
             labels = ', '.join(sorted(l for l in pr.labels if l.startswith('agent:')))
