@@ -138,7 +138,9 @@ def main(argv=None):
         snap = dispatcher.snapshot()
         for pr in snap.prs:
             labels = ', '.join(sorted(l for l in pr.labels if l.startswith('agent:')))
-            log(f'PR #{pr.number} (issue #{pr.issue}) [{labels}] rounds={len(pr.reviews)} ci={pr.checks}')
+            conflict = ' CONFLICT with ' + cfg.base_branch if pr.merge_state == 'conflict' else ''
+            log(f'PR #{pr.number} (issue #{pr.issue}) [{labels}] rounds={len(pr.reviews)} '
+                f'ci={pr.checks} merge={pr.merge_state}{conflict}')
         for issue in snap.ready_issues:
             log(f'ready #{issue["number"]} labelled by {issue["labeler"]}: {issue["title"]}')
         for action in plan(snap, cfg):

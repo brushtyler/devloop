@@ -16,6 +16,10 @@ PR     agent:review ─► (CI fail | request_changes) ─► agent:changes ─�
 Readiness is bound to the approved commit: a PR is promoted only if its head is still the
 reviewed commit and CI passed. A ready PR whose head moves, or whose CI is running again, goes
 back to review (to agent:changes when CI fails on it).
+
+A PR in review or ready that conflicts with the base branch is neither reviewed nor promoted: a
+``sync`` merges the base into it, with the implementer resolving the conflicts, and sends it
+back to review. A sync is not a review round.
 """
 
 import string
@@ -26,14 +30,14 @@ from pathlib import Path
 
 from .agents import AgentError
 from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, PR_COMMENT, REVIEW
-from .github import GitHubError
+from .github import GitHubError, merge_state
 from .markdown import (RESUME, dispatcher_header, publishable, read_marker, render_escalation,
                        render_fix, render_native_review, render_review)
 from .review import ci_failure_review, normalize_review, open_findings
 from .workspace import WorkspaceError
 
 PROMPT_DIR = Path(__file__).resolve().parent / 'prompts'
-EXPENSIVE = ('review', 'fix', 'implement')
+EXPENSIVE = ('review', 'fix', 'implement', 'sync')
 LABEL_STYLE = {
     'ready': ('0e8a16', 'devloop: pronta per essere implementata da un agent'),
     'working': ('fbca04', 'devloop: implementazione in corso'),
@@ -59,6 +63,7 @@ class PullRequest:
     checks: str = 'none'
     failed_checks: list = field(default_factory=list)
     failed_runs: list = field(default_factory=list)
+    merge_state: str = 'clean'  # clean, conflict, unknown (see github.merge_state)
 
 
 @dataclass
@@ -106,6 +111,8 @@ def plan(snapshot, cfg):
             approved = latest is not None and latest['verdict'] == 'approve'
             if not approved or latest['head_sha'] != pr.head_sha:
                 actions.append(Action('revoke', pr.number, 'head is not the approved commit'))
+            elif pr.merge_state == 'conflict':
+                actions.append(Action('sync', pr.number, 'conflicts with the base branch'))
             elif pr.checks == 'fail':
                 actions.append(Action('ci_failed', pr.number, 'CI failed after approval')
                                if rounds_left else Action('round_limit', pr.number))
@@ -121,6 +128,11 @@ def plan(snapshot, cfg):
             replay = latest is not None and latest['head_sha'] == pr.head_sha and not answered
             if replay and latest['verdict'] != 'approve':
                 actions.append(Action('apply_review', pr.number, 'verdict already recorded'))
+            elif pr.merge_state == 'conflict':
+                # Neither reviewed nor promoted: the merge would change the head anyway.
+                actions.append(Action('sync', pr.number, 'conflicts with the base branch'))
+            elif pr.merge_state == 'unknown':
+                continue  # GitHub is still computing mergeability: next tick
             elif pr.checks == 'pending':
                 continue
             elif replay and pr.checks != 'fail':
@@ -281,7 +293,9 @@ class Dispatcher:
         return PullRequest(number=raw['number'], issue=issue,
                            head_ref=ref, head_sha=raw['headRefOid'],
                            title=raw['title'], body=raw.get('body', ''),
-                           labels=label_names(raw['labels']), meta=meta or {})
+                           labels=label_names(raw['labels']), meta=meta or {},
+                           merge_state=merge_state(raw.get('mergeable'),
+                                                   raw.get('mergeStateStatus')))
 
     def snapshot(self):
         lb = self.cfg.labels
@@ -332,11 +346,13 @@ class Dispatcher:
         self.gh.comment(number, render_escalation(reason, detail))
         self.gh.edit_labels(number, add=[self.cfg.labels.needs_human], remove=remove)
 
+    def _log_hint(self, exc):
+        log = getattr(exc, 'log', None)
+        return f' Log locale: `{Path(log).name}` in `{self.cfg.state_dir}/logs`.' if log else ''
+
     def _escalate_failure(self, action, pr, exc):
         lb = self.cfg.labels
-        log = getattr(exc, 'log', None)
-        where = f' Log locale: `{Path(log).name}` in `{self.cfg.state_dir}/logs`.' if log else ''
-        reason = f'Il passo `{action.kind}` è fallito: {exc}.{where}'
+        reason = f'Il passo `{action.kind}` è fallito: {exc}.{self._log_hint(exc)}'
         try:
             if pr is not None:
                 self._escalate(pr.number, reason,
@@ -634,6 +650,99 @@ class Dispatcher:
             pr.number, render_fix(fix, self.runner.header(agent), latest['round']))
         self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.changes])
         self.ws.remove(name)
+
+    def _do_sync(self, pr):
+        """Merge the base branch into a conflicting PR. The implementer resolves the conflicts
+        in the PR worktree, the dispatcher concludes the merge, pushes it and sends the PR back
+        to review. No review record is written, so no round is spent."""
+        cfg, lb = self.cfg, self.cfg.labels
+        remove = [lb.review, lb.ready_to_merge]
+        base = f'origin/{cfg.base_branch}'
+        if pr.meta['implementer'] not in cfg.agents:
+            return self._escalate(
+                pr.number, f'La PR è in conflitto con `{cfg.base_branch}` e il suo implementer '
+                           f'(`{pr.meta["implementer"]}`) non è più configurato: serve una '
+                           'decisione su chi risolve i conflitti.', remove=remove)
+        agent = cfg.agent(pr.meta['implementer'])
+        issue, _ = self._issue_context(pr.issue)
+        name = f'pr-{pr.number}'
+        path = self.ws.existing_branch(name, pr.head_ref)
+        if self.ws.head(path) != pr.head_sha:
+            self.log('  head moved since the snapshot; retrying next tick')
+            return
+        # Git wants a committer even to start the merge: the implementer's, as for the commit.
+        files = self.ws.start_merge(path, author=self._git_auth(agent.key, IMPLEMENT))
+        if files is None:
+            self.log(f'  the branch already contains {base}; waiting for GitHub to recompute')
+            self.ws.remove(name)
+            return
+        target = self.ws.merge_head(path)
+        listed = _format_conflicts((f, self.ws.base_commits(path, f)) for f in files)
+        message = f'Merge {base} into {pr.head_ref}'
+        if files:
+            message += '\n\nConflicts resolved in:\n' + '\n'.join(f'- {f}' for f in files)
+
+            def fail(reason, detail=''):
+                self._escalate(pr.number, f'Sincronizzazione con `{cfg.base_branch}` non '
+                                          f'riuscita. {reason}\n\nFile in conflitto:\n\n{listed}',
+                               detail, remove=remove)
+            prompt = _template('sync', repo=cfg.repo, pr_number=pr.number, issue_number=pr.issue,
+                               issue_title=issue['title'], issue_body=issue.get('body') or '',
+                               base_branch=cfg.base_branch, conflicts=listed,
+                               test_cmd=cfg.test_cmd, language=cfg.language)
+            try:
+                result, failure = self._write_turn(agent, prompt, 'sync', path,
+                                                   f'pr-{pr.number}-sync')
+            except AgentError as exc:
+                return fail(f'Il passo `sync` è fallito: {exc}.{self._log_hint(exc)}')
+            if result['status'] == 'blocked':
+                return self._blocked(pr.number, agent, result['blocked_reason'].strip()
+                                     + f'\n\nFile in conflitto con `{cfg.base_branch}`:\n\n'
+                                     + listed, remove=remove, on_pr=True)
+            if failure:
+                return fail(failure[0], failure[1])
+            # The dispatcher started the merge and concludes it: an agent that committed, reset
+            # or aborted it leaves a result that is not the reviewed branch plus the base.
+            if self.ws.head(path) != pr.head_sha or self.ws.merge_head(path) != target:
+                return fail('Il merge in corso è stato concluso o annullato durante la '
+                            'risoluzione dei conflitti, quindi non viene pubblicato.')
+            left = self.ws.conflict_markers(path, files)
+            if left:
+                return fail('Restano marcatori di conflitto in '
+                            + ', '.join(f'`{f}`' for f in left) + '.')
+            message = self._commit_message(agent, message, pr.issue)
+        else:
+            message += f'\n\nRefs #{pr.issue}\n'
+        auth = self._git_auth(agent.key, IMPLEMENT)
+        head = self.ws.commit_all(path, message, author=auth)
+        # The branch never differs from the base under protected_paths, and neither may the merge.
+        protected = self._protected_changes(path, since=base)
+        if protected:
+            return self._escalate_protected(pr.number, protected, remove=remove)
+        self.ws.push(path, pr.head_ref, auth=auth)
+        text = (f'\n## Sincronizzazione con `{cfg.base_branch}`\n\n'
+                f'Merge di `{base}` (`{target[:12]}`) nel branch, nuovo head `{head[:12]}`. La PR '
+                'torna in review sul nuovo head; la sincronizzazione non consuma un round di '
+                'review.\n\n')
+        if files:
+            text += f'File in conflitto risolti:\n\n{listed}\n\n{result["summary"].strip()}'
+            self._as(agent.key, PR_COMMENT).comment(
+                pr.number, publishable(self.runner.header(agent) + text))
+        else:
+            self.gh.comment(pr.number, publishable(dispatcher_header() + text
+                                                   + 'Il merge locale non aveva conflitti.'))
+        self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.ready_to_merge, lb.changes])
+        self.ws.remove(name)
+        self.log(f'  merged {base} into {pr.head_ref}: {head[:12]}')
+
+
+def _format_conflicts(conflicts):
+    """``(file, base commits)`` pairs as a Markdown list."""
+    lines = []
+    for name, commits in conflicts:
+        lines.append(f'- `{name}`')
+        lines += [f'  - `{c.split(" ", 1)[0]}` {c.partition(" ")[2]}'.rstrip() for c in commits]
+    return '\n'.join(lines) or '(none)'
 
 
 def ensure_labels(gh, labels):
