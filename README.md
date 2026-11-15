@@ -255,7 +255,7 @@ All new runs use the task scheduler, including Tier S. See [unified execution an
 
 - **Task mode is the default for all new runs**, including Tier S. Recovery transitions, scope amendments and the feedback workflow apply to task-mode runs.
 - **No automatic merge.** Approval and every limit extension are explicit operator actions.
-- **Integrity checks are not authentication.** SHA-256 hashes detect changes at checkpoints. They do not protect against a host user who rewrites both evidence and hashes, and there is no continuous containment (workstream B).
+- **Integrity checks are not authentication.** SHA-256 hashes detect changes at checkpoints. They do not protect against a host user who rewrites both evidence and hashes, and there is no continuous containment (workstream B). The task journal's hash chain does not detect a rewrite of the whole journal, truncation or rollback without an independent trust anchor; see the [task journal threat model](docs/architecture.md#task-journal-guarantees-and-threat-model).
 - **Cost accounting is partial.** Claude reports CLI estimates and OpenRouter reports metered usage. Subscription CLIs such as Codex do not report a cost; see [#43](https://github.com/brushtyler/ssdlc/issues/43) and [#14](https://github.com/brushtyler/ssdlc/issues/14).
 - **Supervision is single-host Linux.** It is not a distributed scheduler.
 
