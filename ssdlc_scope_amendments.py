@@ -345,10 +345,23 @@ def _refusals_recorded(ticket, repo, held_locks, inputs):
             raise
 
 
+USAGE_CONTRACT = 'live-usage-profile-admission-v1'
+PROFILE_CONTRACTS = ('feedback-profile-admission-v1', USAGE_CONTRACT)
+
+
+def _admission(contract):
+    """Profile admission module for an explicit contract; None keeps the feedback admission."""
+    if contract == USAGE_CONTRACT:
+        import ssdlc_usage_admission as module
+    else:
+        import ssdlc_feedback_admission as module
+    return module
+
+
 def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_snapshot,
             guard=lambda: None, clock=time.time, fault=lambda point: None, held_locks=(), delegation=None, profile_update=None,
             repair_return=None, repair_session=None, feedback_request_id=None, reconcile_feedback_evidence=False,
-            operator_owner_limit=None, operator_recovery_profile=None, verification_repair=None):
+            operator_owner_limit=None, operator_recovery_profile=None, verification_repair=None, profile_contract=None):
     """Stage a reviewed amendment, retaining all prior generations and counters.
 
     A malformed plan or a non-canonical ticket refuses before anything is
@@ -363,7 +376,7 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
     if ticket != repo / '.ssdlc' / plan.get('ticket_id', ''):
         raise TransitionError('Scope target must be the canonical ticket of the target repository')
     inputs = dict(plan=plan, review=review, reason=reason, runtime_identity=runtime_identity,
-                  controller_snapshot=controller_snapshot, profile_update=profile_update,
+                  controller_snapshot=controller_snapshot, profile_update=profile_update, profile_contract=profile_contract,
                   repair_return=repair_return, feedback_request_id=feedback_request_id,
                   reconcile_feedback_evidence=reconcile_feedback_evidence,
                   operator_owner_limit=operator_owner_limit, operator_recovery_profile=operator_recovery_profile,
@@ -393,6 +406,8 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                 raise TransitionError('Operator owner feedback cannot be combined with another transition capability')
             if profile_update is not None and delegation is not None:
                 raise TransitionError('Profile admission cannot use scope delegation')
+            if profile_contract not in (None, USAGE_CONTRACT) or profile_contract is not None and profile_update is None:
+                raise TransitionError('Unknown or unbound profile admission contract')
             if repair_return is not None and (profile_update is not None or delegation is not None):
                 raise TransitionError('An unchanged-scope return cannot amend grants or targets')
             return_proof = None
@@ -438,8 +453,7 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                     reconcile_feedback_evidence=reconcile_feedback_evidence,
                     operator_owner_limit=operator_owner_limit)
             elif profile_update is not None:
-                from ssdlc_feedback_admission import subject as admission_subject
-                reviewed = admission_subject(source, plan, profile_update, reason)
+                reviewed = _admission(profile_contract).subject(source, plan, profile_update, reason)
             else:
                 reviewed = subject(source, plan, reason, feedback_request_id=feedback_request_id,
                                    reconcile_feedback_evidence=reconcile_feedback_evidence,
@@ -472,7 +486,13 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
             attempt_profile = (verification_repair['profile'] if verification_repair else
                                operator_recovery_profile or source['envelope']['policy'])
             extension = reviewed.get('verification_repair', {}).get('deadline_extension')
-            if extension is None:
+            if extension is None and profile_contract == USAGE_CONTRACT:
+                # Capacity under the admitted model, exempting exactly the listed legacy rows.
+                proposed_envelope = copy.deepcopy(source['envelope']); proposed_envelope['policy'] = profile_update
+                proposed_counters = dict(source['counters'],
+                                         legacy_uncovered_invocations=reviewed['legacy_uncovered_invocations'])
+                limits.check_capacity(proposed_envelope, proposed_counters, '03-dev', '03-dev')
+            elif extension is None:
                 limits.check(source['counters'], source['envelope']['policy'])
                 limits.require_capacity('03-dev', '03-dev')
             else:
@@ -519,6 +539,11 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                 envelope, counters = copy.deepcopy(source['envelope']), copy.deepcopy(source['counters'])
                 if profile_update is not None:
                     envelope['policy'] = copy.deepcopy(profile_update)
+                if profile_update is not None and profile_contract == USAGE_CONTRACT:
+                    # Exactly the authorized legacy rows stop blocking; they stay uncovered and unpriced.
+                    envelope['binding']['legacy_uncovered_invocations'] = list(reviewed['legacy_uncovered_invocations'])
+                    counters['legacy_uncovered_invocations'] = list(reviewed['legacy_uncovered_invocations'])
+                elif profile_update is not None:
                     phases = envelope['binding'].setdefault('allowed_phases', [])
                     if 'feedback' not in phases:
                         phases.append('feedback')
@@ -591,8 +616,10 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                     from ssdlc_feedback_delegation import CONTRACT
                     proposal.update(authorization_contract=CONTRACT, delegation_sha256=digest(review))
                 if profile_update is not None:
-                    from ssdlc_feedback_admission import CONTRACT as PROFILE_CONTRACT
-                    proposal.update(authorization_contract=PROFILE_CONTRACT, profile_sha256=digest(profile_update))
+                    proposal.update(authorization_contract=_admission(profile_contract).CONTRACT,
+                                    profile_sha256=digest(profile_update))
+                if profile_contract == USAGE_CONTRACT:
+                    proposal['legacy_uncovered_invocations'] = list(reviewed['legacy_uncovered_invocations'])
                 if operator_recovery_profile is not None:
                     from ssdlc_operator_recovery import CONTRACT as RECOVERY_CONTRACT
                     proposal.update(authorization_contract=RECOVERY_CONTRACT,
@@ -642,14 +669,14 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
         validate_allowance_binding(proposal, recipe['subject'].get('owner_feedback', {}))
     from ssdlc_feedback_delegation import CONTRACT, FencedSession, finalize
     delegated = proposal.get('authorization_contract') == CONTRACT
-    profile_admission = proposal.get('authorization_contract') == 'feedback-profile-admission-v1'
+    profile_admission = proposal.get('authorization_contract') in PROFILE_CONTRACTS
     operator_recovery = proposal.get('authorization_contract') == RECOVERY_CONTRACT
     verification_repair = proposal.get('authorization_contract') in VERIFICATION_CONTRACTS
     from ssdlc_feedback_return import CONTRACTS as RETURN_CONTRACTS, CONTRACT as RETURN_CONTRACT
     repair_return = proposal.get('authorization_contract') in RETURN_CONTRACTS
     repair_delegated = proposal.get('authorization_contract') == RETURN_CONTRACT
     if (preparation != ticket / 'execution' / ('prepared-' + proposal['transition_id'])
-            or proposal.get('authorization_contract') not in {'scope-amendment-v1', CONTRACT, RECOVERY_CONTRACT, *VERIFICATION_CONTRACTS, 'feedback-profile-admission-v1', *RETURN_CONTRACTS}
+            or proposal.get('authorization_contract') not in {'scope-amendment-v1', CONTRACT, RECOVERY_CONTRACT, *VERIFICATION_CONTRACTS, *PROFILE_CONTRACTS, *RETURN_CONTRACTS}
             or delegated and (not isinstance(delegation, FencedSession) or delegation.ticket != ticket
                               or delegation.root != Path(recipe['source_root']))
             or not delegated and delegation is not None):
@@ -720,8 +747,8 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
                 if proof != recipe['review']:
                     raise TransitionError('Delegated feedback changed after preparation')
             if profile_admission:
-                from ssdlc_feedback_admission import subject as admission_subject
-                if admission_subject(source, source['plan'], recipe['envelope']['policy'], recipe['subject']['reason']) != recipe['subject']:
+                admission = _admission(proposal['authorization_contract'] if proposal['authorization_contract'] == USAGE_CONTRACT else None)
+                if admission.subject(source, source['plan'], recipe['envelope']['policy'], recipe['subject']['reason']) != recipe['subject']:
                     raise TransitionError('Profile admission source changed')
             if repair_return:
                 from ssdlc_feedback_return import subject as return_subject, validate_proof

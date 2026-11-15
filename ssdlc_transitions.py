@@ -72,6 +72,12 @@ def validate_authorization(authorization, proposal):
         expected |= {'profile_sha256'}
         if authorization.get('profile_sha256') != proposal.get('profile_sha256') or proposal.get('scope_diff') != {}:
             raise TransitionError('Feedback profile admission requires exact unchanged scope and profile authorization')
+    if proposal.get('authorization_contract') == 'live-usage-profile-admission-v1':
+        expected |= {'profile_sha256', 'legacy_uncovered_invocations'}
+        if (authorization.get('profile_sha256') != proposal.get('profile_sha256') or proposal.get('scope_diff') != {}
+                or not isinstance(proposal.get('legacy_uncovered_invocations'), list)
+                or authorization.get('legacy_uncovered_invocations') != proposal['legacy_uncovered_invocations']):
+            raise TransitionError('Live-usage admission requires exact profile and listed legacy uncovered invocations')
     if proposal.get('authorization_contract') in {'operator-verification-repair-v1', 'operator-verification-repair-deadline-v1'}:
         expected |= {'profile_sha256', 'quality_contract_sha256', 'verification_repair_sha256', 'authorize_extensions'}
         if (any(authorization.get(key) != proposal.get(key) for key in
@@ -234,7 +240,7 @@ class TransitionStore:
         pointer = self.root / 'active.json'
         if pointer.exists() and self._read(self.root, 'active.json') != selected:
             if (proposal.get('authorization_contract') not in {'scope-amendment-v1', 'feedback-scope-delegation-v1',
-                    'feedback-profile-admission-v1', 'operator-owner-recovery-v1',
+                    'feedback-profile-admission-v1', 'live-usage-profile-admission-v1', 'operator-owner-recovery-v1',
                     'operator-verification-repair-v1',
                     'operator-verification-repair-deadline-v1',
                     'feedback-in-scope-return-v1', 'feedback-operator-repair-return-v1'}

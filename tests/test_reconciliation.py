@@ -33,7 +33,10 @@ class ReconciliationTests(ContinuationTests):
             'phase_invocations': {'03-dev': 3, '02-design': 6, '04-review': 3},
             'transport_retries': 0, 'design_diagnoses': 1, 'metered_usd': 10,
             'cli_estimate_usd': 10, 'development_attempts': 2, 'design_rounds': 6,
-            'invocation_timeout_seconds': 1800},
+            'invocation_timeout_seconds': 1800,
+            'live_unknown_usage': {engine: {'model': 'unmetered_quota',
+                                            'reason': 'Offline fixture: subscription CLI bounded by invocation caps'}
+                                   for engine in ('codex', 'agy')}},
             'ledger_mapping': [{'index': 0, 'sha256': digest(self.outer['ledger'][0]),
                 'role': '02-design-task-plan', 'phase': '02-design',
                 'origins': ['02-design/task-planning/session.json:opaque:0']}],

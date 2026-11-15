@@ -1,0 +1,121 @@
+"""Operator-only admission of a live unknown-usage model to a stopped I2 generation.
+
+Issue #43: a live call without a reported dollar cost is never counted as zero.
+An already active profile gains ``live_unknown_usage`` only through this exact,
+hash-bound transition. It keeps counters, caps and the deadline unchanged. The
+live rows already recorded without cost and without a model are listed exactly
+in the authorization: they stop blocking, stay visible as "not covered" and are
+never reclassified or priced.
+"""
+import copy
+from pathlib import Path
+
+from ssdlc_recovery import uncovered, validate_live_usage
+from ssdlc_tasks import TaskError, digest, validate_document
+
+
+CONTRACT = 'live-usage-profile-admission-v1'
+
+
+def legacy_uncovered(counters):
+    return sorted(identity for identity, row in counters['invocations'].items() if uncovered(row))
+
+
+def subject(source, plan, profile, reason):
+    validate_document('recovery-limits', profile)
+    try:
+        validate_live_usage(profile)
+    except (ValueError, KeyError, AttributeError) as exc:
+        raise TaskError('Live unknown-usage model is invalid: ' + str(exc)) from None
+    if plan != source['plan'] or not isinstance(reason, str) or not reason.strip() or len(reason) > 1600:
+        raise TaskError('Live-usage admission cannot amend a plan or omit its reason')
+    old = source['envelope']['policy']
+    declared, previous = profile.get('live_unknown_usage', {}), old.get('live_unknown_usage', {})
+    if not declared or any(declared.get(engine) != rule for engine, rule in previous.items()) or declared == previous:
+        raise TaskError('Live-usage admission must add an engine model without changing declared ones')
+    normalized = copy.deepcopy(profile)
+    normalized.pop('live_unknown_usage')
+    if previous:
+        normalized['live_unknown_usage'] = copy.deepcopy(previous)
+    if normalized != old:
+        raise TaskError('Live-usage admission cannot change counters, caps, deadline or other profile fields')
+    return dict(schema_version=1, compatibility=CONTRACT, parent_selector=source['parent_selector'],
+                source_files_sha256=digest(source['files']), old_plan_sha256=digest(plan), new_plan_sha256=digest(plan),
+                scope_diff={}, task_id=source['task_id'], reason=reason,
+                counters_sha256=digest(source['counters']), journal_sha256=source['files']['03-dev/tasks/task-journal.jsonl'],
+                profile_sha256=digest(profile), old_profile_sha256=digest(old),
+                live_unknown_usage=copy.deepcopy(declared),
+                legacy_uncovered_invocations=legacy_uncovered(source['counters']))
+
+
+def prepare(ticket, repo, profile, reason, **kwargs):
+    from ssdlc_scope_amendments import inspect, prepare as native_prepare
+    from ssdlc_locks import transition_lock
+    with transition_lock(Path(ticket) / 'ticket.lock', kwargs.get('held_locks', ())) as lease:
+        source = inspect(ticket, allow_host_hints=True)
+        held = kwargs.get('held_locks', ())
+        held = held if any(value is lease for value in held) else (*held, lease)
+        return native_prepare(ticket, repo, source['plan'], None, reason, profile_update=profile,
+                              profile_contract=CONTRACT, **dict(kwargs, held_locks=held))
+
+
+def activate(ticket, preparation, authorization, **kwargs):
+    import json
+    from ssdlc_transitions import _regular
+    proposal = json.loads(_regular(Path(preparation), 'proposal.json').read_text())
+    if proposal.get('authorization_contract') != CONTRACT:
+        raise TaskError('Live-usage activation requires its own admission contract')
+    from ssdlc_scope_amendments import activate as native_activate
+    return native_activate(ticket, preparation, authorization, **kwargs)
+
+
+def main(argv=None):
+    import argparse
+    import json
+    import re
+    import sys
+    from ssdlc_controller import controller_snapshot, assert_controller, execution_contract
+    from ssdlc_feedback_delegation import observe_environment
+    from ssdlc_preparations import docker_quiescent
+    parser = argparse.ArgumentParser(description='Explicit live unknown-usage profile admission; no model calls')
+    commands = parser.add_subparsers(dest='command', required=True)
+    for name in ('prepare', 'activate'):
+        p = commands.add_parser('usage-profile-' + name)
+        p.add_argument('--repo', required=True); p.add_argument('--ticket', required=True)
+        if name == 'prepare':
+            p.add_argument('--profile', required=True); p.add_argument('--reason', required=True)
+        else:
+            p.add_argument('--preparation', required=True); p.add_argument('--authorization', required=True)
+    args = parser.parse_args(argv)
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', args.ticket) or args.ticket in {'.', '..'}:
+        parser.error('Invalid ticket')
+    repo = Path(args.repo).resolve(); ticket = repo / '.ssdlc' / args.ticket
+    read = lambda path: json.loads(Path(path).read_text())
+    try:
+        controller = Path(__file__).resolve().parent; snapshot = controller_snapshot(controller)
+        environment = observe_environment()
+        identity = dict(controller_sha256=digest(execution_contract(snapshot)), environment=environment)
+        def guard():
+            assert_controller(controller, snapshot)
+            if observe_environment() != environment or not docker_quiescent(dict(ticket_root=str(ticket),
+                    runtime='execution-runtimes', preparation='execution', source_root=str(ticket))):
+                raise TaskError('Live-usage admission environment or writer ownership changed')
+        if args.command.endswith('prepare'):
+            result = prepare(ticket, repo, read(args.profile), args.reason, runtime_identity=identity,
+                             controller_snapshot=snapshot, guard=guard)
+            subject_value = json.loads((Path(result['preparation']) / 'recipe.json').read_text())['subject']
+            result = dict(preparation=result['preparation'], proposal_sha256=digest(result['proposal']),
+                          transition_id=result['proposal']['transition_id'], execution_authorized=False,
+                          legacy_uncovered_invocations=subject_value['legacy_uncovered_invocations'])
+        else:
+            preparation = Path(args.preparation).absolute()
+            if preparation.parent != ticket / 'execution':
+                raise TaskError('Activation requires the canonical preparation')
+            if read(preparation / 'recipe.json')['runtime_identity'] != identity:
+                raise TaskError('Prepared controller or environment differs from the executing runtime')
+            result = activate(ticket, preparation, read(args.authorization), guard=guard)
+            result = dict(transition_id=result['transition_id'], ready_for_signoff=False)
+        print(json.dumps(dict(result, model_dispatches=0), sort_keys=True)); return 0
+    except (TaskError, OSError, ValueError, KeyError, TypeError) as exc:
+        print(json.dumps(dict(status='USAGE_PROFILE_REFUSED', reason=str(exc)[:240], model_dispatches=0)), file=sys.stderr)
+        return 2

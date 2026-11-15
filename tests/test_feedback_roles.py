@@ -35,7 +35,8 @@ class FundedFeedbackRoleTests(unittest.TestCase):
         self.row = f.authorized()
         self.guard_calls = []
         self.roles = FundedFeedbackRoles(f.store, self.limits, guard=lambda: self.guard_calls.append('guard'))
-        self.metadata = records.a('planner')
+        # A real engine: issue #43 refuses an engine without reported cost or a declared model.
+        self.metadata = dict(records.a('planner'), engine='codex')
         self.calls = []
         self.response = dict(response={'route': 'INCONCLUSIVE'},
                              usage={'metered_usd': None, 'cli_estimate_usd': None})
@@ -75,6 +76,41 @@ class FundedFeedbackRoleTests(unittest.TestCase):
         self.assertEqual(len(self.limits._load(repair=False)[1]['invocations']), 1)
         with self.assertRaisesRegex(FeedbackError, 'already reserved'):
             self.run_role()
+
+    def test_reported_tokens_reach_the_row_and_survive_replay_without_duplication(self):
+        tokens = {'input_tokens': 120, 'output_tokens': 30}
+        self.response['tokens'] = tokens
+        def fault(point):
+            if point == 'response_captured':
+                raise OSError('crash')
+        with self.assertRaises(OSError):
+            self.run_role(fault=fault)
+        row = next(iter(self.limits._load(repair=False)[1]['invocations'].values()))
+        self.assertEqual(row['status'], 'reserved')
+        self.assertNotIn('reported_tokens', row)
+        operation = self.fixture.store.inspect()['role_calls'][0]['operation_id']
+        for _ in range(2):
+            self.assertEqual(self.roles.resume_response(operation), self.response['response'])
+        rows = self.limits._load(repair=False)[1]['invocations']
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(next(iter(rows.values()))['reported_tokens'], tokens)
+        self.assertEqual(self.limits.coverage_report()['engines']['codex']['reported_tokens'], tokens)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_normal_return_records_tokens_and_invalid_tokens_are_malformed(self):
+        self.response['tokens'] = {'input_tokens': 120, 'output_tokens': None}
+        self.run_role()
+        row = next(iter(self.limits._load(repair=False)[1]['invocations'].values()))
+        self.assertEqual(row['reported_tokens'], {'input_tokens': 120, 'output_tokens': None})
+        for bad in ({'input_tokens': -1, 'output_tokens': 1}, {'input_tokens': True, 'output_tokens': 1}, {'tokens': 3}):
+            with self.subTest(bad=bad):
+                self.initialize()
+                self.response['tokens'] = bad
+                with self.assertRaisesRegex(FeedbackError, 'Malformed returned'):
+                    self.run_role()
+                row = next(iter(self.limits._load(repair=False)[1]['invocations'].values()))
+                self.assertEqual(row['status'], 'returned')
+                self.assertNotIn('reported_tokens', row)
 
     def test_crash_between_reservation_and_binding_remains_uncertain(self):
         def fault(point):

@@ -59,6 +59,68 @@ guarantee a financial ceiling on a call whose price is unknown in advance;
 invocation/time bounds provide the independent hard limits. No API route falls
 back silently to a different provider under this policy.
 
+### Live calls without a reported cost ([issue #43](https://github.com/brushtyler/ssdlc/issues/43))
+
+A live call that reports no dollar cost never counts as zero. The profile
+declares, per engine, how such calls are bounded in `live_unknown_usage`
+(engines `claude`, `codex`, `agy`, `openrouter`). The rule is part of the profile
+hash. It is never applied implicitly, and absent means "no rule", not zero:
+
+```json
+"live_unknown_usage": {
+  "codex": {"model": "unmetered_quota", "reason": "ChatGPT subscription; bounded by role/phase caps and deadline"},
+  "claude": {"model": "reserve_per_invocation", "metered_usd": 1.0, "cli_estimate_usd": 1.0,
+             "reason": "Proxy from the historical mean per invocation, not observed billing"}
+}
+```
+
+- `reserve_per_invocation`: the reservation records a strictly positive, finite
+  `conservative_usage` for both cost kinds **before** dispatch. A call whose
+  reserve would exceed a frozen cap is refused at reservation, not discovered
+  afterwards. A reported cost is stored separately in `usage` and can only raise
+  the charge for that call (per cost kind, the larger of the two). The combined
+  cap counts one reserve per call, as `exclusive_cost_kind_v1` does.
+- `unmetered_quota`: the engine is declared not metered in dollars, for example
+  a subscription CLI. Its calls are outside the dollar caps; the limits are the
+  invocation counts per role and phase and the deadline. Any reported dollar
+  value still counts.
+- No rule: `codex` and `agy` never report a cost, so their dispatch is refused
+  with `LIMIT_REACHED` before launch. `claude` and OpenRouter may still run, but
+  a returned or terminated call with no cost (including a reported 0) blocks the
+  next dispatch with `LIMIT_REACHED`.
+
+Token counts reported by the adapter are stored on the row as `reported_tokens`,
+independently of any dollar cost: `claude` and OpenRouter report them with their
+cost, `codex` through the `turn.completed` events of `codex exec --json`
+(`input_tokens` already includes the cached input). `agy` reports no tokens. The
+same telemetry is kept for feedback consultations, in the captured response and
+on the native row, also when a captured return is reconciled after a crash.
+Tokens are unauthenticated telemetry and the controller never converts them to
+dollars.
+
+Supervisor `status` (field `limits_coverage`) and the Evidence Pack show, per
+engine: calls with an observed cost, with a reserve, declared unmetered, not
+covered, the reported tokens, and whether the dollar caps cover all calls or only
+part of them.
+
+An active profile without `live_unknown_usage` stays valid. It gains a rule only
+through the exact `live-usage-profile-admission-v1` transition on a stopped
+generation, which reuses native staging and changes no counter, cap or deadline:
+
+```sh
+python3 orchestrator.py usage-profile-prepare --repo REPO --ticket TICKET \
+  --profile /private/profile.json --reason 'Declare the codex quota model'
+python3 orchestrator.py usage-profile-activate --repo REPO --ticket TICKET \
+  --preparation PREPARATION --authorization /private/authorization.json
+```
+
+The profile may only add engine rules; rules already declared cannot change.
+The proposal lists the exact `legacy_uncovered_invocations`: the live rows
+already recorded with no cost and no rule. The authorization must repeat that
+list together with `profile_sha256`. The listed rows stop blocking but are not
+reclassified or priced: they stay visible as not covered. Any new uncovered
+row still blocks.
+
 The absolute UTC deadline includes preflight, execution and operator waits.
 Per-call subprocess timeouts are clamped to remaining ticket time and the frozen
 call timeout. The detached supervisor uses the earlier of its own configured

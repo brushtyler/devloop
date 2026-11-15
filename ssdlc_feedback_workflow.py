@@ -17,7 +17,7 @@ from ssdlc_feedback_analysis import failure_hint
 from ssdlc_feedback_delegation import (CONTRACT, FencedSession, fenced, prepare, activate,
                                       validate_grant)
 from ssdlc_feedback_roles import FundedFeedbackRoles
-from ssdlc_recovery import LimitsStore, NotDispatched, observed_usage
+from ssdlc_recovery import LimitsStore, NotDispatched, observed_tokens, observed_usage
 from ssdlc_scope_amendments import inspect
 from ssdlc_tasks import TaskError, digest, ticket_lock, parse_plan_output, validate_document
 from ssdlc_transitions import _regular, runtime_root
@@ -232,6 +232,7 @@ class ReadOnlyRoleRunner:
             if after != before or git_metadata(workspace) != git_before:
                 raise FeedbackError('Read-only feedback role changed disposable source')
             usage = observed_usage(metadata['engine'], 'run_' + metadata['engine'], result)
+            tokens = observed_tokens(metadata['engine'], 'run_' + metadata['engine'], result)
             raw = result[0]
             try:
                 response = parse_plan_output(raw) if result[1] == 0 else {'protocol_error':'CLI_FAILURE'}
@@ -239,7 +240,7 @@ class ReadOnlyRoleRunner:
                     response = {'protocol_error':'OUTPUT_LIMIT'}
             except (ValueError, TaskError):
                 response = {'protocol_error':'INVALID_JSON'}
-            return dict(response=response, usage=usage, raw_output=dict(text=raw[-1600:],
+            return dict(response=response, usage=usage, tokens=tokens, raw_output=dict(text=raw[-1600:],
                 sha256=hashlib.sha256(raw.encode()).hexdigest(), truncated=len(raw)>1600, characters=len(raw)))
 
 

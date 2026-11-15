@@ -163,7 +163,8 @@ class FeedbackWorkflowTests(unittest.TestCase):
             limits = LimitsStore(self.source['root'])
             metadata = flow.role_actor(config(), row['request_id'], 'planner')
             response = dict(route='REJECTED', requested_files=[], reason_code='do_not_weaken_test')
-            cli = subprocess.CompletedProcess(['claude'], 0, json.dumps({'result':json.dumps(response),'total_cost_usd':0.05}), '')
+            cli = subprocess.CompletedProcess(['claude'], 0, json.dumps({'result':json.dumps(response),'total_cost_usd':0.05,
+                'usage':{'input_tokens':120,'output_tokens':30}}), '')
             runner = flow.ReadOnlyRoleRunner(self.source, limits, flow.role_prompt(self.source, row, 'planner'), 'low')
             before = len(limits._load(repair=False)[1]['invocations'])
             with (patch.object(orch_module.EngineRunner, '_should_spawn_role_container', return_value=True),
@@ -176,8 +177,11 @@ class FeedbackWorkflowTests(unittest.TestCase):
             self.assertEqual(len(current['invocations']), before + 1)
             paid = [v for v in current['invocations'].values() if v['role'] == 'feedback-planner']
             self.assertEqual(paid[0]['usage'], {'metered_usd':None,'cli_estimate_usd':0.05})
+            # Issue #43: the consultation tokens reach the native row, apart from dollars.
+            self.assertEqual(paid[0]['reported_tokens'], {'input_tokens':120,'output_tokens':30})
             receipt=store.inspect()['role_calls'][0]['receipt']['response']
             self.assertEqual(receipt['raw_output']['text'],json.dumps(response))
+            self.assertEqual(receipt['tokens'], {'input_tokens':120,'output_tokens':30})
 
     def test_cli_format_error_retains_raw_response_and_known_cost_without_retry(self):
         with self.host(), delegated.fenced(self.case.ticket, Path(__file__).parent.parent,
