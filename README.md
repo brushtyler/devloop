@@ -181,6 +181,7 @@ The full reference covers routing tables, reasoning effort, budgets, container l
 | `./ssdlc doctor` | Check tools, isolation and credentials |
 | `./ssdlc run --ticket T --goal "…" [--tier auto]` | Run the pipeline in the foreground |
 | `./ssdlc run … --from-phase 03-dev` | Resume from a phase, preserving approved upstream work |
+| `./ssdlc run … --until-phase 03-dev` | Stop as `PAUSED_AT_PHASE_BOUNDARY` before the global gates; continue with `--from-phase 04-review` ([docs](docs/task-mode.md#stopping-at-a-phase-boundary)) |
 | `./ssdlc po` / `design` / `plan --ticket T` | Revalidate PO output, resume design, retry task planning (task mode) |
 | `./ssdlc approve T` / `reject T --reason "…"` | Human sign-off |
 | `python3 orchestrator.py start` / `status` / `cancel` / `resume` / `monitor` | Detached supervision ([docs](docs/supervision.md)) |

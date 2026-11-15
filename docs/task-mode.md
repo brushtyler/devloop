@@ -127,6 +127,24 @@ if not result.complete:
 
 Each attempt uses a fresh directory, with exclusive log creation and durable check start and completion events. Check logs, failed-attempt diffs, preflight logs and revalidation logs are hash-checked. Root identity and directory ancestry are checked before writes, which detects evidence-root redirection. A mutation of source or HEAD never produces a false COMPLETED transition. Discard a scheduler instance after an exception. See also [Architecture › Integrity model](architecture.md#integrity-model-and-its-limits).
 
+## Stopping at a phase boundary
+
+`run --until-phase 03-dev` stops after task development and before review, QA, AppSec and the other paid global gates. This lets the operator inspect the verified result first. `03-dev` is the only supported upper bound.
+
+```bash
+# #22: development only, on the authorized generation, then inspect the result
+./ssdlc run --ticket TKT-022 --goal "The original scoped goal" --from-phase 03-dev --until-phase 03-dev
+# later, an explicit decision to run the global gates on the same checkpoint
+./ssdlc run --ticket TKT-022 --goal "The original scoped goal" --from-phase 04-review
+```
+
+The supervised equivalents are `start … --from-phase 03-dev --until-phase 03-dev` and `resume --entrypoint run --from-phase 04-review` ([Detached supervision](supervision.md#resume-and-fingerprints)). They replace an operator launcher that called `run_phase_dev` and copied the `run_pipeline` error handling.
+
+- **Same wrapper.** The stop happens inside `run_pipeline`. A failed task, a `TASK_EXECUTION_GATE` failure, the failure evidence pack and the final status are recorded exactly as on the full path.
+- **Pause, not failure.** When every task is completed, the run ends as `PAUSED_AT_PHASE_BOUNDARY` (exit code 0). `state.json` gets a `phase_boundary` record with the phase, the next phase, the verified head, a clean worktree, the completed tasks and the usage so far: ledger rows, reported cost, rows with unknown cost and the accounted spend. Nothing is written to `failure`. No evidence pack, readiness or sign-off is produced, and `approve` refuses the run.
+- **Resume.** `--from-phase 04-review` is accepted only from `PAUSED_AT_PHASE_BOUNDARY` at `03-dev`. The resume rechecks the same compatibility, controller pin and frozen limits. It proves again that every task is completed and that the worktree is clean at the recorded verified head, and it refuses a recovered corrective transaction. It then runs the global gates without dispatching a developer. No limit or counter is reset.
+- A recovered corrective transaction cannot stop at the boundary, because it reruns global gates.
+
 ## Global gates in task mode
 
 ### Review and QA input
