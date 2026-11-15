@@ -59,10 +59,15 @@ def build_command(agent, mode, prompt, *, schema_file, out_file):
                 '--output-format', 'json', '--json-schema', schema, *extra]
         return argv, prompt
     if agent.kind == 'codex':
-        sandbox = 'workspace-write' if mode == 'write' else 'read-only'
+        # A reviewer runs in a disposable copy of the PR worktree (Workspace.review_copy): it
+        # may write there and in the temporary directory, so that tests creating temporary
+        # files can run, but not elsewhere (no extra writable roots from the operator's
+        # config) and without network.
+        review = ['-c', 'sandbox_workspace_write.network_access=false',
+                  '-c', 'sandbox_workspace_write.writable_roots=[]'] if mode == 'review' else []
         argv = ['codex', 'exec', '--ephemeral', '-m', agent.model,
-                '-c', f'model_reasoning_effort="{agent.effort}"', '-s', sandbox,
-                '--output-schema', str(schema_file), '-o', str(out_file), *extra, '-']
+                '-c', f'model_reasoning_effort="{agent.effort}"', '-s', 'workspace-write',
+                *review, '--output-schema', str(schema_file), '-o', str(out_file), *extra, '-']
         return argv, prompt
     if agent.kind == 'agy':
         argv = ['agy', '-p', prompt, '--model', agent.model, '--effort', agent.effort,

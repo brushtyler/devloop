@@ -187,10 +187,28 @@ but never the agent that implemented the PR: without an independent reviewer, or
 implementer is no longer configured, the PR goes to `agent:needs-human`.
 
 Agents run headless: `claude -p`, `codex exec`, `agy -p`, with the schema in
-[`devloop/schemas/`](../devloop/schemas/). Reviewers run read-only (codex `read-only` sandbox,
-agy `plan` mode, claude without edit tools). Implementers edit only their worktree; the
+[`devloop/schemas/`](../devloop/schemas/). Implementers edit only their worktree; the
 dispatcher process does every commit, push and GitHub write, with the identity of the actor
 it acts for.
+
+A reviewer does not run in the PR worktree but in a disposable copy of it: a detached worktree
+at the same commit, `pr-<n>-review`, which shares the repository's refs (so
+`git diff origin/main...HEAD` works) and is removed after the review. The tests the reviewer runs
+can therefore write files and temporary directories. After the review the dispatcher checks
+that the PR worktree is still at the reviewed commit with no change and no new file, not even
+an ignored one; otherwise the verdict is discarded and the PR goes to `agent:needs-human`.
+
+| Reviewer | Sandbox |
+|---|---|
+| codex | `workspace-write` sandbox: writes only in the copy and in the temporary directory, no extra `writable_roots`, network disabled |
+| claude | no edit tools; Bash limited to `git diff`, `git log`, `git show` and `python3 -m unittest tests.*` (`review_args`) |
+| agy | `plan` mode |
+
+Only codex has an OS-level sandbox. claude and agy are limited by their tools and modes, not by
+the system: the tests they run can still reach the network and write outside the copy, as any
+code running as the same user. For them, the copy and the final check catch writes to the
+reviewed tree, not access to the rest of the system. With the network disabled, codex cannot run tests
+that open TCP sockets, even on loopback.
 
 ## Limits
 
