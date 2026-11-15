@@ -256,6 +256,13 @@ class FeedbackWorkflowTests(unittest.TestCase):
                     self.assertEqual(orch.state['artifacts']['feedback-summary.json']['sha256'],current)
                     self.assertNotIn('| [`EVIDENCE_PACK.md`]',pack.read_text())
             self.assertNotEqual(hashes[0],hashes[1])
+            summary=json.loads((orch.ssdlc_root/'feedback-summary.json').read_text())
+            self.assertEqual(summary['metrics'],{'sample':2})
+            self.assertEqual(summary['avoidable_omissions'][0]['status'],'UNKNOWN')
+            self.assertIsNone(summary['avoidable_omissions'][0]['count'])
+            self.assertEqual(summary['profile_delta']['status'],'MEASURED')
+            # The delegated amendment is automatic, not a manual extension.
+            self.assertEqual(summary['manual_extension_pending_tasks'],dict(status='MEASURED',transitions=[]))
         finally:
             orch_module._dispatch_local.limits = previous
 

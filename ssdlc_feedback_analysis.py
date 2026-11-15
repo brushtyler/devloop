@@ -165,10 +165,13 @@ def impact_attribution(report, report_sha256, paths):
     """Absence of a usable historical report is not evidence of unpredictability."""
     if report is None:
         return dict(status='UNKNOWN', report_sha256=None, detectable_files=[], unmatched_files=sorted(paths))
-    if (not isinstance(report, dict) or digest(report) != report_sha256
-            or not isinstance(report.get('references'), list)):
+    from ssdlc_impact import related_paths
+    if not isinstance(report, dict) or digest(report) != report_sha256:
         raise TaskError('Historical impact report digest or structure changed')
-    references = {row['path'] for row in report['references']}
+    try:
+        references = related_paths(report)
+    except (KeyError, TypeError):
+        raise TaskError('Historical impact report digest or structure changed') from None
     detected = sorted(set(paths) & references)
     return dict(status='DETECTABLE' if detected else 'NOT_IN_REPORT', report_sha256=report_sha256,
                 detectable_files=detected, unmatched_files=sorted(set(paths) - references),
@@ -177,8 +180,10 @@ def impact_attribution(report, report_sha256, paths):
 
 def historical_impact(source, paths):
     import json
-    ref = '02-design/fixture-impact.json'
-    if ref not in source['files']:
+    # Continuations register the deterministic report; older runs the legacy hint.
+    ref = next((r for r in ('02-design/impact-report.json', '02-design/fixture-impact.json')
+                if r in source['files']), None)
+    if ref is None:
         return impact_attribution(None, None, paths)
     path = _regular(source['root'], ref)
     if file_hash(path) != source['files'][ref]:

@@ -53,7 +53,7 @@ class ContinuationHardeningTests(ContinuationTests):
         self.new_plan['tasks'][0]['target_files'].append('extra.py')
         from ssdlc_continuations import amendment_subject, impact_report
         subject = amendment_subject(inspect_source(self.artifacts), self.new_plan, self.quality, self.context,
-                                    self.manifest, impact_report(self.repo, self.snapshot, self.manifest))
+                                    self.manifest, impact_report(self.repo, self.snapshot, self.manifest, self.new_plan))
         with self.assertRaisesRegex(TaskError, 'scope_diff declaration'):
             self.prepare(review={'subject_sha256': digest(subject), 'reviewer': 'reviewer',
                                  'report': {'verdict': 'APPROVED', 'findings': []}})

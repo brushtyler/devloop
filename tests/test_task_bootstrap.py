@@ -990,7 +990,9 @@ class OrchestratorBootstrapTests(RepositoryTests):
         tests_dir = self.repo / 'tests'
         tests_dir.mkdir()
         (tests_dir / 'test_app.py').write_text('import unittest\n')
-        git(self.repo, 'add', 'tests/test_app.py')
+        # A consumer outside the manifest is an advisory possible omission only.
+        (self.repo / 'consumer.py').write_text('import app\n')
+        git(self.repo, 'add', 'tests/test_app.py', 'consumer.py')
         git(self.repo, 'commit', '-m', 'project test convention')
         with patch.dict(os.environ, {'SSDLC_ENABLE_TASK_BREAKDOWN': 'true'}):
             orch = self.make_orchestrator()
@@ -1015,10 +1017,19 @@ class OrchestratorBootstrapTests(RepositoryTests):
                     self.assertEqual(payload['plan'], planned)
                     self.assertIn('execution_contract', payload['context'])
                     self.assertEqual(payload['review_history'], [])
-                    impact = payload['fixture_impact']
-                    self.assertEqual(impact['changed_paths'], ['app.py'])
+                    self.assertNotIn('fixture_impact', payload)
+                    impact = payload['impact_report']
+                    self.assertEqual(impact['target_files'], ['app.py'])
+                    self.assertEqual(impact['base_commit'], planned['base_commit'])
+                    self.assertTrue(impact['advisory'])
+                    self.assertFalse(impact['blocking'])
                     self.assertFalse(impact['complete_dependency_proof'])
-                    ref = '02-design/task-planning/fixture-impact-' + digest(planned) + '.json'
+                    self.assertIn('impact_report is deterministic, advisory', system)
+                    self.assertEqual(impact['possible_omissions'], [dict(path='consumer.py',
+                                     relations=['CONSUMER'], targets=['app.py'])])
+                    self.assertEqual(impact['targets'][0]['consumers'], [dict(
+                        path='consumer.py', evidence_path='consumer.py', line=1, via='IMPORT')])
+                    ref = '02-design/task-planning/impact-report-' + digest(planned) + '.json'
                     self.assertEqual(orch.state['artifacts'][ref]['sha256'], file_hash(orch.ssdlc_root / ref))
                     out = json.dumps({'verdict': 'APPROVED', 'findings': []})
                 return out, 0, 0, 0, 'test-trace'
@@ -1027,6 +1038,9 @@ class OrchestratorBootstrapTests(RepositoryTests):
             with patch('orchestrator.EngineRunner.run_sandboxed_cmd', return_value=('Ran 1 test\nOK', '', 0)), patch('orchestrator.SquadDispatcher.dispatch_role', side_effect=dispatch), patch('orchestrator.EngineRunner.invoke_role', side_effect=invoke):
                 actual = orch._ensure_task_plan()
             self.assertEqual(actual, planned)
+            # The possible omission did not change approval or the approved plan.
+            self.assertTrue(any(g['gate'] == 'TASK_PLAN_GATE' and g['passed']
+                                for g in orch.state['gate_history']))
             self.assertTrue((orch.dir_recon / 'quality-contract.json').exists())
             self.assertTrue(orch.state['task_breakdown'])
 

@@ -137,22 +137,22 @@ def import_projection(source, *, plan, quality, context, runtime_identity, task_
     return result
 
 
-def impact_report(repo, snapshot_root, manifest):
-    from ssdlc_amendments import fixture_impact, changed_symbols
+def impact_report(repo, snapshot_root, manifest, plan):
+    """Advisory host report of the proposed plan; it never authorizes or blocks."""
+    from ssdlc_impact import build_report
     validate_document('continuation-snapshot', manifest)
     for entry in manifest['source_files']:
         confined(Path(repo), entry['path'])
         if not entry.get('deleted'):
             _regular(Path(snapshot_root), entry['path'])
-    return fixture_impact(repo, [e['path'] for e in manifest['source_files']],
-                          changed_symbols(repo, snapshot_root, manifest))
+    return build_report(repo, plan)
 
 
 def amendment_subject(source, plan, quality, context, manifest, impact):
     from ssdlc_amendments import scope_diff
     return {'schema_version': 1, 'old_plan_sha256': digest(source['plan']),
             'new_plan': plan, 'quality_policy': {k: v for k, v in quality.items() if k != 'baseline'},
-            'context_sha256': digest(context), 'snapshot': manifest, 'fixture_impact': impact,
+            'context_sha256': digest(context), 'snapshot': manifest, 'impact_report': impact,
             'scope_diff': scope_diff(source['plan'], plan)}
 
 
@@ -207,7 +207,7 @@ def _prepare_generation(source_root, ticket_root, repo, *, task_id, plan, qualit
         raise TransitionError('Target repository does not match the proposed base')
     if snapshot_manifest.get('base_commit') != plan['base_commit']:
         raise TransitionError('Resolved snapshot must explicitly name the new base commit')
-    impact = impact_report(repo, snapshot_root, snapshot_manifest)
+    impact = impact_report(repo, snapshot_root, snapshot_manifest, plan)
     subject = amendment_subject(source, plan, quality, context, snapshot_manifest, impact)
     if (not isinstance(review, dict) or set(review) not in ({'subject_sha256', 'reviewer', 'report'}, {'subject_sha256', 'reviewer', 'report', 'scope_diff'})
             or not isinstance(review['reviewer'], str) or not review['reviewer'].strip()
@@ -362,7 +362,7 @@ def _prepare_generation(source_root, ticket_root, repo, *, task_id, plan, qualit
     atomic_json(runtime / '00-recon/quality-contract.json', quality)
     atomic_json(runtime / '02-design/plan.json', plan)
     atomic_json(runtime / '02-design/amendment-review.json', {'review': review, 'validation': amendment, 'subject': subject})
-    atomic_json(runtime / '02-design/fixture-impact.json', impact)
+    atomic_json(runtime / '02-design/impact-report.json', impact)
     for folder in ('00-recon', '01-po', '02-design'):
         for path in (runtime / folder).rglob('*'):
             if path.is_file():
@@ -589,8 +589,9 @@ def main(argv=None):
             source = inspect_stopped_source(a.source)
             manifest = read(a.manifest)
             validate_document('continuation-snapshot', manifest)
-            subject = amendment_subject(source, read(a.plan), read(a.quality), source['context'], manifest,
-                                        impact_report(repo, Path(a.snapshot), manifest))
+            plan = read(a.plan)
+            subject = amendment_subject(source, plan, read(a.quality), source['context'], manifest,
+                                        impact_report(repo, Path(a.snapshot), manifest, plan))
             result = {'subject_sha256': digest(subject), 'subject': subject, 'execution_authorized': False}
         else:
             if not EngineRunner._should_spawn_role_container():

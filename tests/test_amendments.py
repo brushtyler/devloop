@@ -1,10 +1,8 @@
 import copy
 import json
-from pathlib import Path
-import tempfile
 import unittest
 
-from ssdlc_amendments import fixture_impact, validate_amendment
+from ssdlc_amendments import validate_amendment
 from ssdlc_tasks import PlanError
 
 
@@ -53,15 +51,3 @@ class AmendmentTests(unittest.TestCase):
         self.report = 'The model said it approved'
         with self.assertRaises(PlanError):
             self.check()
-
-    def test_fixture_strings_and_imports_are_detected_without_execution(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / 'test_fixture.py').write_text('from unittest.mock import patch\npatch("orchestrator._task_mode")\n')
-            (root / 'broken.py').write_text('not valid python !!!')
-            (root / 'ignored.py').symlink_to(root / 'test_fixture.py')
-            report = fixture_impact(root, ['orchestrator.py'], ['_task_mode'])
-            self.assertEqual(report['references'][0]['path'], 'test_fixture.py')
-            self.assertIn('_task_mode', report['references'][0]['references'])
-            self.assertEqual(report['parse_errors'], ['broken.py'])
-            self.assertFalse(report['complete_dependency_proof'])

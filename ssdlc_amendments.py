@@ -1,8 +1,8 @@
-"""Deterministic plan-amendment checks; review remains a separate authority."""
-import ast
-from pathlib import Path
-import re
+"""Deterministic plan-amendment checks; review remains a separate authority.
 
+The advisory impact report that replaced ``fixture_impact`` lives in
+``ssdlc_impact``.
+"""
 from ssdlc_planning import validate_plan_review
 from ssdlc_tasks import PlanError, digest
 
@@ -80,62 +80,3 @@ def validate_amendment(old, new, report, validator, requirements, quality, *, li
     return {'old_plan_sha256': digest(old), 'new_plan_sha256': digest(new),
             'assessment': assessment, 'lineage': lineage, 'scope_diff': changes,
             'ordered_task_ids': [t['task_id'] for t in ordered]}
-
-
-def fixture_impact(root, changed_paths, symbols=()):
-    """Conservative hints, not a complete dependency or coverage proof.
-
-    Parse source as data only. A syntax error is recorded, never executed or
-    interpreted as a valid acceptance failure. Symlink trees are excluded.
-    """
-    root = Path(root)
-    modules = {Path(p).stem for p in changed_paths if p.endswith('.py')}
-    needles = modules | set(symbols)
-    hits, errors = [], []
-    for path in sorted(root.rglob('*.py')):
-        relative = path.relative_to(root)
-        if (any(part in {'.git', '.ssdlc', '.tools', '__pycache__'} for part in relative.parts)
-                or any((root / Path(*relative.parts[:i])).is_symlink() for i in range(1, len(relative.parts) + 1))):
-            continue
-        try:
-            source = path.read_text()
-            tree = ast.parse(source)
-        except (OSError, UnicodeError, SyntaxError):
-            errors.append(relative.as_posix())
-            continue
-        references = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Name):
-                references.add(node.id)
-            elif isinstance(node, ast.Attribute):
-                references.add(node.attr)
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                references.update(node.module.split('.'))
-            elif isinstance(node, ast.Import):
-                references.update(part for name in node.names for part in name.name.split('.'))
-            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-                references.update(name for name in needles
-                                  if re.search(r'(?<!\w)' + re.escape(name) + r'(?!\w)', node.value))
-        matched = sorted(references & needles)
-        if matched:
-            hits.append({'path': relative.as_posix(), 'references': matched})
-    return {'schema_version': 1, 'changed_paths': sorted(changed_paths), 'references': hits,
-            'parse_errors': errors, 'complete_dependency_proof': False}
-
-
-def changed_symbols(repo, snapshot_root, manifest):
-    """Names of removed or signature-changed Python declarations for fixture hints."""
-    def declarations(path):
-        try:
-            tree = ast.parse(path.read_text())
-        except (OSError, SyntaxError, UnicodeError):
-            return {}
-        return {node.name: ast.dump(node.args, include_attributes=False)
-                for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    result = set()
-    for entry in manifest['source_files']:
-        if entry['path'].endswith('.py'):
-            old = declarations(Path(repo) / entry['path'])
-            new = {} if entry.get('deleted') else declarations(Path(snapshot_root) / entry['path'])
-            result.update(name for name, signature in old.items() if new.get(name) != signature)
-    return sorted(result)

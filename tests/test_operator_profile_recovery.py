@@ -122,6 +122,17 @@ class OperatorProfileRecoveryTests(unittest.TestCase):
         admitted, _ = FundedFeedbackRoles(self.store, LimitsStore(root), guard=lambda:None)._authority()
         self.assertEqual(admitted['policy'], self.profile)
         self.assertEqual(TaskJournal(root/'03-dev/tasks').peek()['tasks']['T2']['attempts'], 3)
+        from ssdlc_impact import summary_metrics
+        metrics = summary_metrics(self.f.ticket)
+        delta = metrics['profile_delta']
+        self.assertEqual(delta['status'], 'MEASURED')
+        self.assertEqual(delta['active_profile_sha256'], digest(self.profile))
+        self.assertEqual(delta['changes']['development_attempts']['new'], self.profile['development_attempts'])
+        self.assertLess(delta['changes']['development_attempts']['old'], self.profile['development_attempts'])
+        recovered = metrics['manual_extension_pending_tasks']['transitions'][-1]
+        self.assertEqual((recovered['authorization_contract'], recovered['status']), (CONTRACT, 'MEASURED'))
+        # No impact report was registered for this historical plan: UNKNOWN, not 0.
+        self.assertEqual(metrics['avoidable_omissions'][0]['status'], 'UNKNOWN')
         import orchestrator
         dispatches = []
         def provider(argv, **kwargs):
