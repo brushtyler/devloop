@@ -1,10 +1,17 @@
 """Dispatcher configuration (TOML)."""
 
+import json
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .policy import MAX_LEVEL, MIN_LEVEL, ReviewPolicy
+
 DEFAULT_CONFIG = Path(__file__).resolve().parent / 'config.toml'
+# The root of the running dispatcher's installation (a pinned checkout, see docs/devloop.md):
+# relative ``sensitive_path_lists`` are read from here, never from a PR branch.
+INSTALL_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_SENSITIVE_LISTS = ('schemas/recovery-grader-baseline.json',)
 AGENT_KINDS = ('claude', 'codex', 'agy')
 STALL_ACTIONS = ('warn', 'abort')
 
@@ -75,6 +82,7 @@ class Config:
     apps: dict = field(default_factory=dict)
     app_key_dir: str = '~/.ghapps'
     labels: Labels = field(default_factory=Labels)
+    review_policy: ReviewPolicy = field(default_factory=ReviewPolicy)
 
     def agent(self, key):
         return self.agents[key]
@@ -96,7 +104,45 @@ def _str_list(table, key, where, default=()):
     return tuple(value)
 
 
-def parse_config(data):
+def _listed_files(name, root):
+    """The keys of the ``files`` object of the JSON file ``name`` (relative to ``root``)."""
+    where = f'review_policy.sensitive_path_lists: {name}'
+    path = Path(name) if Path(name).is_absolute() else Path(root) / name
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f'{where}: {exc}') from exc
+    files = data.get('files') if isinstance(data, dict) else None
+    if not isinstance(files, dict) or not all(isinstance(k, str) and k for k in files):
+        raise ConfigError(f'{where}: expected an object "files" keyed by path')
+    return tuple(files)
+
+
+def parse_review_policy(table, root):
+    """The policy of ``[review_policy]``. A list file that cannot be read stops devloop: the
+    policy never runs with fewer sensitive paths than configured."""
+    if not isinstance(table, dict):
+        raise ConfigError('review_policy: expected a table')
+    where = 'review_policy'
+    default = ReviewPolicy()
+    level = table.get('default_level', default.default_level)
+    if (not isinstance(level, int) or isinstance(level, bool)
+            or not MIN_LEVEL <= level <= MAX_LEVEL):
+        raise ConfigError(f'{where}.default_level: must be an integer from {MIN_LEVEL} to '
+                          f'{MAX_LEVEL}')
+    label = table.get('label', default.label)
+    if not isinstance(label, str) or not label.strip():
+        raise ConfigError(f'{where}.label: expected a non-empty string')
+    paths = _str_list(table, 'sensitive_paths', where, default.sensitive_paths)
+    files = []
+    for name in _str_list(table, 'sensitive_path_lists', where, DEFAULT_SENSITIVE_LISTS):
+        files += _listed_files(name, root)
+    return ReviewPolicy(default_level=level, label=label, sensitive_paths=paths,
+                        sensitive_files=tuple(files))
+
+
+def parse_config(data, root=INSTALL_ROOT):
+    """``root`` is where relative ``review_policy.sensitive_path_lists`` are read."""
     agents = {}
     for key, table in (data.get('agents') or {}).items():
         where = f'agents.{key}'
@@ -169,6 +215,7 @@ def parse_config(data):
         priority_labels=_str_list(data, 'priority_labels', 'config', ('prerequisito',)),
         protected_paths=_str_list(data, 'protected_paths', 'config', ('.github/',)),
         apps=apps, app_key_dir=key_dir, agent_stall_action=stall_action,
+        review_policy=parse_review_policy(data.get('review_policy', {}), root),
         **ints)
 
 

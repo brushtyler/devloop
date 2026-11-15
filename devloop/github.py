@@ -99,12 +99,17 @@ class GitHub:
                         for n in nodes if n['__typename'] == 'RenamedTitleEvent'],
         }
 
-    def last_labeler(self, number, label):
-        """Login of whoever most recently added ``label`` to issue ``number``."""
+    def labelers(self, number, label):
+        """Logins of every ``labeled`` event of ``label`` on issue or PR ``number``, oldest
+        first, including events of a label removed since."""
         done = self._gh('api', '--paginate', f'repos/{self.repo}/issues/{number}/events',
                         '--jq', f'.[] | select(.event == "labeled" and .label.name == {json.dumps(label)})'
                                 ' | .actor.login')
-        logins = done.stdout.split()
+        return done.stdout.split()
+
+    def last_labeler(self, number, label):
+        """Login of whoever most recently added ``label`` to issue ``number``."""
+        logins = self.labelers(number, label)
         return logins[-1] if logins else None
 
     def open_prs(self):

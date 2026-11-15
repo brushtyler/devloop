@@ -20,6 +20,11 @@ back to review (to agent:changes when CI fails on it).
 A PR in review or ready that conflicts with the base branch is neither reviewed nor promoted: a
 ``sync`` merges the base into it, with the implementer resolving the conflicts, and sends it
 back to review. A sync is not a review round.
+
+Review level (``policy``): every agent review, CI round and promotion records a receipt of the
+running dispatcher's review policy for the head. A level the dispatcher cannot review yet (2)
+sends the PR to agent:needs-human; an approval is promoted only if its receipt matches the one
+recomputed just before, otherwise a new review is needed.
 """
 
 import string
@@ -33,6 +38,8 @@ from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, PR_COMMENT, REVIEW
 from .github import GitHubError, merge_state
 from .markdown import (RESUME, dispatcher_header, publishable, read_marker, render_escalation,
                        render_fix, render_native_review, render_review)
+from .policy import describe as describe_receipt
+from .policy import differences, evaluate, receipt_of, recorded_level
 from .review import ci_failure_review, normalize_review, open_findings
 from .workspace import WorkspaceError
 
@@ -47,6 +54,10 @@ LABEL_STYLE = {
     'ready_to_merge': ('0e8a16', 'devloop: approvata, in attesa del merge umano'),
     'needs_human': ('b60205', 'devloop: serve una decisione umana'),
 }
+LEVEL_LABEL_STYLE = ('5319e7', 'devloop: la PR richiede una review di livello 2')
+_RECEIPT_FIELDS = {'pr': 'PR', 'base': 'commit di base', 'head': 'head',
+                   'policy': 'versione della policy', 'level': 'livello',
+                   'reviewers': 'reviewer richiesti'}
 
 
 @dataclass
@@ -69,6 +80,10 @@ class PullRequest:
     operator_comments: list = field(default_factory=list)
     rereview: bool = False
     merge_state: str = 'clean'  # clean, conflict, unknown (see github.merge_state)
+    # Policy records the dispatcher wrote (``policy`` markers), and whether one written after
+    # the latest review found that the approval's receipt no longer matches.
+    policy: list = field(default_factory=list)
+    stale_receipt: bool = False
 
 
 @dataclass
@@ -133,6 +148,9 @@ def plan(snapshot, cfg):
             # A trusted user's rereview request voids the recorded verdict for this head.
             replay = (latest is not None and latest['head_sha'] == pr.head_sha and not answered
                       and not pr.rereview)
+            # An approval counts only with a policy receipt that still matched the last time
+            # it was checked; one recorded before receipts existed needs a new review.
+            unbound = replay and (receipt_of(latest) is None or pr.stale_receipt)
             if replay and latest['verdict'] != 'approve':
                 actions.append(Action('apply_review', pr.number, 'verdict already recorded'))
             elif pr.merge_state == 'conflict':
@@ -142,7 +160,7 @@ def plan(snapshot, cfg):
                 continue  # GitHub is still computing mergeability: next tick
             elif pr.checks == 'pending':
                 continue
-            elif replay and pr.checks != 'fail':
+            elif replay and not unbound and pr.checks != 'fail':
                 actions.append(Action('apply_review', pr.number, 'approval already recorded'))
             elif not rounds_left:
                 # Every new round, a CI failure or a review, counts against the limit.
@@ -150,8 +168,9 @@ def plan(snapshot, cfg):
             elif pr.checks == 'fail':
                 actions.append(Action('ci_failed', pr.number))
             else:
-                actions.append(Action('review', pr.number, 'new review requested by a trusted user'
-                                      if pr.rereview else ''))
+                reason = ('new review requested by a trusted user' if pr.rereview
+                          else 'the approval has no matching policy receipt' if unbound else '')
+                actions.append(Action('review', pr.number, reason))
     free = cfg.max_open_prs - len(snapshot.prs)
     if free > 0:
         blocked = set(cfg.blocked_labels) | {lb.working, lb.needs_human}
@@ -289,8 +308,8 @@ class Dispatcher:
     # Snapshot ------------------------------------------------------------
     def _markers(self, pr, comments, kind):
         """Records of ``kind`` from the identities allowed to write them, at most one per
-        comment: fixes from the PR's implementer, CI verdicts from the dispatcher, reviews from
-        the agent named in the record, never the implementer."""
+        comment: fixes from the PR's implementer, CI verdicts and policy records from the
+        dispatcher, reviews from the agent named in the record, never the implementer."""
         return [record for _, record in self._marker_entries(pr, comments, kind)]
 
     def _marker_entries(self, pr, comments, kind):
@@ -303,6 +322,8 @@ class Dispatcher:
                 continue
             if kind == 'fix':
                 actor = implementer
+            elif kind == 'policy':
+                actor = DISPATCHER
             elif record['source'] == 'ci':
                 actor = DISPATCHER
             elif record.get('reviewer') == implementer:
@@ -352,7 +373,12 @@ class Dispatcher:
                                  key=lambda e: (e[1]['round'], e[0]))
                 pr.reviews = [record for _, record in entries]
                 pr.fixes = self._markers(pr, comments, 'fix')
+                policy = self._marker_entries(pr, comments, 'policy')
+                pr.policy = [record for _, record in policy]
                 if entries:
+                    # A receipt found stale after the latest review voids its approval.
+                    pr.stale_receipt = any(position > entries[-1][0] and record['event'] == 'stale'
+                                           for position, record in policy)
                     # Only what trusted users wrote after the latest verdict can void it.
                     since = comments[entries[-1][0] + 1:]
                     pr.operator_comments = operator_comments(since, self.cfg.trusted_users)
@@ -480,13 +506,68 @@ class Dispatcher:
             return False
         return True
 
+    # Review policy -----------------------------------------------------------
+    def _receipt(self, pr):
+        """The policy receipt of the PR's pushed head, computed now from the running
+        dispatcher's policy: the full diff against the latest base commit, every ``labeled``
+        event of the level label on the PR, and the highest level already recorded on it."""
+        policy = self.cfg.review_policy
+        base, head, changes = self.ws.review_diff(pr.head_ref)
+        return evaluate(policy, pr=pr.number, base=base, head=head, changes=changes,
+                        labelers=self.gh.labelers(pr.number, policy.label),
+                        trusted_users=self.cfg.trusted_users,
+                        previous_level=recorded_level(pr.reviews + pr.policy),
+                        reviewer=self._reviewer_key(pr))
+
+    def _policy_comment(self, pr, title, text, receipt, event):
+        self.gh.comment(pr.number, publishable(
+            dispatcher_header() + f'\n## {title}\n\n{text.strip()}\n\n'
+            + describe_receipt(receipt), 'policy', {'event': event, 'receipt': receipt}))
+
+    def _escalate_level(self, pr, receipt):
+        """A level devloop cannot review yet: no review, no promotion, a human decides."""
+        lb = self.cfg.labels
+        self._policy_comment(
+            pr, f'Review di livello {receipt["level"]}: serve un intervento umano',
+            f'La policy di review del dispatcher richiede per questa PR il livello '
+            f'{receipt["level"]}. devloop non avvia ancora più reviewer, quindi non revisiona '
+            'né promuove la PR: la review e la decisione sul merge spettano a una persona. Il '
+            'livello resta acquisito anche se la label viene rimossa o il diff cambia.',
+            receipt, 'level')
+        self.gh.edit_labels(pr.number, add=[lb.needs_human],
+                            remove=[lb.review, lb.changes, lb.ready_to_merge])
+
+    def _promote(self, pr, review):
+        """Promote an approval whose receipt matches the one recomputed now; otherwise record
+        why and leave the PR in review for a new review of the same head."""
+        lb = self.cfg.labels
+        current = self._receipt(pr)
+        if current['level'] > 1:
+            return self._escalate_level(pr, current)
+        changed = differences(receipt_of(review), current)
+        if changed:
+            what = ('l\'approvazione non ha una ricevuta di policy' if receipt_of(review) is None
+                    else 'cambiati: ' + ', '.join(_RECEIPT_FIELDS[k] for k in changed))
+            self._policy_comment(
+                pr, 'Approvazione non valida per la promozione',
+                f'La ricevuta di policy ricalcolata prima della promozione non coincide con '
+                f'quella dell\'approvazione ({what}). La PR resta in review: serve una nuova '
+                'review, anche dello stesso commit. Round e finding aperti restano invariati.',
+                current, 'stale')
+            self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.changes, lb.ready_to_merge])
+            return
+        self._policy_comment(
+            pr, 'Pronta per il merge',
+            f'Approvazione del commit `{review["head_sha"][:12]}` confermata: la ricevuta di '
+            'policy ricalcolata coincide con quella della review.', current, 'promoted')
+        self.gh.edit_labels(pr.number, add=[lb.ready_to_merge], remove=[lb.review, lb.changes])
+
     def _apply_verdict(self, pr, review, announce):
         lb = self.cfg.labels
         transient = [lb.review, lb.changes, lb.ready_to_merge]
         if review['verdict'] == 'approve':
             if self._approval_current(pr, review):
-                self.gh.edit_labels(pr.number, add=[lb.ready_to_merge],
-                                    remove=[lb.review, lb.changes])
+                self._promote(pr, review)
         elif review['verdict'] == 'needs_human':
             self.gh.edit_labels(pr.number, add=[lb.needs_human], remove=transient)
         elif review['round'] >= self.cfg.max_review_rounds:
@@ -507,7 +588,8 @@ class Dispatcher:
             title = 'Readiness sospesa'
             reason = (f'La CI del commit approvato `{approved[:12]}` è di nuovo in corso. La PR '
                       'torna in review: l\'approvazione resta registrata e verrà riapplicata '
-                      'senza una nuova review se la CI passa')
+                      'senza una nuova review se la CI passa e la ricevuta di policy coincide '
+                      'ancora')
         elif approved:
             title = 'Approvazione revocata'
             reason = (f'Il commit `{pr.head_sha[:12]}` non è quello approvato (`{approved[:12]}`). '
@@ -579,12 +661,26 @@ class Dispatcher:
         self.ws.remove(name)
         self.log(f'  opened {url}')
 
+    def _current_receipt(self, pr):
+        """The receipt of the snapshot's head, or None (logged) when the head moved since."""
+        receipt = self._receipt(pr)
+        if receipt['head'] != pr.head_sha:
+            self.log('  head moved since the snapshot; retrying next tick')
+            return None
+        return receipt
+
     def _do_ci_failed(self, pr):
+        receipt = self._current_receipt(pr)
+        if receipt is None:
+            return
+        if receipt['level'] > 1:
+            return self._escalate_level(pr, receipt)
         log_tail = '\n'.join(self.gh.failed_log(run) for run in pr.failed_runs[:2])
         review = ci_failure_review(failed_checks=pr.failed_checks, log_tail=log_tail,
                                    previous_open=open_findings(pr.reviews),
                                    round_no=len(pr.reviews) + 1,
                                    max_rounds=self.cfg.max_review_rounds, head_sha=pr.head_sha)
+        review['receipt'] = receipt
         self.gh.comment(pr.number, render_review(review, dispatcher_header()))
         self._apply_verdict(pr, review, announce=True)
 
@@ -609,6 +705,11 @@ class Dispatcher:
                            f'(`{pr.meta["implementer"]}`): la review non può essere indipendente.',
                 remove=[cfg.labels.review])
         agent = cfg.agent(reviewer_key)
+        receipt = self._current_receipt(pr)
+        if receipt is None:
+            return
+        if receipt['level'] > 1:
+            return self._escalate_level(pr, receipt)
         issue, _ = self._issue_context(pr.issue)
         name = f'pr-{pr.number}'
         path = self.ws.existing_branch(name, pr.head_ref)
@@ -640,6 +741,7 @@ class Dispatcher:
         review = normalize_review(raw, previous_open=previous_open, round_no=round_no,
                                   max_rounds=cfg.max_review_rounds, head_sha=pr.head_sha,
                                   ci=pr.checks, reviewer=agent.key)
+        review['receipt'] = receipt
         reviewer_gh = self._as(agent.key, REVIEW)
         reviewer_gh.comment(pr.number, render_review(review, self.runner.header(agent)))
         if self._app_login(agent.key):
@@ -796,9 +898,11 @@ def _format_conflicts(conflicts):
     return '\n'.join(lines) or '(none)'
 
 
-def ensure_labels(gh, labels):
+def ensure_labels(gh, labels, review_policy=None):
     for attr, (color, description) in LABEL_STYLE.items():
         gh.ensure_label(getattr(labels, attr), color, description)
+    if review_policy is not None:
+        gh.ensure_label(review_policy.label, *LEVEL_LABEL_STYLE)
 
 
 def run_forever(dispatcher, interval, sleep=time.sleep):

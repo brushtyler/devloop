@@ -13,6 +13,8 @@ import base64
 import json
 import re
 
+from .policy import EVENTS, valid_receipt
+
 UNKNOWN = 'non noto'
 _EFFORT_LABELS = {'xhigh': 'Extra High', 'max': 'Max'}
 _MARKER = re.compile(r'<!-- devloop:(?P<kind>[a-z]+):v1 (?P<payload>[A-Za-z0-9+/=]+) -->')
@@ -97,7 +99,11 @@ def _valid_pr(m):
                                               for k in ('implementer', 'reviewer'))
 
 
-_VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr}
+def _valid_policy(p):
+    return p.get('event') in EVENTS and valid_receipt(p.get('receipt'))
+
+
+_VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy': _valid_policy}
 
 
 def read_marker(text, kind):
@@ -148,6 +154,11 @@ def render_review(review, head):
     parts = [f'## Review automatica, round {review["round"]}/{review["max_rounds"]}', '',
              f'**Verdetto:** {_VERDICT_TEXT[review["verdict"]]}  ',
              f'**Commit:** `{review["head_sha"][:12]}` · **CI:** {review["ci"]}']
+    receipt = review.get('receipt')
+    if valid_receipt(receipt):
+        parts[-1] += '  '
+        parts.append(f'**Livello di review:** {receipt["level"]} · **Base:** '
+                     f'`{receipt["base"][:12]}` · **Policy:** `{receipt["policy"][:12]}`')
     if review.get('note'):
         parts += ['', f'> {review["note"]}']
     parts += ['', review['summary'].strip()]
