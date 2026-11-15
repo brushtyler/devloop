@@ -1215,16 +1215,47 @@ class CredentialIsolationTests(unittest.TestCase):
         # First devloop run on #52: Claude killed the full suite at its default ten-minute Bash
         # limit, twice, and the turn ran to the agent timeout.
         import devloop.__main__ as cli
-        cfg = dataclasses.replace(CFG, test_timeout_seconds=3600)
+        # Issue #96: a Bash command without a timeout uses the short default instead, so a wait
+        # loop that never ends stops on its own rather than holding the turn for an hour.
+        cfg = dataclasses.replace(CFG, test_timeout_seconds=3600, agent_command_timeout_seconds=600)
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {}, clear=False):
             for name in ('BASH_DEFAULT_TIMEOUT_MS', 'BASH_MAX_TIMEOUT_MS'):
                 os.environ.pop(name, None)
             env = cli.agent_environment(cfg, Path(tmp))
             self.assertEqual((env['BASH_DEFAULT_TIMEOUT_MS'], env['BASH_MAX_TIMEOUT_MS']),
-                             ('3600000', '3600000'))
+                             ('600000', '3600000'))
             self.assertNotIn('GH_TOKEN', env)
+            env = cli.agent_environment(dataclasses.replace(cfg, agent_command_timeout_seconds=120),
+                                        Path(tmp))
+            self.assertEqual(env['BASH_DEFAULT_TIMEOUT_MS'], '120000')
+            # The operator's own values win over both.
+            os.environ['BASH_DEFAULT_TIMEOUT_MS'] = '7'
             os.environ['BASH_MAX_TIMEOUT_MS'] = '42'
-            self.assertEqual(cli.agent_environment(cfg, Path(tmp))['BASH_MAX_TIMEOUT_MS'], '42')
+            env = cli.agent_environment(cfg, Path(tmp))
+            self.assertEqual((env['BASH_DEFAULT_TIMEOUT_MS'], env['BASH_MAX_TIMEOUT_MS']),
+                             ('7', '42'))
+
+    def test_agent_command_timeout_is_configurable_and_within_the_test_timeout(self):
+        import tomllib
+        data = tomllib.loads(config.DEFAULT_CONFIG.read_text())
+        self.assertEqual(CFG.agent_command_timeout_seconds, 600)
+        self.assertEqual(config.parse_config(dict(data, agent_command_timeout_seconds=300))
+                         .agent_command_timeout_seconds, 300)
+        omitted = {k: v for k, v in data.items() if k != 'agent_command_timeout_seconds'}
+        self.assertEqual(config.parse_config(omitted).agent_command_timeout_seconds, 600)
+        for value in (0, data['test_timeout_seconds'] + 1, '600'):
+            with self.subTest(value=value), self.assertRaises(config.ConfigError):
+                config.parse_config(dict(data, agent_command_timeout_seconds=value))
+
+    def test_write_prompts_run_tests_in_the_foreground(self):
+        # Issue #96: an implementer started tests in the background and waited with
+        # `until grep -qE "^(OK|FAILED)" ...; do sleep 5; done`; one output never had that line.
+        from devloop.dispatcher import PROMPT_DIR
+        for name in ('implement', 'fix'):
+            with self.subTest(prompt=name):
+                text = ' '.join((PROMPT_DIR / f'{name}.md').read_text().split())
+                self.assertIn('Run tests in the foreground and use their exit code.', text)
+                self.assertIn('Do not start them in the background', text)
 
     def test_agents_find_no_github_app_key(self):
         # AGENTS.md tells interactive agents to publish with scripts/agent-token.py; agents that

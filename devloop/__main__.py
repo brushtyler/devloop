@@ -39,13 +39,14 @@ def log(message):
 
 
 def agent_environment(cfg, gh_config):
-    """Environment for agent CLIs and the test command: :func:`isolated_env`, plus a Bash time
-    limit for Claude Code as long as the test timeout. Claude caps each Bash command at ten minutes
-    by default, less than the full suite needs; an operator's own values are kept."""
+    """Environment for agent CLIs and the test command: :func:`isolated_env`, plus Bash time
+    limits for Claude Code. A command may ask for up to the test timeout, which the full suite
+    needs; one that asks for nothing stops after ``agent_command_timeout_seconds``, so a wait loop
+    that never ends does not hold the turn for an hour (issue #96). An operator's own values are
+    kept."""
     env = isolated_env(gh_config)
-    limit = str(cfg.test_timeout_seconds * 1000)
-    env.setdefault('BASH_DEFAULT_TIMEOUT_MS', limit)
-    env.setdefault('BASH_MAX_TIMEOUT_MS', limit)
+    env.setdefault('BASH_DEFAULT_TIMEOUT_MS', str(cfg.agent_command_timeout_seconds * 1000))
+    env.setdefault('BASH_MAX_TIMEOUT_MS', str(cfg.test_timeout_seconds * 1000))
     return env
 
 

@@ -22,6 +22,9 @@ max_actions_per_tick = 3
 implement_test_retries = 1  # extra implementer attempts when local tests fail
 agent_timeout_seconds = 3600
 test_timeout_seconds = 3600     # suite: ~8 min with test_cmd on 4 CPUs, ~25 min serially
+# Claude Code Bash commands that set no timeout stop after this; a command may ask for up to
+# test_timeout_seconds (issue #96).
+agent_command_timeout_seconds = 600
 
 blocked_labels = ["bloccata"]
 priority_labels = ["prerequisito"]
