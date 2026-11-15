@@ -199,6 +199,19 @@ class StallWatchTests(unittest.TestCase):
         self.assertIsNone(follow.pending_call(Path(self.tmp.name) / 'missing.jsonl'))
 
 
+class RunInGroupWatchTests(unittest.TestCase):
+    def test_the_prompt_survives_several_watch_intervals(self):
+        # Review of #103: input passed again to communicate() after its timeout raised
+        # ValueError, so every turn longer than watch_interval failed.
+        from devloop.workspace import run_in_group
+        pids = []
+        done = run_in_group(['bash', '-c', 'read -r line; sleep 0.3; echo "got $line"'],
+                            input='prompt\n', watch=pids.append, watch_interval=0.05,
+                            timeout=30)
+        self.assertEqual((done.returncode, done.stdout), (0, 'got prompt\n'))
+        self.assertGreater(len(pids), 1)
+
+
 class SlowWS(FakeWS):
     def __init__(self, root):
         super().__init__()

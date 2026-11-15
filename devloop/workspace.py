@@ -49,8 +49,10 @@ def run_in_group(argv, *, timeout=None, input=None, watch=None, watch_interval=3
         if watch is not None:
             wait = watch_interval if wait is None else min(wait, watch_interval)
         try:
-            # Retrying communicate() after its timeout loses no output; the input is sent once.
-            out, err = proc.communicate(input=input, timeout=wait)
+            # Retrying communicate() after its timeout loses no output and keeps writing the
+            # input given to the first call; passing input again raises ValueError.
+            pending, input = input, None
+            out, err = proc.communicate(input=pending, timeout=wait)
             break
         except subprocess.TimeoutExpired:
             if watch is None or (deadline is not None and time.monotonic() >= deadline):
