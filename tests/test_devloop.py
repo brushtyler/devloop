@@ -1120,6 +1120,21 @@ class CredentialIsolationTests(unittest.TestCase):
                          {('credential.helper', ''), ('http.extraHeader', '')})
         self.assertEqual(env['DEVLOOP_APP_KEY_DIR'], '/state/gh/no-app-keys')
 
+    def test_claude_bash_limit_covers_the_test_timeout(self):
+        # First devloop run on #52: Claude killed the full suite at its default ten-minute Bash
+        # limit, twice, and the turn ran to the agent timeout.
+        import devloop.__main__ as cli
+        cfg = dataclasses.replace(CFG, test_timeout_seconds=3600)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {}, clear=False):
+            for name in ('BASH_DEFAULT_TIMEOUT_MS', 'BASH_MAX_TIMEOUT_MS'):
+                os.environ.pop(name, None)
+            env = cli.agent_environment(cfg, Path(tmp))
+            self.assertEqual((env['BASH_DEFAULT_TIMEOUT_MS'], env['BASH_MAX_TIMEOUT_MS']),
+                             ('3600000', '3600000'))
+            self.assertNotIn('GH_TOKEN', env)
+            os.environ['BASH_MAX_TIMEOUT_MS'] = '42'
+            self.assertEqual(cli.agent_environment(cfg, Path(tmp))['BASH_MAX_TIMEOUT_MS'], '42')
+
     def test_agents_find_no_github_app_key(self):
         # AGENTS.md tells interactive agents to publish with scripts/agent-token.py; agents that
         # devloop launches must not, since the dispatcher does every GitHub write. The keys sit

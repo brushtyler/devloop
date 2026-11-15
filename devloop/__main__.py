@@ -38,6 +38,17 @@ def log(message):
     print(f'{time.strftime("%H:%M:%S")} {message}', flush=True)
 
 
+def agent_environment(cfg, gh_config):
+    """Environment for agent CLIs and the test command: :func:`isolated_env`, plus a Bash time
+    limit for Claude Code as long as the test timeout. Claude caps each Bash command at ten minutes
+    by default, less than the full suite needs; an operator's own values are kept."""
+    env = isolated_env(gh_config)
+    limit = str(cfg.test_timeout_seconds * 1000)
+    env.setdefault('BASH_DEFAULT_TIMEOUT_MS', limit)
+    env.setdefault('BASH_MAX_TIMEOUT_MS', limit)
+    return env
+
+
 def build(args):
     cfg = load_config(args.config)
     root = main_checkout()
@@ -50,7 +61,7 @@ def build(args):
     # Agents and the test command never see the operator's GitHub credentials.
     gh_config = state / 'agent-gh-config'
     gh_config.mkdir(parents=True, exist_ok=True)
-    agent_env = isolated_env(gh_config)
+    agent_env = agent_environment(cfg, gh_config)
     ws = Workspace(root, cfg.state_dir, cfg.base_branch, test_env=agent_env)
     runner = AgentRunner(state / 'logs', cfg.agent_timeout_seconds, env=agent_env)
     dispatcher = Dispatcher(cfg, identities.github(DISPATCHER), ws, runner, log=log,
