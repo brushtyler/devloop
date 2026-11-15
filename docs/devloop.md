@@ -16,6 +16,7 @@ plans the next steps and runs them. A crashed tick is resumed by the next one.
 | CI | Checks pending | Wait; failing checks become a review round sent back as `agent:changes` |
 | Review | CI passed or absent | A **different** agent posts a structured verdict (see below) |
 | Fix | `agent:changes` | The implementer fixes or disputes each open finding, then back to `agent:review` |
+| Sync | A PR in `agent:review` or `agent:ready-to-merge` conflicts with `main` | The implementer resolves the conflicts of a merge of `origin/main`; the dispatcher pushes the merge commit, back to `agent:review` (see below) |
 | Approve | Verdict `approve` | `agent:ready-to-merge`, only if the PR head is still the reviewed commit and CI passed (both re-read just before promotion) |
 | Merge | `agent:ready-to-merge` | **A human merges.** devloop never merges |
 
@@ -27,9 +28,40 @@ Readiness belongs to the approved commit. Every tick re-checks ready PRs:
   recorded approval is applied again, without a new review, once CI passes;
 - if CI fails on the approved commit, the failure becomes a review round (`agent:changes`).
 
+### Conflicts with `main`
+
+With more than one PR open, merging one can put another in conflict with `main`. Before planning
+a review or a promotion, the dispatcher reads each PR's merge state from GitHub (`mergeable` and
+`mergeStateStatus`, in the same `gh pr list` call as the rest of the snapshot):
+
+- **conflict** (`mergeable` CONFLICTING, or `DIRTY`): the PR is neither reviewed nor kept ready;
+  the tick plans a `sync`. A verdict that asks for changes and is already recorded is applied
+  first, and a PR in `agent:changes` is fixed first: the sync happens when it is back in review;
+- **unknown** (`UNKNOWN`, GitHub is still computing): nothing is planned for the PR until a later
+  tick knows the state. A PR already in `agent:ready-to-merge` keeps its label meanwhile;
+- any other state (`CLEAN`, `BLOCKED`, `BEHIND`, `UNSTABLE`, …) is not a conflict.
+
+A sync runs in the PR worktree. The dispatcher starts `git merge --no-commit origin/main`; if
+files are left in conflict, the PR's implementer gets a prompt that lists them, each with the
+commits of `main` that changed it, and resolves them keeping the behaviour of both sides. The
+agent edits the files only: the dispatcher then checks that the merge is still the one it started
+(head unchanged, same `MERGE_HEAD`) and that no conflict marker (`<<<<<<<`, `>>>>>>>`) is left,
+runs the test command (with the usual retry), commits the merge with the implementer's identity
+and pushes it. A merge without local conflicts (GitHub's state was older than `main`) is
+committed and pushed without an agent; a branch that already contains `origin/main` is left
+alone until GitHub recomputes. As for any push, the merge must not differ from `main` under
+`protected_paths`.
+
+A sync writes no review record, so it does not consume a review round, and it runs even when no
+round is left. The PR goes back to `agent:review`, also from `agent:ready-to-merge`, and the next
+round reviews the new head after CI as usual; that round counts against `max_review_rounds`. A
+sync that fails (the implementer is blocked, tests still fail, markers are left, the merge was
+concluded or aborted by the agent, or the agent run failed) goes to `agent:needs-human` with a
+comment that lists the files in conflict and their commits.
+
 Any step can stop at `agent:needs-human` with a comment explaining why: the agent declared itself
 blocked, tests still fail after the retry, the reviewer asked for a decision, the round limit
-was reached, an agent, `gh` or `git` call failed or timed out, the issue text was changed by an
+was reached, a sync with `main` failed, an agent, `gh` or `git` call failed or timed out, the issue text was changed by an
 untrusted user after `agent:ready`, or the PR body lost its marker. While `agent:needs-human` is
 set devloop ignores the PR or issue, so to resume: fix the cause, **remove `agent:needs-human`**
 and set the label that should run next (`agent:ready` on the issue, `agent:review` or
@@ -37,7 +69,7 @@ and set the label that should run next (`agent:ready` on the issue, `agent:revie
 
 The round limit (`max_review_rounds`) is checked before every new round, whether a review or a
 CI failure, so a PR whose head keeps moving cannot be reviewed indefinitely. Replaying a verdict
-that is already recorded is not a new round.
+that is already recorded is not a new round, and neither is a sync with `main`.
 
 ### Resuming after a `needs_human` verdict without code changes
 
@@ -166,7 +198,7 @@ needs a dedicated system user or a container.
 
 ```bash
 python3 -m devloop setup            # create the agent:* labels
-python3 -m devloop status           # running action, devloop PRs, ready issues, planned actions
+python3 -m devloop status           # running action, devloop PRs (with merge state and conflicts), ready issues, planned actions
 python3 -m devloop apps             # check the GitHub App of each actor
 python3 -m devloop tick --dry-run   # print the plan, change nothing
 python3 -m devloop tick             # run one round
