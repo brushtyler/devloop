@@ -91,6 +91,28 @@ class ConfigTests(unittest.TestCase):
                 self.assertIn('WebFetch', denied)
                 self.assertIn('WebSearch', denied)
 
+    def test_claude_implementer_may_run_the_targeted_test_form_of_the_prompts(self):
+        # Issue #83: `python3 -m unittest tests.x` fails for modules that import helpers from
+        # tests/, and `PYTHONPATH=tests ...` is not allowed. The prompts point at `discover`,
+        # which works for every module; write_args allow it and nothing else beyond the
+        # unittest and read-only git commands.
+        import fnmatch
+        import re
+        args = list(CFG.agents['claude'].write_args)
+        allowed = args[args.index('--allowedTools') + 1:args.index('--disallowedTools')]
+        self.assertEqual(allowed, ['Bash(python3 -m unittest *)', 'Bash(git status *)',
+                                   'Bash(git diff *)', 'Bash(git log *)', 'Bash(git show *)'])
+        patterns = [re.fullmatch(r'Bash\((.*)\)', rule).group(1) for rule in allowed]
+        from devloop.dispatcher import PROMPT_DIR
+        form = "python3 -m unittest discover -s tests -p 'test_name.py'"
+        for name in ('implement', 'fix'):
+            with self.subTest(prompt=name):
+                text = ' '.join((PROMPT_DIR / f'{name}.md').read_text().split())
+                self.assertIn(f'`{form}`', text)
+                self.assertNotIn('`python3 -m unittest tests.', text)
+        self.assertTrue(any(fnmatch.fnmatchcase(form, p) for p in patterns))
+        self.assertFalse(any(fnmatch.fnmatchcase('PYTHONPATH=tests ' + form, p) for p in patterns))
+
     def test_apps_belong_to_known_actors_and_bots_are_never_trusted(self):
         import tomllib
         data = tomllib.loads(config.DEFAULT_CONFIG.read_text())

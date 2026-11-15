@@ -42,6 +42,8 @@ model_label = "Claude Opus 5.5"
 effort = "high"
 # No web tools: the repository is public, and its issues and comments are readable without
 # credentials; agents get the trusted content from the prompt only (issue #79).
+# `python3 -m unittest *` covers the targeted form that the implement and fix prompts suggest,
+# `python3 -m unittest discover -s tests -p 'test_name.py'` (issue #83).
 write_args = ["--permission-mode", "acceptEdits",
               "--allowedTools", "Bash(python3 -m unittest *)", "Bash(git status *)",
               "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)",
