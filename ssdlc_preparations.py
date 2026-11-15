@@ -57,7 +57,8 @@ def unfinished(ticket, *, namespace="continuations"):
     records = []
     for path in (root / 'preparations').glob('*.json'):
         record = json.loads(_regular(path.parent, path.name).read_text())
-        if record['status'] not in ('ABORTED', 'ACTIVE'):
+        # REFUSED owns only its refusal record: no runtime, worktree or fence.
+        if record['status'] not in ('ABORTED', 'ACTIVE', 'REFUSED'):
             records.append(record['transition_id'])
     known = {p.stem for p in (root / 'preparations').glob('*.json')}
     active = json.loads(_regular(root, 'active.json').read_text())['transition_id'] if (root / 'active.json').exists() else None
