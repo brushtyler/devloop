@@ -153,7 +153,7 @@ def prepare(ticket, repo, request, **kwargs):
 def _prepare(ticket, repo, request, *, runtime_identity, controller_snapshot, verifier, guard=lambda: None,
             clock=time.time, fault=lambda point: None):
     """Stage actual native runtime and cumulative journal for operator review."""
-    from ssdlc_candidates import CandidateStore, checkout, inventory, git_identity, git_metadata
+    from ssdlc_candidates import CandidateStore, checkout, inventory
     from ssdlc_controller import execution_contract
     ticket, repo = Path(ticket).resolve(), Path(repo).resolve()
     validate_document('reconciliation-request', request)
@@ -192,19 +192,22 @@ def _prepare(ticket, repo, request, *, runtime_identity, controller_snapshot, ve
         update(ticket, identity, namespace='execution', worktree_created=True)
         fault('worktree_created')
         quality = copy.deepcopy(source['quality']); quality['baseline'] = []
+        from ssdlc_preparations import record_baseline_refusal, run_baseline_check
         for check in quality['checks']:
             worker = prepared / ('baseline-' + check['check_id'])
             checkout(repo, worker, source['plan']['base_commit'])
-            before, metadata = inventory(worker), git_identity(worker)
-            out, err, code = verifier(check['argv'], confined(worker, check['cwd']), check['timeout_sec'], worker)
-            after = inventory(worker)
-            if (any(after.get(p) != value for p, value in before.items()) or git_identity(worker) != metadata
-                    or git_metadata(worker) != metadata['metadata']):
-                raise TransitionError('Reconciliation baseline mutated source/metadata')
-            if code or test_suite_is_empty(out, err): raise RecoveryStop('ENVIRONMENT_DIAGNOSIS', 'Fresh baseline failed')
+            # Record first, then refuse (A4.2): a refusal keeps its own evidence.
             ref = '00-recon/baseline/reconciliation-' + check['check_id'] + '.log'
-            path = runtime / ref; path.parent.mkdir(parents=True, exist_ok=True); path.write_text(out + '\n' + err)
-            quality['baseline'].append({'check_id': check['check_id'], 'exit_code': 0, 'log_ref': ref, 'sha256': file_hash(path)})
+            result = run_baseline_check(verifier, check, worker, confined(worker, check['cwd']), runtime, ref, prepared)
+            if result['classification'] in ('SOURCE_CHANGED', 'METADATA_CHANGED'):
+                record_baseline_refusal(ticket, identity, prepared, result,
+                                        'Reconciliation baseline mutated source/metadata', namespace='execution')
+                raise TransitionError('Reconciliation baseline mutated source/metadata')
+            if result['classification'] != 'PASSED':
+                record_baseline_refusal(ticket, identity, prepared, result, 'Fresh baseline failed', namespace='execution')
+                raise RecoveryStop('ENVIRONMENT_DIAGNOSIS', 'Fresh baseline failed')
+            quality['baseline'].append({'check_id': check['check_id'], 'exit_code': 0, 'log_ref': ref,
+                                        'sha256': result['log_sha256']})
             guard()
         if runtime_identity['controller_sha256'] != digest(execution_contract(controller_snapshot)):
             raise TransitionError('New controller identity does not match its snapshot')

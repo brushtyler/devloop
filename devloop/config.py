@@ -65,6 +65,7 @@ class Config:
     implement_test_retries: int = 1
     agent_timeout_seconds: int = 3600
     test_timeout_seconds: int = 3600
+    agent_command_timeout_seconds: int = 600
     blocked_labels: tuple = ('bloccata',)
     priority_labels: tuple = ('prerequisito',)
     protected_paths: tuple = ('.github/',)
@@ -139,12 +140,16 @@ def parse_config(data):
         raise ConfigError('apps: each actor needs its own app')
     ints = {}
     for key in ('max_open_prs', 'max_review_rounds', 'max_actions_per_tick',
-                'implement_test_retries', 'agent_timeout_seconds', 'test_timeout_seconds'):
+                'implement_test_retries', 'agent_timeout_seconds', 'test_timeout_seconds',
+                'agent_command_timeout_seconds'):
         if key in data:
             value = _require(data, key, int, 'config')
             if value < (0 if key == 'implement_test_retries' else 1):
                 raise ConfigError(f'{key}: out of range')
             ints[key] = value
+    if (ints.get('agent_command_timeout_seconds', Config.agent_command_timeout_seconds)
+            > ints.get('test_timeout_seconds', Config.test_timeout_seconds)):
+        raise ConfigError('agent_command_timeout_seconds: must not exceed test_timeout_seconds')
     return Config(
         repo=_require(data, 'repo', str, 'config'),
         base_branch=data.get('base_branch', 'main'),

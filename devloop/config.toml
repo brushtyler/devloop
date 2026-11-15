@@ -22,6 +22,9 @@ max_actions_per_tick = 3
 implement_test_retries = 1  # extra implementer attempts when local tests fail
 agent_timeout_seconds = 3600
 test_timeout_seconds = 3600     # suite: ~8 min with test_cmd on 4 CPUs, ~25 min serially
+# Claude Code Bash commands that set no timeout stop after this; a command may ask for up to
+# test_timeout_seconds (issue #96).
+agent_command_timeout_seconds = 600
 
 blocked_labels = ["bloccata"]
 priority_labels = ["prerequisito"]
@@ -42,6 +45,8 @@ model_label = "Claude Opus 5.5"
 effort = "high"
 # No web tools: the repository is public, and its issues and comments are readable without
 # credentials; agents get the trusted content from the prompt only (issue #79).
+# `python3 -m unittest *` covers the targeted form that the implement and fix prompts suggest,
+# `python3 -m unittest discover -s tests -p 'test_name.py'` (issue #83).
 write_args = ["--permission-mode", "acceptEdits",
               "--allowedTools", "Bash(python3 -m unittest *)", "Bash(git status *)",
               "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)",

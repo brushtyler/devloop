@@ -16,6 +16,7 @@ plans the next steps and runs them. A crashed tick is resumed by the next one.
 | CI | Checks pending | Wait; failing checks become a review round sent back as `agent:changes` |
 | Review | CI passed or absent | A **different** agent posts a structured verdict (see below) |
 | Fix | `agent:changes` | The implementer fixes or disputes each open finding, then back to `agent:review` |
+| Sync | A PR in `agent:review` or `agent:ready-to-merge` conflicts with `main` | The implementer resolves the conflicts of a merge of `origin/main`; the dispatcher pushes the merge commit, back to `agent:review` (see below) |
 | Approve | Verdict `approve` | `agent:ready-to-merge`, only if the PR head is still the reviewed commit and CI passed (both re-read just before promotion) |
 | Merge | `agent:ready-to-merge` | **A human merges.** devloop never merges |
 
@@ -27,9 +28,40 @@ Readiness belongs to the approved commit. Every tick re-checks ready PRs:
   recorded approval is applied again, without a new review, once CI passes;
 - if CI fails on the approved commit, the failure becomes a review round (`agent:changes`).
 
+### Conflicts with `main`
+
+With more than one PR open, merging one can put another in conflict with `main`. Before planning
+a review or a promotion, the dispatcher reads each PR's merge state from GitHub (`mergeable` and
+`mergeStateStatus`, in the same `gh pr list` call as the rest of the snapshot):
+
+- **conflict** (`mergeable` CONFLICTING, or `DIRTY`): the PR is neither reviewed nor kept ready;
+  the tick plans a `sync`. A verdict that asks for changes and is already recorded is applied
+  first, and a PR in `agent:changes` is fixed first: the sync happens when it is back in review;
+- **unknown** (`UNKNOWN`, GitHub is still computing): nothing is planned for the PR until a later
+  tick knows the state. A PR already in `agent:ready-to-merge` keeps its label meanwhile;
+- any other state (`CLEAN`, `BLOCKED`, `BEHIND`, `UNSTABLE`, …) is not a conflict.
+
+A sync runs in the PR worktree. The dispatcher starts `git merge --no-commit origin/main`; if
+files are left in conflict, the PR's implementer gets a prompt that lists them, each with the
+commits of `main` that changed it, and resolves them keeping the behaviour of both sides. The
+agent edits the files only: the dispatcher then checks that the merge is still the one it started
+(head unchanged, same `MERGE_HEAD`) and that no conflict marker (`<<<<<<<`, `>>>>>>>`) is left,
+runs the test command (with the usual retry), commits the merge with the implementer's identity
+and pushes it. A merge without local conflicts (GitHub's state was older than `main`) is
+committed and pushed without an agent; a branch that already contains `origin/main` is left
+alone until GitHub recomputes. As for any push, the merge must not differ from `main` under
+`protected_paths`.
+
+A sync writes no review record, so it does not consume a review round, and it runs even when no
+round is left. The PR goes back to `agent:review`, also from `agent:ready-to-merge`, and the next
+round reviews the new head after CI as usual; that round counts against `max_review_rounds`. A
+sync that fails (the implementer is blocked, tests still fail, markers are left, the merge was
+concluded or aborted by the agent, or the agent run failed) goes to `agent:needs-human` with a
+comment that lists the files in conflict and their commits.
+
 Any step can stop at `agent:needs-human` with a comment explaining why: the agent declared itself
 blocked, tests still fail after the retry, the reviewer asked for a decision, the round limit
-was reached, an agent, `gh` or `git` call failed or timed out, the issue text was changed by an
+was reached, a sync with `main` failed, an agent, `gh` or `git` call failed or timed out, the issue text was changed by an
 untrusted user after `agent:ready`, or the PR body lost its marker. While `agent:needs-human` is
 set devloop ignores the PR or issue, so to resume: fix the cause, **remove `agent:needs-human`**
 and set the label that should run next (`agent:ready` on the issue, `agent:review` or
@@ -37,7 +69,7 @@ and set the label that should run next (`agent:ready` on the issue, `agent:revie
 
 The round limit (`max_review_rounds`) is checked before every new round, whether a review or a
 CI failure, so a PR whose head keeps moving cannot be reviewed indefinitely. Replaying a verdict
-that is already recorded is not a new round.
+that is already recorded is not a new round, and neither is a sync with `main`.
 
 A devloop PR is recognised by its branch, `agent/issue-<n>`, opened by a trusted user. Its body
 ends with a hidden marker that records the issue, implementer and reviewer: text may be edited
@@ -75,7 +107,9 @@ link.
 
 Every text devloop publishes starts with the header that [AGENTS.md](../AGENTS.md) requires. The
 values come from the configured agent: CLI version from its `--version`, model and reasoning level
-as passed on the command line. Text the dispatcher writes on its own, such as escalations and CI
+as passed on the command line. A known version is cached for the life of the process; a failed
+`--version` is retried at the next publication, and the header says `CLI non noto` only for texts
+published while it keeps failing. Text the dispatcher writes on its own, such as escalations and CI
 rounds, names `devloop dispatcher` as the agent and no model.
 
 ## GitHub identities
@@ -130,9 +164,12 @@ repositories (`GIT_ALLOW_PROTOCOL=file`), so neither SSH keys nor HTTPS credenti
 the config files say; credential helpers, askpass programs, preconfigured authentication headers
 and SSH are disabled as further layers. `DEVLOOP_APP_KEY_DIR` points to a directory without keys,
 so the GitHub App helpers in the worktree (`devloop.apps`, `scripts/agent-token.py`) cannot mint a
-token: the dispatcher does every GitHub write. Claude Code caps each Bash command at ten minutes by
-default; devloop raises `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` to `test_timeout_seconds`
-unless the operator set them. This prevents accidental use of the operator's credentials, not
+token: the dispatcher does every GitHub write. For Claude Code, devloop sets `BASH_MAX_TIMEOUT_MS`
+to `test_timeout_seconds`, so a command that asks for it can run the full suite, and
+`BASH_DEFAULT_TIMEOUT_MS` to `agent_command_timeout_seconds` (default ten minutes, at most
+`test_timeout_seconds`), so a command that sets no timeout, such as a wait loop that never ends,
+stops on its own instead of holding the turn for an hour. Values the operator set in the
+environment are kept. This prevents accidental use of the operator's credentials, not
 deliberate access: code running as the same system user can still read files. Real isolation
 needs a dedicated system user or a container.
 
@@ -140,17 +177,39 @@ needs a dedicated system user or a container.
 
 ```bash
 python3 -m devloop setup            # create the agent:* labels
-python3 -m devloop status           # devloop PRs, ready issues, planned actions
+python3 -m devloop status           # running action, devloop PRs (with merge state and conflicts), ready issues, planned actions
 python3 -m devloop apps             # check the GitHub App of each actor
 python3 -m devloop tick --dry-run   # print the plan, change nothing
 python3 -m devloop tick             # run one round
 python3 -m devloop run --interval 600
 python3 -m devloop cleanup          # remove worktrees left by failed steps
+python3 -m devloop follow issue-52  # follow live the implementer of issue #52 (pr-<N>: reviewer or fixer)
 ```
 
 Run it from any checkout of this repository. Worktrees, agent prompts and logs, and the lock that
 prevents two dispatchers from running at once live under `state_dir` (default `.ssdlc/devloop`)
 in the main checkout.
+
+### Watching a tick
+
+While a tick runs an action it records it in `state_dir/activity.json`: the action, the issue or
+PR, the agent and the path of its prompt once an agent turn starts, the start time and the
+dispatcher's process id. The record is removed when the action ends, also when it fails.
+`devloop status` shows it first, with how long it has been running. If no dispatcher holds the
+lock, or the recorded process is gone, the action is reported as `interrupted`: the tick was
+killed before it could clean up, and the next tick overwrites the record when it starts an action.
+
+devloop writes an agent's log only when its turn ends. To follow the agent while it works,
+`devloop follow issue-<N>` (implementer) or `devloop follow pr-<N>` (reviewer or fixer) prints
+the messages and tool calls of the newest Claude (`~/.claude/projects`) or Codex
+(`~/.codex/sessions`) session transcript whose working directory is that worktree, then keeps
+following it, and switches to a newer transcript of the same worktree when one appears, for
+example the next attempt of a turn. The reviewer works in a disposable copy of the PR worktree,
+`pr-<N>-review`, so `devloop follow pr-<N>` looks at both and follows the newest session: the
+reviewer's while a review runs, the fixer's while a fix runs. It reads local files only and needs no GitHub access. Ctrl-C
+stops it. Antigravity sessions are not supported. For this reason devloop runs `codex exec`
+without `--ephemeral`: Codex saves the session of every turn in `~/.codex/sessions`, and these
+transcripts stay there after the turn.
 
 ### Run from a pinned installation
 
@@ -185,10 +244,28 @@ but never the agent that implemented the PR: without an independent reviewer, or
 implementer is no longer configured, the PR goes to `agent:needs-human`.
 
 Agents run headless: `claude -p`, `codex exec`, `agy -p`, with the schema in
-[`devloop/schemas/`](../devloop/schemas/). Reviewers run read-only (codex `read-only` sandbox,
-agy `plan` mode, claude without edit tools). Implementers edit only their worktree; the
+[`devloop/schemas/`](../devloop/schemas/). Implementers edit only their worktree; the
 dispatcher process does every commit, push and GitHub write, with the identity of the actor
 it acts for.
+
+A reviewer does not run in the PR worktree but in a disposable copy of it: a detached worktree
+at the same commit, `pr-<n>-review`, which shares the repository's refs (so
+`git diff origin/main...HEAD` works) and is removed after the review. The tests the reviewer runs
+can therefore write files and temporary directories. After the review the dispatcher checks
+that the PR worktree is still at the reviewed commit with no change and no new file, not even
+an ignored one; otherwise the verdict is discarded and the PR goes to `agent:needs-human`.
+
+| Reviewer | Sandbox |
+|---|---|
+| codex | `workspace-write` sandbox: writes only in the copy and in the temporary directory, no extra `writable_roots`, network disabled |
+| claude | no edit tools; Bash limited to `git diff`, `git log`, `git show` and `python3 -m unittest tests.*` (`review_args`) |
+| agy | `plan` mode |
+
+Only codex has an OS-level sandbox. claude and agy are limited by their tools and modes, not by
+the system: the tests they run can still reach the network and write outside the copy, as any
+code running as the same user. For them, the copy and the final check catch writes to the
+reviewed tree, not access to the rest of the system. With the network disabled, codex cannot run tests
+that open TCP sockets, even on loopback.
 
 ## Limits
 

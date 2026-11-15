@@ -8,9 +8,13 @@ Read `AGENTS.md` and the README section "Developing SSDLC" before changing anyth
 
 - Implement what the issue asks, and nothing else. Keep the change as small as the issue allows.
 - Add or update tests for the behaviour you change. Update user-facing docs when behaviour or limits change.
-- Before finishing, run the tests that cover what you changed (for example
-  `python3 -m unittest tests.test_name`). Do not run the full suite (`$test_cmd`): it can outlast
+- Before finishing, run the tests that cover what you changed, one module at a time with
+  `python3 -m unittest discover -s tests -p 'test_name.py'`: this form works for every module,
+  including those that import helpers from `tests/`. Do not run the full suite (`$test_cmd`): it can outlast
   your tool's time limit, and the dispatcher runs it after you finish and sends you any failures.
+- Run tests in the foreground and use their exit code. Do not start them in the background and then
+  wait with a loop that searches their output for some text: if that text never appears, the loop
+  holds your turn until the command time limit.
 - Do not commit, push, open pull requests or comment on GitHub. The dispatcher commits your
   working-tree changes and publishes them, with the attribution header, after you finish.
 - Never weaken explicit operator authority, approvals, limits, evidence or integrity checks unless

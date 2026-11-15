@@ -181,6 +181,7 @@ The full reference covers routing tables, reasoning effort, budgets, container l
 | `./ssdlc doctor` | Check tools, isolation and credentials |
 | `./ssdlc run --ticket T --goal "…" [--tier auto]` | Run the pipeline in the foreground |
 | `./ssdlc run … --from-phase 03-dev` | Resume from a phase, preserving approved upstream work |
+| `./ssdlc run … --until-phase 03-dev` | Stop as `PAUSED_AT_PHASE_BOUNDARY` before the global gates; continue with `--from-phase 04-review` ([docs](docs/task-mode.md#stopping-at-a-phase-boundary)) |
 | `./ssdlc po` / `design` / `plan --ticket T` | Revalidate PO output, resume design, retry task planning (task mode) |
 | `./ssdlc approve T` / `reject T --reason "…"` | Human sign-off |
 | `python3 orchestrator.py start` / `status` / `cancel` / `resume` / `monitor` | Detached supervision ([docs](docs/supervision.md)) |
@@ -271,7 +272,7 @@ python3 -m venv .tools/python
 python3 -I ssdlc_replay_gate.py --output recovery-benchmark.json # isolated A5 recovery gate
 ```
 
-- Running a single module needs `PYTHONPATH=tests`.
+- Running a single module: `python3 -m unittest discover -s tests -p 'test_name.py'` (works for every module; `python3 -m unittest tests.test_name` needs `PYTHONPATH=tests` for modules that import helpers from `tests/`).
 - Docker smoke tests: `python3 tests/docker_smoke.py --image <image> --suite` and `python3 tests/docker_pid_smoke.py --image <image>`.
 - When SSDLC develops itself, run a pinned controller checkout against a **separate** target checkout.
 - Agents contributing to this repository follow [AGENTS.md](AGENTS.md).

@@ -27,7 +27,8 @@ python3 orchestrator.py resume --ticket T-1 --entrypoint design --rounds 4 --rep
 ## Resume and fingerprints
 
 `resume` starts a new run linked to the old one through `resumes`. Supported transitions:
-- `run` from `00-recon` or from `03-dev`;
+- `run` from `00-recon` or from `03-dev`, optionally bounded by `--until-phase 03-dev`;
+- `run` from `04-review`, only for a run paused at the `03-dev` boundary ([Stopping at a phase boundary](task-mode.md#stopping-at-a-phase-boundary)). `start` refuses `04-review`;
 - `plan` before execution;
 - `design` before planning or execution.
 
@@ -37,6 +38,8 @@ Upstream approvals, sealed artifact hashes and baseline compatibility still appl
 - A change in goal, tier, test command, environment or controller fingerprint blocks resume.
 - `--reauthorize-fingerprints` records an explicit, audited authorization. It never overrides transition compatibility or approvals.
 - Switching from a goal-bearing `run` to `plan` or `design` changes the goal fingerprint to null, so it requires `--reauthorize-fingerprints`.
+- `--until-phase` is recorded in the run's authorization, and it is part of `inputs_sha256`. Every worker and controller launch, including `monitor --restart-worker`, must carry the same `--from-phase` and `--until-phase`. A resume that starts at or before the recorded limit and drops or raises it is a fingerprint change: it is blocked unless `--reauthorize-fingerprints` records the change. A resume from the next phase (`04-review`) is the explicit crossing of the boundary.
+- A bounded run completes only at its recorded boundary: `status` reports `completed` when `state.json` is `PAUSED_AT_PHASE_BOUNDARY` at that phase, with the verified head and a clean worktree.
 
 **Configuration digest**
 - The digest covers the whole effective environment, except the supervisor markers, `PWD`, `SHLVL` and `_`. A different `TERM`, `OLDPWD` or `SSH_AUTH_SOCK` can therefore block adoption, so restart from the same effective environment.
