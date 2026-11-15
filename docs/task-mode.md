@@ -79,8 +79,13 @@ The planner returns a structured plan (`schemas/plan.schema.json`), which an ind
 
 **Stops**
 - Three consecutive reviews that keep the same blocking IDs stop as `STAGNATION`.
-- A missing environment prerequisite stops as `ENVIRONMENT_PREREQUISITE`.
+- A missing environment prerequisite stops as `ENVIRONMENT_PREREQUISITE`. New permissions or external resources are operator decisions, not planned tasks.
 - Invalid reviewer output gets one correction on the same candidate, then stops as `REVIEW_PROTOCOL`.
+
+**Declared contract changes**
+- A task may declare in `contract_changes` the contracts it modifies: `contract`, `producer` (in its own `target_files`) and `expected_change` (`COMPATIBLE`, `INCOMPATIBLE`, `REMOVED`), with a `description`. Plans without declarations validate as before.
+- The impact report verifies them statically at the plan base. A breaking change with a demonstrated consumer that no task covers, or that only a task unordered with the declaring one covers, is a `PLAN_DEFECT` bound to the declaring task's approved obligations: the review must report it as an OPEN BLOCKING finding, so the plan needs a revision. `UNKNOWN` dependencies and generic references are diagnoses and never block on their own.
+- A prerequisite is a normal task with `depends_on`. Details: [Declared contract changes](developer-feedback.md#declared-contract-changes).
 
 Evidence lives in `02-design/task-planning/`.
 

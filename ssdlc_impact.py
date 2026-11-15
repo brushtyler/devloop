@@ -20,6 +20,12 @@ Analysis perimeter:
 Everything else is ``UNKNOWN``: other languages, unparsable Python and dynamic
 imports whose destination is not a literal. A dynamic import is reported for
 the file that contains it; no destination is inferred.
+
+When tasks declare ``contract_changes``, the report also verifies them
+(``contracts``): a breaking change with a demonstrated, uncovered or unordered
+consumer is a ``PLAN_DEFECT`` the plan review must report. That is the only
+part of the report that can require a plan revision; undecidable cases stay
+non-blocking diagnoses.
 """
 import ast
 import json
@@ -315,6 +321,9 @@ def build_report(repo, plan):
                 if schema != path:
                     relations[path]['validators'].add((schema, path, line, 'PATH_REFERENCE'))
     owners_source, owners = _codeowners(files, texts, targets)
+    contracts = None
+    if any(task.get('contract_changes') for task in plan['tasks']):
+        contracts = _contract_analysis(plan, files, texts, modules)
     rows, omissions = [], {}
     for target in targets:
         row = dict(path=target, exists_at_base=target in files,
@@ -330,13 +339,215 @@ def build_report(repo, plan):
                     entry = omissions.setdefault(item['path'], dict(relations=set(), targets=set()))
                     entry['relations'].add(label)
                     entry['targets'].add(target)
-    return dict(schema_version=SCHEMA_VERSION, kind=KIND, advisory=True, blocking=False,
-                complete_dependency_proof=False, base_commit=plan['base_commit'], plan_sha256=digest(plan),
-                target_files=targets, owners_source=owners_source, targets=rows,
-                possible_omissions=[dict(path=p, relations=sorted(v['relations']), targets=sorted(v['targets']))
-                                    for p, v in sorted(omissions.items())],
-                unknown=sorted(unknown, key=lambda u: (u['path'], u['line'], u['reason'])),
-                unscanned=unscanned)
+    report = dict(schema_version=SCHEMA_VERSION, kind=KIND, advisory=True, blocking=False,
+                  complete_dependency_proof=False, base_commit=plan['base_commit'], plan_sha256=digest(plan),
+                  target_files=targets, owners_source=owners_source, targets=rows,
+                  possible_omissions=[dict(path=p, relations=sorted(v['relations']), targets=sorted(v['targets']))
+                                      for p, v in sorted(omissions.items())],
+                  unknown=sorted(unknown, key=lambda u: (u['path'], u['line'], u['reason'])),
+                  unscanned=unscanned)
+    if contracts is not None:
+        # Only plans that declare contract changes get the key: older reports keep their bytes.
+        report['contracts'] = contracts
+    return report
+
+
+# ---------------------------------------------------------------------------
+# Declared contract changes. A consumer is demonstrated only by a static use
+# of the declared name at the plan base; everything else is a diagnosis.
+# ---------------------------------------------------------------------------
+
+BREAKING_CHANGES = {'INCOMPATIBLE', 'REMOVED'}
+OBLIGATION_FIELDS = ('requirement_refs', 'standard_refs', 'quality_check_refs')
+_IDENTIFIER = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+
+
+def _dotted(node):
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _dotted(node.value)
+        return base + '.' + node.attr if base else None
+    return None
+
+
+def _top_level_names(tree):
+    names = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            names.update((a.asname or a.name).split('.')[0] for a in node.names if a.name != '*')
+    return names
+
+
+def _names_producer(modules, importer, dotted, relative, producer):
+    """True/False when ``dotted`` statically is/is not the producer; None when it depends on ``sys.path``."""
+    found, environment_dependent = _resolve(modules, importer, dotted, 'IMPORT', relative)
+    if environment_dependent:
+        directory = '.'.join(PurePosixPath(importer).parts[:-1])
+        if producer in (found, _lookup(modules, directory + '.' + dotted, 'IMPORT')):
+            return None
+    return found == producer
+
+
+def _contract_uses(path, tree, modules, producer, contract):
+    """Lines of ``path`` that use ``producer.contract``, and lines where that is not decidable."""
+    package = list(PurePosixPath(path).parts[:-1])
+    targets = {name + '.' + contract for name in _module_names(producer)}
+    bindings, uses, unknown = set(), [], []
+
+    def bind(dotted, relative, line, name):
+        hit = _names_producer(modules, path, dotted, relative, producer)
+        if hit is None:
+            unknown.append((line, 'ENVIRONMENT_DEPENDENT_IMPORT'))
+        elif hit:
+            bindings.add(name)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bind(alias.name, False, node.lineno, alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            relative = bool(node.level)
+            if relative:
+                up = node.level - 1
+                if up > len(package):
+                    continue
+                module = '.'.join(package[:len(package) - up] + (node.module.split('.') if node.module else []))
+            else:
+                module = node.module
+            if module:
+                hit = _names_producer(modules, path, module, relative, producer)
+                if hit is None:
+                    unknown.append((node.lineno, 'ENVIRONMENT_DEPENDENT_IMPORT'))
+                    continue
+                if hit:
+                    for alias in node.names:
+                        if alias.name == '*':
+                            unknown.append((node.lineno, 'STAR_IMPORT'))
+                        elif alias.name == contract:
+                            uses.append((node.lineno, 'IMPORT'))
+                    continue
+            for alias in node.names:
+                if alias.name != '*':
+                    bind((module + '.' if module else '') + alias.name, relative, node.lineno,
+                         alias.asname or alias.name)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == contract and _dotted(node.value) in bindings:
+            uses.append((node.lineno, 'ATTRIBUTE'))
+        elif isinstance(node, ast.Call) and node.args:
+            name, first = _call_name(node), _literal(node.args[0])
+            second = _literal(node.args[1]) if len(node.args) > 1 else None
+            if name == 'getattr' and len(node.args) > 1 and _dotted(node.args[0]) in bindings:
+                if second is None:
+                    unknown.append((node.lineno, 'DYNAMIC_ATTRIBUTE'))
+                elif second == contract:
+                    uses.append((node.lineno, 'GETATTR'))
+            elif name == 'patch' and first in targets:
+                uses.append((node.lineno, 'PATCH_TARGET'))
+            elif name == 'object' and _dotted(node.args[0]) in bindings and second == contract:
+                uses.append((node.lineno, 'PATCH_TARGET'))
+    return sorted(set(uses)), sorted(set(unknown))
+
+
+def _related_tasks(tasks, task_id):
+    """The task itself, its ancestors and its descendants: tasks ordered with it."""
+    def closure(start, edges):
+        found, pending = set(), list(edges(start))
+        while pending:
+            current = pending.pop()
+            if current not in found and current in tasks:
+                found.add(current)
+                pending.extend(edges(current))
+        return found
+    ancestors = closure(task_id, lambda t: tasks[t].get('depends_on', []))
+    descendants = closure(task_id, lambda t: [k for k, v in tasks.items() if t in v.get('depends_on', [])])
+    return {task_id} | ancestors | descendants
+
+
+def _obligations(task):
+    return dict(requirement_refs=sorted(set(task.get('ac_refs', [])) | set(task.get('sec_refs', []))),
+                standard_refs=sorted(task.get('standard_refs', [])),
+                quality_check_refs=sorted((task.get('verification') or {}).get('quality_check_refs', [])))
+
+
+def _contract_analysis(plan, files, texts, modules):
+    """Verify each declared contract change against the static uses at the plan base.
+
+    A breaking change (``INCOMPATIBLE``/``REMOVED``) with a demonstrated
+    consumer that no task covers, or that only a task unordered with the
+    declaring one covers, is a defect bound to the declaring task's approved
+    obligations. Without such obligations, and for every undecidable case, the
+    result is a non-blocking diagnosis.
+    """
+    tasks = {t['task_id']: t for t in plan['tasks']}
+    trees = {}
+    for path in sorted(texts):
+        if path.endswith('.py'):
+            try:
+                trees[path] = ast.parse(texts[path])
+            except (SyntaxError, ValueError):
+                pass
+    declarations, defects, diagnoses = [], [], []
+    for task in plan['tasks']:
+        related = _related_tasks(tasks, task['task_id'])
+        for item in task.get('contract_changes', []):
+            contract, producer, change = item['contract'], item['producer'], item['expected_change']
+            subject = dict(task_id=task['task_id'], contract=contract, producer=producer, expected_change=change)
+            reason = None
+            if not _IDENTIFIER.fullmatch(contract):
+                reason = 'ATTRIBUTE_CONTRACT' if all(_IDENTIFIER.fullmatch(p) for p in contract.split('.')) \
+                    else 'GENERIC_CONTRACT'
+            elif producer not in files:
+                reason = 'PRODUCER_NOT_AT_BASE'
+            elif not producer.endswith('.py'):
+                reason = 'NON_PYTHON_PRODUCER'
+            elif producer not in trees:
+                reason = 'UNREADABLE_PRODUCER'
+            elif change in BREAKING_CHANGES and contract not in _top_level_names(trees[producer]):
+                reason = 'CONTRACT_NOT_AT_BASE'
+            if reason:
+                declarations.append(dict(subject, status='UNKNOWN', reason=reason, consumers=[]))
+                diagnoses.append(dict(subject, reason=reason, path=producer, line=None))
+                continue
+            consumers = []
+            for path, tree in trees.items():
+                if path == producer:
+                    continue
+                uses, unknown = _contract_uses(path, tree, modules, producer, contract)
+                for line, why in unknown:
+                    diagnoses.append(dict(subject, reason=why, path=path, line=line))
+                if not uses:
+                    continue
+                line, via = uses[0]
+                covering = sorted(k for k, t in tasks.items() if path in t['target_files'])
+                coverage = ('UNCOVERED' if not covering else 'COVERED' if set(covering) & related
+                            else 'UNORDERED')
+                consumers.append(dict(path=path, line=line, via=via, coverage=coverage, covering_task_ids=covering))
+                if change not in BREAKING_CHANGES or coverage == 'COVERED':
+                    continue
+                gap = 'OWNER_OR_SCOPE' if coverage == 'UNCOVERED' else 'ORDERING'
+                obligations = _obligations(task)
+                if any(obligations.values()):
+                    defects.append(dict(subject, category='PLAN_DEFECT', consumer=path, line=line, via=via,
+                                        gap=gap, covering_task_ids=covering, **obligations))
+                else:
+                    diagnoses.append(dict(subject, reason='NO_APPROVED_OBLIGATION', path=path, line=line))
+            declarations.append(dict(subject, status='ANALYZED', consumers=consumers))
+    order = lambda row: (row['task_id'], row['producer'], row['contract'])
+    return dict(declarations=sorted(declarations, key=order),
+                defects=sorted(defects, key=lambda d: (*order(d), d['consumer'])),
+                diagnoses=sorted(diagnoses, key=lambda d: (*order(d), d['path'], d['line'] or 0, d['reason'])))
+
+
+def contract_defects(report):
+    """Demonstrated contract incompatibilities that the plan review must report as blockers."""
+    return list((report.get('contracts') or {}).get('defects', []))
 
 
 def related_paths(report):

@@ -5,9 +5,33 @@ from pathlib import Path
 from ssdlc_tasks import PlanError, atomic_json, confined, digest, file_hash, parse_plan_output, log_retry_reason, validate_document
 
 
+def unreported_contract_defects(findings: list[dict], defects) -> list[dict]:
+    """Host-demonstrated contract defects that no OPEN BLOCKING PLAN_DEFECT reports.
+
+    A finding reports a defect when it names the declaring task, cites the
+    consumer path in its message or evidence and shares at least one approved
+    obligation reference with the defect.
+    """
+    missing = []
+    for defect in defects:
+        if not any(f['status'] == 'OPEN' and f['severity'] == 'BLOCKING' and f['category'] == 'PLAN_DEFECT'
+                   and defect['task_id'] in f['task_ids']
+                   and defect['consumer'] in f['message'] + '\n' + f['evidence']
+                   and any(set(f.get(field, [])) & set(defect[field])
+                           for field in ('requirement_refs', 'standard_refs', 'quality_check_refs'))
+                   for f in findings):
+            missing.append(defect)
+    return missing
+
+
 def validate_plan_review(report: str, plan: dict, requirements: list[str], history: list[dict], quality=None,
-                         schema_name='task-plan-review') -> dict:
-    """Require attributable findings and explicit dispositions of earlier blockers."""
+                         schema_name='task-plan-review', contract_defects=()) -> dict:
+    """Require attributable findings and explicit dispositions of earlier blockers.
+
+    ``contract_defects`` are the impact report's demonstrated contract
+    incompatibilities: each needs an OPEN BLOCKING ``PLAN_DEFECT``, so the plan
+    cannot be approved while one remains.
+    """
     result = parse_plan_output(report)
     validate_document(schema_name, result)
     findings = result['findings']
@@ -41,7 +65,12 @@ def validate_plan_review(report: str, plan: dict, requirements: list[str], histo
                 raise PlanError('Blocking finding needs an approved requirement or quality obligation and cannot be an optional improvement')
         if assessed and finding['finding_id'] not in old_ids and finding['new_issue_reason'] == 'INITIAL_REVIEW':
             raise PlanError('New review finding must explain introduction by revision or earlier omission')
-    blockers = [f for f in findings if f['status'] == 'OPEN' and f['severity'] == 'BLOCKING']
+    unreported = unreported_contract_defects(findings, contract_defects)
+    if unreported:
+        raise PlanError('Review omitted demonstrated contract incompatibilities: report each as an OPEN BLOCKING '
+                        'PLAN_DEFECT naming the declaring task, the consumer path and an approved obligation of the defect',
+                        [{'code': 'CONTRACT_DEFECT_NOT_REPORTED', **defect} for defect in unreported])
+    blockers =[f for f in findings if f['status'] == 'OPEN' and f['severity'] == 'BLOCKING']
     if (result['verdict'] == 'APPROVED') != (not blockers):
         raise PlanError('Review verdict contradicts its open blocking findings')
     return result
@@ -49,7 +78,7 @@ def validate_plan_review(report: str, plan: dict, requirements: list[str], histo
 
 class PlanRepair:
     def __init__(self, directory: Path, inputs: dict, validator, generate, review, budget, review_repairs=None,
-                 structured_reviews=False):
+                 structured_reviews=False, contract_defects=None):
         self.root = directory / 'task-planning'
         self.root.mkdir(exist_ok=True)
         self.path = self.root / 'session.json'
@@ -62,6 +91,8 @@ class PlanRepair:
             raise PlanError('review_repairs must be an integer between 0 and 4')
         self.review_repairs = review_repairs
         self.structured_reviews = structured_reviews
+        # plan -> demonstrated contract defects the review must report (from the impact report).
+        self.contract_defects = contract_defects or (lambda plan: [])
 
     def _fingerprint(self):
         return digest({'inputs': self.inputs, 'review_protocol': 'structured-v1'}) if self.structured_reviews else digest(self.inputs)
@@ -101,7 +132,8 @@ class PlanRepair:
         report = (self.root / record['review']).read_text()
         history = self._history(session)[:-1]
         assessment = validate_plan_review(report, plan, context['requirement_catalogue']['required_ids'], history,
-                                          context.get('quality_contract'))
+                                          context.get('quality_contract'),
+                                          contract_defects=self.contract_defects(plan))
         if assessment['verdict'] != 'REVISION_REQUIRED':
             raise PlanError('Review recovery cannot grant approval; a rejected review with open blockers is required')
         index = len(session.get('recoveries', [])) + 1
@@ -144,7 +176,8 @@ class PlanRepair:
             self.budget()
             try:
                 assessment = validate_plan_review(report, plan, self.inputs['context']['requirement_catalogue']['required_ids'], history,
-                                                  self.inputs['context'].get('quality_contract'))
+                                                  self.inputs['context'].get('quality_contract'),
+                                                  contract_defects=self.contract_defects(plan))
                 return report, assessment
             except PlanError as exc:
                 errors = json.dumps(exc.diagnostics, indent=2)
@@ -241,7 +274,8 @@ class PlanRepair:
                     history = self._history(session)[:-1]
                     result = validate_plan_review((self.root / record['review']).read_text(), plan,
                                                   self.inputs['context']['requirement_catalogue']['required_ids'], history,
-                                                  self.inputs['context'].get('quality_contract'))
+                                                  self.inputs['context'].get('quality_contract'),
+                                                  contract_defects=self.contract_defects(plan))
                     if result['verdict'] != 'APPROVED':
                         raise PlanError('Persisted candidate has no approving review')
                 return plan

@@ -125,6 +125,44 @@
             "minItems": 0,
             "uniqueItems": true
           },
+          "contract_changes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "contract": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "producer": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "expected_change": {
+                  "enum": [
+                    "COMPATIBLE",
+                    "INCOMPATIBLE",
+                    "REMOVED"
+                  ]
+                },
+                "description": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1000
+                }
+              },
+              "required": [
+                "contract",
+                "producer",
+                "expected_change",
+                "description"
+              ],
+              "additionalProperties": false
+            },
+            "minItems": 0,
+            "uniqueItems": true
+          },
           "verification": {
             "type": "object",
             "properties": {
