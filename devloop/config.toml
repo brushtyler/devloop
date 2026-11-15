@@ -82,7 +82,9 @@ kind = "codex"
 display_name = "Codex"
 model = "gpt-6.1-sol"
 model_label = "gpt-6.1-sol"
-effort = "medium"
+# Reviews need the deeper pass: on PR #112 a medium review approved while a high one
+# reproduced five remaining defects (issue #123). The operator asked for high, never less.
+effort = "high"
 
 [agents.agy]
 kind = "agy"
