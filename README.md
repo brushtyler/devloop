@@ -272,7 +272,7 @@ python3 -m venv .tools/python
 python3 -I ssdlc_replay_gate.py --output recovery-benchmark.json # isolated A5 recovery gate
 ```
 
-- Running a single module needs `PYTHONPATH=tests`.
+- Running a single module: `python3 -m unittest discover -s tests -p 'test_name.py'` (works for every module; `python3 -m unittest tests.test_name` needs `PYTHONPATH=tests` for modules that import helpers from `tests/`).
 - Docker smoke tests: `python3 tests/docker_smoke.py --image <image> --suite` and `python3 tests/docker_pid_smoke.py --image <image>`.
 - When SSDLC develops itself, run a pinned controller checkout against a **separate** target checkout.
 - Agents contributing to this repository follow [AGENTS.md](AGENTS.md).
