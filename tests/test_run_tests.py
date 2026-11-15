@@ -100,6 +100,38 @@ class RunTestsEquivalenceTests(unittest.TestCase):
         self.assertNotEqual(parallel.returncode, 0, parallel.stdout)
         self.assertIn('WORKER PROBLEM', parallel.stdout)
 
+    def test_a_test_tree_that_changes_during_discovery_fails_the_run(self):
+        # Codex review of #75, round 3: workers picked children by the main process's indices, so
+        # a module creating a test module on import shifted them and a failing test went unrun.
+        root = self.project({
+            'tests/test_a_generator.py': '''
+                import os, unittest
+                generated = os.path.join(os.path.dirname(__file__), 'test_0_generated.py')
+                if not os.path.exists(generated):
+                    with open(generated, 'w') as fh:
+                        fh.write('import unittest\\nclass G(unittest.TestCase):\\n    def test_g(self):\\n        pass\\n')
+                class T(unittest.TestCase):
+                    def test_ok(self):
+                        pass
+            ''',
+            'tests/test_z_failure.py': '''
+                import unittest
+                class T(unittest.TestCase):
+                    def test_fails(self):
+                        self.fail('must not be skipped')
+            ''',
+        })
+        parallel = subprocess.run([sys.executable, 'scripts/run-tests.py', '-j', '2'], cwd=root,
+                                  capture_output=True, text=True, timeout=120)
+        self.assertNotEqual(parallel.returncode, 0, parallel.stdout)
+
+    def test_no_tests_is_not_a_success(self):
+        # Codex review of #75, round 3: like `python3 -m unittest`, running nothing exits with 5.
+        root = self.project({'tests/test_empty.py': 'import unittest\n'})
+        serial, parallel = self.both(root)
+        self.assertEqual(parallel.returncode, serial.returncode, parallel.stdout)
+        self.assertNotEqual(parallel.returncode, 0)
+
     def test_an_unimportable_module_fails_the_run(self):
         root = self.project({'tests/test_broken.py': 'import does_not_exist_anywhere\n',
                              'tests/test_fine.py': 'import unittest\n'})

@@ -13,6 +13,7 @@ failed module; the exit code is non-zero if any test failed or a worker did not 
 """
 
 import argparse
+import hashlib
 import io
 import json
 import os
@@ -48,8 +49,24 @@ def label(child):
     return None
 
 
-def worker(indices, results_file):
+def test_ids(suite):
+    """Every test id in ``suite``, in order."""
+    if isinstance(suite, unittest.TestSuite):
+        return [i for item in suite for i in test_ids(item)]
+    return [suite.id()]
+
+
+def inventory(children):
+    """A fingerprint of the discovered tests, child by child: workers must see the same suite."""
+    return hashlib.sha256(json.dumps([test_ids(c) for c in children]).encode()).hexdigest()
+
+
+def worker(indices, results_file, expected):
     children = discover()
+    if inventory(children) != expected:
+        print('The discovered tests differ from the ones the main process found: a module changes '
+              'the test tree while it is imported, or discovery is not deterministic.', flush=True)
+        return 3
     with open(results_file, 'a', encoding='utf-8') as out:
         for index in indices:
             child = children[index]
@@ -57,6 +74,7 @@ def worker(indices, results_file):
             start = time.monotonic()
             result = unittest.TextTestRunner(stream=stream, verbosity=1).run(child)
             out.write(json.dumps(dict(index=index, run=result.testsRun, ok=result.wasSuccessful(),
+                                      skipped=len(result.skipped),
                                       seconds=round(time.monotonic() - start, 1),
                                       output=stream.getvalue())) + '\n')
             out.flush()
@@ -68,11 +86,13 @@ def main(argv):
     parser.add_argument('-j', '--jobs', type=int, default=os.cpu_count() or 2)
     parser.add_argument('--worker', help=argparse.SUPPRESS)
     parser.add_argument('--results', help=argparse.SUPPRESS)
+    parser.add_argument('--inventory', help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.worker is not None:
-        return worker([int(i) for i in args.worker.split(',') if i], args.results)
+        return worker([int(i) for i in args.worker.split(',') if i], args.results, args.inventory)
 
     children = discover()
+    expected = inventory(children)
     labels = [label(c) or f'#{i}' for i, c in enumerate(children)]
     try:
         previous = json.loads(DURATIONS.read_text())
@@ -102,8 +122,8 @@ def main(argv):
             results, log = Path(tmp) / f'w{k}.jsonl', Path(tmp) / f'w{k}.log'
             with open(log, 'w') as fh:
                 code = subprocess.run([sys.executable, __file__, '--worker', ','.join(map(str, bins[k])),
-                                       '--results', str(results)], cwd=ROOT, stdout=fh,
-                                      stderr=subprocess.STDOUT).returncode
+                                       '--results', str(results), '--inventory', expected],
+                                      cwd=ROOT, stdout=fh, stderr=subprocess.STDOUT).returncode
             done = [json.loads(line) for line in results.read_text().splitlines()] if results.exists() else []
             with lock:
                 for row in done:
@@ -145,6 +165,9 @@ def main(argv):
     if failed or problems:
         print(f'\nFAILED (modules={len(failed)}, worker problems={len(problems)})')
         return 1
+    if not sum(r['run'] for r in rows.values()) and not sum(r.get('skipped', 0) for r in rows.values()):
+        print('\nNO TESTS RAN')
+        return 5  # as `python3 -m unittest` does since Python 3.12
     print('\nOK')
     return 0
 
