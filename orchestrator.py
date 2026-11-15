@@ -352,7 +352,18 @@ def _resume_design_refusal(repo, root, state, read_git=None):
         raise PlanError('Design requires the unchanged clean target baseline')
 
 
+PAUSED_AT_PHASE_BOUNDARY = 'PAUSED_AT_PHASE_BOUNDARY'
+# Upper phase bounds with a native stop and a supported next-phase resume.
+UNTIL_PHASES = {'03-dev': '04-review'}
+
+
 def _resume_run_refusal(root, state, from_phase, baseline_exists=True):
+    if from_phase in UNTIL_PHASES.values():
+        boundary = state.get('phase_boundary') if isinstance(state.get('phase_boundary'), dict) else {}
+        if (not baseline_exists or state.get('status') != PAUSED_AT_PHASE_BOUNDARY
+                or UNTIL_PHASES.get(boundary.get('phase')) != from_phase):
+            raise TaskError(f'Resume from {from_phase} requires a run paused at the preceding phase boundary')
+        return
     if from_phase not in ('00-recon', '03-dev'):
         raise TaskError('Bootstrap task mode resumes from 03-dev; skipping later gates requires Step 3 attestations')
     if from_phase == '03-dev' and not baseline_exists:
@@ -578,7 +589,7 @@ def resume_compatibility(repo_root, ticket, entrypoint, from_phase=None, env=Non
         resolved = runtime_root(root)
         if resolved != root:
             from ssdlc_reconciliation import authorized
-            if not authorized(root, resolved) or entrypoint != 'run' or from_phase != '03-dev':
+            if not authorized(root, resolved) or entrypoint != 'run' or from_phase not in ('03-dev', '04-review'):
                 raise TaskError('Continuation execution requires exact run-from-03 authorization')
             root = resolved
         path = root / 'state.json'
@@ -5523,9 +5534,14 @@ To **REJECT** and record feedback (free text authorizes no repair):
         test_cmd: Optional[str] = None,
         tier: str = "auto",
         from_phase: str = "00-recon",
+        until_phase: Optional[str] = None,
     ) -> Path:
         _warn_obsolete_task_flag(self.ticket_id)
-        if self.ssdlc_root != self.repo_root / '.ssdlc' / self.ticket_id and from_phase != '03-dev':
+        if until_phase is not None and (until_phase not in UNTIL_PHASES or from_phase not in self.PHASE_ORDER
+                or self.PHASE_ORDER.index(from_phase) > self.PHASE_ORDER.index(until_phase)):
+            raise TaskError('Unsupported phase range: --until-phase must be 03-dev and not precede --from-phase')
+        if (self.ssdlc_root != self.repo_root / '.ssdlc' / self.ticket_id
+                and from_phase not in ('03-dev', UNTIL_PHASES['03-dev'])):
             raise DevelopmentBlocked('SCOPE_REQUIRED', 'Reconciled execution must resume from 03-dev')
         with ticket_lock(getattr(self, "ticket_lock_path", self.ssdlc_root / "ticket.lock")):
             # Another invocation may have sealed an unproven contract while
@@ -5539,7 +5555,7 @@ To **REJECT** and record feedback (free text authorizes no repair):
                 raise TaskError("Task mode in Docker requires role-container isolation. Run the controller on the host with the runner image available, or explicitly select local mode.")
             self._ensure_quality_contract()
             try:
-                return self._run_pipeline(goal, test_cmd, tier, from_phase)
+                return self._run_pipeline(goal, test_cmd, tier, from_phase, until_phase)
             except TaskError as exc:
                 if getattr(exc, 'feedback_source_preserved', False):
                     raise
@@ -5567,9 +5583,26 @@ To **REJECT** and record feedback (free text authorizes no repair):
         test_cmd: Optional[str] = None,
         tier: str = "auto",
         from_phase: str = "00-recon",
+        until_phase: Optional[str] = None,
     ) -> Path:
         recovered = self._reconcile_open_txn()
         _resume_run_refusal(self.ssdlc_root, self.state, from_phase)
+        if recovered and until_phase is not None:
+            # A recovered corrective round reruns global gates; it has no 03-dev stop.
+            raise TaskError('A recovered corrective transaction cannot stop at a phase boundary')
+        if from_phase in UNTIL_PHASES.values():
+            # The boundary is re-proved, not trusted from the paused status.
+            paused = self.state['phase_boundary']
+            current = self._phase_boundary_checkpoint()
+            if recovered or current['verified_head'] != paused.get('verified_head'):
+                raise TaskError('Paused phase boundary no longer matches the verified task checkpoint')
+            # Same native completed-task evidence validation as a 03-dev resume,
+            # without developer dispatch or counter changes.
+            scheduler, ordered = self._make_task_scheduler()
+            self.state.update(current_phase='03-dev', current_step='phase-boundary')
+            scheduler.run(ordered, verify_captured_only=True)
+            self.state.update(status='IN_PROGRESS')
+            self._save_state()
         quality_path = self.ssdlc_root / '00-recon' / 'quality-contract.json'
         if quality_path.exists() and candidate_reports.convergence_enabled(json.loads(quality_path.read_text())):
             candidate_reports.reconcile_candidate_store(self.ssdlc_root, self.state['artifacts'], self._register_new)
@@ -5630,6 +5663,8 @@ To **REJECT** and record feedback (free text authorizes no repair):
                 if not corrective_run and start_idx <= self.PHASE_ORDER.index("03-dev"):
                     self.run_phase_dev()
                     self.check_budget_circuit_breaker()
+                    if until_phase == "03-dev":
+                        return self._pause_at_phase_boundary("03-dev")
                 else:
                     print("    [RESUME] Skipping initial 03-dev execution")
 
@@ -5697,6 +5732,36 @@ To **REJECT** and record feedback (free text authorizes no repair):
                     or git(self.worktree_dir, "status", "--porcelain")):
                 raise TaskError("Code changed after task verification; global gates cannot authorize delivery")
         return self.compile_evidence_pack(ready_for_signoff=passed_all)
+
+    def _phase_boundary_checkpoint(self) -> Dict[str, Any]:
+        """Prove the completed, clean task checkpoint that a phase boundary stops on."""
+        journal = TaskJournal(self.dir_dev / 'tasks').peek() or {}
+        tasks = journal.get('tasks') or {}
+        if not tasks or any(task.get('status') != 'COMPLETED' for task in tasks.values()):
+            raise TaskError('Phase boundary requires every planned task to be completed')
+        head = self.state.get('task_verified_head')
+        if (not head or journal.get('expected_head') != head
+                or self._get_head_sha(self.worktree_dir) != head
+                or git(self.worktree_dir, 'status', '--porcelain')):
+            raise TaskError('Phase boundary requires the clean verified task checkpoint')
+        return dict(verified_head=head, worktree_clean=True, completed_tasks=sorted(tasks))
+
+    def _pause_at_phase_boundary(self, phase: str) -> Path:
+        """Stop after an authorized upper phase. Not a failure, readiness or sign-off."""
+        checkpoint = self._phase_boundary_checkpoint()
+        ledger = self.state.get('ledger', [])
+        known = [row['cost_usd'] for row in ledger
+                 if type(row.get('cost_usd')) in (int, float) and math.isfinite(row['cost_usd']) and row['cost_usd'] >= 0]
+        usage = dict(ledger_entries=len(ledger), reported_cost_usd=sum(known),
+                     unknown_cost_rows=len(ledger) - len(known),
+                     accounted_usd=self._corrective_accounted_spend())
+        self.state.update(status=PAUSED_AT_PHASE_BOUNDARY, current_phase=phase, current_step='phase-boundary',
+                          phase_boundary=dict(checkpoint, phase=phase, next_phase=UNTIL_PHASES[phase],
+                                              usage=usage, paused_at=utc_now()))
+        self._save_state()
+        print(f"    [PHASE-BOUNDARY] Paused after {phase} at verified head {checkpoint['verified_head'][:12]}; "
+              f"resume with --from-phase {UNTIL_PHASES[phase]}")
+        return self.state_file
 
     def approve_and_merge(self) -> None:
         with ticket_lock(getattr(self, "ticket_lock_path", self.ssdlc_root / "ticket.lock")):
@@ -5871,6 +5936,8 @@ def _foreground_main(argv=None) -> int:
         choices=SSDLCOrchestrator.PHASE_ORDER,
         help="Resume an interrupted ticket starting from a specific phase (default: 00-recon)",
     )
+    p_run.add_argument('--until-phase', default=None, choices=sorted(UNTIL_PHASES),
+                       help='Stop as PAUSED_AT_PHASE_BOUNDARY after this phase; resume with the next --from-phase')
     run_sync = p_run.add_mutually_exclusive_group()
     run_sync.add_argument("--sync-remote", dest="sync_remote", action="store_true", default=None,
                           help="Enable remote synchronization")
@@ -5894,6 +5961,7 @@ def _foreground_main(argv=None) -> int:
     p_start.add_argument('--repo', '-r', default='.')
     p_start.add_argument('--test-cmd')
     p_start.add_argument('--from-phase', default='00-recon', choices=['00-recon', '03-dev'])
+    p_start.add_argument('--until-phase', default=None, choices=sorted(UNTIL_PHASES))
     p_start.add_argument('--recovery-allowance', default='3')
     p_start.add_argument('--json', action='store_true')
     p_resume = sub.add_parser('resume', help='Start a new compatible supervised run')
@@ -5901,7 +5969,8 @@ def _foreground_main(argv=None) -> int:
     p_resume.add_argument('--repo', '-r', default='.')
     p_resume.add_argument('--run-id')
     p_resume.add_argument('--entrypoint', choices=['run', 'plan', 'design'], required=True)
-    p_resume.add_argument('--from-phase', choices=['00-recon', '03-dev'], default='03-dev')
+    p_resume.add_argument('--from-phase', choices=['00-recon', '03-dev', '04-review'], default='03-dev')
+    p_resume.add_argument('--until-phase', default=None, choices=sorted(UNTIL_PHASES))
     p_resume.add_argument('--tier', choices=['auto', 'S', 'M', 'L'], default='auto')
     goals = p_resume.add_mutually_exclusive_group()
     goals.add_argument('--goal')
@@ -6085,6 +6154,7 @@ def _foreground_main(argv=None) -> int:
             test_cmd=args.test_cmd,
             tier=effective_tier,
             from_phase=args.from_phase,
+            until_phase=args.until_phase,
         )
         return 0
 

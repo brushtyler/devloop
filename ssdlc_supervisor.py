@@ -62,6 +62,9 @@ TICKET = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]*\Z')
 RUN_ID = re.compile(r'[a-f0-9]{32}\Z')
 TERMINAL = {'completed', 'cancelled', 'failed', 'blocked', 'operator_wait'}
 MARK = 'SSDLC_SUPERVISED_'
+# Supervised run phases in pipeline order; 04-review only resumes a paused boundary.
+RUN_PHASES = ('00-recon', '03-dev', '04-review')
+UNTIL_PHASES = {'03-dev'}
 OWNED, GONE, NOT_OWNED, UNKNOWN = 'OWNED', 'GONE', 'NOT_OWNED', 'UNKNOWN'
 
 
@@ -84,9 +87,13 @@ def validate_args(args):
         a['tier'] = 'auto'
     if a['tier'] not in {'auto', 'S', 'M', 'L'}:
         raise ValueError('invalid_tier')
-    if a.get('from_phase', '00-recon') not in {'00-recon', '03-dev'}:
+    if a.get('from_phase', '00-recon') not in RUN_PHASES:
         raise ValueError('unsupported_transition')
     a.setdefault('from_phase', '00-recon')
+    a['until_phase'] = a.get('until_phase')
+    if a['until_phase'] is not None and (a['entrypoint'] != 'run' or a['until_phase'] not in UNTIL_PHASES
+            or RUN_PHASES.index(a['from_phase']) > RUN_PHASES.index(a['until_phase'])):
+        raise ValueError('unsupported_transition')
     for key, low, high, default in [('recovery_allowance', 0, 100, 3),
                                     ('handoff_timeout_sec', 1, 3600, 30),
                                     ('payload_io_timeout_sec', 1, 300, 30)]:
@@ -131,6 +138,8 @@ def build_argv(entrypoint_id, validated_args):
         return argv
     argv = [sys.executable, controller, 'run', '--ticket', a['ticket'], '--goal', a['goal'],
             '--tier', a['tier'], '--repo', a['repo'], '--from-phase', a['from_phase']]
+    if a['until_phase'] is not None:
+        argv += ['--until-phase', a['until_phase']]
     if a.get('test_cmd') is not None:
         argv += ['--test-cmd', a['test_cmd']]
     return argv + ['--no-sync-remote']
@@ -392,7 +401,11 @@ def validate_record(d):
         raise SupervisorIntegrityError('metadata_corrupt')
     if d['status_reason'] not in REASONS:
         raise SupervisorIntegrityError('metadata_corrupt')
-    if d['authorized']['entrypoint'] not in {'run', 'plan', 'design'} or d['authorized']['from_phase'] not in {'00-recon', '03-dev'} or d['authorized']['tier'] not in {'auto', 'S', 'M', 'L'}:
+    if d['authorized']['entrypoint'] not in {'run', 'plan', 'design'} or d['authorized']['from_phase'] not in RUN_PHASES or d['authorized']['tier'] not in {'auto', 'S', 'M', 'L'}:
+        raise SupervisorIntegrityError('metadata_corrupt')
+    until = d['authorized'].get('until_phase')
+    if 'until_phase' in d['authorized'] and (until not in UNTIL_PHASES or d['authorized']['entrypoint'] != 'run'
+            or RUN_PHASES.index(d['authorized']['from_phase']) > RUN_PHASES.index(until)):
         raise SupervisorIntegrityError('metadata_corrupt')
     if d['authorized']['test_cmd_authority'] != 'operator_flag' or 'test_cmd_sha256' not in d['authorized']:
         raise SupervisorIntegrityError('metadata_corrupt')
@@ -424,7 +437,7 @@ def validate_record(d):
         raise SupervisorIntegrityError('metadata_corrupt')
     if set(d) - (set(RUN_SHAPE) | required | {'in_flight'}):
         raise SupervisorIntegrityError('metadata_corrupt')
-    for key, allowed in [('authorized', set(RUN_SHAPE['authorized']) | {'test_cmd_sha256', 'argv_id', 'compatibility_approved', 'review_repairs', 'rounds', 'containers_possible', 'task_mode', 'runtime_root'}),
+    for key, allowed in [('authorized', set(RUN_SHAPE['authorized']) | {'test_cmd_sha256', 'argv_id', 'compatibility_approved', 'review_repairs', 'rounds', 'containers_possible', 'task_mode', 'runtime_root', 'until_phase'}),
                          ('fingerprints', set(RUN_SHAPE['fingerprints'])),
                          ('processes', {'worker', 'controller', 'descendants'}),
                          ('handoff', {'outcome', 'at'})]:
@@ -657,6 +670,12 @@ def config_digest(env):
                                    if not k.startswith(MARK) and k not in {'PWD', 'SHLVL', '_'})))
 
 
+def phase_range_changed(a, d):
+    """Launch inputs may not move the authorized phase range of their run."""
+    return (a['from_phase'] != d['authorized']['from_phase']
+            or a.get('until_phase') != d['authorized'].get('until_phase'))
+
+
 def goal_digest(a):
     return digest(a['goal']) if a.get('goal') is not None else None
 
@@ -739,6 +758,9 @@ def new_record(a, store):
                       containers_possible=project_env.get('SSDLC_EXECUTION_MODE', 'docker') != 'native',
                       runtime_root=str(canonical_root(a['repo'], a['ticket']).relative_to(Path(a['repo']))),
                       task_mode=True)
+    if a.get('until_phase') is not None:
+        # Part of inputs_sha256 and fenced at every launch of this run.
+        authorized['until_phase'] = a['until_phase']
     return dict(schema_version=1, revision=0, worker_generation=1, run_id=store.run_id, nonce=uuid.uuid4().hex,
         resumes=a.get('_resumes'), project=dict(key=digest(a['repo'])[:16], name='project'), ticket=a['ticket'],
         created_at=float(store.clock.time()), authorized=authorized,
@@ -959,6 +981,9 @@ def reconcile(store, proc=None):
 def start(args, clock=None, fault=None):
     a = validate_args(args)  # validation must precede filesystem/lock side effects
     build_argv('orchestrator.' + a['entrypoint'], a)
+    if a['from_phase'] not in {'00-recon', '03-dev'} and not a.get('_resumes'):
+        # Crossing a paused phase boundary is a resume of the recorded run.
+        raise ValueError('unsupported_transition')
     if not sys.platform.startswith('linux'):
         return public({}, 'unsupported', 'unsupported_platform')
     store = RunStore(a['repo'], a['ticket'], clock=clock, fault=fault)
@@ -1014,7 +1039,7 @@ def start(args, clock=None, fault=None):
                     d = reconcile(store)
                     if d['status_reason'] != 'inputs_required':
                         return public(store.handoff('blocked', 'reconcile'))
-                    if (d['authorized']['goal_sha256'] != goal_digest(a) or
+                    if (phase_range_changed(a, d) or d['authorized']['goal_sha256'] != goal_digest(a) or
                         d['authorized']['test_cmd_sha256'] != (digest(a['test_cmd']) if a.get('test_cmd') is not None else None) or
                         d['fingerprints']['controller']['sha256'] != digest(Path(build_argv('orchestrator.' + a['entrypoint'], a)[1]).read_bytes()) or
                         d['fingerprints']['config_sha256'] != config_digest(build_project_env(a['repo'], os.environ))):
@@ -1064,6 +1089,13 @@ def fingerprint_changes(old, new, native_runtime_advance=False):
                     continue
                 changes.append(dict(field=field, old_sha256=digest(json.dumps(a, sort_keys=True)),
                                     new_sha256=digest(json.dumps(b, sort_keys=True))))
+    # A phase limit binds every later run that re-enters its range. Starting
+    # after the limit is the explicit crossing; lifting it needs reauthorization.
+    limit, until = old['authorized'].get('until_phase'), new['authorized'].get('until_phase')
+    if (limit is not None and RUN_PHASES.index(new['authorized']['from_phase']) <= RUN_PHASES.index(limit)
+            and (until is None or RUN_PHASES.index(until) > RUN_PHASES.index(limit))):
+        changes.append(dict(field='until_phase', old_sha256=digest(json.dumps(limit, sort_keys=True)),
+                            new_sha256=digest(json.dumps(until, sort_keys=True))))
     return changes
 
 
@@ -1163,7 +1195,7 @@ def boot(args):
             os.close(args.payload_fd)
             a = validate_args(payload['args'])
             argv = build_argv('orchestrator.' + a['entrypoint'], a)
-            if goal_digest(a) != d['authorized']['goal_sha256'] or config_digest(payload['env']) != d['fingerprints']['config_sha256'] or digest(Path(argv[1]).read_bytes()) != d['fingerprints']['controller']['sha256'] or controller_snapshot_digest() != d['fingerprints']['controller'].get('snapshot_sha256'):
+            if phase_range_changed(a, d) or goal_digest(a) != d['authorized']['goal_sha256'] or config_digest(payload['env']) != d['fingerprints']['config_sha256'] or digest(Path(argv[1]).read_bytes()) != d['fingerprints']['controller']['sha256'] or controller_snapshot_digest() != d['fingerprints']['controller'].get('snapshot_sha256'):
                 raise FencedOut()
             with store.locked():
                 d = store.read()
@@ -1222,7 +1254,7 @@ def worker(store, args):
             store.clock.sleep(1)
     a = validate_args(payload['args'])
     argv = build_argv('orchestrator.' + a['entrypoint'], a)
-    if goal_digest(a) != d['authorized']['goal_sha256'] or config_digest(payload['env']) != d['fingerprints']['config_sha256'] or digest(Path(argv[1]).read_bytes()) != d['fingerprints']['controller']['sha256'] or controller_snapshot_digest() != d['fingerprints']['controller'].get('snapshot_sha256'):
+    if phase_range_changed(a, d) or goal_digest(a) != d['authorized']['goal_sha256'] or config_digest(payload['env']) != d['fingerprints']['config_sha256'] or digest(Path(argv[1]).read_bytes()) != d['fingerprints']['controller']['sha256'] or controller_snapshot_digest() != d['fingerprints']['controller'].get('snapshot_sha256'):
         store.handoff('blocked', 'fingerprint_mismatch', args.generation)
         return 11
     # The worker receives only markers at exec; frozen inputs stay in memory.
@@ -2040,7 +2072,15 @@ def completion(store, d, state):
         return False
     kind = d['authorized']['entrypoint']
     if kind == 'run':
-        if state.get('status') != 'AWAITING_SUPERVISOR_SIGNOFF':
+        until = d['authorized'].get('until_phase')
+        if until is not None:
+            # Only the authorized boundary completes a bounded run; readiness
+            # would mean the controller ran past its limit.
+            boundary = state.get('phase_boundary')
+            if (state.get('status') != 'PAUSED_AT_PHASE_BOUNDARY' or not isinstance(boundary, dict)
+                    or boundary.get('phase') != until or boundary.get('verified_head') != state.get('task_verified_head')):
+                return False
+        elif state.get('status') != 'AWAITING_SUPERVISOR_SIGNOFF':
             return False
         # Observation of an already completed legacy run grants no execution.
         if (d['authorized'].get('task_mode') is False
@@ -2400,6 +2440,7 @@ def restart_worker(store, goal=None, test_cmd=None, env=None, proc=None):
                     return public(d, 'blocked', 'inputs_required')
                 a = validate_args(dict(repo=str(repo), ticket=store.ticket, goal=goal, test_cmd=test_cmd,
                                        tier=d['authorized']['tier'], from_phase=d['authorized']['from_phase'],
+                                       until_phase=d['authorized'].get('until_phase'),
                                        entrypoint=d['authorized']['entrypoint'], review_repairs=d['authorized'].get('review_repairs'),
                                        rounds=d['authorized'].get('rounds')))
                 if (goal_digest(a) != d['authorized']['goal_sha256'] or

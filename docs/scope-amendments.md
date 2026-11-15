@@ -102,7 +102,8 @@ and runtime files private because they include full historical evidence.
    dispatch. Retry the exact command after an interruption; it does not select an
    older parent or duplicate a selected transition.
 7. Resume through native `run --from-phase 03-dev`, with the original operator
-   boundary before paid global gates. Activation grants no readiness or sign-off
+   boundary before paid global gates (`--until-phase 03-dev`, see
+   [Stopping at a phase boundary](task-mode.md#stopping-at-a-phase-boundary)). Activation grants no readiness or sign-off
    and does not authorize a broader pipeline.
 
 An unselected or rejected preparation is discarded through
