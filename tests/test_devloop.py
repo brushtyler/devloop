@@ -81,6 +81,16 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(config.ConfigError):
             config.parse_config(dict(data, max_review_rounds=0))
 
+    def test_claude_agents_have_no_web_tools(self):
+        # Issue #79: the repository is public; an agent must not read issues and comments
+        # outside its prompt, where devloop keeps only trusted content.
+        claude = CFG.agents['claude']
+        for args in (claude.write_args, claude.review_args):
+            denied = list(args)[list(args).index('--disallowedTools') + 1:]
+            with self.subTest(args=args):
+                self.assertIn('WebFetch', denied)
+                self.assertIn('WebSearch', denied)
+
     def test_apps_belong_to_known_actors_and_bots_are_never_trusted(self):
         import tomllib
         data = tomllib.loads(config.DEFAULT_CONFIG.read_text())
