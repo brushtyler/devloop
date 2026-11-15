@@ -3369,7 +3369,7 @@ class SSDLCOrchestrator:
             "whose message or evidence cites the consumer path, and whose references include at least one of the "
             "defect's requirement_refs, standard_refs or quality_check_refs; the requested change gives the consumer "
             "an owning task in scope, ordered through depends_on. contracts.diagnoses (UNKNOWN dependencies, generic "
-            "references, missing approved obligations) need a diagnosis in an ADVISORY finding but never block on "
+            "references, uses whose incompatibility is not demonstrated, missing approved obligations) need a diagnosis in an ADVISORY finding but never block on "
             "their own. New permissions or external resources are operator decisions: report them as "
             "ENVIRONMENT_PREREQUISITE, never as planned tasks.\n" + review_schema)
         prompt += ("\nUse repair.history to preserve all earlier fixes. Avoid unrelated rewrites during repair. "

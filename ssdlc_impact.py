@@ -22,12 +22,14 @@ imports whose destination is not a literal. A dynamic import is reported for
 the file that contains it; no destination is inferred.
 
 When tasks declare ``contract_changes``, the report also verifies them
-(``contracts``): a breaking change with a demonstrated, uncovered or unordered
-consumer is a ``PLAN_DEFECT`` the plan review must report. That is the only
+(``contracts``): an uncovered or unordered consumer whose incompatibility is
+demonstrated (an unguarded use of a removed name) is a ``PLAN_DEFECT`` the plan
+review must report. That is the only
 part of the report that can require a plan revision; undecidable cases stay
 non-blocking diagnoses.
 """
 import ast
+import builtins
 import json
 from pathlib import Path, PurePosixPath
 import re
@@ -354,12 +356,16 @@ def build_report(repo, plan):
 
 # ---------------------------------------------------------------------------
 # Declared contract changes. A consumer is demonstrated only by a static use
-# of the declared name at the plan base; everything else is a diagnosis.
+# of the declared name at the plan base, through a binding whose identity is
+# provable in its scope; everything else is a diagnosis. A use demonstrates an
+# incompatibility only when removing the name makes it fail.
 # ---------------------------------------------------------------------------
 
 BREAKING_CHANGES = {'INCOMPATIBLE', 'REMOVED'}
 OBLIGATION_FIELDS = ('requirement_refs', 'standard_refs', 'quality_check_refs')
 _IDENTIFIER = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+_GUARD_CALLS = {'hasattr', 'getattr'}
 
 
 def _dotted(node):
@@ -395,63 +401,307 @@ def _names_producer(modules, importer, dotted, relative, producer):
     return found == producer
 
 
+class _Binding:
+    """One binding of a name: an import (``identity`` names the bound object) or anything else."""
+    __slots__ = ('kind', 'bound', 'identity', 'hit')
+
+    def __init__(self, kind, bound=None, identity=None, hit=False):
+        self.kind, self.bound, self.identity, self.hit = kind, bound, identity, hit
+
+
+_OTHER = _Binding('OTHER')
+_STAR = _Binding('STAR')
+
+
+class _Scope:
+    __slots__ = ('kind', 'parent', 'module', 'raw', 'local', 'globals', 'nonlocals', 'star')
+
+    def __init__(self, kind, parent):
+        self.kind, self.parent = kind, parent
+        self.module = parent.module if parent else self
+        self.raw, self.local, self.globals, self.nonlocals, self.star = [], {}, set(), set(), False
+
+    def owner(self, name):
+        """The scope that a binding of ``name`` in this scope assigns."""
+        if name in self.globals:
+            return self.module
+        if name not in self.nonlocals:
+            return self
+        scope = self.parent
+        while scope.kind != 'module':
+            if scope.kind != 'class' and name not in scope.nonlocals:
+                if name in scope.globals:
+                    return self.module
+                if any(n == name for n, _ in scope.raw):
+                    return scope
+            scope = scope.parent
+        return self.module
+
+    def lookup(self, name, free=False):
+        """Every binding ``name`` may denote here, flow-insensitively; empty for builtins and unbound names."""
+        scope = self
+        while True:
+            if scope.kind == 'module':
+                return scope.local.get(name, []) + ([_STAR] if scope.star else [])
+            if name in scope.globals:
+                scope = scope.module
+                continue
+            if scope.kind == 'class':
+                if not free and name in scope.local:
+                    # A class body reads its own binding or, before it, the enclosing one.
+                    return scope.local[name] + scope.parent.lookup(name, True)
+            elif name not in scope.nonlocals and name in scope.local:
+                return list(scope.local[name])
+            scope, free = scope.parent, True
+
+
+def _guard_test(expr):
+    """True when a condition checks for an attribute or for type checking."""
+    for node in ast.walk(expr):
+        if isinstance(node, ast.Call) and _call_name(node) in _GUARD_CALLS:
+            return True
+        if (isinstance(node, ast.Name) and node.id == 'TYPE_CHECKING'
+                or isinstance(node, ast.Attribute) and node.attr == 'TYPE_CHECKING'):
+            return True
+    return False
+
+
+def _scan_scopes(tree, on_import):
+    """Bind every name to its scope; return the attribute and call sites with their scope and guard.
+
+    A site is guarded when the removal of a name it uses may be handled or never
+    evaluated: a ``try`` body with handlers, a ``hasattr``/``getattr`` or
+    ``TYPE_CHECKING`` condition, ``suppress`` or an annotation.
+    """
+    module = _Scope('module', None)
+    scopes, sites = [module], []
+    stack = [(node, module, False) for node in reversed(tree.body)]
+
+    def push(nodes, scope, guarded):
+        stack.extend((n, scope, guarded) for n in reversed([n for n in nodes if n is not None]))
+
+    def child(kind, scope):
+        new = _Scope(kind, scope)
+        scopes.append(new)
+        return new
+
+    def bind_arguments(args, scope, outer, guarded):
+        for arg in (*args.posonlyargs, *args.args, args.vararg, *args.kwonlyargs, args.kwarg):
+            if arg is not None:
+                scope.raw.append((arg.arg, _OTHER))
+                push([arg.annotation], outer, True)
+        push([*args.defaults, *args.kw_defaults], outer, guarded)
+
+    while stack:
+        node, scope, guarded = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            if not isinstance(node, ast.Lambda):
+                scope.raw.append((node.name, _OTHER))
+                push(node.decorator_list, scope, guarded)
+                push([node.returns], scope, True)
+            inner = child('function', scope)
+            bind_arguments(node.args, inner, scope, guarded)
+            push(node.body if isinstance(node.body, list) else [node.body], inner, guarded)
+        elif isinstance(node, ast.ClassDef):
+            scope.raw.append((node.name, _OTHER))
+            push([*node.decorator_list, *node.bases, *node.keywords], scope, guarded)
+            push(node.body, child('class', scope), guarded)
+        elif isinstance(node, _COMPREHENSIONS):
+            inner = child('comprehension', scope)
+            # The first iterable is evaluated in the enclosing scope.
+            push([node.generators[0].iter], scope, guarded)
+            for index, generator in enumerate(node.generators):
+                push([generator.target, *generator.ifs, *([generator.iter] if index else [])], inner, guarded)
+            push([node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt], inner, guarded)
+        elif isinstance(node, ast.NamedExpr):
+            target = scope
+            while target.kind == 'comprehension':
+                target = target.parent
+            target.raw.append((node.target.id, _OTHER))
+            push([node.value], scope, guarded)
+        elif isinstance(node, ast.Name):
+            if not isinstance(node.ctx, ast.Load):
+                scope.raw.append((node.id, _OTHER))
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for name, binding in on_import(node, guarded):
+                if name == '*':
+                    scope.star = True
+                else:
+                    scope.raw.append((name, binding))
+        elif isinstance(node, ast.Global):
+            scope.globals.update(node.names)
+        elif isinstance(node, ast.Nonlocal):
+            scope.nonlocals.update(node.names)
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name:
+                scope.raw.append((node.name, _OTHER))
+            push([node.type, *node.body], scope, guarded)
+        elif isinstance(node, (ast.Try, getattr(ast, 'TryStar', ast.Try))):
+            push(node.body, scope, guarded or bool(node.handlers))
+            push([*node.handlers, *node.orelse, *node.finalbody], scope, guarded)
+        elif isinstance(node, (ast.If, ast.While, ast.IfExp)):
+            branch = guarded or _guard_test(node.test)
+            push([node.test], scope, guarded)
+            push(node.body if isinstance(node.body, list) else [node.body], scope, branch)
+            push(node.orelse if isinstance(node.orelse, list) else [node.orelse], scope, branch)
+        elif isinstance(node, ast.BoolOp):
+            push(node.values, scope, guarded or any(_guard_test(v) for v in node.values))
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            push(node.items, scope, guarded)
+            handled = any(isinstance(n, ast.Call) and _call_name(n) == 'suppress'
+                          for item in node.items for n in ast.walk(item.context_expr))
+            push(node.body, scope, guarded or handled)
+        elif isinstance(node, ast.AnnAssign):
+            push([node.target, node.value], scope, guarded)
+            push([node.annotation], scope, True)
+        else:
+            if type(node).__name__.startswith('Match'):
+                # Capture patterns of ``match`` bind names too.
+                for field in ('name', 'rest'):
+                    if isinstance(getattr(node, field, None), str):
+                        scope.raw.append((getattr(node, field), _OTHER))
+            if isinstance(node, (ast.Attribute, ast.Call)):
+                sites.append((node, scope, guarded))
+            push(list(ast.iter_child_nodes(node)), scope, guarded)
+    for scope in scopes:
+        for name, binding in scope.raw:
+            scope.owner(name).local.setdefault(name, []).append(binding)
+    return sites
+
+
 def _contract_uses(path, tree, modules, producer, contract):
-    """Lines of ``path`` that use ``producer.contract``, and lines where that is not decidable."""
+    """Uses of ``producer.contract`` in ``path`` and the lines where that is not decidable.
+
+    Each use is ``(line, via, breaking)``: ``breaking`` when removing the name
+    makes that use fail. A name is the producer only when every binding it may
+    denote in its scope is the same import; otherwise the use is ``UNKNOWN``.
+    The same holds for ``getattr`` (the builtin) and ``patch`` (``mock``'s).
+    """
     package = list(PurePosixPath(path).parts[:-1])
     targets = {name + '.' + contract for name in _module_names(producer)}
-    bindings, uses, unknown = set(), [], []
+    patches = {'unittest.mock.patch'} | ({'mock.patch'} if 'mock' not in modules else set())
+    objects = {p + '.object' for p in patches}
+    uses, unknown = [], []
 
-    def bind(dotted, relative, line, name):
-        hit = _names_producer(modules, path, dotted, relative, producer)
-        if hit is None:
-            unknown.append((line, 'ENVIRONMENT_DEPENDENT_IMPORT'))
-        elif hit:
-            bindings.add(name)
-
-    for node in ast.walk(tree):
+    def imported(node, guarded):
+        bindings = []
         if isinstance(node, ast.Import):
             for alias in node.names:
-                bind(alias.name, False, node.lineno, alias.asname or alias.name)
-        elif isinstance(node, ast.ImportFrom):
-            relative = bool(node.level)
-            if relative:
-                up = node.level - 1
-                if up > len(package):
-                    continue
-                module = '.'.join(package[:len(package) - up] + (node.module.split('.') if node.module else []))
-            else:
-                module = node.module
-            if module:
-                hit = _names_producer(modules, path, module, relative, producer)
+                hit = _names_producer(modules, path, alias.name, False, producer)
                 if hit is None:
                     unknown.append((node.lineno, 'ENVIRONMENT_DEPENDENT_IMPORT'))
-                    continue
+                if alias.asname:
+                    bindings.append((alias.asname, _Binding('IMPORT', alias.asname, alias.name, hit)))
+                else:
+                    # ``import a.b`` binds ``a``; only ``a.b`` itself names the module.
+                    head = alias.name.split('.')[0]
+                    bindings.append((head, _Binding('IMPORT', alias.name, head, hit)))
+            return bindings
+        relative = bool(node.level)
+        if relative:
+            up = node.level - 1
+            if up > len(package):
+                return [(alias.asname or alias.name, _OTHER) for alias in node.names]
+            module = '.'.join(package[:len(package) - up] + (node.module.split('.') if node.module else []))
+        else:
+            module = node.module
+        hit = _names_producer(modules, path, module, relative, producer) if module else False
+        if hit is None:
+            unknown.append((node.lineno, 'ENVIRONMENT_DEPENDENT_IMPORT'))
+        for alias in node.names:
+            if alias.name == '*':
                 if hit:
-                    for alias in node.names:
-                        if alias.name == '*':
-                            unknown.append((node.lineno, 'STAR_IMPORT'))
-                        elif alias.name == contract:
-                            uses.append((node.lineno, 'IMPORT'))
-                    continue
-            for alias in node.names:
-                if alias.name != '*':
-                    bind((module + '.' if module else '') + alias.name, relative, node.lineno,
-                         alias.asname or alias.name)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and node.attr == contract and _dotted(node.value) in bindings:
-            uses.append((node.lineno, 'ATTRIBUTE'))
-        elif isinstance(node, ast.Call) and node.args:
-            name, first = _call_name(node), _literal(node.args[0])
-            second = _literal(node.args[1]) if len(node.args) > 1 else None
-            if name == 'getattr' and len(node.args) > 1 and _dotted(node.args[0]) in bindings:
-                if second is None:
-                    unknown.append((node.lineno, 'DYNAMIC_ATTRIBUTE'))
-                elif second == contract:
-                    uses.append((node.lineno, 'GETATTR'))
-            elif name == 'patch' and first in targets:
-                uses.append((node.lineno, 'PATCH_TARGET'))
-            elif name == 'object' and _dotted(node.args[0]) in bindings and second == contract:
-                uses.append((node.lineno, 'PATCH_TARGET'))
+                    unknown.append((node.lineno, 'STAR_IMPORT'))
+                bindings.append(('*', None))
+                continue
+            full = (module + '.' if module else '') + alias.name
+            if hit and alias.name == contract:
+                uses.append((node.lineno, 'IMPORT', not guarded))
+            member = _names_producer(modules, path, full, relative, producer) if hit is False else False
+            if member is None:
+                unknown.append((node.lineno, 'ENVIRONMENT_DEPENDENT_IMPORT'))
+            name = alias.asname or alias.name
+            bindings.append((name, _Binding('IMPORT', name, full, member)))
+        return bindings
+
+    sites = _scan_scopes(tree, imported)
+
+    def reference(scope, expr):
+        """'PRODUCER' when ``expr`` provably names the producer module, 'AMBIGUOUS' when it may, else None."""
+        dotted = _dotted(expr)
+        if dotted is None:
+            return None
+        bindings = scope.lookup(dotted.split('.')[0])
+        # An environment-dependent import is already UNKNOWN at its own line.
+        if not any(b.kind == 'IMPORT' and b.bound == dotted and b.hit for b in bindings):
+            return None
+        if all(b.kind == 'IMPORT' and b.identity == bindings[0].identity for b in bindings):
+            return 'PRODUCER'
+        return 'AMBIGUOUS'
+
+    def qualified(scope, expr):
+        """The provable qualified name of a callable, or None."""
+        dotted = _dotted(expr)
+        if dotted is None:
+            return None
+        head = dotted.split('.')[0]
+        bindings = scope.lookup(head)
+        if not bindings:
+            return dotted if hasattr(builtins, head) else None
+        if all(b.kind == 'IMPORT' and b.identity == bindings[0].identity for b in bindings):
+            return bindings[0].identity + dotted[len(head):]
+        return None
+
+    def creates(node, position):
+        # ``create`` lets patch add a missing attribute: unless it is literally false, nothing breaks.
+        return len(node.args) > position or any(
+            k.arg is None or k.arg == 'create' and not (isinstance(k.value, ast.Constant) and k.value.value is False)
+            for k in node.keywords)
+
+    for node, scope, guarded in sites:
+        line = node.lineno
+        if isinstance(node, ast.Attribute):
+            if node.attr != contract:
+                continue
+            state = reference(scope, node.value)
+            if state == 'PRODUCER':
+                uses.append((line, 'ATTRIBUTE', not guarded and not isinstance(node.ctx, ast.Store)))
+            elif state:
+                unknown.append((line, 'AMBIGUOUS_BINDING'))
+            continue
+        if not node.args:
+            continue
+        name, parts = qualified(scope, node.func), (_dotted(node.func) or '').split('.')
+        first = _literal(node.args[0])
+        second = _literal(node.args[1]) if len(node.args) > 1 else None
+        if name == 'getattr' or parts == ['getattr']:
+            state = reference(scope, node.args[0])
+            if len(node.args) < 2 or not state or second not in (None, contract):
+                continue
+            if state != 'PRODUCER':
+                unknown.append((line, 'AMBIGUOUS_BINDING'))
+            elif name != 'getattr':
+                unknown.append((line, 'UNRESOLVED_CALL'))
+            elif second is None:
+                unknown.append((line, 'DYNAMIC_ATTRIBUTE'))
+            else:
+                # A default handles the missing attribute.
+                uses.append((line, 'GETATTR', not guarded and len(node.args) == 2 and not node.keywords))
+        elif name in patches or parts[-1] == 'patch':
+            if first not in targets:
+                continue
+            if name in patches:
+                uses.append((line, 'PATCH_TARGET', not guarded and not creates(node, 3)))
+            else:
+                unknown.append((line, 'UNRESOLVED_PATCH'))
+        elif name in objects or parts[-2:] == ['patch', 'object']:
+            state = reference(scope, node.args[0])
+            if not state or second != contract:
+                continue
+            if state == 'PRODUCER' and name in objects:
+                uses.append((line, 'PATCH_TARGET', not guarded and not creates(node, 4)))
+            else:
+                unknown.append((line, 'UNRESOLVED_PATCH' if state == 'PRODUCER' else 'AMBIGUOUS_BINDING'))
     return sorted(set(uses)), sorted(set(unknown))
 
 
@@ -479,11 +729,12 @@ def _obligations(task):
 def _contract_analysis(plan, files, texts, modules):
     """Verify each declared contract change against the static uses at the plan base.
 
-    A breaking change (``INCOMPATIBLE``/``REMOVED``) with a demonstrated
-    consumer that no task covers, or that only a task unordered with the
-    declaring one covers, is a defect bound to the declaring task's approved
-    obligations. Without such obligations, and for every undecidable case, the
-    result is a non-blocking diagnosis.
+    A consumer whose incompatibility is demonstrated (an unguarded use of a
+    ``REMOVED`` name) and that no task covers, or that only a task unordered
+    with the declaring one covers, is a defect bound to the declaring task's
+    approved obligations. Without such obligations, for uses that may survive
+    the change (any ``INCOMPATIBLE`` use, guarded or fallback uses) and for
+    every undecidable case, the result is a non-blocking diagnosis.
     """
     tasks = {t['task_id']: t for t in plan['tasks']}
     trees = {}
@@ -524,12 +775,22 @@ def _contract_analysis(plan, files, texts, modules):
                     diagnoses.append(dict(subject, reason=why, path=path, line=line))
                 if not uses:
                     continue
-                line, via = uses[0]
+                breaking = [(line, via) for line, via, breaks in uses if breaks]
+                # Only a removal makes a use fail statically: the new shape of an
+                # INCOMPATIBLE contract is not known at the base, and a guarded or
+                # fallback use survives the removal.
+                incompatibility = ('NOT_EXPECTED' if change not in BREAKING_CHANGES
+                                   else 'DEMONSTRATED' if change == 'REMOVED' and breaking else 'NOT_DEMONSTRATED')
+                line, via = breaking[0] if incompatibility == 'DEMONSTRATED' else uses[0][:2]
                 covering = sorted(k for k, t in tasks.items() if path in t['target_files'])
                 coverage = ('UNCOVERED' if not covering else 'COVERED' if set(covering) & related
                             else 'UNORDERED')
-                consumers.append(dict(path=path, line=line, via=via, coverage=coverage, covering_task_ids=covering))
+                consumers.append(dict(path=path, line=line, via=via, coverage=coverage, covering_task_ids=covering,
+                                      incompatibility=incompatibility))
                 if change not in BREAKING_CHANGES or coverage == 'COVERED':
+                    continue
+                if incompatibility != 'DEMONSTRATED':
+                    diagnoses.append(dict(subject, reason='INCOMPATIBILITY_NOT_DEMONSTRATED', path=path, line=line))
                     continue
                 gap = 'OWNER_OR_SCOPE' if coverage == 'UNCOVERED' else 'ORDERING'
                 obligations = _obligations(task)

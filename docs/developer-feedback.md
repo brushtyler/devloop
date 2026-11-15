@@ -622,12 +622,23 @@ rules as above and without running code. It adds `contracts` with:
   `getattr(module, "name")`, or a literal `patch("module.name")` /
   `patch.object(module, "name")`. Importing the producer without using the name
   is not a use: not every importer is a file to modify. Re-exports are not
-  followed. Each consumer has a `coverage`: `COVERED` when the declaring task, or
+  followed. Names are resolved in their scope: a use counts only when every
+  binding the name may denote there (a parameter, a local or a reassignment
+  shadows an import) is the same import of the producer, `getattr` is the
+  builtin and `patch` is `unittest.mock`'s (or `mock`'s), aliases included.
+  Each consumer has a `coverage`: `COVERED` when the declaring task, or
   a task ordered with it through `depends_on` (ancestor or descendant), has it
   in `target_files`; `UNORDERED` when only unordered tasks cover it;
-  `UNCOVERED` otherwise.
-- `defects`: for `INCOMPATIBLE` and `REMOVED` changes, one entry per
-  `UNCOVERED` (`gap: OWNER_OR_SCOPE`) or `UNORDERED` (`gap: ORDERING`) consumer,
+  `UNCOVERED` otherwise. Its `incompatibility` separates the use from the break:
+  `DEMONSTRATED` only for a `REMOVED` name used where its absence fails
+  (an import, a read or `del`, `getattr` without default, `patch` without
+  `create`), outside a `try` with handlers, a `hasattr`/`getattr` or
+  `TYPE_CHECKING` condition, `suppress` and annotations; `NOT_DEMONSTRATED`
+  for every `INCOMPATIBLE` use (the base does not show the new shape, and a
+  call such as `load("x")` may stay valid) and for uses that survive the
+  removal; `NOT_EXPECTED` for `COMPATIBLE` changes.
+- `defects`: one entry per consumer with a `DEMONSTRATED` incompatibility that
+  is `UNCOVERED` (`gap: OWNER_OR_SCOPE`) or `UNORDERED` (`gap: ORDERING`),
   with `category: PLAN_DEFECT` and the declaring task's approved obligations:
   `requirement_refs` (its AC/SEC), `standard_refs` and `quality_check_refs`.
 - `diagnoses`: everything that is not demonstrated. `UNKNOWN` declarations
@@ -635,7 +646,11 @@ rules as above and without running code. It adds `contracts` with:
   `NON_PYTHON_PRODUCER`, `PRODUCER_NOT_AT_BASE`, `UNREADABLE_PRODUCER`, or
   `CONTRACT_NOT_AT_BASE` for a breaking change of a name the producer does not
   define at top level), undecidable uses (`STAR_IMPORT`, `DYNAMIC_ATTRIBUTE`,
-  `ENVIRONMENT_DEPENDENT_IMPORT`) and defects of a task without approved
+  `ENVIRONMENT_DEPENDENT_IMPORT`, `AMBIGUOUS_BINDING` when the name may denote
+  something else, `UNRESOLVED_PATCH`/`UNRESOLVED_CALL` when `patch` or `getattr`
+  is not provably the expected one), uncovered or unordered consumers of a
+  breaking change whose incompatibility is not demonstrated
+  (`INCOMPATIBILITY_NOT_DEMONSTRATED`) and defects of a task without approved
   obligations (`NO_APPROVED_OBLIGATION`).
 
 Only `defects` can require a revision. The plan review must report each one as

@@ -84,7 +84,7 @@ The planner returns a structured plan (`schemas/plan.schema.json`), which an ind
 
 **Declared contract changes**
 - A task may declare in `contract_changes` the contracts it modifies: `contract`, `producer` (in its own `target_files`) and `expected_change` (`COMPATIBLE`, `INCOMPATIBLE`, `REMOVED`), with a `description`. Plans without declarations validate as before.
-- The impact report verifies them statically at the plan base. A breaking change with a demonstrated consumer that no task covers, or that only a task unordered with the declaring one covers, is a `PLAN_DEFECT` bound to the declaring task's approved obligations: the review must report it as an OPEN BLOCKING finding, so the plan needs a revision. `UNKNOWN` dependencies and generic references are diagnoses and never block on their own.
+- The impact report verifies them statically at the plan base, resolving each name in its scope. A consumer whose incompatibility is demonstrated (an unguarded use of a `REMOVED` name, with no fallback) and that no task covers, or that only a task unordered with the declaring one covers, is a `PLAN_DEFECT` bound to the declaring task's approved obligations: the review must report it as an OPEN BLOCKING finding, so the plan needs a revision. A use alone does not demonstrate a break: `INCOMPATIBLE` uses, guarded or fallback uses, `UNKNOWN` dependencies (including names whose binding is not provably the producer) and generic references are diagnoses and never block on their own.
 - A prerequisite is a normal task with `depends_on`. Details: [Declared contract changes](developer-feedback.md#declared-contract-changes).
 
 Evidence lives in `02-design/task-planning/`.

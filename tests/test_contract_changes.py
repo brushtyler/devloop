@@ -188,6 +188,97 @@ class UnknownDependencyTests(ContractFixture):
         self.assertEqual((declaration['status'], declaration['reason']), ('UNKNOWN', 'NON_PYTHON_PRODUCER'))
 
 
+SCOPED_FILES = {
+    # Uses that survive the removal: a fallback, a handled import, a checked
+    # access, an assignment and a patch allowed to create the attribute.
+    'pkg/fallback.py': 'from pkg import api\n\nload = getattr(api, "load", None)\n',
+    'pkg/guarded.py': 'try:\n    from pkg.api import load\nexcept ImportError:\n    load = None\n',
+    'pkg/checked.py': 'import pkg.api as api\n\nif hasattr(api, "load"):\n    api.load("x")\n',
+    'pkg/assigns.py': 'import pkg.api as api\n\napi.load = print\n',
+    'tests/test_created.py': ('from unittest.mock import patch\n\n\n@patch("pkg.api.load", create=True)\n'
+                              'def test(mocked): pass\n'),
+    # Names whose identity is not the producer, or not provably so.
+    'pkg/shadowed.py': 'import pkg.api as api\n\n\ndef unrelated(api):\n    return api.load("x")\n',
+    'pkg/rebound.py': 'import pkg.api as api\napi = None\nvalue = api.load\n',
+    'tests/test_local_patch.py': 'def patch(target):\n    return target\n\n\npatch("pkg.api.load")\n',
+    'pkg/local_getattr.py': ('from pkg import api\n\n\ndef getattr(obj, name):\n    return name\n\n\n'
+                             'getattr(api, "load")\n'),
+    # Provable identities through aliases, nested scopes and patch.object.
+    'tests/test_alias.py': ('from unittest import mock\nfrom unittest.mock import patch as replace\n'
+                            'import pkg.api as api\n\n\n@replace("pkg.api.load")\ndef test(mocked):\n'
+                            '    with mock.patch.object(api, "load"):\n        pass\n'),
+    'pkg/nested.py': ('import pkg.api as api\n\n\nclass Holder:\n    def run(self):\n'
+                      '        return [api.load(x) for x in "ab"]\n'),
+}
+SURVIVING = ['pkg/assigns.py', 'pkg/checked.py', 'pkg/fallback.py', 'pkg/guarded.py', 'tests/test_created.py']
+BROKEN = ['pkg/nested.py', 'tests/test_alias.py']
+
+
+class ConsumerIncompatibilityTests(ContractFixture):
+    def setUp(self):
+        super().setUp()
+        for name, text in SCOPED_FILES.items():
+            (self.repo / name).write_text(text)
+        git(self.repo, 'add', *SCOPED_FILES)
+        git(self.repo, 'commit', '-m', 'scoped uses')
+        self.base = git(self.repo, 'rev-parse', 'HEAD')
+        self.quality['base_commit'] = self.plan['base_commit'] = self.base
+        # The fixture's own consumers are covered: only the scoped files matter here.
+        self.plan['tasks'][0]['target_files'] = ['pkg/api.py', *CONSUMERS]
+
+    def consumers(self, contracts):
+        [declaration] = contracts['declarations']
+        return {c['path']: (c['incompatibility'], c['via'], c['line']) for c in declaration['consumers']}
+
+    def test_an_incompatible_contract_does_not_demonstrate_that_its_users_break(self):
+        # load(path) -> load(path, /): load("x") still works, and the base cannot tell.
+        self.plan['tasks'][0]['target_files'] = ['pkg/api.py']
+        self.plan['tasks'][0]['contract_changes'] = [change(expected='INCOMPATIBLE')]
+        contracts = self.contracts()
+        self.assertEqual(contracts['defects'], [])
+        consumers = self.consumers(contracts)
+        self.assertEqual({p: c[0] for p, c in consumers.items() if p in CONSUMERS},
+                         dict.fromkeys(CONSUMERS, 'NOT_DEMONSTRATED'))
+        undemonstrated = sorted(d['path'] for d in contracts['diagnoses']
+                                if d['reason'] == 'INCOMPATIBILITY_NOT_DEMONSTRATED')
+        self.assertEqual(undemonstrated, sorted(consumers))
+        self.assertEqual(self.validate_review(review([]))['verdict'], 'APPROVED')
+
+    def test_uses_that_survive_a_removal_are_diagnoses_not_defects(self):
+        contracts = self.contracts()
+        consumers = self.consumers(contracts)
+        self.assertEqual({p: consumers[p] for p in SURVIVING}, {
+            'pkg/assigns.py': ('NOT_DEMONSTRATED', 'ATTRIBUTE', 3),
+            'pkg/checked.py': ('NOT_DEMONSTRATED', 'ATTRIBUTE', 4),
+            'pkg/fallback.py': ('NOT_DEMONSTRATED', 'GETATTR', 3),
+            'pkg/guarded.py': ('NOT_DEMONSTRATED', 'IMPORT', 2),
+            'tests/test_created.py': ('NOT_DEMONSTRATED', 'PATCH_TARGET', 4)})
+        self.assertEqual(sorted(d['path'] for d in contracts['diagnoses']
+                                if d['reason'] == 'INCOMPATIBILITY_NOT_DEMONSTRATED'), SURVIVING)
+        # Only unguarded uses through provable bindings are demonstrated breaks.
+        self.assertEqual([(d['consumer'], d['via'], d['line']) for d in contracts['defects']],
+                         [('pkg/nested.py', 'ATTRIBUTE', 6), ('tests/test_alias.py', 'PATCH_TARGET', 6)])
+        self.assertEqual({p: consumers[p][0] for p in BROKEN}, dict.fromkeys(BROKEN, 'DEMONSTRATED'))
+
+    def test_bindings_follow_scopes_and_unprovable_identities_stay_unknown(self):
+        contracts = self.contracts()
+        consumers = self.consumers(contracts)
+        # A parameter named like the import is not the producer.
+        self.assertNotIn('pkg/shadowed.py', consumers)
+        self.assertFalse([d for d in contracts['diagnoses'] if d['path'] == 'pkg/shadowed.py'])
+        for path in ('pkg/rebound.py', 'tests/test_local_patch.py', 'pkg/local_getattr.py'):
+            self.assertNotIn(path, consumers)
+        unknown = {(d['path'], d['line'], d['reason']) for d in contracts['diagnoses']
+                   if d['reason'] in {'AMBIGUOUS_BINDING', 'UNRESOLVED_PATCH', 'UNRESOLVED_CALL'}}
+        self.assertEqual(unknown, {('pkg/rebound.py', 3, 'AMBIGUOUS_BINDING'),
+                                   ('tests/test_local_patch.py', 5, 'UNRESOLVED_PATCH'),
+                                   ('pkg/local_getattr.py', 8, 'UNRESOLVED_CALL')})
+        # Once the demonstrated consumers are owned, nothing else blocks the approval.
+        self.plan['tasks'][0]['target_files'] += BROKEN
+        self.assertEqual(self.contracts()['defects'], [])
+        self.assertEqual(self.validate_review(review([]))['verdict'], 'APPROVED')
+
+
 class PrerequisiteTests(ContractFixture):
     def test_prerequisite_task_is_validated_ordered_and_closes_the_defect(self):
         prerequisite = self.task('T0', [], [], list(CONSUMERS))
