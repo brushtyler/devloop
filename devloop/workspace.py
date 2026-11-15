@@ -2,10 +2,15 @@
 
 import base64
 import os
+import re
 import shutil
 import signal
 import subprocess
 from pathlib import Path
+
+# The opening and closing lines git writes around a conflict (`=======` alone also underlines
+# Markdown and reST headings, so it is not a reliable sign).
+_CONFLICT_MARKER = re.compile(rb'^(?:<{7}|>{7})(?: |\r?$)', re.MULTILINE)
 
 
 class WorkspaceError(RuntimeError):
@@ -150,6 +155,47 @@ class Workspace:
         # them from a prefix check.
         out = self._git('diff', '--name-only', '-z', '--no-renames', span, cwd=path)
         return [name for name in out.split('\0') if name]
+
+    def start_merge(self, path):
+        """Merge ``origin/<base>`` into the branch in ``path`` without committing.
+
+        Returns None when the branch already contains the base (nothing to merge), otherwise
+        the files left in conflict (possibly none). The merge stays in progress, with
+        ``MERGE_HEAD`` set, so that :meth:`commit_all` concludes it with a merge commit."""
+        base = f'origin/{self.base_branch}'
+        if self._git('rev-list', '--count', f'HEAD..{base}', cwd=path).strip() == '0':
+            return None
+        target = self._git('rev-parse', base, cwd=path).strip()
+        # Exit status 1 means conflicts: the outcome is read from MERGE_HEAD and the index.
+        self._git('merge', '--no-commit', '--no-ff', target, cwd=path, check=False)
+        if self.merge_head(path) != target:
+            raise WorkspaceError(f'git merge {base}: the merge did not start')
+        out = self._git('diff', '--name-only', '-z', '--diff-filter=U', cwd=path)
+        return [name for name in out.split('\0') if name]
+
+    def merge_head(self, path):
+        """The commit being merged into ``path``, or None when no merge is in progress."""
+        return self._git('rev-parse', '-q', '--verify', 'MERGE_HEAD', cwd=path,
+                         check=False).strip() or None
+
+    def base_commits(self, path, name, limit=5):
+        """``<short sha> <subject>`` of the base-branch commits, not yet on the branch, that
+        changed ``name``: the ones that brought the conflict."""
+        out = self._git('log', f'-n{limit}', '--format=%h %s', f'HEAD..origin/{self.base_branch}',
+                        '--', name, cwd=path)
+        return [line for line in out.splitlines() if line.strip()]
+
+    def conflict_markers(self, path, names):
+        """The files among ``names`` that still contain conflict markers."""
+        left = []
+        for name in names:
+            try:
+                data = (Path(path) / name).read_bytes()
+            except (FileNotFoundError, IsADirectoryError):
+                continue  # resolved by deleting it
+            if _CONFLICT_MARKER.search(data):
+                left.append(name)
+        return left
 
     def commit_all(self, path, message, author=None):
         """Commit everything; ``author`` (``{name, email}``) is both author and committer."""

@@ -105,7 +105,7 @@ class ConfigTests(unittest.TestCase):
         patterns = [re.fullmatch(r'Bash\((.*)\)', rule).group(1) for rule in allowed]
         from devloop.dispatcher import PROMPT_DIR
         form = "python3 -m unittest discover -s tests -p 'test_name.py'"
-        for name in ('implement', 'fix'):
+        for name in ('implement', 'fix', 'sync'):
             with self.subTest(prompt=name):
                 text = ' '.join((PROMPT_DIR / f'{name}.md').read_text().split())
                 self.assertIn(f'`{form}`', text)
@@ -390,6 +390,25 @@ class GitHubAdapterTests(unittest.TestCase):
         self.assertTrue(all(argv[1] == 'api' for argv, _ in self.calls))
         self.assertTrue(any(f'commits/{SHA1}/check-runs' in ' '.join(a) for a, _ in self.calls))
 
+    def test_open_prs_carry_their_merge_state(self):
+        gh = self.make([('pr list', (0, '[]', ''))])
+        gh.open_prs()
+        fields = self.calls[-1][0][self.calls[-1][0].index('--json') + 1].split(',')
+        self.assertIn('mergeable', fields)
+        self.assertIn('mergeStateStatus', fields)
+
+    def test_merge_state(self):
+        from devloop.github import merge_state
+        cases = [(('CONFLICTING', 'DIRTY'), 'conflict'), (('CONFLICTING', 'UNKNOWN'), 'conflict'),
+                 (('UNKNOWN', 'DIRTY'), 'conflict'), ((False, 'dirty'), 'conflict'),
+                 (('UNKNOWN', 'UNKNOWN'), 'unknown'), (('MERGEABLE', 'UNKNOWN'), 'unknown'),
+                 ((None, None), 'unknown'), (('MERGEABLE', 'CLEAN'), 'clean'),
+                 (('MERGEABLE', 'BLOCKED'), 'clean'), (('MERGEABLE', 'BEHIND'), 'clean'),
+                 (('MERGEABLE', 'UNSTABLE'), 'clean')]
+        for (mergeable, status), expected in cases:
+            with self.subTest(mergeable=mergeable, status=status):
+                self.assertEqual(merge_state(mergeable, status), expected)
+
     def test_no_checks_at_all(self):
         gh = self.make([('check-runs', (0, '', '')),
                         ('/status', (0, '{"state":"pending","total_count":0,"statuses":[]}', ''))])
@@ -491,13 +510,13 @@ class GitHubAdapterTests(unittest.TestCase):
 # Dispatcher ------------------------------------------------------------------
 
 def pr(number=100, issue=7, labels=('agent:review',), reviews=(), fixes=(), checks='pass',
-       head=SHA1):
+       head=SHA1, merge='clean'):
     return PullRequest(number=number, issue=issue, head_ref=f'agent/issue-{issue}', head_sha=head,
                        title='t', body='b', labels=set(labels),
                        meta=dict(META, issue=issue),
                        reviews=list(reviews), fixes=list(fixes), checks=checks,
                        failed_checks=['Unit Tests'] if checks == 'fail' else [],
-                       failed_runs=['42'] if checks == 'fail' else [])
+                       failed_runs=['42'] if checks == 'fail' else [], merge_state=merge)
 
 
 def ready(number, labels=(), labeler='brushtyler'):
@@ -589,6 +608,47 @@ class PlanTests(unittest.TestCase):
         actions = self.kinds(snap)
         self.assertEqual(actions[0], ('stale', 50))
         self.assertEqual(len([a for a in actions if a[0] == 'fix']), CFG.max_actions_per_tick)
+        # A sync runs an agent: it counts against the same cap.
+        snap = Snapshot(prs=[pr(number=100 + i, issue=i, merge='conflict') for i in range(4)],
+                        ready_issues=[], working_issues=[])
+        self.assertEqual(self.kinds(snap), [('sync', 100 + i) for i in range(CFG.max_actions_per_tick)])
+
+    def test_conflicting_prs_are_synced_not_reviewed_or_promoted(self):
+        # Issue #99: PR #95 went DIRTY after PR #94 was merged, and the next tick planned a review.
+        for checks in ('pass', 'pending', 'fail', 'none'):
+            with self.subTest(checks=checks):
+                self.assertEqual(self.kinds(Snapshot([pr(checks=checks, merge='conflict')], [], [])),
+                                 [('sync', 100)])
+        approval = norm(raw_review())
+        # A recorded approval is not promoted on a conflicting head, nor kept ready.
+        self.assertEqual(self.kinds(Snapshot([pr(reviews=[approval], merge='conflict')], [], [])),
+                         [('sync', 100)])
+        ready_pr = dict(labels=['agent:ready-to-merge'], reviews=[approval], merge='conflict')
+        self.assertEqual(self.kinds(Snapshot([pr(**ready_pr)], [], [])), [('sync', 100)])
+        self.assertEqual(self.kinds(Snapshot([pr(**ready_pr, checks='fail')], [], [])),
+                         [('sync', 100)])
+        self.assertEqual(self.kinds(Snapshot([pr(**ready_pr, head=SHA2)], [], [])),
+                         [('revoke', 100)])
+        # A recorded request for changes is applied first; the fixer works before the sync.
+        changes = norm(raw_review('request_changes', [finding()]))
+        self.assertEqual(self.kinds(Snapshot([pr(reviews=[changes], merge='conflict')], [], [])),
+                         [('apply_review', 100)])
+        self.assertEqual(self.kinds(Snapshot([pr(labels=['agent:changes'], reviews=[changes],
+                                                 merge='conflict')], [], [])), [('fix', 100)])
+        # A sync is not a round: it is planned even when no round is left.
+        rounds = [dict(norm(raw_review(), round_no=i), round=i) for i in (1, 2, 3)]
+        self.assertEqual(self.kinds(Snapshot([pr(reviews=rounds, head=SHA2, merge='conflict')],
+                                             [], [])), [('sync', 100)])
+
+    def test_unknown_mergeability_waits_for_the_next_tick(self):
+        approval = norm(raw_review())
+        for p in (pr(merge='unknown'), pr(merge='unknown', checks='fail'),
+                  pr(merge='unknown', reviews=[approval])):
+            with self.subTest(p=p):
+                self.assertEqual(self.kinds(Snapshot([p], [], [])), [])
+        # Readiness already granted stays: nothing is planned until the state is known.
+        ready_pr = pr(labels=['agent:ready-to-merge'], reviews=[approval], merge='unknown')
+        self.assertEqual(self.kinds(Snapshot([ready_pr], [], [])), [])
 
 
 class RecognitionTests(unittest.TestCase):
@@ -699,13 +759,33 @@ class FakeGH:
     def failed_log(self, run_id):
         return f'log of {run_id}'
 
+    # Snapshot reads: ``open`` holds the raw open PRs, as `gh pr list` returns them.
+    open = ()
+
+    def open_prs(self):
+        return [dict(raw) for raw in self.open]
+
+    def pr_comments(self, number):
+        return [{'author': {'login': 'brushtyler'}, 'body': body}
+                for n, body in self.comments if n == number]
+
+    def issues_with_label(self, label):
+        return []
+
+
+SHA3 = 'c' * 40
+
 
 class FakeWS:
-    def __init__(self, head=SHA1, changes=True, tests=(True,), files=('x.py',)):
+    def __init__(self, head=SHA1, changes=True, tests=(True,), files=('x.py',),
+                 conflicts=('devloop/agents.py',), markers=()):
         self._head = head
         self.changes = changes
         self.tests = list(tests)
         self.files = list(files)
+        self.conflicts = conflicts  # None: the branch already contains the base
+        self.markers = list(markers)  # files the agent left with conflict markers
+        self.merging = None
         self.commits = []
         self.authors = []
         self.pushes = []
@@ -735,10 +815,25 @@ class FakeWS:
     def run_tests(self, path, command, timeout):
         return (self.tests.pop(0) if len(self.tests) > 1 else self.tests[0]), 'FAILED test_x'
 
+    def start_merge(self, path):
+        if self.conflicts is not None:
+            self.merging = SHA3
+        return None if self.conflicts is None else list(self.conflicts)
+
+    def merge_head(self, path):
+        return self.merging
+
+    def base_commits(self, path, name):
+        return ['abc1234 fix: main changed it']
+
+    def conflict_markers(self, path, names):
+        return [n for n in names if n in self.markers]
+
     def commit_all(self, path, message, author=None):
         self.commits.append(message)
         self.authors.append(author)
         self._head = SHA2
+        self.merging = None
         return SHA2
 
     def changed_files(self, path, since=None):
@@ -1089,6 +1184,151 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual([a.kind for a in d.tick(dry_run=True)], ['review', 'implement'])
         self.assertEqual((self.gh.comments, self.gh.labels), ([], {}))
 
+    # Sync with the base branch (issue #99) ---------------------------------------------
+
+    @staticmethod
+    def raw_pr(mergeable, status, head=SHA1, labels=('agent:review',)):
+        return {'number': 100, 'title': 't', 'body': markdown.publishable('Why.', 'pr', META),
+                'labels': [{'name': name} for name in labels], 'headRefName': 'agent/issue-7',
+                'headRefOid': head, 'author': {'login': 'brushtyler'}, 'isCrossRepository': False,
+                'mergeable': mergeable, 'mergeStateStatus': status}
+
+    @staticmethod
+    def synced(status='completed'):
+        return {'status': status, 'summary': 'Kept both sides.',
+                'blocked_reason': 'needs a product call' if status == 'blocked' else ''}
+
+    def test_dirty_pr_is_synced_and_reviewed_again_without_spending_a_round(self):
+        runner = FakeRunner(self.synced())
+        d = self.make(runner)
+        self.gh.open = [self.raw_pr('CONFLICTING', 'DIRTY')]
+        self.gh.labels[100] = {'agent:review'}
+        self.assertEqual([a.kind for a in d.tick(dry_run=True)], ['sync'])
+        self.assertEqual((runner.calls, self.gh.comments), ([], []))
+        self.assertEqual([a.kind for a in d.tick()], ['sync'])
+        ((agent_key, mode, schema_name, prompt),) = runner.calls
+        self.assertEqual((agent_key, mode, schema_name), (IMPL, 'write', 'sync'))
+        self.assertIn('`devloop/agents.py`', prompt)
+        self.assertIn('`abc1234` fix: main changed it', prompt)
+        self.assertIn('Do not run `git merge`', prompt)
+        # The merge commit concludes the merge the dispatcher started, and is pushed as is.
+        (message,) = self.ws.commits
+        self.assertTrue(message.startswith('Merge origin/main into agent/issue-7\n'))
+        self.assertIn('- devloop/agents.py', message)
+        self.assertIn('Refs #7', message)
+        self.assertEqual(self.ws.pushes, [('agent/issue-7', False)])
+        self.assertEqual(self.ws.spans, ['origin/main'])
+        self.assertEqual(self.gh.labels[100], {'agent:review'})
+        body = self.gh.comments[-1][1]
+        self.assertTrue(body.startswith(f'> [!NOTE]\n> **Agent:** {IMPL_NAME}'))
+        self.assertIn('`devloop/agents.py`', body)
+        self.assertIn('Kept both sides.', body)
+        self.assertIsNone(markdown.read_marker(body, 'review'))
+        self.assertEqual(self.ws.removed, ['pr-100'])
+        # GitHub reports the new head mergeable: it is reviewed as round 1, after CI.
+        self.gh.open = [self.raw_pr('MERGEABLE', 'CLEAN', head=SHA2)]
+        snap = d.snapshot()
+        self.assertEqual((snap.prs[0].reviews, snap.prs[0].merge_state), ([], 'clean'))
+        self.assertEqual(plan(snap, CFG), [Action('review', 100)])
+        self.gh.ci = 'pending'
+        self.assertEqual(plan(d.snapshot(), CFG), [])
+
+    def test_unknown_merge_state_is_deferred_without_errors(self):
+        runner = FakeRunner()
+        d = self.make(runner)
+        for mergeable, status in (('UNKNOWN', 'UNKNOWN'), ('MERGEABLE', 'UNKNOWN'), (None, None)):
+            with self.subTest(mergeable=mergeable, status=status):
+                self.gh.open = [self.raw_pr(mergeable, status)]
+                self.gh.labels[100] = {'agent:review'}
+                self.assertEqual(d.tick(), [])
+                self.assertEqual(d.snapshot().prs[0].merge_state, 'unknown')
+                self.assertEqual((runner.calls, self.gh.comments, self.ws.pushes), ([], [], []))
+                self.assertEqual(self.gh.labels[100], {'agent:review'})
+
+    def test_sync_of_a_ready_pr_sends_it_back_to_review(self):
+        d = self.make(FakeRunner(self.synced()))
+        p = pr(labels=['agent:ready-to-merge'], reviews=[norm(raw_review())], merge='conflict')
+        self.gh.labels[100] = set(p.labels)
+        d._do_sync(p)
+        self.assertEqual(self.gh.labels[100], {'agent:review'})
+        self.assertEqual(len(self.ws.pushes), 1)
+
+    def test_failed_sync_goes_to_a_human_with_the_conflicting_files(self):
+        test = self
+
+        class AbortingRunner(FakeRunner):
+            def run(self, *args):
+                test.ws.merging = None  # e.g. `git merge --abort`
+                return super().run(*args)
+
+        cases = {
+            'blocked': (FakeRunner(self.synced('blocked')), FakeWS(), 'needs a product call'),
+            'tests': (FakeRunner(self.synced(), self.synced()), FakeWS(tests=(False, False)),
+                      'FAILED test_x'),
+            'agent': (FakeRunner(agents.AgentError('claude exited with 1')), FakeWS(),
+                      'exited with 1'),
+            'markers': (FakeRunner(self.synced()), FakeWS(markers=['devloop/agents.py']),
+                        'Restano marcatori di conflitto'),
+            'aborted': (AbortingRunner(self.synced()), FakeWS(), 'concluso o annullato'),
+        }
+        for case, (runner, ws, reason) in cases.items():
+            with self.subTest(case=case):
+                d = self.make(runner, ws)
+                p = pr(merge='conflict')
+                self.gh.labels[100] = set(p.labels)
+                d._do_sync(p)
+                self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+                self.assertEqual((ws.commits, ws.pushes), ([], []))
+                body = self.gh.comments[-1][1]
+                self.assertIn(reason, body)
+                self.assertIn('`devloop/agents.py`', body)
+                self.assertIn('`abc1234`', body)
+                self.assertIn('rimuovere `agent:needs-human`', body)
+
+    def test_a_clean_local_merge_needs_no_agent(self):
+        runner = FakeRunner()
+        d = self.make(runner, FakeWS(conflicts=()))
+        self.gh.labels[100] = {'agent:review'}
+        d._do_sync(pr(merge='conflict'))
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(self.ws.pushes, [('agent/issue-7', False)])
+        self.assertNotIn('Co-Authored-By', self.ws.commits[0])
+        self.assertIn('**Agent:** devloop dispatcher', self.gh.comments[-1][1])
+        self.assertEqual(self.gh.labels[100], {'agent:review'})
+
+    def test_a_branch_that_already_contains_the_base_is_left_alone(self):
+        runner = FakeRunner()
+        d = self.make(runner, FakeWS(conflicts=None))
+        self.gh.labels[100] = {'agent:review'}
+        d._do_sync(pr(merge='conflict'))
+        self.assertEqual((runner.calls, self.ws.commits, self.gh.comments), ([], [], []))
+        self.assertEqual(self.gh.labels[100], {'agent:review'})
+        self.assertEqual(self.ws.removed, ['pr-100'])
+
+    def test_sync_stops_when_the_head_moved_or_the_implementer_is_gone(self):
+        runner = FakeRunner(self.synced())
+        d = self.make(runner, FakeWS(head=SHA2))
+        d._do_sync(pr(merge='conflict'))
+        self.assertEqual((runner.calls, self.ws.commits, self.gh.comments), ([], [], []))
+        p = pr(merge='conflict')
+        p.meta = dict(META, implementer='gone')
+        d = self.make(runner)
+        self.gh.labels[100] = set(p.labels)
+        d._do_sync(p)
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+
+    def test_status_shows_conflicting_prs(self):
+        import devloop.__main__ as cli
+        d = self.make(FakeRunner())
+        self.gh.open = [self.raw_pr('CONFLICTING', 'DIRTY')]
+        lines = []
+        with mock.patch.object(cli, 'build', return_value=(CFG, Path('/state'), d)), \
+                mock.patch.object(cli, 'log', lines.append):
+            cli.main(['status'])
+        self.assertIn('merge=conflict CONFLICT with main', lines[0])
+        self.assertEqual(lines[-1], 'next: sync #100')
+
 
 # GitHub App identities -----------------------------------------------------------
 
@@ -1251,7 +1491,7 @@ class CredentialIsolationTests(unittest.TestCase):
         # Issue #96: an implementer started tests in the background and waited with
         # `until grep -qE "^(OK|FAILED)" ...; do sleep 5; done`; one output never had that line.
         from devloop.dispatcher import PROMPT_DIR
-        for name in ('implement', 'fix'):
+        for name in ('implement', 'fix', 'sync'):
             with self.subTest(prompt=name):
                 text = ' '.join((PROMPT_DIR / f'{name}.md').read_text().split())
                 self.assertIn('Run tests in the foreground and use their exit code.', text)
@@ -1565,6 +1805,56 @@ class CredentialIsolationTests(unittest.TestCase):
             (Path(tmp) / 'x.pyc').write_text('ignored')
             self.assertFalse(ws.pristine(tmp, head))
 
+    def test_sync_merge_of_the_base_branch(self):
+        # Issue #99: the merge the dispatcher starts, the facts the prompt reports, and the merge
+        # commit that concludes it.
+        def rev(ref):
+            return subprocess.run(['git', 'rev-parse', ref], cwd=tmp, capture_output=True,
+                                  text=True, check=True).stdout.strip()
+
+        def commit(message):
+            self.git('add', '-A', cwd=tmp)
+            self.git('commit', '-q', '-m', message, cwd=tmp)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.git('init', '-q', '-b', 'main', cwd=tmp)
+            self.git('config', 'user.name', 't', cwd=tmp)
+            self.git('config', 'user.email', 't@x', cwd=tmp)
+            (root / 'a.py').write_text('x = 1\n')
+            (root / 'doc.md').write_text('Title\n=======\n')
+            commit('base')
+            self.git('checkout', '-q', '-b', 'agent/issue-7', cwd=tmp)
+            (root / 'a.py').write_text('x = 2\n')
+            commit('pr change')
+            branch_head = rev('HEAD')
+            self.git('checkout', '-q', 'main', cwd=tmp)
+            (root / 'a.py').write_text('x = 3\n')
+            commit('fix: main changed a')
+            (root / 'b.py').write_text('b = 1\n')
+            commit('feat: b')
+            self.git('update-ref', 'refs/remotes/origin/main', 'main', cwd=tmp)
+            self.git('checkout', '-q', 'agent/issue-7', cwd=tmp)
+            ws = Workspace(tmp, '.state', 'main')
+
+            self.assertEqual(ws.start_merge(tmp), ['a.py'])
+            self.assertEqual(ws.merge_head(tmp), rev('main'))
+            self.assertEqual(ws.head(tmp), branch_head)
+            (base_commit,) = ws.base_commits(tmp, 'a.py')
+            self.assertTrue(base_commit.endswith(' fix: main changed a'))
+            # A Markdown heading underline is not a conflict marker.
+            self.assertEqual(ws.conflict_markers(tmp, ['a.py', 'doc.md', 'gone.py']), ['a.py'])
+            (root / 'a.py').write_text('x = 3\ny = 2\n')
+            self.assertEqual(ws.conflict_markers(tmp, ['a.py']), [])
+            head = ws.commit_all(tmp, 'Merge origin/main into agent/issue-7\n')
+            parents = subprocess.run(['git', 'rev-list', '--parents', '-n1', head], cwd=tmp,
+                                     capture_output=True, text=True, check=True).stdout.split()
+            self.assertEqual(parents, [head, branch_head, rev('main')])
+            self.assertIsNone(ws.merge_head(tmp))
+            self.assertEqual((root / 'b.py').read_text(), 'b = 1\n')
+            # Nothing left to merge.
+            self.assertIsNone(ws.start_merge(tmp))
+
 
 class ActingAs:
     """The GitHub client of one actor: records who did what on the shared FakeGH."""
@@ -1631,6 +1921,12 @@ class IdentityTests(unittest.TestCase):
         d = self.make(FakeRunner(fixed()), FakeWS(files=['.github/actions/x/action.yml']))
         d._do_fix(pr(labels=['agent:changes'], reviews=[first]))
         self.assertEqual((self.ws.pushes, self.ws.spans), ([], [SHA1]))
+        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        # A sync merge may not differ from the base under protected paths.
+        synced = {'status': 'completed', 'summary': 's', 'blocked_reason': ''}
+        d = self.make(FakeRunner(synced), FakeWS(files=['.github/workflows/ci.yml']))
+        d._do_sync(pr(merge='conflict'))
+        self.assertEqual((self.ws.pushes, self.ws.spans), ([], ['origin/main']))
         self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
 
     def test_the_reviewer_posts_its_verdict_and_a_native_review(self):

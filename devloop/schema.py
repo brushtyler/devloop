@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 
 SCHEMA_DIR = Path(__file__).resolve().parent / 'schemas'
-SCHEMA_NAMES = ('implement', 'fix', 'review')
+SCHEMA_NAMES = ('implement', 'fix', 'review', 'sync')
 
 
 class SchemaError(ValueError):
