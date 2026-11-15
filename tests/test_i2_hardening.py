@@ -307,7 +307,7 @@ class GraderProtectionTests(unittest.TestCase):
             for name in REQUIRED:
                 path = root / name; path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source / name, path)
-            self.assertEqual(verify_baseline(root), 'i2-fixtures-v4')
+            self.assertEqual(verify_baseline(root), 'i2-fixtures-v5')
             for name in REQUIRED - {'schemas/recovery-grader-baseline.json'}:
                 with self.subTest(path=name):
                     path = root / name; original = path.read_bytes()

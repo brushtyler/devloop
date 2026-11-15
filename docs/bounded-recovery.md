@@ -189,7 +189,7 @@ hardening remains in issue #29.
 
 ## Protected baseline and issue #29 validation
 
-`schemas/recovery-grader-baseline.json` (`i2-fixtures-v4`) pins the grader,
+`schemas/recovery-grader-baseline.json` (`i2-fixtures-v5`) pins the grader,
 expectations, replay fixtures, imported test helpers and existing CI gate by
 SHA256. The host verifies those bytes before executing the corpus and before
 self-development planning/scheduling. Self-development is identified from the
