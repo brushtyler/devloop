@@ -126,6 +126,7 @@ class TestPreflightScope(Case):
         for models, default, expected in [
             ('claude:sonnet,codex:test', 'openrouter', {'claude', 'codex'}),
             ('unqualified', 'openrouter', {'codex', 'openrouter'}),
+            ('unqualified', 'auto', {'codex', 'openrouter'}),
             ('unqualified', 'codex', {'codex'})]:
             env = dict(self.explicit(), SSDLC_REVIEW_MODELS=models, SSDLC_REVIEW_ENGINE=default)
             self.assertEqual(s.resolve_routes(self.repo, 'run', 'L', env, 'T'), expected)

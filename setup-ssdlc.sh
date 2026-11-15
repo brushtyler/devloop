@@ -225,16 +225,17 @@ export SSDLC_RECON_MODEL=""
 export SSDLC_PO_ENGINE="auto"
 export SSDLC_PO_MODEL=""
 
-export SSDLC_DESIGN_ARCH_ENGINE="auto"
-export SSDLC_DESIGN_ARCH_MODEL=""
-export SSDLC_DESIGN_SEC_ENGINE="auto"
-export SSDLC_DESIGN_SEC_MODEL=""
+# Design roles: SSDLC_ARCH_* for 02-design-arch, SSDLC_SEC_* for 02-design-sec
+export SSDLC_ARCH_ENGINE="auto"
+export SSDLC_ARCH_MODEL=""
+export SSDLC_SEC_ENGINE="auto"
+export SSDLC_SEC_MODEL=""
 
 export SSDLC_DEV_ENGINE="auto"
 export SSDLC_DEV_MODEL=""
-export SSDLC_DEV_ESCALATION_MODEL=""
 export SSDLC_DEV_USE_OPENROUTER="false"
 
+# Engine for SSDLC_REVIEW_MODELS entries without an "engine:" prefix ("auto" = openrouter)
 export SSDLC_REVIEW_ENGINE="auto"
 export SSDLC_REVIEW_MODELS=""
 
@@ -251,19 +252,18 @@ export SSDLC_DOCS_ENGINE="auto"
 export SSDLC_DOCS_MODEL=""
 
 export SSDLC_DEFAULT_TIER="auto"
-export SSDLC_CONTAINER_PIDS_LIMIT="1024"
-export SSDLC_MAX_DESIGN_ROUNDS=3
+export SSDLC_MAX_DESIGN_ROUNDS=5
 export SSDLC_MAX_DEV_RETRIES=3
 
-# --- 3. Ephemeral Container Resource & Privilege Limits ---
+# --- Ephemeral Container Resource & Privilege Limits ---
 export SSDLC_CONTAINER_MEMORY="4g"
 export SSDLC_CONTAINER_CPUS="2"
-export SSDLC_CONTAINER_PIDS_LIMIT="512"
+export SSDLC_CONTAINER_PIDS_LIMIT="1024"
 EOF
     chmod 600 "${env_file}"
     log_ok "Created project config: ${env_file}"
   else
-    log_ok "Preserved existing project config: ${env_file}"
+    log_ok "Preserved existing project config: ${env_file} (run ./ssdlc doctor to check for obsolete or duplicated settings)"
     if [ "${sync_mode_explicit}" = "true" ]; then
       if grep -q '^export SSDLC_SYNC_REMOTE=' "${env_file}"; then
         sed -i "s/^export SSDLC_SYNC_REMOTE=.*/export SSDLC_SYNC_REMOTE=\"${sync_mode}\"/" "${env_file}"

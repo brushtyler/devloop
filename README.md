@@ -119,7 +119,7 @@ cd /path/to/my-project
 ./ssdlc doctor
 ```
 
-`doctor` verifies the CLIs, isolation, credential fingerprints and GitHub token visibility.
+`doctor` verifies the CLIs, isolation, credential fingerprints and GitHub token visibility. It also reports obsolete, unknown or duplicated `SSDLC_*` settings in `project.env` and `global.env`.
 
 **3. Run a ticket** from a clean, committed baseline, with a narrowly scoped goal:
 

@@ -1193,8 +1193,72 @@ class SquadDispatcher:
 
 
 def resolve_review_entry(entry: str, default_engine: str = "openrouter") -> Tuple[str, str]:
-    """Resolve the qualified/unqualified rule shared by both review paths."""
-    return tuple(entry.split(":", 1)) if ":" in entry and not entry.startswith("http") else (default_engine, entry)
+    """Resolve the qualified/unqualified rule shared by both review paths.
+
+    ``SSDLC_REVIEW_ENGINE="auto"`` (the template value) or an empty value leaves
+    unprefixed entries on the documented default engine, ``openrouter``.
+    """
+    if ":" in entry and not entry.startswith("http"):
+        return tuple(entry.split(":", 1))
+    engine = (default_engine or "").strip()
+    return ("openrouter" if engine.lower() in ("", "auto") else engine), entry
+
+
+# Per-role overrides read by SquadDispatcher.dispatch_role (last segment of the phase key).
+ROLE_OVERRIDE_ENV_VARS = frozenset(
+    f"SSDLC_{phase.split('-')[-1].upper()}_{suffix}"
+    for phase in SquadDispatcher.BASE_EFFORT_MATRIX for suffix in ("ENGINE", "MODEL"))
+
+# Operator settings that may appear in project.env / global.env.
+KNOWN_PROJECT_ENV_VARS = ROLE_OVERRIDE_ENV_VARS | frozenset({
+    "SSDLC_PROJECT_ID", "SSDLC_EXECUTION_MODE", "SSDLC_SYNC_REMOTE", "SSDLC_STANDARDS_PROFILE",
+    "SSDLC_INHERIT_HOST_CODEX_AUTH", "SSDLC_INHERIT_HOST_CLAUDE_AUTH", "SSDLC_AUTONOMOUS",
+    "SSDLC_DEV_USE_OPENROUTER", "SSDLC_REVIEW_MODELS", "SSDLC_DEFAULT_TIER", "SSDLC_MAX_REASONING_EFFORT",
+    "SSDLC_BUDGET_CAP_USD", "SSDLC_DEV_BUDGET_USD", "SSDLC_MAX_DEV_RETRIES", "SSDLC_MAX_DESIGN_ROUNDS",
+    "SSDLC_DEV_TIMEOUT", "SSDLC_REVIEW_MAX_DIFF_CHARS", "SSDLC_SUPERVISOR_HARD_TIMEOUT",
+    "SSDLC_PREFLIGHT_MIN_FREE_MB", "SSDLC_CONTAINER_MEMORY", "SSDLC_CONTAINER_CPUS",
+    "SSDLC_CONTAINER_PIDS_LIMIT",
+})
+
+# Names that older templates generated but that have no effect. Value: replacement, or None to remove.
+OBSOLETE_PROJECT_ENV_VARS: Dict[str, Optional[str]] = {
+    "SSDLC_DESIGN_ARCH_ENGINE": "SSDLC_ARCH_ENGINE",
+    "SSDLC_DESIGN_ARCH_MODEL": "SSDLC_ARCH_MODEL",
+    "SSDLC_DESIGN_SEC_ENGINE": "SSDLC_SEC_ENGINE",
+    "SSDLC_DESIGN_SEC_MODEL": "SSDLC_SEC_MODEL",
+    "SSDLC_DEV_ESCALATION_MODEL": None,
+}
+
+
+def audit_env_file(env_path: Path) -> List[str]:
+    """Report obsolete, unknown and duplicated SSDLC settings without modifying the file."""
+    if not env_path.is_file():
+        return []
+    assignments: Dict[str, List[Tuple[int, str]]] = {}
+    for lineno, raw_line in enumerate(env_path.read_text(encoding="utf-8").splitlines(), 1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        assignments.setdefault(key.strip(), []).append((lineno, value.strip().strip('"').strip("'")))
+    findings = []
+    for key, entries in assignments.items():
+        first = entries[0][0]
+        if key in OBSOLETE_PROJECT_ENV_VARS:
+            replacement = OBSOLETE_PROJECT_ENV_VARS[key]
+            action = f"rename it to {replacement}" if replacement else "remove it"
+            findings.append(f"line {first}: {key} is obsolete and has no effect; {action}")
+        elif key.startswith("SSDLC_") and key not in KNOWN_PROJECT_ENV_VARS:
+            findings.append(f"line {first}: {key} is not read by SSDLC; check the name or remove it")
+        if len(entries) > 1:
+            lines = ", ".join(str(n) for n, _ in entries)
+            findings.append(f"lines {lines}: {key} is set {len(entries)} times and the last value "
+                            f"'{entries[-1][1]}' wins; keep a single assignment")
+    return findings
 
 
 DynamicRoutingPolicy = SquadDispatcher
@@ -5694,6 +5758,14 @@ def cmd_doctor(repo: Path) -> int:
     print(f"  - Project Env File   : {iso['project_env']} ({'EXISTS' if Path(iso['project_env']).exists() else 'MISSING'})")
     print(f"  - Isolated CODEX_HOME: {iso['codex_home']}")
     print(f"  - Isolated CLAUDE_DIR: {iso['claude_home']}")
+    print("  - Config Audit       :")
+    audited = False
+    for env_path in (Path(iso['project_env']), Path.home() / ".ssdlc" / "global.env"):
+        for finding in audit_env_file(env_path):
+            audited = True
+            print(f"      * {env_path}: {finding}")
+    if not audited:
+        print("      * OK (no obsolete, unknown or duplicated SSDLC settings)")
     print("  - CLI Versions       :")
     for binary in ("agy", "codex", "claude", "git", "tmux", "uv", "gitleaks"):
         print(f"      * {binary:<10}: {get_cli_version(binary)}")
