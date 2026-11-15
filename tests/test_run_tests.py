@@ -160,6 +160,37 @@ class RunTestsEquivalenceTests(unittest.TestCase):
         self.assertNotEqual(serial.returncode, 0)
         self.assertNotEqual(parallel.returncode, 0, parallel.stdout)
 
+    def test_a_tests_helper_shadowing_the_runner_imports_is_seen_by_the_tests(self):
+        # Codex review of #75, round 6 (#78): the worker imported json before its discover put
+        # tests/ first on sys.path, so tests/json.py broke the serial discover but not the worker.
+        root = self.project({
+            'tests/json.py': 'BROKEN = True\n',
+            'tests/test_uses_json.py': '''
+                import unittest
+                class T(unittest.TestCase):
+                    def test_loads(self):
+                        import json
+                        self.assertEqual(json.loads('42'), 42)
+            ''',
+        })
+        serial, parallel = self.both(root)
+        self.assertNotEqual(serial.returncode, 0)
+        self.assertNotEqual(parallel.returncode, 0, parallel.stdout)
+        self.assertIn('FAILED MODULE test_uses_json', parallel.stdout)
+        self.assertNotIn('WORKER PROBLEM', parallel.stdout)
+
+        # The runner itself must not pick up the helper: with no test using json, both pass.
+        write(root, 'tests/test_uses_json.py', '''
+            import unittest
+            class T(unittest.TestCase):
+                def test_ok(self):
+                    pass
+        ''')
+        serial, parallel = self.both(root)
+        self.assertEqual(serial.returncode, 0, serial.stderr)
+        self.assertEqual(parallel.returncode, 0, parallel.stdout)
+        self.assertEqual(ran(parallel.stdout), ran(serial.stderr))
+
     def test_no_tests_is_not_a_success(self):
         # Codex review of #75, round 3: like `python3 -m unittest`, running nothing exits with 5.
         root = self.project({'tests/test_empty.py': 'import unittest\n'})
