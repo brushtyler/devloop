@@ -3,7 +3,8 @@
 devloop writes its own agent log only when a turn ends. This reads the newest session transcript
 whose working directory is the worktree: Claude (``~/.claude/projects``) or Codex
 (``~/.codex/sessions``), and keeps following it, switching to a newer transcript of the same
-worktree when one appears (for example the next attempt of a turn).
+worktree when one appears (for example the next attempt of a turn). The reviewer of a PR works in
+a disposable copy, ``pr-<N>-review``: following ``pr-<N>`` covers both, newest session first.
 """
 
 import json
@@ -68,6 +69,21 @@ def format_record(record):
     return lines
 
 
+def worktrees(root, target):
+    """The worktrees whose agents ``devloop follow <target>`` shows: ``issue-<N>`` for the
+    implementer; ``pr-<N>`` for the fixer and its copy ``pr-<N>-review`` for the reviewer
+    (see :meth:`devloop.workspace.Workspace.review_copy`)."""
+    paths = [Path(root) / target]
+    if target.startswith('pr-'):
+        paths.append(Path(root) / f'{target}-review')
+    return paths
+
+
+def _paths(worktree):
+    """One worktree or several, as a list."""
+    return [worktree] if isinstance(worktree, (str, os.PathLike)) else list(worktree)
+
+
 def claude_dirs(home, worktree):
     """Claude Code keeps a project's sessions in a directory named after its path."""
     names = set()
@@ -94,11 +110,13 @@ def codex_cwd(path):
 
 
 def find_transcript(worktree, home):
-    """The newest Claude or Codex transcript of ``worktree``, or None. Claude wins a tie."""
-    targets = {str(worktree), os.path.realpath(worktree)}
+    """The newest Claude or Codex transcript of ``worktree`` (one path or several), or None.
+    Claude wins a tie."""
+    wts = _paths(worktree)
+    targets = {t for w in wts for t in (str(w), os.path.realpath(w))}
     found = []
-    claude = [(m, p) for d in claude_dirs(home, worktree) for p in d.glob('*.jsonl')
-              if (m := _mtime(p)) is not None]
+    dirs = sorted({d for w in wts for d in claude_dirs(home, w)})
+    claude = [(m, p) for d in dirs for p in d.glob('*.jsonl') if (m := _mtime(p)) is not None]
     if claude:
         found.append(max(claude, key=lambda c: c[0]))
     codex = [(m, p) for p in (Path(home) / '.codex' / 'sessions').glob('*/*/*/*.jsonl')
@@ -153,12 +171,14 @@ def show(lines, out):
 
 def follow(worktree, home=None, out=sys.stdout, err=sys.stderr, sleep=time.sleep,
            interval=1.0, rescan_every=10, polls=None):
-    """Print the transcript of ``worktree`` and keep following it; ``polls`` bounds the loop
-    (for tests). Returns the exit status."""
+    """Print the transcript of ``worktree`` (one path or several: the newest session among
+    them) and keep following it; ``polls`` bounds the loop (for tests). Returns the exit
+    status."""
     home = Path.home() if home is None else Path(home)
     path = find_transcript(worktree, home)
     if path is None:
-        err.write(f'no Claude or Codex session found for {worktree}\n')
+        where = ' or '.join(str(w) for w in _paths(worktree))
+        err.write(f'no Claude or Codex session found for {where}\n')
         return 1
     err.write(f'following {path}\n')
     tail = Tail(path)

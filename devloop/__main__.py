@@ -98,9 +98,9 @@ def main(argv=None):
             cfg = load_config(args.config)
         except ConfigError as exc:
             sys.exit(f'devloop: invalid config: {exc}')
-        worktree = main_checkout() / cfg.state_dir / 'worktrees' / args.target
+        root = main_checkout() / cfg.state_dir / 'worktrees'
         try:
-            sys.exit(follow.follow(worktree))
+            sys.exit(follow.follow(follow.worktrees(root, args.target)))
         except KeyboardInterrupt:
             sys.exit(0)
 

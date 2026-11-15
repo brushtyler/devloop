@@ -5,6 +5,7 @@ import io
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -334,6 +335,62 @@ class FollowTranscriptTests(unittest.TestCase):
         follow.follow(self.wt, self.home, out, io.StringIO(), polls=1)
         self.assertEqual(out.getvalue(), '10:00:00 · working on it\n')
 
+    def test_follow_pr_shows_the_reviewer_working_in_the_review_copy(self):
+        # Review of #95: the reviewer runs in pr-<N>-review, and `follow pr-<N>` found only the
+        # fixer's older session, or nothing at all.
+        import devloop.__main__ as cli
+        from devloop.workspace import Workspace
+        repo = Path(os.path.realpath(self.tmp.name)) / 'repo'
+
+        def git(argv, **kw):
+            return SimpleNamespace(returncode=0, stdout='0' * 40 + '\n', stderr='')
+        ws = Workspace(repo, CFG.state_dir, 'main', run=git)
+        pr_wt = ws.path('pr-95')
+        pr_wt.mkdir(parents=True)
+        self.codex('fixer.jsonl', pr_wt, [json.dumps(
+            {'type': 'response_item', 'timestamp': '2026-11-15T09:00:00Z',
+             'payload': {'type': 'message', 'role': 'assistant',
+                         'content': [{'text': 'fixing'}]}})], 100)
+        name, copy = ws.review_copy(pr_wt)  # where Dispatcher._do_review runs the reviewer
+        copy.mkdir()
+        bin_dir = Path(self.tmp.name) / 'bin'
+        bin_dir.mkdir()
+        (bin_dir / 'codex').write_text(FAKE_CODEX)
+        (bin_dir / 'codex').chmod(0o755)
+        env = {**os.environ, 'HOME': str(self.home),
+               'PATH': f'{bin_dir}{os.pathsep}{os.environ.get("PATH", "")}'}
+        env.pop('CODEX_HOME', None)
+        runner = agents.AgentRunner(Path(self.tmp.name) / 'logs', 60, env=env)
+        runner.run(CFG.agent('codex'), 'write', 'p', 'implement', copy, name)
+
+        def run(target, out):
+            real = follow.follow
+            with mock.patch.object(cli, 'main_checkout', return_value=repo), \
+                    mock.patch.dict(os.environ, {'HOME': str(self.home)}), \
+                    mock.patch.object(cli.follow, 'follow', side_effect=lambda wts: real(
+                        wts, out=out, err=io.StringIO(), polls=1)), \
+                    self.assertRaises(SystemExit) as ctx:
+                cli.main(['follow', target])
+            return ctx.exception.code
+        out = io.StringIO()
+        self.assertEqual(run('pr-95', out), 0)
+        self.assertEqual(out.getvalue(), '10:00:00 · working on it\n')
+        # The fixer's next session, newer than the review, is followed again.
+        self.codex('fixer2.jsonl', pr_wt, [json.dumps(
+            {'type': 'response_item', 'timestamp': '2026-11-15T11:00:00Z',
+             'payload': {'type': 'message', 'role': 'assistant',
+                         'content': [{'text': 'fixing again'}]}})], time.time() + 60)
+        out = io.StringIO()
+        self.assertEqual(run('pr-95', out), 0)
+        self.assertEqual(out.getvalue(), '11:00:00 · fixing again\n')
+        # The review copy belongs to the PR only.
+        self.assertEqual(run('issue-95', io.StringIO()), 1)
+
+    def test_worktrees_of_a_target(self):
+        root = Path('/r/worktrees')
+        self.assertEqual(follow.worktrees(root, 'issue-7'), [root / 'issue-7'])
+        self.assertEqual(follow.worktrees(root, 'pr-7'), [root / 'pr-7', root / 'pr-7-review'])
+
 
 FAKE_CODEX = '''#!/usr/bin/env python3
 import json, os, sys
@@ -362,7 +419,8 @@ class FollowCommandTests(unittest.TestCase):
                 self.assertRaises(SystemExit) as ctx:
             cli.main(['follow', 'pr-74'])
         self.assertEqual(ctx.exception.code, 0)
-        run.assert_called_once_with(Path('/repo') / CFG.state_dir / 'worktrees' / 'pr-74')
+        root = Path('/repo') / CFG.state_dir / 'worktrees'
+        run.assert_called_once_with([root / 'pr-74', root / 'pr-74-review'])
 
     def test_follow_refuses_other_names(self):
         import devloop.__main__ as cli
