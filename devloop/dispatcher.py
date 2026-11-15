@@ -560,7 +560,16 @@ class Dispatcher:
                            diff_stat=self.ws.diff_stat(path),
                            previous=format_previous_rounds(pr.reviews, pr.fixes),
                            language=cfg.language)
-        raw = self.runner.run(agent, 'review', prompt, 'review', path, f'pr-{pr.number}-review')
+        # The reviewer works in a disposable copy, where its tests may write; the PR worktree
+        # must come out of the review untouched, or the verdict is discarded.
+        copy_name, copy = self.ws.review_copy(path)
+        try:
+            raw = self.runner.run(agent, 'review', prompt, 'review', copy, f'pr-{pr.number}-review')
+        finally:
+            self.ws.remove(copy_name)
+        if not self.ws.pristine(path, pr.head_sha):
+            raise WorkspaceError(f'the worktree of PR #{pr.number} changed during the review; '
+                                 'verdict discarded')
         review = normalize_review(raw, previous_open=previous_open, round_no=round_no,
                                   max_rounds=cfg.max_review_rounds, head_sha=pr.head_sha,
                                   ci=pr.checks, reviewer=agent.key)

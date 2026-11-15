@@ -105,6 +105,25 @@ class Workspace:
         self._git('worktree', 'add', '--force', '-B', branch, str(path), f'origin/{branch}')
         return path
 
+    def review_copy(self, path):
+        """``(name, path)`` of a disposable worktree for a reviewer, detached at the HEAD of
+        ``path`` and sharing its refs, so that ``origin/<base>`` resolves. What the reviewer and
+        its tests write lands in the copy, which is removed with :meth:`remove`, not in
+        ``path``."""
+        name = f'{Path(path).name}-review'
+        copy = self.path(name)
+        self._fresh(copy)
+        self._git('worktree', 'add', '--force', '--detach', str(copy), self.head(path))
+        return name, copy
+
+    def pristine(self, path, head):
+        """Whether ``path`` is still at commit ``head``, with no change and no new file, not
+        even an ignored one."""
+        if self.head(path) != head:
+            return False
+        return not self._git('status', '--porcelain', '--ignored', '--untracked-files=all',
+                             cwd=path).strip()
+
     def remove(self, name):
         path = self.path(name)
         if path.exists():
