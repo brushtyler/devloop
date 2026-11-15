@@ -294,6 +294,60 @@ def validate_advisory(document: dict, artifacts: Path) -> dict[str, str]:
     return hashes
 
 
+def transitional_expectation_issues(plan: dict) -> list[dict]:
+    """A preparatory test's transitional expectation needs a planned replacement.
+
+    Each record names the test and the expectation text, the owner task that
+    writes it, a later successor task that updates it, and the successor's
+    final check. Records grant no AC/SEC coverage and no extra scope.
+    """
+    tasks = {t['task_id']: t for t in plan['tasks']}
+    issues, seen = [], set()
+
+    def ancestors(task_id):
+        found, pending = set(), list(tasks[task_id]['depends_on'])
+        while pending:
+            current = pending.pop()
+            if current not in found and current in tasks:
+                found.add(current)
+                pending.extend(tasks[current]['depends_on'])
+        return found
+
+    for item in plan.get('transitional_expectations', []):
+        where = {'expectation_id': item['expectation_id'], 'field': 'transitional_expectations'}
+        if item['expectation_id'] in seen:
+            issues.append({**where, 'code': 'DUPLICATE_TRANSITIONAL_EXPECTATION',
+                           'message': 'Duplicate transitional expectation_id'})
+        seen.add(item['expectation_id'])
+        if not item['expectation'].strip() or '\x00' in item['expectation']:
+            issues.append({**where, 'code': 'INVALID_TRANSITIONAL_EXPECTATION',
+                           'message': 'A transitional expectation needs its exact expectation text'})
+        owner, successor = tasks.get(item['owner_task_id']), tasks.get(item['successor_task_id'])
+        if owner is None:
+            issues.append({**where, 'code': 'TRANSITIONAL_OWNER_REQUIRED', 'task_id': item['owner_task_id'],
+                           'message': 'A transitional expectation needs a planned owner task'})
+        if successor is None or successor is owner:
+            issues.append({**where, 'code': 'TRANSITIONAL_SUCCESSOR_REQUIRED',
+                           'task_id': item['successor_task_id'],
+                           'message': 'A transitional expectation needs a different planned successor task'})
+        if owner is None or successor is None or successor is owner:
+            continue
+        if owner['task_id'] not in ancestors(successor['task_id']):
+            issues.append({**where, 'code': 'TRANSITIONAL_DEPENDENCY_REQUIRED',
+                           'task_id': successor['task_id'], 'owner_task_id': owner['task_id'],
+                           'message': 'The successor must depend on the transitional expectation owner'})
+        for role, task in (('owner', owner), ('successor', successor)):
+            if item['test_path'] not in task['target_files']:
+                issues.append({**where, 'code': 'TRANSITIONAL_TEST_OUTSIDE_SCOPE', 'role': role,
+                               'task_id': task['task_id'], 'test_path': item['test_path'],
+                               'message': f'The transitional test must be in the {role} target_files'})
+        if item['final_check_id'] not in {c['check_id'] for c in successor['verification']['checks']}:
+            issues.append({**where, 'code': 'TRANSITIONAL_FINAL_CHECK_REQUIRED',
+                           'task_id': successor['task_id'], 'check_id': item['final_check_id'],
+                           'message': 'The final check must be an executable check of the successor'})
+    return issues
+
+
 class TaskPlanValidator:
     def __init__(self, repo: Path, requirements: str, quality: dict, artifacts: Path | None = None):
         self.repo = repo.resolve()
@@ -424,6 +478,7 @@ class TaskPlanValidator:
                     issues.append({**location, 'code': 'INVALID_CONTRACT_REF', 'field': 'contract_refs',
                                    'ref': ref, 'message': str(exc),
                                    'available_refs': self.available_contract_refs()})
+        issues.extend(transitional_expectation_issues(plan))
         missing = sorted(self.requirements - covered)
         if missing:
             issues.append({'code': 'UNCOVERED_REQUIREMENTS', 'field': 'tasks', 'missing_refs': missing,

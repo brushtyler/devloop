@@ -36,6 +36,38 @@ def contract(source, paths):
                 for tid in owners})
 
 
+def transitional_contract(plan, expectation_id, worktree, base_head, owner_checkpoint):
+    """Owner contract for a successor replacing one planned transitional expectation.
+
+    Build it before the successor attempt, as for `contract`. It binds the
+    expectation record, the owner and successor tasks with their AC/SEC
+    references, the owner checkpoint and the current test hash. The replacement
+    then needs the same hash-bound coverage review (`validate_review`,
+    `coverage_ok`) and fresh owner checks as a scope amendment. The coverage
+    facts are a syntactic guard, not proof of semantic equivalence.
+    """
+    items = [item for item in plan.get('transitional_expectations', [])
+             if item['expectation_id'] == expectation_id]
+    tasks = {t['task_id']: t for t in plan['tasks']}
+    if (len(items) != 1 or items[0]['owner_task_id'] not in tasks
+            or items[0]['successor_task_id'] not in tasks
+            or items[0]['owner_task_id'] == items[0]['successor_task_id']):
+        raise TaskError('Transitional expectation needs one planned owner and successor')
+    if (not isinstance(owner_checkpoint, dict)
+            or set(owner_checkpoint) != {'commit', 'capture_sha256'}):
+        raise TaskError('Transitional owner checkpoint needs its commit and capture hash')
+    item = copy.deepcopy(items[0])
+    owner, successor = item['owner_task_id'], item['successor_task_id']
+    path = confined(Path(worktree), item['test_path'])
+    return dict(schema_version=1, capability='transitional-expectation-revalidation-v1',
+        base_head=base_head, expectation=item,
+        files={item['test_path']: dict(kind='COMPLETED_TEST', owners=[owner],
+                                       sha256=file_hash(path) if path.is_file() else None)},
+        owners={owner: dict(task=copy.deepcopy(tasks[owner]), commit=owner_checkpoint['commit'],
+                            capture_sha256=owner_checkpoint['capture_sha256'])},
+        successor=copy.deepcopy(tasks[successor]))
+
+
 def scope_contract(source, paths):
     inherited = source['journal']['tasks'][source['task_id']].get('scope_reconciliation', {}).get('owner_revalidation')
     combined = set(paths)
