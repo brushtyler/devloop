@@ -10,24 +10,33 @@ are split across N worker processes, slowest first, using the durations of the p
 (``.ssdlc/test-durations.json``, ignored by git). Each worker repeats the same discover and runs only
 its children. The summary at the end gives the total, the slowest modules and the output of every
 failed module; the exit code is non-zero if any test failed or a worker did not finish.
+
+A worker imports ``unittest`` and runs the discover before loading this file, as
+``python3 -m unittest`` does: the discover puts ``tests/`` first on ``sys.path``, so a helper there
+named like a standard module (``tests/json.py``) must reach the tests exactly as in the serial run.
+For the same reason the module level below imports only what ``unittest`` has already loaded, and
+the worker writes its results with ``repr`` instead of ``json``; the main process imports the rest.
 """
 
-import argparse
-import hashlib
 import io
-import json
 import os
-import subprocess
 import sys
-import tempfile
-import threading
 import time
 import unittest
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-DURATIONS = ROOT / '.ssdlc' / 'test-durations.json'
-WORKER_BOOT = 'import runpy, sys; sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name="__main__")'
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+# After the discover the boot loads this file with the builtins open, compile and exec only:
+# runpy, importlib.util and the like would import modules (pkgutil, ...) that tests/ can shadow.
+WORKER_BOOT = '\n'.join([
+    'import sys, unittest',
+    'children = list(unittest.defaultTestLoader.discover("tests"))',
+    'sys.argv = sys.argv[1:]',
+    'with open(sys.argv[0], encoding="utf-8") as fh:',
+    '    source = fh.read()',
+    'runner = {"__name__": "run_tests_worker", "__file__": sys.argv[0]}',
+    'exec(compile(source, sys.argv[0], "exec"), runner)',
+    'sys.exit(runner["worker_main"](sys.argv[1:], children))',
+])
 
 
 def discover():
@@ -35,9 +44,9 @@ def discover():
     os.chdir(ROOT)
     # Same import path as `python3 -m unittest`: the working directory first, and not the
     # directory of this script, which `python3 scripts/run-tests.py` would otherwise add.
-    here = Path(__file__).resolve().parent
-    sys.path[:] = [p for p in sys.path if p and Path(p).resolve() != here]
-    sys.path.insert(0, str(ROOT))
+    here = os.path.dirname(os.path.realpath(__file__))
+    sys.path[:] = [p for p in sys.path if p and os.path.realpath(p) != here]
+    sys.path.insert(0, ROOT)
     return list(unittest.defaultTestLoader.discover('tests'))
 
 
@@ -61,12 +70,14 @@ def test_ids(suite):
 
 
 def inventory(children):
-    """A fingerprint of the discovered tests, child by child: workers must see the same suite."""
-    return hashlib.sha256(json.dumps([test_ids(c) for c in children]).encode()).hexdigest()
+    """The discovered tests, child by child, as one line of text: workers must see the same suite."""
+    return repr([test_ids(c) for c in children])
 
 
-def worker(indices, results_file, expected):
-    children = discover()
+def worker(children, indices, results_file, expected_file):
+    """Run ``children[i]`` for each index; ``children`` comes from the discover in WORKER_BOOT."""
+    with open(expected_file, encoding='utf-8') as fh:
+        expected = fh.read()
     if inventory(children) != expected:
         print('The discovered tests differ from the ones the main process found: a module changes '
               'the test tree while it is imported, or discovery is not deterministic.', flush=True)
@@ -77,29 +88,42 @@ def worker(indices, results_file, expected):
             stream = io.StringIO()
             start = time.monotonic()
             result = unittest.TextTestRunner(stream=stream, verbosity=1).run(child)
-            out.write(json.dumps(dict(index=index, run=result.testsRun, ok=result.wasSuccessful(),
-                                      skipped=len(result.skipped),
-                                      seconds=round(time.monotonic() - start, 1),
-                                      output=stream.getvalue())) + '\n')
+            # One Python literal per line, read back with ast.literal_eval: json is not loaded yet.
+            out.write(repr(dict(index=index, run=result.testsRun, ok=result.wasSuccessful(),
+                                skipped=len(result.skipped),
+                                seconds=round(time.monotonic() - start, 1),
+                                output=stream.getvalue())) + '\n')
             out.flush()
     return 0
 
 
+def worker_main(argv, children):
+    """Entry point of WORKER_BOOT: ``--worker I,J,... --results FILE --inventory FILE``."""
+    opts = dict(zip(argv[::2], argv[1::2]))
+    return worker(children, [int(i) for i in opts['--worker'].split(',') if i], opts['--results'],
+                  opts['--inventory'])
+
+
 def main(argv):
+    # Imported here, not at module level: a worker loads this file after its discover (see the
+    # module docstring), when these names would resolve to tests/ first.
+    import argparse
+    import ast
+    import json
+    import subprocess
+    import tempfile
+    import threading
+    from pathlib import Path
+
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('-j', '--jobs', type=int, default=os.cpu_count() or 2)
-    parser.add_argument('--worker', help=argparse.SUPPRESS)
-    parser.add_argument('--results', help=argparse.SUPPRESS)
-    parser.add_argument('--inventory', help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
-    if args.worker is not None:
-        return worker([int(i) for i in args.worker.split(',') if i], args.results, args.inventory)
 
+    durations = Path(ROOT) / '.ssdlc' / 'test-durations.json'
     children = discover()
-    expected = inventory(children)
     labels = [label(c) or f'#{i}' for i, c in enumerate(children)]
     try:
-        previous = json.loads(DURATIONS.read_text())
+        previous = json.loads(durations.read_text())
     except (OSError, ValueError):
         previous = {}
     cost = [previous.get(labels[i], c.countTestCases() * 0.5) for i, c in enumerate(children)]
@@ -115,6 +139,9 @@ def main(argv):
     rows, problems = {}, []
     lock = threading.Lock()
     with tempfile.TemporaryDirectory() as tmp:
+        expected = Path(tmp) / 'inventory.txt'
+        expected.write_text(inventory(children), encoding='utf-8')
+
         def run(k):
             try:
                 collect(k)
@@ -123,15 +150,17 @@ def main(argv):
                     problems.append(f'worker {k}: {type(exc).__name__}: {exc}')
 
         def collect(k):
-            results, log = Path(tmp) / f'w{k}.jsonl', Path(tmp) / f'w{k}.log'
+            results, log = Path(tmp) / f'w{k}.results', Path(tmp) / f'w{k}.log'
             with open(log, 'w') as fh:
                 # `python3 -c` puts the working directory first on sys.path before any import, as
-                # `python3 -m unittest` does: the worker's own imports resolve like the tests'.
+                # `python3 -m unittest` does; WORKER_BOOT then runs the discover before loading
+                # this file, so the tests see the same modules as in the serial discover.
                 code = subprocess.run([sys.executable, '-c', WORKER_BOOT, __file__, '--worker',
                                        ','.join(map(str, bins[k])), '--results', str(results),
-                                       '--inventory', expected],
+                                       '--inventory', str(expected)],
                                       cwd=ROOT, stdout=fh, stderr=subprocess.STDOUT).returncode
-            done = [json.loads(line) for line in results.read_text().splitlines()] if results.exists() else []
+            done = ([ast.literal_eval(line) for line in results.read_text(encoding='utf-8').splitlines()]
+                    if results.exists() else [])
             with lock:
                 for row in done:
                     rows[row['index']] = row
@@ -153,8 +182,8 @@ def main(argv):
         problems.append('no result for ' + ', '.join(missing))
 
     try:
-        DURATIONS.parent.mkdir(exist_ok=True)
-        DURATIONS.write_text(json.dumps({**previous, **{labels[i]: r['seconds'] for i, r in rows.items()}},
+        durations.parent.mkdir(exist_ok=True)
+        durations.write_text(json.dumps({**previous, **{labels[i]: r['seconds'] for i, r in rows.items()}},
                                         indent=1, sort_keys=True))
     except OSError:
         pass
