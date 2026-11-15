@@ -25,6 +25,12 @@ Review level (``policy``): every agent review, CI round and promotion records a 
 running dispatcher's review policy for the head. A level the dispatcher cannot review yet (2)
 sends the PR to agent:needs-human; an approval is promoted only if its receipt matches the one
 recomputed just before, otherwise a new review is needed.
+
+Findings (#110): every blocking finding has an owner, ``round/reviewer/ID``. Only its owner
+closes it in a later review; the dispatcher closes CI findings when CI passes on the current
+head, and a trusted user can close any finding with ``/devloop finding <key> resolved|withdrawn
+<reason>``. Both closures are dispatcher ``finding`` records. An approval is not promoted while
+another owner's finding is open.
 """
 
 import string
@@ -40,7 +46,8 @@ from .markdown import (RESUME, dispatcher_header, publishable, read_marker, rend
                        render_fix, render_native_review, render_review)
 from .policy import describe as describe_receipt
 from .policy import differences, evaluate, receipt_of, recorded_level
-from .review import ci_failure_review, normalize_review, open_findings
+from .review import (CI, FINDING_COMMAND, OPERATOR, ci_failure_review, finding_commands,
+                     finding_key, finding_state, normalize_review, open_findings, owner_of)
 from .workspace import WorkspaceError
 
 PROMPT_DIR = Path(__file__).resolve().parent / 'prompts'
@@ -58,6 +65,7 @@ LEVEL_LABEL_STYLE = ('5319e7', 'devloop: la PR richiede una review di livello 2'
 _RECEIPT_FIELDS = {'pr': 'PR', 'base': 'commit di base', 'head': 'head',
                    'policy': 'versione della policy', 'level': 'livello',
                    'reviewers': 'reviewer richiesti'}
+_CLOSED_TEXT = {'resolved': 'risolto', 'withdrawn': 'ritirato'}
 
 
 @dataclass
@@ -84,6 +92,11 @@ class PullRequest:
     # the latest review found that the approval's receipt no longer matches.
     policy: list = field(default_factory=list)
     stale_receipt: bool = False
+    # Findings (#110): closures the dispatcher recorded (``finding`` markers), closures asked by
+    # trusted users' commands and not recorded yet, and why some finding has no owner.
+    closures: list = field(default_factory=list)
+    commands: list = field(default_factory=list)
+    finding_problems: list = field(default_factory=list)
 
 
 @dataclass
@@ -124,6 +137,10 @@ def plan(snapshot, cfg):
             # e.g. a crash between creating the PR and labelling it
             actions.append(Action('reconcile', pr.number, 'devloop PR without a state label'))
             continue
+        if pr.finding_problems:
+            actions.append(Action('unattributable', pr.number,
+                                  'findings whose owner cannot be reconstructed'))
+            continue
         latest = pr.reviews[-1] if pr.reviews else None
         rounds_left = len(pr.reviews) < cfg.max_review_rounds
         if lb.ready_to_merge in pr.labels:
@@ -141,13 +158,26 @@ def plan(snapshot, cfg):
                 # recorded approval is replayed from agent:review, without a new review.
                 actions.append(Action('revoke', pr.number, 'CI pending on the approved commit'))
             continue
+        still_open = open_findings(pr.reviews, pr.closures)
+        ci_green = (lb.review in pr.labels and pr.checks == 'pass'
+                    and any(f['owner'] == CI for f in still_open))
+        if pr.commands or ci_green:
+            # Closures are recorded first; the next tick plans with them.
+            actions.append(Action('findings', pr.number, 'CI passed on the head' if ci_green
+                                  else 'operator command'))
+            continue
+        # A request for changes whose findings were all closed by CI or the operator: nothing
+        # is left to fix, and the head needs a new review.
+        settled = (latest is not None and latest['verdict'] == 'request_changes'
+                   and bool(pr.closures) and not still_open)
         if lb.changes in pr.labels:
-            actions.append(Action('fix', pr.number))
+            actions.append(Action('reconcile', pr.number, 'every open finding is closed')
+                           if settled else Action('fix', pr.number))
         elif lb.review in pr.labels:
             answered = latest is not None and any(f['round'] == latest['round'] for f in pr.fixes)
             # A trusted user's rereview request voids the recorded verdict for this head.
             replay = (latest is not None and latest['head_sha'] == pr.head_sha and not answered
-                      and not pr.rereview)
+                      and not pr.rereview and not settled)
             # An approval counts only with a policy receipt that still matched the last time
             # it was checked; one recorded before receipts existed needs a new review.
             unbound = replay and (receipt_of(latest) is None or pr.stale_receipt)
@@ -169,7 +199,9 @@ def plan(snapshot, cfg):
                 actions.append(Action('ci_failed', pr.number))
             else:
                 reason = ('new review requested by a trusted user' if pr.rereview
-                          else 'the approval has no matching policy receipt' if unbound else '')
+                          else 'the approval has no matching policy receipt' if unbound
+                          else 'every finding of the request for changes is closed' if settled
+                          else '')
                 actions.append(Action('review', pr.number, reason))
     free = cfg.max_open_prs - len(snapshot.prs)
     if free > 0:
@@ -254,23 +286,31 @@ def _format_findings(findings):
     lines = []
     for f in findings:
         where = f' ({f["file"]}{":" + str(f["line"]) if f["line"] > 0 else ""})' if f['file'] else ''
-        lines.append(f'- **{f["id"]}**{where}: {f["title"]}\n  {f["detail"]}'
+        lines.append(f'- **{f.get("key") or f["id"]}**{where}: {f["title"]}\n  {f["detail"]}'
                      + (f'\n  Suggested fix: {f["suggested_fix"]}' if f['suggested_fix'] else ''))
     return '\n'.join(lines) or '(none)'
 
 
-def format_previous_rounds(reviews, fixes):
+def format_previous_rounds(reviews, fixes, closures=()):
     if not reviews:
         return 'This is the first round.'
     parts = []
     for review in reviews:
+        owner = owner_of(review)
         parts.append(f'### Round {review["round"]}: {review["verdict"]} on {review["head_sha"][:12]}'
-                     f' ({review["source"]})\n\n{review["summary"]}\n\nBlocking findings:\n'
-                     + _format_findings(review['blocking_findings']))
+                     f' ({review["source"]}, reviewer {owner})\n\n{review["summary"]}\n\n'
+                     'Blocking findings:\n' + _format_findings(
+                         [dict(f, key=f.get('key') or finding_key(review['round'], owner, f['id']))
+                          for f in review['blocking_findings']]))
         for fix in fixes:
             if fix['round'] == review['round']:
                 parts.append('Implementer responses:\n' + '\n'.join(
                     f'- {r["finding_id"]}: {r["action"]}: {r["note"]}' for r in fix['responses']))
+    if closures:
+        parts.append('### Findings closed by CI or by the operator\n\n' + '\n'.join(
+            f'- {c["key"]}: {c["status"]} by '
+            + ('CI' if c['by'] == CI else f'the operator ({c["author"]})') + f': {c["reason"]}'
+            for c in closures))
     return '\n\n'.join(parts)
 
 
@@ -312,27 +352,79 @@ class Dispatcher:
         dispatcher, reviews from the agent named in the record, never the implementer."""
         return [record for _, record in self._marker_entries(pr, comments, kind)]
 
-    def _marker_entries(self, pr, comments, kind):
-        """``(position in comments, record)`` for each record ``_markers`` accepts."""
+    def _marker_entries(self, pr, comments, kind, problems=None):
+        """``(position in comments, record)`` for each record ``_markers`` accepts.
+
+        A review counts only if each finding key it carries is ``round/owner/ID`` of the review
+        itself. ``problems`` collects reviews that an identity allowed to write records wrote
+        but whose findings have no reconstructible owner: a review without a reviewer, or with
+        keys of another round or owner."""
         implementer = pr.meta.get('implementer')
         found = []
         for position, comment in enumerate(comments):
             record = read_marker(comment.get('body', ''), kind)
             if record is None:
                 continue
+            login = (comment.get('author') or {}).get('login')
             if kind == 'fix':
                 actor = implementer
-            elif kind == 'policy':
+            elif kind in ('policy', 'finding'):
                 actor = DISPATCHER
             elif record['source'] == 'ci':
                 actor = DISPATCHER
-            elif record.get('reviewer') == implementer:
+            elif not isinstance(record.get('reviewer'), str) or not record['reviewer']:
+                if problems is not None and self._writes_records(login):
+                    problems.append(f'la review del round {record["round"]} non registra il '
+                                    'reviewer')
+                continue
+            elif record['reviewer'] in (implementer, CI):
                 continue
             else:
-                actor = record.get('reviewer')
-            if actor and self._wrote((comment.get('author') or {}).get('login'), actor):
-                found.append((position, record))
+                actor = record['reviewer']
+            if not (actor and self._wrote(login, actor)):
+                continue
+            if kind == 'review':
+                owner = owner_of(record)
+                wrong = [f['key'] for f in record['blocking_findings']
+                         if 'key' in f and f['key'] != finding_key(record['round'], owner, f['id'])]
+                if wrong:
+                    if problems is not None:
+                        problems.append(f'la review del round {record["round"]} di `{owner}` '
+                                        'attribuisce finding ad altri: '
+                                        + ', '.join(f'`{k}`' for k in wrong))
+                    continue
+            found.append((position, record))
         return found
+
+    def _writes_records(self, login):
+        """Whether ``login`` may write some devloop record: an agent's, or the dispatcher's."""
+        return any(self._wrote(login, actor) for actor in (*self.cfg.agents, DISPATCHER))
+
+    def _finding_commands(self, pr, comments, state):
+        """Closures asked with ``FINDING_COMMAND`` lines and not recorded yet, one per open
+        finding, from comments trusted users wrote in person. A command from anyone else,
+        malformed, or naming a finding that never existed is ignored and logged; one naming a
+        finding already closed has nothing left to do."""
+        open_keys = {f['key'] for f in state.open}
+        pending = {}
+        for comment in comments:
+            body = comment.get('body') or ''
+            if body.lstrip().startswith('> [!NOTE]'):
+                continue  # text devloop or its agents published: never a command
+            login = (comment.get('author') or {}).get('login')
+            for line, parsed in finding_commands(body):
+                why = ('the author is not a trusted user' if login not in self.cfg.trusted_users
+                       else 'malformed, expected `/devloop finding <round/reviewer/ID> '
+                            'resolved|withdrawn <reason>`' if parsed is None
+                       else 'no such finding' if parsed[0] not in state.known else None)
+                if why:
+                    self.log(f'  PR #{pr.number}: ignored `{line[:120]}` by {login}: {why}')
+                    continue
+                key, status, reason = parsed
+                if key in open_keys and key not in pending:
+                    pending[key] = {'key': key, 'status': status, 'by': OPERATOR,
+                                    'author': login, 'reason': reason, 'head_sha': pr.head_sha}
+        return list(pending.values())
 
     def _devloop_pr(self, raw):
         """A devloop PR is recognised by its branch, ``<branch_prefix><issue>``, so that it stays
@@ -369,10 +461,16 @@ class Dispatcher:
                 continue
             if pr.meta and pr.labels & {lb.review, lb.changes, lb.ready_to_merge}:
                 comments = self.gh.pr_comments(pr.number)
-                entries = sorted(self._marker_entries(pr, comments, 'review'),
+                problems = []
+                entries = sorted(self._marker_entries(pr, comments, 'review', problems),
                                  key=lambda e: (e[1]['round'], e[0]))
                 pr.reviews = [record for _, record in entries]
                 pr.fixes = self._markers(pr, comments, 'fix')
+                pr.closures = [c for record in self._markers(pr, comments, 'finding')
+                               for c in record['closed']]
+                state = finding_state(pr.reviews, pr.closures)
+                pr.finding_problems = problems + state.problems
+                pr.commands = self._finding_commands(pr, comments, state)
                 policy = self._marker_entries(pr, comments, 'policy')
                 pr.policy = [record for _, record in policy]
                 if entries:
@@ -562,11 +660,16 @@ class Dispatcher:
             'policy ricalcolata coincide con quella della review.', current, 'promoted')
         self.gh.edit_labels(pr.number, add=[lb.ready_to_merge], remove=[lb.review, lb.changes])
 
-    def _apply_verdict(self, pr, review, announce):
+    def _apply_verdict(self, pr, review, announce, reviews):
+        """``reviews``: every review of the PR up to ``review`` included."""
         lb = self.cfg.labels
         transient = [lb.review, lb.changes, lb.ready_to_merge]
         if review['verdict'] == 'approve':
-            if self._approval_current(pr, review):
+            left = open_findings(reviews, pr.closures)
+            if left:
+                # Another owner's finding: this approval does not close it.
+                self._escalate(pr.number, _open_findings_reason(left), remove=transient)
+            elif self._approval_current(pr, review):
                 self._promote(pr, review)
         elif review['verdict'] == 'needs_human':
             self.gh.edit_labels(pr.number, add=[lb.needs_human], remove=transient)
@@ -610,7 +713,44 @@ class Dispatcher:
         self.gh.edit_labels(number, remove=[self.cfg.labels.working])
 
     def _do_reconcile(self, pr):
-        self.gh.edit_labels(pr.number, add=[self.cfg.labels.review])
+        self.gh.edit_labels(pr.number, add=[self.cfg.labels.review],
+                            remove=[self.cfg.labels.changes])
+
+    def _do_findings(self, pr):
+        """Record the closures of open findings: those trusted users asked for, and the CI
+        findings once CI passes on the PR's current head."""
+        closed = list(pr.commands)
+        ci = [f for f in open_findings(pr.reviews, pr.closures) if f['owner'] == CI]
+        if ci and self.cfg.labels.review in pr.labels and pr.checks == 'pass':
+            if self.gh.pr_head(pr.number) != pr.head_sha:
+                self.log('  head moved since the snapshot; CI findings stay open')
+            else:
+                closed += [{'key': f['key'], 'status': 'resolved', 'by': CI,
+                            'author': self._app_login(DISPATCHER) or 'devloop dispatcher',
+                            'reason': f'CI verde sul commit {pr.head_sha[:12]}',
+                            'head_sha': pr.head_sha} for f in ci]
+        if not closed:
+            return
+        lines = []
+        for c in closed:
+            who = 'la CI' if c['by'] == CI else f'l\'operatore `{c["author"]}`'
+            lines.append(f'- `{c["key"]}`: {_CLOSED_TEXT[c["status"]]} da {who}: '
+                         + ' '.join(c['reason'].split()))
+        self.gh.comment(pr.number, publishable(
+            dispatcher_header() + '\n## Finding chiusi\n\n' + '\n'.join(lines)
+            + '\n\nDa ora questi finding sono chiusi: nessuna review successiva li riapre.',
+            'finding', {'closed': closed}))
+        pr.closures = pr.closures + closed
+        pr.commands = []
+
+    def _do_unattributable(self, pr):
+        lb = self.cfg.labels
+        self._escalate(pr.number, 'Non è possibile ricostruire il proprietario di alcuni finding '
+                                  'dai marker di questa PR, quindi devloop non sa chi può '
+                                  'chiuderli e non prosegue: la review e la decisione sul merge '
+                                  'spettano a una persona.\n\n'
+                       + '\n'.join(f'- {p}' for p in pr.finding_problems),
+                       remove=[lb.review, lb.changes, lb.ready_to_merge])
 
     def _do_lost_meta(self, pr):
         lb = self.cfg.labels
@@ -677,15 +817,15 @@ class Dispatcher:
             return self._escalate_level(pr, receipt)
         log_tail = '\n'.join(self.gh.failed_log(run) for run in pr.failed_runs[:2])
         review = ci_failure_review(failed_checks=pr.failed_checks, log_tail=log_tail,
-                                   previous_open=open_findings(pr.reviews),
+                                   previous_open=open_findings(pr.reviews, pr.closures),
                                    round_no=len(pr.reviews) + 1,
                                    max_rounds=self.cfg.max_review_rounds, head_sha=pr.head_sha)
         review['receipt'] = receipt
         self.gh.comment(pr.number, render_review(review, dispatcher_header()))
-        self._apply_verdict(pr, review, announce=True)
+        self._apply_verdict(pr, review, announce=True, reviews=pr.reviews + [review])
 
     def _do_apply_review(self, pr):
-        self._apply_verdict(pr, pr.reviews[-1], announce=False)
+        self._apply_verdict(pr, pr.reviews[-1], announce=False, reviews=pr.reviews)
 
     def _reviewer_key(self, pr):
         """The PR's recorded reviewer, else the configured one; never the PR's implementer, even
@@ -717,7 +857,7 @@ class Dispatcher:
             self.log('  head moved since the snapshot; retrying next tick')
             return
         round_no = len(pr.reviews) + 1
-        previous_open = open_findings(pr.reviews)
+        previous_open = open_findings(pr.reviews, pr.closures)
         prompt = _template('review', repo=cfg.repo, base_branch=cfg.base_branch,
                            pr_number=pr.number, round=round_no, max_rounds=cfg.max_review_rounds,
                            implementer=pr.meta.get('implementer', cfg.implementer),
@@ -725,7 +865,7 @@ class Dispatcher:
                            issue_number=pr.issue, issue_title=issue['title'],
                            issue_body=issue.get('body') or '', pr_body=pr.body,
                            diff_stat=self.ws.diff_stat(path),
-                           previous=format_previous_rounds(pr.reviews, pr.fixes),
+                           previous=format_previous_rounds(pr.reviews, pr.fixes, pr.closures),
                            operator_comments=format_operator_comments(pr),
                            language=cfg.language)
         # The reviewer works in a disposable copy, where its tests may write; the PR worktree
@@ -752,7 +892,7 @@ class Dispatcher:
                                           **render_native_review(review, self.runner.header(agent)))
             except GitHubError as exc:
                 self.log(f'  native review not submitted: {exc}')
-        self._apply_verdict(pr, review, announce=True)
+        self._apply_verdict(pr, review, announce=True, reviews=pr.reviews + [review])
         self.ws.remove(name)
         self.log(f'  verdict: {review["verdict"]}')
 
@@ -762,7 +902,7 @@ class Dispatcher:
             return self._escalate(pr.number, 'Modifiche richieste ma nessuna review devloop da '
                                              'correggere.', remove=[lb.changes])
         latest = pr.reviews[-1]
-        findings = open_findings(pr.reviews)
+        findings = open_findings(pr.reviews, pr.closures)
         if not findings:
             return self._escalate(pr.number, 'Modifiche richieste ma nessun finding aperto.',
                                   remove=[lb.changes])
@@ -887,6 +1027,17 @@ class Dispatcher:
         self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.ready_to_merge, lb.changes])
         self.ws.remove(name)
         self.log(f'  merged {base} into {pr.head_ref}: {head[:12]}')
+
+
+def _open_findings_reason(findings):
+    """Why an approval is not promoted while other owners' findings are open."""
+    listed = '\n'.join(f'- `{f["key"]}` ({f["title"]})' for f in findings)
+    return ('L\'approvazione non chiude i finding aperti da altri: un finding lo chiude solo il '
+            'reviewer che l\'ha aperto, la CI verde (per i finding `ci`) o l\'operatore. Restano '
+            f'aperti:\n\n{listed}\n\nUn utente fidato può chiuderli con un commento sulla PR '
+            f'che contiene una riga `{FINDING_COMMAND} <round/reviewer/ID> resolved|withdrawn '
+            '<motivazione>`, poi riportare la PR in `agent:review`: l\'approvazione registrata '
+            'viene riapplicata senza una nuova review.')
 
 
 def _format_conflicts(conflicts):

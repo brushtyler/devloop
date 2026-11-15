@@ -198,7 +198,7 @@ class MarkdownTests(unittest.TestCase):
         record = norm(raw_review('request_changes', [finding()]))
         body = markdown.render_review(record, markdown.header('Claude Code', '1.0', 'M', 'high'))
         self.assertTrue(body.startswith('> [!NOTE]\n> **Agent:** Claude Code (CLI v1.0)'))
-        self.assertIn('**R1-1** `x.py:3`: bug', body)
+        self.assertIn(f'**1/{REV}/R1-1** `x.py:3`: bug', body)
         self.assertEqual(markdown.read_marker(body, 'review'), record)
 
 

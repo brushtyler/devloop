@@ -26,7 +26,8 @@ Return only the structured result:
 - `status`: `completed` or `blocked`.
 - `summary`: what you changed, in $language.
 - `commit_message`: subject line plus an optional body. Do not add trailers.
-- `responses`: one entry per open finding, with `finding_id`, `action` (`fixed`, `disputed`
+- `responses`: one entry per open finding, with `finding_id` (its identifier as listed below,
+  for example `2/codex/R2-1`), `action` (`fixed`, `disputed`
   or `not_applicable`) and a short `note` in $language.
 - `blocked_reason`: empty unless `status` is `blocked`.
 

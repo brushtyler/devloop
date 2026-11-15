@@ -17,7 +17,7 @@ plans the next steps and runs them. A crashed tick is resumed by the next one.
 | Review | CI passed or absent | The dispatcher computes the PR's [review level](#review-level-and-policy-receipt); at level 1 a **different** agent posts a structured verdict (see below), at level 2 the PR goes to `agent:needs-human` |
 | Fix | `agent:changes` | The implementer fixes or disputes each open finding, then back to `agent:review` |
 | Sync | A PR in `agent:review` or `agent:ready-to-merge` conflicts with `main` | The implementer resolves the conflicts of a merge of `origin/main`; the dispatcher pushes the merge commit, back to `agent:review` (see below) |
-| Approve | Verdict `approve` | `agent:ready-to-merge`, only if the PR head is still the reviewed commit, CI passed and the policy receipt recomputed just before promotion matches the approval's |
+| Approve | Verdict `approve` | `agent:ready-to-merge`, only if no [finding](#findings-and-who-closes-them) is still open, the PR head is still the reviewed commit, CI passed and the policy receipt recomputed just before promotion matches the approval's |
 | Merge | `agent:ready-to-merge` | **A human merges.** devloop never merges |
 
 Readiness belongs to the approved commit. Every tick re-checks ready PRs:
@@ -62,7 +62,8 @@ comment that lists the files in conflict and their commits.
 
 Any step can stop at `agent:needs-human` with a comment explaining why: the agent declared itself
 blocked, tests still fail after the retry, the reviewer asked for a decision, the round limit
-was reached, the review level is 2, a sync with `main` failed, an agent, `gh` or `git` call failed or timed out, an agent
+was reached, the review level is 2, an approval left open a finding of another owner, the
+owner of a finding cannot be reconstructed from the markers, a sync with `main` failed, an agent, `gh` or `git` call failed or timed out, an agent
 stalled with `agent_stall_action = "abort"` (see [Stalled agents](#stalled-agents)), the issue text was changed by an
 untrusted user after `agent:ready`, or the PR body lost its marker. While `agent:needs-human` is
 set devloop ignores the PR or issue, so to resume: fix the cause, **remove `agent:needs-human`**
@@ -176,6 +177,60 @@ Findings get stable ids (`R<round>-<n>`). The fix step answers each one (`fixed`
 `not_applicable`), and the next round sees those answers. The comment shows the review in
 readable form and carries the full record in a hidden base64 marker for the next tick.
 
+### Findings and who closes them
+
+Every blocking finding has an owner, the reviewer that opened it, and its identity is the triple
+`round/reviewer/ID`, for example `2/codex/R2-1`. The key is recorded in the review marker; a
+review whose keys name another round or another owner is not accepted, and the PR goes to
+`agent:needs-human` (#110). A CI round is
+a review of the reviewer `ci`. A finding stays open until one of these closes it:
+
+| Who | How |
+|---|---|
+| The reviewer that opened it | `resolved` or `withdrawn` in one of its later reviews |
+| The dispatcher, for a `ci` finding | Automatically, when CI passes on the PR's current head (the same commit that failed after a re-run, or a later one) |
+| The operator | The `/devloop finding` command below |
+
+Another reviewer's assessment does not close a finding: it is recorded in its review, with a
+note, and the finding stays open. So an `approve` that leaves another owner's finding open is
+not promoted: the PR goes to `agent:needs-human` with a comment that lists the open findings.
+Once the operator has closed them, putting the PR back into `agent:review` applies the recorded
+approval again, without a new review. The round count does not change.
+
+The closures made by CI and by the operator are dispatcher comments with a `finding` marker,
+read only from the dispatcher's identity: each entry records the key, `resolved` or
+`withdrawn`, who closed it (`ci` or `operator`, with the author), the reason and the head. A
+closed finding stays closed. When they close every finding of a request for changes, the PR
+goes back to `agent:review` and the head gets a new review. The tick that records closures
+does nothing else on that PR; the next tick continues with them.
+
+#### Closing a finding as the operator
+
+A user in `trusted_users` comments on the PR with a line:
+
+```text
+/devloop finding 2/codex/R2-1 resolved|withdrawn <reason>
+```
+
+The line can be anywhere in the comment, and a comment can hold more than one. The dispatcher
+recognises it, as it recognises `/devloop rereview`, and records the closure with the author
+and the reason; from then on the finding is closed. The reason is required. A command from
+anyone outside `trusted_users`, malformed, or naming a finding that does not exist is ignored
+and written to the dispatcher log; one naming a finding already closed has no effect. Text
+devloop publishes is never a command. devloop reads the comments of a PR only while it is in
+`agent:review`, `agent:changes` or `agent:ready-to-merge`: a command written while the PR is in
+`agent:needs-human` takes effect once the label is back.
+
+#### Markers written before #110
+
+Review markers written before finding keys existed are read with the rules of their time: the
+rounds and the findings still open are kept, and each finding is attributed to the reviewer
+recorded in the marker of the round that opened it (`ci` for CI rounds). From the first keyed
+review on, only the owner, CI or the operator closes them. When the owner cannot be
+reconstructed (a review marker without a reviewer, or one that leaves open a finding whose
+round is unknown), the PR goes to `agent:needs-human` with a comment that lists the problem:
+the review and the decision on the merge are up to a person.
+
 Markers are control records, while the rest of each comment is text written by a model, and both
 are published by the same account. So the dispatcher neutralizes HTML comments in all published
 text, and reads a marker only from the last line of a comment, of the expected kind and with a
@@ -198,7 +253,7 @@ Each agent and the dispatcher can act on GitHub with its own GitHub App (#65), c
 
 | Actor | Does |
 |---|---|
-| dispatcher | every read, labels, escalations, CI rounds, readiness |
+| dispatcher | every read, labels, escalations, CI rounds, finding closures, readiness |
 | implementer | commits (author and committer are its bot), push, opens the PR, fix and blocked comments |
 | reviewer | the review comment and a native GitHub review (`APPROVE`, `REQUEST_CHANGES` or `COMMENT`) on the reviewed commit |
 
@@ -210,8 +265,8 @@ cannot push; labels are always set by the dispatcher.
 
 Records are bound to identities. A PR counts as a devloop PR with its marker only if it was opened
 by the app of the implementer the marker names; a review counts only if its comment was written by
-the app of the reviewer named in it, and never by the PR's implementer; a CI round only from the
-dispatcher's app; a fix only from the implementer's app. `trusted_users` stays for people: it
+the app of the reviewer named in it, and never by the PR's implementer; a CI round and a finding
+closure only from the dispatcher's app; a fix only from the implementer's app. `trusted_users` stays for people: it
 decides who can start work with `agent:ready`, and it cannot contain bots.
 
 The native review mirrors the verdict for GitHub and branch protection; devloop itself reads only
