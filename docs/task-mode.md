@@ -78,7 +78,7 @@ The planner returns a structured plan (`schemas/plan.schema.json`), which an ind
 - All reservations persist. Exhaustion stops the session; it never approves.
 
 **Stops**
-- Three consecutive reviews that keep the same blocking IDs stop as `STAGNATION`. The session counts these passes without progress: a review whose open blocking IDs equal those of the previous review adds one, a review with a different set (or none) resets the count to 0. The limit is 2 passes, that is three identical sets in a row. The counter (`no_progress` in `session.json` and on each attempt) survives resume, and appears in the `TASK_PLAN_GATE` details and in the `STAGNATION` stop message. It is separate from the repair allowances, `REPAIR_STALLED`, feedback `max_rounds` and `gate_round_ceiling`.
+- Three consecutive reviews that keep the same blocking IDs stop as `STAGNATION`. The session counts these passes without progress: a review whose open blocking IDs equal those of the previous review adds one, a review with a different set (or none) resets the count to 0. The limit is 2 passes, that is three identical sets in a row. The counter (`no_progress` in `session.json` and on each attempt) survives resume, and appears in the `TASK_PLAN_GATE` details (passed or failed, for example after exhausted repairs) and in the `STAGNATION` stop message. It is separate from the repair allowances, `REPAIR_STALLED`, feedback `max_rounds` and `gate_round_ceiling`.
 - A missing environment prerequisite stops as `ENVIRONMENT_PREREQUISITE`.
 - Invalid reviewer output gets one correction on the same candidate, then stops as `REVIEW_PROTOCOL`.
 

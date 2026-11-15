@@ -3405,7 +3405,15 @@ class SSDLCOrchestrator:
                 initial = previous_candidate.read_text()
             plan = repair.run(initial_candidate=initial)
         except PlanError as exc:
-            self.record_gate("TASK_PLAN_GATE", False, str(exc))
+            details = str(exc)
+            try:
+                counter = repair.no_progress()
+            except (OSError, ValueError):
+                counter = None  # The failure may concern the session evidence itself.
+            # STAGNATION already reports the counter in its message.
+            if counter and describe_no_progress(counter) not in details:
+                details += '; ' + describe_no_progress(counter)
+            self.record_gate("TASK_PLAN_GATE", False, details)
             raise
         for path in sorted(repair.root.glob("*")):
             if path.is_file():
