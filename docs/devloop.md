@@ -132,9 +132,12 @@ repositories (`GIT_ALLOW_PROTOCOL=file`), so neither SSH keys nor HTTPS credenti
 the config files say; credential helpers, askpass programs, preconfigured authentication headers
 and SSH are disabled as further layers. `DEVLOOP_APP_KEY_DIR` points to a directory without keys,
 so the GitHub App helpers in the worktree (`devloop.apps`, `scripts/agent-token.py`) cannot mint a
-token: the dispatcher does every GitHub write. Claude Code caps each Bash command at ten minutes by
-default; devloop raises `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` to `test_timeout_seconds`
-unless the operator set them. This prevents accidental use of the operator's credentials, not
+token: the dispatcher does every GitHub write. For Claude Code, devloop sets `BASH_MAX_TIMEOUT_MS`
+to `test_timeout_seconds`, so a command that asks for it can run the full suite, and
+`BASH_DEFAULT_TIMEOUT_MS` to `agent_command_timeout_seconds` (default ten minutes, at most
+`test_timeout_seconds`), so a command that sets no timeout, such as a wait loop that never ends,
+stops on its own instead of holding the turn for an hour. Values the operator set in the
+environment are kept. This prevents accidental use of the operator's credentials, not
 deliberate access: code running as the same system user can still read files. Real isolation
 needs a dedicated system user or a container.
 
