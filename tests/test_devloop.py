@@ -231,11 +231,16 @@ class ReviewNormalizationTests(unittest.TestCase):
 
 
 class AgentCommandTests(unittest.TestCase):
-    def test_review_mode_is_read_only_for_every_kind(self):
+    def test_review_mode_cannot_edit_or_reach_the_network(self):
+        # Issue #85: codex reviews in a disposable copy (Workspace.review_copy) with
+        # workspace-write, so tests can write temporary files; network off, no extra roots.
         schema_file = schema.schema_path('review')
         codex, _ = agents.build_command(CFG.agent('codex'), 'review', 'p',
                                         schema_file=schema_file, out_file='o')
-        self.assertEqual(codex[codex.index('-s') + 1], 'read-only')
+        self.assertEqual(codex[codex.index('-s') + 1], 'workspace-write')
+        overrides = [codex[i + 1] for i, arg in enumerate(codex) if arg == '-c']
+        self.assertIn('sandbox_workspace_write.network_access=false', overrides)
+        self.assertIn('sandbox_workspace_write.writable_roots=[]', overrides)
         self.assertEqual(codex[-1], '-')
         agy, stdin = agents.build_command(CFG.agent('agy'), 'review', 'p',
                                           schema_file=schema_file, out_file='o')
@@ -252,6 +257,7 @@ class AgentCommandTests(unittest.TestCase):
         codex, _ = agents.build_command(CFG.agent('codex'), 'write', 'p',
                                         schema_file='s', out_file='o')
         self.assertEqual(codex[codex.index('-s') + 1], 'workspace-write')
+        self.assertNotIn('sandbox_workspace_write.writable_roots=[]', codex)
         self.assertIn('model_reasoning_effort="medium"', codex)
         claude, _ = agents.build_command(CFG.agent('claude'), 'write', 'p',
                                          schema_file=schema.schema_path('fix'), out_file='o')
@@ -706,11 +712,19 @@ class FakeWS:
         self.auths = []
         self.spans = []
         self.removed = []
+        self.touched = False  # a reviewer wrote to the PR worktree
 
     def new_branch(self, name, branch):
         return Path('/wt') / name
 
     existing_branch = new_branch
+
+    def review_copy(self, path):
+        name = f'{Path(path).name}-review'
+        return name, Path('/wt') / name
+
+    def pristine(self, path, head):
+        return not self.touched and self._head == head
 
     def head(self, path):
         return self._head
@@ -746,9 +760,11 @@ class FakeRunner:
     def __init__(self, *outputs):
         self.outputs = list(outputs)
         self.calls = []
+        self.workdirs = []
 
     def run(self, agent, mode, prompt, schema_name, workdir, label):
         self.calls.append((agent.key, mode, schema_name, prompt))
+        self.workdirs.append(workdir)
         out = self.outputs.pop(0)
         if isinstance(out, Exception):
             raise out
@@ -895,6 +911,27 @@ class DispatcherTests(unittest.TestCase):
         d._do_review(p)
         self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
         self.assertIn('limite di 3 round', self.gh.comments[-1][1])
+
+    def test_review_runs_in_a_disposable_copy(self):
+        runner = FakeRunner(raw_review())
+        d = self.make(runner)
+        d._do_review(pr())
+        self.assertEqual(runner.workdirs, [Path('/wt/pr-100-review')])
+        self.assertEqual(self.ws.removed, ['pr-100-review', 'pr-100'])
+
+    def test_review_is_discarded_if_the_pr_worktree_changed(self):
+        for failure in (None, agents.AgentError('boom')):
+            with self.subTest(failure=failure):
+                ws = FakeWS()
+                ws.touched = failure is None
+                d = self.make(FakeRunner(failure or raw_review()), ws)
+                p = pr()
+                self.gh.labels[100] = set(p.labels)
+                with self.assertRaises(WorkspaceError if failure is None else agents.AgentError):
+                    d._do_review(p)
+                self.assertEqual(ws.removed, ['pr-100-review'])  # copy gone, PR worktree kept
+                self.assertEqual(self.gh.comments, [])
+                self.assertEqual(self.gh.labels[100], {'agent:review'})
 
     def test_review_skips_when_head_moved(self):
         runner = FakeRunner(raw_review())
@@ -1424,6 +1461,78 @@ class CredentialIsolationTests(unittest.TestCase):
         self.assertEqual(ws.changed_files('/wt'), ['a.py', '.github/workflows/x.yml'])
         self.assertIn('origin/main...HEAD', calls[-1])
         self.assertIn('-z', calls[-1])
+
+    def test_review_leaves_the_pr_worktree_untouched(self):
+        # Issue #85: the reviewer and its tests write in a disposable copy of the PR worktree;
+        # the PR worktree is checked after the review, and a change to it discards the verdict.
+        test = self
+
+        class WritingReviewer(FakeRunner):
+            def __init__(self, target=None):
+                super().__init__(raw_review())
+                self.target = target
+
+            def run(self, agent, mode, prompt, schema_name, workdir, label):
+                base = subprocess.run(['git', 'rev-parse', 'origin/main'], cwd=workdir,
+                                      capture_output=True, text=True, check=True).stdout.strip()
+                test.assertEqual(base, head)  # `git diff origin/main...HEAD` works in the copy
+                for where in filter(None, (Path(workdir), self.target)):
+                    (where / 'a.py').write_text('changed\n')
+                    (where / 'new.txt').write_text('untracked\n')
+                    (where / '__pycache__').mkdir(exist_ok=True)
+                    (where / '__pycache__' / 'a.pyc').write_text('ignored\n')
+                return super().run(agent, mode, prompt, schema_name, workdir, label)
+
+        for writes_pr_worktree in (False, True):
+            with self.subTest(writes_pr_worktree=writes_pr_worktree), \
+                    tempfile.TemporaryDirectory() as tmp:
+                (Path(tmp) / '.gitignore').write_text('__pycache__/\n.state/\n')
+                (Path(tmp) / 'a.py').write_text('a\n')
+                self.git('init', '-q', cwd=tmp)
+                self.git('add', '-A', cwd=tmp)
+                self.git('-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'c',
+                         cwd=tmp)
+                self.git('update-ref', 'refs/remotes/origin/main', 'HEAD', cwd=tmp)
+                head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=tmp, capture_output=True,
+                                      text=True, check=True).stdout.strip()
+                ws = Workspace(tmp, '.state', 'main')
+                path = ws.path('pr-100')
+
+                def existing_branch(name, branch):  # no remote to fetch from
+                    self.git('worktree', 'add', '-q', '--detach', str(ws.path(name)), head,
+                             cwd=tmp)
+                    return ws.path(name)
+                ws.existing_branch = existing_branch
+                runner = WritingReviewer(path if writes_pr_worktree else None)
+                gh = FakeGH()
+                p = pr(head=head)
+                gh.labels[100] = set(p.labels)
+                d = Dispatcher(CFG, gh, ws, runner, log=lambda m: None)
+                if writes_pr_worktree:
+                    with self.assertRaisesRegex(WorkspaceError, 'changed during the review'):
+                        d._do_review(p)
+                    self.assertEqual(gh.comments, [])
+                    self.assertFalse(ws.pristine(path, head))
+                else:
+                    d._do_review(p)
+                    self.assertEqual(len(gh.comments), 1)
+                    self.assertFalse(path.exists())  # reviewed, checked, then removed
+                self.assertEqual(runner.workdirs, [ws.path('pr-100-review')])
+                self.assertFalse(ws.path('pr-100-review').exists())
+
+    def test_pristine_sees_any_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / '.gitignore').write_text('*.pyc\n')
+            self.git('init', '-q', cwd=tmp)
+            self.git('add', '-A', cwd=tmp)
+            self.git('-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'c',
+                     cwd=tmp)
+            ws = Workspace(tmp, '.state', 'main')
+            head = ws.head(tmp)
+            self.assertTrue(ws.pristine(tmp, head))
+            self.assertFalse(ws.pristine(tmp, '0' * 40))
+            (Path(tmp) / 'x.pyc').write_text('ignored')
+            self.assertFalse(ws.pristine(tmp, head))
 
 
 class ActingAs:
