@@ -143,6 +143,37 @@ class PhaseBoundaryTests(RepositoryTests):
         self.assertEqual(orch.state['gate_history'][-1]['gate'], 'TASK_EXECUTION_GATE')
         self.assertNotEqual(orch.state['status'], o.PAUSED_AT_PHASE_BOUNDARY)
 
+    def test_resume_from_review_rejects_missing_or_altered_task_evidence(self, _runtime):
+        for tamper in ('delete', 'alter'):
+            with self.subTest(tamper=tamper):
+                self.doCleanups()
+                self.setUp()
+                self.pause()
+                tasks_dir = self.orch.dir_dev / 'tasks'
+                journal = o.TaskJournal(tasks_dir).peek()
+                log = tasks_dir / journal['tasks']['T1']['checks'][0]['log_ref']
+                self.assertTrue(log.is_file())
+                if tamper == 'delete':
+                    log.unlink()
+                else:
+                    log.write_text(log.read_text() + 'tampered\n')
+                orch = self.make_orchestrator()
+                review, qa, appsec = self.gates(orch)
+                with patch('orchestrator.EngineRunner.run_codex', side_effect=AssertionError('provider called')), \
+                        patch('orchestrator.EngineRunner.run_sandboxed_cmd', side_effect=AssertionError('verifier called')), \
+                        review as review, qa as qa, appsec as appsec:
+                    with self.assertRaisesRegex(TaskError, 'evidence changed'):
+                        orch.run_pipeline('Scoped goal', from_phase='04-review')
+                    review.assert_not_called()
+                    qa.assert_not_called()
+                    appsec.assert_not_called()
+                after = o.TaskJournal(tasks_dir).peek()
+                # Journal (attempts, counters, status) untouched; failure recorded by the same wrapper.
+                self.assertEqual(after, journal)
+                self.assertEqual(orch.state['failure']['phase'], '03-dev')
+                self.assertEqual(orch.state['gate_history'][-1]['gate'], 'TASK_EXECUTION_GATE')
+                self.assertNotEqual(orch.state['status'], 'AWAITING_SUPERVISOR_SIGNOFF')
+
     def test_resume_from_review_requires_a_pause_and_a_valid_range(self, _runtime):
         with self.assertRaisesRegex(TaskError, 'paused at the preceding phase boundary'):
             o._resume_run_refusal(self.orch.ssdlc_root, self.orch.state, '04-review')

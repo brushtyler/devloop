@@ -5596,6 +5596,11 @@ To **REJECT** and record feedback (free text authorizes no repair):
             current = self._phase_boundary_checkpoint()
             if recovered or current['verified_head'] != paused.get('verified_head'):
                 raise TaskError('Paused phase boundary no longer matches the verified task checkpoint')
+            # Same native completed-task evidence validation as a 03-dev resume,
+            # without developer dispatch or counter changes.
+            scheduler, ordered = self._make_task_scheduler()
+            self.state.update(current_phase='03-dev', current_step='phase-boundary')
+            scheduler.run(ordered, verify_captured_only=True)
             self.state.update(status='IN_PROGRESS')
             self._save_state()
         quality_path = self.ssdlc_root / '00-recon' / 'quality-contract.json'
