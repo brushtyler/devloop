@@ -25,10 +25,18 @@ import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-WORKER_BOOT = ('import runpy, sys, unittest; '
-               'children = list(unittest.defaultTestLoader.discover("tests")); '
-               'sys.argv = sys.argv[1:]; '
-               'sys.exit(runpy.run_path(sys.argv[0])["worker_main"](sys.argv[1:], children))')
+# After the discover the boot loads this file with the builtins open, compile and exec only:
+# runpy, importlib.util and the like would import modules (pkgutil, ...) that tests/ can shadow.
+WORKER_BOOT = '\n'.join([
+    'import sys, unittest',
+    'children = list(unittest.defaultTestLoader.discover("tests"))',
+    'sys.argv = sys.argv[1:]',
+    'with open(sys.argv[0], encoding="utf-8") as fh:',
+    '    source = fh.read()',
+    'runner = {"__name__": "run_tests_worker", "__file__": sys.argv[0]}',
+    'exec(compile(source, sys.argv[0], "exec"), runner)',
+    'sys.exit(runner["worker_main"](sys.argv[1:], children))',
+])
 
 
 def discover():

@@ -191,6 +191,27 @@ class RunTestsEquivalenceTests(unittest.TestCase):
         self.assertEqual(parallel.returncode, 0, parallel.stdout)
         self.assertEqual(ran(parallel.stdout), ran(serial.stderr))
 
+    def test_the_worker_imports_nothing_after_its_discover(self):
+        # Review of #89: the worker loaded the runner with runpy, which imports pkgutil after the
+        # discover, so an unused tests/pkgutil.py broke the worker but not the serial discover.
+        # The other names are the modules the main process imports, also unused by the tests.
+        shadowed = ['pkgutil', 'runpy', 'json', 'argparse', 'ast', 'subprocess', 'tempfile',
+                    'threading', 'pathlib']
+        root = self.project({
+            **{f'tests/{name}.py': 'BROKEN = True\n' for name in shadowed},
+            'tests/test_plain.py': '''
+                import unittest
+                class T(unittest.TestCase):
+                    def test_ok(self):
+                        pass
+            ''',
+        })
+        serial, parallel = self.both(root)
+        self.assertEqual(serial.returncode, 0, serial.stderr)
+        self.assertEqual(parallel.returncode, 0, parallel.stdout)
+        self.assertEqual(ran(parallel.stdout), ran(serial.stderr))
+        self.assertEqual(ran(serial.stderr), 1)
+
     def test_no_tests_is_not_a_success(self):
         # Codex review of #75, round 3: like `python3 -m unittest`, running nothing exits with 5.
         root = self.project({'tests/test_empty.py': 'import unittest\n'})
