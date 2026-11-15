@@ -145,17 +145,39 @@ needs a dedicated system user or a container.
 
 ```bash
 python3 -m devloop setup            # create the agent:* labels
-python3 -m devloop status           # devloop PRs, ready issues, planned actions
+python3 -m devloop status           # running action, devloop PRs, ready issues, planned actions
 python3 -m devloop apps             # check the GitHub App of each actor
 python3 -m devloop tick --dry-run   # print the plan, change nothing
 python3 -m devloop tick             # run one round
 python3 -m devloop run --interval 600
 python3 -m devloop cleanup          # remove worktrees left by failed steps
+python3 -m devloop follow issue-52  # follow live the implementer of issue #52 (pr-<N>: reviewer or fixer)
 ```
 
 Run it from any checkout of this repository. Worktrees, agent prompts and logs, and the lock that
 prevents two dispatchers from running at once live under `state_dir` (default `.ssdlc/devloop`)
 in the main checkout.
+
+### Watching a tick
+
+While a tick runs an action it records it in `state_dir/activity.json`: the action, the issue or
+PR, the agent and the path of its prompt once an agent turn starts, the start time and the
+dispatcher's process id. The record is removed when the action ends, also when it fails.
+`devloop status` shows it first, with how long it has been running. If no dispatcher holds the
+lock, or the recorded process is gone, the action is reported as `interrupted`: the tick was
+killed before it could clean up, and the next tick overwrites the record when it starts an action.
+
+devloop writes an agent's log only when its turn ends. To follow the agent while it works,
+`devloop follow issue-<N>` (implementer) or `devloop follow pr-<N>` (reviewer or fixer) prints
+the messages and tool calls of the newest Claude (`~/.claude/projects`) or Codex
+(`~/.codex/sessions`) session transcript whose working directory is that worktree, then keeps
+following it, and switches to a newer transcript of the same worktree when one appears, for
+example the next attempt of a turn. The reviewer works in a disposable copy of the PR worktree,
+`pr-<N>-review`, so `devloop follow pr-<N>` looks at both and follows the newest session: the
+reviewer's while a review runs, the fixer's while a fix runs. It reads local files only and needs no GitHub access. Ctrl-C
+stops it. Antigravity sessions are not supported. For this reason devloop runs `codex exec`
+without `--ephemeral`: Codex saves the session of every turn in `~/.codex/sessions`, and these
+transcripts stay there after the turn.
 
 ### Run from a pinned installation
 
