@@ -194,6 +194,38 @@ class Workspace:
         out = self._git('diff', '--name-only', '-z', '--no-renames', span, cwd=path)
         return [name for name in out.split('\0') if name]
 
+    def review_diff(self, branch):
+        """``(base, head, changes)`` for the review policy: the latest base branch commit, the
+        pushed head of ``branch``, and every path of the branch's full diff against the base
+        (from their merge base, as GitHub shows it).
+
+        ``changes`` holds one ``{path, links}`` per path: added, modified and deleted files,
+        and both the old and the new path of a rename (renames are not detected). ``links``
+        holds the target of the path on each side of the diff where it is a symlink."""
+        self._git('fetch', 'origin', self.base_branch,
+                  f'+refs/heads/{branch}:refs/remotes/origin/{branch}')
+        base = self._git('rev-parse', f'origin/{self.base_branch}^{{commit}}').strip()
+        head = self._git('rev-parse', f'origin/{branch}^{{commit}}').strip()
+        out = self._git('diff', '--raw', '-z', '--no-renames', '--no-abbrev', '--no-ext-diff',
+                        f'{base}...{head}')
+        fields = out.split('\0')
+        changes, i = [], 0
+        while i < len(fields):
+            meta = fields[i]
+            if not meta.startswith(':'):
+                i += 1
+                continue
+            old_mode, new_mode, old_sha, new_sha, status = meta[1:].split()[:5]
+            # Renames and copies (not requested, but possible) carry two paths.
+            count = 2 if status[:1] in ('R', 'C') else 1
+            paths = [p for p in fields[i + 1:i + 1 + count] if p]
+            i += 1 + count
+            links = [self._git('cat-file', 'blob', sha)
+                     for mode, sha in ((old_mode, old_sha), (new_mode, new_sha))
+                     if mode == '120000' and sha.strip('0')]
+            changes += [{'path': p, 'links': links} for p in paths]
+        return base, head, changes
+
     def start_merge(self, path, author=None):
         """Merge ``origin/<base>`` into the branch in ``path`` without committing.
 

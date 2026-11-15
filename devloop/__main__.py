@@ -116,8 +116,8 @@ def main(argv=None):
         sys.exit(f'devloop: invalid config: {exc}')
 
     if args.command == 'setup':
-        ensure_labels(dispatcher.gh, cfg.labels)
-        log('labels ready: ' + ', '.join(cfg.labels.all()))
+        ensure_labels(dispatcher.gh, cfg.labels, cfg.review_policy)
+        log('labels ready: ' + ', '.join((*cfg.labels.all(), cfg.review_policy.label)))
         return
     if args.command == 'apps':
         failed = False

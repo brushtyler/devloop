@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from devloop import agents, apps, config, markdown, review, schema
+from devloop import agents, apps, config, markdown, policy, review, schema
 from devloop.dispatcher import (Action, Dispatcher, PullRequest, Snapshot, UntrustedChange, plan,
                                 untrusted_change)
 from devloop.github import GitHub, GitHubError, author_login, normalize_checks, summarize_checks
@@ -34,9 +34,26 @@ def raw_review(verdict='approve', blocking=(), previous=(), human=''):
             'human_reason': human, 'checks_performed': ['read diff']}
 
 
-def norm(raw, previous_open=(), round_no=1, head=SHA1):
-    return review.normalize_review(raw, previous_open=list(previous_open), round_no=round_no,
-                                   max_rounds=3, head_sha=head, ci='pass', reviewer=REV)
+BASE = 'd' * 40  # the base branch commit FakeWS reports
+
+
+def receipt(head=SHA1, base=BASE, files=('x.py',), labelers=(), previous=0, pr_number=100,
+            cfg=CFG):
+    """The receipt the dispatcher computes for PR #100 with FakeWS and FakeGH defaults."""
+    return policy.evaluate(cfg.review_policy, pr=pr_number, base=base, head=head,
+                           changes=[{'path': f, 'links': []} for f in files],
+                           labelers=list(labelers), trusted_users=cfg.trusted_users,
+                           previous_level=previous, reviewer=cfg.reviewer)
+
+
+def norm(raw, previous_open=(), round_no=1, head=SHA1, bound=True):
+    """A normalized review record; with ``bound`` it carries the receipt the dispatcher would
+    record for it (an approval without one is not promoted)."""
+    record = review.normalize_review(raw, previous_open=list(previous_open), round_no=round_no,
+                                     max_rounds=3, head_sha=head, ci='pass', reviewer=REV)
+    if bound:
+        record['receipt'] = receipt(head=head)
+    return record
 
 
 class SchemaTests(unittest.TestCase):
@@ -759,6 +776,12 @@ class FakeGH:
     def failed_log(self, run_id):
         return f'log of {run_id}'
 
+    # Logins of the `labeled` events of a label on a PR, oldest first.
+    level_labelers = ()
+
+    def labelers(self, number, label):
+        return list(self.level_labelers) if label == 'reviews:2' else []
+
     # Snapshot reads: ``open`` holds the raw open PRs, as `gh pr list` returns them.
     open = ()
 
@@ -794,6 +817,11 @@ class FakeWS:
         self.spans = []
         self.removed = []
         self.touched = False  # a reviewer wrote to the PR worktree
+        self.base = BASE
+        self.diff = [{'path': 'x.py', 'links': []}]  # the PR's full diff, for the policy
+
+    def review_diff(self, branch):
+        return self.base, self._head, list(self.diff)
 
     def new_branch(self, name, branch):
         return Path('/wt') / name
@@ -1877,6 +1905,7 @@ class CredentialIsolationTests(unittest.TestCase):
                              cwd=tmp)
                     return ws.path(name)
                 ws.existing_branch = existing_branch
+                ws.review_diff = lambda branch: (head, head, [])
                 runner = WritingReviewer(path if writes_pr_worktree else None)
                 gh = FakeGH()
                 p = pr(head=head)

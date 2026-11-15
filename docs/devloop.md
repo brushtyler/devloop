@@ -14,10 +14,10 @@ plans the next steps and runs them. A crashed tick is resumed by the next one.
 | Start | A trusted user adds `agent:ready` to an issue | `agent:working`; the implementer works in a fresh worktree |
 | Implement | Changes made and local tests pass | Dispatcher commits, pushes `agent/issue-<n>`, opens a PR labelled `agent:review` |
 | CI | Checks pending | Wait; failing checks become a review round sent back as `agent:changes` |
-| Review | CI passed or absent | A **different** agent posts a structured verdict (see below) |
+| Review | CI passed or absent | The dispatcher computes the PR's [review level](#review-level-and-policy-receipt); at level 1 a **different** agent posts a structured verdict (see below), at level 2 the PR goes to `agent:needs-human` |
 | Fix | `agent:changes` | The implementer fixes or disputes each open finding, then back to `agent:review` |
 | Sync | A PR in `agent:review` or `agent:ready-to-merge` conflicts with `main` | The implementer resolves the conflicts of a merge of `origin/main`; the dispatcher pushes the merge commit, back to `agent:review` (see below) |
-| Approve | Verdict `approve` | `agent:ready-to-merge`, only if the PR head is still the reviewed commit and CI passed (both re-read just before promotion) |
+| Approve | Verdict `approve` | `agent:ready-to-merge`, only if the PR head is still the reviewed commit, CI passed and the policy receipt recomputed just before promotion matches the approval's |
 | Merge | `agent:ready-to-merge` | **A human merges.** devloop never merges |
 
 Readiness belongs to the approved commit. Every tick re-checks ready PRs:
@@ -25,7 +25,8 @@ Readiness belongs to the approved commit. Every tick re-checks ready PRs:
 - if the head is no longer the approved commit, the approval is revoked and the PR goes back to
   `agent:review` for a new review;
 - if CI is running again on the approved commit, readiness is suspended (`agent:review`) and the
-  recorded approval is applied again, without a new review, once CI passes;
+  recorded approval is applied again, without a new review, once CI passes and if its policy
+  receipt still matches;
 - if CI fails on the approved commit, the failure becomes a review round (`agent:changes`).
 
 ### Conflicts with `main`
@@ -61,7 +62,7 @@ comment that lists the files in conflict and their commits.
 
 Any step can stop at `agent:needs-human` with a comment explaining why: the agent declared itself
 blocked, tests still fail after the retry, the reviewer asked for a decision, the round limit
-was reached, a sync with `main` failed, an agent, `gh` or `git` call failed or timed out, an agent
+was reached, the review level is 2, a sync with `main` failed, an agent, `gh` or `git` call failed or timed out, an agent
 stalled with `agent_stall_action = "abort"` (see [Stalled agents](#stalled-agents)), the issue text was changed by an
 untrusted user after `agent:ready`, or the PR body lost its marker. While `agent:needs-human` is
 set devloop ignores the PR or issue, so to resume: fix the cause, **remove `agent:needs-human`**
@@ -103,6 +104,62 @@ was opened, is put back into `agent:review`, and its issue loses `agent:working`
 Open devloop PRs are capped by `max_open_prs`, including PRs waiting for merge or for a human,
 so unattended work cannot outrun review capacity. New issues start in order: `priority_labels`
 first, then by number. Issues with a `blocked_labels` label are skipped.
+
+## Review level and policy receipt
+
+The number of reviews a PR needs is its **review level**. The dispatcher computes it from its own
+review policy, never from the PR (#106, first step of #66). The effective level of a head is the
+highest of:
+
+- `default_level` of the configuration (1);
+- 2, if a user in `trusted_users` added the `reviews:2` label (`label`) **to the PR**. Every
+  `labeled` event in the PR's history counts, so the level stays raised if the label is removed
+  later, even before the next tick, or added again by someone untrusted. The label added by
+  anyone else, or to the issue, is ignored;
+- 2, if the PR's full diff against the base (from their merge base, as GitHub shows it) touches
+  a sensitive path. Deletions count, both the old and the new path of a rename count, and a
+  symlink counts also for its target (a target outside the repository always counts);
+- the highest level already recorded on the PR by an earlier receipt. A fix that widens the
+  diff to the core raises the level, and a later head that narrows it again does not lower it.
+
+Nothing lowers a level, and nothing takes it below 1. The level is computed again on every new
+head, before each review, CI round and promotion.
+
+Sensitive paths are configurable under `[review_policy]`: `sensitive_paths` (default `devloop/`,
+`AGENTS.md`, `CLAUDE.md`, `.github/`, `schemas/`; an entry is a directory or a file at the root)
+plus the files listed in the `files` object of each JSON file in `sensitive_path_lists` (default
+`schemas/recovery-grader-baseline.json`). The policy comes from the running dispatcher and its
+configuration: the lists are read at startup from the root of the running installation (the
+pinned checkout, see [Run from a pinned installation](#run-from-a-pinned-installation)), never
+from a PR branch, so a PR that changes `devloop/config.toml`, the prompts or the lists cannot
+apply weaker rules to itself. A list that cannot be read stops devloop at startup.
+
+**Level 1** works as before: one independent reviewer. **Level 2** does not start more
+reviewers yet (#111): the PR is neither reviewed nor promoted, it goes to `agent:needs-human`
+with a dispatcher comment that gives the level and its reason (the label and who added it, or
+the sensitive paths). Since the level does not go down, putting the PR back into `agent:review`
+escalates it again: a person reviews it and decides on the merge.
+
+### Receipts
+
+Every agent review, CI round and promotion records a **receipt** in its marker:
+
+| Field | Content |
+|---|---|
+| `pr`, `base`, `head` | The PR, the base branch commit and the head the level was computed for |
+| `policy` | The policy version: the SHA-256 of the loaded policy configuration |
+| `level`, `reasons` | The effective level and why: default, label with its author, sensitive paths, earlier level |
+| `reviewers` | The reviewers the level requires (none at level 2 in this step) |
+
+Promotions and level-2 escalations are dispatcher comments with a `policy` marker, read only from
+the dispatcher's identity. Before promoting an approval the dispatcher recomputes the receipt.
+The approval counts only if the commit of base, the policy version, the level and the required
+reviewers (and the head) all match: when the base branch advanced, the policy or the reviewer
+configuration changed, or the level rose, the PR stays in `agent:review`, a dispatcher comment
+says what changed, and the next tick runs a new review, even of the same head. That review is a
+round like any other and waits for CI. Approvals recorded before receipts existed have none:
+they are not promoted and need a new review; their rounds and open findings stay as they are. A
+PR already in `agent:ready-to-merge` keeps its label until something sends it back to review.
 
 ## Structured review
 
@@ -198,7 +255,7 @@ needs a dedicated system user or a container.
 ## Usage
 
 ```bash
-python3 -m devloop setup            # create the agent:* labels
+python3 -m devloop setup            # create the agent:* labels and the review level label
 python3 -m devloop status           # running action, devloop PRs (with merge state and conflicts), ready issues, planned actions
 python3 -m devloop apps             # check the GitHub App of each actor
 python3 -m devloop tick --dry-run   # print the plan, change nothing
@@ -290,7 +347,10 @@ the `implementer` and `reviewer` roles (they must be different agents) and, for 
 model, reasoning effort and extra CLI arguments for writing and reviewing turns. Pass another file
 with `--config`. Among the limits, `agent_stall_seconds` (an integer of at least 1, default 900)
 and `agent_stall_action` (`"warn"`, the default, or `"abort"`) control the
-[stall check](#stalled-agents); other values stop devloop at startup.
+[stall check](#stalled-agents); other values stop devloop at startup. `[review_policy]` sets the
+[review level](#review-level-and-policy-receipt): `default_level` (1 or 2, default 1), the level
+`label` (default `reviews:2`), `sensitive_paths` and `sensitive_path_lists`; changing any of them
+changes the policy version, so pending approvals need a new review.
 
 Each PR records its implementer and reviewer when it is opened, so changing the roles does not
 affect open PRs. If the recorded reviewer is no longer configured, the configured one takes over,
