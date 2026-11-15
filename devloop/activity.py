@@ -1,7 +1,8 @@
 """The action a tick is running, recorded in ``state_dir`` so that ``devloop status`` can show it.
 
 The tick writes the record when an action starts and removes it when the action ends, also on
-error. The agent and the prompt are filled in when an agent turn starts. A record whose dispatcher
+error. The agent and the prompt are filled in when an agent turn starts, and ``stalled`` while
+the turn shows no activity (see :mod:`devloop.stall`). A record whose dispatcher
 no longer holds the lock, or whose process is gone, belongs to an interrupted tick.
 """
 
@@ -44,7 +45,21 @@ class Activity:
         if self._record is None:
             return
         self._record.update(agent=agent, prompt=str(prompt))
+        self._record.pop('stalled', None)
         self._write()
+
+    def stalled(self, since, command=None):
+        """The agent turn shows no activity since ``since`` (epoch); ``command`` is the tool call
+        in progress, if known."""
+        if self._record is None:
+            return
+        self._record['stalled'] = {'since': _iso(since), 'command': command}
+        self._write()
+
+    def resumed(self):
+        """The stalled agent turn is active again."""
+        if self._record is not None and self._record.pop('stalled', None) is not None:
+            self._write()
 
     def clear(self):
         self._record = None
@@ -110,6 +125,15 @@ def duration(seconds):
     return f'{secs}s'
 
 
+def _since(stamp, now):
+    """How long ago the ``_iso`` timestamp ``stamp`` was."""
+    try:
+        begun = datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return 'unknown time'
+    return duration(now - begun.timestamp())
+
+
 def describe(state_dir, now=None, alive=pid_alive, held=lock_held):
     """One line about the recorded action, or None when no action is recorded."""
     record = read(state_dir)
@@ -120,14 +144,17 @@ def describe(state_dir, now=None, alive=pid_alive, held=lock_held):
     what = f'{record.get("kind")} #{record.get("number")}'
     if record.get('agent'):
         what += f' with {record["agent"]}'
+    now = time.time() if now is None else now
     started = record.get('started_at')
-    try:
-        begun = datetime.strptime(started, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
-        elapsed = duration((time.time() if now is None else now) - begun.timestamp())
-    except (TypeError, ValueError):
-        elapsed = 'unknown time'
+    elapsed = _since(started, now)
     prompt = f', prompt {record["prompt"]}' if record.get('prompt') else ''
     if held(Path(state_dir) / LOCK) and alive(record.get('pid')):
+        stalled = record.get('stalled')
+        if isinstance(stalled, dict):
+            since = stalled.get('since')
+            command = f', command: {stalled["command"]}' if stalled.get('command') else ''
+            return (f'stalled: {what}, no agent activity for {_since(since, now)} (since {since}'
+                    f'{command}); running for {elapsed} (since {started}{prompt})')
         return f'running: {what} for {elapsed} (since {started}{prompt})'
     return (f'interrupted: {what}, started {started} ({elapsed} ago{prompt}): no live dispatcher '
             'holds the lock')

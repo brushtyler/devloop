@@ -103,14 +103,16 @@ def extract_output(kind, stdout, out_file):
 
 
 class AgentRunner:
-    """``on_turn(agent, prompt_path)``, if given, is called when a turn starts."""
+    """``on_turn(agent, prompt_path)``, if given, is called when a turn starts. ``stall``
+    (``stall.StallWatch``), if given, checks each turn for stalls while it runs."""
 
-    def __init__(self, log_dir, timeout, run=subprocess.run, env=None, on_turn=None):
+    def __init__(self, log_dir, timeout, run=subprocess.run, env=None, on_turn=None, stall=None):
         self.log_dir = Path(log_dir)
         self.timeout = timeout
         self._run = run
         self._env = env
         self._on_turn = on_turn
+        self._stall = stall
         self._versions = {}
 
     def version(self, agent):
@@ -143,10 +145,18 @@ class AgentRunner:
         log = stem.with_suffix('.log')
         kwargs = {'env': self._env} if self._env is not None else {}
         # Its own process group: a timeout also stops the commands the CLI left in the background.
-        run = run_in_group if self._run is subprocess.run else self._run
+        run = self._run
+        if run is subprocess.run:
+            run = run_in_group
+            if self._stall is not None:
+                kwargs.update(watch=self._stall.turn(agent.key, workdir),
+                              watch_interval=self._stall.interval)
         try:
             done = run(argv, input=stdin, cwd=workdir, capture_output=True, text=True,
                        timeout=self.timeout, **kwargs)
+        except AgentError as exc:  # the stall check stopped the turn
+            exc.log = log
+            raise
         except subprocess.TimeoutExpired as exc:
             raise AgentError(f'{agent.key} timed out after {self.timeout}s', log) from exc
         except OSError as exc:

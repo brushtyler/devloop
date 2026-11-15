@@ -29,7 +29,8 @@ Readiness belongs to the approved commit. Every tick re-checks ready PRs:
 
 Any step can stop at `agent:needs-human` with a comment explaining why: the agent declared itself
 blocked, tests still fail after the retry, the reviewer asked for a decision, the round limit
-was reached, an agent, `gh` or `git` call failed or timed out, the issue text was changed by an
+was reached, an agent, `gh` or `git` call failed or timed out, an agent stalled with
+`agent_stall_action = "abort"` (see [Stalled agents](#stalled-agents)), the issue text was changed by an
 untrusted user after `agent:ready`, or the PR body lost its marker. While `agent:needs-human` is
 set devloop ignores the PR or issue, so to resume: fix the cause, **remove `agent:needs-human`**
 and set the label that should run next (`agent:ready` on the issue, `agent:review` or
@@ -179,6 +180,36 @@ stops it. Antigravity sessions are not supported. For this reason devloop runs `
 without `--ephemeral`: Codex saves the session of every turn in `~/.codex/sessions`, and these
 transcripts stay there after the turn.
 
+### Stalled agents
+
+An agent can wait without progress until a Bash command's maximum timeout or until
+`agent_timeout_seconds`, for example on a command that never ends. While a turn runs, the
+dispatcher checks two signals every `agent_stall_seconds / 10` seconds (between 1 and 30):
+
+- the newest session transcript of the turn's worktree, the files `devloop follow` reads: a new
+  event counts as activity;
+- the processes the agent CLI started (its descendants and the other members of its session, the
+  CLI itself excluded): CPU use of at least 1% of the time since the previous check counts as
+  activity. A test suite running in the foreground is active; `sleep`, or a loop that waits for
+  a line in a file, is not.
+
+When neither shows activity for `agent_stall_seconds` (default 900), the tick log gets a
+`stalled` line, and the activity record a `stalled` entry with the time of the last activity and,
+if the transcript shows one, the tool call still in progress. `devloop status` then reports
+`stalled: <action> #<n> with <agent>, no agent activity for <time> (since <time>, command: <call>)`.
+If the agent becomes active again, the log says so and the mark is removed.
+
+`agent_stall_action` decides what follows:
+
+| Value | Effect |
+|---|---|
+| `warn` (default) | Report only. The turn goes on; stopping it is the operator's decision |
+| `abort` | Also stop the turn (its whole process group) and escalate it like any agent failure: the issue or PR goes to `agent:needs-human` with a comment giving the reason |
+
+The CPU signal reads `/proc`, so the check works on Linux only; elsewhere it is off and the tick
+log says so once per turn. Antigravity writes no transcript that devloop can read, so for it only
+the CPU signal counts: a long silence of the model alone is reported as a stall.
+
 ### Run from a pinned installation
 
 devloop works on this repository, including on its own code, so run a pinned copy rather than
@@ -204,7 +235,9 @@ can later move to its own repository without changes.
 [`devloop/config.toml`](../devloop/config.toml) sets the repository, the test command, limits,
 the `implementer` and `reviewer` roles (they must be different agents) and, for each agent, the
 model, reasoning effort and extra CLI arguments for writing and reviewing turns. Pass another file
-with `--config`.
+with `--config`. Among the limits, `agent_stall_seconds` (an integer of at least 1, default 900)
+and `agent_stall_action` (`"warn"`, the default, or `"abort"`) control the
+[stall check](#stalled-agents); other values stop devloop at startup.
 
 Each PR records its implementer and reviewer when it is opened, so changing the roles does not
 affect open PRs. If the recorded reviewer is no longer configured, the configured one takes over,
