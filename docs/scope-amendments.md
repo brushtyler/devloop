@@ -111,6 +111,37 @@ An unselected or rejected preparation is discarded through
 The existing owned-resource discard archives evidence, confirms quiescence and
 removes only the recorded staged worktree. It never removes the selected parent.
 
+### Refusal records
+
+When `continuation-scope-prepare` refuses after taking the ticket lock, it writes
+`execution/prepared-<id>/refusal.json`, whether the refusal comes from the source
+inspection, the subject or preparation itself. The preparation receipt records
+its path and SHA-256. The record contains:
+
+- `stage`: `inspect`, `subject` or `prepare`;
+- `code`: an explicit code where the controller assigns one (for example
+  `target_removed`, `obligations_changed`, `other_task_scope`,
+  `no_target_added`, `plan_revision`, or a recovery category such as
+  `LIMIT_REACHED`). Otherwise it is the controller guard that refused: an alias
+  such as `./x` or `a//b` gives `literal_path`, `../x` gives `confined`;
+- `error_type` and a `message` capped at 500 characters. Credentials and
+  secret-named host environment values are redacted, ticket and repository
+  paths are replaced by placeholders, and filenames in OS errors are omitted;
+- `inputs`: the SHA-256 of each input involved (plan, review, reason, runtime
+  identity, controller snapshot, any extra capability input, and, after
+  inspection, the source files, parent selector and computed subject). Input
+  values are not copied.
+
+A refusal raised before the generation is registered gets a `REFUSED` receipt.
+It owns no runtime, worktree, branch or pending fence, so it does not block a
+corrected preparation. A refusal after registration keeps the existing
+`REJECTED` receipt, which still requires discard. Either can be removed with
+`continuation-scope-discard`, which archives `refusal.json` under
+`execution/aborted/<id>/preparation/`. A malformed plan, a non-canonical
+ticket or an earlier unfinished preparation is refused before anything is
+written. `inspect` and `preview` stay read-only and write no record. The
+refusal printed on stderr is redacted in the same way.
+
 ## Remaining boundaries
 
 The ordinary scope-only rule does not merge/split tasks, alter requirements, loosen checks, change
@@ -118,7 +149,8 @@ verification environments, grant attempts or raise budgets. Arbitrary controller
 migration, invalidated-task recovery and automatic replanning still require their
 own compatibility rules. Final review/QA/AppSec and delivery requirements remain
 those of the original run. #36 separately tracks native phase-boundary stops and
-retaining failed-baseline diagnostics during I1/I2 preparation.
+retaining failed-baseline diagnostics during I1/I2 preparation; scope-amendment
+refusals keep their own [refusal records](#refusal-records).
 
 ## Operator repair after a verification timeout
 

@@ -4,6 +4,7 @@ Preparation never executes candidate code or dispatches a provider. The next
 native scheduler preflight verifies the retained checkpoint before dispatch.
 Completed receipts remain historical proof bound to their original inputs.
 """
+import contextlib
 import copy
 import json
 from pathlib import Path
@@ -19,6 +20,87 @@ from ssdlc_tasks import (TaskError, TaskJournal, TaskScheduler, TaskPlanValidato
 from ssdlc_transitions import (TransitionError, TransitionStore, _regular,
                                source_binding, sync_tree, validate_authorization)
 from ssdlc_locks import transition_lock
+
+
+class ScopeRefusal(TransitionError):
+    """A refusal with a stable code for the persistent refusal record."""
+
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
+def refusal_code(exc):
+    """Explicit code or category, else the innermost controller guard that refused."""
+    for name in ('code', 'category'):
+        value = getattr(exc, name, None)
+        if isinstance(value, str) and value:
+            return value
+    import traceback
+    controller = Path(__file__).resolve().parent
+    frames = [frame.name for frame in traceback.extract_tb(exc.__traceback__)
+              if Path(frame.filename).resolve().parent == controller]
+    return frames[-1] if frames else type(exc).__name__
+
+
+def _refusal_message(exc, ticket, repo):
+    """Bounded, redacted message without host paths or OS error filenames."""
+    from ssdlc_tasks import redact_sensitive
+    if isinstance(exc, OSError) and (exc.filename is not None or exc.filename2 is not None):
+        text = type(exc).__name__ + ': ' + (exc.strerror or 'unreadable')
+    else:
+        text = str(exc)
+    for path, label in ((ticket, '<ticket>'), (repo, '<repo>')):
+        text = text.replace(str(path), label)
+    return redact_sensitive(text)[:500]
+
+
+def _input_hashes(values):
+    """Bind each involved input by SHA-256; values are never copied into the record."""
+    hashes = {}
+    for name, value in values.items():
+        try:
+            hashes[name] = {'sha256': digest(value)}
+        except (TypeError, ValueError):
+            hashes[name] = {'sha256': None, 'unhashable': type(value).__name__}
+    return hashes
+
+
+def _record_refusal(ticket, repo, progress, exc, inputs):
+    """Persist why prepare refused in the preparation; the caller re-raises.
+
+    A refusal before any owned resource exists gets a ``REFUSED`` receipt that
+    owns only ``prepared-<id>/refusal.json``: it fences nothing and native
+    discard archives it. Later refusals keep their ``REJECTED`` receipt.
+    """
+    from ssdlc_preparations import receipt_path, register, update
+    execution = ticket / 'execution'
+    if (execution.is_symlink() or not execution.is_dir()
+            or (execution / 'preparations').is_symlink()):
+        return None
+    identity, source = progress['identity'], progress.get('source')
+    involved = dict(inputs)
+    if source is not None:
+        involved.update(source_files=source['files'], parent_selector=source['parent_selector'])
+    if 'subject' in progress:
+        involved['subject'] = progress['subject']
+    refusal = {'schema_version': 1, 'transition_id': identity, 'namespace': 'execution',
+               'stage': progress['stage'], 'code': refusal_code(exc), 'error_type': type(exc).__name__,
+               'message': _refusal_message(exc, ticket, repo), 'inputs': _input_hashes(involved),
+               'generation_selected': False, 'model_dispatches': 0}
+    if source is not None:
+        refusal['source_generation'] = source['projection']['transition_id']
+    if not receipt_path(ticket, identity, 'execution').exists():
+        register(ticket, repo, source['root'] if source else ticket, identity,
+                 source['journal']['expected_head'] if source else None, namespace='execution')
+        update(ticket, identity, namespace='execution', status='REFUSED')
+    prepared = execution / ('prepared-' + identity)
+    prepared.mkdir(mode=0o700, exist_ok=True)
+    path = prepared / 'refusal.json'
+    atomic_json(path, refusal)
+    update(ticket, identity, namespace='execution', refusal_ref='refusal.json', refusal_sha256=file_hash(path),
+           refusal_code=refusal['code'])
+    return refusal
 
 
 def _ticket(path):
@@ -137,16 +219,25 @@ def subject(source, plan, reason, *, feedback_request_id=None, reconcile_feedbac
     validate_document('plan', plan)
     old = source['plan']
     changes = scope_diff(old, plan)
-    if (set(changes) != {source['task_id']} or changes[source['task_id']]['removed']
-            or not changes[source['task_id']]['added']):
-        raise TransitionError('Only target additions to the selected failed task are supported')
+    additions = 'Only target additions to the selected failed task are supported'
+    selected = changes.get(source['task_id'], {'added': [], 'removed': []})
+    if set(changes) - {source['task_id']}:
+        raise ScopeRefusal('other_task_scope', additions)
+    if selected['removed']:
+        raise ScopeRefusal('target_removed', additions)
+    if not selected['added']:
+        raise ScopeRefusal('no_target_added', additions)
     normalized = copy.deepcopy(plan)
     normalized['plan_revision'] = old['plan_revision']
     for before, after in zip(old['tasks'], normalized['tasks']):
         if after.get('task_id') == source['task_id']:
             after['target_files'] = copy.deepcopy(before['target_files'])
-    if normalized != old or plan['plan_revision'] != old['plan_revision'] + 1:
-        raise TransitionError('Scope amendment cannot change obligations, checks, identity or ordering')
+    if normalized != old:
+        raise ScopeRefusal('obligations_changed',
+                           'Scope amendment cannot change obligations, checks, identity or ordering')
+    if plan['plan_revision'] != old['plan_revision'] + 1:
+        raise ScopeRefusal('plan_revision',
+                           'Scope amendment cannot change obligations, checks, identity or ordering')
     validator = TaskPlanValidator(source['root'] / 'worktree', source['context'][CONTEXT[0]],
                                   source['quality'], source['root'])
     validator.validate(plan)
@@ -183,23 +274,59 @@ def subject(source, plan, reason, *, feedback_request_id=None, reconcile_feedbac
     return result
 
 
+@contextlib.contextmanager
+def _refusals_recorded(ticket, repo, held_locks, inputs):
+    """Hold the ticket lock; record any refusal raised inside it, then re-raise.
+
+    An earlier unfinished preparation refuses before anything is written: that
+    preparation is its own record.
+    """
+    from ssdlc_preparations import unfinished
+    with transition_lock(ticket / 'ticket.lock', held_locks):
+        if unfinished(ticket, namespace='execution'):
+            raise TransitionError('Earlier preparation requires native discard')
+        progress = dict(identity=uuid.uuid4().hex, stage='inspect')
+        try:
+            yield progress
+        except BaseException as exc:
+            try:
+                _record_refusal(ticket, repo, progress, exc, inputs)
+            except Exception as failure:
+                # The original refusal stays the raised error.
+                exc.add_note('Refusal record was not persisted: ' + type(failure).__name__)
+            raise
+
+
 def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_snapshot,
             guard=lambda: None, clock=time.time, fault=lambda point: None, held_locks=(), delegation=None, profile_update=None,
             repair_return=None, repair_session=None, feedback_request_id=None, reconcile_feedback_evidence=False,
             operator_owner_limit=None, operator_recovery_profile=None, verification_repair=None):
-    """Stage a reviewed amendment, retaining all prior generations and counters."""
-    from ssdlc_preparations import unfinished, register, update, pending, clear_pending
+    """Stage a reviewed amendment, retaining all prior generations and counters.
+
+    A malformed plan or a non-canonical ticket refuses before anything is
+    written. Once the canonical ticket is locked, any refusal by inspect,
+    subject or prepare leaves a persistent, discardable ``refusal.json`` in the
+    preparation (see ``_record_refusal``).
+    """
+    from ssdlc_preparations import register, update, pending, clear_pending
     from ssdlc_candidates import inventory
     validate_document('plan', plan)
     ticket, repo = _ticket(ticket), Path(repo).resolve()
     if ticket != repo / '.ssdlc' / plan.get('ticket_id', ''):
         raise TransitionError('Scope target must be the canonical ticket of the target repository')
-    with transition_lock(ticket / 'ticket.lock', held_locks):
-        if unfinished(ticket, namespace='execution'):
-            raise TransitionError('Earlier preparation requires native discard')
+    inputs = dict(plan=plan, review=review, reason=reason, runtime_identity=runtime_identity,
+                  controller_snapshot=controller_snapshot, profile_update=profile_update,
+                  repair_return=repair_return, feedback_request_id=feedback_request_id,
+                  reconcile_feedback_evidence=reconcile_feedback_evidence,
+                  operator_owner_limit=operator_owner_limit, operator_recovery_profile=operator_recovery_profile,
+                  verification_repair=verification_repair,
+                  delegation_request_id=delegation[1] if isinstance(delegation, tuple) and len(delegation) == 2 else None)
+    inputs = {name: value for name, value in inputs.items() if value is not None and value is not False}
+    with _refusals_recorded(ticket, repo, held_locks, inputs) as progress:
         source = inspect(ticket, allow_host_hints=(review is not None or delegation is not None
                          or profile_update is not None or repair_return is not None),
                          verification_repair=verification_repair is not None)
+        progress.update(source=source, stage='prepare')
         with transition_lock(source['root'] / '03-dev/tasks/scheduler.lock', held_locks):
             guard()
             if verification_repair is not None and (not isinstance(verification_repair, dict)
@@ -243,6 +370,7 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                 feedback = FeedbackStore(ticket)
                 reason = feedback.inspect()['requests'][request_id]['proposal']['reason_code']
                 review = build_proof(session, source, plan, reason, feedback, request_id)
+            progress['stage'] = 'subject'
             if repair_return is not None:
                 reviewed = return_subject(source, plan, reason, repair_return['request_id'],
                                           repair_return['repair_files'], operator=operator)
@@ -267,6 +395,7 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                 reviewed = subject(source, plan, reason, feedback_request_id=feedback_request_id,
                                    reconcile_feedback_evidence=reconcile_feedback_evidence,
                                    operator_owner_limit=operator_owner_limit)
+            progress.update(subject=reviewed, stage='prepare')
             review_fields = {'subject_sha256', 'reviewer', 'report', 'scope_diff'}
             if 'owner_revalidation' in reviewed:
                 review_fields.add('owner_coverage')
@@ -303,7 +432,7 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                 limits.check_capacity(proposed_envelope, proposed_counters, '03-dev', '03-dev')
             if source['journal']['tasks'][source['task_id']]['attempts'] >= attempt_profile['development_attempts']:
                 raise RecoveryStop('LIMIT_REACHED', 'Scope amendment cannot grant another development attempt')
-            identity = uuid.uuid4().hex
+            identity = progress['identity']
             register(ticket, repo, source['root'], identity, source['journal']['expected_head'], namespace='execution')
             branch = f"ssdlc/{plan['ticket_id']}/execution-{identity}"
             update(ticket, identity, namespace='execution', branch=branch)
@@ -723,5 +852,7 @@ def main(argv=None):
         print(json.dumps(result, sort_keys=True))
         return 0
     except (TaskError, OSError, ValueError, KeyError, TypeError) as exc:
-        print(json.dumps(dict(status='SCOPE_AMENDMENT_REFUSED', reason=str(exc)[:240], model_dispatches=0)), file=sys.stderr)
+        from ssdlc_tasks import redact_sensitive
+        print(json.dumps(dict(status='SCOPE_AMENDMENT_REFUSED', reason=redact_sensitive(str(exc))[:240],
+                              model_dispatches=0)), file=sys.stderr)
         return 2

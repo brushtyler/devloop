@@ -8,8 +8,8 @@ from unittest.mock import patch
 import test_reconciliation as fixtures
 from ssdlc_controller import execution_contract
 from ssdlc_recovery import LimitsStore
-from ssdlc_scope_amendments import inspect, subject, prepare, activate
-from ssdlc_tasks import TaskScheduler, TaskJournal, TaskError, atomic_json, digest
+from ssdlc_scope_amendments import inspect, subject, prepare, activate, refusal_code
+from ssdlc_tasks import TaskScheduler, TaskJournal, TaskError, atomic_json, digest, file_hash
 from ssdlc_transitions import TransitionError, runtime_root
 
 
@@ -132,6 +132,141 @@ class ScopeAmendmentTests(unittest.TestCase):
                 subject(self.source, plan, self.reason)
         plan = copy.deepcopy(self.plan); plan['tasks'][0]['target_files'].append('extra.py')
         with self.assertRaises(TaskError): subject(self.source, plan, self.reason)
+
+    def amended(self, mutate):
+        plan = copy.deepcopy(self.plan)
+        mutate(plan['tasks'][1])
+        return plan
+
+    def test_scope_level_refusals_carry_their_codes(self):
+        def replace(path):
+            return lambda task: task['target_files'].__setitem__(-1, path)
+        def check(task):
+            task['verification']['checks'][0]['timeout_sec'] += 1
+        def verification(task):
+            task['verification']['checks'].append(dict(task['verification']['checks'][0], check_id='CHECK-T2B'))
+        cases = [
+            ('target removed', lambda task: task['target_files'].remove('next.py'), 'target_removed'),
+            ('check modified', check, 'obligations_changed'),
+            ('verification modified', verification, 'obligations_changed'),
+            ('./ alias', replace('./app.py'), 'literal_path'),
+            ('// alias', replace('sub//new.py'), 'literal_path'),
+            ('.. alias', replace('../x.py'), 'confined'),
+        ]
+        for name, mutate, code in cases:
+            with self.subTest(name):
+                # Caught here: assertRaises drops the traceback that names the refusing guard.
+                try:
+                    subject(self.source, self.amended(mutate), self.reason)
+                except TaskError as exc:
+                    self.assertEqual(refusal_code(exc), code)
+                else:
+                    self.fail('amendment was accepted')
+
+    def refusal(self, identity):
+        receipt = json.loads((self.ticket / 'execution/preparations' / (identity + '.json')).read_text())
+        path = self.ticket / 'execution' / ('prepared-' + identity) / receipt['refusal_ref']
+        self.assertEqual(receipt['refusal_sha256'], file_hash(path))
+        return receipt, json.loads(path.read_text())
+
+    def only_preparation(self):
+        """The single preparation carrying a refusal; the fixture's own import has none."""
+        identities = [p.stem for p in (self.ticket / 'execution/preparations').glob('*.json')
+                      if 'refusal_ref' in json.loads(p.read_text())]
+        self.assertEqual(len(identities), 1)
+        return identities[0]
+
+    def test_subject_refusal_is_recorded_in_a_discardable_preparation(self):
+        from ssdlc_preparations import discard, unfinished
+        self.plan = self.amended(lambda task: task['target_files'].__setitem__(-1, './app.py'))
+        with self.assertRaises(TaskError):
+            self.stage()
+        identity = self.only_preparation()
+        receipt, refusal = self.refusal(identity)
+        self.assertEqual(receipt['status'], 'REFUSED')
+        self.assertEqual((refusal['stage'], refusal['code'], refusal['error_type']),
+                         ('subject', 'literal_path', 'FeedbackError'))
+        self.assertIn('canonical confined literal path', refusal['message'])
+        self.assertEqual(refusal['inputs']['plan'], {'sha256': digest(self.plan)})
+        self.assertEqual(refusal['inputs']['review'], {'sha256': digest(self.review)})
+        self.assertEqual(refusal['inputs']['reason'], {'sha256': digest(self.reason)})
+        self.assertEqual(refusal['inputs']['source_files'], {'sha256': digest(self.source['files'])})
+        self.assertEqual(refusal['source_generation'], self.source['projection']['transition_id'])
+        self.assertFalse(refusal['generation_selected'])
+        self.assertNotIn(self.reason, json.dumps(refusal))
+        # A refusal owns no runtime or fence: nothing to reconcile before retrying.
+        self.assertEqual(unfinished(self.ticket, namespace='execution'), [])
+        self.assertFalse((self.ticket / 'execution-runtimes' / identity).exists())
+        self.assertFalse((self.ticket / 'execution/pending.json').exists())
+        self.assertEqual(runtime_root(self.ticket), self.root)
+        result = discard(self.ticket, identity, namespace='execution', writers_quiescent=lambda _: True)
+        self.assertEqual(result['status'], 'ABORTED')
+        archived = self.ticket / 'execution/aborted' / identity / 'preparation/refusal.json'
+        self.assertEqual(json.loads(archived.read_text()), refusal)
+        self.assertFalse((self.ticket / 'execution' / ('prepared-' + identity)).exists())
+
+    def test_inspect_refusal_is_recorded_without_source_inputs(self):
+        journal = self.root / '03-dev/tasks/task-journal.jsonl'
+        journal.write_bytes(journal.read_bytes() + b'{')
+        with self.assertRaisesRegex(TaskError, 'Interrupted journal tail'):
+            self.stage()
+        receipt, refusal = self.refusal(self.only_preparation())
+        self.assertEqual((receipt['status'], refusal['stage'], refusal['code']), ('REFUSED', 'inspect', 'inspect'))
+        self.assertEqual(refusal['message'], 'Interrupted journal tail requires reconciliation')
+        self.assertEqual(set(refusal['inputs']), {'plan', 'review', 'reason', 'runtime_identity', 'controller_snapshot'})
+        self.assertEqual(refusal['inputs']['runtime_identity'], {'sha256': digest(self.identity)})
+
+    def test_prepare_refusals_are_recorded_before_and_after_registration(self):
+        self.identity['environment'] = {'image_id': 'different'}
+        with self.assertRaisesRegex(TaskError, 'verification environment'):
+            self.stage()
+        receipt, refusal = self.refusal(self.only_preparation())
+        self.assertEqual((receipt['status'], refusal['stage'], refusal['code']), ('REFUSED', 'prepare', 'prepare'))
+        self.assertEqual(refusal['inputs']['subject'], {'sha256': self.review['subject_sha256']})
+        case = ScopeAmendmentTests()
+        case.initialize(attempt_cap=2)
+        self.addCleanup(case.doCleanups)
+        with self.assertRaises(TaskError):
+            case.stage()
+        _, refusal = case.refusal(case.only_preparation())
+        self.assertEqual((refusal['stage'], refusal['code']), ('prepare', 'LIMIT_REACHED'))
+        # A refusal after registration keeps the owned REJECTED receipt.
+        def fault(point):
+            if point == 'worktree_created': raise OSError('injected preparation interruption')
+        rejected = ScopeAmendmentTests()
+        rejected.setUp(); self.addCleanup(rejected.doCleanups)
+        with self.assertRaises(OSError): rejected.stage(fault=fault)
+        receipt, refusal = rejected.refusal(rejected.only_preparation())
+        self.assertEqual((receipt['status'], receipt['error_type']), ('REJECTED', 'OSError'))
+        self.assertEqual((refusal['stage'], refusal['code'], refusal['message']),
+                         ('prepare', 'prepare', 'injected preparation interruption'))
+
+    def test_refusal_record_and_cli_omit_host_credentials_and_paths(self):
+        import contextlib
+        import io
+        import os
+        import orchestrator as o
+        secret = 'hostcredential' + 'value1234'
+        self.plan = self.amended(lambda task: task['target_files'].__setitem__(-1, f'../{secret}.py'))
+        with patch.dict(os.environ, {'SSDLC_PROBE_TOKEN': secret}):
+            with self.assertRaises(TaskError):
+                self.stage()
+            plan = self.repo / 'amendment-plan.json'
+            atomic_json(plan, self.plan)
+            with contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(o.main(['continuation-scope-preview', '--repo', str(self.repo), '--ticket',
+                                         self.ticket.name, '--plan', str(plan), '--reason', self.reason]), 2)
+        identity = self.only_preparation()
+        _, refusal = self.refusal(identity)
+        self.assertEqual(refusal['code'], 'confined')
+        self.assertIn('[REDACTED]', refusal['message'])
+        text = (self.ticket / 'execution' / ('prepared-' + identity) / 'refusal.json').read_text()
+        receipt = (self.ticket / 'execution/preparations' / (identity + '.json')).read_text()
+        for leaked in (secret, str(self.repo), self.reason):
+            self.assertNotIn(leaked, text)
+        self.assertNotIn(secret, receipt)
+        self.assertNotIn(secret, errors.getvalue())
+        self.assertIn('[REDACTED]', errors.getvalue())
 
     def test_malformed_plan_refuses_before_creating_preparation(self):
         before = sorted((self.ticket / 'execution/preparations').iterdir())
