@@ -788,6 +788,7 @@ class FakeWS:
         self.merging = None
         self.commits = []
         self.authors = []
+        self.merge_authors = []
         self.pushes = []
         self.auths = []
         self.spans = []
@@ -815,7 +816,8 @@ class FakeWS:
     def run_tests(self, path, command, timeout):
         return (self.tests.pop(0) if len(self.tests) > 1 else self.tests[0]), 'FAILED test_x'
 
-    def start_merge(self, path):
+    def start_merge(self, path, author=None):
+        self.merge_authors.append(author)
         if self.conflicts is not None:
             self.merging = SHA3
         return None if self.conflicts is None else list(self.conflicts)
@@ -1856,6 +1858,50 @@ class CredentialIsolationTests(unittest.TestCase):
             # Nothing left to merge.
             self.assertIsNone(ws.start_merge(tmp))
 
+    def test_sync_merge_without_an_ambient_git_identity(self):
+        # Issue #99: with GitHub Apps no user.name/user.email need be configured, yet git wants
+        # a committer even for `merge --no-commit`.
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as home:
+            env = {k: v for k, v in os.environ.items()
+                   if not k.startswith(('GIT_AUTHOR_', 'GIT_COMMITTER_', 'GIT_CONFIG'))
+                   and k != 'EMAIL'}
+            env.update(HOME=home, XDG_CONFIG_HOME=home, GIT_CONFIG_NOSYSTEM='1')
+            with mock.patch.dict(os.environ, env, clear=True):
+                root = Path(tmp)
+                me = ('-c', 'user.name=t', '-c', 'user.email=t@x')
+                self.git('init', '-q', '-b', 'main', cwd=tmp)
+                # No identity guessed from the host name either.
+                self.git('config', 'user.useConfigOnly', 'true', cwd=tmp)
+                (root / 'a.py').write_text('x = 1\n')
+                self.git('add', '-A', cwd=tmp)
+                self.git(*me, 'commit', '-q', '-m', 'base', cwd=tmp)
+                self.git('checkout', '-q', '-b', 'agent/issue-7', cwd=tmp)
+                (root / 'a.py').write_text('x = 2\n')
+                self.git(*me, 'commit', '-q', '-am', 'pr change', cwd=tmp)
+                self.git('checkout', '-q', 'main', cwd=tmp)
+                (root / 'a.py').write_text('x = 3\n')
+                self.git(*me, 'commit', '-q', '-am', 'main change', cwd=tmp)
+                self.git('update-ref', 'refs/remotes/origin/main', 'main', cwd=tmp)
+                self.git('checkout', '-q', 'agent/issue-7', cwd=tmp)
+                ws = Workspace(tmp, '.state', 'main')
+
+                # Without an identity the merge does not start, and git's reason is kept.
+                with self.assertRaises(WorkspaceError) as caught:
+                    ws.start_merge(tmp)
+                self.assertIn('the merge did not start', str(caught.exception))
+                self.assertIn('identity', str(caught.exception).lower())
+                self.assertIsNone(ws.merge_head(tmp))
+
+                author = {'name': 'impl[bot]', 'email': '1+impl[bot]@users.noreply.github.com'}
+                self.assertEqual(ws.start_merge(tmp, author=author), ['a.py'])
+                (root / 'a.py').write_text('x = 3\ny = 2\n')
+                head = ws.commit_all(tmp, 'Merge origin/main into agent/issue-7\n', author=author)
+                who = subprocess.run(['git', 'log', '-1', '--format=%an <%ae>|%cn <%ce>', head],
+                                     cwd=tmp, capture_output=True, text=True,
+                                     check=True).stdout.strip()
+                bot = 'impl[bot] <1+impl[bot]@users.noreply.github.com>'
+                self.assertEqual(who, f'{bot}|{bot}')
+
 
 class ActingAs:
     """The GitHub client of one actor: records who did what on the shared FakeGH."""
@@ -1929,6 +1975,15 @@ class IdentityTests(unittest.TestCase):
         d._do_sync(pr(merge='conflict'))
         self.assertEqual((self.ws.pushes, self.ws.spans), ([], ['origin/main']))
         self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+
+    def test_the_implementer_starts_and_concludes_a_sync_merge(self):
+        # Issue #99: git wants a committer even for `merge --no-commit`.
+        d = self.make(FakeRunner({'status': 'completed', 'summary': 's', 'blocked_reason': ''}))
+        d._do_sync(pr(merge='conflict'))
+        (merge_author,) = self.ws.merge_authors
+        self.assertEqual(merge_author['name'], self.login(IMPL))
+        self.assertEqual(self.ws.authors[0]['name'], self.login(IMPL))
+        self.assertEqual(len(self.ws.pushes), 1)
 
     def test_the_reviewer_posts_its_verdict_and_a_native_review(self):
         for raw, event in ((raw_review(), 'APPROVE'),

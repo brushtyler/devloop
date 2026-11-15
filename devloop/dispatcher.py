@@ -670,7 +670,8 @@ class Dispatcher:
         if self.ws.head(path) != pr.head_sha:
             self.log('  head moved since the snapshot; retrying next tick')
             return
-        files = self.ws.start_merge(path)
+        # Git wants a committer even to start the merge: the implementer's, as for the commit.
+        files = self.ws.start_merge(path, author=self._git_auth(agent.key, IMPLEMENT))
         if files is None:
             self.log(f'  the branch already contains {base}; waiting for GitHub to recompute')
             self.ws.remove(name)

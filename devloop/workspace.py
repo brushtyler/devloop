@@ -57,6 +57,15 @@ def git_config_env(pairs):
     return env
 
 
+def _identity_env(author):
+    """Variables that make ``author`` (``{name, email}``) both author and committer of one git
+    command, or None for the ambient identity."""
+    if not author:
+        return None
+    return {'GIT_AUTHOR_NAME': author['name'], 'GIT_AUTHOR_EMAIL': author['email'],
+            'GIT_COMMITTER_NAME': author['name'], 'GIT_COMMITTER_EMAIL': author['email']}
+
+
 class Workspace:
     def __init__(self, repo_root, state_dir, base_branch, run=subprocess.run, test_env=None):
         self.repo_root = Path(repo_root)
@@ -66,6 +75,11 @@ class Workspace:
         self._test_env = test_env
 
     def _git(self, *args, cwd=None, check=True, stdin=None, env=None, unset=()):
+        return self._git_run(*args, cwd=cwd, check=check, stdin=stdin, env=env,
+                             unset=unset).stdout
+
+    def _git_run(self, *args, cwd=None, check=True, stdin=None, env=None, unset=()):
+        """The completed git command, stdout and stderr included."""
         kwargs = {}
         if env or unset:
             inherited = {k: v for k, v in os.environ.items() if k not in unset}
@@ -79,7 +93,7 @@ class Workspace:
             raise WorkspaceError(f'git could not start: {exc}') from exc
         if check and done.returncode != 0:
             raise WorkspaceError(f'git {" ".join(args[:2])}: {done.stderr.strip()[:500]}')
-        return done.stdout
+        return done
 
     def path(self, name):
         return self.root / name
@@ -156,20 +170,25 @@ class Workspace:
         out = self._git('diff', '--name-only', '-z', '--no-renames', span, cwd=path)
         return [name for name in out.split('\0') if name]
 
-    def start_merge(self, path):
+    def start_merge(self, path, author=None):
         """Merge ``origin/<base>`` into the branch in ``path`` without committing.
 
         Returns None when the branch already contains the base (nothing to merge), otherwise
         the files left in conflict (possibly none). The merge stays in progress, with
-        ``MERGE_HEAD`` set, so that :meth:`commit_all` concludes it with a merge commit."""
+        ``MERGE_HEAD`` set, so that :meth:`commit_all` concludes it with a merge commit.
+        ``author`` (``{name, email}``) is the identity git requires even to start a merge, as
+        in :meth:`commit_all`."""
         base = f'origin/{self.base_branch}'
         if self._git('rev-list', '--count', f'HEAD..{base}', cwd=path).strip() == '0':
             return None
         target = self._git('rev-parse', base, cwd=path).strip()
         # Exit status 1 means conflicts: the outcome is read from MERGE_HEAD and the index.
-        self._git('merge', '--no-commit', '--no-ff', target, cwd=path, check=False)
+        done = self._git_run('merge', '--no-commit', '--no-ff', target, cwd=path, check=False,
+                             env=_identity_env(author))
         if self.merge_head(path) != target:
-            raise WorkspaceError(f'git merge {base}: the merge did not start')
+            detail = (done.stderr.strip() or done.stdout.strip())[:500]
+            raise WorkspaceError(f'git merge {base}: the merge did not start'
+                                 + (f': {detail}' if detail else ''))
         out = self._git('diff', '--name-only', '-z', '--diff-filter=U', cwd=path)
         return [name for name in out.split('\0') if name]
 
@@ -199,12 +218,8 @@ class Workspace:
 
     def commit_all(self, path, message, author=None):
         """Commit everything; ``author`` (``{name, email}``) is both author and committer."""
-        env = None
-        if author:
-            env = {'GIT_AUTHOR_NAME': author['name'], 'GIT_AUTHOR_EMAIL': author['email'],
-                   'GIT_COMMITTER_NAME': author['name'], 'GIT_COMMITTER_EMAIL': author['email']}
         self._git('add', '-A', cwd=path)
-        self._git('commit', '-F', '-', cwd=path, stdin=message, env=env)
+        self._git('commit', '-F', '-', cwd=path, stdin=message, env=_identity_env(author))
         return self.head(path)
 
     def push(self, path, branch, *, replace=False, auth=None):
