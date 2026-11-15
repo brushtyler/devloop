@@ -31,6 +31,7 @@ jobs:
       # scripts/run-tests.py runs exactly the tests of `python3 -m unittest discover -s tests`,
       # split across parallel processes (issue #84). The count check guards the equivalence.
       - name: Run unit test suite
+        shell: bash  # bash -eo pipefail: the runner's exit code survives the pipe to tee
         run: |
           expected=$(python3 -c "import unittest; print(unittest.defaultTestLoader.discover('tests').countTestCases())")
           python3 scripts/run-tests.py | tee test-output.txt
