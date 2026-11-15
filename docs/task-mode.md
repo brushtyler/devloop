@@ -92,6 +92,21 @@ Evidence lives in `02-design/task-planning/`.
 
 `plan` checks the registered upstream hashes and design approval, and requires that execution has not started. Success records `PLAN_READY`; continue with `run --from-phase 03-dev`.
 
+### Transitional expectations in preparatory tests
+
+A preparatory task can write a test whose expectation a later task must change. The plan records each such expectation in `transitional_expectations`:
+
+- `test_path` and `expectation`: the test and the exact text of the expectation to replace;
+- `owner_task_id`: the task that writes it;
+- `successor_task_id`: the later task that updates it. It must depend on the owner, directly or through other tasks, and the test must be in the `target_files` of both;
+- `final_check_id`: an executable check of the successor.
+
+The plan validator rejects a record without an owner or successor, with an unknown or identical owner and successor, without the dependency, with the test outside either scope, or with a final check from another task. Both tasks stay `kind=task` with automated checks; `subgoal` and `review_only` remain excluded. A record grants no AC/SEC coverage: the obligations and their checks are validated exactly as without it.
+
+The replacement is reviewed with existing mechanisms. The record is part of the plan, so it is covered by the plan review and by the plan hash that binds gate reports. `ssdlc_owner_revalidation.transitional_contract` binds the record, the owner and successor tasks with their AC/SEC references, the owner checkpoint and the test hash. A replacement then needs the same hash-bound coverage review (`validate_review`, `coverage_ok`) and fresh owner checks as a scope amendment. These are syntactic checks, not a complete proof that the new test is semantically equivalent.
+
+When the bounce reader (`read_evidence`, also used by `bounce-preview`) finds that the reviewed checkpoint still contains the exact expectation text, or no longer has the test, it blocks with `contradictory_evidence`. No repair roots or corrective scope are produced. The planner prompt does not ask for these records yet: use on real runs is tracked separately in #53.
+
 ## Task execution
 
 The scheduler runs one task at a time. It writes manifests, logs, diffs, `task-journal.jsonl` (authoritative) and `tasks-state.json` under `03-dev/tasks/`.

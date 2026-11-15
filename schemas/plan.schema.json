@@ -241,6 +241,50 @@
       },
       "minItems": 1,
       "uniqueItems": true
+    },
+    "transitional_expectations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "expectation_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+          },
+          "test_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "expectation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          },
+          "owner_task_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+          },
+          "successor_task_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+          },
+          "final_check_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+          }
+        },
+        "required": [
+          "expectation_id",
+          "test_path",
+          "expectation",
+          "owner_task_id",
+          "successor_task_id",
+          "final_check_id"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 0,
+      "uniqueItems": true
     }
   },
   "required": [

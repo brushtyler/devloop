@@ -414,6 +414,24 @@ def verify_recorded_evaluation(**kwargs):
         raise BounceError('malformed_record') from exc
 
 
+def verify_transitional_expectations(worktree, head, plan):
+    """A gated checkpoint cannot still hold a planned transitional expectation.
+
+    The plan says each successor replaces its expectation before the gates run.
+    If the reviewed commit still contains the exact expectation text, or lost
+    the test, the evidence contradicts the plan. This is a literal check, not
+    proof that the replacement is semantically equivalent.
+    """
+    from ssdlc_tasks import git
+    for item in plan.get('transitional_expectations', []):
+        try:
+            text = git(worktree, 'show', f'{head}:{item["test_path"]}')
+        except TaskError:
+            raise BounceError('contradictory_evidence') from None
+        if item['expectation'] in text:
+            raise BounceError('contradictory_evidence')
+
+
 def read_evidence(*, root, state, repo, worktree, phase, attempt):
     """D12 boundary: read exact host phase records or return a blocked result.
 
@@ -480,6 +498,7 @@ def read_evidence(*, root, state, repo, worktree, phase, attempt):
         if plan['base_commit'] != state['base_commit'] or plan['ticket_id'] != state['ticket_id']:
             raise BounceError('contradictory_evidence')
         TaskPlanValidator(Path(repo), requirements, quality, root).validate(plan)
+        verify_transitional_expectations(worktree, head, plan)
         evaluations = []
         for member, finished in zip(members, completion['evaluators']):
             if finished['evaluator'] != member or member['gate'] != PHASES[phase] or member['attempt'] != attempt or member['reviewed_commit'] != head:
