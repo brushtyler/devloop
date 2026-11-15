@@ -69,7 +69,15 @@ Keep all input/proposal/runtime files private; they can contain prompts and logs
    `history/`, captures the resolved source and appends `CONTINUATION_IMPORTED`
    after the exact original journal prefix. Future acceptance files are checked
    structurally, and are not executed as baseline tests. Nonzero/empty baseline,
-   missing launchers/cwd or source/metadata mutation refuse preparation. The
+   timeout, missing launchers/cwd or source/metadata mutation refuse preparation.
+   Each baseline check is recorded before its outcome is decided: the redacted
+   output goes to `00-recon/baseline/continuation-<check>.log` in the runtime,
+   and exit code, duration, classification and (for mutations) the inventory
+   diff go to `continuations/prepared-<id>/baseline/<check>.json`, both hashed.
+   A baseline refusal also writes `prepared-<id>/refusal.json`, linked to those
+   records by path and SHA-256 and recorded in the preparation receipt, so the
+   reason is readable without running the check again. `continuation-discard`
+   archives these files with the rest of the preparation. The
    output names a private preparation directory and proposal hash. No generation
    is active yet. Preparation fences ordinary run/plan/design on that target.
 6. Review `proposal.json`, `recipe.json`, `projection.json`, `runtime-seal.json`

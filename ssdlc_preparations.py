@@ -154,6 +154,98 @@ def discard(ticket, identity, *, writers_quiescent, namespace="continuations"):
         return record
 
 
+def _atomic_bytes(path, data):
+    import tempfile
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix='.' + path.name, dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(data); stream.flush(); os.fsync(stream.fileno())
+        os.replace(name, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try: os.fsync(directory)
+        finally: os.close(directory)
+    finally:
+        if os.path.exists(name): os.unlink(name)
+
+
+def _inventory_diff(before, after):
+    """Existing source must stay stable; scratch additions are listed, not refused."""
+    return {'modified': sorted(p for p in before if p in after and after[p] != before[p]),
+            'deleted': sorted(p for p in before if p not in after),
+            'added': sorted(p for p in after if p not in before)}
+
+
+def run_baseline_check(verifier, check, worker, cwd, runtime, log_ref, preparation):
+    """Run one baseline check and record it durably before any outcome decision.
+
+    The sanitized log is written under the generation runtime at ``log_ref``;
+    exit code, duration, classification and, for mutations, the inventory diff
+    are written to ``baseline/<check_id>.json`` inside the preparation. Both are
+    archived by native discard. The caller decides only from the returned record.
+    """
+    import subprocess
+    import time
+    from ssdlc_candidates import git_identity, git_metadata, inventory
+    from ssdlc_tasks import redact_sensitive, test_suite_is_empty
+    before, metadata = inventory(worker), git_identity(worker)
+    started = time.monotonic()
+    try:
+        out, err, code = verifier(check['argv'], cwd, check['timeout_sec'], worker)
+        timed_out = False
+    except subprocess.TimeoutExpired as exc:
+        # Keep partial output as evidence; a timeout never counts as a pass.
+        out, err = exc.output or '', exc.stderr or ''
+        out = out.decode('utf-8', errors='replace') if isinstance(out, bytes) else out
+        err = err.decode('utf-8', errors='replace') if isinstance(err, bytes) else err
+        err += f'\nVerification timeout: {exc}'
+        code, timed_out = 124, True
+    duration = round(time.monotonic() - started, 3)
+    diff = _inventory_diff(before, inventory(worker))
+    metadata_changed = git_metadata(worker) != metadata['metadata'] or git_identity(worker) != metadata
+    empty = not timed_out and test_suite_is_empty(out, err)
+    if diff['modified'] or diff['deleted']:
+        classification = 'SOURCE_CHANGED'
+    elif metadata_changed:
+        classification = 'METADATA_CHANGED'
+    elif timed_out:
+        classification = 'TIMEOUT'
+    elif code:
+        classification = 'FAILED'
+    elif empty:
+        classification = 'EMPTY_SUITE'
+    else:
+        classification = 'PASSED'
+    log = confined(runtime, log_ref, protect=False)
+    # Same boundary as check logs: host-isolated output, plus credential redaction.
+    _atomic_bytes(log, redact_sensitive(out + '\n' + err).encode())
+    record = {'schema_version': 1, 'check_id': check['check_id'], 'exit_code': code,
+              'empty_suite': empty, 'duration_sec': duration, 'classification': classification,
+              'log_ref': log_ref, 'log_sha256': file_hash(log), 'metadata_changed': metadata_changed}
+    if classification == 'SOURCE_CHANGED' or diff['added']:
+        record['inventory_diff'] = diff
+    record_ref = 'baseline/' + check['check_id'] + '.json'
+    atomic_json(Path(preparation) / record_ref, record)
+    record['record_ref'], record['record_sha256'] = record_ref, file_hash(Path(preparation) / record_ref)
+    return record
+
+
+def record_baseline_refusal(ticket, identity, preparation, record, message, *, namespace="continuations"):
+    """Persist the refusal linked to its recorded evidence, then let the caller raise."""
+    refusal = {'schema_version': 1, 'transition_id': identity, 'namespace': namespace,
+               'reason': record['classification'], 'message': message, 'check_id': record['check_id'],
+               'exit_code': record['exit_code'], 'duration_sec': record['duration_sec'],
+               'log': {'root': 'runtime', 'ref': record['log_ref'], 'sha256': record['log_sha256']},
+               'check_record': {'root': 'preparation', 'ref': record['record_ref'], 'sha256': record['record_sha256']},
+               'generation_selected': False, 'model_dispatches': 0}
+    if 'inventory_diff' in record:
+        refusal['inventory_diff'] = record['inventory_diff']
+    path = Path(preparation) / 'refusal.json'
+    atomic_json(path, refusal)
+    update(ticket, identity, namespace=namespace, refusal_ref='refusal.json', refusal_sha256=file_hash(path))
+    return refusal
+
+
 def docker_quiescent(record):
     """Observe only mount ownership; never signal unrelated containers."""
     import subprocess
