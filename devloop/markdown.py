@@ -86,7 +86,9 @@ def _valid_review(r):
             and all(_list_of_dicts(r.get(k)) for k in ('blocking_findings',
                                                         'non_blocking_findings',
                                                         'previous_findings'))
-            and all(isinstance(f.get('id'), str) for f in r['blocking_findings']))
+            and all(isinstance(f.get('id'), str) for f in r['blocking_findings'])
+            and all(isinstance(f.get('key', ''), str)
+                    for f in r['blocking_findings'] + r['previous_findings']))
 
 
 def _valid_fix(f):
@@ -103,7 +105,19 @@ def _valid_policy(p):
     return p.get('event') in EVENTS and valid_receipt(p.get('receipt'))
 
 
-_VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy': _valid_policy}
+def _valid_closure(c):
+    return (isinstance(c, dict) and isinstance(c.get('key'), str)
+            and c.get('status') in ('resolved', 'withdrawn') and c.get('by') in ('ci', 'operator')
+            and all(isinstance(c.get(k), str) for k in ('author', 'reason', 'head_sha')))
+
+
+def _valid_finding(f):
+    closed = f.get('closed')
+    return isinstance(closed, list) and bool(closed) and all(_valid_closure(c) for c in closed)
+
+
+_VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy': _valid_policy,
+          'finding': _valid_finding}
 
 
 def read_marker(text, kind):
@@ -141,7 +155,7 @@ def _location(finding):
 def _findings(findings):
     lines = []
     for f in findings:
-        lines.append(f'- **{f["id"]}**{_location(f)}: {f["title"]}')
+        lines.append(f'- **{f.get("key") or f["id"]}**{_location(f)}: {f["title"]}')
         if f['detail']:
             lines.append(f'  {f["detail"]}'.replace('\n', '\n  '))
         if f['suggested_fix']:
@@ -172,7 +186,7 @@ def render_review(review, head):
         parts += ['', '### Finding dei round precedenti', '', '| ID | Stato | Nota |', '|---|---|---|']
         for p in review['previous_findings']:
             note = p['note'].replace('|', '\\|').replace('\n', ' ')
-            parts.append(f'| {p["id"]} | {_STATUS_TEXT[p["status"]]} | {note} |')
+            parts.append(f'| {p.get("key") or p["id"]} | {_STATUS_TEXT[p["status"]]} | {note} |')
     if review['checks_performed']:
         parts += ['', '<details><summary>Controlli eseguiti</summary>', '']
         parts += [f'- {c}' for c in review['checks_performed']]
