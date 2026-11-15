@@ -41,10 +41,11 @@ def _with_ids(findings, round_no, start):
     return [dict(f, id=f'R{round_no}-{start + i}') for i, f in enumerate(findings)]
 
 
-def _keyed(review):
-    """Whether a record carries finding keys (written since #110). Older records have none and
-    are read with the rules of their time."""
-    return all('key' in f for f in review['blocking_findings'] + review['previous_findings'])
+def _keys(review):
+    """How many of a record's findings carry a key, and how many there are. Records written
+    since #110 carry one on every finding; older ones carry none."""
+    items = review['blocking_findings'] + review['previous_findings']
+    return sum('key' in f for f in items), len(items)
 
 
 class FindingState:
@@ -65,21 +66,29 @@ def finding_state(reviews, closures=()):
     A keyed review closes only the findings it owns, then opens its own. An older record without
     keys is read as before (migration): the open set becomes the earlier findings it marks
     unresolved plus its own, each attributed to the reviewer recorded in the round that opened
-    it; a finding whose round is unknown cannot be attributed. A closure is final: by ``ci`` it
-    closes only a CI finding, by ``operator`` any finding.
+    it; a finding whose round is unknown cannot be attributed. Migration covers only the
+    historical prefix: once a record carries keys, a later record without them (or with keys on
+    only some findings) closes nothing and only opens its own findings. A closure is final: by
+    ``ci`` it closes only a CI finding, by ``operator`` any finding.
     """
     open_, seen, known, problems = {}, {}, set(), []
+    keyed_seen = False
     for review in reviews:
         owner, round_no = owner_of(review), review['round']
         if not isinstance(owner, str) or not owner:
             problems.append(f'il round {round_no} non registra il reviewer')
             continue
-        if _keyed(review):
+        with_key, total = _keys(review)
+        if with_key == total:
             for p in review['previous_findings']:
                 earlier = open_.get(p['key'])
                 if p['status'] in CLOSING and earlier is not None and earlier['owner'] == owner:
                     del open_[p['key']]
             own = review['blocking_findings']
+        elif with_key or keyed_seen:
+            # Not a historical record: its assessments close nothing.
+            own = [dict(f, key=f.get('key') or finding_key(round_no, owner, f['id']))
+                   for f in review['blocking_findings']]
         else:
             carried = {}
             for p in review['previous_findings']:
@@ -94,6 +103,7 @@ def finding_state(reviews, closures=()):
             open_ = carried
             own = [dict(f, key=finding_key(round_no, owner, f['id']))
                    for f in review['blocking_findings']]
+        keyed_seen = keyed_seen or with_key > 0
         for f in own:
             f = dict(f, owner=owner)
             open_[f['key']] = f

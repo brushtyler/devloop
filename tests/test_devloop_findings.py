@@ -185,6 +185,31 @@ class CiClosureTests(Flow, unittest.TestCase):
         self.assertEqual(self.planned(), [Action('review', 100, 'every finding of the request '
                                                                  'for changes is closed')])
 
+    def test_a_ci_finding_closes_when_a_rerun_passes_while_the_pr_awaits_changes(self):
+        # CI fails on SHA1: the CI round sends the PR to agent:changes, without manual labels.
+        self.make([], ci='fail')
+        self.gh.comments.clear()
+        self.assertEqual([a.kind for a in self.planned()], ['ci_failed'])
+        self.d.tick()
+        self.assertEqual(self.gh.labels[100], {'agent:changes'})
+        self.assertEqual(keys(review.open_findings(self.d.snapshot().prs[0].reviews)),
+                         ['1/ci/R1-1'])
+        self.gh.ci = 'pending'
+        self.assertEqual([a.kind for a in self.planned()], ['fix'])
+        # The re-run passes on the same head before the implementer starts: the CI finding is
+        # closed instead of starting a fix, then the head goes back to review.
+        self.gh.ci = 'pass'
+        self.assertEqual(self.planned(), [Action('findings', 100, 'CI passed on the head')])
+        self.d.tick()
+        (closed,) = self.published('finding')
+        self.assertEqual([(c['key'], c['by'], c['head_sha']) for c in closed['closed']],
+                         [('1/ci/R1-1', 'ci', SHA1)])
+        self.assertEqual(self.runner.calls, [])
+        self.assertEqual(self.planned(), [Action('reconcile', 100, 'every open finding is closed')])
+        self.d.tick()
+        self.assertEqual(self.gh.labels[100], {'agent:review'})
+        self.assertEqual([a.kind for a in self.planned()], ['review'])
+
     def test_a_ci_finding_closes_on_a_fixed_head_and_others_stay_open(self):
         first = reviewed_by(REV, raw_review('request_changes', [finding()]))
         ci = ci_round(review.open_findings([first]), round_no=2)
@@ -301,6 +326,33 @@ class MigrationTests(Flow, unittest.TestCase):
             {'id': f'1/{REV}/R1-2', 'status': 'resolved', 'note': ''},
             {'id': '3/ci/R3-1', 'status': 'resolved', 'note': ''}]), state.open, round_no=4)
         self.assertEqual(keys(review.open_findings(old + [later])), ['3/ci/R3-1'])
+
+    def test_a_record_without_keys_after_keyed_ones_closes_nothing(self):
+        # A keyed request for changes by OTHER, then an approval by REV without keys that
+        # declares OTHER's finding resolved, through snapshot, plan and promotion.
+        first = reviewed_by(OTHER, raw_review('request_changes', [finding()]))
+        approve = legacy(reviewed_by(REV, raw_review('approve', previous=[
+            {'id': f'1/{OTHER}/R1-1', 'status': 'resolved', 'note': 'ok'}]),
+            review.open_findings([first]), round_no=2))
+        self.assertEqual(approve['previous_findings'][0]['status'], 'resolved')
+        self.assertEqual(keys(review.open_findings([first, approve])), [f'1/{OTHER}/R1-1'])
+        self.make([review_comment(first), fix_comment(1), review_comment(approve)])
+        snap = self.d.snapshot()
+        self.assertEqual(snap.prs[0].finding_problems, [])
+        self.assertEqual(len(snap.prs[0].reviews), 2)
+        self.assertEqual([a.kind for a in plan(snap, CFG)], ['apply_review'])
+        self.d.tick()
+        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.published('policy'), [])  # no promotion
+        self.assertIn(f'1/{OTHER}/R1-1', self.gh.comments[-1][1])
+        # Its own findings still open, attributed to its reviewer; so do partly keyed records.
+        later = legacy(reviewed_by(REV, raw_review('request_changes', [finding()]),
+                                   review.open_findings([first]), round_no=2))
+        self.assertEqual(keys(review.open_findings([first, later])),
+                         [f'1/{OTHER}/R1-1', f'2/{REV}/R2-1'])
+        mixed = dict(approve, blocking_findings=[dict(finding(), id='R2-1', key=f'2/{REV}/R2-1')])
+        self.assertEqual(keys(review.open_findings([legacy(first), mixed])),
+                         [f'1/{OTHER}/R1-1', f'2/{REV}/R2-1'])
 
     def test_an_unattributable_marker_sends_the_pr_to_a_human(self):
         first = legacy(reviewed_by(REV, raw_review('request_changes', [finding()])))

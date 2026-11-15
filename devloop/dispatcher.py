@@ -159,8 +159,9 @@ def plan(snapshot, cfg):
                 actions.append(Action('revoke', pr.number, 'CI pending on the approved commit'))
             continue
         still_open = open_findings(pr.reviews, pr.closures)
-        ci_green = (lb.review in pr.labels and pr.checks == 'pass'
-                    and any(f['owner'] == CI for f in still_open))
+        # Also from agent:changes: a CI round sends the PR there, and a re-run may pass on the
+        # same head before the implementer starts.
+        ci_green = (pr.checks == 'pass' and any(f['owner'] == CI for f in still_open))
         if pr.commands or ci_green:
             # Closures are recorded first; the next tick plans with them.
             actions.append(Action('findings', pr.number, 'CI passed on the head' if ci_green
@@ -482,7 +483,10 @@ class Dispatcher:
                     pr.operator_comments = operator_comments(since, self.cfg.trusted_users)
                     pr.rereview = any(requests_rereview(c.get('body'))
                                       for c in pr.operator_comments)
-            if pr.labels & {lb.review, lb.ready_to_merge}:
+            # In agent:changes CI matters only to close an open CI finding (``plan``).
+            ci_open = lb.changes in pr.labels and any(
+                f['owner'] == CI for f in open_findings(pr.reviews, pr.closures))
+            if pr.labels & {lb.review, lb.ready_to_merge} or ci_open:
                 pr.checks, pr.failed_checks, pr.failed_runs = self.gh.checks(pr.head_sha)
             prs.append(pr)
         ready = []
@@ -721,7 +725,7 @@ class Dispatcher:
         findings once CI passes on the PR's current head."""
         closed = list(pr.commands)
         ci = [f for f in open_findings(pr.reviews, pr.closures) if f['owner'] == CI]
-        if ci and self.cfg.labels.review in pr.labels and pr.checks == 'pass':
+        if ci and pr.checks == 'pass':
             if self.gh.pr_head(pr.number) != pr.head_sha:
                 self.log('  head moved since the snapshot; CI findings stay open')
             else:

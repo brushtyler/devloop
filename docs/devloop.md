@@ -188,7 +188,7 @@ a review of the reviewer `ci`. A finding stays open until one of these closes it
 | Who | How |
 |---|---|
 | The reviewer that opened it | `resolved` or `withdrawn` in one of its later reviews |
-| The dispatcher, for a `ci` finding | Automatically, when CI passes on the PR's current head (the same commit that failed after a re-run, or a later one) |
+| The dispatcher, for a `ci` finding | Automatically, when CI passes on the PR's current head (the same commit that failed after a re-run, or a later one), in `agent:review` or still in `agent:changes` before the implementer starts |
 | The operator | The `/devloop finding` command below |
 
 Another reviewer's assessment does not close a finding: it is recorded in its review, with a
@@ -226,7 +226,9 @@ devloop publishes is never a command. devloop reads the comments of a PR only wh
 Review markers written before finding keys existed are read with the rules of their time: the
 rounds and the findings still open are kept, and each finding is attributed to the reviewer
 recorded in the marker of the round that opened it (`ci` for CI rounds). From the first keyed
-review on, only the owner, CI or the operator closes them. When the owner cannot be
+review on, only the owner, CI or the operator closes them. These rules cover only the markers
+that precede the first keyed one: a later review marker without keys, or with keys on only some
+findings, closes nothing, and its own findings stay open, attributed to its reviewer. When the owner cannot be
 reconstructed (a review marker without a reviewer, or one that leaves open a finding whose
 round is unknown), the PR goes to `agent:needs-human` with a comment that lists the problem:
 the review and the decision on the merge are up to a person.
