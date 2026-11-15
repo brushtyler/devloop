@@ -6,7 +6,7 @@ import tempfile
 import threading
 import unittest
 
-from ssdlc_locks import current_lock, transition_lock
+from ssdlc_locks import current_lock, record_lock, transition_lock
 from ssdlc_tasks import TaskError, ticket_lock
 
 
@@ -70,6 +70,33 @@ class LockLeaseTests(unittest.TestCase):
         for operation in (fcntl.LOCK_UN, fcntl.LOCK_SH):
             with self.subTest(operation=operation), ticket_lock(self.path) as lease:
                 fcntl.flock(lease.fd, operation)
+                with self.assertRaisesRegex(TaskError, 'Kernel exclusive'):
+                    lease.validate(self.path)
+
+    def test_shared_lease_requires_an_observed_shared_flock(self):
+        with self.path.open('a+') as stream:
+            fcntl.flock(stream, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            with record_lock(self.path, stream.fileno(), shared=True) as lease:
+                self.assertTrue(lease.shared)
+                self.assertIs(current_lock(self.path), lease)
+                with self.assertRaisesRegex(TaskError, 'Shared lock'):
+                    with transition_lock(self.path, (lease,)):
+                        self.fail('shared ownership never authorizes a transition')
+                for operation in (fcntl.LOCK_EX, fcntl.LOCK_UN):
+                    with self.subTest(operation=operation):
+                        fcntl.flock(stream, operation | fcntl.LOCK_NB)
+                        with self.assertRaisesRegex(TaskError, 'Kernel shared'):
+                            lease.validate(self.path)
+                fcntl.flock(stream, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                self.assertIs(lease.validate(self.path), lease)
+                with self.assertRaisesRegex(TaskError, 'no current'):
+                    replace(lease, shared=False).validate(self.path)
+
+    def test_exclusive_lease_is_not_satisfied_by_a_shared_flock(self):
+        with self.path.open('a+') as stream:
+            fcntl.flock(stream, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            with record_lock(self.path, stream.fileno()) as lease:
+                self.assertFalse(lease.shared)
                 with self.assertRaisesRegex(TaskError, 'Kernel exclusive'):
                     lease.validate(self.path)
 

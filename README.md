@@ -244,6 +244,7 @@ All new runs use the task scheduler, including Tier S. See [unified execution an
 | [Developer feedback](docs/developer-feedback.md) | Scope diagnosis, reviewed feedback roles, delegated amendments, GitHub projections (#39) |
 | [Native gate convergence](docs/native-gate-convergence.md) | Candidate checks collected before the reviews that need them |
 | [Bounce preview](docs/bounce-preview.md) | Read-only preview of a targeted bounce from a gate |
+| [Writer fencing](docs/writer-fencing.md) | Writer gate protocol for automatic fencing (#45); not yet used by real runs |
 
 ### Plans
 
