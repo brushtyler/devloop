@@ -2008,16 +2008,19 @@ class EngineRunner:
             return out, cost, tin, tout, trace_user
 
         if engine == "codex":
-            out, rc = EngineRunner.run_codex(
+            result = EngineRunner.run_codex(
                 full_prompt,
                 cwd=cwd,
                 sandbox=sandbox,
                 model=model,
                 reasoning_effort=reasoning_effort,
             )
+            out, rc = result
             if rc != 0:
                 raise RuntimeError(f"codex exited with code {rc}:\n{out}")
-            return out, 0.0, 0, 0, trace_user
+            # The nested dispatch does not record; carry the CLI tokens to the outer one.
+            from ssdlc_recovery import ReportedOutput
+            return ReportedOutput((out, 0.0, 0, 0, trace_user), getattr(result, "reported_tokens", None))
 
         return EngineRunner.call_openrouter(
             model,

@@ -265,6 +265,30 @@ class LiveUnknownUsageTests(unittest.TestCase):
         self.assertEqual(tuple(result), ('plain text', 0))
         self.assertEqual(observed_tokens('codex', 'run_codex', result), {'input_tokens': None, 'output_tokens': None})
 
+    def test_codex_reported_tokens_survive_invoke_role_to_the_row_and_report(self):
+        import subprocess
+        from orchestrator import EngineRunner
+        events = [{'type': 'item.completed', 'item': {'id': 'i1', 'type': 'agent_message', 'text': 'role answer'}},
+                  {'type': 'turn.completed', 'usage': {'input_tokens': 120, 'output_tokens': 30}}]
+        stdout = '\n'.join(json.dumps(e) for e in events) + '\n'
+        store = self.store(policy())
+        with patch.object(EngineRunner, '_should_spawn_role_container', return_value=False), \
+                patch.object(EngineRunner, '_run_role_command',
+                             return_value=subprocess.CompletedProcess([], 0, stdout, '')):
+            result = self.dispatch(store, EngineRunner.invoke_role, 'codex', 'm', 'sys', 'user', self.root,
+                                   'P', 'T1', '03-dev')
+        # Controller callers still unpack five values; tokens are never priced.
+        out, cost, tin, tout, trace = result
+        self.assertEqual((out, cost, trace), ('role answer', 0.0, 'P:T1:03-dev'))
+        rows = self.rows(store)
+        self.assertEqual(len(rows), 1)
+        row = next(iter(rows.values()))
+        self.assertEqual(row['engine'], 'codex')
+        self.assertEqual(row['usage'], {'metered_usd': None, 'cli_estimate_usd': None})
+        self.assertEqual(row['reported_tokens'], {'input_tokens': 120, 'output_tokens': 30})
+        codex = store.coverage_report()['engines']['codex']
+        self.assertEqual(codex['reported_tokens'], {'input_tokens': 120, 'output_tokens': 30})
+
     def test_status_and_evidence_pack_show_partial_dollar_cap_coverage(self):
         from orchestrator import SSDLCOrchestrator
         import ssdlc_supervisor
