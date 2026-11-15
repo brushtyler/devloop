@@ -154,10 +154,60 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(findings, [
             'line 2: SSDLC_DESIGN_ARCH_ENGINE is obsolete and has no effect; rename it to SSDLC_ARCH_ENGINE',
             'line 3: SSDLC_DEV_ESCALATION_MODEL is obsolete and has no effect; remove it',
-            "lines 4, 8: SSDLC_CONTAINER_PIDS_LIMIT is set 2 times and the last value '512' wins; keep a single assignment",
+            'lines 4, 8: SSDLC_CONTAINER_PIDS_LIMIT is set 2 times and the last assignment (line 8) wins; '
+            'keep a single assignment',
             'line 6: SSDLC_TYPO is not read by SSDLC; check the name or remove it',
         ])
         self.assertFalse(any('sk-or-secret' in f for f in findings))
+
+    def test_duplicated_api_keys_are_reported_without_values(self):
+        content = ('export OPENAI_API_KEY="sk-first-secret"\n'
+                   'export ANTHROPIC_API_KEY=sk-ant-only\n'
+                   "export OPENAI_API_KEY='sk-second-secret'\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / 'project.env'
+            env_file.write_text(content)
+            for override in (True, False):
+                with self.subTest(override=override):
+                    findings = o.audit_env_file(env_file, override=override)
+                    self.assertEqual(len(findings), 1)
+                    self.assertTrue(findings[0].startswith('lines 1, 3: OPENAI_API_KEY is set 2 times'))
+                    for secret in ('sk-first-secret', 'sk-second-secret', 'sk-ant-only'):
+                        self.assertNotIn(secret, findings[0])
+
+    def assert_effective_pids_limit(self, env_file, preset, expected):
+        env = {'SSDLC_CONTAINER_PIDS_LIMIT': preset} if preset else {}
+        with patch.dict(os.environ, env, clear=False):
+            if not preset:
+                os.environ.pop('SSDLC_CONTAINER_PIDS_LIMIT', None)
+            o.load_env_file(env_file, override=False)
+            self.assertEqual(os.environ['SSDLC_CONTAINER_PIDS_LIMIT'], expected)
+
+    def test_global_env_duplicates_report_first_assignment_like_the_loaders(self):
+        content = ('export SSDLC_CONTAINER_PIDS_LIMIT="1024"\n'
+                   'export SSDLC_CONTAINER_PIDS_LIMIT="512"\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            home, repo = Path(tmp) / 'home', Path(tmp) / 'repo'
+            (home / '.ssdlc').mkdir(parents=True)
+            (repo / '.ssdlc').mkdir(parents=True)
+            global_env = home / '.ssdlc/global.env'
+            global_env.write_text(content)
+            findings = o.audit_env_file(global_env, override=False)
+            self.assertEqual(findings, [
+                'lines 1, 2: SSDLC_CONTAINER_PIDS_LIMIT is set 2 times and the first assignment (line 1) '
+                'wins unless SSDLC_CONTAINER_PIDS_LIMIT is already set in the environment; '
+                'keep a single assignment'])
+            # The reported precedence matches both loaders, with and without a pre-existing value.
+            self.assert_effective_pids_limit(global_env, None, '1024')
+            self.assert_effective_pids_limit(global_env, '256', '256')
+            self.assertEqual(s.build_project_env(repo, {'HOME': str(home)})['SSDLC_CONTAINER_PIDS_LIMIT'], '1024')
+            self.assertEqual(s.build_project_env(repo, {'HOME': str(home), 'SSDLC_CONTAINER_PIDS_LIMIT': '256'})
+                             ['SSDLC_CONTAINER_PIDS_LIMIT'], '256')
+            # project.env keeps the last assignment.
+            project_env = repo / '.ssdlc/project.env'
+            project_env.write_text(content)
+            self.assertIn('the last assignment (line 2) wins', o.audit_env_file(project_env)[0])
+            self.assertEqual(s.build_project_env(repo, {'HOME': str(home)})['SSDLC_CONTAINER_PIDS_LIMIT'], '512')
 
     def test_audit_ignores_missing_file(self):
         self.assertEqual(o.audit_env_file(Path('/nonexistent/project.env')), [])
@@ -169,6 +219,11 @@ class AuditTests(unittest.TestCase):
             home.mkdir()
             env_file = repo / '.ssdlc/project.env'
             env_file.write_text(self.LEGACY)
+            global_env = home / '.ssdlc/global.env'
+            global_env.parent.mkdir()
+            global_dup = ('export SSDLC_CONTAINER_PIDS_LIMIT="1024"\nexport OPENAI_API_KEY="sk-global-one"\n'
+                          'export SSDLC_CONTAINER_PIDS_LIMIT="512"\nexport OPENAI_API_KEY="sk-global-two"\n')
+            global_env.write_text(global_dup)
             out = io.StringIO()
             remote = type('Remote', (), dict(token='', remote_url='', provider='none', owner='', repo='',
                                               enabled=False, mode='false'))()
@@ -179,10 +234,16 @@ class AuditTests(unittest.TestCase):
                     contextlib.redirect_stdout(out):
                 self.assertEqual(o.cmd_doctor(repo), 0)
             self.assertEqual(env_file.read_text(), self.LEGACY)
+            self.assertEqual(global_env.read_text(), global_dup)
         text = out.getvalue()
         self.assertIn('rename it to SSDLC_ARCH_ENGINE', text)
-        self.assertIn('SSDLC_CONTAINER_PIDS_LIMIT is set 2 times', text)
-        self.assertNotIn('sk-or-secret', text)
+        self.assertIn(f'{env_file}: lines 4, 8: SSDLC_CONTAINER_PIDS_LIMIT is set 2 times and the last '
+                      'assignment (line 8) wins', text)
+        self.assertIn(f'{global_env}: lines 1, 3: SSDLC_CONTAINER_PIDS_LIMIT is set 2 times and the first '
+                      'assignment (line 1) wins unless', text)
+        self.assertIn(f'{global_env}: lines 2, 4: OPENAI_API_KEY is set 2 times', text)
+        for secret in ('sk-or-secret', 'sk-global-one', 'sk-global-two'):
+            self.assertNotIn(secret, text)
 
 
 class ReviewEngineAutoTests(unittest.TestCase):

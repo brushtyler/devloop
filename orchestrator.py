@@ -1230,11 +1230,17 @@ OBSOLETE_PROJECT_ENV_VARS: Dict[str, Optional[str]] = {
 }
 
 
-def audit_env_file(env_path: Path) -> List[str]:
-    """Report obsolete, unknown and duplicated SSDLC settings without modifying the file."""
+def audit_env_file(env_path: Path, override: bool = True) -> List[str]:
+    """Report obsolete, unknown and duplicated SSDLC settings without modifying the file.
+
+    ``override`` mirrors how ``load_env_file`` reads the file: project.env is loaded with
+    ``override=True`` (the last assignment wins), global.env with ``override=False`` (the first
+    assignment wins unless the variable is already set in the environment). Values are never
+    reported, because a duplicated key may hold a credential.
+    """
     if not env_path.is_file():
         return []
-    assignments: Dict[str, List[Tuple[int, str]]] = {}
+    assignments: Dict[str, List[int]] = {}
     for lineno, raw_line in enumerate(env_path.read_text(encoding="utf-8").splitlines(), 1):
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -1243,11 +1249,11 @@ def audit_env_file(env_path: Path) -> List[str]:
             line = line[len("export ") :].strip()
         if "=" not in line:
             continue
-        key, value = line.split("=", 1)
-        assignments.setdefault(key.strip(), []).append((lineno, value.strip().strip('"').strip("'")))
+        key = line.split("=", 1)[0]
+        assignments.setdefault(key.strip(), []).append(lineno)
     findings = []
     for key, entries in assignments.items():
-        first = entries[0][0]
+        first = entries[0]
         if key in OBSOLETE_PROJECT_ENV_VARS:
             replacement = OBSOLETE_PROJECT_ENV_VARS[key]
             action = f"rename it to {replacement}" if replacement else "remove it"
@@ -1255,9 +1261,14 @@ def audit_env_file(env_path: Path) -> List[str]:
         elif key.startswith("SSDLC_") and key not in KNOWN_PROJECT_ENV_VARS:
             findings.append(f"line {first}: {key} is not read by SSDLC; check the name or remove it")
         if len(entries) > 1:
-            lines = ", ".join(str(n) for n, _ in entries)
-            findings.append(f"lines {lines}: {key} is set {len(entries)} times and the last value "
-                            f"'{entries[-1][1]}' wins; keep a single assignment")
+            lines = ", ".join(str(n) for n in entries)
+            if override:
+                effective = f"the last assignment (line {entries[-1]}) wins"
+            else:
+                effective = (f"the first assignment (line {first}) wins unless {key} "
+                             f"is already set in the environment")
+            findings.append(f"lines {lines}: {key} is set {len(entries)} times and {effective}; "
+                            f"keep a single assignment")
     return findings
 
 
@@ -5760,8 +5771,10 @@ def cmd_doctor(repo: Path) -> int:
     print(f"  - Isolated CLAUDE_DIR: {iso['claude_home']}")
     print("  - Config Audit       :")
     audited = False
-    for env_path in (Path(iso['project_env']), Path.home() / ".ssdlc" / "global.env"):
-        for finding in audit_env_file(env_path):
+    # Same load modes as ProjectRuntimeIsolation.activate: project.env overrides, global.env does not.
+    for env_path, override in ((Path(iso['project_env']), True),
+                               (Path.home() / ".ssdlc" / "global.env", False)):
+        for finding in audit_env_file(env_path, override=override):
             audited = True
             print(f"      * {env_path}: {finding}")
     if not audited:
