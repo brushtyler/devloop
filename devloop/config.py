@@ -6,6 +6,7 @@ from pathlib import Path
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / 'config.toml'
 AGENT_KINDS = ('claude', 'codex', 'agy')
+STALL_ACTIONS = ('warn', 'abort')
 
 
 class ConfigError(ValueError):
@@ -66,6 +67,8 @@ class Config:
     agent_timeout_seconds: int = 3600
     test_timeout_seconds: int = 3600
     agent_command_timeout_seconds: int = 600
+    agent_stall_seconds: int = 900
+    agent_stall_action: str = 'warn'
     blocked_labels: tuple = ('bloccata',)
     priority_labels: tuple = ('prerequisito',)
     protected_paths: tuple = ('.github/',)
@@ -141,7 +144,7 @@ def parse_config(data):
     ints = {}
     for key in ('max_open_prs', 'max_review_rounds', 'max_actions_per_tick',
                 'implement_test_retries', 'agent_timeout_seconds', 'test_timeout_seconds',
-                'agent_command_timeout_seconds'):
+                'agent_command_timeout_seconds', 'agent_stall_seconds'):
         if key in data:
             value = _require(data, key, int, 'config')
             if value < (0 if key == 'implement_test_retries' else 1):
@@ -150,6 +153,9 @@ def parse_config(data):
     if (ints.get('agent_command_timeout_seconds', Config.agent_command_timeout_seconds)
             > ints.get('test_timeout_seconds', Config.test_timeout_seconds)):
         raise ConfigError('agent_command_timeout_seconds: must not exceed test_timeout_seconds')
+    stall_action = data.get('agent_stall_action', Config.agent_stall_action)
+    if stall_action not in STALL_ACTIONS:
+        raise ConfigError(f'agent_stall_action: must be one of {STALL_ACTIONS}')
     return Config(
         repo=_require(data, 'repo', str, 'config'),
         base_branch=data.get('base_branch', 'main'),
@@ -162,7 +168,7 @@ def parse_config(data):
         blocked_labels=_str_list(data, 'blocked_labels', 'config', ('bloccata',)),
         priority_labels=_str_list(data, 'priority_labels', 'config', ('prerequisito',)),
         protected_paths=_str_list(data, 'protected_paths', 'config', ('.github/',)),
-        apps=apps, app_key_dir=key_dir,
+        apps=apps, app_key_dir=key_dir, agent_stall_action=stall_action,
         **ints)
 
 

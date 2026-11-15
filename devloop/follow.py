@@ -69,6 +69,50 @@ def format_record(record):
     return lines
 
 
+def pending_call(path, limit=2_000_000):
+    """``'<tool> <argument>'`` of the last tool call in a Claude or Codex transcript that has no
+    result yet, read from its last ``limit`` bytes; None if there is none or it is not known."""
+    try:
+        with open(path, 'rb') as fh:
+            size = fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, size - limit))
+            data = fh.read()
+    except OSError:
+        return None
+    lines = data.decode('utf-8', 'replace').split('\n')
+    if size > limit:
+        lines = lines[1:]  # the first line is cut
+    pending = {}
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        message = record.get('message')
+        content = message.get('content') if isinstance(message, dict) else None
+        payload = record.get('payload') if isinstance(record.get('payload'), dict) else {}
+        if record.get('type') in ('assistant', 'user') and isinstance(content, list):
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                if item.get('type') == 'tool_use':
+                    args = item.get('input') if isinstance(item.get('input'), dict) else {}
+                    arg = _first(args.get('command'), args.get('file_path'), args.get('pattern'))
+                    pending[item.get('id')] = f'{_cut(_first(item.get("name")), 60)} {_cut(arg, 200)}'
+                elif item.get('type') == 'tool_result':
+                    pending.pop(item.get('tool_use_id'), None)
+        elif record.get('type') == 'response_item':
+            if payload.get('type') in ('function_call', 'custom_tool_call'):
+                arg = _first(payload.get('arguments'), payload.get('input'))
+                pending[payload.get('call_id')] = (f'{_cut(_first(payload.get("name")), 60)} '
+                                                   f'{_cut(arg, 200)}')
+            elif payload.get('type') in ('function_call_output', 'custom_tool_call_output'):
+                pending.pop(payload.get('call_id'), None)
+    return list(pending.values())[-1].strip() if pending else None
+
+
 def worktrees(root, target):
     """The worktrees whose agents ``devloop follow <target>`` shows: ``issue-<N>`` for the
     implementer; ``pr-<N>`` for the fixer and its copy ``pr-<N>-review`` for the reviewer

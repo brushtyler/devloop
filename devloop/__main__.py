@@ -14,6 +14,7 @@ from .apps import DISPATCHER, Identities
 from .config import ConfigError, load_config
 from .dispatcher import Dispatcher, ensure_labels, plan, run_forever
 from .github import GitHubError
+from .stall import StallWatch
 from .workspace import Workspace
 
 
@@ -66,8 +67,12 @@ def build(args):
     agent_env = agent_environment(cfg, gh_config)
     ws = Workspace(root, cfg.state_dir, cfg.base_branch, test_env=agent_env)
     current = activity.Activity(state)
+    # Session transcripts are found where the agent CLIs write them, in their HOME.
+    stall = StallWatch(cfg.agent_stall_seconds, cfg.agent_stall_action, log=log,
+                       activity=current, home=agent_env.get('HOME'))
     runner = AgentRunner(state / 'logs', cfg.agent_timeout_seconds, env=agent_env,
-                         on_turn=lambda agent, prompt: current.turn(agent.key, prompt))
+                         on_turn=lambda agent, prompt: current.turn(agent.key, prompt),
+                         stall=stall)
     dispatcher = Dispatcher(cfg, identities.github(DISPATCHER), ws, runner, log=log,
                             identities=identities, activity=current)
     return cfg, state, dispatcher

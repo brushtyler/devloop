@@ -6,6 +6,7 @@ import re
 import shutil
 import signal
 import subprocess
+import time
 from pathlib import Path
 
 # The opening and closing lines git writes around a conflict (`=======` alone also underlines
@@ -17,33 +18,56 @@ class WorkspaceError(RuntimeError):
     pass
 
 
-def run_in_group(argv, *, timeout=None, input=None, **kwargs):
+def _kill_group(proc):
+    """Kill the process group of ``proc`` and return what it wrote, ``('', '')`` if unknown."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        return proc.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        # A descendant that left the group (its own session) still holds the pipes: give up
+        # on the output rather than wait for it.
+        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+            if pipe:
+                pipe.close()
+        proc.wait()
+        return '', ''
+
+
+def run_in_group(argv, *, timeout=None, input=None, watch=None, watch_interval=30.0, **kwargs):
     """Like ``subprocess.run(..., capture_output=True, text=True)``, but the command gets its own
     process group, and a timeout kills the whole group: the test runner's workers, or the
-    background commands an agent CLI started, do not outlive it."""
+    background commands an agent CLI started, do not outlive it.
+
+    ``watch(pid)``, if given, is called every ``watch_interval`` seconds while the command runs;
+    an exception it raises kills the whole group and propagates."""
     kwargs.pop('capture_output', None)
     kwargs.pop('text', None)
     proc = subprocess.Popen(argv, stdin=subprocess.PIPE if input is not None else None,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                             start_new_session=True, **kwargs)
-    try:
-        out, err = proc.communicate(input=input, timeout=timeout)
-    except subprocess.TimeoutExpired:
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        wait = None if deadline is None else max(0.0, deadline - time.monotonic())
+        if watch is not None:
+            wait = watch_interval if wait is None else min(wait, watch_interval)
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        try:
-            out, err = proc.communicate(timeout=5)
+            # Retrying communicate() after its timeout loses no output and keeps writing the
+            # input given to the first call; passing input again raises ValueError.
+            pending, input = input, None
+            out, err = proc.communicate(input=pending, timeout=wait)
+            break
         except subprocess.TimeoutExpired:
-            # A descendant that left the group (its own session) still holds the pipes: give up
-            # on the output rather than wait for it.
-            for pipe in (proc.stdin, proc.stdout, proc.stderr):
-                if pipe:
-                    pipe.close()
-            proc.wait()
-            out = err = ''
-        raise subprocess.TimeoutExpired(argv, timeout, output=out, stderr=err) from None
+            if watch is None or (deadline is not None and time.monotonic() >= deadline):
+                out, err = _kill_group(proc)
+                raise subprocess.TimeoutExpired(argv, timeout, output=out, stderr=err) from None
+        try:
+            watch(proc.pid)
+        except BaseException:
+            _kill_group(proc)
+            raise
     return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
 

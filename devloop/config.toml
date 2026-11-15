@@ -25,6 +25,12 @@ test_timeout_seconds = 3600     # suite: ~8 min with test_cmd on 4 CPUs, ~25 min
 # Claude Code Bash commands that set no timeout stop after this; a command may ask for up to
 # test_timeout_seconds (issue #96).
 agent_command_timeout_seconds = 600
+# An agent turn with no new event in its session transcript and no child process using CPU for
+# this long is reported as stalled in the tick log and in `devloop status` (issue #100).
+# agent_stall_action: "warn" only reports it; "abort" also stops the turn and escalates it to
+# agent:needs-human with a comment.
+agent_stall_seconds = 900
+agent_stall_action = "warn"
 
 blocked_labels = ["bloccata"]
 priority_labels = ["prerequisito"]
