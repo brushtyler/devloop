@@ -9,7 +9,9 @@ Read `AGENTS.md` before changing anything.
 - Address every open finding listed below. For each one, either fix it or dispute it with a concrete
   technical reason (for example, the finding misreads the code or the issue). Do not dispute to avoid work.
 - Do not make unrelated changes, and do not rewrite parts the reviewer did not question.
-- Run the test suite before finishing: `$test_cmd`.
+- Before finishing, run the tests that cover what you changed (for example
+  `python3 -m unittest tests.test_name`). Do not run the full suite (`$test_cmd`): it can outlast
+  your tool's time limit, and the dispatcher runs it after you finish and sends you any failures.
 - Do not commit, push or comment on GitHub. The dispatcher publishes your changes after you finish.
 - If a finding requires a product decision or contradicts the issue, return `status: "blocked"`.
 

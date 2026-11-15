@@ -3,12 +3,43 @@
 import base64
 import os
 import shutil
+import signal
 import subprocess
 from pathlib import Path
 
 
 class WorkspaceError(RuntimeError):
     pass
+
+
+def run_in_group(argv, *, timeout=None, input=None, **kwargs):
+    """Like ``subprocess.run(..., capture_output=True, text=True)``, but the command gets its own
+    process group, and a timeout kills the whole group: the test runner's workers, or the
+    background commands an agent CLI started, do not outlive it."""
+    kwargs.pop('capture_output', None)
+    kwargs.pop('text', None)
+    proc = subprocess.Popen(argv, stdin=subprocess.PIPE if input is not None else None,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            start_new_session=True, **kwargs)
+    try:
+        out, err = proc.communicate(input=input, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            out, err = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            # A descendant that left the group (its own session) still holds the pipes: give up
+            # on the output rather than wait for it.
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                if pipe:
+                    pipe.close()
+            proc.wait()
+            out = err = ''
+        raise subprocess.TimeoutExpired(argv, timeout, output=out, stderr=err) from None
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
 
 def git_config_env(pairs):
@@ -155,9 +186,10 @@ class Workspace:
     def run_tests(self, path, command, timeout):
         """``(passed, output_tail)`` for the project test command in ``path``."""
         kwargs = {'env': self._test_env} if self._test_env is not None else {}
+        run = run_in_group if self._run is subprocess.run else self._run
         try:
-            done = self._run(['bash', '-c', command], cwd=path, capture_output=True, text=True,
-                             timeout=timeout, **kwargs)
+            done = run(['bash', '-c', command], cwd=path, capture_output=True, text=True,
+                       timeout=timeout, **kwargs)
         except subprocess.TimeoutExpired:
             return False, f'Test command timed out after {timeout}s'
         tail = '\n'.join((done.stdout + '\n' + done.stderr).strip().splitlines()[-60:])

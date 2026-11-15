@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .markdown import header, parse_version
 from .schema import load_schema, schema_path, validate, SchemaError
-from .workspace import git_config_env
+from .workspace import git_config_env, run_in_group
 
 MODES = ('write', 'review')
 CREDENTIAL_VARS = ('GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN',
@@ -23,7 +23,10 @@ def isolated_env(gh_config_dir, base=None):
     - git may only use local repositories (``GIT_ALLOW_PROTOCOL=file``), so neither SSH keys nor
       HTTPS credentials can be used, whatever the config files say;
     - as further layers, credential helpers, askpass programs (``GIT_ASKPASS`` overrides
-      ``core.askPass``), preconfigured authentication headers and SSH are disabled.
+      ``core.askPass``), preconfigured authentication headers and SSH are disabled;
+    - ``DEVLOOP_APP_KEY_DIR`` points to a directory without keys, so the GitHub App helpers in
+      the worktree (``devloop.apps``, ``scripts/agent-token.py``) find no app key: the dispatcher
+      does every GitHub write.
 
     This prevents accidental use of the operator's credentials, not deliberate access: code
     running as the same system user can still read files. Real isolation needs a dedicated
@@ -34,7 +37,8 @@ def isolated_env(gh_config_dir, base=None):
     env.update(git_config_env([('credential.helper', ''), ('http.extraHeader', '')]))
     env.update({'GH_CONFIG_DIR': str(gh_config_dir), 'GIT_ALLOW_PROTOCOL': 'file',
                 'GIT_TERMINAL_PROMPT': '0', 'GIT_ASKPASS': 'false', 'SSH_ASKPASS': 'false',
-                'GIT_SSH_COMMAND': 'false'})
+                'GIT_SSH_COMMAND': 'false',
+                'DEVLOOP_APP_KEY_DIR': str(Path(gh_config_dir) / 'no-app-keys')})
     return env
 
 
@@ -121,9 +125,11 @@ class AgentRunner:
         stem.with_suffix('.prompt.md').write_text(prompt, encoding='utf-8')
         log = stem.with_suffix('.log')
         kwargs = {'env': self._env} if self._env is not None else {}
+        # Its own process group: a timeout also stops the commands the CLI left in the background.
+        run = run_in_group if self._run is subprocess.run else self._run
         try:
-            done = self._run(argv, input=stdin, cwd=workdir, capture_output=True, text=True,
-                             timeout=self.timeout, **kwargs)
+            done = run(argv, input=stdin, cwd=workdir, capture_output=True, text=True,
+                       timeout=self.timeout, **kwargs)
         except subprocess.TimeoutExpired as exc:
             raise AgentError(f'{agent.key} timed out after {self.timeout}s', log) from exc
         except OSError as exc:

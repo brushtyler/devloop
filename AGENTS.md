@@ -41,7 +41,9 @@ Usare i valori **effettivi della sessione corrente** al momento della pubblicazi
 
 ## Identità GitHub degli agent
 
-Sull'host dell'operatore, dove sono configurate le GitHub App di [`devloop/config.toml`](devloop/config.toml) e le loro chiavi, commenti, review e issue si pubblicano con l'app dell'agent, non con il login `gh` dell'operatore (`brushtyler`). Chi lavora su un fork o senza queste app usa il proprio account.
+Sull'host dell'operatore, dove sono configurate le GitHub App di [`devloop/config.toml`](devloop/config.toml) e le loro chiavi, commenti, review, issue e PR si pubblicano con l'app dell'agent, non con il login `gh` dell'operatore (`brushtyler`). Chi lavora su un fork o senza queste app usa il proprio account.
+
+**Gli agent avviati da devloop non pubblicano su GitHub** e non usano lo script qui sotto: tutte le scritture le fa il dispatcher, dopo i suoi controlli. Nel loro ambiente lo script non trova le chiavi delle app.
 
 | Agent | Actor | Login su GitHub |
 |---|---|---|
@@ -49,7 +51,7 @@ Sull'host dell'operatore, dove sono configurate le GitHub App di [`devloop/confi
 | Codex | `codex` | `brushtyler-devloop-codex-agent[bot]` |
 | Antigravity | `agy` | `brushtyler-devloop-agy-agent[bot]` |
 
-Lo script [`scripts/agent-token.py`](scripts/agent-token.py) esegue un comando con il token dell'app passato in `GH_TOKEN`:
+Lo script [`scripts/agent-token.py`](scripts/agent-token.py) esegue un comando con il token dell'app passato in `GH_TOKEN`. Si lancia dal checkout principale, perché usa il pacchetto `devloop` che trova accanto a sé:
 
 ```bash
 python3 scripts/agent-token.py <actor> -- gh pr comment <PR> --body-file <FILE>
@@ -66,4 +68,4 @@ python3 scripts/agent-token.py <actor> --perm pull_requests=write -- \
 - **L'app del dispatcher è riservata a devloop**, che si fida di alcuni marker solo se li ha scritti il dispatcher. Lo script non la espone.
 - **Una review deve venire da un'identità diversa da quella dell'autore della PR.** GitHub non accetta l'approvazione né la richiesta di modifiche da parte dell'autore stesso.
 
-Per seguire dal vivo un agent che lavora in un worktree di devloop: `scripts/devloop-follow.sh issue-<N>` oppure `scripts/devloop-follow.sh pr-<N>`.
+Per seguire dal vivo un agent che lavora in un worktree di devloop: `scripts/devloop-follow.sh issue-<N>` oppure `scripts/devloop-follow.sh pr-<N>` (richiede `jq`).

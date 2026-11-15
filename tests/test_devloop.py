@@ -1118,6 +1118,43 @@ class CredentialIsolationTests(unittest.TestCase):
         self.assertEqual(env['GIT_CONFIG_COUNT'], '2')
         self.assertEqual({(env[f'GIT_CONFIG_KEY_{i}'], env[f'GIT_CONFIG_VALUE_{i}']) for i in (0, 1)},
                          {('credential.helper', ''), ('http.extraHeader', '')})
+        self.assertEqual(env['DEVLOOP_APP_KEY_DIR'], '/state/gh/no-app-keys')
+
+    def test_claude_bash_limit_covers_the_test_timeout(self):
+        # First devloop run on #52: Claude killed the full suite at its default ten-minute Bash
+        # limit, twice, and the turn ran to the agent timeout.
+        import devloop.__main__ as cli
+        cfg = dataclasses.replace(CFG, test_timeout_seconds=3600)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {}, clear=False):
+            for name in ('BASH_DEFAULT_TIMEOUT_MS', 'BASH_MAX_TIMEOUT_MS'):
+                os.environ.pop(name, None)
+            env = cli.agent_environment(cfg, Path(tmp))
+            self.assertEqual((env['BASH_DEFAULT_TIMEOUT_MS'], env['BASH_MAX_TIMEOUT_MS']),
+                             ('3600000', '3600000'))
+            self.assertNotIn('GH_TOKEN', env)
+            os.environ['BASH_MAX_TIMEOUT_MS'] = '42'
+            self.assertEqual(cli.agent_environment(cfg, Path(tmp))['BASH_MAX_TIMEOUT_MS'], '42')
+
+    def test_agents_find_no_github_app_key(self):
+        # AGENTS.md tells interactive agents to publish with scripts/agent-token.py; agents that
+        # devloop launches must not, since the dispatcher does every GitHub write. The keys sit
+        # where the config says, readable by the same system user.
+        import tomllib
+        data = tomllib.loads(config.DEFAULT_CONFIG.read_text())
+        with tempfile.TemporaryDirectory() as tmp:
+            key = Path(tmp) / 'x-agent.2026-11-14.private-key.pem'
+            key.write_text('key')
+            key.chmod(0o600)
+            cfg = config.parse_config(dict(data, apps={'key_dir': tmp,
+                                                       'claude': {'app_id': 1, 'slug': 'x-agent'}}))
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop('DEVLOOP_APP_KEY_DIR', None)
+                self.assertEqual(apps.Identities.from_config(cfg).apps['claude'].login,
+                                 'x-agent[bot]')
+                env = agents.isolated_env(Path(tmp) / 'gh', dict(os.environ))
+            with mock.patch.dict(os.environ, env, clear=True), \
+                    self.assertRaisesRegex(FileNotFoundError, 'no private key for x-agent'):
+                apps.Identities.from_config(cfg)
 
     def test_isolated_git_cannot_reach_a_remote_or_ask_for_credentials(self):
         # Codex review of #70: an askpass inherited from an IDE answered for git, and a
@@ -1139,6 +1176,61 @@ class CredentialIsolationTests(unittest.TestCase):
                                           timeout=30)
                     self.assertNotEqual(done.returncode, 0)
                     self.assertIn('not allowed', done.stderr)
+
+    def test_a_timeout_stops_the_whole_process_group(self):
+        # Codex review of #75: when the test command timed out, the parallel runner's workers
+        # kept running; an agent CLI's background commands would too.
+        import time
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / 'pid'
+            command = f'sleep 60 & echo $! > {pid_file}; wait'
+            passed, tail = Workspace(tmp, '.state', 'main').run_tests(tmp, command, 1)
+            self.assertFalse(passed)
+            self.assertIn('timed out', tail)
+            pid = int(pid_file.read_text())
+            for _ in range(50):
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.1)
+            else:
+                os.kill(pid, 9)
+                self.fail('the background child outlived the timeout')
+            runner = agents.AgentRunner(Path(tmp) / 'logs', 1)
+            agent = SimpleNamespace(key='x', kind='claude', model='m', effort='e', write_args=(),
+                                    review_args=())
+            with mock.patch.object(agents, 'build_command', return_value=(['bash', '-c', command], None)), \
+                    self.assertRaisesRegex(agents.AgentError, 'timed out'):
+                runner.run(agent, 'write', 'p', 'implement', tmp, 'label')
+            pid = int(pid_file.read_text())
+            for _ in range(50):
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.1)
+            else:
+                os.kill(pid, 9)
+                self.fail('the agent background child outlived the timeout')
+
+    def test_a_timeout_does_not_wait_for_an_escaped_descendant(self):
+        # Codex review of #75, round 2: a child in its own session keeps the pipes open after the
+        # group is killed, and collecting the output waited for it.
+        import time
+        from devloop.workspace import run_in_group
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / 'pid'
+            start = time.monotonic()
+            with self.assertRaises(subprocess.TimeoutExpired):
+                run_in_group(['bash', '-c', f'setsid sleep 60 & echo $! > {pid_file}; sleep 60'],
+                             timeout=0.5)
+            elapsed = time.monotonic() - start
+            try:
+                os.kill(int(pid_file.read_text()), 9)
+            except (ProcessLookupError, ValueError):
+                pass
+            self.assertLess(elapsed, 15)
 
     def test_runner_and_test_command_use_the_isolated_environment(self):
         seen = []
