@@ -1214,6 +1214,24 @@ class CredentialIsolationTests(unittest.TestCase):
                 os.kill(pid, 9)
                 self.fail('the agent background child outlived the timeout')
 
+    def test_a_timeout_does_not_wait_for_an_escaped_descendant(self):
+        # Codex review of #75, round 2: a child in its own session keeps the pipes open after the
+        # group is killed, and collecting the output waited for it.
+        import time
+        from devloop.workspace import run_in_group
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / 'pid'
+            start = time.monotonic()
+            with self.assertRaises(subprocess.TimeoutExpired):
+                run_in_group(['bash', '-c', f'setsid sleep 60 & echo $! > {pid_file}; sleep 60'],
+                             timeout=0.5)
+            elapsed = time.monotonic() - start
+            try:
+                os.kill(int(pid_file.read_text()), 9)
+            except (ProcessLookupError, ValueError):
+                pass
+            self.assertLess(elapsed, 15)
+
     def test_runner_and_test_command_use_the_isolated_environment(self):
         seen = []
 

@@ -28,7 +28,16 @@ def run_in_group(argv, *, timeout=None, input=None, **kwargs):
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        out, err = proc.communicate()
+        try:
+            out, err = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            # A descendant that left the group (its own session) still holds the pipes: give up
+            # on the output rather than wait for it.
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                if pipe:
+                    pipe.close()
+            proc.wait()
+            out = err = ''
         raise subprocess.TimeoutExpired(argv, timeout, output=out, stderr=err) from None
     return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 

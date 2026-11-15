@@ -82,6 +82,24 @@ class RunTestsEquivalenceTests(unittest.TestCase):
         self.assertEqual(ran(parallel.stdout), ran(serial.stderr))
         self.assertIn('regression', parallel.stdout)
 
+    def test_a_lost_result_fails_the_run(self):
+        # Codex review of #75, round 2: an error while reading a worker's results ended its
+        # thread silently, and the run reported OK with fewer tests.
+        root = self.project({
+            'tests/test_corrupt.py': '''
+                import sys, unittest
+                class T(unittest.TestCase):
+                    def test_writes_into_the_results_file(self):
+                        if '--results' in sys.argv:
+                            with open(sys.argv[sys.argv.index('--results') + 1], 'a') as fh:
+                                fh.write('{truncated\\n')
+            ''',
+        })
+        serial, parallel = self.both(root)
+        self.assertEqual(serial.returncode, 0, serial.stderr)
+        self.assertNotEqual(parallel.returncode, 0, parallel.stdout)
+        self.assertIn('WORKER PROBLEM', parallel.stdout)
+
     def test_an_unimportable_module_fails_the_run(self):
         root = self.project({'tests/test_broken.py': 'import does_not_exist_anywhere\n',
                              'tests/test_fine.py': 'import unittest\n'})

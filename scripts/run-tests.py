@@ -92,6 +92,13 @@ def main(argv):
     lock = threading.Lock()
     with tempfile.TemporaryDirectory() as tmp:
         def run(k):
+            try:
+                collect(k)
+            except Exception as exc:  # any failure here must fail the run, never vanish
+                with lock:
+                    problems.append(f'worker {k}: {type(exc).__name__}: {exc}')
+
+        def collect(k):
             results, log = Path(tmp) / f'w{k}.jsonl', Path(tmp) / f'w{k}.log'
             with open(log, 'w') as fh:
                 code = subprocess.run([sys.executable, __file__, '--worker', ','.join(map(str, bins[k])),
@@ -114,6 +121,9 @@ def main(argv):
         for t in threads:
             t.join()
     elapsed = time.monotonic() - start
+    missing = [labels[i] for i in range(len(children)) if i not in rows]
+    if missing and not problems:
+        problems.append('no result for ' + ', '.join(missing))
 
     try:
         DURATIONS.parent.mkdir(exist_ok=True)
