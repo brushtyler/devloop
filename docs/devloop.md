@@ -170,7 +170,9 @@ the messages and tool calls of the newest Claude (`~/.claude/projects`) or Codex
 (`~/.codex/sessions`) session transcript whose working directory is that worktree, then keeps
 following it, and switches to a newer transcript of the same worktree when one appears, for
 example the next attempt of a turn. It reads local files only and needs no GitHub access. Ctrl-C
-stops it. Antigravity sessions are not supported.
+stops it. Antigravity sessions are not supported. For this reason devloop runs `codex exec`
+without `--ephemeral`: Codex saves the session of every turn in `~/.codex/sessions`, and these
+transcripts stay there after the turn.
 
 ### Run from a pinned installation
 

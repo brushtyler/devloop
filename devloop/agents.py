@@ -60,7 +60,9 @@ def build_command(agent, mode, prompt, *, schema_file, out_file):
         return argv, prompt
     if agent.kind == 'codex':
         sandbox = 'workspace-write' if mode == 'write' else 'read-only'
-        argv = ['codex', 'exec', '--ephemeral', '-m', agent.model,
+        # Not --ephemeral: the session transcript in ~/.codex/sessions is what `devloop follow`
+        # reads while the turn runs.
+        argv = ['codex', 'exec', '-m', agent.model,
                 '-c', f'model_reasoning_effort="{agent.effort}"', '-s', sandbox,
                 '--output-schema', str(schema_file), '-o', str(out_file), *extra, '-']
         return argv, prompt

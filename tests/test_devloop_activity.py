@@ -314,6 +314,44 @@ class FollowTranscriptTests(unittest.TestCase):
         self.assertEqual(follow.follow(self.wt, self.home, io.StringIO(), err, polls=1), 1)
         self.assertIn('no Claude or Codex session found', err.getvalue())
 
+    def test_follow_finds_the_session_of_a_codex_turn_run_by_devloop(self):
+        # Codex review of #95: with --ephemeral, Codex saves no session and follow finds nothing.
+        # The stand-in CLI saves its session like Codex does, unless told to be ephemeral.
+        bin_dir = Path(self.tmp.name) / 'bin'
+        bin_dir.mkdir()
+        fake = bin_dir / 'codex'
+        fake.write_text(FAKE_CODEX)
+        fake.chmod(0o755)
+        env = {**os.environ, 'HOME': str(self.home),
+               'PATH': f'{bin_dir}{os.pathsep}{os.environ.get("PATH", "")}'}
+        env.pop('CODEX_HOME', None)
+        runner = agents.AgentRunner(Path(self.tmp.name) / 'logs', 60, env=env)
+        output = runner.run(CFG.agent('codex'), 'write', 'p', 'implement', self.wt, 'issue-52')
+        self.assertEqual(output['status'], 'completed')
+        path = follow.find_transcript(self.wt, self.home)
+        self.assertIsNotNone(path, 'the Codex turn left no session for devloop follow')
+        out = io.StringIO()
+        follow.follow(self.wt, self.home, out, io.StringIO(), polls=1)
+        self.assertEqual(out.getvalue(), '10:00:00 · working on it\n')
+
+
+FAKE_CODEX = '''#!/usr/bin/env python3
+import json, os, sys
+argv = sys.argv[1:]
+sys.stdin.read()
+if '--ephemeral' not in argv:
+    folder = os.path.join(os.environ['HOME'], '.codex', 'sessions', '2026', '11', '15')
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, 'rollout-2026-11-15T10-00-00-x.jsonl'), 'w') as fh:
+        fh.write(json.dumps({'type': 'session_meta', 'payload': {'cwd': os.getcwd()}}) + '\\n')
+        fh.write(json.dumps({'type': 'response_item', 'timestamp': '2026-11-15T10:00:00Z',
+                             'payload': {'type': 'message', 'role': 'assistant',
+                                         'content': [{'text': 'working on it'}]}}) + '\\n')
+with open(argv[argv.index('-o') + 1], 'w') as fh:
+    json.dump({'status': 'completed', 'summary': 's', 'pr_title': 't', 'commit_message': 'c',
+               'pr_body': 'b', 'blocked_reason': ''}, fh)
+'''
+
 
 class FollowCommandTests(unittest.TestCase):
     def test_follow_reads_the_worktree_without_github(self):
