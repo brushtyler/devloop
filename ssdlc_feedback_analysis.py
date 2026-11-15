@@ -165,10 +165,13 @@ def impact_attribution(report, report_sha256, paths):
     """Absence of a usable historical report is not evidence of unpredictability."""
     if report is None:
         return dict(status='UNKNOWN', report_sha256=None, detectable_files=[], unmatched_files=sorted(paths))
-    if (not isinstance(report, dict) or digest(report) != report_sha256
-            or not isinstance(report.get('references'), list)):
+    from ssdlc_impact import related_paths
+    if not isinstance(report, dict) or digest(report) != report_sha256:
         raise TaskError('Historical impact report digest or structure changed')
-    references = {row['path'] for row in report['references']}
+    try:
+        references = related_paths(report)
+    except (KeyError, TypeError):
+        raise TaskError('Historical impact report digest or structure changed') from None
     detected = sorted(set(paths) & references)
     return dict(status='DETECTABLE' if detected else 'NOT_IN_REPORT', report_sha256=report_sha256,
                 detectable_files=detected, unmatched_files=sorted(set(paths) - references),
@@ -177,6 +180,20 @@ def impact_attribution(report, report_sha256, paths):
 
 def historical_impact(source, paths):
     import json
+    from ssdlc_impact import registered_report, source_lineage
+    # Planning registers ``task-planning/impact-report-<plan sha>.json`` and
+    # continuations ``impact-report.json``. Either counts only when the source
+    # state registers it, its bytes are intact, and it is bound to the source
+    # plan or to the plan that plan extended. Older runs keep the legacy hint.
+    state = source.get('state')
+    if not isinstance(state, dict):
+        state = (json.loads(_regular(source['root'], 'state.json').read_text())
+                 if 'state.json' in source['files'] else {})
+    registered = {ref: meta['sha256'] for ref, meta in state.get('artifacts', {}).items()
+                  if ref in source['files']}
+    report = registered_report(source['root'], registered, source_lineage(source))
+    if report is not None:
+        return impact_attribution(report, digest(report), paths)
     ref = '02-design/fixture-impact.json'
     if ref not in source['files']:
         return impact_attribution(None, None, paths)

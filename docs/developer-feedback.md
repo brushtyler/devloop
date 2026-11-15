@@ -551,12 +551,87 @@ complete. These unsupported cases go through the operator/intake contract.
 `ADVISORY` remains optional backlog; it cannot replace a required blocker or
 pretend that a refused developer completed its existing obligations.
 
+## Advisory impact report
+
+Before each plan review the host builds a deterministic impact report
+(`ssdlc_impact.build_report`) and gives it to the plan reviewer as
+`impact_report`. It replaced the earlier `fixture_impact` hint. The same report
+binds continuation amendment subjects (`impact_report` key) and is registered as
+`02-design/task-planning/impact-report-<plan sha256>.json`, or as
+`02-design/impact-report.json` in a continuation runtime.
+
+- **Input.** The plan only: every task `target_file` is a modification point.
+  The plan schema is unchanged.
+- **Source.** Git objects at the plan `base_commit`. The working tree, untracked
+  files, symlinks and submodules are not read, and no repository code runs.
+  Files above 1 MiB are listed as `unscanned`.
+- **Relations per target, each with `evidence_path` and `line`:**
+  - `consumers`: non-test Python modules that import it. Absolute imports are
+    resolved against the repository root only; relative imports against their
+    package. Literal `importlib.import_module`/`__import__` names and literal
+    `mock.patch` targets count as imports. When the importing file's own
+    directory would resolve an absolute import to a different module (a
+    `sys.path` choice of the environment), that line is `UNKNOWN`
+    (`ENVIRONMENT_DEPENDENT_IMPORT`) and no relation to that module is inferred.
+  - `tests`: test or fixture files (under `tests/`, `test/`, `fixtures/`, or
+    named `test_*`, `*_test.py`, `conftest.py`) that import it or cite its
+    repository-relative path literally.
+  - `validators`: files in `schemas/` that cite the target's path, or that the
+    target cites by path. No other schema link is inferred.
+  - `owners`: the last matching rule of `.github/CODEOWNERS`, `CODEOWNERS` or
+    `docs/CODEOWNERS`. Status `ABSENT` without such a file, `NONE` without a
+    matching owner, `UNKNOWN` for unsupported pattern syntax.
+- **UNKNOWN.** Non-Python targets have `consumers_status: UNKNOWN`. Unparsable
+  Python, non-literal dynamic imports (`import_module`, `__import__`,
+  `run_module`, `run_path`, `spec_from_file_location`, ...) and non-literal
+  `patch` targets appear in `unknown` with the file and line that contain them.
+  No destination is inferred for them.
+- **Possible omissions.** Consumers and tests not covered by any task
+  `target_files` are listed in `possible_omissions`. The report is
+  `advisory: true` and `blocking: false`: it does not change the review verdict,
+  the plan or its approval. The reviewer prompt says so explicitly.
+- **Determinism.** Same plan and repository objects give the same bytes: stable
+  ordering, no timestamps. A changed report for the same plan digest is refused.
+
+`complete_dependency_proof` stays `false`. Feedback attribution
+(`planner_feedback`) reads the new report at either registered path. The report
+must be registered in the source `state.json`, have unchanged bytes and name, in
+`plan_sha256`, the source plan or a plan it was extended from by an execution
+generation (a runtime copies the report of the plan it extends). Otherwise
+attribution falls back to the legacy `fixture-impact.json` of older runs, and
+without it is `UNKNOWN`.
+
 ## Evidence and rollout
 
 `compile_evidence_pack` registers `feedback-summary.json`, with classifications,
 decisions/coverage judgments, hashed provenance and plan subjects, amendment
 counts, host timing/observed waits, impact-report attribution, consultation usage
-and publication status. Raw role responses remain in the canonical private
+and publication status. Three additive keys (`ssdlc_impact.summary_metrics`)
+complete it; existing keys are unchanged:
+
+- `avoidable_omissions`: one entry per originating plan, sorted by digest.
+  Plans are collected from the runtime genealogy: the canonical ticket, the
+  selected continuation runtime and every execution generation, each with its
+  registered `02-design/plan.json`. A plan extended by an execution generation
+  belongs to the plan it was extended from; planning and continuations originate
+  plans. Each entry counts distinct paths that the registered impact report of
+  that plan (either path above, bound by `plan_sha256`) flagged as possible
+  omissions and that later appeared in a `MISSING_TARGET` feedback request
+  (developer or host hint, attributed through its bound plan) or in an applied
+  manual extension (attributed through the plan it extended). A path seen in
+  both counts once. Without a registered, unchanged report for that plan, as for
+  historical plans, `status` is `UNKNOWN` and `count` is `null`, never 0.
+- `profile_delta`: the limits profile first authorized for the ticket (its own
+  frozen limits, otherwise those of its oldest execution generation) against
+  the active generation's profile. `changes` maps each changed field to
+  `{old, new}`, the format of the operator-recovery delta.
+- `manual_extension_pending_tasks`: for each activated non-delegated transition
+  that added paths, the IDs of tasks that were `PENDING` just before activation
+  (the sealed `journal_state`) and whose pre-extension `target_files` intersect
+  the added paths.
+
+Missing or changed evidence makes a metric `UNKNOWN` with a reason; it never
+blocks the summary or any gate. Raw role responses remain in the canonical private
 ledger. Older timestamps/costs stay null when not observed. Reported required
 operator decisions are not claimed as actual human interventions. Amendment
 approval alone grants no signoff; the normal review/QA/security gates remain.

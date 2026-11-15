@@ -256,6 +256,18 @@ class FeedbackWorkflowTests(unittest.TestCase):
                     self.assertEqual(orch.state['artifacts']['feedback-summary.json']['sha256'],current)
                     self.assertNotIn('| [`EVIDENCE_PACK.md`]',pack.read_text())
             self.assertNotEqual(hashes[0],hashes[1])
+            summary=json.loads((orch.ssdlc_root/'feedback-summary.json').read_text())
+            self.assertEqual(summary['metrics'],{'sample':2})
+            # One entry per originating plan: the historical plan has no report
+            # (UNKNOWN, not 0); the continuation registered its own report.
+            avoidable={row['plan_sha256']:row for row in summary['avoidable_omissions']}
+            historical=avoidable.pop(digest(json.loads((self.case.ticket/'02-design/plan.json').read_text())))
+            self.assertEqual((historical['status'],historical['count'],historical['reason']),
+                             ('UNKNOWN',None,'NO_IMPACT_REPORT'))
+            self.assertEqual([(row['status'],row['count']) for row in avoidable.values()],[('MEASURED',0)])
+            self.assertEqual(summary['profile_delta']['status'],'MEASURED')
+            # The delegated amendment is automatic, not a manual extension.
+            self.assertEqual(summary['manual_extension_pending_tasks'],dict(status='MEASURED',transitions=[]))
         finally:
             orch_module._dispatch_local.limits = previous
 

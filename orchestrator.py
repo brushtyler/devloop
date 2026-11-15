@@ -3313,25 +3313,29 @@ class SSDLCOrchestrator:
             "MISSED_EARLIER and explain why in evidence. Review planned behavioral assertions, not code that does not exist yet. "
             "Reject label-only checks and tests deferred beyond the task implementing the behavior. "
             "Use the supplied execution_contract for controller prerequisites; never invent environment variables. "
-            "Infrastructure prerequisites belong to ENVIRONMENT_PREREQUISITE, not speculative target code changes.\n" + review_schema)
+            "Infrastructure prerequisites belong to ENVIRONMENT_PREREQUISITE, not speculative target code changes. "
+            "impact_report is deterministic, advisory host evidence from the plan base: its possible_omissions are "
+            "consumers and tests not covered by any task. Examine them, but they never block approval on their own, "
+            "and UNKNOWN entries are not evidence of a dependency.\n" + review_schema)
         prompt += ("\nUse repair.history to preserve all earlier fixes. Avoid unrelated rewrites during repair. "
                    "Honor execution_contract: the host harness captures and verifies the executing controller. "
                    "Do not create controller-capture tasks or assume undeclared environment variables. "
                    "For crash safety, enumerate persistence boundaries from the approved design and specify "
                    "the fault injection and expected recovery for each; justify equivalence when grouping boundaries.")
         def review(plan, history):
-            from ssdlc_amendments import fixture_impact
-            impact = fixture_impact(self.repo_root, sorted({p for t in plan['tasks'] for p in t['target_files']}))
-            impact_path = self.dir_design / 'task-planning' / ('fixture-impact-' + digest(plan) + '.json')
+            from ssdlc_impact import build_report
+            # Advisory only: the report never changes the review verdict or plan state.
+            impact = build_report(self.repo_root, plan)
+            impact_path = self.dir_design / 'task-planning' / ('impact-report-' + digest(plan) + '.json')
             if impact_path.exists() and json.loads(impact_path.read_text()) != impact:
-                raise PlanError('Fixture impact changed on the same plan; explicit revision required')
+                raise PlanError('Impact report changed on the same plan; explicit revision required')
             atomic_json(impact_path, impact)
             self.record_artifact(str(impact_path.relative_to(self.ssdlc_root)), impact_path)
             t0 = time.time()
             out, cost, tin, tout, trace = EngineRunner.invoke_role(
                 rev_engine, rev_model,
                 review_prompt,
-                json.dumps({"context": context, "plan": plan, "review_history": history, "fixture_impact": impact}), self.repo_root,
+                json.dumps({"context": context, "plan": plan, "review_history": history, "impact_report": impact}), self.repo_root,
                 self.project_id, self.ticket_id, "02-design-task-plan-review", reasoning_effort=rev_effort,
             )
             self.record_ledger(CostAndTelemetryEntry(
@@ -5336,6 +5340,9 @@ class SSDLCOrchestrator:
             summary = dict(feedback=projection(FeedbackStore(canonical_ticket)),
                            metrics=metrics(FeedbackStore(canonical_ticket)),
                            publication=ProjectionOutbox(canonical_ticket).summary(), amendment_alone_grants_signoff=False)
+            # Additive keys: avoidable_omissions, profile_delta, manual_extension_pending_tasks.
+            from ssdlc_impact import summary_metrics
+            summary.update(summary_metrics(canonical_ticket))
             path = self.ssdlc_root / 'feedback-summary.json'
             atomic_json(path, summary); self.record_artifact('feedback-summary.json', path)
             completion_disclosures += '\nFeedback provenance and counters: [feedback-summary.json](./feedback-summary.json).\n'

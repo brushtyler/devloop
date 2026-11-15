@@ -68,7 +68,8 @@ class ContinuationTests(RepositoryTests):
         args.update(kwargs)
         if 'review' not in kwargs:
             subject = amendment_subject(inspect_source(self.artifacts), args['plan'], args['quality'],
-                args['context'], args['snapshot_manifest'], impact_report(self.repo, self.snapshot, self.manifest))
+                args['context'], args['snapshot_manifest'],
+                impact_report(self.repo, self.snapshot, self.manifest, args['plan']))
             args['review'] = {'subject_sha256': digest(subject), 'reviewer': 'independent offline fixture',
                               'report': {'verdict': 'APPROVED', 'findings': []}}
             if subject['scope_diff']:
