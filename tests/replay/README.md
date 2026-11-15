@@ -32,9 +32,17 @@ tests directory. All twelve corpus expectations are unchanged. Direct in-process
 benchmark execution is useful for development but is not the isolated CI gate.
 
 
-The current `i2-fixtures-v4` baseline extracts shared Git/scheduler and design
+The `i2-fixtures-v4` baseline extracts shared Git/scheduler and design
 fixture definitions unchanged into `repository_fixtures.py`. The protected
 replay imports that pinned module directly and does not import the ordinary
 execution-mode test modules. Those tests remain in full unit discovery with
 unchanged assertions; candidate tasks still cannot change replay helpers,
 scenarios, expectations or the isolated gate.
+
+
+The current `i2-fixtures-v5` baseline, authorized by the operator for issues
+#84 and #43, re-pins `.github/workflows/test.yml` after the `Unit Tests` job
+switched to the parallel runner `scripts/run-tests.py` (with a check that it
+runs as many tests as plain discovery). The `recovery-benchmark` job, the
+replay helpers, scenarios and expectations are unchanged. The same
+authorization covers the later #43 assertions in `tests/test_recovery_limits.py`.
