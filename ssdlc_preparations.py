@@ -193,7 +193,9 @@ def _metadata_diff(worker, before, errors):
     """Diff checkout metadata against its pre-run identity; empty means unchanged.
 
     Unreadable or deleted metadata counts as changed: the failure goes to
-    ``errors`` and the readable part of the comparison to the diff.
+    ``errors``, the failed reads to ``inspection_failed`` and the readable part
+    of the comparison to the diff. A failed read alone is never "unchanged",
+    even when HEAD and tree are still readable and equal.
     """
     from ssdlc_candidates import _git, git_metadata
     directory = Path(worker) / '.git'
@@ -209,10 +211,10 @@ def _metadata_diff(worker, before, errors):
                if identity[key] != before[key]}
     if changed:
         diff['identity'] = changed
-    failed = any(key in errors for key in ('metadata', 'head', 'tree'))
-    if not failed and not any(diff.values()):
-        return {}
-    return diff
+    failed = [key for key in ('metadata', 'head', 'tree') if key in errors]
+    if failed:
+        diff['inspection_failed'] = failed
+    return diff if any(diff.values()) else {}
 
 
 def run_baseline_check(verifier, check, worker, cwd, runtime, log_ref, preparation):

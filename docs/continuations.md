@@ -77,7 +77,8 @@ Keep all input/proposal/runtime files private; they can contain prompts and logs
    `continuations/prepared-<id>/baseline/<check>.json`, both hashed. The log is
    written before the post-run inspections: metadata the verifier deleted or
    left unreadable (for example a corrupt index) is recorded as a metadata
-   mutation with its read error, not lost.
+   mutation with its read error, not lost. A failed metadata read refuses the
+   check even when HEAD and tree are still readable and unchanged.
    A baseline refusal also writes `prepared-<id>/refusal.json`, linked to those
    records by path and SHA-256 and recorded in the preparation receipt, so the
    reason is readable without running the check again. `continuation-discard`

@@ -8,7 +8,11 @@ import os
 import shutil
 import subprocess
 import unittest
+from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import patch
+
+import ssdlc_candidates
 
 from test_continuations import ContinuationTests
 from test_reconciliation import ReconciliationTests
@@ -56,6 +60,31 @@ def index_corrupting(argv, cwd, timeout, workspace):
     return 'Ran 1 test\nOK', 'corrupt index stderr', 0
 
 
+UNREADABLE = []
+
+
+def metadata_unreadable(argv, cwd, timeout, workspace):
+    # From now on a metadata file cannot be read; HEAD and tree stay readable and unchanged.
+    UNREADABLE.append(Path(workspace))
+    return 'Ran 1 test\nOK', 'unreadable metadata stderr', 0
+
+
+@contextmanager
+def unreadable_metadata_after_verifier():
+    """Root ignores file modes: fail git_metadata on the worker only once the verifier ran."""
+    original = ssdlc_candidates.git_metadata
+    def read(root):
+        if Path(root) in UNREADABLE:
+            raise PermissionError(13, 'Permission denied')
+        return original(root)
+    UNREADABLE.clear()
+    try:
+        with patch.object(ssdlc_candidates, 'git_metadata', read):
+            yield
+    finally:
+        UNREADABLE.clear()
+
+
 def config_only(test, diff, errors):
     test.assertEqual((diff['modified'], diff['deleted'], diff['added']), (['config'], [], []))
     test.assertNotIn('identity', diff)
@@ -67,6 +96,7 @@ def metadata_gone(test, diff, errors):
     test.assertIn('config', diff['deleted'])
     test.assertEqual(diff['identity']['head']['after'], None)
     test.assertIn('metadata', errors)
+    test.assertIn('metadata', diff['inspection_failed'])
 
 
 def index_unreadable(test, diff, errors):
@@ -74,19 +104,28 @@ def index_unreadable(test, diff, errors):
     test.assertEqual(diff['identity']['tree']['after'], None)
     test.assertNotIn('head', diff['identity'])
     test.assertEqual(set(errors), {'tree'})
+    test.assertEqual(diff['inspection_failed'], ['tree'])
+
+
+def metadata_read_failed(test, diff, errors):
+    # HEAD and tree are readable and unchanged: the failed read alone is the mutation.
+    test.assertEqual(diff, {'inspection_failed': ['metadata']})
+    test.assertEqual(errors, {'metadata': 'PermissionError: Permission denied'})
 
 
 SCENARIOS = {'failed': (failing, 'FAILED'), 'empty': (empty, 'EMPTY_SUITE'),
              'mutation': (mutating, 'SOURCE_CHANGED'), 'timeout': (timing_out, 'TIMEOUT'),
              'config': (config_changing, 'METADATA_CHANGED'),
              'metadata_deleted': (metadata_deleting, 'METADATA_CHANGED'),
-             'index_corrupt': (index_corrupting, 'METADATA_CHANGED')}
-METADATA_EXPECTATIONS = {'config': config_only, 'metadata_deleted': metadata_gone, 'index_corrupt': index_unreadable}
+             'index_corrupt': (index_corrupting, 'METADATA_CHANGED'),
+             'metadata_unreadable': (metadata_unreadable, 'METADATA_CHANGED')}
+METADATA_EXPECTATIONS = {'config': config_only, 'metadata_deleted': metadata_gone, 'index_corrupt': index_unreadable,
+                         'metadata_unreadable': metadata_read_failed}
 OUTPUTS = {'failed': ['Traceback: assertion in test_app', 'FAILED (failures=1)', '[REDACTED]'],
            'empty': ['NO TESTS RAN'], 'mutation': ['mutation stderr'],
            'timeout': ['partial output before timeout', 'Verification timeout'],
            'config': ['config stderr'], 'metadata_deleted': ['deleted metadata stderr'],
-           'index_corrupt': ['corrupt index stderr']}
+           'index_corrupt': ['corrupt index stderr'], 'metadata_unreadable': ['unreadable metadata stderr']}
 
 
 class BaselineEvidenceMixin:
@@ -163,13 +202,15 @@ class ContinuationBaselineEvidenceTests(BaselineEvidenceMixin, ContinuationTests
     log_name = 'continuation-' + CHECK + '.log'
     messages = {'failed': 'baseline failed', 'empty': 'baseline failed', 'timeout': 'baseline failed',
                 'mutation': 'changed source', 'config': 'changed checkout metadata',
-                'metadata_deleted': 'changed checkout metadata', 'index_corrupt': 'changed checkout metadata'}
+                'metadata_deleted': 'changed checkout metadata', 'index_corrupt': 'changed checkout metadata',
+                'metadata_unreadable': 'changed checkout metadata'}
 
     def test_refused_baseline_keeps_log_record_and_refusal(self):
         for name, (verifier, classification) in SCENARIOS.items():
             with self.subTest(name=name), patch.dict(os.environ, {'SSDLC_TEST_TOKEN': SECRET}):
                 wrapped, calls = self.counted(verifier)
-                with self.assertRaisesRegex(TransitionError, self.messages[name]):
+                with unreadable_metadata_after_verifier(), \
+                        self.assertRaisesRegex(TransitionError, self.messages[name]):
                     self.prepare(verifier=wrapped)
                 ids = unfinished(self.target)
                 self.assertEqual(len(ids), 1)
@@ -195,7 +236,7 @@ class ReconciliationBaselineEvidenceTests(BaselineEvidenceMixin, ReconciliationT
                 wrapped, calls = self.counted(verifier)
                 expected = ((TransitionError, 'mutated source/metadata') if classification.endswith('_CHANGED')
                             else (RecoveryStop, 'baseline failed'))
-                with self.assertRaisesRegex(*expected):
+                with unreadable_metadata_after_verifier(), self.assertRaisesRegex(*expected):
                     prepare(self.target, self.repo, self.request, runtime_identity=self.identity,
                             controller_snapshot=self.controller, verifier=wrapped)
                 ids = unfinished(self.target, namespace='execution')
