@@ -72,6 +72,27 @@ The round limit (`max_review_rounds`) is checked before every new round, whether
 CI failure, so a PR whose head keeps moving cannot be reviewed indefinitely. Replaying a verdict
 that is already recorded is not a new round, and neither is a sync with `main`.
 
+### Resuming after a `needs_human` verdict without code changes
+
+A verdict is bound to the reviewed commit. Back in `agent:review` with the same head, devloop
+applies the recorded verdict again without a new review, so a `needs_human` verdict sends the
+PR straight back to `agent:needs-human`. When the decision the reviewer asked for needs no code
+change (for example a linked issue was opened, or the PR description was updated), ask for a
+new review of the same commit:
+
+1. A user in `trusted_users` comments on the PR with `/devloop rereview` as the **first line**.
+   The lines below it can explain the decision.
+2. Remove `agent:needs-human` and set `agent:review`.
+
+The next tick runs a new review. It is a new round: it waits for CI like any review, and it
+does not start once `max_review_rounds` is reached. The reviewer's prompt includes every
+comment the trusted users wrote after the previous verdict. Only a request written after the
+latest verdict counts, so it starts one review: once the new verdict is recorded, that verdict
+is replayed again until another request. The request is ignored when it comes from anyone
+outside `trusted_users`, when the command is not the first line, and in text devloop publishes:
+that text starts with the attribution header, also when an actor without a GitHub App publishes
+with the operator's login.
+
 A devloop PR is recognised by its branch, `agent/issue-<n>`, opened by a trusted user. Its body
 ends with a hidden marker that records the issue, implementer and reviewer: text may be edited
 above it, but the marker must stay the last line. A PR whose marker is missing stays in the flow

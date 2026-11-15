@@ -1333,6 +1333,106 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(lines[-1], 'next: sync #100')
 
 
+class SnapshotGH(FakeGH):
+    """FakeGH with the reads of a snapshot: PR #100 for issue 7 at SHA1, with ``earlier``
+    comments followed by whatever devloop has published since."""
+
+    def __init__(self, earlier):
+        super().__init__()
+        self.earlier = list(earlier)
+
+    def open_prs(self):
+        return [{'number': 100, 'title': 't', 'body': markdown.publishable('b', 'pr', META),
+                 'labels': [{'name': name} for name in sorted(self.labels.get(100, ()))],
+                 'headRefName': 'agent/issue-7', 'headRefOid': SHA1,
+                 'author': {'login': 'brushtyler'}, 'isCrossRepository': False,
+                 'mergeable': 'MERGEABLE', 'mergeStateStatus': 'CLEAN'}]
+
+    def pr_comments(self, number):
+        return self.earlier +[{'author': {'login': 'brushtyler'}, 'body': body}
+                               for n, body in self.comments if n == number]
+
+    def issues_with_label(self, label):
+        return []
+
+
+class RereviewTests(unittest.TestCase):
+    """#101: after a needs_human verdict that needs no code change, a trusted user can ask for a
+    new review of the same head."""
+
+    def needs_human_then(self, *after, rounds=1):
+        reviewer = markdown.header(REV_NAME, '9.9', 'm', 'high')
+        reviews = [{'author': {'login': 'brushtyler'},
+                    'body': markdown.render_review(
+                        norm(raw_review('needs_human', human='manca una issue collegata'),
+                             round_no=i), reviewer)}
+                   for i in range(1, rounds + 1)]
+        return reviews + [{'author': {'login': who}, 'body': body} for who, body in after]
+
+    def make(self, comments, runner=None):
+        self.gh = SnapshotGH(comments)
+        # The operator removed agent:needs-human and set agent:review again.
+        self.gh.labels[100] = {'agent:review'}
+        self.runner = runner or FakeRunner()
+        return Dispatcher(CFG, self.gh, FakeWS(), self.runner, log=lambda m: None)
+
+    def planned(self, d):
+        return [(a.kind, a.number) for a in plan(d.snapshot(), CFG)]
+
+    def test_trusted_request_runs_a_new_review_round_with_the_operator_comments(self):
+        request = '/devloop rereview\n\nAperta la #100 per il punto 3; descrizione aggiornata.'
+        d = self.make(self.needs_human_then(('brushtyler', request)), FakeRunner(raw_review()))
+        snap = d.snapshot()
+        self.assertTrue(snap.prs[0].rereview)
+        self.assertEqual(plan(snap, CFG),
+                         [Action('review', 100, 'new review requested by a trusted user')])
+        d.tick()
+        prompt = self.runner.calls[0][3]
+        self.assertIn('round 2 of at most 3', prompt)
+        self.assertIn('Aperta la #100 per il punto 3', prompt)
+        self.assertIn('asked for a new review of this commit', prompt)
+        recorded = markdown.read_marker(self.gh.comments[0][1], 'review')
+        self.assertEqual((recorded['round'], recorded['head_sha']), (2, SHA1))
+        self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
+        # The request is spent: the new verdict is the one replayed from now on.
+        self.gh.labels[100] = {'agent:review'}
+        self.assertEqual(self.planned(d), [('apply_review', 100)])
+
+    def test_untrusted_request_is_ignored(self):
+        d = self.make(self.needs_human_then(('stranger', '/devloop rereview')))
+        snap = d.snapshot()
+        self.assertFalse(snap.prs[0].rereview)
+        self.assertEqual(snap.prs[0].operator_comments, [])
+        self.assertEqual(plan(snap, CFG), [Action('apply_review', 100, 'verdict already recorded')])
+
+    def test_without_a_request_the_recorded_verdict_is_reapplied(self):
+        for after in ((), (('brushtyler', 'Ho aperto la #100.'),),
+                      # The command must be the first line of the comment.
+                      (('brushtyler', 'Nota.\n/devloop rereview'),),
+                      # Text devloop or its agents publish carries the attribution header, also
+                      # when an actor without an app publishes with the operator's login.
+                      (('brushtyler', markdown.header(IMPL_NAME, '9.9', 'm', 'high')
+                        + '/devloop rereview'),)):
+            with self.subTest(after=after):
+                d = self.make(self.needs_human_then(*after))
+                self.assertEqual(self.planned(d), [('apply_review', 100)])
+                d.tick()
+                self.assertEqual(self.runner.calls, [])
+                self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+
+    def test_a_request_before_the_latest_verdict_is_spent(self):
+        comments = self.needs_human_then(('brushtyler', '/devloop rereview'), rounds=1)
+        comments += self.needs_human_then(rounds=2)[1:]
+        d = self.make(comments)
+        self.assertEqual(self.planned(d), [('apply_review', 100)])
+
+    def test_a_requested_review_respects_the_round_limit(self):
+        d = self.make(self.needs_human_then(('brushtyler', '/devloop rereview'), rounds=3))
+        self.assertEqual(self.planned(d), [('round_limit', 100)])
+        self.gh.ci = 'pending'
+        self.assertEqual(self.planned(d), [])  # waits for CI like any new round
+
+
 # GitHub App identities -----------------------------------------------------------
 
 class FakeHTTP:
