@@ -3,7 +3,7 @@
   "baseline_id": "i2-fixtures-v5",
   "change_authority": "Operator-authorized revision (brushtyler on PR #87 and issue #43, 2026-11-15): issue #84 runs the Unit Tests job with scripts/run-tests.py; the recovery-benchmark job and all replay helpers, scenarios and expectations are unchanged. The same authorization covers the issue #43 assertions in tests/test_recovery_limits.py.",
   "files": {
-    ".github/workflows/test.yml": "0c41d83d3e8f27885ff31d862611c310a1313ff1cb671e9eee0be0847aca24d3",
+    ".github/workflows/test.yml": "6455d87487049253d2f9ec454bc0fce935ac1cb274f99d19a3a864ca2a4fd67d",
     "ssdlc_grader.py": "ff0071926733772d74f2402dc934c373757493e91bc26afa8c2d59ec94194aef",
     "ssdlc_replay_gate.py": "db2bbbf054aff07f7b6434739fc5c7a5d909151102f0b2fc85b2294c7cacadff",
     "tests/replay/README.md": "59eeff0a2d1736b2b218f1b4292514275338d87f9487e128e596251eec3c4385",

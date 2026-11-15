@@ -34,8 +34,11 @@ jobs:
         shell: bash  # bash -eo pipefail: the runner's exit code survives the pipe to tee
         run: |
           expected=$(python3 -c "import unittest; print(unittest.defaultTestLoader.discover('tests').countTestCases())")
-          python3 scripts/run-tests.py | tee test-output.txt
-          ran=$(grep -oE '^Ran [0-9]+' test-output.txt | tail -1 | cut -d' ' -f2)
+          # The output goes outside the checkout: controller snapshots count untracked files,
+          # so a file growing in the repository during the run looks like a controller change.
+          out="$RUNNER_TEMP/unit-tests.txt"
+          python3 scripts/run-tests.py | tee "$out"
+          ran=$(grep -oE '^Ran [0-9]+' "$out" | tail -1 | cut -d' ' -f2)
           echo "Discovered $expected tests, ran $ran"
           test "$ran" = "$expected"
 
