@@ -75,7 +75,9 @@ link.
 
 Every text devloop publishes starts with the header that [AGENTS.md](../AGENTS.md) requires. The
 values come from the configured agent: CLI version from its `--version`, model and reasoning level
-as passed on the command line. Text the dispatcher writes on its own, such as escalations and CI
+as passed on the command line. A known version is cached for the life of the process; a failed
+`--version` is retried at the next publication, and the header says `CLI non noto` only for texts
+published while it keeps failing. Text the dispatcher writes on its own, such as escalations and CI
 rounds, names `devloop dispatcher` as the agent and no model.
 
 ## GitHub identities
