@@ -33,6 +33,7 @@ from .review import ci_failure_review, normalize_review, open_findings
 from .workspace import WorkspaceError
 
 PROMPT_DIR = Path(__file__).resolve().parent / 'prompts'
+REREVIEW_COMMAND = '/devloop rereview'
 EXPENSIVE = ('review', 'fix', 'implement')
 LABEL_STYLE = {
     'ready': ('0e8a16', 'devloop: pronta per essere implementata da un agent'),
@@ -59,6 +60,10 @@ class PullRequest:
     checks: str = 'none'
     failed_checks: list = field(default_factory=list)
     failed_runs: list = field(default_factory=list)
+    # Comments trusted users wrote in person after the latest review record, and whether one of
+    # them asks for a new review of the same head (``REREVIEW_COMMAND``).
+    operator_comments: list = field(default_factory=list)
+    rereview: bool = False
 
 
 @dataclass
@@ -118,7 +123,9 @@ def plan(snapshot, cfg):
             actions.append(Action('fix', pr.number))
         elif lb.review in pr.labels:
             answered = latest is not None and any(f['round'] == latest['round'] for f in pr.fixes)
-            replay = latest is not None and latest['head_sha'] == pr.head_sha and not answered
+            # A trusted user's rereview request voids the recorded verdict for this head.
+            replay = (latest is not None and latest['head_sha'] == pr.head_sha and not answered
+                      and not pr.rereview)
             if replay and latest['verdict'] != 'approve':
                 actions.append(Action('apply_review', pr.number, 'verdict already recorded'))
             elif pr.checks == 'pending':
@@ -131,7 +138,8 @@ def plan(snapshot, cfg):
             elif pr.checks == 'fail':
                 actions.append(Action('ci_failed', pr.number))
             else:
-                actions.append(Action('review', pr.number))
+                actions.append(Action('review', pr.number, 'new review requested by a trusted user'
+                                      if pr.rereview else ''))
     free = cfg.max_open_prs - len(snapshot.prs)
     if free > 0:
         blocked = set(cfg.blocked_labels) | {lb.working, lb.needs_human}
@@ -174,6 +182,36 @@ def untrusted_change(history, ready_label, trusted_users):
         if at >= since and who not in trusted_users:
             return f'il titolo è stato modificato da `{who}` dopo la label `{ready_label}`'
     return None
+
+
+def operator_comments(comments, trusted_users):
+    """The comments in ``comments`` that a trusted user wrote in person.
+
+    Every text devloop publishes starts with the AGENTS.md attribution header. An actor without
+    a GitHub App publishes with the operator's own login, so the header, not the author alone,
+    tells the text of devloop and its agents apart from the operator's.
+    """
+    return [c for c in comments
+            if (c.get('author') or {}).get('login') in trusted_users
+            and not (c.get('body') or '').lstrip().startswith('> [!NOTE]')]
+
+
+def requests_rereview(body):
+    """Whether a comment asks for a new review: its first line is ``REREVIEW_COMMAND``."""
+    lines = (body or '').strip().splitlines()
+    return bool(lines) and lines[0].strip() == REREVIEW_COMMAND
+
+
+def format_operator_comments(pr):
+    if not pr.operator_comments:
+        return ''
+    intro = ('A trusted user asked for a new review of this commit after the previous verdict. '
+             if pr.rereview else '')
+    rendered = '\n\n'.join(f'### Comment by {c["author"]["login"]}\n\n{c["body"]}'
+                           for c in pr.operator_comments)
+    return ('## Comments from trusted users since the previous verdict\n\n' + intro
+            + 'The operator wrote them after the previous round, for example to settle a point '
+              'that round left to a human.\n\n' + rendered)
 
 
 def _template(name, **values):
@@ -241,9 +279,13 @@ class Dispatcher:
         """Records of ``kind`` from the identities allowed to write them, at most one per
         comment: fixes from the PR's implementer, CI verdicts from the dispatcher, reviews from
         the agent named in the record, never the implementer."""
+        return [record for _, record in self._marker_entries(pr, comments, kind)]
+
+    def _marker_entries(self, pr, comments, kind):
+        """``(position in comments, record)`` for each record ``_markers`` accepts."""
         implementer = pr.meta.get('implementer')
         found = []
-        for comment in comments:
+        for position, comment in enumerate(comments):
             record = read_marker(comment.get('body', ''), kind)
             if record is None:
                 continue
@@ -256,7 +298,7 @@ class Dispatcher:
             else:
                 actor = record.get('reviewer')
             if actor and self._wrote((comment.get('author') or {}).get('login'), actor):
-                found.append(record)
+                found.append((position, record))
         return found
 
     def _devloop_pr(self, raw):
@@ -292,8 +334,16 @@ class Dispatcher:
                 continue
             if pr.meta and pr.labels & {lb.review, lb.changes, lb.ready_to_merge}:
                 comments = self.gh.pr_comments(pr.number)
-                pr.reviews = sorted(self._markers(pr, comments, 'review'), key=lambda r: r['round'])
+                entries = sorted(self._marker_entries(pr, comments, 'review'),
+                                 key=lambda e: (e[1]['round'], e[0]))
+                pr.reviews = [record for _, record in entries]
                 pr.fixes = self._markers(pr, comments, 'fix')
+                if entries:
+                    # Only what trusted users wrote after the latest verdict can void it.
+                    since = comments[entries[-1][0] + 1:]
+                    pr.operator_comments = operator_comments(since, self.cfg.trusted_users)
+                    pr.rereview = any(requests_rereview(c.get('body'))
+                                      for c in pr.operator_comments)
             if pr.labels & {lb.review, lb.ready_to_merge}:
                 pr.checks, pr.failed_checks, pr.failed_runs = self.gh.checks(pr.head_sha)
             prs.append(pr)
@@ -559,6 +609,7 @@ class Dispatcher:
                            issue_body=issue.get('body') or '', pr_body=pr.body,
                            diff_stat=self.ws.diff_stat(path),
                            previous=format_previous_rounds(pr.reviews, pr.fixes),
+                           operator_comments=format_operator_comments(pr),
                            language=cfg.language)
         # The reviewer works in a disposable copy, where its tests may write; the PR worktree
         # must come out of the review untouched, or the verdict is discarded.

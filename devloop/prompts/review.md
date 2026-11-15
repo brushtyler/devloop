@@ -55,3 +55,5 @@ $diff_stat
 ## Previous rounds
 
 $previous
+
+$operator_comments
