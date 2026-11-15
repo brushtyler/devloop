@@ -24,6 +24,7 @@ back to review. A sync is not a review round.
 
 import string
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -218,15 +219,17 @@ def format_previous_rounds(reviews, fixes):
 
 class Dispatcher:
     """``gh`` acts as the dispatcher. ``identities`` (``apps.Identities``) gives each agent its
-    own GitHub identity; without it every actor uses ``gh``."""
+    own GitHub identity; without it every actor uses ``gh``. ``activity``
+    (``activity.Activity``) records the running action for ``devloop status``."""
 
-    def __init__(self, cfg, gh, ws, runner, log=print, identities=None):
+    def __init__(self, cfg, gh, ws, runner, log=print, identities=None, activity=None):
         self.cfg = cfg
         self.gh = gh
         self.ws = ws
         self.runner = runner
         self.log = log
         self.identities = identities
+        self.activity = activity
 
     # Identities ------------------------------------------------------------
     def _as(self, actor, permissions):
@@ -327,11 +330,15 @@ class Dispatcher:
             if dry_run:
                 continue
             handler = getattr(self, f'_do_{action.kind}')
-            try:
-                handler(prs.get(action.number) or action.number)
-            except (AgentError, GitHubError, WorkspaceError, UntrustedChange) as exc:
-                self.log(f'  failed: {exc}')
-                self._escalate_failure(action, prs.get(action.number), exc)
+            # Recorded for `devloop status` while it runs, removed afterwards even on error.
+            running = (self.activity.action(action.kind, action.number) if self.activity
+                       else nullcontext())
+            with running:
+                try:
+                    handler(prs.get(action.number) or action.number)
+                except (AgentError, GitHubError, WorkspaceError, UntrustedChange) as exc:
+                    self.log(f'  failed: {exc}')
+                    self._escalate_failure(action, prs.get(action.number), exc)
         return actions
 
     # Helpers -------------------------------------------------------------

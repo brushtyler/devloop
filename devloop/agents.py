@@ -65,7 +65,9 @@ def build_command(agent, mode, prompt, *, schema_file, out_file):
         # config) and without network.
         review = ['-c', 'sandbox_workspace_write.network_access=false',
                   '-c', 'sandbox_workspace_write.writable_roots=[]'] if mode == 'review' else []
-        argv = ['codex', 'exec', '--ephemeral', '-m', agent.model,
+        # Not --ephemeral: the session transcript in ~/.codex/sessions is what `devloop follow`
+        # reads while the turn runs.
+        argv = ['codex', 'exec', '-m', agent.model,
                 '-c', f'model_reasoning_effort="{agent.effort}"', '-s', 'workspace-write',
                 *review, '--output-schema', str(schema_file), '-o', str(out_file), *extra, '-']
         return argv, prompt
@@ -101,11 +103,14 @@ def extract_output(kind, stdout, out_file):
 
 
 class AgentRunner:
-    def __init__(self, log_dir, timeout, run=subprocess.run, env=None):
+    """``on_turn(agent, prompt_path)``, if given, is called when a turn starts."""
+
+    def __init__(self, log_dir, timeout, run=subprocess.run, env=None, on_turn=None):
         self.log_dir = Path(log_dir)
         self.timeout = timeout
         self._run = run
         self._env = env
+        self._on_turn = on_turn
         self._versions = {}
 
     def version(self, agent):
@@ -131,7 +136,10 @@ class AgentRunner:
         out_file = stem.with_suffix('.last.json')
         argv, stdin = build_command(agent, mode, prompt, schema_file=schema_path(schema_name),
                                     out_file=out_file)
-        stem.with_suffix('.prompt.md').write_text(prompt, encoding='utf-8')
+        prompt_file = stem.with_suffix('.prompt.md')
+        prompt_file.write_text(prompt, encoding='utf-8')
+        if self._on_turn:
+            self._on_turn(agent, prompt_file)
         log = stem.with_suffix('.log')
         kwargs = {'env': self._env} if self._env is not None else {}
         # Its own process group: a timeout also stops the commands the CLI left in the background.

@@ -1326,7 +1326,8 @@ class DispatcherTests(unittest.TestCase):
         with mock.patch.object(cli, 'build', return_value=(CFG, Path('/state'), d)), \
                 mock.patch.object(cli, 'log', lines.append):
             cli.main(['status'])
-        self.assertIn('merge=conflict CONFLICT with main', lines[0])
+        pr_line = next(line for line in lines if line.startswith('PR #100 '))
+        self.assertIn('merge=conflict CONFLICT with main', pr_line)
         self.assertEqual(lines[-1], 'next: sync #100')
 
 

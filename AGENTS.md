@@ -80,4 +80,4 @@ python3 scripts/agent-token.py <actor> --perm pull_requests=write -- \
 - **L'app del dispatcher è riservata a devloop**, che si fida di alcuni marker solo se li ha scritti il dispatcher. Lo script non la espone.
 - **Una review deve venire da un'identità diversa da quella dell'autore della PR.** GitHub non accetta l'approvazione né la richiesta di modifiche da parte dell'autore stesso.
 
-Per seguire dal vivo un agent che lavora in un worktree di devloop: `scripts/devloop-follow.sh issue-<N>` oppure `scripts/devloop-follow.sh pr-<N>` (richiede `jq`).
+Per seguire dal vivo un agent che lavora in un worktree di devloop: `python3 -m devloop follow issue-<N>` oppure `python3 -m devloop follow pr-<N>`.
