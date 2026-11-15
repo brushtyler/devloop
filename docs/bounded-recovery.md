@@ -89,9 +89,14 @@ hash. It is never applied implicitly, and absent means "no rule", not zero:
   a returned or terminated call with no cost (including a reported 0) blocks the
   next dispatch with `LIMIT_REACHED`.
 
-Token counts reported by the adapter (`claude`, OpenRouter) are stored on the
-row as `reported_tokens`. They are unauthenticated telemetry and the controller
-never converts them to dollars.
+Token counts reported by the adapter are stored on the row as `reported_tokens`,
+independently of any dollar cost: `claude` and OpenRouter report them with their
+cost, `codex` through the `turn.completed` events of `codex exec --json`
+(`input_tokens` already includes the cached input). `agy` reports no tokens. The
+same telemetry is kept for feedback consultations, in the captured response and
+on the native row, also when a captured return is reconciled after a crash.
+Tokens are unauthenticated telemetry and the controller never converts them to
+dollars.
 
 Supervisor `status` (field `limits_coverage`) and the Evidence Pack show, per
 engine: calls with an observed cost, with a reserve, declared unmetered, not

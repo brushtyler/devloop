@@ -219,6 +219,52 @@ class LiveUnknownUsageTests(unittest.TestCase):
             with self.subTest(tokens=tokens), self.assertRaises(ValueError):
                 store.finish(identity, 'returned', None, tokens)
 
+    def test_codex_reported_tokens_are_recorded_from_simulated_cli_output(self):
+        import subprocess
+        from orchestrator import EngineRunner
+        events = [{'type': 'thread.started', 'thread_id': 't'}, {'type': 'turn.started'},
+                  {'type': 'item.completed', 'item': {'id': 'i0', 'type': 'reasoning', 'text': 'thinking'}},
+                  {'type': 'item.completed', 'item': {'id': 'i1', 'type': 'agent_message', 'text': 'final answer'}},
+                  {'type': 'turn.completed', 'usage': {'input_tokens': 131000, 'cached_input_tokens': 90000,
+                                                       'output_tokens': 4200}}]
+        stdout = '\n'.join(json.dumps(e) for e in events) + '\n'
+        calls = []
+        def cli(cmd, **kwargs):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout, 'tool transcript')
+        store = self.store(policy())
+        with patch.object(EngineRunner, '_should_spawn_role_container', return_value=False), \
+                patch.object(EngineRunner, '_run_role_command', side_effect=cli):
+            result = self.dispatch(store, EngineRunner.run_codex, 'prompt', self.root)
+        self.assertIn('--json', calls[0])
+        # The phase result still unpacks as (text, code); tokens ride along as telemetry.
+        text, code = result
+        self.assertEqual((text, code), ('final answer', 0))
+        row = next(iter(self.rows(store).values()))
+        self.assertEqual(row['engine'], 'codex')
+        self.assertEqual(row['usage'], {'metered_usd': None, 'cli_estimate_usd': None})
+        self.assertEqual(row['reported_tokens'], {'input_tokens': 131000, 'output_tokens': 4200})
+        envelope, state = store._load()
+        self.assertEqual(store.accounted_total(state, envelope['policy']), 0)
+        codex = store.coverage_report()['engines']['codex']
+        self.assertEqual((codex['unmetered_quota'], codex['reported_tokens']),
+                         (1, {'input_tokens': 131000, 'output_tokens': 4200}))
+        # Failure and non-JSON output: errors and raw text are kept, absent tokens stay unreported.
+        failed = '\n'.join(json.dumps(e) for e in (
+            {'type': 'turn.failed', 'error': {'message': 'usage limit reached'}},)) + '\n'
+        with patch.object(EngineRunner, '_should_spawn_role_container', return_value=False), \
+                patch.object(EngineRunner, '_run_role_command',
+                             return_value=subprocess.CompletedProcess([], 1, failed, 'stderr')):
+            result = EngineRunner.run_codex('prompt', self.root)
+        self.assertEqual(tuple(result), ('usage limit reached\nstderr', 1))
+        self.assertEqual(observed_tokens('codex', 'run_codex', result), {'input_tokens': None, 'output_tokens': None})
+        with patch.object(EngineRunner, '_should_spawn_role_container', return_value=False), \
+                patch.object(EngineRunner, '_run_role_command',
+                             return_value=subprocess.CompletedProcess([], 0, 'plain text\n', '')):
+            result = EngineRunner.run_codex('prompt', self.root)
+        self.assertEqual(tuple(result), ('plain text', 0))
+        self.assertEqual(observed_tokens('codex', 'run_codex', result), {'input_tokens': None, 'output_tokens': None})
+
     def test_status_and_evidence_pack_show_partial_dollar_cap_coverage(self):
         from orchestrator import SSDLCOrchestrator
         import ssdlc_supervisor

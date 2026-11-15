@@ -466,14 +466,32 @@ def observed_usage(engine, function, result):
     return usage
 
 
+class ReportedOutput(tuple):
+    """An adapter result that unpacks as before and carries the CLI token telemetry.
+
+    Token availability is independent of dollar cost: an engine without a
+    reported cost (codex) may still report tokens.
+    """
+    def __new__(cls, values, reported_tokens=None):
+        result = super().__new__(cls, values)
+        result.reported_tokens = reported_tokens
+        return result
+
+
 def observed_tokens(engine, function, result):
     """Token counts the adapter reported; the controller never converts them to dollars."""
     tokens = {'input_tokens': None, 'output_tokens': None}
-    if not isinstance(result, tuple) or engine not in REPORTED_COST:
+    if not isinstance(result, tuple):
         return tokens
-    index = 3 if function == 'run_claude' else 2
-    for key, offset in (('input_tokens', 0), ('output_tokens', 1)):
-        value = result[index + offset] if len(result) > index + offset else None
+    if isinstance(result, ReportedOutput):
+        reported = result.reported_tokens if isinstance(result.reported_tokens, dict) else {}
+        values = [reported.get(key) for key in tokens]
+    elif engine in REPORTED_COST:
+        index = 3 if function == 'run_claude' else 2
+        values = [result[i] if len(result) > i else None for i in (index, index + 1)]
+    else:
+        return tokens
+    for key, value in zip(tokens, values):
         if type(value) is int and value > 0:
             tokens[key] = value
     return tokens

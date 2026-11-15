@@ -24,6 +24,16 @@ def _usage(value):
     return value
 
 
+def _tokens(value):
+    """Reported token telemetry, kept apart from dollars; absent means not reported."""
+    if value is None:
+        return None
+    if (not isinstance(value, dict) or set(value) != {'input_tokens', 'output_tokens'}
+            or any(v is not None and (type(v) is not int or v < 0) for v in value.values())):
+        raise FeedbackError('Invalid reported feedback tokens')
+    return value
+
+
 class FundedFeedbackRoles:
     def __init__(self, feedback, limits, *, guard):
         self.feedback, self.limits, self.guard = feedback, limits, guard
@@ -62,7 +72,8 @@ class FundedFeedbackRoles:
         """Exactly one newly reserved read-only consultation, never a retry.
 
         runner receives host-stamped role metadata and an opaque invocation ID,
-        and returns {response: object, usage: typed observation}. It must not
+        and returns {response: object, usage: typed observation} plus the
+        optional reported tokens {input_tokens, output_tokens}. It must not
         reserve another invocation. An exception without trusted non-dispatch
         or confirmed termination evidence retains native uncertainty.
         """
@@ -110,12 +121,13 @@ class FundedFeedbackRoles:
                 raise
             # An absent/invalid response does not authorize a blind inference.
             if (not isinstance(result, dict) or not {'response', 'usage'} <= set(result)
-                    or set(result) - {'response', 'usage', 'raw_output'}):
+                    or set(result) - {'response', 'usage', 'tokens', 'raw_output'}):
                 self.limits.finish(invocation, 'returned')
                 raise FeedbackError('Malformed returned feedback response; operator reconciliation required')
-            usage = None
+            usage = tokens = None
             try:
                 usage = _usage(result['usage'])
+                tokens = _tokens(result.get('tokens'))
                 if 'raw_output' in result:
                     raw = result['raw_output']
                     if (not isinstance(raw, dict) or set(raw) != {'text','sha256','truncated','characters'}
@@ -133,11 +145,11 @@ class FundedFeedbackRoles:
                 if len(encoded) > 16000 or not isinstance(result['response'], dict):
                     raise FeedbackError('Malformed or oversized feedback response')
             except (TypeError, ValueError, FeedbackError):
-                self.limits.finish(invocation, 'returned', usage)
+                self.limits.finish(invocation, 'returned', usage, tokens)
                 raise FeedbackError('Malformed returned feedback data; no automatic retry') from None
             receipt = self.feedback.record_role_result(call['operation_id'], result)
             fault('response_captured')
-            self.limits.finish(invocation, 'returned', usage)
+            self.limits.finish(invocation, 'returned', usage, tokens)
             fault('native_returned')
             self.guard()
             return copy.deepcopy(receipt['receipt']['response']['response'])
@@ -161,7 +173,9 @@ class FundedFeedbackRoles:
             if digest(result) != call['receipt']['response_sha256']:
                 raise FeedbackError('Captured consultation response changed')
             _usage(result['usage'])
+            tokens = _tokens(result.get('tokens'))
             if invocation['status'] not in {'reserved', 'returned'}:
                 raise FeedbackError('Native consultation has a conflicting terminal outcome')
-            self.limits.finish(binding['invocation_id'], 'returned', result['usage'])
+            # The captured telemetry is reapplied idempotently, never added twice.
+            self.limits.finish(binding['invocation_id'], 'returned', result['usage'], tokens)
             return copy.deepcopy(result['response'])

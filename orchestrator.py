@@ -1827,6 +1827,7 @@ class EngineRunner:
         cmd = [
             "codex",
             "exec",
+            "--json",
             "--skip-git-repo-check",
             "--sandbox",
             effective_sandbox,
@@ -1852,9 +1853,50 @@ class EngineRunner:
         )
         if getattr(proc, "resource_failure", False):
             raise ResourceLimitError(f"ENVIRONMENT_RESOURCE: container limit reached; code correction not requested. Evidence: {proc.resource_evidence}")
-        combined = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+        from ssdlc_recovery import ReportedOutput
+        message, errors, tokens = EngineRunner._codex_exec_events(proc.stdout or "")
+        if message is None and not errors:
+            # Not a JSONL event stream: keep the raw output, report no tokens.
+            stdout = (proc.stdout or "").strip()
+        else:
+            stdout = "\n".join(errors) if proc.returncode != 0 and errors else (message or "")
+        combined = stdout + ("\n" + proc.stderr if proc.stderr else "")
         # Successful stdout is the phase result; stderr contains tool transcripts.
-        return (proc.stdout or "").strip() if proc.returncode == 0 else combined.strip(), proc.returncode
+        return ReportedOutput((stdout.strip() if proc.returncode == 0 else combined.strip(), proc.returncode), tokens)
+
+    @staticmethod
+    def _codex_exec_events(stdout: str):
+        """Final agent message, error messages and reported tokens of `codex exec --json`.
+
+        Token counts are unauthenticated CLI telemetry. Codex `input_tokens`
+        already includes the cached input, so it is not added again. A count
+        never reported stays None, never zero.
+        """
+        message, errors = None, []
+        tokens = {"input_tokens": None, "output_tokens": None}
+        for line in stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            kind, item = event.get("type"), event.get("item")
+            if (kind == "item.completed" and isinstance(item, dict) and item.get("type") == "agent_message"
+                    and isinstance(item.get("text"), str)):
+                message = item["text"]
+            elif kind == "turn.completed" and isinstance(event.get("usage"), dict):
+                for key in tokens:
+                    value = event["usage"].get(key)
+                    if type(value) is int and value >= 0:
+                        tokens[key] = (tokens[key] or 0) + value
+            elif kind in ("error", "turn.failed"):
+                error = event.get("error")
+                detail = (event.get("message") if kind == "error"
+                          else error.get("message") if isinstance(error, dict) else None)
+                if isinstance(detail, str):
+                    errors.append(detail)
+        return message, errors, tokens
 
     @staticmethod
     @_supervised_dispatch
