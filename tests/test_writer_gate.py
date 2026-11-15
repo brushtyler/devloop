@@ -58,6 +58,21 @@ with ticket_lock(ticket / 'ticket.lock') as canonical, ticket_lock(ticket / 'sch
         print('HANDOFF', new, lease.generation, flush=True)
 '''
 
+# A controller whose trusted host command keeps writing, without daemonizing.
+CONTROLLER = r'''
+import sys
+from pathlib import Path
+from ssdlc_writer_gate import run_host, writer
+ticket, selector, beat = sys.argv[1], Path(sys.argv[2]), sys.argv[3]
+command = ("import os, sys, time\n"
+           "while True:\n"
+           "    with open(sys.argv[1], 'a') as out:\n"
+           "        out.write(str(os.getpid()) + '\\n')\n"
+           "    time.sleep(0.05)\n")
+with writer(ticket, 'gen-1', selector.read_text, timeout=5) as lease:
+    run_host(lease, [sys.executable, '-c', command, beat])
+'''
+
 
 class GateCase(unittest.TestCase):
     def setUp(self):
@@ -221,11 +236,12 @@ class CrashAndMetadataTests(GateCase):
         wg._register(gate, 'uncovered', reused)
         wg._register(gate, 'writer', dict(me, boot_id='another-boot'))
         wg._register(gate, 'writer', me)  # live identity, but no kernel lock
+        wg._register(gate, 'host', reused)  # session PID now names another process life
         self.assertFalse(wg.is_live(reused))
         with transition(str(self.ticket)) as proof:
             found = holders(proof._gate)
-            self.assertEqual(len(found['stale_records']), 3)
-            self.assertEqual(found['uncovered'], [])
+            self.assertEqual(len(found['stale_records']), 4)
+            self.assertEqual((found['uncovered'], found['host_sessions']), ([], []))
             self.assertEqual([h['registered'] for h in found['kernel']], [True])  # only the proof's own flock
         # A forged receipt is not ownership either.
         with writer(str(self.ticket), 'gen-1', self.read) as lease:
@@ -286,6 +302,42 @@ class GateIdentityTests(GateCase):
                 lease.check()
             self.assertEqual(raised.exception.code, 'gate_replaced')
         self.assert_refused('gate_replaced', expected_identity=bound)
+
+    def test_deleted_gate_under_a_live_writer_is_never_recreated(self):
+        child = self.ready()
+        anchor = self.ticket / wg.ANCHOR_NAME
+        inode = self.gate.stat().st_ino
+        self.assertEqual(anchor.stat().st_ino, inode)
+        self.gate.unlink()
+        # No bound identity: the anchor alone tells a deleted gate from a first creation.
+        refused = self.assert_refused('gate_missing')
+        self.assertIn('never recreated', refused.detail)
+        self.assertFalse(self.gate.exists())
+        anchor.unlink()  # even without the anchor, the registry shows a past initialization
+        self.assert_all_refuse('gate_missing')
+        self.assertFalse(self.gate.exists() or anchor.exists())
+        child.stdin.close()
+        self.assertEqual(self.line(child), 'REFUSED gate_missing')
+        self.assertEqual(child.wait(timeout=15), 3)
+
+    def test_missing_or_foreign_anchor_is_refused(self):
+        with transition(str(self.ticket)):
+            pass
+        anchor = self.ticket / wg.ANCHOR_NAME
+        anchor.unlink()
+        self.assert_all_refuse('gate_anchor_missing')
+        anchor.write_bytes(self.gate.read_bytes())  # a copy is not the anchored inode
+        self.assert_all_refuse('gate_replaced')
+
+    def test_concurrent_first_initialization_converges_on_one_gate(self):
+        children = [self.spawn('gen-1') for _ in range(4)]
+        for child in children:
+            self.assertEqual(self.line(child).split()[0], 'READY')
+        inode = self.gate.stat().st_ino
+        self.assertEqual((self.ticket / wg.ANCHOR_NAME).stat().st_ino, inode)
+        self.assertEqual(json.loads(self.gate.read_text())['inode'], inode)
+        for child in children:
+            self.finish(child)
 
     def test_symlinked_or_relative_ticket_root_is_refused(self):
         link = self.ticket.parent / 'T-link'
@@ -384,6 +436,57 @@ class HostWriterTests(GateCase):
         self.assertFalse(wg.is_live(survivor))
         with transition(str(self.ticket)) as proof:
             proof.check()
+
+    def wait_gone(self, identity):
+        deadline = time.monotonic() + 15
+        while wg.is_live(identity) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(wg.is_live(identity))
+
+    def test_host_command_stays_covered_after_its_controller_is_killed(self):
+        beat = self.ticket.parent / 'beat'
+        controller = subprocess.Popen([sys.executable, '-c', CONTROLLER, str(self.ticket), str(self.selector),
+                                       str(beat)], cwd=ROOT, env=dict(os.environ, PYTHONPATH=str(ROOT)))
+        self.addCleanup(lambda: controller.poll() is None and controller.kill())
+        deadline = time.monotonic() + 15
+        while not (beat.exists() and beat.read_text().strip()) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        command = wg.process_identity(int(beat.read_text().split()[0]))[0]
+
+        def stop():
+            if wg.is_live(command):
+                os.kill(command['pid'], signal.SIGKILL)
+        self.addCleanup(stop)
+        controller.send_signal(signal.SIGKILL)  # killed while blocked in communicate()
+        controller.wait(timeout=15)
+        written = len(beat.read_text())
+        time.sleep(0.3)
+        self.assertGreater(len(beat.read_text()), written, 'the host command keeps writing')
+        refused = self.assert_refused('uncovered_execution')
+        self.assertIn(f'host command session {command["pid"]}', refused.detail)
+        gate = open_gate(str(self.ticket))
+        self.addCleanup(gate.close)
+        self.assertEqual(holders(gate)['host_sessions'], [command])
+        os.kill(command['pid'], signal.SIGKILL)
+        self.wait_gone(command)
+        with transition(str(self.ticket)) as proof:
+            proof.check()
+            self.assertEqual(len(holders(proof._gate)['stale_records']), 2)  # dead writer and host session
+
+    def test_host_command_never_runs_without_its_session_record(self):
+        marker = self.ticket.parent / 'ran'
+        with writer(str(self.ticket), 'gen-1', self.read) as lease:
+            refusal = GateError('registry_invalid', 'simulated')
+            with mock.patch.object(wg, '_register', side_effect=refusal), self.assertRaises(GateError):
+                run_host(lease, [sys.executable, '-c', 'import sys; open(sys.argv[1], "w")', str(marker)])
+            self.assertFalse(marker.exists(), 'the command ran before its session was recorded')
+            done = run_host(lease, ['sh', '-c', 'read line; echo "$line"'], input='payload\n',
+                            capture_output=True, text=True)
+            self.assertEqual(done.stdout, 'payload\n')
+            self.assertEqual(done.args, ['sh', '-c', 'read line; echo "$line"'])
+            self.assertEqual(list((self.ticket / wg.REGISTRY_NAME).glob('h-*.json')), [])
+            with self.assertRaises(FileNotFoundError):
+                run_host(lease, ['ssdlc-no-such-command'])
 
 
 class ProtocolDocumentationTests(unittest.TestCase):

@@ -17,6 +17,7 @@ import logging
 import os
 from pathlib import Path
 import secrets
+import shutil
 import signal
 import stat
 import subprocess
@@ -27,7 +28,11 @@ from ssdlc_locks import current_lock, record_lock
 
 
 GATE_NAME = 'writer.gate'
+# Second hard link to the gate inode, published before the gate path: it marks the
+# ticket as initialized and keeps the canonical identity outside the gate path.
+ANCHOR_NAME = 'writer-gate.anchor'
 REGISTRY_NAME = 'writer-gate.d'
+INIT_WAIT = 5.0
 KIND = 'ssdlc-writer-gate-v1'
 RECORD_MAX = 4096
 MAX_WAIT = 300.0
@@ -109,9 +114,13 @@ def process_identity(pid):
     return dict(pid=ident.pid, boot_id=ident.boot_id, start_ticks=ident.start_ticks), ident.sid
 
 
+def is_identity(identity):
+    return (isinstance(identity, dict) and type(identity.get('pid')) is int
+            and isinstance(identity.get('boot_id'), str) and type(identity.get('start_ticks')) is int)
+
+
 def is_live(identity):
-    if not (isinstance(identity, dict) and type(identity.get('pid')) is int
-            and isinstance(identity.get('boot_id'), str) and type(identity.get('start_ticks')) is int):
+    if not is_identity(identity):
         return False
     observed = process_identity(identity['pid'])
     return observed is not None and observed[0] == {k: identity[k] for k in ('pid', 'boot_id', 'start_ticks')}
@@ -150,12 +159,18 @@ def _read_record(fd):
     return record
 
 
+def _lstat(dirfd, name):
+    try:
+        return os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
 def _verify(dirfd, fd, expected=None):
     opened = os.fstat(fd)
-    try:
-        linked = os.stat(GATE_NAME, dir_fd=dirfd, follow_symlinks=False)
-    except FileNotFoundError:
-        raise GateError('gate_replaced', 'gate path disappeared') from None
+    linked = _lstat(dirfd, GATE_NAME)
+    if linked is None:
+        raise GateError('gate_missing', 'gate path disappeared; the gate is never recreated')
     if stat.S_ISLNK(linked.st_mode):
         raise GateError('gate_symlink', 'gate path is a symlink')
     if not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(linked.st_mode):
@@ -165,6 +180,12 @@ def _verify(dirfd, fd, expected=None):
     record = _read_record(fd)
     if record['inode'] != opened.st_ino:
         raise GateError('gate_replaced', f'gate record belongs to inode {record["inode"]}, file is inode {opened.st_ino}')
+    anchor = _lstat(dirfd, ANCHOR_NAME)
+    if anchor is None:
+        raise GateError('gate_anchor_missing',
+                        f'{ANCHOR_NAME} is missing: the gate cannot be told apart from a recreated one')
+    if not stat.S_ISREG(anchor.st_mode) or (anchor.st_dev, anchor.st_ino) != (opened.st_dev, opened.st_ino):
+        raise GateError('gate_replaced', f'gate is not the inode anchored by {ANCHOR_NAME}')
     identity = dict(device=opened.st_dev, inode=opened.st_ino)
     if expected is not None and dict(device=expected['device'], inode=expected['inode']) != identity:
         raise GateError('gate_replaced', 'gate identity differs from the bound identity')
@@ -177,7 +198,11 @@ def _write_all(fd, data):
 
 
 def _create(dirfd):
-    """Publish a complete gate with link(2): it never replaces an existing path."""
+    """Publish a complete gate with link(2): anchor first, then the gate path.
+
+    Called only under the initialization lock, with neither name present. link(2)
+    never replaces an existing path, so a conflict is a refusal, not a replacement.
+    """
     tmp = f'.{GATE_NAME}.{secrets.token_hex(8)}.tmp'
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o444, dir_fd=dirfd)
     try:
@@ -188,16 +213,52 @@ def _create(dirfd):
             os.fsync(fd)
         finally:
             os.close(fd)
-        with contextlib.suppress(FileExistsError):
-            os.link(tmp, GATE_NAME, src_dir_fd=dirfd, dst_dir_fd=dirfd, follow_symlinks=False)
+        try:
+            for name in (ANCHOR_NAME, GATE_NAME):
+                os.link(tmp, name, src_dir_fd=dirfd, dst_dir_fd=dirfd, follow_symlinks=False)
+        except FileExistsError:
+            raise GateError('gate_init_conflict', 'gate created outside the initialization lock') from None
         os.fsync(dirfd)
     finally:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(tmp, dir_fd=dirfd)
 
 
+@contextlib.contextmanager
+def _init_lock(dirfd):
+    """Serialize first initialization on a private descriptor of the ticket directory."""
+    fd = os.open('.', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC, dir_fd=dirfd)
+    try:
+        deadline = time.monotonic() + INIT_WAIT
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise GateError('gate_init_contended',
+                                    f'gate initialization still locked after {INIT_WAIT:.0f}s') from None
+                time.sleep(0.01)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _initialize(dirfd):
+    """Create the gate only on a ticket that never had one; never recreate it."""
+    with _init_lock(dirfd):
+        if _lstat(dirfd, GATE_NAME) is not None:
+            return  # the anchor is checked by _verify, after the gate's own diagnostics
+        if _lstat(dirfd, ANCHOR_NAME) is not None:
+            raise GateError('gate_missing', 'gate path disappeared after initialization; the gate is never recreated')
+        if _lstat(dirfd, REGISTRY_NAME) is not None:
+            raise GateError('gate_missing', f'gate and anchor are missing but {REGISTRY_NAME} exists: '
+                                            'the gate was initialized before and is never recreated')
+        _create(dirfd)
+
+
 def open_gate(ticket_root, expected_identity=None):
-    """Open (creating once if absent) and verify the canonical ticket's gate."""
+    """Open and verify the canonical ticket's gate, creating it only on first initialization."""
     _require_linux()
     root = Path(ticket_root)
     if not root.is_absolute():
@@ -209,28 +270,24 @@ def open_gate(ticket_root, expected_identity=None):
     fd = None
     try:
         filesystem = check_filesystem(dirfd)
-        for _ in range(2):
-            try:
-                linked = os.stat(GATE_NAME, dir_fd=dirfd, follow_symlinks=False)
-            except FileNotFoundError:
-                _create(dirfd)
-                continue
-            if stat.S_ISLNK(linked.st_mode):
-                raise GateError('gate_symlink', 'gate path is a symlink')
-            if not stat.S_ISREG(linked.st_mode):
-                raise GateError('gate_not_regular', 'gate path is not a regular file')
-            try:
-                fd = os.open(GATE_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NOCTTY | os.O_NONBLOCK,
-                             dir_fd=dirfd)
-            except OSError as exc:
-                if exc.errno == errno.ELOOP:
-                    raise GateError('gate_symlink', 'gate path is a symlink') from None
-                if exc.errno == errno.ENOENT:
-                    raise GateError('gate_replaced', 'gate path disappeared while opening') from None
-                raise GateError('gate_unreadable', exc.strerror) from None
-            break
-        if fd is None:
-            raise GateError('gate_replaced', 'gate path disappeared after creation')
+        if _lstat(dirfd, GATE_NAME) is None or _lstat(dirfd, ANCHOR_NAME) is None:
+            _initialize(dirfd)
+        linked = _lstat(dirfd, GATE_NAME)
+        if linked is None:
+            raise GateError('gate_missing', 'gate path disappeared after initialization')
+        if stat.S_ISLNK(linked.st_mode):
+            raise GateError('gate_symlink', 'gate path is a symlink')
+        if not stat.S_ISREG(linked.st_mode):
+            raise GateError('gate_not_regular', 'gate path is not a regular file')
+        try:
+            fd = os.open(GATE_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NOCTTY | os.O_NONBLOCK,
+                         dir_fd=dirfd)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise GateError('gate_symlink', 'gate path is a symlink') from None
+            if exc.errno == errno.ENOENT:
+                raise GateError('gate_missing', 'gate path disappeared while opening') from None
+            raise GateError('gate_unreadable', exc.strerror) from None
         check_filesystem(fd)
         identity = _verify(dirfd, fd, expected_identity)
         return _Gate(root, dirfd, fd, identity, filesystem, expected_identity)
@@ -296,10 +353,16 @@ def _records(gate):
                     os.close(fd)
             except (OSError, ValueError):
                 record = None
-            if not isinstance(record, dict) or record.get('role') not in {'writer', 'uncovered'}:
+            if not isinstance(record, dict) or record.get('role') not in {'writer', 'uncovered', 'host'}:
                 LOG.warning('writer-gate ignored malformed registry record ticket=%s name=%s', gate.ticket_root, name)
                 continue
-            found.append(dict(record, name=name, live=is_live(record.get('identity'))))
+            identity = record.get('identity')
+            if record['role'] == 'host':
+                # A host command is covered for its whole session, not only its leader.
+                live = (is_identity(identity) and bool(_session_members(identity['pid'], identity)))
+            else:
+                live = is_live(identity)
+            found.append(dict(record, name=name, live=live))
         return found
     finally:
         os.close(rfd)
@@ -340,7 +403,8 @@ def holders(gate):
         kernel.append(dict(held, identity=identity, registered=registered))
     stale = [r['name'] for r in records if not r['live']]
     return dict(kernel=kernel, stale_records=stale,
-                uncovered=[r['identity'] for r in records if r['role'] == 'uncovered' and r['live']])
+                uncovered=[r['identity'] for r in records if r['role'] == 'uncovered' and r['live']],
+                host_sessions=[r['identity'] for r in records if r['role'] == 'host' and r['live']])
 
 
 def _describe(found):
@@ -458,8 +522,11 @@ class TransitionProof:
 
 
 def _uncovered(gate, coverage):
+    records = _records(gate)
     reasons = [f'host process {r["identity"]["pid"]} escaped a writer lease'
-               for r in _records(gate) if r['role'] == 'uncovered' and r['live']]
+               for r in records if r['role'] == 'uncovered' and r['live']]
+    reasons += [f'host command session {r["identity"]["pid"]} outlived its controller\'s writer lease'
+                for r in records if r['role'] == 'host' and r['live']]
     for probe in coverage:
         try:
             reason = probe()
@@ -530,11 +597,29 @@ def handoff(lease, publish, *, held=(), coverage=()):
 
 # ---------------------------------------------------------------------------
 # Trusted host commands: run inside a live writer lease, in their own session,
-# without the gate descriptor; leftovers are recorded and refuse fencing.
+# without the gate descriptor. The session is registered before the command
+# executes and stays registered until it is empty, so a controller killed at any
+# point leaves either no command or a recorded one that refuses fencing.
+
+# The barrier reads one line from the command's stdin pipe, which only the
+# controller can write, once the session is registered. EOF (the controller died
+# or refused) exits without executing the command. ``read`` consumes exactly that
+# line, so the command then sees the caller's input, or EOF.
+_BARRIER = 'IFS= read -r _ || exit 125; exec "$@"'
+
 
 def _session_members(sid, leader):
     from ssdlc_supervisor import Proc
     proc, members = Proc(), []
+    try:
+        ident, _, _ = proc.stat(sid)
+    except (OSError, ValueError, IndexError):
+        pass
+    else:
+        # A session keeps its leader's PID allocated while any member lives, so a
+        # PID now naming another process life means the old session is empty.
+        if (ident.boot_id, ident.start_ticks) != (leader['boot_id'], leader['start_ticks']):
+            return members
     for pid in proc.pids():
         try:
             ident, state, _ = proc.stat(pid)
@@ -546,15 +631,40 @@ def _session_members(sid, leader):
     return members
 
 
+def _resolve(program, env):
+    """Resolve the executable like Popen would, so a missing one still raises FileNotFoundError."""
+    if os.sep in program:
+        return program
+    found = shutil.which(program, path=(os.environ if env is None else env).get('PATH', os.defpath))
+    if found is None:
+        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), program)
+    return found
+
+
 def run_host(lease, argv, *, cwd=None, env=None, input=None, timeout=None, capture_output=False, text=False):
     lease.check()
+    argv = [os.fspath(arg) for arg in argv]
+    program = _resolve(argv[0], env)
     pipe = subprocess.PIPE if capture_output else None
-    child = subprocess.Popen(list(argv), cwd=cwd, env=env, text=text, stdout=pipe, stderr=pipe,
-                             stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+    child = subprocess.Popen(['/bin/sh', '-c', _BARRIER, 'ssdlc-host', program, *argv[1:]],
+                             cwd=cwd, env=env, text=text, stdout=pipe, stderr=pipe, stdin=subprocess.PIPE,
                              close_fds=True, start_new_session=True)
-    # Not reaped yet, so /proc/<pid> still describes our child.
-    observed = process_identity(child.pid)
-    leader = observed[0] if observed else dict(self_identity()[0], start_ticks=0)
+    record = None
+    try:
+        # Not reaped and still waiting on the barrier, so /proc/<pid> describes our child.
+        observed = process_identity(child.pid)
+        if observed is None or observed[1] != child.pid:
+            raise GateError('uncovered_execution', 'host command session could not be identified')
+        leader = observed[0]
+        # Registered before the command runs: it outlives a SIGKILL of this controller.
+        record = _register(lease._gate, 'host', leader, controller=self_identity()[0])
+        with contextlib.suppress(BrokenPipeError):
+            _write_all(child.stdin.fileno(), b'\n')
+    except BaseException:
+        child.communicate()  # EOF on the barrier: the command is never executed
+        if record is not None:
+            _unregister(lease._gate, record)
+        raise
     try:
         out, err = child.communicate(input, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -569,8 +679,10 @@ def run_host(lease, argv, *, cwd=None, env=None, input=None, timeout=None, captu
         if survivors:
             LOG.warning('writer-gate host command left live descendants ticket=%s pids=%s',
                         lease.ticket_root, [s['pid'] for s in survivors])
+        # Only once every survivor is recorded does the session record go away.
+        _unregister(lease._gate, record)
     if survivors:
         raise GateError('uncovered_execution',
                         f'host command left {len(survivors)} live descendants outside the writer lease')
     lease.check()
-    return subprocess.CompletedProcess(child.args, child.returncode, out, err)
+    return subprocess.CompletedProcess(argv, child.returncode, out, err)

@@ -34,7 +34,16 @@ of the canonical ticket is running. This page describes the protocol implemented
 
 The gate is created once. A complete record (`ssdlc-writer-gate-v1`, holding the
 gate's own inode number) is written to a temporary file and published with `link(2)`,
-which never replaces an existing path. Concurrent creators converge on the same file.
+which never replaces an existing path, first as the anchor `writer-gate.anchor` and
+then as `writer.gate`. The anchor is a second hard link to the same inode: it keeps the
+canonical identity outside the gate path and marks the ticket as initialized.
+
+Creation happens only on **first initialization**: under a short `flock` on a private
+descriptor of the ticket directory (bounded wait, 5 s), with neither the gate, the
+anchor nor the registry `writer-gate.d/` present. Concurrent creators serialize on that
+lock and converge on the same file. After initialization a missing gate is refused
+(`gate_missing`) and never recreated, even when a writer still holds the old inode and
+the caller binds no identity.
 
 Every opening verifies the gate's identity:
 
@@ -44,13 +53,17 @@ Every opening verifies the gate's identity:
   `lstat`), both before and after the lock is acquired;
 - the inode recorded in the gate must equal the open inode, so a copy of the gate is
   not the gate;
+- the anchor must be a regular file naming the same device and inode;
 - a caller may bind the identity it saw earlier (`expected_identity`); a different
   identity is refused.
 
 | Situation | Refusal code |
 | --- | --- |
 | Gate path is a symlink | `gate_symlink` |
-| Gate path names another file (replaced, copied, recreated) | `gate_replaced` |
+| Gate path names another file (replaced, copied, recreated) or not the anchored inode | `gate_replaced` |
+| Gate path deleted after initialization | `gate_missing` |
+| Anchor deleted while the gate remains | `gate_anchor_missing` |
+| Initialization lock held for more than 5 s, or a name created outside it | `gate_init_contended`, `gate_init_conflict` |
 | Gate path is a directory, FIFO or device | `gate_not_regular` |
 | Gate file is empty or holds a foreign record | `gate_corrupt` |
 | Ticket directory is a symlink or a relative path | `ticket_root_invalid` |
@@ -81,6 +94,10 @@ From outermost to innermost:
 2. `03-dev/tasks/scheduler.lock` of the source generation;
 3. other serialization locks (`feedback.lock`, `consultation.lock`, `limits/limits.lock`);
 4. `writer.gate`, always last.
+
+The ticket-directory lock used for first initialization is taken only while neither
+`writer.gate` nor its anchor is fully published, is never held together with the gate
+lock, and is released before the gate is opened.
 
 Serialization locks keep their current behaviour and receipts. Every exclusive gate
 acquisition is non-blocking, and a writer's wait for `LOCK_SH` is bounded (default 30 s,
@@ -115,10 +132,22 @@ path, and the commands of local mode) run through `run_host(lease, argv)`:
 
 - the controller holds a live writer lease, checked before and after the command;
 - the command runs in a new session, without the gate descriptor;
-- after it exits, any live process left in its session is recorded as uncovered.
+- **before the command executes**, its session (leader PID, boot id and start time) is
+  recorded in the registry as a `host` record. The child starts as a `/bin/sh` barrier
+  that waits for one line on its stdin pipe, which only the controller writes after the
+  record is durable, and then `exec`s the command. If the controller dies or the
+  registration fails first, the barrier reads EOF and exits without executing anything;
+- after the command exits, any live process left in its session is recorded as
+  uncovered, and only then is the `host` record removed.
 
-A transition refuses automatic fencing (`uncovered_execution`) while an uncovered
-process is alive, and whenever a caller's coverage probe reports an execution tree not
+If the controller is killed (even with `SIGKILL`) while the command runs, the `host`
+record stays. It refuses automatic fencing as long as any process of that session is
+alive, so the command is covered for its whole life, not only for the controller's.
+A session keeps its leader's PID allocated while any member lives; a record whose PID
+now names another process life describes an empty session and is ignored as stale.
+
+A transition refuses automatic fencing (`uncovered_execution`) while a `host` session
+or an uncovered process is alive, and whenever a caller's coverage probe reports an execution tree not
 covered by the gate, for example a role container. Trusted host commands must not
 daemonize out of their session: Git must run with `gc.autoDetach=false` and
 `maintenance.autoDetach=false`.
@@ -144,8 +173,10 @@ or a transition:
 - a record left by a killed writer, or a record whose PID now belongs to another
   process, is reported as stale and ignored;
 - a record of a live process that does not hold the lock admits nothing;
-- only a live `uncovered` record (a host descendant that escaped its lease) refuses
-  automatic fencing, and only while that exact process is alive.
+- only a live `uncovered` record (a host descendant that escaped its lease) or a live
+  `host` record (a host command session whose controller may be gone) refuses
+  automatic fencing, and only while that exact process, or a process of that exact
+  session, is alive.
 
 Contention is logged by the `ssdlc_writer_gate` logger with the kernel holders from
 `/proc/locks`.
@@ -169,6 +200,7 @@ an authorized I2 generation without `state.json` is refused before anything is c
   every opener.
 - **Docker on the same host.** Containers are covered only through the host controller
   and coverage probes; a container on another host cannot be fenced.
-- A recreated gate is detected through a bound identity or an open lease; a gate
-  deleted and recreated while nobody holds or binds it cannot be told apart from a
-  first creation.
+- A deleted or replaced gate is detected through its anchor, the registry, a bound
+  identity or an open lease, and is never recreated. Only deleting the gate, its anchor
+  and the whole `writer-gate.d/` registry together makes the ticket look never
+  initialized; that is outside the protocol and needs an operator.
