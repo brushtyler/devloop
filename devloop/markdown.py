@@ -96,6 +96,10 @@ def _valid_fix(f):
             and _list_of_dicts(f.get('responses')))
 
 
+def _valid_sync(s):
+    return isinstance(s.get('head_sha'), str)
+
+
 def _valid_pr(m):
     return _is_int(m.get('issue'), 1) and all(isinstance(m.get(k), str)
                                               for k in ('implementer', 'reviewer'))
@@ -117,7 +121,7 @@ def _valid_finding(f):
 
 
 _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy': _valid_policy,
-          'finding': _valid_finding}
+          'finding': _valid_finding, 'sync': _valid_sync}
 
 
 def read_marker(text, kind):

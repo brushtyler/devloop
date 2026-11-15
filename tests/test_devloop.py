@@ -45,7 +45,9 @@ def receipt(head=SHA1, base=BASE, files=('x.py',), labelers=(), previous=0, pr_n
                            changes=[{'path': f, 'links': []} for f in files],
                            labelers=list(labelers), trusted_users=cfg.trusted_users,
                            previous_level=previous,
-                           select=lambda level: [cfg.reviewer] if level == 1 else [])
+                           select=lambda level: [cfg.reviewer] if level == 1 else [],
+                           profile=lambda key: policy.agent_profile(cfg.agent(key), None,
+                                                                    'review'))
 
 
 def norm(raw, previous_open=(), round_no=1, head=SHA1, bound=True):

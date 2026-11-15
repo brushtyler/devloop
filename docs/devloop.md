@@ -153,15 +153,16 @@ distinct only if they differ both in GitHub identity (their app; agents without 
 operator's login) and in the tuple `(kind, model, effort, review_args)`; keys and descriptions
 do not count. Neither may share the identity or the `(kind, model, effort)` of whoever wrote
 code on the PR: the implementer recorded in the PR marker, the author of every fix, also of
-earlier rounds, and the agent configured now under the implementer's key, which runs fixes and
-syncs. The dispatcher scans the pool in configuration order and takes the first such pair. The
+earlier rounds, the agent that resolved the conflicts of every sync, and the agent configured
+now under the implementer's key, which runs fixes and syncs. The dispatcher scans the pool in configuration order and takes the first such pair. The
 choice is deterministic, so it stays the same for the whole round, and it is recorded in the
 receipt (`reviewers`).
 
-Since #111 the PR marker, every fix and every review record the identity and tuple actually
-used (`profile`). At level 2, when a PR or one of its fixes was recorded before, independence
-cannot be verified and the PR goes to `agent:needs-human`. At level 1 older markers stay valid
-as before.
+Since #111 the PR marker, every fix, every sync whose conflicts an agent resolved (`sync`
+marker) and every review record the identity and tuple actually used (`profile`). At level 2,
+when a PR or one of its fixes was recorded before, or a sync marker lacks the profile,
+independence cannot be verified and the PR goes to `agent:needs-human`. At level 1 older markers
+stay valid as before.
 
 A round at level 2 works as follows:
 
@@ -200,13 +201,15 @@ Every agent review, CI round and promotion records a **receipt** in its marker:
 | `policy` | The policy version: the SHA-256 of the loaded policy configuration, including key, app, kind, model, effort and `review_args` of every reviewer of the pool |
 | `level`, `reasons` | The effective level and why: default, label with its author, sensitive paths, earlier level |
 | `reviewers` | The reviewers the level requires, in order (none when the pool has not enough independent ones) |
+| `profiles` | The identity and tuple `(kind, model, effort, review_args)` each required reviewer reviews with now. At level 1 the PR's recorded reviewer stays required even when it is no longer in the pool, so the policy version does not cover it: its profile does |
 
 Promotions and escalations for a pool without enough independent reviewers are dispatcher
 comments with a `policy` marker, read only from the dispatcher's identity. Before promoting a
 round the dispatcher recomputes the receipt. The approvals count only if each required reviewer
-approved and the commit of base, the policy version, the level and the required reviewers (and
-the head) all match: when the base branch advanced, the policy or the reviewer configuration
-(pool, apps, models, efforts, `review_args`) changed, or the level rose, the PR stays in
+approved and the commit of base, the policy version, the level, the required reviewers and their
+profiles (and the head) all match: when the base branch advanced, the policy or the
+configuration of the pool or of a required reviewer (apps, models, efforts, `review_args`)
+changed, or the level rose, the PR stays in
 `agent:review`, a dispatcher comment says what changed, and the next tick runs a new review,
 even of the same head. That review is a
 round like any other and waits for CI. Approvals recorded before receipts existed have none:

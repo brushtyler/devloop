@@ -50,8 +50,8 @@ from .github import GitHubError, merge_state
 from .markdown import (RESUME, dispatcher_header, publishable, read_marker, render_escalation,
                        render_fix, render_native_review, render_review)
 from .policy import describe as describe_receipt
-from .policy import (BINDING, differences, distinct, evaluate, independent, profile_of,
-                     receipt_of, recorded_level)
+from .policy import (BINDING, agent_profile, differences, distinct, evaluate, independent,
+                     profile_of, receipt_of, recorded_level)
 from .review import (CI, FINDING_COMMAND, OPERATOR, ci_failure_review, current_round,
                      finding_commands, finding_key, finding_state, last_round, normalize_review,
                      open_findings, owner_of, round_verdict)
@@ -71,7 +71,8 @@ LABEL_STYLE = {
 LEVEL_LABEL_STYLE = ('5319e7', 'devloop: la PR richiede una review di livello 2')
 _RECEIPT_FIELDS = {'pr': 'PR', 'base': 'commit di base', 'head': 'head',
                    'policy': 'versione della policy', 'level': 'livello',
-                   'reviewers': 'reviewer richiesti'}
+                   'reviewers': 'reviewer richiesti',
+                   'profiles': 'identità, modello, effort o argomenti dei reviewer'}
 _CLOSED_TEXT = {'resolved': 'risolto', 'withdrawn': 'ritirato'}
 
 
@@ -87,6 +88,8 @@ class PullRequest:
     meta: dict
     reviews: list = field(default_factory=list)
     fixes: list = field(default_factory=list)
+    # Conflict resolutions of syncs (``sync`` markers), with who resolved them (#111).
+    syncs: list = field(default_factory=list)
     checks: str = 'none'
     failed_checks: list = field(default_factory=list)
     failed_runs: list = field(default_factory=list)
@@ -399,7 +402,7 @@ class Dispatcher:
             if record is None:
                 continue
             login = (comment.get('author') or {}).get('login')
-            if kind == 'fix':
+            if kind in ('fix', 'sync'):
                 actor = implementer
             elif kind in ('policy', 'finding'):
                 actor = DISPATCHER
@@ -499,6 +502,7 @@ class Dispatcher:
                                  key=lambda e: (e[1]['round'], e[0]))
                 pr.reviews = [record for _, record in entries]
                 pr.fixes = self._markers(pr, comments, 'fix')
+                pr.syncs = self._markers(pr, comments, 'sync')
                 pr.closures = [c for record in self._markers(pr, comments, 'finding')
                                for c in record['closed']]
                 state = finding_state(pr.reviews, pr.closures)
@@ -657,15 +661,13 @@ class Dispatcher:
                         labelers=self.gh.labelers(pr.number, policy.label),
                         trusted_users=self.cfg.trusted_users,
                         previous_level=recorded_level(pr.reviews + pr.policy),
-                        select=lambda level: self._select(pr, level)[0])
+                        select=lambda level: self._select(pr, level)[0],
+                        profile=lambda key: self._profile(key, 'review'))
 
     def _profile(self, key, mode):
         """The identity and tuple agent ``key`` acts with now in ``mode`` (``write`` or
         ``review``), as markers record them."""
-        agent = self.cfg.agent(key)
-        return {'identity': self._app_login(key), 'kind': agent.kind, 'model': agent.model,
-                'effort': agent.effort,
-                'args': list(agent.review_args if mode == 'review' else agent.write_args)}
+        return agent_profile(self.cfg.agent(key), self._app_login(key), mode)
 
     def _select(self, pr, level):
         """``(reviewers, problem)``: the reviewers ``level`` requires on the PR, in order, or
@@ -674,9 +676,10 @@ class Dispatcher:
         Level 1 keeps the rule from before #111: the PR's recorded reviewer, else the first of
         the pool, never the PR's implementer. Level 2 takes the first pair of the pool, in
         configuration order, that is distinct and independent of everyone who wrote code on
-        the PR: the implementer and every fixer as their markers record them, and the agent
-        configured now under the implementer's key, which runs fixes and syncs. When a marker
-        does not record who wrote the code, independence cannot be verified."""
+        the PR: the implementer, every fixer and every agent that resolved conflicts in a sync,
+        as their markers record them, and the agent configured now under the implementer's
+        key, which runs fixes and syncs. When a marker does not record who wrote the code,
+        independence cannot be verified."""
         cfg, implementer = self.cfg, pr.meta['implementer']
         if level == 1:
             for key in (pr.meta['reviewer'], *cfg.pool()):
@@ -684,11 +687,11 @@ class Dispatcher:
                     return [key], ''
             return [], (f'nessun reviewer configurato è diverso dall\'implementer della PR '
                         f'(`{implementer}`)')
-        authors = [profile_of(pr.meta), *map(profile_of, pr.fixes)]
+        authors = [profile_of(pr.meta), *map(profile_of, pr.fixes + pr.syncs)]
         if None in authors:
             return [], ('non è verificabile che i reviewer siano indipendenti da chi ha scritto '
-                        'il codice: la PR o una sua correzione non registra identità e tupla '
-                        'dell\'agent (marker precedenti a #111)')
+                        'il codice: la PR, una sua correzione o una risoluzione di conflitti '
+                        'non registra identità e tupla dell\'agent (marker precedenti a #111)')
         if implementer in cfg.agents:
             authors.append(self._profile(implementer, 'write'))
         candidates = [(key, self._profile(key, 'review')) for key in cfg.pool()
@@ -1140,8 +1143,12 @@ class Dispatcher:
                 'review.\n\n')
         if files:
             text += f'File in conflitto risolti:\n\n{listed}\n\n{result["summary"].strip()}'
+            # Who resolved the conflicts wrote code on the PR: the marker keeps its profile,
+            # so a later change of configuration cannot make it a reviewer of its own code.
             self._as(agent.key, PR_COMMENT).comment(
-                pr.number, publishable(self.runner.header(agent) + text))
+                pr.number, publishable(self.runner.header(agent) + text, 'sync',
+                                       {'head_sha': head,
+                                        'profile': self._profile(agent.key, 'write')}))
         else:
             self.gh.comment(pr.number, publishable(dispatcher_header() + text
                                                    + 'Il merge locale non aveva conflitti.'))

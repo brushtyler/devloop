@@ -35,7 +35,10 @@ SENSITIVE_LEVEL = 2
 # approval whose receipt no longer matches, or a promotion.
 EVENTS = ('level', 'stale', 'promoted')
 # The receipt fields an approval must match. ``reasons`` explains the level and is not compared.
-BINDING = ('pr', 'base', 'head', 'policy', 'level', 'reviewers')
+# ``profiles`` are the identity and tuple each required reviewer reviews with: a reviewer
+# outside the configured pool (level 1 keeps the PR's recorded one) is not covered by the policy
+# version, and a change to its model, effort or arguments must still void its approvals.
+BINDING = ('pr', 'base', 'head', 'policy', 'level', 'reviewers', 'profiles')
 MAX_LISTED_PATHS = 50
 
 
@@ -111,13 +114,14 @@ def sensitive_changes(policy, changes):
 
 
 def evaluate(policy, *, pr, base, head, changes, labelers, trusted_users, previous_level,
-             select):
+             select, profile=lambda key: None):
     """The receipt of head ``head`` of PR ``pr`` against base commit ``base``.
 
     ``labelers`` are the logins of every ``labeled`` event of ``policy.label`` on the PR,
     oldest first; ``previous_level`` the highest level recorded on the PR so far (0 if none);
     ``select(level)`` the reviewers that level requires, in order: as many as the level, or
-    none when the pool has not enough independent ones."""
+    none when the pool has not enough independent ones; ``profile(key)`` the identity and
+    tuple reviewer ``key`` reviews with now."""
     level = max(MIN_LEVEL, policy.default_level)
     reasons = [{'kind': 'default', 'level': level}]
     by = next((who for who in labelers if who in trusted_users), None)
@@ -136,7 +140,8 @@ def evaluate(policy, *, pr, base, head, changes, labelers, trusted_users, previo
     level = min(level, MAX_LEVEL)
     reviewers = list(select(level))
     return {'pr': pr, 'base': base, 'head': head, 'policy': policy.version(), 'level': level,
-            'reasons': reasons, 'reviewers': reviewers}
+            'reasons': reasons, 'reviewers': reviewers,
+            'profiles': [profile(key) for key in reviewers]}
 
 
 def valid_profile(p):
@@ -145,6 +150,14 @@ def valid_profile(p):
     return (isinstance(p, dict) and (p.get('identity') is None or isinstance(p['identity'], str))
             and all(isinstance(p.get(k), str) for k in ('kind', 'model', 'effort'))
             and isinstance(p.get('args'), list) and all(isinstance(a, str) for a in p['args']))
+
+
+def agent_profile(agent, identity, mode):
+    """The profile ``agent`` acts with in ``mode`` (``write`` or ``review``) under GitHub
+    ``identity``, as markers and receipts record it."""
+    return {'identity': identity, 'kind': agent.kind, 'model': agent.model,
+            'effort': agent.effort,
+            'args': list(agent.review_args if mode == 'review' else agent.write_args)}
 
 
 def profile_of(record):
@@ -183,7 +196,10 @@ def valid_receipt(r):
             and isinstance(r.get('reviewers'), list)
             and all(isinstance(x, str) for x in r['reviewers'])
             and isinstance(r.get('reasons'), list)
-            and all(isinstance(x, dict) for x in r['reasons']))
+            and all(isinstance(x, dict) for x in r['reasons'])
+            # Receipts written before profiles were bound carry none: still valid, so their
+            # level counts, but they never match a current receipt.
+            and (r.get('profiles') is None or isinstance(r['profiles'], list)))
 
 
 def receipt_of(record):

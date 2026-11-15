@@ -139,7 +139,14 @@ class LevelTests(unittest.TestCase):
         self.assertEqual(policy.differences(dict(current, reviewers=['agy']), current),
                          ['reviewers'])
         self.assertEqual(policy.differences(receipt(files=['AGENTS.md']), current),
-                         ['level', 'reviewers'])
+                         ['level', 'reviewers', 'profiles'])
+        changed = [dict(current['profiles'][0], model='other')]
+        self.assertEqual(policy.differences(dict(current, profiles=changed), current),
+                         ['profiles'])
+        # A receipt from before profiles were bound keeps its level but matches nothing.
+        legacy = {k: v for k, v in current.items() if k != 'profiles'}
+        self.assertEqual(policy.receipt_of({'receipt': legacy}), legacy)
+        self.assertEqual(policy.differences(legacy, current), ['profiles'])
         # A record without a receipt, or with a malformed one, has none.
         self.assertIsNone(policy.receipt_of(norm(raw_review(), bound=False)))
         self.assertIsNone(policy.receipt_of({'receipt': dict(current, level=5)}))

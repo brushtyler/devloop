@@ -247,6 +247,32 @@ class PoolTests(Quorum):
                     'profile': d._profile(FIRST, 'review')}]
         self.assertEqual(d._select(p, 2)[0], [])
 
+    def test_who_resolved_conflicts_is_excluded_after_a_config_change(self):
+        first = CFG.agents[FIRST]
+        twin = dataclasses.replace(CFG.agents[IMPL], kind=first.kind, model=first.model,
+                                   effort=first.effort)
+        d = self.make({'status': 'completed', 'summary': 'Kept both sides.',
+                       'blocked_reason': ''})
+        # The implementer's key runs with the first reviewer's model while it resolves the
+        # conflicts, then the configuration goes back to what it was.
+        d.cfg = dataclasses.replace(CFG, agents=dict(CFG.agents, **{IMPL: twin}))
+        p = d.snapshot().prs[0]
+        p.merge_state = 'conflict'
+        d._do_sync(p)
+        self.assertEqual(self.reviewed(), [])
+        self.assertEqual(self.gh.written[-1], FakeIdentities.LOGINS[IMPL])
+        d.cfg = CFG
+        p = d.snapshot().prs[0]
+        (sync,) = p.syncs
+        self.assertEqual(sync['profile'], dict(d._profile(IMPL, 'write'), model=first.model,
+                                               kind=first.kind, effort=first.effort))
+        selected, why = d._select(p, 2)
+        self.assertEqual(selected, [])
+        self.assertIn('non ne ha abbastanza', why)
+        # A sync marker without a profile leaves independence unverifiable.
+        p.syncs = [{'head_sha': SHA2}]
+        self.assertIn('non è verificabile', d._select(p, 2)[1])
+
     def test_unverifiable_history_goes_to_a_human(self):
         # A PR opened before #111 records no profile of its implementer.
         self.make(profile=False)
@@ -317,6 +343,35 @@ class RecoveryTests(Quorum):
         self.d.tick()
         self.assertEqual(self.reviewed(), [FIRST, SECOND])
         self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
+
+    def test_a_reviewer_outside_the_pool_is_bound_by_its_profile(self):
+        # Level 1 keeps the PR's recorded reviewer even when the pool no longer lists it, so
+        # the policy version does not cover it: the receipt binds its profile instead.
+        pool = dataclasses.replace(CFG, reviewer=SECOND, reviewers=(SECOND,))
+        for change in ({}, {'model': 'other'}, {'effort': 'low'}, {'review_args': ('--x',)}):
+            with self.subTest(change=change):
+                self.make(raw_review(), cfg=pool, diff=[{'path': 'x.py', 'links': []}])
+                self.gh.meta['reviewer'] = FIRST
+                self.d._apply_round = lambda *a, **kw: None  # stops before applying the round
+                self.d.tick()
+                del self.d._apply_round
+                self.assertEqual(self.reviewed(), [FIRST])
+                changed = dataclasses.replace(pool, agents=dict(
+                    CFG.agents, **{FIRST: dataclasses.replace(CFG.agents[FIRST], **change)}))
+                self.assertEqual(changed.review_policy.version(), pool.review_policy.version())
+                self.d.cfg = changed
+                self.assertEqual(self.planned(), [Action('apply_review', 100,
+                                                         'approval already recorded')])
+                self.d.tick()
+                self.assertEqual(self.reviewed(), [FIRST])
+                if not change:
+                    self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
+                    continue
+                self.assertEqual(self.gh.labels[100], {'agent:review'})
+                (stale,) = self.records('policy')
+                self.assertEqual(stale['event'], 'stale')
+                self.assertIn('identità, modello, effort o argomenti dei reviewer',
+                              self.gh.comments[-1][1])
 
     def test_a_round_counts_once_against_the_limit(self):
         cfg = dataclasses.replace(CFG, max_review_rounds=1)
