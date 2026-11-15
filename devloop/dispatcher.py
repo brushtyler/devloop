@@ -22,9 +22,13 @@ A PR in review or ready that conflicts with the base branch is neither reviewed 
 back to review. A sync is not a review round.
 
 Review level (``policy``): every agent review, CI round and promotion records a receipt of the
-running dispatcher's review policy for the head. A level the dispatcher cannot review yet (2)
-sends the PR to agent:needs-human; an approval is promoted only if its receipt matches the one
-recomputed just before, otherwise a new review is needed.
+running dispatcher's review policy for the head, with the reviewers the level requires: one at
+level 1, at level 2 the first pair of the pool that is independent (#111). A round is one
+evaluation of a head: a CI failure, or one review by each required reviewer, run one per action
+and applied together once all are in, so that a single fix receives every open finding. A PR
+whose pool has not enough independent reviewers goes to agent:needs-human. A round is promoted
+only if every required reviewer approved the head with the receipt recomputed just before,
+otherwise a new review is needed.
 
 Findings (#110): every blocking finding has an owner, ``round/reviewer/ID``. Only its owner
 closes it in a later review; the dispatcher closes CI findings when CI passes on the current
@@ -33,6 +37,7 @@ head, and a trusted user can close any finding with ``/devloop finding <key> res
 another owner's finding is open.
 """
 
+import itertools
 import string
 import time
 from contextlib import nullcontext
@@ -45,9 +50,11 @@ from .github import GitHubError, merge_state
 from .markdown import (RESUME, dispatcher_header, publishable, read_marker, render_escalation,
                        render_fix, render_native_review, render_review)
 from .policy import describe as describe_receipt
-from .policy import differences, evaluate, receipt_of, recorded_level
-from .review import (CI, FINDING_COMMAND, OPERATOR, ci_failure_review, finding_commands,
-                     finding_key, finding_state, normalize_review, open_findings, owner_of)
+from .policy import (BINDING, differences, distinct, evaluate, independent, profile_of,
+                     receipt_of, recorded_level)
+from .review import (CI, FINDING_COMMAND, OPERATOR, ci_failure_review, current_round,
+                     finding_commands, finding_key, finding_state, last_round, normalize_review,
+                     open_findings, owner_of, round_verdict)
 from .workspace import WorkspaceError
 
 PROMPT_DIR = Path(__file__).resolve().parent / 'prompts'
@@ -87,6 +94,9 @@ class PullRequest:
     # them asks for a new review of the same head (``REREVIEW_COMMAND``).
     operator_comments: list = field(default_factory=list)
     rereview: bool = False
+    # The same, written after the latest review of an earlier round: what a reviewer joining the
+    # latest round sees, as the round's first reviewer did.
+    round_comments: list = field(default_factory=list)
     merge_state: str = 'clean'  # clean, conflict, unknown (see github.merge_state)
     # Policy records the dispatcher wrote (``policy`` markers), and whether one written after
     # the latest review found that the approval's receipt no longer matches.
@@ -141,12 +151,16 @@ def plan(snapshot, cfg):
             actions.append(Action('unattributable', pr.number,
                                   'findings whose owner cannot be reconstructed'))
             continue
-        latest = pr.reviews[-1] if pr.reviews else None
-        rounds_left = len(pr.reviews) < cfg.max_review_rounds
+        # The latest round, and the reviewers it still waits for: its verdict counts only once
+        # every reviewer its receipt requires has reviewed.
+        latest = current_round(pr.reviews)
+        pending = pending_reviewers(latest)
+        verdict = round_verdict(latest) if latest and not pending else None
+        head = latest[0]['head_sha'] if latest else None
+        rounds_left = last_round(pr.reviews) < cfg.max_review_rounds
         if lb.ready_to_merge in pr.labels:
             # Readiness belongs to the approved commit: re-check it on every tick.
-            approved = latest is not None and latest['verdict'] == 'approve'
-            if not approved or latest['head_sha'] != pr.head_sha:
+            if verdict != 'approve' or head != pr.head_sha:
                 actions.append(Action('revoke', pr.number, 'head is not the approved commit'))
             elif pr.merge_state == 'conflict':
                 actions.append(Action('sync', pr.number, 'conflicts with the base branch'))
@@ -169,20 +183,22 @@ def plan(snapshot, cfg):
             continue
         # A request for changes whose findings were all closed by CI or the operator: nothing
         # is left to fix, and the head needs a new review.
-        settled = (latest is not None and latest['verdict'] == 'request_changes'
-                   and bool(pr.closures) and not still_open)
+        settled = verdict == 'request_changes' and bool(pr.closures) and not still_open
         if lb.changes in pr.labels:
             actions.append(Action('reconcile', pr.number, 'every open finding is closed')
                            if settled else Action('fix', pr.number))
         elif lb.review in pr.labels:
-            answered = latest is not None and any(f['round'] == latest['round'] for f in pr.fixes)
+            answered = bool(latest) and any(f['round'] == latest[0]['round'] for f in pr.fixes)
             # A trusted user's rereview request voids the recorded verdict for this head.
-            replay = (latest is not None and latest['head_sha'] == pr.head_sha and not answered
-                      and not pr.rereview and not settled)
+            current = (bool(latest) and head == pr.head_sha and not answered
+                       and not pr.rereview and not settled)
+            # A round still waiting for a reviewer continues: it is not a new round.
+            partial = current and bool(pending)
+            replay = current and not pending
             # An approval counts only with a policy receipt that still matched the last time
             # it was checked; one recorded before receipts existed needs a new review.
-            unbound = replay and (receipt_of(latest) is None or pr.stale_receipt)
-            if replay and latest['verdict'] != 'approve':
+            unbound = replay and (any(receipt_of(r) is None for r in latest) or pr.stale_receipt)
+            if replay and verdict != 'approve':
                 actions.append(Action('apply_review', pr.number, 'verdict already recorded'))
             elif pr.merge_state == 'conflict':
                 # Neither reviewed nor promoted: the merge would change the head anyway.
@@ -193,6 +209,9 @@ def plan(snapshot, cfg):
                 continue
             elif replay and not unbound and pr.checks != 'fail':
                 actions.append(Action('apply_review', pr.number, 'approval already recorded'))
+            elif partial and pr.checks != 'fail':
+                actions.append(Action('review', pr.number, 'the round waits for '
+                                      + ', '.join(pending)))
             elif not rounds_left:
                 # Every new round, a CI failure or a review, counts against the limit.
                 actions.append(Action('round_limit', pr.number))
@@ -220,6 +239,17 @@ def plan(snapshot, cfg):
             spent += 1
         capped.append(action)
     return capped
+
+
+def pending_reviewers(records):
+    """The reviewers an agent round still waits for: those the receipt of its first review
+    requires and that have not reviewed yet. A CI round, or a review without a receipt, is
+    complete as it is."""
+    receipt = receipt_of(records[0]) if records and records[0]['source'] == 'agent' else None
+    if receipt is None:
+        return []
+    done = {owner_of(r) for r in records}
+    return [key for key in receipt['reviewers'] if key not in done]
 
 
 class UntrustedChange(RuntimeError):
@@ -266,13 +296,13 @@ def requests_rereview(body):
     return bool(lines) and lines[0].strip() == REREVIEW_COMMAND
 
 
-def format_operator_comments(pr):
-    if not pr.operator_comments:
+def format_operator_comments(comments):
+    if not comments:
         return ''
     intro = ('A trusted user asked for a new review of this commit after the previous verdict. '
-             if pr.rereview else '')
+             if any(requests_rereview(c.get('body')) for c in comments) else '')
     rendered = '\n\n'.join(f'### Comment by {c["author"]["login"]}\n\n{c["body"]}'
-                           for c in pr.operator_comments)
+                           for c in comments)
     return ('## Comments from trusted users since the previous verdict\n\n' + intro
             + 'The operator wrote them after the previous round, for example to settle a point '
               'that round left to a human.\n\n' + rendered)
@@ -296,13 +326,15 @@ def format_previous_rounds(reviews, fixes, closures=()):
     if not reviews:
         return 'This is the first round.'
     parts = []
-    for review in reviews:
+    for position, review in enumerate(reviews):
         owner = owner_of(review)
         parts.append(f'### Round {review["round"]}: {review["verdict"]} on {review["head_sha"][:12]}'
                      f' ({review["source"]}, reviewer {owner})\n\n{review["summary"]}\n\n'
                      'Blocking findings:\n' + _format_findings(
                          [dict(f, key=f.get('key') or finding_key(review['round'], owner, f['id']))
                           for f in review['blocking_findings']]))
+        if reviews[position + 1:position + 2] and reviews[position + 1]['round'] == review['round']:
+            continue  # the fix answers the whole round: after its last review
         for fix in fixes:
             if fix['round'] == review['round']:
                 parts.append('Implementer responses:\n' + '\n'.join(
@@ -475,14 +507,20 @@ class Dispatcher:
                 policy = self._marker_entries(pr, comments, 'policy')
                 pr.policy = [record for _, record in policy]
                 if entries:
+                    last = max(position for position, _ in entries)
                     # A receipt found stale after the latest review voids its approval.
-                    pr.stale_receipt = any(position > entries[-1][0] and record['event'] == 'stale'
+                    pr.stale_receipt = any(position > last and record['event'] == 'stale'
                                            for position, record in policy)
                     # Only what trusted users wrote after the latest verdict can void it.
-                    since = comments[entries[-1][0] + 1:]
+                    since = comments[last + 1:]
                     pr.operator_comments = operator_comments(since, self.cfg.trusted_users)
                     pr.rereview = any(requests_rereview(c.get('body'))
                                       for c in pr.operator_comments)
+                    latest = entries[-1][1]['round']
+                    before = max((position for position, record in entries
+                                  if record['round'] < latest), default=-1)
+                    pr.round_comments = operator_comments(comments[before + 1:],
+                                                          self.cfg.trusted_users)
             # In agent:changes CI matters only to close an open CI finding (``plan``).
             ci_open = lb.changes in pr.labels and any(
                 f['owner'] == CI for f in open_findings(pr.reviews, pr.closures))
@@ -619,7 +657,51 @@ class Dispatcher:
                         labelers=self.gh.labelers(pr.number, policy.label),
                         trusted_users=self.cfg.trusted_users,
                         previous_level=recorded_level(pr.reviews + pr.policy),
-                        reviewer=self._reviewer_key(pr))
+                        select=lambda level: self._select(pr, level)[0])
+
+    def _profile(self, key, mode):
+        """The identity and tuple agent ``key`` acts with now in ``mode`` (``write`` or
+        ``review``), as markers record them."""
+        agent = self.cfg.agent(key)
+        return {'identity': self._app_login(key), 'kind': agent.kind, 'model': agent.model,
+                'effort': agent.effort,
+                'args': list(agent.review_args if mode == 'review' else agent.write_args)}
+
+    def _select(self, pr, level):
+        """``(reviewers, problem)``: the reviewers ``level`` requires on the PR, in order, or
+        none and why.
+
+        Level 1 keeps the rule from before #111: the PR's recorded reviewer, else the first of
+        the pool, never the PR's implementer. Level 2 takes the first pair of the pool, in
+        configuration order, that is distinct and independent of everyone who wrote code on
+        the PR: the implementer and every fixer as their markers record them, and the agent
+        configured now under the implementer's key, which runs fixes and syncs. When a marker
+        does not record who wrote the code, independence cannot be verified."""
+        cfg, implementer = self.cfg, pr.meta['implementer']
+        if level == 1:
+            for key in (pr.meta['reviewer'], *cfg.pool()):
+                if key in cfg.agents and key != implementer:
+                    return [key], ''
+            return [], (f'nessun reviewer configurato è diverso dall\'implementer della PR '
+                        f'(`{implementer}`)')
+        authors = [profile_of(pr.meta), *map(profile_of, pr.fixes)]
+        if None in authors:
+            return [], ('non è verificabile che i reviewer siano indipendenti da chi ha scritto '
+                        'il codice: la PR o una sua correzione non registra identità e tupla '
+                        'dell\'agent (marker precedenti a #111)')
+        if implementer in cfg.agents:
+            authors.append(self._profile(implementer, 'write'))
+        candidates = [(key, self._profile(key, 'review')) for key in cfg.pool()
+                      if key in cfg.agents and key != implementer]
+        candidates = [(key, p) for key, p in candidates if all(independent(p, a) for a in authors)]
+        for group in itertools.combinations(candidates, level):
+            if all(distinct(a[1], b[1]) for a, b in itertools.combinations(group, 2)):
+                return [key for key, _ in group], ''
+        pool = ', '.join(f'`{key}`' for key in cfg.pool())
+        return [], (f'il pool di reviewer ({pool}) non ne ha abbastanza: due reviewer contano '
+                    'come distinti solo se differiscono sia per identità GitHub sia per la tupla '
+                    '(kind, model, effort, review_args), e nessuno può avere l\'identità o il '
+                    'modello (kind, model, effort) dell\'implementer o di chi ha corretto la PR')
 
     def _policy_comment(self, pr, title, text, receipt, event):
         self.gh.comment(pr.number, publishable(
@@ -627,29 +709,37 @@ class Dispatcher:
             + describe_receipt(receipt), 'policy', {'event': event, 'receipt': receipt}))
 
     def _escalate_level(self, pr, receipt):
-        """A level devloop cannot review yet: no review, no promotion, a human decides."""
-        lb = self.cfg.labels
+        """Not enough independent reviewers for the level: no review, no promotion, a human
+        decides."""
+        lb, level = self.cfg.labels, receipt['level']
+        needed = 'un reviewer indipendente' if level == 1 else f'{level} reviewer indipendenti'
         self._policy_comment(
-            pr, f'Review di livello {receipt["level"]}: serve un intervento umano',
-            f'La policy di review del dispatcher richiede per questa PR il livello '
-            f'{receipt["level"]}. devloop non avvia ancora più reviewer, quindi non revisiona '
-            'né promuove la PR: la review e la decisione sul merge spettano a una persona. Il '
+            pr, f'Review di livello {level}: serve un intervento umano',
+            f'La policy di review del dispatcher richiede per questa PR il livello {level}, '
+            f'quindi {needed}, ma {self._select(pr, level)[1]}. devloop non revisiona né '
+            'promuove la PR: la review e la decisione sul merge spettano a una persona. Il '
             'livello resta acquisito anche se la label viene rimossa o il diff cambia.',
             receipt, 'level')
         self.gh.edit_labels(pr.number, add=[lb.needs_human],
                             remove=[lb.review, lb.changes, lb.ready_to_merge])
 
-    def _promote(self, pr, review):
-        """Promote an approval whose receipt matches the one recomputed now; otherwise record
-        why and leave the PR in review for a new review of the same head."""
+    def _promote(self, pr, records):
+        """Promote a round whose approvals reach the quorum: every reviewer the receipt
+        recomputed now requires approved the head with that same receipt. Otherwise record why
+        and leave the PR in review for a new review of the same head."""
         lb = self.cfg.labels
         current = self._receipt(pr)
-        if current['level'] > 1:
+        if len(current['reviewers']) < current['level']:
             return self._escalate_level(pr, current)
-        changed = differences(receipt_of(review), current)
-        if changed:
-            what = ('l\'approvazione non ha una ricevuta di policy' if receipt_of(review) is None
-                    else 'cambiati: ' + ', '.join(_RECEIPT_FIELDS[k] for k in changed))
+        changed = [k for k in BINDING
+                   if any(k in differences(receipt_of(r), current) for r in records)]
+        approved = {owner_of(r) for r in records if r['verdict'] == 'approve'}
+        missing = [key for key in current['reviewers'] if key not in approved]
+        if changed or missing:
+            what = ('l\'approvazione non ha una ricevuta di policy'
+                    if any(receipt_of(r) is None for r in records)
+                    else 'cambiati: ' + ', '.join(_RECEIPT_FIELDS[k] for k in changed) if changed
+                    else 'manca l\'approvazione di ' + ', '.join(f'`{k}`' for k in missing))
             self._policy_comment(
                 pr, 'Approvazione non valida per la promozione',
                 f'La ricevuta di policy ricalcolata prima della promozione non coincide con '
@@ -658,26 +748,31 @@ class Dispatcher:
                 current, 'stale')
             self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.changes, lb.ready_to_merge])
             return
+        by = ', '.join(f'`{key}`' for key in current['reviewers'])
         self._policy_comment(
             pr, 'Pronta per il merge',
-            f'Approvazione del commit `{review["head_sha"][:12]}` confermata: la ricevuta di '
-            'policy ricalcolata coincide con quella della review.', current, 'promoted')
+            f'Approvazione del commit `{records[0]["head_sha"][:12]}` da parte di {by} '
+            'confermata: la ricevuta di policy ricalcolata coincide con quella della review.',
+            current, 'promoted')
         self.gh.edit_labels(pr.number, add=[lb.ready_to_merge], remove=[lb.review, lb.changes])
 
-    def _apply_verdict(self, pr, review, announce, reviews):
-        """``reviews``: every review of the PR up to ``review`` included."""
+    def _apply_round(self, pr, records, announce, reviews):
+        """Apply a complete round, ``records`` (one per reviewer). ``reviews``: every review of
+        the PR up to the round included. Every finding still open counts here, whoever owns
+        it: an approval does not close another owner's finding."""
         lb = self.cfg.labels
         transient = [lb.review, lb.changes, lb.ready_to_merge]
-        if review['verdict'] == 'approve':
+        verdict = round_verdict(records)
+        if verdict == 'approve':
             left = open_findings(reviews, pr.closures)
             if left:
-                # Another owner's finding: this approval does not close it.
+                # Owners outside the round (CI, an earlier reviewer): no agent closes them.
                 self._escalate(pr.number, _open_findings_reason(left), remove=transient)
-            elif self._approval_current(pr, review):
-                self._promote(pr, review)
-        elif review['verdict'] == 'needs_human':
+            elif self._approval_current(pr, records[0]):
+                self._promote(pr, records)
+        elif verdict == 'needs_human':
             self.gh.edit_labels(pr.number, add=[lb.needs_human], remove=transient)
-        elif review['round'] >= self.cfg.max_review_rounds:
+        elif records[0]['round'] >= self.cfg.max_review_rounds:
             if announce:
                 self.gh.comment(pr.number, render_escalation(
                     f'Raggiunto il limite di {self.cfg.max_review_rounds} round di review con '
@@ -689,8 +784,10 @@ class Dispatcher:
     # Actions -------------------------------------------------------------
     def _do_revoke(self, pr):
         lb = self.cfg.labels
-        latest = pr.reviews[-1] if pr.reviews else None
-        approved = latest['head_sha'] if latest and latest['verdict'] == 'approve' else None
+        latest = current_round(pr.reviews)
+        complete = latest and not pending_reviewers(latest)
+        approved = (latest[0]['head_sha'] if complete and round_verdict(latest) == 'approve'
+                    else None)
         if approved == pr.head_sha:
             title = 'Readiness sospesa'
             reason = (f'La CI del commit approvato `{approved[:12]}` è di nuovo in corso. La PR '
@@ -795,7 +892,8 @@ class Dispatcher:
         if protected:
             return self._escalate_protected(number, protected, remove=[lb.working])
         self.ws.push(path, branch, replace=True, auth=auth)
-        meta = {'issue': number, 'implementer': agent.key, 'reviewer': cfg.reviewer}
+        meta = {'issue': number, 'implementer': agent.key, 'reviewer': cfg.reviewer,
+                'profile': self._profile(agent.key, 'write')}
         body = publishable(self.runner.header(agent) + '\n' + result['pr_body'].strip()
                            + f'\n\nCloses #{number}', 'pr', meta)
         pr_number, url = self._as(agent.key, IMPLEMENT).create_pr(
@@ -817,51 +915,59 @@ class Dispatcher:
         receipt = self._current_receipt(pr)
         if receipt is None:
             return
-        if receipt['level'] > 1:
+        if receipt['level'] > 1 and len(receipt['reviewers']) < receipt['level']:
             return self._escalate_level(pr, receipt)
         log_tail = '\n'.join(self.gh.failed_log(run) for run in pr.failed_runs[:2])
         review = ci_failure_review(failed_checks=pr.failed_checks, log_tail=log_tail,
                                    previous_open=open_findings(pr.reviews, pr.closures),
-                                   round_no=len(pr.reviews) + 1,
+                                   round_no=last_round(pr.reviews) + 1,
                                    max_rounds=self.cfg.max_review_rounds, head_sha=pr.head_sha)
         review['receipt'] = receipt
         self.gh.comment(pr.number, render_review(review, dispatcher_header()))
-        self._apply_verdict(pr, review, announce=True, reviews=pr.reviews + [review])
+        self._apply_round(pr, [review], announce=True, reviews=pr.reviews + [review])
 
     def _do_apply_review(self, pr):
-        self._apply_verdict(pr, pr.reviews[-1], announce=False, reviews=pr.reviews)
+        self._apply_round(pr, current_round(pr.reviews), announce=False, reviews=pr.reviews)
 
-    def _reviewer_key(self, pr):
-        """The PR's recorded reviewer, else the configured one; never the PR's implementer, even
-        after a configuration change. None when no such agent is configured."""
-        implementer = pr.meta['implementer']
-        for key in (pr.meta['reviewer'], self.cfg.reviewer):
-            if key in self.cfg.agents and key != implementer:
-                return key
-        return None
+    def _continues(self, pr, records, receipt):
+        """Whether the round ``records`` is still in progress for this head and ``receipt``:
+        an agent round of the same head, not answered by a fix nor voided by a rereview
+        request, with the same receipt, still waiting for a reviewer."""
+        return (bool(records) and records[0]['source'] == 'agent'
+                and records[0]['head_sha'] == pr.head_sha and not pr.rereview
+                and not any(f['round'] == records[0]['round'] for f in pr.fixes)
+                and not any(differences(receipt_of(r), receipt) for r in records)
+                and bool(pending_reviewers(records)))
 
     def _do_review(self, pr):
+        """One review by one reviewer: each review call is an action of its own. The first
+        reviewer of a round opens it; the next ones, on later actions, join it while it reviews
+        the same head under the same receipt. The round is applied once every required reviewer
+        has reviewed; a review already recorded in it is never run again."""
         cfg = self.cfg
-        reviewer_key = self._reviewer_key(pr)
-        if reviewer_key is None:
-            return self._escalate(
-                pr.number, f'Nessun reviewer configurato diverso dall\'implementer della PR '
-                           f'(`{pr.meta["implementer"]}`): la review non può essere indipendente.',
-                remove=[cfg.labels.review])
-        agent = cfg.agent(reviewer_key)
         receipt = self._current_receipt(pr)
         if receipt is None:
             return
-        if receipt['level'] > 1:
+        if len(receipt['reviewers']) < receipt['level']:
             return self._escalate_level(pr, receipt)
+        latest = current_round(pr.reviews)
+        if self._continues(pr, latest, receipt):
+            round_no, done, comments = latest[0]['round'], latest, pr.round_comments
+        else:
+            round_no, done, comments = last_round(pr.reviews) + 1, [], pr.operator_comments
+        if round_no > cfg.max_review_rounds:
+            return self._do_round_limit(pr)
+        reviewed = {owner_of(r) for r in done}
+        agent = cfg.agent(next(key for key in receipt['reviewers'] if key not in reviewed))
         issue, _ = self._issue_context(pr.issue)
         name = f'pr-{pr.number}'
         path = self.ws.existing_branch(name, pr.head_ref)
         if self.ws.head(path) != pr.head_sha:
             self.log('  head moved since the snapshot; retrying next tick')
             return
-        round_no = len(pr.reviews) + 1
-        previous_open = open_findings(pr.reviews, pr.closures)
+        # Each reviewer of a round judges the head on its own: earlier rounds only.
+        earlier = [r for r in pr.reviews if r['round'] < round_no]
+        previous_open = open_findings(earlier, pr.closures)
         prompt = _template('review', repo=cfg.repo, base_branch=cfg.base_branch,
                            pr_number=pr.number, round=round_no, max_rounds=cfg.max_review_rounds,
                            implementer=pr.meta.get('implementer', cfg.implementer),
@@ -869,8 +975,8 @@ class Dispatcher:
                            issue_number=pr.issue, issue_title=issue['title'],
                            issue_body=issue.get('body') or '', pr_body=pr.body,
                            diff_stat=self.ws.diff_stat(path),
-                           previous=format_previous_rounds(pr.reviews, pr.fixes, pr.closures),
-                           operator_comments=format_operator_comments(pr),
+                           previous=format_previous_rounds(earlier, pr.fixes, pr.closures),
+                           operator_comments=format_operator_comments(comments),
                            language=cfg.language)
         # The reviewer works in a disposable copy, where its tests may write; the PR worktree
         # must come out of the review untouched, or the verdict is discarded.
@@ -882,10 +988,16 @@ class Dispatcher:
         if not self.ws.pristine(path, pr.head_sha):
             raise WorkspaceError(f'the worktree of PR #{pr.number} changed during the review; '
                                  'verdict discarded')
+        if receipt['level'] > 1 and self.gh.pr_head(pr.number) != pr.head_sha:
+            # A verdict on a superseded head joins no round: the new head is reviewed afresh.
+            self.log('  head moved during the review; verdict discarded')
+            self.ws.remove(name)
+            return
         review = normalize_review(raw, previous_open=previous_open, round_no=round_no,
                                   max_rounds=cfg.max_review_rounds, head_sha=pr.head_sha,
                                   ci=pr.checks, reviewer=agent.key)
         review['receipt'] = receipt
+        review['profile'] = self._profile(agent.key, 'review')
         reviewer_gh = self._as(agent.key, REVIEW)
         reviewer_gh.comment(pr.number, render_review(review, self.runner.header(agent)))
         if self._app_login(agent.key):
@@ -896,16 +1008,21 @@ class Dispatcher:
                                           **render_native_review(review, self.runner.header(agent)))
             except GitHubError as exc:
                 self.log(f'  native review not submitted: {exc}')
-        self._apply_verdict(pr, review, announce=True, reviews=pr.reviews + [review])
+        records = done + [review]
+        waiting = pending_reviewers(records)
+        if not waiting:
+            self._apply_round(pr, records, announce=True, reviews=earlier + records)
         self.ws.remove(name)
-        self.log(f'  verdict: {review["verdict"]}')
+        self.log(f'  verdict of {agent.key}: {review["verdict"]}'
+                 + (f'; the round waits for {", ".join(waiting)}' if waiting else ''))
 
     def _do_fix(self, pr):
         cfg, lb = self.cfg, self.cfg.labels
         if not pr.reviews:
             return self._escalate(pr.number, 'Modifiche richieste ma nessuna review devloop da '
                                              'correggere.', remove=[lb.changes])
-        latest = pr.reviews[-1]
+        # One fix answers the whole round, with every finding still open, whoever owns it.
+        latest = current_round(pr.reviews)[0]
         findings = open_findings(pr.reviews, pr.closures)
         if not findings:
             return self._escalate(pr.number, 'Modifiche richieste ma nessun finding aperto.',
@@ -942,7 +1059,7 @@ class Dispatcher:
             if protected:
                 return self._escalate_protected(pr.number, protected, remove=[lb.changes])
             self.ws.push(path, pr.head_ref, auth=auth)
-        fix = dict(result, head_sha=self.ws.head(path))
+        fix = dict(result, head_sha=self.ws.head(path), profile=self._profile(agent.key, 'write'))
         self._as(agent.key, PR_COMMENT).comment(
             pr.number, render_fix(fix, self.runner.header(agent), latest['round']))
         self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.changes])

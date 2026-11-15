@@ -81,7 +81,7 @@ class LevelTests(unittest.TestCase):
         return policy.evaluate(pol, pr=100, base=BASE, head=SHA1,
                                changes=changes(*paths, links=links), labelers=list(labelers),
                                trusted_users=CFG.trusted_users, previous_level=previous,
-                               reviewer='codex')
+                               select=lambda level: ['codex'] if level == 1 else [])
 
     def test_sensitive_paths(self):
         for path in ('devloop/dispatcher.py', 'AGENTS.md', 'CLAUDE.md', '.github/workflows/t.yml',
@@ -218,7 +218,8 @@ class PolicyDispatcherTests(unittest.TestCase):
         cases = {'base': ({'base': 'e' * 40}, CFG, 'commit di base'),
                  'policy': ({}, dataclasses.replace(CFG, review_policy=dataclasses.replace(
                      POLICY, sensitive_paths=('devloop/',))), 'versione della policy'),
-                 'reviewers': ({}, dataclasses.replace(CFG, reviewer='agy'), 'reviewer richiesti')}
+                 'reviewers': ({}, dataclasses.replace(CFG, reviewer='agy', reviewers=('agy',)),
+                               'reviewer richiesti')}
         for case, (ws_change, cfg, why) in cases.items():
             with self.subTest(case=case):
                 ws = FakeWS()

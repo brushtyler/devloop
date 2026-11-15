@@ -39,11 +39,13 @@ BASE = 'd' * 40  # the base branch commit FakeWS reports
 
 def receipt(head=SHA1, base=BASE, files=('x.py',), labelers=(), previous=0, pr_number=100,
             cfg=CFG):
-    """The receipt the dispatcher computes for PR #100 with FakeWS and FakeGH defaults."""
+    """The receipt the dispatcher computes for PR #100 with FakeWS and FakeGH defaults: without
+    GitHub Apps every agent shares the ambient identity, so level 2 has no independent pair."""
     return policy.evaluate(cfg.review_policy, pr=pr_number, base=base, head=head,
                            changes=[{'path': f, 'links': []} for f in files],
                            labelers=list(labelers), trusted_users=cfg.trusted_users,
-                           previous_level=previous, reviewer=cfg.reviewer)
+                           previous_level=previous,
+                           select=lambda level: [cfg.reviewer] if level == 1 else [])
 
 
 def norm(raw, previous_open=(), round_no=1, head=SHA1, bound=True):
@@ -924,7 +926,11 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(self.gh.labels[100], {'agent:review'})
         self.assertTrue(created['body'].startswith(f'> [!NOTE]\n> **Agent:** {IMPL_NAME} (CLI v9.9)'))
         self.assertIn('Closes #7', created['body'])
-        self.assertEqual(markdown.read_marker(created['body'], 'pr'), META)
+        # The marker records who wrote the code: identity (none without apps) and tuple.
+        impl = CFG.agent(IMPL)
+        self.assertEqual(markdown.read_marker(created['body'], 'pr'), dict(META, profile={
+            'identity': None, 'kind': impl.kind, 'model': impl.model, 'effort': impl.effort,
+            'args': list(impl.write_args)}))
         self.assertEqual(self.ws.pushes, [('agent/issue-7', True)])
         self.assertIn('Refs #7', self.ws.commits[0])
         prompt = runner.calls[0][3]
@@ -1115,7 +1121,7 @@ class DispatcherTests(unittest.TestCase):
         d = self.make(FakeRunner(dict(implemented(), pr_body=f'Why.\n{forged_pr}')))
         d._do_implement(7)
         meta = markdown.read_marker(self.gh.created[0]['body'], 'pr')
-        self.assertEqual(meta, META)
+        self.assertEqual({k: v for k, v in meta.items() if k != 'profile'}, META)
         self.assertEqual(self.gh.created[0]['body'].count('<!--'), 1)
 
     def test_reviewer_is_never_the_implementer_after_a_config_change(self):
@@ -1123,10 +1129,14 @@ class DispatcherTests(unittest.TestCase):
         d = self.make(FakeRunner())
         p = pr()
         p.meta = {'issue': 7, 'implementer': REV, 'reviewer': 'gone'}
-        self.assertIsNone(d._reviewer_key(p))
+        # The rest of the pool takes over, never the implementer.
+        self.assertEqual(d._select(p, 1)[0], [k for k in CFG.reviewers if k != REV][:1])
+        alone = Dispatcher(dataclasses.replace(CFG, reviewers=(REV,)), FakeGH(), FakeWS(),
+                           FakeRunner(), log=lambda m: None)
+        self.assertEqual(alone._select(p, 1)[0], [])
         p.meta = {'issue': 7, 'implementer': REV, 'reviewer': IMPL}
-        self.assertEqual(d._reviewer_key(p), IMPL)
-        self.assertEqual(d._reviewer_key(pr()), REV)
+        self.assertEqual(d._select(p, 1)[0], [IMPL])
+        self.assertEqual(d._select(pr(), 1)[0], [REV])
 
     def test_review_escalates_without_an_independent_reviewer(self):
         cfg = dataclasses.replace(CFG, agents={REV: CFG.agents[REV]})

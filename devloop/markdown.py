@@ -215,6 +215,8 @@ def render_fix(fix, head, round_no):
             note = r['note'].replace('|', '\\|').replace('\n', ' ')
             parts.append(f'| {r["finding_id"]} | {_ACTION_TEXT[r["action"]]} | {note} |')
     payload = {'round': round_no, 'head_sha': fix['head_sha'], 'responses': fix['responses']}
+    if 'profile' in fix:
+        payload['profile'] = fix['profile']  # who wrote the fix (#111)
     return publishable(head + '\n' + '\n'.join(parts), 'fix', payload)
 
 

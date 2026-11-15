@@ -13,6 +13,12 @@ The effective level of a head is the highest of:
 - the highest level already recorded on the PR by an earlier receipt.
 
 Nothing lowers a level, and nothing takes it below 1.
+
+A level asks for as many independent reviewers (#111): one at level 1, two at level 2. Two
+reviewers are distinct only if both their GitHub identity and their tuple ``(kind, model, effort,
+review_args)`` differ; keys and descriptions do not count. At level 2 a reviewer is independent
+of who wrote the code (the implementer, every fixer) only if both its identity and its ``(kind,
+model, effort)`` differ from theirs.
 """
 
 import hashlib
@@ -22,7 +28,7 @@ from dataclasses import dataclass
 
 # Bumped when the meaning of a policy changes, so that receipts given under the old meaning no
 # longer match.
-POLICY_SCHEMA = 1
+POLICY_SCHEMA = 2  # 2: level 2 runs two independent reviewers (#111)
 MIN_LEVEL, MAX_LEVEL = 1, 2
 SENSITIVE_LEVEL = 2
 # What a ``policy`` marker records: a PR stopped at a level devloop cannot review yet, an
@@ -45,13 +51,17 @@ class ReviewPolicy:
     sensitive_paths: tuple = ('devloop/', 'AGENTS.md', 'CLAUDE.md', '.github/', 'schemas/')
     # Files listed by ``sensitive_path_lists``, read when the configuration is loaded.
     sensitive_files: tuple = ()
+    # The configured reviewer pool, in order: ``(key, app slug or None, kind, model, effort,
+    # review_args)`` each. A change to any of them changes the version, and so every receipt.
+    reviewers: tuple = ()
 
     def version(self):
         """Deterministic version of the loaded policy: the SHA-256 of its canonical form."""
         data = {'schema': POLICY_SCHEMA, 'default_level': self.default_level,
                 'label': self.label, 'sensitive_level': SENSITIVE_LEVEL,
                 'sensitive_paths': sorted({_norm(p) for p in self.sensitive_paths}),
-                'sensitive_files': sorted({_norm(p) for p in self.sensitive_files})}
+                'sensitive_files': sorted({_norm(p) for p in self.sensitive_files}),
+                'reviewers': [[*r[:5], list(r[5])] for r in self.reviewers]}
         text = json.dumps(data, sort_keys=True, separators=(',', ':'))
         return hashlib.sha256(text.encode()).hexdigest()
 
@@ -101,12 +111,13 @@ def sensitive_changes(policy, changes):
 
 
 def evaluate(policy, *, pr, base, head, changes, labelers, trusted_users, previous_level,
-             reviewer):
+             select):
     """The receipt of head ``head`` of PR ``pr`` against base commit ``base``.
 
     ``labelers`` are the logins of every ``labeled`` event of ``policy.label`` on the PR,
     oldest first; ``previous_level`` the highest level recorded on the PR so far (0 if none);
-    ``reviewer`` the agent that reviews at level 1 (None if there is none)."""
+    ``select(level)`` the reviewers that level requires, in order: as many as the level, or
+    none when the pool has not enough independent ones."""
     level = max(MIN_LEVEL, policy.default_level)
     reasons = [{'kind': 'default', 'level': level}]
     by = next((who for who in labelers if who in trusted_users), None)
@@ -123,10 +134,41 @@ def evaluate(policy, *, pr, base, head, changes, labelers, trusted_users, previo
         level = previous_level
         reasons.append({'kind': 'previous', 'level': previous_level})
     level = min(level, MAX_LEVEL)
-    # Level 2 does not start more reviewers yet (#111): it needs a human.
-    reviewers = [reviewer] if level == 1 and reviewer else []
+    reviewers = list(select(level))
     return {'pr': pr, 'base': base, 'head': head, 'policy': policy.version(), 'level': level,
             'reasons': reasons, 'reviewers': reviewers}
+
+
+def valid_profile(p):
+    """An agent profile as markers record it: the GitHub ``identity`` (None for the ambient
+    ``gh`` login), ``kind``, ``model``, ``effort`` and the CLI ``args`` of the turn."""
+    return (isinstance(p, dict) and (p.get('identity') is None or isinstance(p['identity'], str))
+            and all(isinstance(p.get(k), str) for k in ('kind', 'model', 'effort'))
+            and isinstance(p.get('args'), list) and all(isinstance(a, str) for a in p['args']))
+
+
+def profile_of(record):
+    """The valid profile a PR, fix or review record carries, or None (records written before
+    #111 carry none)."""
+    profile = (record or {}).get('profile')
+    return profile if valid_profile(profile) else None
+
+
+def _model(p):
+    return (p['kind'], p['model'], p['effort'])
+
+
+def distinct(a, b):
+    """Whether two reviewers count as two: different identity and different tuple."""
+    return (a['identity'] != b['identity']
+            and (*_model(a), tuple(a['args'])) != (*_model(b), tuple(b['args'])))
+
+
+def independent(reviewer, author):
+    """Whether ``reviewer`` may review code ``author`` wrote: different identity and different
+    ``(kind, model, effort)``. Writing and reviewing arguments differ anyway, so they do not
+    count."""
+    return reviewer['identity'] != author['identity'] and _model(reviewer) != _model(author)
 
 
 def _is_int(value, low, high=None):
@@ -181,6 +223,6 @@ def describe(receipt):
         elif kind == 'previous':
             lines.append(f'- Livello {reason.get("level")} già richiesto in precedenza su questa '
                          'PR: il livello non scende.')
-    reviewers = ', '.join(f'`{r}`' for r in receipt['reviewers']) or 'nessun agent'
+    reviewers = ', '.join(f'`{r}`' for r in receipt['reviewers']) or 'nessun agent indipendente'
     lines.append(f'- Reviewer richiesti: {reviewers}.')
     return '\n'.join(lines)

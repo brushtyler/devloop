@@ -3,7 +3,8 @@
 The reviewer proposes a verdict; devloop enforces the rules that make the
 verdict machine-actionable:
 
-* ``approve`` only with no blocking finding and nothing left unresolved;
+* ``approve`` only with no blocking finding and none of its own earlier findings left
+  unresolved (another owner's open finding is the dispatcher's to check);
 * ``request_changes`` only with at least one open finding to fix;
 * every blocking finding of earlier rounds is accounted for, and one the
   reviewer does not assess stays open.
@@ -150,12 +151,16 @@ def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, 
     if len(assessed) < len(previous_open):
         notes.append('Il reviewer non ha valutato tutti i finding precedenti: quelli mancanti restano aperti.')
     unresolved = [p for p in previous if p['status'] == 'unresolved']
+    # Another owner's open finding alone does not turn an approval into a request for changes
+    # (#111): the dispatcher checks every finding before promoting or fixing.
+    own_unresolved = [p for p, f in zip(previous, previous_open)
+                      if p['status'] == 'unresolved' and f['owner'] == reviewer]
     foreign = [p['key'] for p, f in zip(previous, previous_open)
                if p['status'] in CLOSING and f['owner'] != reviewer]
 
     verdict = raw['verdict']
     human_reason = raw['human_reason']
-    if verdict == 'approve' and (blocking or unresolved):
+    if verdict == 'approve' and (blocking or own_unresolved):
         verdict = 'request_changes'
         notes.append('Verdetto corretto da approve a request_changes: restano finding bloccanti aperti.')
     elif verdict == 'request_changes' and not (blocking or unresolved):
@@ -177,6 +182,33 @@ def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, 
         'round': round_no, 'max_rounds': max_rounds, 'head_sha': head_sha, 'ci': ci,
         'note': ' '.join(notes),
     }
+
+
+def last_round(reviews):
+    """The number of the latest round, 0 before the first. A round is one evaluation of the
+    candidate: a CI failure, or the reviews of every reviewer the level requires (#111)."""
+    return max((r['round'] for r in reviews), default=0)
+
+
+def current_round(reviews):
+    """The records of the latest round, in order, one per owner: a second record of the same
+    owner in the round is a duplicate and does not count."""
+    latest, records, owners = last_round(reviews), [], set()
+    for record in reviews:
+        if record['round'] == latest and owner_of(record) not in owners:
+            owners.add(owner_of(record))
+            records.append(record)
+    return records
+
+
+def round_verdict(records):
+    """The verdict of a complete round: ``needs_human`` if any reviewer asked for a human,
+    else ``request_changes`` if any asked for changes, else ``approve``."""
+    verdicts = {r['verdict'] for r in records}
+    for verdict in ('needs_human', 'request_changes'):
+        if verdict in verdicts:
+            return verdict
+    return 'approve'
 
 
 def ci_failure_review(*, failed_checks, log_tail, previous_open, round_no, max_rounds, head_sha):

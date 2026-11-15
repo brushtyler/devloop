@@ -64,9 +64,11 @@ class Config:
     test_cmd: str
     language: str
     implementer: str
-    reviewer: str
+    reviewer: str  # the first of ``reviewers``, recorded in the PR marker
     agents: dict
     trusted_users: tuple
+    # The reviewer pool, in order (``roles.reviewers``; ``roles.reviewer`` is a pool of one).
+    reviewers: tuple = ()
     max_open_prs: int = 2
     max_review_rounds: int = 3
     max_actions_per_tick: int = 3
@@ -86,6 +88,10 @@ class Config:
 
     def agent(self, key):
         return self.agents[key]
+
+    def pool(self):
+        """The reviewer pool, in configuration order."""
+        return self.reviewers or (self.reviewer,)
 
 
 def _require(table, key, kind, where):
@@ -118,9 +124,10 @@ def _listed_files(name, root):
     return tuple(files)
 
 
-def parse_review_policy(table, root):
+def parse_review_policy(table, root, reviewers=()):
     """The policy of ``[review_policy]``. A list file that cannot be read stops devloop: the
-    policy never runs with fewer sensitive paths than configured."""
+    policy never runs with fewer sensitive paths than configured. ``reviewers`` is the pool
+    as ``ReviewPolicy.reviewers`` records it."""
     if not isinstance(table, dict):
         raise ConfigError('review_policy: expected a table')
     where = 'review_policy'
@@ -138,7 +145,28 @@ def parse_review_policy(table, root):
     for name in _str_list(table, 'sensitive_path_lists', where, DEFAULT_SENSITIVE_LISTS):
         files += _listed_files(name, root)
     return ReviewPolicy(default_level=level, label=label, sensitive_paths=paths,
-                        sensitive_files=tuple(files))
+                        sensitive_files=tuple(files), reviewers=tuple(reviewers))
+
+
+def _reviewer_pool(roles, agents, implementer):
+    """``roles.reviewers``, or ``roles.reviewer`` as a pool of one: known agents, no repeats,
+    never the implementer."""
+    if 'reviewers' in roles:
+        if 'reviewer' in roles:
+            raise ConfigError('roles: set either reviewer or reviewers, not both')
+        pool = _str_list(roles, 'reviewers', 'roles')
+        if not pool:
+            raise ConfigError('roles.reviewers: at least one agent is required')
+        if len(set(pool)) != len(pool):
+            raise ConfigError('roles.reviewers: an agent is listed twice')
+    else:
+        pool = (_require(roles, 'reviewer', str, 'roles'),)
+    for key in pool:
+        if key not in agents:
+            raise ConfigError(f'roles.reviewers: unknown agent {key!r}')
+        if key == implementer:
+            raise ConfigError('roles: the reviewer must be a different agent from the implementer')
+    return pool
 
 
 def parse_config(data, root=INSTALL_ROOT):
@@ -161,12 +189,9 @@ def parse_config(data, root=INSTALL_ROOT):
             commit_trailer=table.get('commit_trailer', ''))
     roles = data.get('roles') or {}
     implementer = _require(roles, 'implementer', str, 'roles')
-    reviewer = _require(roles, 'reviewer', str, 'roles')
-    for role, key in (('implementer', implementer), ('reviewer', reviewer)):
-        if key not in agents:
-            raise ConfigError(f'roles.{role}: unknown agent {key!r}')
-    if implementer == reviewer:
-        raise ConfigError('roles: the reviewer must be a different agent from the implementer')
+    if implementer not in agents:
+        raise ConfigError(f'roles.implementer: unknown agent {implementer!r}')
+    pool = _reviewer_pool(roles, agents, implementer)
     trusted = _str_list(data, 'trusted_users', 'config')
     if not trusted:
         raise ConfigError('trusted_users: at least one GitHub login is required')
@@ -209,13 +234,16 @@ def parse_config(data, root=INSTALL_ROOT):
         state_dir=data.get('state_dir', '.ssdlc/devloop'),
         test_cmd=_require(data, 'test_cmd', str, 'config'),
         language=data.get('language', 'English'),
-        implementer=implementer, reviewer=reviewer, agents=agents,
+        implementer=implementer, reviewer=pool[0], reviewers=pool, agents=agents,
         trusted_users=trusted,
         blocked_labels=_str_list(data, 'blocked_labels', 'config', ('bloccata',)),
         priority_labels=_str_list(data, 'priority_labels', 'config', ('prerequisito',)),
         protected_paths=_str_list(data, 'protected_paths', 'config', ('.github/',)),
         apps=apps, app_key_dir=key_dir, agent_stall_action=stall_action,
-        review_policy=parse_review_policy(data.get('review_policy', {}), root),
+        review_policy=parse_review_policy(
+            data.get('review_policy', {}), root,
+            [(k, apps[k].slug if k in apps else None, agents[k].kind, agents[k].model,
+              agents[k].effort, agents[k].review_args) for k in pool]),
         **ints)
 
 
