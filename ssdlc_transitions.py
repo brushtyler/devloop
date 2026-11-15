@@ -148,9 +148,11 @@ class TransitionStore:
     The published pointer is intentionally separate from historical artifacts.
     Integrating readers must validate the pointer before using its projection.
     """
-    def __init__(self, directory, fault=lambda point: None):
+    def __init__(self, directory, fault=lambda point: None, observe=lambda path: None):
         self.root = Path(directory)
         self.fault = fault
+        # Called with each path ``load`` is about to read, before any check on it.
+        self.observe = observe
 
     def _read(self, root, name):
         return json.loads(_regular(root, name).read_text())
@@ -245,6 +247,7 @@ class TransitionStore:
         return self.load()
 
     def load(self):
+        self.observe(self.root / 'active.json')
         pointer = self._read(self.root, 'active.json')
         return self.load_pointer(pointer)
 
@@ -257,10 +260,15 @@ class TransitionStore:
         if not re.fullmatch(r'[a-f0-9]{32}', identity):
             raise TransitionError('Invalid active generation')
         generation = self.root / identity
+        for name in ('intent.json', 'manifest.json', 'projection.json'):
+            self.observe(generation / name)
         if (file_hash(_regular(generation, 'intent.json')) != pointer['intent_sha256']
                 or file_hash(_regular(generation, 'manifest.json')) != pointer['manifest_sha256']):
             raise TransitionError('Active generation reference changed')
         manifest = self._read(generation, 'manifest.json')
+        if isinstance(manifest, dict):
+            for name in sorted(manifest):
+                self.observe(generation / name)
         if source_binding(generation, manifest) != manifest:
             raise TransitionError('Active generation artifacts changed')
         projection = self._read(generation, 'projection.json')

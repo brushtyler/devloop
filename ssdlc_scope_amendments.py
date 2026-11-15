@@ -160,8 +160,8 @@ def inspect(ticket, *, allow_host_hints=False, verification_repair=False, observ
     ticket = _ticket(ticket)
     _ticket(ticket / 'execution')
     observe = lambda path: _observe(observed, ticket, path)
-    observe(ticket / 'execution/active.json')
-    store = TransitionStore(ticket / 'execution')
+    # The store observes active.json and the selected generation's files it reads.
+    store = TransitionStore(ticket / 'execution', observe=observe)
     projection = store.load()
     _ticket(ticket / 'execution-runtimes' / projection['transition_id'])
     runtime = ticket / 'execution-runtimes' / projection['transition_id']

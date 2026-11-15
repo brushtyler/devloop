@@ -230,6 +230,29 @@ class ScopeAmendmentTests(unittest.TestCase):
             discard(self.ticket, identity, namespace='execution', writers_quiescent=lambda _: True)
         self.assertNotEqual(recorded[0], recorded[1])
 
+    def test_inspect_refusal_records_the_rejected_generation_manifest(self):
+        import hashlib
+        from ssdlc_preparations import discard
+        pointer = json.loads((self.ticket / 'execution/active.json').read_text())
+        manifest = self.ticket / 'execution' / pointer['transition_id'] / 'manifest.json'
+        ref = 'file:' + manifest.relative_to(self.ticket).as_posix()
+        original = manifest.read_bytes()
+        recorded = []
+        for padding in (b' ', b'  '):
+            manifest.write_bytes(original + padding)
+            with self.assertRaisesRegex(TaskError, 'Active generation reference changed'):
+                self.stage()
+            identity = self.only_preparation()
+            _, refusal = self.refusal(identity)
+            self.assertEqual(refusal['stage'], 'inspect')
+            # The store's internal reads are bound, not just the selector.
+            self.assertEqual(refusal['inputs'][ref], {'sha256': hashlib.sha256(original + padding).hexdigest()})
+            self.assertIn('file:' + manifest.with_name('intent.json').relative_to(self.ticket).as_posix(),
+                          refusal['inputs'])
+            recorded.append(refusal['inputs'][ref])
+            discard(self.ticket, identity, namespace='execution', writers_quiescent=lambda _: True)
+        self.assertNotEqual(recorded[0], recorded[1])
+
     def test_inspect_refusal_records_a_missing_source_file(self):
         journal = self.root / '03-dev/tasks/task-journal.jsonl'
         journal.unlink()
