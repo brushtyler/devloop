@@ -275,7 +275,7 @@ class AgentCommandTests(unittest.TestCase):
                                         schema_file='s', out_file='o')
         self.assertEqual(codex[codex.index('-s') + 1], 'workspace-write')
         self.assertNotIn('sandbox_workspace_write.writable_roots=[]', codex)
-        self.assertIn('model_reasoning_effort="medium"', codex)
+        self.assertIn('model_reasoning_effort="high"', codex)
         claude, _ = agents.build_command(CFG.agent('claude'), 'write', 'p',
                                          schema_file=schema.schema_path('fix'), out_file='o')
         self.assertEqual(claude[claude.index('--permission-mode') + 1], 'acceptEdits')
