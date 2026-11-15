@@ -125,6 +125,24 @@ class RunTestsEquivalenceTests(unittest.TestCase):
                                   capture_output=True, text=True, timeout=120)
         self.assertNotEqual(parallel.returncode, 0, parallel.stdout)
 
+    def test_the_script_directory_is_not_importable(self):
+        # Codex review of #75, round 4: `python3 scripts/run-tests.py` put scripts/ on sys.path,
+        # so code importing a helper from scripts/ passed here and failed with unittest.
+        root = self.project({
+            'scripts/runtime_helpers.py': 'VALUE = 42\n',
+            'app.py': 'from runtime_helpers import VALUE\n',
+            'tests/test_app.py': '''
+                import unittest
+                class T(unittest.TestCase):
+                    def test_value(self):
+                        import app
+                        self.assertEqual(app.VALUE, 42)
+            ''',
+        })
+        serial, parallel = self.both(root)
+        self.assertNotEqual(serial.returncode, 0)
+        self.assertNotEqual(parallel.returncode, 0, parallel.stdout)
+
     def test_no_tests_is_not_a_success(self):
         # Codex review of #75, round 3: like `python3 -m unittest`, running nothing exits with 5.
         root = self.project({'tests/test_empty.py': 'import unittest\n'})

@@ -32,8 +32,11 @@ DURATIONS = ROOT / '.ssdlc' / 'test-durations.json'
 def discover():
     """The top-level children of the full discover, as ``python3 -m unittest discover -s tests``."""
     os.chdir(ROOT)
-    if str(ROOT) not in sys.path:
-        sys.path.insert(0, str(ROOT))  # `python3 -m` puts the working directory first
+    # Same import path as `python3 -m unittest`: the working directory first, and not the
+    # directory of this script, which `python3 scripts/run-tests.py` would otherwise add.
+    here = Path(__file__).resolve().parent
+    sys.path[:] = [p for p in sys.path if p and Path(p).resolve() != here]
+    sys.path.insert(0, str(ROOT))
     return list(unittest.defaultTestLoader.discover('tests'))
 
 
