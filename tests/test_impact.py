@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import ssdlc_impact
 from ssdlc_feedback_analysis import impact_attribution
@@ -127,6 +128,35 @@ class ImpactReportTests(ImpactFixture):
         git(self.repo, 'add', 'late.py'); git(self.repo, 'commit', '-q', '-m', 'late')
         self.assertEqual(build_report(self.repo, self.plan), first)
 
+    def test_absolute_imports_resolve_from_the_repository_root_only(self):
+        files = {'core.py': 'root = 1\n',
+                 'pkg/absolute.py': 'import core\n',
+                 'pkg/sibling_only.py': '\nimport schema_ref\n',
+                 'pkg/explicit.py': 'from . import core\n'}
+        for name, text in files.items():
+            (self.repo / name).write_text(text)
+        git(self.repo, 'add', *files); git(self.repo, 'commit', '-q', '-m', 'same-named modules')
+        self.plan['base_commit'] = git(self.repo, 'rev-parse', 'HEAD')
+        self.plan['tasks'].append(dict(task_id='T3', target_files=['core.py', 'pkg/schema_ref.py']))
+        report = build_report(self.repo, self.plan)
+        core = self.target(report, 'pkg/core.py')
+        # ``import core`` is absolute: pkg/core.py is not its static destination.
+        self.assertNotIn('pkg/absolute.py', [row['path'] for row in core['consumers']])
+        self.assertIn(dict(path='pkg/explicit.py', evidence_path='pkg/explicit.py', line=1, via='IMPORT'),
+                      core['consumers'])
+        self.assertEqual(self.target(report, 'core.py')['consumers'], [
+            dict(path='pkg/absolute.py', evidence_path='pkg/absolute.py', line=1, via='IMPORT')])
+        # Only the importer's own directory would resolve it: no destination.
+        self.assertEqual(self.target(report, 'pkg/schema_ref.py')['consumers'], [
+            dict(path='pkg/core.py', evidence_path='pkg/core.py', line=2, via='IMPORT')])
+        omissions = {row['path'] for row in report['possible_omissions']}
+        self.assertIn('pkg/explicit.py', omissions)
+        self.assertNotIn('pkg/sibling_only.py', omissions)
+        environment = [row for row in report['unknown'] if row['reason'] == 'ENVIRONMENT_DEPENDENT_IMPORT']
+        self.assertEqual(environment, [
+            dict(path='pkg/absolute.py', line=1, reason='ENVIRONMENT_DEPENDENT_IMPORT'),
+            dict(path='pkg/sibling_only.py', line=2, reason='ENVIRONMENT_DEPENDENT_IMPORT')])
+
     def test_unknown_base_commit_is_refused(self):
         self.plan['base_commit'] = '0' * 40
         with self.assertRaises(TaskError):
@@ -170,28 +200,92 @@ class SummaryMetricTests(ImpactFixture):
         # T2's own added path did not belong to it before the extension.
         self.assertEqual(pending_touched(journal, plan, scope), ['T3'])
 
+    def register(self, root, plan, reports):
+        """Mirror what planning, continuations and generations register in ``state.json``."""
+        root.mkdir(parents=True, exist_ok=True)
+        artifacts = {}
+        for ref, value in [('02-design/plan.json', plan), *reports]:
+            (root / ref).parent.mkdir(parents=True, exist_ok=True)
+            atomic_json(root / ref, value)
+            artifacts[ref] = dict(path=ref, sha256=file_hash(root / ref))
+        atomic_json(root / 'state.json', dict(artifacts=artifacts))
+        return root
+
     def ticket(self, report=True):
         ticket = self.repo / '.ssdlc' / 'TKT'
-        (ticket / '02-design/task-planning').mkdir(parents=True)
-        artifacts = {}
-        def register(ref, value):
-            atomic_json(ticket / ref, value)
-            artifacts[ref] = dict(path=ref, sha256=file_hash(ticket / ref))
-        register('02-design/plan.json', self.plan)
-        if report:
-            register('02-design/task-planning/impact-report-' + digest(self.plan) + '.json',
-                     build_report(self.repo, self.plan))
-        atomic_json(ticket / 'state.json', dict(artifacts=artifacts))
-        return ticket
+        reports = [('02-design/task-planning/impact-report-' + digest(self.plan) + '.json',
+                    build_report(self.repo, self.plan))] if report else []
+        return self.register(ticket, self.plan, reports)
+
+    def extended(self, ticket, identity, task, path):
+        """An execution generation that copied the ticket's files and extended its plan."""
+        plan = json.loads(json.dumps(self.plan))
+        next(t for t in plan['tasks'] if t['task_id'] == task)['target_files'].append(path)
+        copied = [(ref, json.loads((ticket / ref).read_text()))
+                  for ref in json.loads((ticket / 'state.json').read_text())['artifacts'] if 'impact-report' in ref]
+        self.register(ticket / 'execution-runtimes' / identity, plan, copied)
+        chain = [dict(transition_id=identity, proposal={}, recipe=dict(subject=dict(
+            old_plan_sha256=digest(self.plan), new_plan_sha256=digest(plan))))]
+        return plan, chain
 
     def test_avoidable_omissions_count_distinct_flagged_paths_once(self):
         ticket = self.ticket()
-        extensions = [dict(added_paths=['app.py', 'unflagged.py']), dict(added_paths=['app.py'])]
-        result = ssdlc_impact._avoidable(ticket, extensions)
+        _, chain = self.extended(ticket, 'g1', 'T2', 'app.py')
+        extensions = [dict(transition_id='g1', added_paths=['app.py', 'unflagged.py']),
+                      dict(transition_id='g1', added_paths=['app.py'])]
+        [result] = ssdlc_impact._avoidable(ticket, chain, extensions)
         self.assertEqual(result['status'], 'MEASURED')
         self.assertEqual(result['count'], 1)
+        # The extended plan's omissions belong to the plan it was extended from.
         self.assertEqual(result['plan_sha256'], digest(self.plan))
         self.assertEqual(result['paths'], [dict(path='app.py', observed_in=['MANUAL_EXTENSION'])])
+
+    def test_avoidable_omissions_aggregate_feedback_and_extensions_per_originating_plan(self):
+        ticket = self.ticket()
+        extended, chain = self.extended(ticket, 'g1', 'T2', 'app.py')
+        (ticket / 'feedback').mkdir()
+        (ticket / 'feedback/authority.json').write_text('{}')
+        def request(plan, files, cause='MISSING_TARGET'):
+            return dict(request=dict(cause=cause, requested_files=files), binding=dict(plan_sha256=plan))
+        requests = {'r1': request(digest(extended), ['app.py', 'pkg/user.py']),
+                    'r2': request(digest(self.plan), ['tests/test_patch.py'], cause='IMPROVEMENT'),
+                    'r3': request('f' * 64, ['pkg/rel.py'])}
+        with patch('ssdlc_feedback.FeedbackStore') as store:
+            store.return_value.inspect.return_value = dict(requests=requests)
+            result = ssdlc_impact._avoidable(ticket, chain, [dict(transition_id='g1', added_paths=['app.py'])])
+        measured, unknown = result
+        self.assertEqual(measured['plan_sha256'], digest(self.plan))
+        self.assertEqual(measured['count'], 2)
+        self.assertEqual(measured['paths'], [
+            dict(path='app.py', observed_in=['FEEDBACK_MISSING_TARGET', 'MANUAL_EXTENSION']),
+            dict(path='pkg/user.py', observed_in=['FEEDBACK_MISSING_TARGET'])])
+        # A plan without a report is UNKNOWN, never 0, and is not merged into another plan.
+        self.assertEqual(unknown, dict(plan_sha256='f' * 64, report_sha256=None, status='UNKNOWN',
+                                       count=None, paths=[], reason='NO_IMPACT_REPORT'))
+
+    def test_feedback_attribution_reads_the_planning_report_of_the_plan_lineage(self):
+        from ssdlc_feedback_analysis import historical_impact
+        from ssdlc_reconciliation import _files
+        ticket = self.ticket()
+        def source(root, plan):
+            return dict(root=root, plan=plan, state=json.loads((root / 'state.json').read_text()),
+                        files=_files(root))
+        result = historical_impact(source(ticket, self.plan), ['app.py', 'elsewhere.py'])
+        self.assertEqual((result['status'], result['detectable_files']), ('DETECTABLE', ['app.py']))
+        # An extended runtime still reaches the report of the plan it extended.
+        extended, chain = self.extended(ticket, 'g1', 'T2', 'app.py')
+        runtime = ticket / 'execution-runtimes/g1'
+        with patch('ssdlc_impact._transitions', return_value=chain):
+            self.assertEqual(historical_impact(source(runtime, extended), ['app.py'])['status'], 'DETECTABLE')
+        # Without that lineage the copied report is bound to another plan.
+        self.assertEqual(historical_impact(source(runtime, extended), ['app.py'])['status'], 'UNKNOWN')
+        # An unregistered report or one bound to another plan is not evidence.
+        other = json.loads(json.dumps(self.plan)); other['tasks'][1]['target_files'] = ['docs/other.md']
+        self.assertEqual(historical_impact(source(ticket, other), ['app.py'])['status'], 'UNKNOWN')
+        state = json.loads((ticket / 'state.json').read_text())
+        state['artifacts'] = {k: v for k, v in state['artifacts'].items() if 'impact-report' not in k}
+        atomic_json(ticket / 'state.json', state)
+        self.assertEqual(historical_impact(source(ticket, self.plan), ['app.py'])['status'], 'UNKNOWN')
 
     def test_missing_report_is_unknown_not_zero(self):
         ticket = self.ticket(report=False)
@@ -243,6 +337,39 @@ class ManualExtensionMetricTests(unittest.TestCase):
         self.assertEqual(metrics['profile_delta']['initial_profile_sha256'],
                          before['profile_delta']['initial_profile_sha256'])
         self.assertEqual(summary_metrics(case.ticket), metrics)
+        # The extended plan came from the continuation plan, whose runtime registered
+        # ``02-design/impact-report.json``; the historical ticket plan has none.
+        report = json.loads((ssdlc_impact._continuation_root(case.ticket) / '02-design/impact-report.json').read_text())
+        self.assertEqual(report['plan_sha256'], digest(case.source['plan']))
+        avoidable = {row['plan_sha256']: row for row in metrics['avoidable_omissions']}
+        self.assertEqual(avoidable[report['plan_sha256']], dict(
+            plan_sha256=report['plan_sha256'], report_sha256=digest(report), status='MEASURED', count=0, paths=[]))
+        historical = [row for sha, row in avoidable.items() if sha != report['plan_sha256']]
+        self.assertEqual([(row['status'], row['reason']) for row in historical], [('UNKNOWN', 'NO_IMPACT_REPORT')])
+        # Feedback attribution in the generation reads the same report.
+        from ssdlc_feedback_analysis import historical_impact
+        attribution = historical_impact(case.source, ['app.py'])
+        self.assertEqual((attribution['status'], attribution['report_sha256']), ('NOT_IN_REPORT', digest(report)))
+
+
+class ContinuationMetricTests(unittest.TestCase):
+    """A real activated continuation registers its report in the selected runtime."""
+    def setUp(self):
+        import test_continuations as fixtures
+        self.case = fixtures.ContinuationTests()
+        self.case.setUp()
+        self.addCleanup(self.case.doCleanups)
+
+    def test_activated_continuation_report_is_measured(self):
+        from ssdlc_transitions import runtime_root
+        case = self.case
+        case.activate(case.prepare())
+        report = json.loads((runtime_root(case.target) / '02-design/impact-report.json').read_text())
+        self.assertEqual(report['plan_sha256'], digest(case.new_plan))
+        metrics = summary_metrics(case.target)
+        self.assertEqual(metrics['avoidable_omissions'], [dict(
+            plan_sha256=digest(case.new_plan), report_sha256=digest(report), status='MEASURED', count=0, paths=[])])
+        self.assertEqual(summary_metrics(case.target), metrics)
 
 
 if __name__ == '__main__':

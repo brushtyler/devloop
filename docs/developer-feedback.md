@@ -566,10 +566,13 @@ binds continuation amendment subjects (`impact_report` key) and is registered as
   files, symlinks and submodules are not read, and no repository code runs.
   Files above 1 MiB are listed as `unscanned`.
 - **Relations per target, each with `evidence_path` and `line`:**
-  - `consumers`: non-test Python modules that import it. Imports are resolved
-    against the repository root and the importing file's directory; relative
-    imports against their package. Literal `importlib.import_module`/`__import__`
-    names and literal `mock.patch` targets count as imports.
+  - `consumers`: non-test Python modules that import it. Absolute imports are
+    resolved against the repository root only; relative imports against their
+    package. Literal `importlib.import_module`/`__import__` names and literal
+    `mock.patch` targets count as imports. When the importing file's own
+    directory would resolve an absolute import to a different module (a
+    `sys.path` choice of the environment), that line is `UNKNOWN`
+    (`ENVIRONMENT_DEPENDENT_IMPORT`) and no relation to that module is inferred.
   - `tests`: test or fixture files (under `tests/`, `test/`, `fixtures/`, or
     named `test_*`, `*_test.py`, `conftest.py`) that import it or cite its
     repository-relative path literally.
@@ -591,8 +594,12 @@ binds continuation amendment subjects (`impact_report` key) and is registered as
   ordering, no timestamps. A changed report for the same plan digest is refused.
 
 `complete_dependency_proof` stays `false`. Feedback attribution
-(`planner_feedback`) reads the new report and still accepts the legacy
-`fixture-impact.json` of older runs.
+(`planner_feedback`) reads the new report at either registered path. The report
+must be registered in the source `state.json`, have unchanged bytes and name, in
+`plan_sha256`, the source plan or a plan it was extended from by an execution
+generation (a runtime copies the report of the plan it extends). Otherwise
+attribution falls back to the legacy `fixture-impact.json` of older runs, and
+without it is `UNKNOWN`.
 
 ## Evidence and rollout
 
@@ -602,13 +609,18 @@ counts, host timing/observed waits, impact-report attribution, consultation usag
 and publication status. Three additive keys (`ssdlc_impact.summary_metrics`)
 complete it; existing keys are unchanged:
 
-- `avoidable_omissions`: one entry per original plan (the canonical
-  `02-design/plan.json`). It counts distinct paths that the registered impact
-  report flagged as possible omissions and that later appeared in a
-  `MISSING_TARGET` feedback request (developer or host hint) or in an applied
-  manual extension. A path seen in both counts once. Without a registered,
-  unchanged report for that plan, as for historical plans, `status` is
-  `UNKNOWN` and `count` is `null`, never 0.
+- `avoidable_omissions`: one entry per originating plan, sorted by digest.
+  Plans are collected from the runtime genealogy: the canonical ticket, the
+  selected continuation runtime and every execution generation, each with its
+  registered `02-design/plan.json`. A plan extended by an execution generation
+  belongs to the plan it was extended from; planning and continuations originate
+  plans. Each entry counts distinct paths that the registered impact report of
+  that plan (either path above, bound by `plan_sha256`) flagged as possible
+  omissions and that later appeared in a `MISSING_TARGET` feedback request
+  (developer or host hint, attributed through its bound plan) or in an applied
+  manual extension (attributed through the plan it extended). A path seen in
+  both counts once. Without a registered, unchanged report for that plan, as for
+  historical plans, `status` is `UNKNOWN` and `count` is `null`, never 0.
 - `profile_delta`: the limits profile first authorized for the ticket (its own
   frozen limits, otherwise those of its oldest execution generation) against
   the active generation's profile. `changes` maps each changed field to

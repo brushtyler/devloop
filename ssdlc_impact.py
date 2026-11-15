@@ -9,8 +9,10 @@ Analysis perimeter:
 
 - static Python imports (``import``/``from``, relative imports, literal
   ``importlib.import_module``/``__import__`` names and literal ``mock.patch``
-  targets), resolved against the repository root and the importing file's own
-  directory;
+  targets). Relative imports resolve against the importer's package and
+  absolute ones against the repository root only. An absolute import that the
+  importer's own directory would resolve differently depends on ``sys.path``
+  and is ``UNKNOWN`` for that line;
 - literal repository-relative path references in text files;
 - owners from ``CODEOWNERS`` when it exists (otherwise absent);
 - schema links only when a file literally names the other one.
@@ -135,12 +137,12 @@ def _python_references(path, source):
                 base = package[:len(package) - up]
                 module = '.'.join(base + (node.module.split('.') if node.module else []))
                 # Relative imports are package-relative only, never sys.path roots.
-                rooted = True
+                relative = True
             else:
-                module, rooted = node.module, False
+                module, relative = node.module, False
             if module:
-                refs.append((module, node.lineno, 'IMPORT', rooted))
-            refs.extend(((module + '.' if module else '') + alias.name, node.lineno, 'IMPORT', rooted)
+                refs.append((module, node.lineno, 'IMPORT', relative))
+            refs.extend(((module + '.' if module else '') + alias.name, node.lineno, 'IMPORT', relative)
                         for alias in node.names if alias.name != '*')
         elif isinstance(node, ast.Call):
             name = _call_name(node)
@@ -162,22 +164,32 @@ def _python_references(path, source):
     return refs, unknown
 
 
-def _resolve(modules, importer, dotted, kind, rooted):
-    """Exact module paths for a dotted reference; no guessing beyond the roots."""
-    roots = [''] if rooted else ['', '.'.join(PurePosixPath(importer).parts[:-1])]
-    found = set()
-    for root in dict.fromkeys(roots):
-        full = (root + '.' + dotted) if root else dotted
-        if kind == 'PATCH_TARGET':
-            # ``patch('pkg.mod.attr')`` imports the longest module prefix.
-            parts = full.split('.')
-            for size in range(len(parts) - 1, 0, -1):
-                if '.'.join(parts[:size]) in modules:
-                    found.add(modules['.'.join(parts[:size])])
-                    break
-        elif full in modules:
-            found.add(modules[full])
-    return found
+def _lookup(modules, full, kind):
+    if kind == 'PATCH_TARGET':
+        # ``patch('pkg.mod.attr')`` imports the longest module prefix.
+        parts = full.split('.')
+        for size in range(len(parts) - 1, 0, -1):
+            if '.'.join(parts[:size]) in modules:
+                return modules['.'.join(parts[:size])]
+        return None
+    return modules.get(full)
+
+
+def _resolve(modules, importer, dotted, kind, relative):
+    """Return (module path or None, environment-dependent) for a dotted reference.
+
+    Relative imports are already anchored to the importer's package. Absolute
+    imports resolve against the repository root only: the importer's own
+    directory is a ``sys.path`` root only when that file runs as a script or
+    the environment adds it, which is not statically provable. When that
+    directory would yield a different module, the resolution is environment
+    dependent and the caller records it as ``UNKNOWN``.
+    """
+    found = _lookup(modules, dotted, kind)
+    directory = '.'.join(PurePosixPath(importer).parts[:-1])
+    if relative or not directory:
+        return found, False
+    return found, _lookup(modules, directory + '.' + dotted, kind) not in (None, found)
 
 
 def _path_pattern(paths):
@@ -277,14 +289,18 @@ def build_report(repo, plan):
             continue
         refs, problems = _python_references(path, texts[path])
         unknown.extend(problems)
-        seen = set()
-        for dotted, line, kind, rooted in sorted(refs, key=lambda r: (r[1], r[0], r[2])):
-            for found in _resolve(modules, path, dotted, kind, rooted):
-                if found not in target_set or found == path or (found, kind) in seen:
-                    continue
-                seen.add((found, kind))
-                group = 'tests' if _is_test(path) else 'consumers'
-                relations[found][group].add((path, path, line, kind))
+        seen, ambiguous = set(), set()
+        for dotted, line, kind, relative in sorted(refs, key=lambda r: (r[1], r[0], r[2])):
+            found, environment_dependent = _resolve(modules, path, dotted, kind, relative)
+            if environment_dependent and line not in ambiguous:
+                # No destination is inferred from the importer's directory.
+                ambiguous.add(line)
+                unknown.append(dict(path=path, line=line, reason='ENVIRONMENT_DEPENDENT_IMPORT'))
+            if found is None or found not in target_set or found == path or (found, kind) in seen:
+                continue
+            seen.add((found, kind))
+            group = 'tests' if _is_test(path) else 'consumers'
+            relations[found][group].add((path, path, line, kind))
     by_target = _path_pattern(target_set)
     schemas = sorted(p for p in files if p.startswith('schemas/'))
     by_schema = _path_pattern(set(schemas))
@@ -407,38 +423,155 @@ def _manual_extensions(ticket, chain):
     return rows
 
 
-def _registered(ticket, ref):
-    state = _read_json(ticket / 'state.json')
-    meta = state.get('artifacts', {}).get(ref)
-    path = ticket / ref
-    if meta is None or path.is_symlink() or not path.is_file() or file_hash(path) != meta['sha256']:
+PLAN_REF = '02-design/plan.json'
+CONTINUATION_REPORT_REF = '02-design/impact-report.json'
+
+
+def report_refs(plan_sha):
+    """Where normal planning (named by plan digest) and continuations register the report."""
+    return ('02-design/task-planning/impact-report-' + plan_sha + '.json', CONTINUATION_REPORT_REF)
+
+
+def registered_report(root, registered, plans):
+    """The first registered, intact report bound to one of ``plans`` (closest first).
+
+    ``registered`` maps refs to the SHA-256 recorded in the root's ``state.json``.
+    A report counts only when its ``plan_sha256`` names that plan. A registered
+    report whose bytes changed is an error, not a missing report.
+    """
+    from ssdlc_transitions import _regular
+    for plan_sha in plans:
+        for ref in report_refs(plan_sha):
+            if ref not in registered:
+                continue
+            path = _regular(Path(root), ref)
+            if file_hash(path) != registered[ref]:
+                raise TaskError('Registered impact report changed')
+            report = json.loads(path.read_text())
+            if isinstance(report, dict) and report.get('kind') == KIND and report.get('plan_sha256') == plan_sha:
+                return report
+    return None
+
+
+def plan_parents(chain):
+    """Extended plan digest -> the plan it was extended from, per execution generation."""
+    parents = {}
+    for item in chain:
+        subject = (item['recipe'] or {}).get('subject')
+        if isinstance(subject, dict):
+            new, old = subject.get('new_plan_sha256'), subject.get('old_plan_sha256')
+            if isinstance(new, str) and isinstance(old, str) and new != old:
+                parents.setdefault(new, old)
+    return parents
+
+
+def plan_lineage(plan_sha, parents):
+    """``plan_sha`` and its ancestors, closest first; the last is the originating plan."""
+    lineage = [plan_sha]
+    while parents.get(lineage[-1]) is not None and parents[lineage[-1]] not in lineage:
+        lineage.append(parents[lineage[-1]])
+    return lineage
+
+
+def source_lineage(source):
+    """Plan lineage of a feedback source; unreadable lineage keeps the plan alone."""
+    plan_sha = digest(source['plan'])
+    root = Path(source['root'])
+    if root.parent.name != 'execution-runtimes':
+        return [plan_sha]
+    try:
+        return plan_lineage(plan_sha, plan_parents(_transitions(root.parent.parent)))
+    except (TaskError, OSError, ValueError, KeyError, TypeError):
+        return [plan_sha]
+
+
+def _continuation_root(ticket):
+    """The selected continuation runtime, validated like ``runtime_root``."""
+    store = ticket / 'continuations'
+    if not (store / 'active.json').exists():
         return None
-    return json.loads(path.read_text())
+    from ssdlc_transitions import TransitionStore
+    projection = TransitionStore(store).load()
+    identity = projection.get('transition_id', '')
+    if not isinstance(identity, str) or not re.fullmatch(r'[a-f0-9]{32}', identity):
+        raise TaskError('Active continuation identity is missing')
+    root = ticket / 'runtime-generations' / identity
+    if _read_json(root / 'generation.json') != projection['runtime_binding']:
+        raise TaskError('Runtime generation binding changed')
+    return root
 
 
-def _avoidable(ticket, extensions):
-    plan = _registered(ticket, '02-design/plan.json')
-    if plan is None:
-        return dict(plan_sha256=None, report_sha256=None, status='UNKNOWN', count=None, paths=[],
-                    reason='NO_REGISTERED_PLAN')
-    plan_sha = digest(plan)
-    report = _registered(ticket, '02-design/task-planning/impact-report-' + plan_sha + '.json')
-    if not isinstance(report, dict) or report.get('kind') != KIND or report.get('plan_sha256') != plan_sha:
-        return dict(plan_sha256=plan_sha, report_sha256=None, status='UNKNOWN', count=None, paths=[],
-                    reason='NO_IMPACT_REPORT')
-    observed = {}
+def _registrations(ticket, chain):
+    """(root, registered refs) of the ticket, its continuation and its generations, oldest first."""
+    roots = [ticket]
+    continuation = _continuation_root(ticket)
+    if continuation is not None:
+        roots.append(continuation)
+    roots.extend(ticket / 'execution-runtimes' / item['transition_id'] for item in chain)
+    result = []
+    for root in roots:
+        if root == ticket and not (root / 'state.json').exists():
+            continue  # A continuation target ticket keeps its state in the runtime.
+        state = _read_json(root / 'state.json')
+        result.append((root, {ref: meta['sha256'] for ref, meta in state.get('artifacts', {}).items()}))
+    return result
+
+
+def _registered_plan(root, registered):
+    from ssdlc_transitions import _regular
+    if PLAN_REF not in registered:
+        return None
+    path = _regular(root, PLAN_REF)
+    if file_hash(path) != registered[PLAN_REF]:
+        raise TaskError('Registered plan changed')
+    return digest(json.loads(path.read_text()))
+
+
+def _avoidable(ticket, chain, extensions):
+    """Avoidable omissions per originating plan of the ticket's runtime genealogy.
+
+    A plan extended by an execution generation belongs to the plan it was
+    extended from; planning and continuations originate plans with their own
+    report. Feedback is attributed through its bound plan, extensions through
+    the plan they extended.
+    """
+    registrations = _registrations(ticket, chain)
+    parents = plan_parents(chain)
+    plans = [sha for root, registered in registrations
+             for sha in [_registered_plan(root, registered)] if sha is not None]
+    if not plans:
+        return [dict(plan_sha256=None, report_sha256=None, status='UNKNOWN', count=None, paths=[],
+                     reason='NO_REGISTERED_PLAN')]
+    groups = {plan_lineage(sha, parents)[-1]: {} for sha in plans}
+    def observe(plan_sha, path, source):
+        origin = plan_lineage(plan_sha, parents)[-1] if isinstance(plan_sha, str) else None
+        groups.setdefault(origin, {}).setdefault(path, set()).add(source)
     if (ticket / 'feedback/authority.json').exists():
         from ssdlc_feedback import FeedbackStore
         for row in FeedbackStore(ticket).inspect()['requests'].values():
             if row['request']['cause'] == 'MISSING_TARGET':
                 for path in row['request']['requested_files']:
-                    observed.setdefault(path, set()).add('FEEDBACK_MISSING_TARGET')
+                    observe(row['binding']['plan_sha256'], path, 'FEEDBACK_MISSING_TARGET')
+    subjects = {item['transition_id']: (item['recipe'] or {}).get('subject') or {} for item in chain}
     for row in extensions:
         for path in row['added_paths']:
-            observed.setdefault(path, set()).add('MANUAL_EXTENSION')
-    flagged = {row['path'] for row in report['possible_omissions']}
-    paths = [dict(path=p, observed_in=sorted(observed[p])) for p in sorted(flagged & set(observed))]
-    return dict(plan_sha256=plan_sha, report_sha256=digest(report), status='MEASURED', count=len(paths), paths=paths)
+            observe(subjects.get(row['transition_id'], {}).get('old_plan_sha256'), path, 'MANUAL_EXTENSION')
+    result = []
+    for origin in sorted(groups, key=lambda sha: (sha is None, sha or '')):
+        report = None
+        if origin is not None:
+            report = next((found for root, registered in registrations
+                           for found in [registered_report(root, registered, [origin])] if found is not None), None)
+        if report is None:
+            result.append(dict(plan_sha256=origin, report_sha256=None, status='UNKNOWN', count=None, paths=[],
+                               reason='NO_IMPACT_REPORT' if origin else 'NO_ORIGINATING_PLAN'))
+            continue
+        observed = groups[origin]
+        flagged = {row['path'] for row in report['possible_omissions']}
+        paths = [dict(path=p, observed_in=sorted(observed[p])) for p in sorted(flagged & set(observed))]
+        result.append(dict(plan_sha256=origin, report_sha256=digest(report), status='MEASURED',
+                           count=len(paths), paths=paths))
+    return result
 
 
 def _profiles(ticket, chain):
@@ -468,18 +601,18 @@ def summary_metrics(ticket):
     except errors:
         chain = extensions = None
         pending = dict(status='UNKNOWN', transitions=[], reason='EXECUTION_LINEAGE_UNAVAILABLE')
+    unknown = lambda reason: [dict(plan_sha256=None, report_sha256=None, status='UNKNOWN', count=None,
+                                   paths=[], reason=reason)]
     if extensions is None:
-        avoidable = dict(plan_sha256=None, report_sha256=None, status='UNKNOWN', count=None, paths=[],
-                         reason='EXECUTION_LINEAGE_UNAVAILABLE')
+        avoidable = unknown('EXECUTION_LINEAGE_UNAVAILABLE')
         delta = dict(status='UNKNOWN', reason='EXECUTION_LINEAGE_UNAVAILABLE')
     else:
         try:
-            avoidable = _avoidable(ticket, extensions)
+            avoidable = _avoidable(ticket, chain, extensions)
         except errors:
-            avoidable = dict(plan_sha256=None, report_sha256=None, status='UNKNOWN', count=None, paths=[],
-                             reason='EVIDENCE_UNAVAILABLE')
+            avoidable = unknown('EVIDENCE_UNAVAILABLE')
         try:
             delta = _profiles(ticket, chain)
         except errors:
             delta = dict(status='UNKNOWN', reason='PROFILE_UNAVAILABLE')
-    return dict(avoidable_omissions=[avoidable], profile_delta=delta, manual_extension_pending_tasks=pending)
+    return dict(avoidable_omissions=avoidable, profile_delta=delta, manual_extension_pending_tasks=pending)

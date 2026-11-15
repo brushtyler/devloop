@@ -1041,6 +1041,13 @@ class OrchestratorBootstrapTests(RepositoryTests):
             # The possible omission did not change approval or the approved plan.
             self.assertTrue(any(g['gate'] == 'TASK_PLAN_GATE' and g['passed']
                                 for g in orch.state['gate_history']))
+            # Feedback attribution reads the report that normal planning registered.
+            from ssdlc_feedback_analysis import historical_impact
+            from ssdlc_reconciliation import _files
+            source = dict(root=orch.ssdlc_root, plan=actual, state=orch.state, files=_files(orch.ssdlc_root))
+            attribution = historical_impact(source, ['consumer.py', 'elsewhere.py'])
+            self.assertEqual(attribution['status'], 'DETECTABLE')
+            self.assertEqual(attribution['detectable_files'], ['consumer.py'])
             self.assertTrue((orch.dir_recon / 'quality-contract.json').exists())
             self.assertTrue(orch.state['task_breakdown'])
 

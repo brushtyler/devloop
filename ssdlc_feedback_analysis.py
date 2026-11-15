@@ -180,10 +180,22 @@ def impact_attribution(report, report_sha256, paths):
 
 def historical_impact(source, paths):
     import json
-    # Continuations register the deterministic report; older runs the legacy hint.
-    ref = next((r for r in ('02-design/impact-report.json', '02-design/fixture-impact.json')
-                if r in source['files']), None)
-    if ref is None:
+    from ssdlc_impact import registered_report, source_lineage
+    # Planning registers ``task-planning/impact-report-<plan sha>.json`` and
+    # continuations ``impact-report.json``. Either counts only when the source
+    # state registers it, its bytes are intact, and it is bound to the source
+    # plan or to the plan that plan extended. Older runs keep the legacy hint.
+    state = source.get('state')
+    if not isinstance(state, dict):
+        state = (json.loads(_regular(source['root'], 'state.json').read_text())
+                 if 'state.json' in source['files'] else {})
+    registered = {ref: meta['sha256'] for ref, meta in state.get('artifacts', {}).items()
+                  if ref in source['files']}
+    report = registered_report(source['root'], registered, source_lineage(source))
+    if report is not None:
+        return impact_attribution(report, digest(report), paths)
+    ref = '02-design/fixture-impact.json'
+    if ref not in source['files']:
         return impact_attribution(None, None, paths)
     path = _regular(source['root'], ref)
     if file_hash(path) != source['files'][ref]:

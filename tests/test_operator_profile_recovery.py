@@ -132,7 +132,12 @@ class OperatorProfileRecoveryTests(unittest.TestCase):
         recovered = metrics['manual_extension_pending_tasks']['transitions'][-1]
         self.assertEqual((recovered['authorization_contract'], recovered['status']), (CONTRACT, 'MEASURED'))
         # No impact report was registered for this historical plan: UNKNOWN, not 0.
-        self.assertEqual(metrics['avoidable_omissions'][0]['status'], 'UNKNOWN')
+        # The continuation's own plan has its registered report and is measured.
+        avoidable = {row['plan_sha256']: row for row in metrics['avoidable_omissions']}
+        historical = avoidable.pop(digest(json.loads((self.f.ticket/'02-design/plan.json').read_text())))
+        self.assertEqual((historical['status'], historical['count'], historical['reason']),
+                         ('UNKNOWN', None, 'NO_IMPACT_REPORT'))
+        self.assertEqual([(row['status'], row['count']) for row in avoidable.values()], [('MEASURED', 0)])
         import orchestrator
         dispatches = []
         def provider(argv, **kwargs):
