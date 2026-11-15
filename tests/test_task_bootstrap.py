@@ -1041,6 +1041,9 @@ class OrchestratorBootstrapTests(RepositoryTests):
             # The possible omission did not change approval or the approved plan.
             self.assertTrue(any(g['gate'] == 'TASK_PLAN_GATE' and g['passed']
                                 for g in orch.state['gate_history']))
+            # The gate summary carries the persisted no-progress counter of the planning session.
+            self.assertTrue(any(g['gate'] == 'TASK_PLAN_GATE' and g['details'].endswith(
+                'no-progress passes 0/2 at candidate 1 (open blockers: none)') for g in orch.state['gate_history']))
             # Feedback attribution reads the report that normal planning registered.
             from ssdlc_feedback_analysis import historical_impact
             from ssdlc_reconciliation import _files

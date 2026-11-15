@@ -6,7 +6,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 from ssdlc_controller import assert_controller, controller_snapshot
-from ssdlc_planning import PlanRepair, validate_plan_review
+from ssdlc_planning import PlanRepair, describe_no_progress, validate_plan_review
 from ssdlc_tasks import PlanError, TaskError, git
 from test_task_bootstrap import RepositoryTests
 
@@ -139,6 +139,41 @@ class ConvergenceTests(unittest.TestCase):
                 self.repair(answers).run()
         self.assertEqual(len(self.generations), 3)
         self.assertEqual(self.session()['attempts'][-1]['failure_kind'], 'STAGNATION')
+
+    def test_three_identical_blocker_sets_reach_the_no_progress_limit_and_escalate(self):
+        with self.assertRaisesRegex(PlanError, 'STAGNATION; no-progress passes 2/2 at candidate 3') as raised:
+            self.repair([report([finding()])] * 3).run()
+        self.assertEqual(raised.exception.diagnostics[0]['code'], 'STAGNATION')
+        session = self.session()
+        self.assertEqual([r['no_progress']['passes'] for r in session['attempts']], [0, 1, 2])
+        self.assertEqual(session['no_progress'], {'passes': 2, 'limit': 2, 'blocker_ids': ['F1'], 'attempt': 3})
+        record = session['attempts'][-1]
+        self.assertEqual((record['failure_kind'], record['status']), ('STAGNATION', 'REJECTED'))
+        self.assertTrue((self.root/'task-planning'/record['review']).is_file())
+
+    def test_different_blocker_set_resets_the_no_progress_counter(self):
+        f2 = finding('F2', new_issue_reason='INTRODUCED_BY_REVISION')
+        answers = [report([finding()]), report([finding()]), report([finding(), f2]), report([finding(), f2])]
+        with self.assertRaisesRegex(PlanError, 'Semantic.*exhausted'):
+            self.repair(answers, review_repairs=3).run()
+        session = self.session()
+        self.assertEqual([r['no_progress']['passes'] for r in session['attempts']], [0, 1, 0, 1])
+        self.assertNotIn('failure_kind', session['attempts'][-1])
+        self.assertEqual(session['no_progress']['blocker_ids'], ['F1', 'F2'])
+
+    def test_no_progress_counter_survives_resume_and_appears_in_summary(self):
+        with self.assertRaisesRegex(PlanError, 'Semantic.*exhausted'):
+            self.repair([report([finding()])] * 2, review_repairs=1).run()
+        self.assertEqual(self.session()['no_progress']['passes'], 1)
+        self.assertEqual(describe_no_progress(self.repair([]).no_progress()),
+                         'no-progress passes 1/2 at candidate 2 (open blockers: F1)')
+        # The resumed session continues from the persisted count instead of starting over.
+        with self.assertRaisesRegex(PlanError, 'STAGNATION; no-progress passes 2/2 at candidate 3'):
+            self.repair([report([finding()])], review_repairs=2).run()
+        self.assertEqual(self.session()['no_progress']['passes'], 2)
+        with self.assertRaisesRegex(PlanError, 'no-progress passes 2/2'):
+            self.repair([]).run()
+        self.assertEqual(len(self.generations), 3)
 
     def test_environment_prerequisite_is_not_sent_to_developer_or_blindly_replanned(self):
         problem = finding(category='ENVIRONMENT_PREREQUISITE', requirement_refs=['SEC-10'],
