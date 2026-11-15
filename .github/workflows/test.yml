@@ -28,9 +28,15 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
+      # scripts/run-tests.py runs exactly the tests of `python3 -m unittest discover -s tests`,
+      # split across parallel processes (issue #84). The count check guards the equivalence.
       - name: Run unit test suite
         run: |
-          python3 -m unittest discover -s tests -v
+          expected=$(python3 -c "import unittest; print(unittest.defaultTestLoader.discover('tests').countTestCases())")
+          python3 scripts/run-tests.py | tee test-output.txt
+          ran=$(grep -oE '^Ran [0-9]+' test-output.txt | tail -1 | cut -d' ' -f2)
+          echo "Discovered $expected tests, ran $ran"
+          test "$ran" = "$expected"
 
   recovery-benchmark:
     name: Isolated A5 Recovery Benchmark
