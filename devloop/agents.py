@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .markdown import header, parse_version
 from .schema import load_schema, schema_path, validate, SchemaError
-from .workspace import git_config_env
+from .workspace import git_config_env, run_in_group
 
 MODES = ('write', 'review')
 CREDENTIAL_VARS = ('GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN',
@@ -125,9 +125,11 @@ class AgentRunner:
         stem.with_suffix('.prompt.md').write_text(prompt, encoding='utf-8')
         log = stem.with_suffix('.log')
         kwargs = {'env': self._env} if self._env is not None else {}
+        # Its own process group: a timeout also stops the commands the CLI left in the background.
+        run = run_in_group if self._run is subprocess.run else self._run
         try:
-            done = self._run(argv, input=stdin, cwd=workdir, capture_output=True, text=True,
-                             timeout=self.timeout, **kwargs)
+            done = run(argv, input=stdin, cwd=workdir, capture_output=True, text=True,
+                       timeout=self.timeout, **kwargs)
         except subprocess.TimeoutExpired as exc:
             raise AgentError(f'{agent.key} timed out after {self.timeout}s', log) from exc
         except OSError as exc:

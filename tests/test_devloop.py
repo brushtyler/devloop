@@ -1177,6 +1177,43 @@ class CredentialIsolationTests(unittest.TestCase):
                     self.assertNotEqual(done.returncode, 0)
                     self.assertIn('not allowed', done.stderr)
 
+    def test_a_timeout_stops_the_whole_process_group(self):
+        # Codex review of #75: when the test command timed out, the parallel runner's workers
+        # kept running; an agent CLI's background commands would too.
+        import time
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / 'pid'
+            command = f'sleep 60 & echo $! > {pid_file}; wait'
+            passed, tail = Workspace(tmp, '.state', 'main').run_tests(tmp, command, 1)
+            self.assertFalse(passed)
+            self.assertIn('timed out', tail)
+            pid = int(pid_file.read_text())
+            for _ in range(50):
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.1)
+            else:
+                os.kill(pid, 9)
+                self.fail('the background child outlived the timeout')
+            runner = agents.AgentRunner(Path(tmp) / 'logs', 1)
+            agent = SimpleNamespace(key='x', kind='claude', model='m', effort='e', write_args=(),
+                                    review_args=())
+            with mock.patch.object(agents, 'build_command', return_value=(['bash', '-c', command], None)), \
+                    self.assertRaisesRegex(agents.AgentError, 'timed out'):
+                runner.run(agent, 'write', 'p', 'implement', tmp, 'label')
+            pid = int(pid_file.read_text())
+            for _ in range(50):
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.1)
+            else:
+                os.kill(pid, 9)
+                self.fail('the agent background child outlived the timeout')
+
     def test_runner_and_test_command_use_the_isolated_environment(self):
         seen = []
 
