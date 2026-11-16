@@ -27,6 +27,7 @@ class LockLease:
     thread: int
     device: int
     inode: int
+    shared: bool = False
 
     def _identity(self, path):
         expected = Path(path).absolute()
@@ -47,20 +48,25 @@ class LockLease:
         self._identity(path)
         # A still-open descriptor is not evidence that flock was not unlocked
         # or downgraded. Linux exposes the actual FLOCK on this descriptor.
+        # A shared lease must show exactly READ, an exclusive one exactly WRITE:
+        # neither mode ever stands in for the other.
+        mode = 'READ' if self.shared else 'WRITE'
         try:
             info = Path('/proc/self/fdinfo', str(self.fd)).read_text()
         except OSError:
             raise _error('Kernel lock ownership cannot be observed') from None
         for line in info.splitlines():
             words = line.split()
-            if (len(words) >= 9 and words[0] == 'lock:' and words[2:5] == ['FLOCK', 'ADVISORY', 'WRITE']
+            if (len(words) >= 9 and words[0] == 'lock:' and words[2:5] == ['FLOCK', 'ADVISORY', mode]
                     and words[5] == str(self.pid) and words[-2:] == ['0', 'EOF']):
                 return self
+        if self.shared:
+            raise _error('Kernel shared lock ownership is absent')
         raise _error('Kernel exclusive lock ownership is absent')
 
 
 @contextlib.contextmanager
-def record_lock(path, fd):
+def record_lock(path, fd, *, shared=False):
     path = Path(path).absolute()
     locks = getattr(_owned, 'locks', None)
     if locks is None:
@@ -68,7 +74,8 @@ def record_lock(path, fd):
     if path in locks:
         raise _error('Native lock registration is not reentrant')
     metadata = os.fstat(fd)
-    lease = LockLease(path, fd, os.getpid(), threading.get_ident(), metadata.st_dev, metadata.st_ino)
+    lease = LockLease(path, fd, os.getpid(), threading.get_ident(), metadata.st_dev, metadata.st_ino,
+                      shared=bool(shared))
     locks[path] = lease
     try:
         # Ordinary ticket locks keep their existing POSIX behavior; borrowing
@@ -94,6 +101,8 @@ def transition_lock(path, held=()):
     if len(matches) > 1:
         raise _error('Ambiguous native lock ownership')
     if matches:
+        if matches[0].shared:
+            raise _error('Shared lock ownership cannot authorize a transition')
         yield matches[0].validate(path)
     else:
         from ssdlc_tasks import ticket_lock
