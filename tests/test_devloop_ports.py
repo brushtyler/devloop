@@ -23,6 +23,8 @@ from test_devloop_preflight import IssueGH as PreflightIssueGH
 from test_devloop_priority import QueueGH
 from test_devloop_quorum import Identities as QuorumIdentities
 from test_devloop_quorum import QuorumGH
+from test_devloop_supervisor_labels import HistoryGH
+from test_devloop_supervisor_labels import QueueGH as SupervisorQueueGH
 from test_devloop_ports_equivalence import TrackerGH
 
 PACKAGE = Path(__file__).resolve().parents[1] / 'devloop'
@@ -39,11 +41,14 @@ EXPECTED = {
 }
 # Fakes defined as classes: their methods are compared as the adapter's, unbound.
 FAKE_CLASSES = (FakeGH, SnapshotGH, AcceptanceIssueGH, SnapshotIssueGH, LedgerGH, SnapLedgerGH,
-                PreflightIssueGH, QueueGH, QuorumGH, TrackerGH, MergeGH)
+                PreflightIssueGH, QueueGH, QuorumGH, TrackerGH, MergeGH, SupervisorQueueGH,
+                HistoryGH)
 # The same fakes as the tests build them: an instance attribute must not hide a port method.
 FAKE_INSTANCES = (FakeGH, lambda: SnapshotGH([]), lambda: AcceptanceIssueGH('body'),
                   lambda: SnapshotIssueGH('body'), LedgerGH, SnapLedgerGH, PreflightIssueGH,
-                  lambda: QueueGH({}), QuorumGH, TrackerGH, MergeGH)
+                  lambda: QueueGH({}), QuorumGH, TrackerGH, MergeGH,
+                  lambda: SupervisorQueueGH({}),
+                  lambda: HistoryGH('brushtyler', 'brushtyler-devloop-agy-agent[bot]'))
 
 
 def called_attributes(path):
