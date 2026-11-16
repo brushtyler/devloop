@@ -41,9 +41,10 @@ protected_paths = [".github/"]
 
 # Review level of a devloop PR (issue #106): the highest of default_level, level 2 when a trusted
 # user ever added `label` to the PR, level 2 when the PR's full diff against the base touches a
-# sensitive path, and any level already recorded on the PR. Level 2 sends the PR to
-# agent:needs-human (more reviewers are not supported yet). The policy comes from the running
-# dispatcher, never from the PR branch; its hash goes into every receipt.
+# sensitive path, and any level already recorded on the PR. Level 1 needs one reviewer, level 2
+# two independent ones from roles.reviewers (issue #111). The policy comes from the running
+# dispatcher, never from the PR branch; its hash, which covers the reviewers' apps, models,
+# efforts and review_args too, goes into every receipt.
 [review_policy]
 default_level = 1
 label = "reviews:2"
@@ -55,7 +56,12 @@ sensitive_path_lists = ["schemas/recovery-grader-baseline.json"]
 
 [roles]
 implementer = "claude"
-reviewer = "codex"    # must differ from the implementer
+# The reviewer pool, in order; none may be the implementer. Level 1 uses the PR's recorded
+# reviewer (the first of the pool when the PR was opened). Level 2 takes the first pair that
+# differs both in GitHub identity (app) and in (kind, model, effort, review_args), and neither of
+# which shares the identity or (kind, model, effort) of the implementer or of a fixer of the PR;
+# without such a pair the PR goes to agent:needs-human. `reviewer = "codex"` is a pool of one.
+reviewers = ["codex", "agy"]
 
 [agents.claude]
 kind = "claude"

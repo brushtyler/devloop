@@ -27,6 +27,9 @@ Read `AGENTS.md` and the README section "Developing SSDLC".
   implementer's responses below. Accept a reasoned dispute when it is right (`withdrawn`).
   Do not raise new findings on code that did not change since the previous round unless they are
   serious defects you missed: the review must converge.
+- A previous finding is identified as `round/reviewer/ID` (for example `2/codex/R2-1`): use that
+  identifier as `id` in `previous_findings`. Your assessment closes only the findings you opened.
+  A finding opened by CI or by another reviewer stays open whatever you write: assess it anyway.
 
 ## Verdict
 

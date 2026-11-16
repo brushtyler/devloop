@@ -4,6 +4,29 @@ from pathlib import Path
 
 from ssdlc_tasks import PlanError, atomic_json, confined, digest, file_hash, parse_plan_output, log_retry_reason, validate_document
 
+# A pass without progress is a review whose non-empty set of open blocking IDs
+# equals the set of the previous review. Two such passes (three identical sets
+# in a row) stop the session as STAGNATION.
+NO_PROGRESS_LIMIT = 2
+
+
+def no_progress_passes(signatures: list[list[str]], current: list[str]) -> int:
+    """Count the consecutive earlier reviews that repeat the current open blocker set."""
+    passes = 0
+    if current:
+        for previous in reversed(signatures):
+            if previous != current:
+                break
+            passes += 1
+    return passes
+
+
+def describe_no_progress(counter) -> str:
+    if not counter:
+        return 'no-progress passes: not recorded'
+    return (f"no-progress passes {counter['passes']}/{counter['limit']} at candidate {counter['attempt']}"
+            f" (open blockers: {', '.join(counter['blocker_ids']) or 'none'})")
+
 
 def unreported_contract_defects(findings: list[dict], defects) -> list[dict]:
     """Host-demonstrated contract defects that no OPEN BLOCKING PLAN_DEFECT reports.
@@ -225,7 +248,9 @@ class PlanRepair:
             if record and record.get('failure_kind') in ('REVIEW_PROTOCOL', 'ENVIRONMENT_PREREQUISITE', 'STAGNATION'):
                 blockers = [f for f in record.get('assessment', {}).get('findings', [])
                             if f['status'] == 'OPEN' and f['severity'] == 'BLOCKING']
+                counter = record.get('no_progress') if record['failure_kind'] == 'STAGNATION' else None
                 raise PlanError('Task planning needs intervention: ' + record['failure_kind']
+                                + (f'; {describe_no_progress(counter)}' if counter else '')
                                 + f"; report: {self.root / record['review']}",
                                 [{'code': record['failure_kind'], **finding} for finding in blockers] or None)
             if record and record['status'] in ('CANDIDATE', 'VALID', 'REVIEWING', 'APPROVED'):
@@ -303,7 +328,12 @@ class PlanRepair:
                                      if f['status'] == 'OPEN' and f['severity'] == 'BLOCKING')
                               for h in history if 'assessment' in h]
                 current = sorted(f['finding_id'] for f in blockers)
-                if current and len(signatures) >= 2 and signatures[-2:] == [current, current]:
+                counter = {'passes': no_progress_passes(signatures, current), 'limit': NO_PROGRESS_LIMIT,
+                           'blocker_ids': current, 'attempt': record['attempt']}
+                record['no_progress'] = counter
+                session['no_progress'] = counter
+                print(f'[task-plan] {describe_no_progress(counter)}.', flush=True)
+                if counter['passes'] >= NO_PROGRESS_LIMIT:
                     record['failure_kind'] = 'STAGNATION'
             else:
                 report = self.review(plan)
@@ -320,6 +350,10 @@ class PlanRepair:
             self.budget()
             if approved:
                 return plan
+
+    def no_progress(self):
+        """The persisted no-progress counter of this planning session, if a review recorded it."""
+        return json.loads(self.path.read_text()).get('no_progress') if self.path.is_file() else None
 
     def _save_evidence(self, session, record, field, content):
         filename = f"attempt-{record['attempt']}-{field}.txt"
