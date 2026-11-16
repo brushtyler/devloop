@@ -270,6 +270,14 @@ A round at level 2 works as follows:
   and a later action runs the second reviewer, which joins the same round as long as the head
   and the recomputed receipt are unchanged. Each reviewer judges the head on its own: its prompt
   has the earlier rounds, not the other reviewer's verdict.
+- **Both reviewers in one action** with [parallel actions](#parallel-actions)
+  (`max_parallel_actions` above 1, #176). A review action runs at once every reviewer the round
+  still waits for, each in its own copy of the worktree (`pr-<N>-review-<reviewer>`) and with
+  the same prompt, so each still sees only the earlier rounds. Each verdict is recorded as
+  before, one per reviewer, and a round whose reviewers both answer is applied in the same tick.
+  If a reviewer fails, the other verdict stays recorded and the round waits only for the
+  missing reviewer; the failure goes to `agent:needs-human` as any failure does, and once a
+  human sends the PR back to `agent:review` the next action runs only that reviewer.
 - **Aggregation.** The verdicts are applied once both are in: `needs_human` from either sends
   the PR to `agent:needs-human`; otherwise a `request_changes` from either starts a single fix
   that receives every open finding of both; two approvals go to promotion.
@@ -654,7 +662,10 @@ in the main checkout.
 While a tick runs an action it records it in `state_dir/activity.json`: the action, the issue or
 PR, the agent and the path of its prompt once an agent turn starts, the model when the turn runs
 on a [fallback model](#fallback-models), the start time and the dispatcher's process id. The
-record is removed when the action ends, also when it fails. `devloop status` shows it first, with
+record is removed when the action ends, also when it fails. While several
+[parallel actions](#parallel-actions) run, the file holds `{"actions": [...]}`, one record per
+action, and `devloop status` shows one line for each; a reviewer running alongside another one
+in the same action leaves the action's record as it is. `devloop status` shows it first, with
 how long it has been running and, for a fallback, `on fallback model <model>`. If no dispatcher holds the
 lock, or the recorded process is gone, the action is reported as `interrupted`: the tick was
 killed before it could clean up, and the next tick overwrites the record when it starts an action.
@@ -665,7 +676,8 @@ the messages and tool calls of the newest Claude (`~/.claude/projects`) or Codex
 (`~/.codex/sessions`) session transcript whose working directory is that worktree, then keeps
 following it, and switches to a newer transcript of the same worktree when one appears, for
 example the next attempt of a turn. The reviewer works in a disposable copy of the PR worktree,
-`pr-<N>-review`, so `devloop follow pr-<N>` looks at both and follows the newest session: the
+`pr-<N>-review` (`pr-<N>-review-<reviewer>` for each reviewer of a level-2 round running in
+parallel), so `devloop follow pr-<N>` looks at all of them and follows the newest session: the
 reviewer's while a review runs, the fixer's while a fix runs. It reads local files only and needs no GitHub access. Ctrl-C
 stops it. Antigravity sessions are not supported. For this reason devloop runs `codex exec`
 without `--ephemeral` (and with `--json`, for the [telemetry](#evidence-and-telemetry)): Codex saves the session of every turn in `~/.codex/sessions`, and these
@@ -782,7 +794,9 @@ with `--config`. `preflight` (absent by default) names the agent of the
 [readiness check](#readiness-check-before-implementation); it must be a configured agent other
 than the implementer. Among the limits, `agent_stall_seconds` (an integer of at least 1, default 900)
 and `agent_stall_action` (`"warn"`, the default, or `"abort"`) control the
-[stall check](#stalled-agents); other values stop devloop at startup. `[review_policy]` sets the
+[stall check](#stalled-agents); other values stop devloop at startup. `max_parallel_actions`
+(default 1) sets how many actions of a tick run at once ([Parallel actions](#parallel-actions)).
+`[review_policy]` sets the
 [review level](#review-level-and-policy-receipt): `default_level` (1 or 2, default 1), the level
 `label` (default `reviews:2`), `sensitive_paths` and `sensitive_path_lists`; changing any of them,
 or the reviewers of the pool (their order, app, kind, model, effort, `review_args` or
@@ -817,6 +831,36 @@ the system: the tests they run can still reach the network and write outside the
 code running as the same user. For them, the copy and the final check catch writes to the
 reviewed tree, not access to the rest of the system. With the network disabled, codex cannot run tests
 that open TCP sockets, even on loopback.
+
+### Parallel actions
+
+`max_parallel_actions` (an integer of at least 1, default 1) sets how many actions of one tick
+may run at once (#176). With 1 a tick runs its actions one at a time, in plan order, as before.
+This repository sets 3: implement, fix, sync and review of different issues and PRs each take
+10–25 minutes, and each has its own worktree.
+
+- **What runs together.** Actions on different issues and PRs, up to `max_parallel_actions`
+  at once. Two actions on the same number, or on a PR and its issue, run one after the other in
+  plan order. A global action (a write to `main` or to the whole repository, such as a merge or
+  a pin) runs alone: after every action planned before it has ended, and before any action
+  planned after it starts. `max_actions_per_tick` stays the limit on the total, and every agent
+  turn and test run keeps its usual timeout.
+- **Level-2 reviewers.** A review action runs together every reviewer its round still waits
+  for (see [Level 2](#level-2-two-independent-reviewers)), so a round no longer takes two
+  ticks.
+- **Failures.** A failed action does not stop the others, nor the next action on the same
+  number. A failure of an agent, `gh`, git or the issue's trust escalates as before; an
+  unexpected exception escalates its issue or PR too, with `errore inatteso del dispatcher` and
+  the exception, instead of stopping the tick. At the end the tick logs one
+  `outcome of <action> #<N>: done|failed: …|unexpected error: …` line per action.
+- **Tick log.** Each line of an action starts with `#<N>`, its issue or PR, and is written
+  whole: the lines of parallel actions never mix.
+- **Shared state.** Worktrees, agent logs, markers and GitHub writes are already per number.
+  git commands that update state every worktree shares (`fetch`, `worktree`) run one at a
+  time, GitHub App tokens are minted under a lock, the ledger's trace of open turns is updated
+  under a lock, and the telemetry of a turn (`last_report`) belongs to the thread that ran it.
+  Each run of `test_cmd` gets a temporary directory of its own (`TMPDIR`), removed afterwards,
+  so parallel test runs do not share one.
 
 ### agy permissions
 
@@ -915,7 +959,11 @@ fallback_models = [
 - **Independence.** At level 2 a reviewer's fallback model runs only if it is still independent
   of who wrote the code (including the implementer's own fallback models) and distinct from the
   other reviewers of the round, as their records show them; otherwise it is skipped and listed
-  as such.
+  as such. When the reviewers of a round run together ([parallel actions](#parallel-actions)),
+  each reserves the profile it runs with before any turn starts, and a fallback replaces the
+  reservation atomically: a fallback must also be distinct from the profiles the other running
+  reviewers reserved, otherwise it is skipped and the next model is tried. When no model is
+  left, that reviewer fails and the round waits for it, without voiding the other verdict.
 
 ## Limits
 
@@ -933,7 +981,9 @@ fallback_models = [
   goes to `agent:needs-human` rather than being retried. The only exception is an unavailable
   model of an agent with [fallback models](#fallback-models), which runs the turn again on the
   next one.
-- **Single host, sequential.** One tick runs actions one at a time.
+- **Single host.** One dispatcher runs at a time. With `max_parallel_actions = 1` (the
+  default) a tick runs its actions one at a time; above 1, actions on different issues and PRs
+  run in threads of that one process ([Parallel actions](#parallel-actions)).
 - **`gh` compatibility.** Checks, labels, comments and PR creation go through the REST API
   (`gh api`), so devloop does not depend on newer porcelain flags such as `gh pr checks --json`.
   For commit statuses the aggregate state counts, including contexts beyond the first page.

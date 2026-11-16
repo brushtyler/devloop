@@ -26,6 +26,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -89,6 +90,8 @@ class Ledger:
         self._monotonic = monotonic
         self._path = Path(state_dir) / PENDING if state_dir is not None else None
         self._memory = {}
+        # Parallel actions (#176) update the trace from several threads.
+        self._lock = threading.Lock()
 
     # Turns left open -------------------------------------------------------
     def _load(self):
@@ -118,13 +121,14 @@ class Ledger:
             raise LedgerError(f'{self._path}: not written: {exc}') from exc
 
     def _count(self, number, delta):
-        data = self._load()
-        left = data.get(str(number), 0) + delta
-        if left > 0:
-            data[str(number)] = left
-        else:
-            data.pop(str(number), None)
-        self._store(data)
+        with self._lock:
+            data = self._load()
+            left = data.get(str(number), 0) + delta
+            if left > 0:
+                data[str(number)] = left
+            else:
+                data.pop(str(number), None)
+            self._store(data)
 
     def pending(self):
         """The issues and PRs where a turn may have been left open."""
@@ -132,9 +136,10 @@ class Ledger:
 
     def settle(self, number):
         """Forget ``number``: a tick found no turn left open there, or marked them incomplete."""
-        data = self._load()
-        if data.pop(str(number), None) is not None:
-            self._store(data)
+        with self._lock:
+            data = self._load()
+            if data.pop(str(number), None) is not None:
+                self._store(data)
 
     def _now(self):
         return timestamp(self._clock)

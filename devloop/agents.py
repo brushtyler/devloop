@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -318,7 +319,8 @@ class AgentRunner:
 
     ``last_report`` is the ``telemetry`` of the latest turn, ``(fields, models)``, set whether
     the turn succeeded or failed; None when the CLI did not complete (timeout, stall, failed
-    start), so that nothing is attested."""
+    start), so that nothing is attested. It belongs to the calling thread: parallel actions
+    (#176) each read the report of their own turn."""
 
     def __init__(self, log_dir, timeout, run=subprocess.run, env=None, on_turn=None, stall=None):
         self.log_dir = Path(log_dir)
@@ -328,7 +330,15 @@ class AgentRunner:
         self._on_turn = on_turn
         self._stall = stall
         self._versions = {}
-        self.last_report = None
+        self._local = threading.local()
+
+    @property
+    def last_report(self):
+        return getattr(self._local, 'report', None)
+
+    @last_report.setter
+    def last_report(self, report):
+        self._local.report = report
 
     def version(self, agent):
         """The CLI version, cached once known; a failed lookup is retried on the next call."""

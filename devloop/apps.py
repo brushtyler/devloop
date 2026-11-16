@@ -14,6 +14,7 @@ import calendar
 import json
 import os
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -92,6 +93,8 @@ class AppAuth:
         self._installation = None
         self._user_id = None
         self._tokens = {}
+        # Parallel actions (#176) ask for tokens from several threads: one mint per need.
+        self._lock = threading.RLock()
 
     @property
     def login(self):
@@ -105,17 +108,23 @@ class AppAuth:
         return f'{signing_input}.{_b64(self._sign(self.key_path, signing_input.encode()))}'
 
     def installation_id(self):
-        if self._installation is None:
-            found = self._http('GET', f'/repos/{self.repo}/installation', f'Bearer {self.jwt()}')
-            if found['app_id'] != self.app_id:
-                raise GitHubError(f'installation {found["id"]} belongs to app {found["app_id"]}, '
-                                  f'not {self.app_id}')
-            self._installation = found['id']
-        return self._installation
+        with self._lock:
+            if self._installation is None:
+                found = self._http('GET', f'/repos/{self.repo}/installation',
+                                   f'Bearer {self.jwt()}')
+                if found['app_id'] != self.app_id:
+                    raise GitHubError(f'installation {found["id"]} belongs to app '
+                                      f'{found["app_id"]}, not {self.app_id}')
+                self._installation = found['id']
+            return self._installation
 
     def token(self, permissions=None):
         """An installation token for this repository only, limited to ``permissions`` (all the
         installation's permissions when None). Reused while it has a few minutes left."""
+        with self._lock:
+            return self._token(permissions)
+
+    def _token(self, permissions):
         key = tuple(sorted((permissions or {}).items()))
         cached = self._tokens.get(key)
         if cached and cached[1] - self._clock() > _REFRESH_MARGIN:
@@ -131,10 +140,11 @@ class AppAuth:
 
     def user_id(self, token):
         """The id of the app's bot user, for its noreply commit address (read with ``token``)."""
-        if self._user_id is None:
-            user = self._http('GET', f'/users/{self.login}', f'token {token}')
-            self._user_id = user['id']
-        return self._user_id
+        with self._lock:
+            if self._user_id is None:
+                user = self._http('GET', f'/users/{self.login}', f'token {token}')
+                self._user_id = user['id']
+            return self._user_id
 
     def describe(self):
         """What GitHub says about the app and its installation, for ``devloop apps``."""

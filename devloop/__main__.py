@@ -12,7 +12,7 @@ from . import activity, follow
 from .agents import AgentRunner, isolated_env
 from .apps import DISPATCHER, Identities
 from .config import ConfigError, load_config
-from .dispatcher import Dispatcher, ensure_labels, plan, queue_lines, run_forever
+from .dispatcher import Dispatcher, TickLog, ensure_labels, plan, queue_lines, run_forever
 from .github import GitHubError
 from .ledger import Ledger
 from .review import last_round
@@ -67,17 +67,21 @@ def build(args):
     gh_config = state / 'agent-gh-config'
     gh_config.mkdir(parents=True, exist_ok=True)
     agent_env = agent_environment(cfg, gh_config)
-    ws = Workspace(root, cfg.state_dir, cfg.base_branch, test_env=agent_env)
+    # With parallel actions (#176) each test run gets a temporary directory of its own.
+    ws = Workspace(root, cfg.state_dir, cfg.base_branch, test_env=agent_env,
+                   private_tmp=cfg.max_parallel_actions > 1)
     current = activity.Activity(state)
+    # One log for the whole tick: each line whole, with the number of its action (#176).
+    tick_log = TickLog(log)
     # Session transcripts are found where the agent CLIs write them, in their HOME.
-    stall = StallWatch(cfg.agent_stall_seconds, cfg.agent_stall_action, log=log,
+    stall = StallWatch(cfg.agent_stall_seconds, cfg.agent_stall_action, log=tick_log,
                        activity=current, home=agent_env.get('HOME'))
     runner = AgentRunner(state / 'logs', cfg.agent_timeout_seconds, env=agent_env,
                          on_turn=lambda agent, prompt: current.turn(
                              agent.key, prompt, agent.model if agent.fallback_for else None),
                          stall=stall)
     gh = identities.github(DISPATCHER)
-    dispatcher = Dispatcher(cfg, gh, ws, runner, log=log, identities=identities,
+    dispatcher = Dispatcher(cfg, gh, ws, runner, log=tick_log, identities=identities,
                             activity=current, ledger=Ledger(gh, state_dir=state))
     return cfg, state, dispatcher
 
@@ -145,7 +149,8 @@ def main(argv=None):
             sys.exit(1)
         return
     if args.command == 'status':
-        log(activity.describe(state) or 'no action running')
+        for line in (activity.describe(state) or 'no action running').split('\n'):
+            log(line)
         snap = dispatcher.snapshot()
         for pr in snap.prs:
             labels = ', '.join(sorted(l for l in pr.labels if l.startswith('agent:')))

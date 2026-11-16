@@ -122,6 +122,9 @@ class Config:
     max_open_prs: int = 2
     max_review_rounds: int = 3
     max_actions_per_tick: int = 3
+    # Actions of one tick on different issues and PRs that may run at once (#176); 1 runs them
+    # one at a time, in plan order.
+    max_parallel_actions: int = 1
     implement_test_retries: int = 1
     agent_timeout_seconds: int = 3600
     test_timeout_seconds: int = 3600
@@ -410,7 +413,7 @@ def parse_config(data, root=INSTALL_ROOT):
         raise ConfigError('apps: each actor needs its own app')
     ints = {}
     for key in ('max_open_prs', 'max_review_rounds', 'max_actions_per_tick',
-                'implement_test_retries', 'agent_timeout_seconds', 'test_timeout_seconds',
+                'max_parallel_actions', 'implement_test_retries', 'agent_timeout_seconds', 'test_timeout_seconds',
                 'agent_command_timeout_seconds', 'agent_stall_seconds'):
         if key in data:
             value = _require(data, key, int, 'config')

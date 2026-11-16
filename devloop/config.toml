@@ -25,6 +25,10 @@ trusted_users = ["brushtyler"]
 max_open_prs = 2            # devloop PRs open at once; new issues wait
 max_review_rounds = 3       # review rounds (including CI failures) before escalating
 max_actions_per_tick = 3
+# Actions of one tick on different issues and PRs run at once, up to this many (issue #176): two
+# actions on the same issue or PR (or on a PR and its issue) stay in plan order, and at level 2
+# one review action runs every reviewer the round waits for. Default 1: one action at a time.
+max_parallel_actions = 3
 implement_test_retries = 1  # extra implementer attempts when local tests fail
 agent_timeout_seconds = 3600
 test_timeout_seconds = 3600     # suite: ~8 min with test_cmd on 4 CPUs, ~25 min serially

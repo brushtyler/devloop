@@ -16,7 +16,9 @@ from devloop.dispatcher import (Action, Dispatcher, PullRequest, Snapshot, Untru
 from devloop.github import GitHub, GitHubError, author_login, normalize_checks, summarize_checks
 from devloop.workspace import Workspace, WorkspaceError
 
-CFG = config.load_config()
+# The tests describe one action at a time (the default); parallel actions (#176) have their own
+# tests in test_devloop_parallel.py.
+CFG = dataclasses.replace(config.load_config(), max_parallel_actions=1)
 SHA1, SHA2 = 'a' * 40, 'b' * 40
 # Dispatcher tests follow whatever roles config.toml assigns.
 IMPL, REV = CFG.implementer, CFG.reviewer

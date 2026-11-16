@@ -15,7 +15,8 @@ from test_devloop import (CFG, IMPL, SHA1, FakeGH, FakeIdentities, FakeRunner, F
                           implemented, pr, raw_review)
 from test_devloop_quorum import FIRST, SECOND, Quorum
 
-DATA = tomllib.loads(config.DEFAULT_CONFIG.read_text())
+# One action at a time, as in test_devloop.CFG: parallel actions (#176) are tested on their own.
+DATA = dict(tomllib.loads(config.DEFAULT_CONFIG.read_text()), max_parallel_actions=1)
 ARGON, HYDROGEN = 'gemini-4-argon-high', 'gemini-4-hydrogen-high'
 QUOTA = 'Error: RESOURCE_EXHAUSTED: quota of gemini-4-argon-high exhausted for today'
 
