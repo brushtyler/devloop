@@ -14,10 +14,11 @@ from urllib.parse import quote
 _RUN_ID = re.compile(r'/actions/runs/(\d+)')
 _ISSUE_HISTORY = (
     'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){'
-    'issue(number:$number){title body author{login} lastEditedAt editor{login} '
+    'issue(number:$number){title body author{__typename login} lastEditedAt '
+    'editor{__typename login} '
     'timelineItems(itemTypes:[LABELED_EVENT,RENAMED_TITLE_EVENT],last:100){nodes{__typename '
-    '... on LabeledEvent{createdAt actor{login} label{name}} '
-    '... on RenamedTitleEvent{createdAt actor{login}}}}}}}')
+    '... on LabeledEvent{createdAt actor{__typename login} label{name}} '
+    '... on RenamedTitleEvent{createdAt actor{__typename login}}}}}}}')
 _FAILED_CONCLUSIONS = {'failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure',
                        'stale'}
 _FAILED_STATUSES = {'failure', 'error'}
@@ -29,6 +30,15 @@ class GitHubError(RuntimeError):
 
 def _login(who):
     return (who or {}).get('login')
+
+
+def graphql_login(actor):
+    """A GraphQL actor's login in REST form. GraphQL reports a GitHub App (``Bot``) as a bare
+    ``<slug>``, indistinguishable from a user; REST and the trust checks use ``<slug>[bot]``."""
+    login = _login(actor)
+    if login and (actor or {}).get('__typename') == 'Bot' and not login.endswith('[bot]'):
+        return login + '[bot]'
+    return login
 
 
 def author_login(author):
@@ -74,7 +84,7 @@ class GitHub:
     # Reads ---------------------------------------------------------------
     def issues_with_label(self, label):
         return self._json('issue', 'list', '-R', self.repo, '--state', 'open', '--label', label,
-                          '--limit', '200', '--json', 'number,title,labels')
+                          '--limit', '200', '--json', 'number,title,labels,author')
 
     def issue(self, number):
         return self._json('issue', 'view', str(number), '-R', self.repo,
@@ -83,7 +93,8 @@ class GitHub:
     def issue_history(self, number):
         """Title, body and who changed them, read in one query so that the text and its history
         match: ``{title, body, author, last_edited_at, editor, labeled, renamed}``. ``labeled`` is
-        a list of ``(label, login, at)`` and ``renamed`` of ``(login, at)``, oldest first."""
+        a list of ``(label, login, at)`` and ``renamed`` of ``(login, at)``, oldest first. Logins
+        are in REST form (``graphql_login``): an app is ``<slug>[bot]``."""
         owner, name = self.repo.split('/', 1)
         data = self._json('api', 'graphql', '-f', f'query={_ISSUE_HISTORY}', '-f', f'owner={owner}',
                           '-f', f'name={name}', '-F', f'number={int(number)}')
@@ -91,11 +102,12 @@ class GitHub:
         nodes = issue['timelineItems']['nodes']
         return {
             'title': issue['title'], 'body': issue['body'] or '',
-            'author': _login(issue['author']), 'last_edited_at': issue['lastEditedAt'],
-            'editor': _login(issue['editor']),
-            'labeled': [((n.get('label') or {}).get('name'), _login(n['actor']), n['createdAt'])
+            'author': graphql_login(issue['author']), 'last_edited_at': issue['lastEditedAt'],
+            'editor': graphql_login(issue['editor']),
+            'labeled': [((n.get('label') or {}).get('name'), graphql_login(n['actor']),
+                         n['createdAt'])
                         for n in nodes if n['__typename'] == 'LabeledEvent'],
-            'renamed': [(_login(n['actor']), n['createdAt'])
+            'renamed': [(graphql_login(n['actor']), n['createdAt'])
                         for n in nodes if n['__typename'] == 'RenamedTitleEvent'],
         }
 

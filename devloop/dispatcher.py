@@ -55,6 +55,12 @@ Start order (#146): ready issues start by priority (``priority:high``, ``normal`
 ``priority_labels`` label counts as high), then by the oldest current ``agent:ready``, then by
 number. A priority label counts only if a trusted user added it.
 
+Supervisor labels (#178): with ``roles.supervisor`` and its GitHub App, ``agent:ready`` and the
+priority labels count also when the supervisor's app added them, but only on issues opened by a
+trusted user or by one of devloop's apps (``label_admitters``). On anyone else's issue only a
+trusted user's label counts. The issue text stays trusted only while no one outside
+``trusted_users`` edits it after the label.
+
 Parallel actions (#176, ``max_parallel_actions`` above 1): the actions of a tick on different
 issues and PRs run at once, up to that many (``schedule``). Actions on the same number, or on a
 PR and its issue, run one after the other in plan order; a global action (``GLOBAL_ACTIONS``)
@@ -85,7 +91,7 @@ from .acceptance import (acceptance_criteria, acceptance_findings, format_criter
                          latest_map, render_map)
 from .agents import AgentError, ModelsUnavailable, ModelUnavailable, PermissionDenied
 from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, PR_COMMENT, REVIEW
-from .github import GitHubError, merge_state, summarize_checks
+from .github import GitHubError, author_login, merge_state, summarize_checks
 from .ledger import entries as ledger_entries
 from .ledger import open_turns
 from .localtests import module_command, select_modules
@@ -214,7 +220,8 @@ class PullRequest:
 class Snapshot:
     prs: list
     # dicts: number, title, labels (set), labeler and ready_at (login and time of the latest
-    # ``labeled`` event of agent:ready), priority (``issue_priority``), and with ``preflight``
+    # ``labeled`` event of agent:ready), admitted (whether that labeler may admit the issue,
+    # ``label_admitters``), priority (``issue_priority``), and with ``preflight``
     # configured, for the issues that may start or are blocked by the check, ``preflight``
     # (``_preflight_view``)
     ready_issues: list
@@ -309,9 +316,21 @@ def label_names(labels):
     return {label['name'] if isinstance(label, dict) else label for label in labels}
 
 
+def label_admitters(author, trusted_users, supervisor=None, devloop_logins=()):
+    """The logins whose ``agent:ready`` and priority labels count on an issue opened by
+    ``author`` (#178): the trusted users, and ``supervisor`` (the login of the supervisor's
+    app, None without one) only when the author is a trusted user or one of
+    ``devloop_logins``, the logins of devloop's apps."""
+    admitters = set(trusted_users)
+    if supervisor and author and (author in admitters or author in devloop_logins):
+        admitters.add(supervisor)
+    return admitters
+
+
 def issue_priority(labels, events, trusted_users, priority_labels=()):
     """The priority of a ready issue (#146): the highest among the priority labels it has now
-    whose latest ``labeled`` event comes from a trusted user, ``normal`` without any. Labels in
+    whose latest ``labeled`` event comes from ``trusted_users``, the logins that may set it
+    (``label_admitters``), ``normal`` without any. Labels in
     ``priority_labels`` count as ``high``. ``events`` are the issue's ``labeled`` events, oldest
     first, as ``{label, by, at}``."""
     names = dict(PRIORITY_LABELS, **{name: 'high' for name in priority_labels})
@@ -497,7 +516,7 @@ def plan(snapshot, cfg):
         blocked = set(cfg.blocked_labels) | {lb.working, lb.needs_human}
         candidates = [i for i in snapshot.ready_issues
                       if not (i['labels'] & blocked) and i['number'] not in pr_issues
-                      and i['labeler'] in cfg.trusted_users]
+                      and i['admitted']]
         candidates.sort(key=start_order)
         actions += [Action('implement', i['number']) for i in candidates[:free]]
     capped, spent = [], 0
@@ -521,7 +540,7 @@ def _plan_preflight(snapshot, cfg, pr_issues, free):
     excluded = set(cfg.blocked_labels) | {lb.working}
     issues = [i for i in snapshot.ready_issues
               if not (i['labels'] & excluded) and i['number'] not in pr_issues
-              and i['labeler'] in cfg.trusted_users]
+              and i['admitted']]
     issues.sort(key=start_order)
     actions, taken = [], 0
     for issue in issues:
@@ -654,19 +673,29 @@ class UntrustedChange(RuntimeError):
     """The issue text changed after a trusted user approved it with the ready label."""
 
 
-def untrusted_change(history, ready_label, trusted_users):
+def ready_approval(labeled, ready_label, admitters):
+    """The ``(login, at)`` of the latest ``labeled`` event of ``ready_label`` in ``labeled``
+    (``(label, login, at)``, oldest first) when one of ``admitters`` added it, else None. The
+    latest event decides (#178), as for the queue: an approval replaced since by someone else's
+    label no longer counts."""
+    latest = [(who, at) for name, who, at in labeled if name == ready_label][-1:]
+    return latest[0] if latest and latest[0][0] in admitters else None
+
+
+def untrusted_change(history, ready_label, trusted_users, admitters=None):
     """Why the issue's title or body can no longer be trusted, or None.
 
-    Trust comes from a trusted user adding ``ready_label``; a later change to the title or the
-    body by anyone else voids it until a trusted user adds the label again. GitHub timestamps
-    have one-second granularity, so an untrusted change in the same second as the label cannot
-    be proven to precede it and voids trust too.
+    Trust comes from one of ``admitters`` (``label_admitters``, the trusted users by default)
+    adding ``ready_label`` in its latest ``labeled`` event (``ready_approval``); a later change
+    to the title or the body by anyone outside ``trusted_users`` voids it until the label is
+    added again. GitHub timestamps have one-second granularity, so an untrusted change in the
+    same second as the label cannot be proven to precede it and voids trust too.
     """
-    approved = [at for name, who, at in history['labeled']
-                if name == ready_label and who in trusted_users]
+    admitters = trusted_users if admitters is None else admitters
+    approved = ready_approval(history['labeled'], ready_label, admitters)
     if not approved:
         return f'nessuna label `{ready_label}` messa da un utente fidato'
-    since = approved[-1]
+    since = approved[1]
     edited = history['last_edited_at']
     if edited and edited >= since and history['editor'] not in trusted_users:
         return f'il testo è stato modificato da `{history["editor"]}` dopo la label `{ready_label}`'
@@ -870,6 +899,21 @@ class Dispatcher:
         supervisor = self._app_login(self.cfg.supervisor) if self.cfg.supervisor else None
         return login in self.cfg.trusted_users or bool(supervisor and login == supervisor)
 
+    def _admitters(self, author):
+        """The logins whose ``agent:ready`` and priority labels count on an issue opened by
+        ``author`` (#178, ``label_admitters``): the supervisor's app counts only when it has
+        one, and only on issues of trusted users or of devloop's apps."""
+        supervisor = self._app_login(self.cfg.supervisor) if self.cfg.supervisor else None
+        if not supervisor:
+            return set(self.cfg.trusted_users)
+        devloop = {self._app_login(actor) for actor in (*self.cfg.agents, DISPATCHER)} - {None}
+        return label_admitters(author, self.cfg.trusted_users, supervisor, devloop)
+
+    def _untrusted_change(self, history):
+        """``untrusted_change`` of an issue, with the admitters of its author."""
+        return untrusted_change(history, self.cfg.labels.ready, self.cfg.trusted_users,
+                                self._admitters(history['author']))
+
     def _hold_command(self, pr, comments):
         """The hold or release command still to apply (#172), ``{event, by, reason, comment}``
         or None: the latest valid one not spent yet. A dispatcher ``hold`` record spends the
@@ -1045,12 +1089,15 @@ class Dispatcher:
             # The latest agent:ready: its author admits the issue and its time is the issue's
             # seniority in the queue (#146).
             admitted = ([e for e in events if e['label'] == lb.ready] or [{}])[-1]
+            # Whose labels count depends on who opened the issue (#178).
+            admitters = self._admitters(author_login(raw.get('author')))
             issue = {'number': raw['number'], 'title': raw['title'], 'labels': labels,
                      'labeler': admitted.get('by'), 'ready_at': admitted.get('at'),
-                     'priority': issue_priority(labels, events, self.cfg.trusted_users,
+                     'admitted': admitted.get('by') in admitters,
+                     'priority': issue_priority(labels, events, admitters,
                                                 self.cfg.priority_labels)}
             # The readiness check of the issues that may start or are blocked by it (#114).
-            if (self.cfg.preflight and issue['labeler'] in self.cfg.trusted_users
+            if (self.cfg.preflight and issue['admitted']
                     and not issue['labels'] & skip and issue['number'] not in pr_issues):
                 issue['preflight'] = self._preflight_view(issue['number'], issue['labels'])
             ready.append(issue)
@@ -1184,7 +1231,7 @@ class Dispatcher:
         cfg = self.cfg
         agent = cfg.agent(cfg.preflight)
         history = self.gh.issue_history(number)
-        reason = untrusted_change(history, cfg.labels.ready, cfg.trusted_users)
+        reason = self._untrusted_change(history)
         if reason:
             raise UntrustedChange(f'issue #{number}: {reason}')
         comments = self.gh.issue_comments(number)
@@ -1330,11 +1377,11 @@ class Dispatcher:
         history, and are refused if someone outside ``trusted_users`` changed them after the
         ready label."""
         history = self.gh.issue_history(number)
-        reason = untrusted_change(history, self.cfg.labels.ready, self.cfg.trusted_users)
+        reason = self._untrusted_change(history)
         if reason:
             raise UntrustedChange(f'issue #{number}: {reason}')
         issue = dict(self.gh.issue(number), title=history['title'], body=history['body'],
-                     labeled=history['labeled'])
+                     labeled=history['labeled'], admitters=self._admitters(history['author']))
         return issue, _render_issue_comments(issue.get('comments') or [], self.cfg.trusted_users)
 
     # Ledger (#133) -----------------------------------------------------------
@@ -1938,7 +1985,7 @@ class Dispatcher:
             return []
         # The issue text as ``_issue_context`` reads it, without the comments it does not need.
         history = self.gh.issue_history(pr.issue)
-        reason = untrusted_change(history, self.cfg.labels.ready, self.cfg.trusted_users)
+        reason = self._untrusted_change(history)
         if reason:
             return [f'testo dell\'issue non verificabile: {reason}']
         found = acceptance_findings(acceptance_criteria(history['body']),
@@ -2217,10 +2264,9 @@ class Dispatcher:
         if self.ledger is not None:
             # The request as the implementer gets it, at the takeover (#133): not necessarily
             # the text at the time of the label.
-            labeled = [(who, at) for name, who, at in issue['labeled']
-                       if name == lb.ready and who in cfg.trusted_users]
             self.ledger.request(number, title=issue['title'], body=issue.get('body') or '',
-                                labeled=labeled[-1] if labeled else None,
+                                labeled=ready_approval(issue['labeled'], lb.ready,
+                                                       issue['admitters']),
                                 comments=_trusted_comments(issue.get('comments') or [],
                                                            cfg.trusted_users))
         self.gh.edit_labels(number, add=[lb.working], remove=[lb.ready])
