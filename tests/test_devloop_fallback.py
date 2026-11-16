@@ -54,6 +54,30 @@ class FakeCLI:
         return [model for model, _ in self.calls]
 
 
+class FakeCodex:
+    """``subprocess.run`` for codex: each model answers with what ``replies`` maps it to, a
+    ``(returncode, final message file content or None for no file, stderr)`` triple, or a valid
+    review."""
+
+    def __init__(self, **replies):
+        self.replies = replies
+        self.calls = []
+
+    def __call__(self, argv, **kw):
+        if argv[-1] == '--version':
+            return SimpleNamespace(returncode=0, stdout='codex-cli 0.130.0', stderr='')
+        model = argv[argv.index('-m') + 1]
+        self.calls.append(model)
+        code, final, err = self.replies.get(model.replace('-', '_').replace('.', '_'),
+                                            (0, json.dumps(raw_review()), ''))
+        if final is not None:
+            Path(argv[argv.index('-o') + 1]).write_text(final, encoding='utf-8')
+        return SimpleNamespace(returncode=code, stdout='', stderr=err)
+
+
+CODEX_FALLBACK = 'gpt-6-fallback'
+
+
 class FallbackConfigTests(unittest.TestCase):
     def test_agy_runs_on_argon_and_falls_back_to_hydrogen(self):
         agy = CFG.agent('agy')
@@ -177,6 +201,30 @@ class UnavailabilityTests(unittest.TestCase):
         no_output = json.dumps({'status': 'SUCCESS'})
         self.assertFails((1, no_output, QUOTA), True)
 
+    def test_a_parse_error_wins_over_a_match_even_with_a_non_zero_exit(self):
+        for name, out in {'not JSON': 'quota exhausted {', 'list envelope': '[]',
+                          'null envelope': 'null', 'string envelope': '"quota"'}.items():
+            with self.subTest(name):
+                exc = self.assertFails((1, out, QUOTA), False)
+                self.assertEqual(str(exc), 'agy exited with 1')
+                # With a clean exit the envelope is an error too, not a crash.
+                self.assertFails((0, out, QUOTA), False)
+
+    def test_a_malformed_codex_final_message_never_counts(self):
+        agent = dataclasses.replace(CFG.agent('codex'), fallback_models=(
+            config.FallbackModel(CODEX_FALLBACK, 'fallback', 'high'),))
+        model = agent.model.replace('-', '_').replace('.', '_')
+        for name, (final, unavailable) in {'malformed': ('{"verdict": ', False),
+                                           'no file': (None, True),
+                                           'empty file': ('', True)}.items():
+            cli = FakeCodex(**{model: (1, final, QUOTA)})
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaises(agents.AgentError) as ctx:
+                    agents.AgentRunner(tmp, 10, run=cli).run(agent, 'review', 'p', 'review',
+                                                             tmp, 'pr-1')
+                self.assertEqual(isinstance(ctx.exception, agents.ModelUnavailable),
+                                 unavailable, str(ctx.exception))
+
 
 class FallbackTurnTests(unittest.TestCase):
     """The dispatcher reruns the turn on the next model only when the model is unavailable."""
@@ -244,6 +292,38 @@ class FallbackTurnTests(unittest.TestCase):
                 self.assertEqual(cli.models(), [ARGON])
                 self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
                 self.assertNotIn(HYDROGEN, self.gh.comments[-1][1])
+
+    def test_unparsable_output_on_a_failed_turn_does_not_fall_back(self):
+        cases = {'not JSON': '{"status": ', 'list envelope': '[]', 'null envelope': 'null'}
+        for name, out in cases.items():
+            cli = FakeCLI(gemini_4_argon_high=(1, out, QUOTA))
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                d = self.make(agents.AgentRunner(tmp, 10, run=cli))
+                p = self.agy_pr()
+                d.snapshot = lambda: Snapshot([p], [], [])
+                self.assertEqual(d.tick(), [Action('review', 100)])
+                self.assertEqual(cli.models(), [ARGON])
+                self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+                body = self.gh.comments[-1][1]
+                self.assertIn('Il passo `review` è fallito: agy exited with 1.', body)
+                self.assertNotIn(HYDROGEN, body)
+
+    def test_a_malformed_codex_final_message_does_not_fall_back(self):
+        cfg = config.parse_config(with_agent('codex', fallback_models=[
+            {'model': CODEX_FALLBACK, 'model_label': 'fallback'}]))
+        model = cfg.agent('codex').model
+        cli = FakeCodex(**{model.replace('-', '_').replace('.', '_'): (1, '{"verdict": ', QUOTA)})
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self.make(agents.AgentRunner(tmp, 10, run=cli), cfg)
+            p = pr()
+            self.gh.labels[100] = set(p.labels)
+            d.snapshot = lambda: Snapshot([p], [], [])
+            self.assertEqual(d.tick(), [Action('review', 100)])
+        self.assertEqual(cli.calls, [model])
+        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        body = self.gh.comments[-1][1]
+        self.assertIn('Il passo `review` è fallito: codex exited with 1.', body)
+        self.assertNotIn(CODEX_FALLBACK, body)
 
     def test_every_model_unavailable_goes_to_a_human_with_the_models_tried(self):
         cli = FakeCLI(gemini_4_argon_high=(1, '', QUOTA),

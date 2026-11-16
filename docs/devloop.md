@@ -529,9 +529,12 @@ fallback_models = [
   other than `SUCCESS`), and its stdout or stderr matches one of `unavailable_patterns`
   (regular expressions, case-insensitive; default `RESOURCE_EXHAUSTED`, `quota`, `429`,
   `model .* not available`), or the exit code is in `unavailable_exit_codes` (default none). A
-  structured result, valid or not against the schema, takes precedence even with a non-zero
-  exit; it, output that is not JSON after a zero exit, a timeout and a stall never count,
-  whatever the text, and follow the usual path to `agent:needs-human`.
+  structured result, valid or not against the schema, and output that cannot be parsed (stdout
+  that is not JSON or not a JSON object, a codex final message that is not JSON) take
+  precedence even with a non-zero exit: only a missing or empty output, an envelope without
+  `structured_output` or an explicit error envelope leave room for a match. A result, a parse
+  error, a timeout and a stall never count, whatever the text, and follow the usual path to
+  `agent:needs-human`.
 - **Once.** Each model is tried at most once per action: a rate limit the CLI reports as
   terminal counts as persistent, and a model found unavailable is not tried again by the later
   attempts of the same action (`implement_test_retries`). When the last model fails too, the
