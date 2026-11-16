@@ -36,7 +36,9 @@ class IssueGH(FakeGH):
         super().__init__()
         self.labels[7] = set(labels)
         self.thread = []
-        self.label_events = []  # logins of the `labeled` events of agent:needs-human
+        # Logins of the `labeled` events of agent:needs-human. Not `label_events`: that name is a
+        # method of the Tracker port, and an attribute would hide it.
+        self.needs_human_labelers = []
 
     def say(self, body, who='brushtyler'):
         self.thread.append({'author': {'login': who}, 'body': body})
@@ -48,7 +50,7 @@ class IssueGH(FakeGH):
 
     def edit_labels(self, number, add=(), remove=()):
         if NEEDS_HUMAN in add and NEEDS_HUMAN not in self.labels.get(number, set()):
-            self.label_events.append('brushtyler')
+            self.needs_human_labelers.append('brushtyler')
         super().edit_labels(number, add=add, remove=remove)
 
     def issue(self, number):
@@ -59,7 +61,7 @@ class IssueGH(FakeGH):
         return [dict(c) for c in self.thread] if number == 7 else []
 
     def labelers(self, number, label):
-        return list(self.label_events) if label == NEEDS_HUMAN else super().labelers(number, label)
+        return list(self.needs_human_labelers) if label == NEEDS_HUMAN else super().labelers(number, label)
 
     def labeled_events(self, number):
         return [{'label': READY, 'by': 'brushtyler', 'at': '2026-11-13T10:00:00Z'}]
@@ -247,7 +249,7 @@ class PreflightTests(unittest.TestCase):
 
     def test_the_check_loses_the_block_when_someone_else_owns_it(self):
         cases = {
-            'relabelled by someone else': lambda gh: gh.label_events.append('brushtyler'),
+            'relabelled by someone else': lambda gh: gh.needs_human_labelers.append('brushtyler'),
             'another escalation': lambda gh: gh.say(markdown.render_escalation('Altro motivo.')),
         }
         for name, change in cases.items():
@@ -280,11 +282,11 @@ class PreflightTests(unittest.TestCase):
 
     def test_a_label_already_present_is_never_the_checks(self):
         d = self.make(checked(False, [gap()]), checked(True), labels=(READY, NEEDS_HUMAN))
-        self.gh.label_events.append('brushtyler')
+        self.gh.needs_human_labelers.append('brushtyler')
         d._do_preflight(7)
         record = self.records()[-1]
         self.assertFalse(record['blocked'])
-        self.assertEqual(self.gh.label_events, ['brushtyler'])
+        self.assertEqual(self.gh.needs_human_labelers, ['brushtyler'])
         self.gh.say('/devloop recheck')
         self.assertEqual(self.planned(d), [])
         d._do_preflight(7)

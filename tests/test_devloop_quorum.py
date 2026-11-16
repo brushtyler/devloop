@@ -1,12 +1,13 @@
 """devloop: more reviewers, quorum and aggregation at level 2 (#111, part 1 of #66)."""
 
 import dataclasses
+import functools
 import tomllib
 import unittest
 
 from devloop import agents, config, markdown, policy, review
 from devloop.dispatcher import Action, Dispatcher, plan
-from helpers.devloop_fakes import FakeIdentities, SnapshotGH
+from helpers.devloop_fakes import PORT_METHODS, FakeIdentities, SnapshotGH
 from test_devloop import (CFG, IMPL, SHA1, SHA2, FakeRunner, FakeWS, finding, fixed, raw_review)
 
 DATA = tomllib.loads(config.DEFAULT_CONFIG.read_text())
@@ -16,14 +17,18 @@ CORE = [{'path': 'devloop/dispatcher.py', 'links': []}]  # a sensitive diff: lev
 
 
 class Acting:
-    """The client of one actor: the comments it writes carry its app's login."""
+    """The client of one actor: the comments it writes carry its app's login. Like
+    ``ActingAs``, it reaches only the port methods of the fake, with their signatures."""
 
     def __init__(self, fake, actor):
         self._fake, self._actor = fake, actor
 
     def __getattr__(self, name):
+        if name not in PORT_METHODS:
+            raise AttributeError(f'{name} is not a method of the ports')
         method = getattr(self._fake, name)
 
+        @functools.wraps(method)
         def call(*args, **kw):
             self._fake.actor = self._actor
             try:

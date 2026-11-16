@@ -19,6 +19,7 @@ from test_devloop_acceptance import SnapshotIssueGH
 from test_devloop_ledger import LedgerGH, SnapLedgerGH
 from test_devloop_preflight import IssueGH as PreflightIssueGH
 from test_devloop_priority import QueueGH
+from test_devloop_quorum import Identities as QuorumIdentities
 from test_devloop_quorum import QuorumGH
 from test_devloop_ports_equivalence import TrackerGH
 
@@ -37,6 +38,10 @@ EXPECTED = {
 # Fakes defined as classes: their methods are compared as the adapter's, unbound.
 FAKE_CLASSES = (FakeGH, SnapshotGH, AcceptanceIssueGH, SnapshotIssueGH, LedgerGH, SnapLedgerGH,
                 PreflightIssueGH, QueueGH, QuorumGH, TrackerGH)
+# The same fakes as the tests build them: an instance attribute must not hide a port method.
+FAKE_INSTANCES = (FakeGH, lambda: SnapshotGH([]), lambda: AcceptanceIssueGH('body'),
+                  lambda: SnapshotIssueGH('body'), LedgerGH, SnapLedgerGH, PreflightIssueGH,
+                  lambda: QueueGH({}), QuorumGH, TrackerGH)
 
 
 def called_attributes(path):
@@ -112,16 +117,26 @@ class ConformanceTests(unittest.TestCase):
         for fake in FAKE_CLASSES:
             with self.subTest(fake=fake.__name__):
                 self.assert_conforms(fake, bound=False)
-        fake = FakeGH()
-        for instance in (fake, SnapshotGH([])):
+        for build in FAKE_INSTANCES:
+            instance = build()
             with self.subTest(fake=type(instance).__name__):
                 self.assert_conforms(instance, bound=True)
                 self.assertIsInstance(instance, ports.Backend)
+        # The level-0 events of the preflight fake are callable, not its own list (R2-1).
+        self.assertEqual(PreflightIssueGH().label_events(7, 'reviews:0'), [])
         # An actor's client resolves the port methods on access (isinstance cannot see them).
+        fake, quorum = FakeGH(), QuorumGH()
         for instance in (ActingAs(fake, 'claude', None),
-                         FakeIdentities(fake).github('codex', {'issues': 'write'})):
+                         FakeIdentities(fake).github('codex', {'issues': 'write'}),
+                         QuorumIdentities(quorum).github('claude', {'issues': 'write'})):
             with self.subTest(fake=type(instance).__name__):
                 self.assert_conforms(instance, bound=True)
+        # The quorum's client still writes with its actor's login, and reaches only the ports.
+        client = QuorumIdentities(quorum).github('claude')
+        client.comment(100, 'x')
+        self.assertEqual((quorum.written, quorum.actor), (['claude-agent[bot]'], 'dispatcher'))
+        with self.assertRaises(AttributeError):
+            client.written
 
     def test_an_actor_reaches_only_the_ports(self):
         fake = FakeGH()
