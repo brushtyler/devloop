@@ -707,6 +707,61 @@ header names that model and its reasoning level, not the configured ones. Text t
 writes on its own, such as escalations and CI rounds, names `devloop dispatcher` as the agent and
 no model.
 
+## Who does what
+
+Roles are assigned to actors, not to agents: an actor is an agent with its own GitHub App, or the
+operator. The assignment lives in the configuration (`[roles]`) or in
+[ADR 0002](adr/0002-ruoli-e-responsabilita.md), not in the code, and every decision of a role
+leaves a trace on GitHub signed by the identity that takes it. ADR 0002 is the source; its status
+is *proposed* until the operator approves and merges it.
+
+| Role | Actor today | Does | Does not |
+|---|---|---|---|
+| **Operator** | `brushtyler` | Takes the reserved decisions of ADR 0001; resolves escalations (`agent:needs-human`); approves ADRs; assigns roles; can always merge, block or resume any work | — |
+| **Coordinator** (optional, not assigned today) | — | Backlog plan and priorities, draft ADRs, checks the supervisor's work. A revocable delegation of the operator | The reserved decisions |
+| **Supervisor** | Claude Code (`claude-agent`) | Watches devloop; analyses runs; opens issues for problems and improvements; queues issues of trusted authors (`agent:ready`, priority) within the approved priorities; in `auto` mode holds or sequences merges and decides non-critical escalations; escalates to the operator | Implement, review, change configuration, policy, budget or credentials; merge: the dispatcher does |
+| **Dispatcher** | devloop (`dispatcher`) | Runs the steps: preflight, implement, review, fix, sync, CI rounds, promotion, merge (`strict` or `auto` mode), pin (if on), continuous loop (if on); writes the markers; escalates | The reserved decisions; merge with merging off |
+| **Preflight** | Codex (`codex-agent`) | Checks an issue's readiness, read-only | Write to GitHub: the dispatcher does |
+| **Implementer** | Claude (`claude-agent`) | Implements and fixes in the worktree | Publish, push, merge |
+| **Reviewer** | Codex (level 1); Codex + agy (level 2) | Structured review with a verdict | Fix |
+
+The implementer never reviews its own PR, the supervisor neither implements nor reviews, and on a
+PR it also implemented the supervisor decides no escalation or hold: the operator does.
+
+### Merge modes
+
+ADR 0002 sets three merge modes, configured with `[merge].mode` and an optional per-level
+override in `[merge.levels]`; the most restrictive one wins. **They are not implemented yet**: the
+implementation is tracked in #172 and #182, and until then devloop behaves as in `off`.
+
+| Mode | Who decides | Behaviour |
+|---|---|---|
+| `off` (default) | Operator | devloop brings the PR to `agent:ready-to-merge` and stops. A person merges. Every escalation goes to the operator |
+| `strict` | Merge directives | devloop merges **only** when the merge directives hold. Every escalation goes to the operator |
+| `auto` | Directives + supervisor | As `strict`. The supervisor can also hold a merge (`/devloop hold`, `/devloop release`) and **decides non-critical escalations on its own** (`agent:needs-supervisor`). Critical ones go to the operator |
+
+The merge directives are: an approval from every reviewer the level requires, no open finding,
+the head equal to the approved commit, a matching policy receipt, CI passed, the PR mergeable
+without conflicts, and neither `agent:needs-human` nor `agent:merge-hold`. **No mode, and no
+agent, merges with CI not green, with open blocking findings or without the required approvals.**
+
+**Critical: always to the operator, also in `auto`.**
+
+- The reserved decisions of ADR 0001, including rounds and budget beyond the limits.
+- PRs that touch `docs/adr/`, `AGENTS.md` or `CLAUDE.md` (`operator_only_paths`).
+- The preflight's `operator_decision` decisions.
+- Content from untrusted authors, or text changed after `agent:ready`.
+- Any unclassified case.
+
+**Non-critical: in `auto` the supervisor decides, with a trace on GitHub.**
+
+- Retrying a step that failed for a tool problem (agent crashed, model unavailable, permission
+  denied), without counting a round and with at most 2 attempts.
+- Accepting the preflight's technical defaults (`default_available`) on issues of trusted authors.
+- Holding or sequencing merges.
+- Asking for a new review.
+- Parking P2 work according to the operator's strategy.
+
 ## GitHub identities
 
 Each agent and the dispatcher can act on GitHub with its own GitHub App (#65), configured under
