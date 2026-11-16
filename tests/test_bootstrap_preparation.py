@@ -185,27 +185,41 @@ class PreparationTests(unittest.TestCase):
             return lambda: (self.root / bootstrap.PREPARATION).write_bytes(record)
 
         unknown = dict(json.loads(record), format='bootstrap-preparation-v2')
+        def changed_limits():
+            # Controller: live frozen store; preflight: the persisted policy file.
+            stop = patched(o.SSDLCOrchestrator, '_limits_policy_digest', return_value='0' * 64)()
+            policy = self.root / 'limits/policy.json'
+            policy.parent.mkdir()
+            policy.write_text(json.dumps({'policy': {'design_rounds': 9}}))
+            return lambda: (stop(), shutil.rmtree(policy.parent))
+
         cases = [
             ('inputs_changed', tamper_requirements), ('dirty_tree', dirty_repo),
             ('inputs_changed', changed_profile), ('preparation_invalid', foreign_ticket),
             ('controller_changed', patched(o, 'controller_snapshot', return_value={'head': '0' * 40})),
-            ('limits_changed', patched(o.SSDLCOrchestrator, '_limits_policy_digest', return_value='0' * 64)),
+            ('limits_changed', changed_limits),
             ('policy_changed', changed_policy),
             ('preparation_invalid', rewrite_record('{')),
             ('preparation_invalid', rewrite_record(json.dumps(unknown))),
             ('interrupted', historical),
         ]
+        # The shared CLI/supervisor preflight reads the persisted run state.
+        atomic_json(self.root / 'state.json', orch.state)
+        checks = (('controller', lambda: orch._verify_bootstrap_preparation()),
+                  ('preflight', lambda: o.verify_bootstrap_preparation_readonly(
+                      self.repo, self.root, orch.ticket_id)))
         for code, mutate in cases:
-            with self.subTest(code=code, mutate=mutate.__name__):
-                undo = mutate()
-                try:
-                    with self.assertRaises(bootstrap.BootstrapError) as raised:
-                        orch._verify_bootstrap_preparation()
-                    self.assertEqual(raised.exception.code, code)
-                    self.assertFalse(bootstrap.development_started(self.root))
-                finally:
-                    undo()
-                orch._verify_bootstrap_preparation()
+            for where, verify in checks:
+                with self.subTest(code=code, mutate=mutate.__name__, where=where):
+                    undo = mutate()
+                    try:
+                        with self.assertRaises(bootstrap.BootstrapError) as raised:
+                            verify()
+                        self.assertEqual(raised.exception.code, code)
+                        self.assertFalse(bootstrap.development_started(self.root))
+                    finally:
+                        undo()
+                    verify()
         self.assertEqual((self.root / bootstrap.PREPARATION).read_bytes(), record)
         self.assertEqual(json.loads((self.root / '00-recon/quality-contract.json').read_text()), contract)
 
@@ -286,20 +300,24 @@ class PreparationJourneys(integration.StartupJourneys):
         planned['tasks'][0]['verification']['quality_check_refs'] = ['CHECK-TESTS']
         planned['tasks'][0]['target_files'].append('tests/test_app.py')
         self.developers = []
+        self.phases = []
         return orch, planned
 
-    def cli(self, orch, planned, stop=None, expected=0):
+    def cli(self, orch, planned, stop=None, expected=0, variant=False):
         def dispatch(role, *args, **kwargs):
             return ('codex' if role == '03-dev' else 'claude'), ('reviewer' if role.endswith('sec') else 'planner'), 'low', 'fixture'
 
         def claude(prompt, **kwargs):
             phase = next(f for f in inspect.stack() if f.function == 'invoke_role').frame.f_locals['phase']
+            self.phases.append(phase)
             if phase == stop:
                 raise Crash(phase)
+            # A variant provider answers differently with the same requirement IDs.
             if phase == '00-recon':
-                out = 'Small scoped change\nRISK_TIER: S\nDEV_PROFILE: ALGORITHMIC'
+                out = ('Different recon\n' if variant else 'Small scoped change\n') + 'RISK_TIER: S\nDEV_PROFILE: ALGORITHMIC'
             elif phase == '01-po':
-                out = 'AC-1: Correct behavior\nSEC-1: Secure behavior\n'
+                out = ('AC-1: Other behavior\nSEC-1: Other control\n' if variant
+                       else 'AC-1: Correct behavior\nSEC-1: Secure behavior\n')
             elif phase == '02-design-task-plan':
                 out = json.dumps(planned)
             elif phase == '02-design-task-plan-review':
@@ -347,9 +365,15 @@ class PreparationJourneys(integration.StartupJourneys):
         return {name: (root / name).read_bytes() for name in (
             bootstrap.PREPARATION, '00-recon/quality-contract.json') if (root / name).exists()}
 
+    APPROVED = {'00-recon': '00-recon/context-and-blast-radius.md', '01-po': '01-po/requirements.md'}
+
     def stop_and_resume(self, stop):
         orch, planned = self.start()
-        self.cli(orch, planned, stop=stop)
+        if stop == 'before_reservation':
+            with crash_at(stop):
+                self.cli(orch, planned, stop=stop)
+        else:
+            self.cli(orch, planned, stop=stop)
         root = orch.ssdlc_root
         self.assertTrue((root / bootstrap.PREPARATION).is_file())
         self.assertFalse(bootstrap.development_started(root))
@@ -358,11 +382,24 @@ class PreparationJourneys(integration.StartupJourneys):
         self.assertTrue(o.startup_preflight(self.repo, 'TKT-1', 'run')['ok'])
         self.assertTrue(o.resume_compatibility(self.repo, 'TKT-1', 'run', '00-recon')['ok'])
         sealed = self.evidence(orch)
-        ledger = copy.deepcopy(json.loads(orch.state_file.read_text())['ledger'])
-        self.cli(orch, planned, stop='resume')
+        persisted = json.loads(orch.state_file.read_text())
+        ledger, gates = copy.deepcopy(persisted['ledger']), copy.deepcopy(persisted['gate_history'])
+        # Phases approved before the stop are reused, never dispatched again,
+        # even though the provider now answers differently with the same IDs.
+        reused = {'00-recon': (), '01-po': ('00-recon',), '02-design-task-plan': ('00-recon', '01-po'),
+                  'before_reservation': ('00-recon', '01-po')}[stop]
+        approved = {phase: (root / self.APPROVED[phase]).read_bytes() for phase in reused}
+        self.phases.clear()
+        self.cli(orch, planned, stop='resume', variant=True)
+        for phase in reused:
+            self.assertNotIn(phase, self.phases)
+            self.assertEqual((root / self.APPROVED[phase]).read_bytes(), approved[phase])
+        if stop == 'before_reservation':
+            self.assertNotIn('02-design-task-plan', self.phases)
         self.assertEqual(len(self.developers), 1)
         self.assertEqual(self.evidence(orch), sealed)
         self.assertEqual(orch.state['ledger'][:len(ledger)], ledger)
+        self.assertEqual(orch.state['gate_history'][:len(gates)], gates)
         self.assertTrue((root / bootstrap.RESERVATION).is_file())
         journal = TaskJournal(orch.dir_dev / 'tasks').peek()
         self.assertEqual(journal['bootstrap']['status'], 'PROVEN')
@@ -381,6 +418,9 @@ class PreparationJourneys(integration.StartupJourneys):
 
     def test_stop_during_design_resumes(self):
         self.stop_and_resume('02-design-task-plan')
+
+    def test_stop_before_reservation_keeps_approved_plan_inputs(self):
+        self.stop_and_resume('before_reservation')
 
     def test_mutated_inputs_refuse_resume_without_writes(self):
         orch, planned = self.start()
@@ -408,6 +448,7 @@ class PreparationJourneys(integration.StartupJourneys):
                 undo = mutate()
                 try:
                     err = self.cli(orch, planned, stop='resume', expected=24)
+                    self.assert_preflight_refuses(reason)
                 finally:
                     undo()
                 self.assertIn('bootstrap_ineligible: ' + reason, err)
@@ -417,6 +458,18 @@ class PreparationJourneys(integration.StartupJourneys):
         # Restored inputs keep the original authority; nothing was reset.
         self.cli(orch, planned, stop='resume')
         self.assertEqual(len(self.developers), 1)
+
+    def assert_preflight_refuses(self, reason):
+        """CLI preflight, supervisor start and resume refuse before any write or launch."""
+        for check in (o.startup_preflight(self.repo, 'TKT-1', 'run'),
+                      o.resume_compatibility(self.repo, 'TKT-1', 'run', '00-recon')):
+            self.assertEqual((check['ok'], check['code'], check['reason']), (False, 'bootstrap_ineligible', reason))
+        with patch.object(supervisor.RunStore, 'prepare', side_effect=AssertionError('supervisor wrote')), \
+             patch.object(supervisor, 'spawn', side_effect=AssertionError('supervisor launched')):
+            for entry in (supervisor.start, supervisor.resume):
+                result = entry(dict(repo=str(self.repo), ticket='TKT-1', goal='Scoped change'))
+                self.assertEqual((result['status_reason'], result['bootstrap_reason']), ('bootstrap_ineligible', reason))
+                self.assertEqual(supervisor.exit_code(result), 24)
 
     def assert_not_resumable(self, orch, planned, reason='window_spent'):
         dispatched = len(self.developers)

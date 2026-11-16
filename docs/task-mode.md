@@ -287,13 +287,19 @@ implementation diff) is resumable with the normal command:
 python3 orchestrator.py run --repo . --ticket TKT-1 --goal "Scoped change" --tier S --no-sync-remote
 ```
 
-Completed phases are skipped. Before any write, the engine verifies the
-preparation record against the sealed contract and re-checks the controller, the
-registered policy, the profile and initial commit/tree (`decide` must reproduce
-the sealed binding), every registered recon/PO/design artifact and the frozen
-limit policy. History, approvals, ledger and consumed limits are kept; nothing is
-regenerated. The same check runs again immediately before the reservation. The
-supervisor admits the same cases through its read-only compatibility check.
+Before any write, the engine verifies the preparation record against the sealed
+contract and re-checks the controller, the registered policy, the profile and
+initial commit/tree (`decide` must reproduce the sealed binding), every registered
+recon/PO/design artifact and the frozen limit policy. The shared CLI/supervisor
+preflight runs the same full check read-only, so a drifted preparation is refused
+(exit 24, `bootstrap_reason`) before supervisor state, locks or processes exist.
+
+After verification the run continues from the first incomplete phase: recon, PO
+and design whose last gate (`RECON_BLAST_RADIUS_GATE`, `PO_SPEC_GATE`,
+`PAIR_DESIGN_GATE`) passed with registered output are reused, not dispatched again,
+and an interrupted design or planning session resumes from its persisted history.
+History, approvals, ledger and consumed limits are kept; approved phases are not
+regenerated. The same check runs again immediately before the reservation.
 
 The absence of a journal is never proof that no attempt started. Once the
 reservation, a worktree, a task journal or an implementation diff exists, every
