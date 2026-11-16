@@ -169,6 +169,68 @@ class ImpactReportTests(ImpactFixture):
         report = build_report(self.repo, self.plan)
         self.assertEqual({row['owners']['status'] for row in report['targets']}, {'UNKNOWN'})
 
+    def commit(self, files):
+        for name, text in files.items():
+            (self.repo / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / name).write_text(text)
+        git(self.repo, 'add', *files); git(self.repo, 'commit', '-q', '-m', 'more fixtures')
+        self.plan['base_commit'] = git(self.repo, 'rev-parse', 'HEAD')
+
+    def test_literal_path_loaders_are_consumers_and_other_loaders_unknown(self):
+        self.commit({
+            'plugins.py': ('import runpy\nimport importlib.util\nfrom importlib.machinery import SourceFileLoader\n'
+                           "runpy.run_path('./pkg/core.py')\n"
+                           "importlib.util.spec_from_file_location('core', 'pkg/core.py')\n"
+                           "importlib.util.spec_from_file_location('core', location='pkg/core.py')\n"
+                           "importlib.util.spec_from_file_location('core', location=where)\n"
+                           'SourceFileLoader(name, where)\n'
+                           "runpy.run_path(*['pkg/core.py'])\n"),
+            'legacy.py': "import imp\nimp.load_source(name, 'pkg/core.py')\nSourceFileLoader('x', 'docs/new.md')\n",
+            'tests/test_loader.py': "import runpy\nrunpy.run_path('pkg/core.py')\n"})
+        report = build_report(self.repo, self.plan)
+        consumers = self.target(report, 'pkg/core.py')['consumers']
+        self.assertIn(dict(path='plugins.py', evidence_path='plugins.py', line=4, via='DYNAMIC_PATH_LITERAL'),
+                      consumers)
+        self.assertIn(dict(path='legacy.py', evidence_path='legacy.py', line=2, via='DYNAMIC_PATH_LITERAL'),
+                      consumers)
+        # Any target path counts, not only Python modules.
+        self.assertEqual(self.target(report, 'docs/new.md')['consumers'], [
+            dict(path='legacy.py', evidence_path='legacy.py', line=3, via='DYNAMIC_PATH_LITERAL')])
+        self.assertEqual([(row['path'], row['line']) for row in report['unknown'] if row['reason'] == 'DYNAMIC_IMPORT'],
+                         [('loader.py', 4), ('plugins.py', 6), ('plugins.py', 7), ('plugins.py', 8), ('plugins.py', 9)])
+        # Test files keep their literal path reference only.
+        self.assertEqual([row for row in self.target(report, 'pkg/core.py')['tests'] if row['path'] == 'tests/test_loader.py'],
+                         [dict(path='tests/test_loader.py', evidence_path='tests/test_loader.py', line=2,
+                               via='PATH_REFERENCE')])
+        omissions = {row['path'] for row in report['possible_omissions']}
+        self.assertTrue({'plugins.py', 'legacy.py'} <= omissions)
+
+    def test_relative_import_above_the_top_level_package_is_unresolved(self):
+        self.commit({'pkg/up.py': 'from .. import app\n', 'top.py': '\nfrom . import app\n',
+                     'pkg/sub/__init__.py': '', 'pkg/sub/inner.py': 'from .. import core\n'})
+        self.plan['tasks'].append(dict(task_id='T3', target_files=['app.py']))
+        report = build_report(self.repo, self.plan)
+        self.assertEqual(self.target(report, 'app.py')['consumers'], [])
+        unresolved = [row for row in report['unknown'] if row['reason'] == 'UNRESOLVED_RELATIVE_IMPORT']
+        self.assertEqual(unresolved, [dict(path='pkg/up.py', line=1, reason='UNRESOLVED_RELATIVE_IMPORT'),
+                                      dict(path='top.py', line=2, reason='UNRESOLVED_RELATIVE_IMPORT')])
+        # One level up inside the package still resolves.
+        self.assertIn(dict(path='pkg/sub/inner.py', evidence_path='pkg/sub/inner.py', line=1, via='IMPORT'),
+                      self.target(report, 'pkg/core.py')['consumers'])
+
+    def test_root_star_owns_root_files_only_and_inline_comments_are_ignored(self):
+        (self.repo / 'CODEOWNERS').write_text('# owners\n/* @root # comment\ndocs/* @docs   #inline\n')
+        git(self.repo, 'commit', '-q', '-am', 'owners')
+        self.plan['base_commit'] = git(self.repo, 'rev-parse', 'HEAD')
+        self.plan['tasks'].append(dict(task_id='T3', target_files=['app.py']))
+        report = build_report(self.repo, self.plan)
+        self.assertEqual(self.target(report, 'app.py')['owners'],
+                         dict(status='DECLARED', owners=['@root'], evidence_path='CODEOWNERS', line=2))
+        self.assertEqual(self.target(report, 'pkg/core.py')['owners'],
+                         dict(status='NONE', evidence_path='CODEOWNERS', line=None))
+        self.assertEqual(self.target(report, 'docs/new.md')['owners'],
+                         dict(status='DECLARED', owners=['@docs'], evidence_path='CODEOWNERS', line=3))
+
     def test_attribution_reads_new_and_legacy_reports(self):
         report = build_report(self.repo, self.plan)
         result = impact_attribution(report, digest(report), ['app.py', 'elsewhere.py'])
@@ -296,6 +358,45 @@ class SummaryMetricTests(ImpactFixture):
         self.assertEqual(metrics['profile_delta']['status'], 'UNKNOWN')
         self.assertEqual(metrics['manual_extension_pending_tasks'], dict(status='MEASURED', transitions=[]))
 
+    def assert_lineage_unknown(self, ticket):
+        metrics = summary_metrics(ticket)
+        self.assertEqual(metrics['manual_extension_pending_tasks'],
+                         dict(status='UNKNOWN', transitions=[], reason='EXECUTION_LINEAGE_UNAVAILABLE'))
+        self.assertEqual(metrics['profile_delta'], dict(status='UNKNOWN', reason='EXECUTION_LINEAGE_UNAVAILABLE'))
+        self.assertEqual([row['status'] for row in metrics['avoidable_omissions']], ['UNKNOWN'])
+
+    def test_interrupted_lineage_is_unknown_not_measured(self):
+        ticket = self.ticket()
+        (ticket / 'execution').mkdir()
+        identity = 'a' * 32
+        for selector in ([], dict(transition_id='b' * 32)):
+            with self.subTest(selector=selector):
+                atomic_json(ticket / 'execution/active.json', selector)
+                self.assert_lineage_unknown(ticket)
+        # A generation whose parent selector no longer resolves.
+        atomic_json(ticket / 'execution/active.json', dict(transition_id=identity))
+        (ticket / 'execution' / identity).mkdir()
+        atomic_json(ticket / 'execution' / identity / 'intent.json',
+                    dict(proposal=dict(parent_selector=dict(transition_id='c' * 32))))
+        with patch('ssdlc_transitions.TransitionStore.load_pointer'):
+            self.assert_lineage_unknown(ticket)
+            # The oldest generation has no parent selector: the lineage is complete.
+            atomic_json(ticket / 'execution' / identity / 'intent.json', dict(proposal={}))
+            self.assertEqual(summary_metrics(ticket)['manual_extension_pending_tasks'],
+                             dict(status='MEASURED', transitions=[]))
+
+    def test_unmeasured_transition_makes_the_aggregate_unknown(self):
+        ticket = self.ticket()
+        chain = [dict(transition_id='g1', recipe=dict(scope_diff={'T1': dict(added=['app.py'], removed=[])}),
+                      proposal=dict(authorization_contract='cumulative-limits-v1',
+                                    scope_diff={'T1': dict(added=['app.py'], removed=[])}))]
+        with patch('ssdlc_impact._transitions', return_value=chain):
+            pending = summary_metrics(ticket)['manual_extension_pending_tasks']
+        self.assertEqual(pending['status'], 'UNKNOWN')
+        self.assertEqual(pending['reason'], 'TRANSITION_NOT_MEASURED')
+        self.assertEqual([(row['authorization_contract'], row['status']) for row in pending['transitions']],
+                         [('cumulative-limits-v1', 'UNKNOWN')])
+
     def test_changed_report_evidence_is_unknown(self):
         ticket = self.ticket()
         path = ticket / '02-design/task-planning' / ('impact-report-' + digest(self.plan) + '.json')
@@ -350,6 +451,81 @@ class ManualExtensionMetricTests(unittest.TestCase):
         from ssdlc_feedback_analysis import historical_impact
         attribution = historical_impact(case.source, ['app.py'])
         self.assertEqual((attribution['status'], attribution['report_sha256']), ('NOT_IN_REPORT', digest(report)))
+
+
+def evidence_summary(test, repo, ticket):
+    """Compile the native evidence pack of a recovered ticket; return its feedback summary."""
+    import orchestrator as o
+    from ssdlc_tasks import ticket_lock
+    from ssdlc_transitions import runtime_root
+    test.assertFalse((ticket / 'feedback/authority.json').exists())
+    with (patch.object(o.ProjectRuntimeIsolation, 'activate', return_value={'project_id': 'offline'}),
+          patch.object(o.ProjectRuntimeIsolation, 'ensure_trusted_path'),
+          patch.object(o.SSDLCOrchestrator, '_verification_environment', return_value={})):
+        orch = o.SSDLCOrchestrator(repo, ticket.name, sync_remote=False)
+    test.assertEqual(orch.ssdlc_root, runtime_root(ticket))
+    orch._completion_disclosures = lambda: ''
+    orch.state.setdefault('goal', 'offline fixture')
+    # The fixtures freeze a synthetic controller snapshot, not this checkout.
+    with ticket_lock(orch.ticket_lock_path), patch.object(o, 'assert_controller'), patch('sys.stdout'):
+        pack = orch.compile_evidence_pack(ready_for_signoff=False)
+    path = orch.ssdlc_root / 'feedback-summary.json'
+    test.assertEqual(orch.state['artifacts']['feedback-summary.json']['sha256'], file_hash(path))
+    test.assertIn('Impact and limits metrics: [feedback-summary.json]', pack.read_text())
+    summary = json.loads(path.read_text())
+    # Without the feedback workflow only its projections are absent.
+    test.assertEqual(set(summary), {'avoidable_omissions', 'profile_delta', 'manual_extension_pending_tasks'})
+    test.assertEqual(summary, summary_metrics(ticket))
+    return summary
+
+
+class ManualContractSummaryTests(unittest.TestCase):
+    """Runs recovered only through manual contracts, without the feedback workflow."""
+
+    def test_cumulative_limits_only_run(self):
+        import test_verification_repair as fixtures
+        # The owner fixture adds a target in the continuation plan: the
+        # cumulative-limits-v1 generation carries it in its scope diff.
+        case = fixtures.VerificationRepairTests()
+        case.initialize(); self.addCleanup(case.doCleanups)
+        summary = evidence_summary(self, case.repo, case.ticket)
+        pending = summary['manual_extension_pending_tasks']
+        self.assertEqual([(row['authorization_contract'], row['added_paths'], row['status'])
+                          for row in pending['transitions']],
+                         [('cumulative-limits-v1', ['tests/test_extra.py'], 'UNKNOWN')])
+        # Its recipe has no sealed subject or journal state: the aggregate is not measured either.
+        self.assertEqual((pending['status'], pending['reason']), ('UNKNOWN', 'TRANSITION_NOT_MEASURED'))
+        self.assertEqual(summary['profile_delta']['status'], 'MEASURED')
+
+    def test_scope_amendment_only_run(self):
+        import test_scope_amendments as fixtures
+        from ssdlc_scope_amendments import activate
+        case = fixtures.ScopeAmendmentTests()
+        case.initialize(); self.addCleanup(case.doCleanups)
+        staged = case.stage()
+        activate(case.ticket, staged['preparation'], case.auth(staged))
+        summary = evidence_summary(self, case.repo, case.ticket)
+        pending = summary['manual_extension_pending_tasks']
+        self.assertEqual(pending['status'], 'MEASURED')
+        self.assertEqual([(row['authorization_contract'], row['status']) for row in pending['transitions']],
+                         [('scope-amendment-v1', 'MEASURED')])
+        self.assertEqual(summary['profile_delta']['status'], 'MEASURED')
+        self.assertIn('MEASURED', [row['status'] for row in summary['avoidable_omissions']])
+
+    def test_verification_repair_only_run(self):
+        import test_verification_repair as fixtures
+        from ssdlc_scope_amendments import activate
+        case = fixtures.VerificationRepairTests()
+        case.initialize(); self.addCleanup(case.doCleanups)
+        staged = case.stage()
+        activate(case.ticket, staged['preparation'], case.auth(staged))
+        summary = evidence_summary(self, case.repo, case.ticket)
+        rows = {row['authorization_contract']: row for row in summary['manual_extension_pending_tasks']['transitions']}
+        self.assertEqual(rows['operator-verification-repair-v1']['status'], 'MEASURED')
+        self.assertEqual(rows['operator-verification-repair-v1']['added_paths'], ['tests/test_extra.py'])
+        # The repair raised the attempt limit: the delta records it.
+        self.assertEqual(summary['profile_delta']['status'], 'MEASURED')
+        self.assertEqual(summary['profile_delta']['changes']['development_attempts'], dict(old=1, new=2))
 
 
 class ContinuationMetricTests(unittest.TestCase):

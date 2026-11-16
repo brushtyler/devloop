@@ -52,9 +52,16 @@ Keep all input/proposal/runtime files private; they can contain prompts and logs
 3. `continuation-preview --repo TARGET --ticket TICKET --source ORIGINAL
    --task T01 --plan plan.json --quality quality.json --snapshot RESOLVED_SOURCE
    --manifest snapshot.json` prints the review subject and its hash without
-   running repository code. Its fixture report includes Python imports, patch
-   strings and removed/signature-changed function names. Parse errors are
-   explicit. This is a dependency hint, not a coverage proof or test oracle.
+   running repository code. The subject's `impact_report` is the same advisory
+   report that normal planning gives the plan reviewer
+   (`ssdlc_impact.build_report(repo, plan)`): consumers, tests, validators and
+   owners of every plan `target_file`, read from Git objects at the plan base,
+   with `possible_omissions` and an explicit `unknown` list. See
+   [Advisory impact report](developer-feedback.md#advisory-impact-report).
+   Preparation registers it as `02-design/impact-report.json` in the
+   continuation runtime. It is a dependency hint, not a coverage proof or test
+   oracle; I1 consumes the supplied review and does not run a plan review of
+   its own.
 4. Obtain an independent review of that subject. Store an envelope with
    `subject_sha256`, a nonempty `reviewer` attribution and `report` containing the
    existing structured task-plan review. An `APPROVED` string alone is invalid.

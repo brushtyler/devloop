@@ -569,8 +569,14 @@ binds continuation amendment subjects (`impact_report` key) and is registered as
 - **Relations per target, each with `evidence_path` and `line`:**
   - `consumers`: non-test Python modules that import it. Absolute imports are
     resolved against the repository root only; relative imports against their
-    package. Literal `importlib.import_module`/`__import__` names and literal
-    `mock.patch` targets count as imports. When the importing file's own
+    package. A relative import that climbs to or above the top-level package
+    (`from .. import app` in `pkg/mod.py`, `from . import x` in a root module)
+    is `UNKNOWN` (`UNRESOLVED_RELATIVE_IMPORT`). Literal
+    `importlib.import_module`/`__import__` names and literal
+    `mock.patch` targets count as imports. Path loaders (`runpy.run_path`,
+    `spec_from_file_location`, `imp.load_source`, `SourceFileLoader`) with a
+    literal, positional, repository-relative location count too
+    (`via: DYNAMIC_PATH_LITERAL`). When the importing file's own
     directory would resolve an absolute import to a different module (a
     `sys.path` choice of the environment), that line is `UNKNOWN`
     (`ENVIRONMENT_DEPENDENT_IMPORT`) and no relation to that module is inferred.
@@ -581,11 +587,15 @@ binds continuation amendment subjects (`impact_report` key) and is registered as
     target cites by path. No other schema link is inferred.
   - `owners`: the last matching rule of `.github/CODEOWNERS`, `CODEOWNERS` or
     `docs/CODEOWNERS`. Status `ABSENT` without such a file, `NONE` without a
-    matching owner, `UNKNOWN` for unsupported pattern syntax.
+    matching owner, `UNKNOWN` for unsupported pattern syntax. `docs/*` and
+    `/*` own direct children only (`/*`: files in the repository root); text
+    after a whitespace-preceded `#` is a comment, not an owner.
 - **UNKNOWN.** Non-Python targets have `consumers_status: UNKNOWN`. Unparsable
   Python, non-literal dynamic imports (`import_module`, `__import__`,
-  `run_module`, `run_path`, `spec_from_file_location`, ...) and non-literal
-  `patch` targets appear in `unknown` with the file and line that contain them.
+  `run_module`), path loaders whose arguments are passed by keyword, unpacked
+  or not literal (`run_path`, `spec_from_file_location`, ...) and non-literal
+  `patch` targets appear in `unknown` (`DYNAMIC_IMPORT`,
+  `DYNAMIC_PATCH_TARGET`) with the file and line that contain them.
   No destination is inferred for them.
 - **Possible omissions.** Consumers and tests not covered by any task
   `target_files` are listed in `possible_omissions`. The report is
@@ -679,7 +689,12 @@ stop, and new permissions or external resources remain operator decisions.
 decisions/coverage judgments, hashed provenance and plan subjects, amendment
 counts, host timing/observed waits, impact-report attribution, consultation usage
 and publication status. Three additive keys (`ssdlc_impact.summary_metrics`)
-complete it; existing keys are unchanged:
+complete it; existing keys are unchanged. The three keys are computed, written
+and registered for every run, including runs recovered only through manual
+contracts (`cumulative-limits-v1`, `scope-amendment-v1`,
+`operator-verification-repair-v1`) that never started the feedback workflow;
+only the feedback projections (`feedback`, `metrics`, `publication`,
+`amendment_alone_grants_signoff`) require `feedback/authority.json`:
 
 - `avoidable_omissions`: one entry per originating plan, sorted by digest.
   Plans are collected from the runtime genealogy: the canonical ticket, the
@@ -700,8 +715,13 @@ complete it; existing keys are unchanged:
 - `manual_extension_pending_tasks`: for each activated non-delegated transition
   that added paths, the IDs of tasks that were `PENDING` just before activation
   (the sealed `journal_state`) and whose pre-extension `target_files` intersect
-  the added paths.
+  the added paths. A transition whose recipe has no sealed plan subject or
+  journal state (as `cumulative-limits-v1`) is an `UNKNOWN` row, and any
+  `UNKNOWN` row makes the aggregate `UNKNOWN` (`TRANSITION_NOT_MEASURED`).
 
+An interrupted execution lineage (a selector that is not an object or names a
+missing generation) makes all three metrics `UNKNOWN`
+(`EXECUTION_LINEAGE_UNAVAILABLE`), never `MEASURED` with an empty list.
 Missing or changed evidence makes a metric `UNKNOWN` with a reason; it never
 blocks the summary or any gate. Raw role responses remain in the canonical private
 ledger. Older timestamps/costs stay null when not observed. Reported required

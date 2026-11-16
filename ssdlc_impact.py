@@ -8,8 +8,11 @@ approval input: possible omissions never block a plan or change its state.
 Analysis perimeter:
 
 - static Python imports (``import``/``from``, relative imports, literal
-  ``importlib.import_module``/``__import__`` names and literal ``mock.patch``
-  targets). Relative imports resolve against the importer's package and
+  ``importlib.import_module``/``__import__`` names, literal positional
+  locations of path loaders such as ``runpy.run_path`` and
+  ``spec_from_file_location``, and literal ``mock.patch`` targets). Relative
+  imports resolve against the importer's package (never above its top-level
+  package) and
   absolute ones against the repository root only. An absolute import that the
   importer's own directory would resolve differently depends on ``sys.path``
   and is ``UNKNOWN`` for that line;
@@ -18,7 +21,7 @@ Analysis perimeter:
 - schema links only when a file literally names the other one.
 
 Everything else is ``UNKNOWN``: other languages, unparsable Python and dynamic
-imports whose destination is not a literal. A dynamic import is reported for
+imports whose destination is not a positional literal. A dynamic import is reported for
 the file that contains it; no destination is inferred.
 
 When tasks declare ``contract_changes``, the report also verifies them
@@ -123,6 +126,20 @@ def _call_name(node):
     return func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
 
 
+def _loader_location(node, name):
+    """The literal file a path loader call loads, or None when it is not a positional literal.
+
+    ``run_path`` takes the location first; ``spec_from_file_location``,
+    ``load_source`` and ``SourceFileLoader`` take it second. Any argument passed
+    by keyword or unpacked, and any non-literal location, is not resolved.
+    """
+    index = 0 if name == 'run_path' else 1
+    if node.keywords or len(node.args) <= index or any(isinstance(a, ast.Starred) for a in node.args[:index + 1]):
+        return None
+    location = _literal(node.args[index])
+    return str(PurePosixPath(location)) if location else None
+
+
 def _python_references(path, source):
     """Return (dotted references with line and kind, unknown rows)."""
     try:
@@ -139,7 +156,8 @@ def _python_references(path, source):
         elif isinstance(node, ast.ImportFrom):
             if node.level:
                 up = node.level - 1
-                if up > len(package):
+                # ``..`` from ``pkg/mod.py`` leaves the top-level package: Python refuses it.
+                if up >= len(package):
                     unknown.append(dict(path=path, line=node.lineno, reason='UNRESOLVED_RELATIVE_IMPORT'))
                     continue
                 base = package[:len(package) - up]
@@ -161,9 +179,11 @@ def _python_references(path, source):
                 else:
                     refs.append((first, node.lineno, 'DYNAMIC_IMPORT_LITERAL', False))
             elif name in DYNAMIC_PATH_CALLS:
-                # A literal location is covered by the literal path scan.
-                if not node.args or any(_literal(arg) is None for arg in node.args[:2]):
+                location = _loader_location(node, name)
+                if location is None:
                     unknown.append(dict(path=path, line=node.lineno, reason='DYNAMIC_IMPORT'))
+                else:
+                    refs.append((location, node.lineno, 'DYNAMIC_PATH_LITERAL', False))
             elif name == 'patch' and node.args:
                 if first is None:
                     unknown.append(dict(path=path, line=node.lineno, reason='DYNAMIC_PATCH_TARGET'))
@@ -226,7 +246,8 @@ def _codeowners(files, texts, targets):
         return source, {t: dict(status='UNKNOWN', reason='UNREADABLE_CODEOWNERS') for t in targets}
     rules = []
     for number, line in enumerate(text.splitlines(), 1):
-        line = line.strip()
+        # A ``#`` after whitespace starts an inline comment.
+        line = re.split(r'\s#', line.strip(), maxsplit=1)[0]
         if not line or line.startswith('#'):
             continue
         pattern, *owners = line.split()
@@ -265,8 +286,8 @@ def _owner_regex(pattern):
         else:
             out += re.escape(body[i]); i += 1
     prefix = '^' if anchored else '^(?:.*/)?'
-    # ``docs/*`` owns direct children only; other patterns also own subtrees.
-    suffix = '/.*$' if directory else '$' if body.endswith('/*') else '(?:/.*)?$'
+    # ``docs/*`` and ``/*`` own direct children only; other patterns also own subtrees.
+    suffix = '/.*$' if directory else '$' if pattern.endswith('/*') else '(?:/.*)?$'
     return re.compile(prefix + out + suffix)
 
 
@@ -299,7 +320,12 @@ def build_report(repo, plan):
         unknown.extend(problems)
         seen, ambiguous = set(), set()
         for dotted, line, kind, relative in sorted(refs, key=lambda r: (r[1], r[0], r[2])):
-            found, environment_dependent = _resolve(modules, path, dotted, kind, relative)
+            if kind == 'DYNAMIC_PATH_LITERAL':
+                if _is_test(path):
+                    continue  # The literal path scan already relates test files.
+                found, environment_dependent = dotted, False
+            else:
+                found, environment_dependent = _resolve(modules, path, dotted, kind, relative)
             if environment_dependent and line not in ambiguous:
                 # No destination is inferred from the importer's directory.
                 ambiguous.add(line)
@@ -606,7 +632,7 @@ def _contract_uses(path, tree, modules, producer, contract):
         relative = bool(node.level)
         if relative:
             up = node.level - 1
-            if up > len(package):
+            if up >= len(package):
                 return [(alias.asname or alias.name, _OTHER) for alias in node.names]
             module = '.'.join(package[:len(package) - up] + (node.module.split('.') if node.module else []))
         else:
@@ -881,7 +907,10 @@ def _transitions(ticket):
         return []
     store, chain, seen = TransitionStore(store_root), [], set()
     pointer = _read_json(store_root / 'active.json')
-    while isinstance(pointer, dict) and (store_root / str(pointer.get('transition_id', ''))).is_dir():
+    # Only the oldest generation has no parent selector; every other pointer must resolve.
+    while pointer is not None:
+        if not isinstance(pointer, dict) or not (store_root / str(pointer.get('transition_id', ''))).is_dir():
+            raise TaskError('Execution lineage is interrupted')
         identity = pointer['transition_id']
         if identity in seen:
             raise TaskError('Execution lineage contains a cycle')
@@ -1091,6 +1120,9 @@ def summary_metrics(ticket):
         chain = _transitions(ticket)
         extensions = _manual_extensions(ticket, chain)
         pending = dict(status='MEASURED', transitions=extensions)
+        if any(row['status'] != 'MEASURED' for row in extensions):
+            # One unmeasured transition leaves the aggregate unmeasured too.
+            pending.update(status='UNKNOWN', reason='TRANSITION_NOT_MEASURED')
     except errors:
         chain = extensions = None
         pending = dict(status='UNKNOWN', transitions=[], reason='EXECUTION_LINEAGE_UNAVAILABLE')
