@@ -81,6 +81,7 @@ from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, PR_COMMENT, REVIEW
 from .github import GitHubError, merge_state, summarize_checks
 from .ledger import entries as ledger_entries
 from .ledger import open_turns
+from .localtests import module_command, select_modules
 from .markdown import (RESUME, carries_record, dispatcher_header, publishable, read_marker,
                        render_escalation, render_fix, render_native_review, render_preflight, render_review)
 from .policy import describe as describe_receipt
@@ -1211,22 +1212,45 @@ class Dispatcher:
         except GitHubError as exc:
             self.log(f'  turn record on #{entry.number} not closed: {exc}')
 
-    def _verify(self, where, path, attempt):
-        """Run the test command, recording it in the ledger with the tree tested; returns
+    def _local_tests(self, path):
+        """``(command, record)`` of the local tests after a writing turn in ``path`` (#169):
+        the command, None when nothing is to run, and the mode and modules, informative
+        metadata for the log and the implement and fix markers. With ``changed`` the modules are
+        computed again on every call, from the worktree as it is now."""
+        mode = self.cfg.local_tests
+        if mode == 'full':
+            return self.cfg.test_cmd, {'mode': mode}
+        if mode == 'none':
+            return None, {'mode': mode, 'modules': []}
+        modules = select_modules(self.ws.worktree_changes(path), self.ws.test_modules(path))
+        return (module_command(modules) if modules else None), {'mode': mode, 'modules': modules}
+
+    def _run_tests(self, where, path, attempt, command):
+        """Run ``command``, recording it in the ledger with the tree tested; returns
         ``(passed, tail, entry)``."""
         if self.ledger is None or where is None:
-            return (*self.ws.run_tests(path, self.cfg.test_cmd, self.cfg.test_timeout_seconds),
-                    None)
+            return (*self.ws.run_tests(path, command, self.cfg.test_timeout_seconds), None)
         before = self.ws.tree(path)
         started = time.monotonic()
-        passed, tail = self.ws.run_tests(path, self.cfg.test_cmd, self.cfg.test_timeout_seconds)
+        passed, tail = self.ws.run_tests(path, command, self.cfg.test_timeout_seconds)
         duration = int((time.monotonic() - started) * 1000)
         after = self.ws.tree(path)
         entry = self.ledger.verification(where[0], kind=where[1], attempt=attempt,
-                                         command=self.cfg.test_cmd, passed=passed,
+                                         command=command, passed=passed,
                                          duration_ms=duration, tree_before=before,
                                          tree_after=after)
         return passed, tail, entry
+
+    def _verify(self, where, path, attempt):
+        """Run the local tests (``_local_tests``); returns ``(passed, tail, entry, record)``.
+        Without tests to run it passes with no ledger record: the CI decides."""
+        command, record = self._local_tests(path)
+        if command is None:
+            self.log(f'  local tests ({record["mode"]}): none to run, the CI decides')
+            return True, '', None, record
+        if record['mode'] != 'full':
+            self.log(f'  local tests ({record["mode"]}): {", ".join(record["modules"])}')
+        return (*self._run_tests(where, path, attempt, command), record)
 
     def _bind_tested(self, tested, path, commit):
         """Bind the passing test to ``commit`` when the committed tree is the one tested."""
@@ -1354,26 +1378,28 @@ class Dispatcher:
         raise ModelsUnavailable(models.agent.key, models.tried, getattr(failed, 'log', None))
 
     def _write_turn(self, agent, prompt, schema, path, label, where=None):
-        """Run a writing agent, then the tests; retry with the failures. Returns the output,
-        ``None`` on success or a reason to escalate, the agent configuration of the last turn
-        (``_turn``) and the ledger record of the passing test, to bind to the commit that
-        follows (None without a ledger or without a passing test). A model found unavailable
-        is not tried again in later attempts."""
+        """Run a writing agent, then the local tests (``_verify``); retry with the failures.
+        Returns the output, ``None`` on success or a reason to escalate, the agent configuration
+        of the last turn (``_turn``), the ledger record of the passing test, to bind to the
+        commit that follows (None without a ledger or without a passing test), and the mode and
+        modules of the local tests of the last attempt (None when no test was due: a blocked
+        turn, or an implementation without changes). A model found
+        unavailable is not tried again in later attempts."""
         models = Models(agent)
         for attempt in range(1 + self.cfg.implement_test_retries):
             result, used = self._turn(models, 'write', prompt, schema, path,
                                       f'{label}-{attempt + 1}', where=where)
             if result['status'] == 'blocked':
-                return result, None, used, None
+                return result, None, used, None, None
             if not self.ws.has_changes(path) and schema == 'implement':
-                return result, ('Implementazione senza modifiche ai file.', ''), used, None
-            passed, tail, tested = self._verify(where, path, attempt + 1)
+                return result, ('Implementazione senza modifiche ai file.', ''), used, None, None
+            passed, tail, tested, local = self._verify(where, path, attempt + 1)
             if passed:
-                return result, None, used, tested
+                return result, None, used, tested, local
             prompt += ('\n\n## Test failures after your previous attempt\n\nThe test command failed. '
                        f'Fix the cause, then finish again.\n\n```text\n{tail}\n```\n')
         return (result, ('I test locali falliscono anche dopo i tentativi di correzione.', tail),
-                used, None)
+                used, None, local)
 
     def _commit_message(self, agent, message, issue):
         message = message.strip() + f'\n\nRefs #{issue}\n'
@@ -1886,9 +1912,9 @@ class Dispatcher:
                            issue_body=issue.get('body') or '', issue_comments=comments,
                            acceptance_criteria=format_criteria(criteria),
                            test_cmd=cfg.test_cmd, language=cfg.language)
-        result, failure, used, tested = self._write_turn(agent, prompt, 'implement', path,
-                                                         f'issue-{number}-implement',
-                                                         where=(number, 'implement'))
+        result, failure, used, tested, local = self._write_turn(
+            agent, prompt, 'implement', path, f'issue-{number}-implement',
+            where=(number, 'implement'))
         if result['status'] == 'blocked':
             return self._blocked(number, used, result['blocked_reason'], remove=[lb.working],
                                  on_pr=False)
@@ -1905,7 +1931,9 @@ class Dispatcher:
         # The marker keeps the map the reviewer checks until a fix replaces it (#134).
         meta = {'issue': number, 'implementer': agent.key, 'reviewer': cfg.reviewer,
                 'profile': self._profile(agent.key, 'write', used),
-                'acceptance_map': result['acceptance_map']}
+                'acceptance_map': result['acceptance_map'],
+                # Informative only (#169): no receipt nor approval depends on it.
+                'local_tests': local}
         body = publishable(self.runner.header(used) + '\n' + result['pr_body'].strip()
                            + '\n\n' + render_map(result['acceptance_map'])
                            + f'\n\nCloses #{number}', 'pr', meta)
@@ -2021,6 +2049,10 @@ class Dispatcher:
         if self.ws.head(path) != pr.head_sha:
             self.log('  head moved since the snapshot; retrying next tick')
             return
+        if not joins and cfg.local_tests != 'full' and pr.checks == 'none':
+            # The first reviewer of a round runs it; the next ones review the same head.
+            if not self._full_suite_without_ci(pr, path, name):
+                return
         # Each reviewer of a round judges the head on its own: earlier rounds only.
         earlier = [r for r in pr.reviews if r['round'] < round_no]
         previous_open = open_findings(earlier, pr.closures)
@@ -2155,6 +2187,30 @@ class Dispatcher:
                                 thread_name_prefix='devloop-review') as pool:
             return list(pool.map(call, keys))
 
+    def _full_suite_without_ci(self, pr, path, name):
+        """The CI gate when the local tests may not have covered the whole suite (#169): with
+        ``local_tests`` other than ``full`` a review needs the CI passed, and a head without CI
+        gets the full ``test_cmd`` locally first, in a disposable copy of the PR worktree.
+        Returns whether the review may start; a failure escalates the PR."""
+        lb = self.cfg.labels
+        self.log(f'  no CI on {pr.head_sha[:12]} with local_tests = {self.cfg.local_tests}: '
+                 'full suite before the review')
+        copy_name, copy = self.ws.review_copy(path)
+        try:
+            passed, tail, _ = self._run_tests((pr.number, 'review'), copy, 1, self.cfg.test_cmd)
+        finally:
+            self.ws.remove(copy_name)
+        if passed:
+            return True
+        self.ws.remove(name)
+        self._escalate(pr.number, f'Sul head `{pr.head_sha[:12]}` non risulta alcuna CI e, con '
+                                  f'`local_tests = "{self.cfg.local_tests}"`, i test locali non '
+                                  'hanno eseguito la suite completa. La suite completa '
+                                  f'(`{self.cfg.test_cmd}`), eseguita in locale prima della '
+                                  'review, fallisce: la review non parte.', tail,
+                       remove=[lb.review])
+        return False
+
     def _do_fix(self, pr):
         cfg, lb = self.cfg, self.cfg.labels
         if not pr.reviews:
@@ -2186,7 +2242,7 @@ class Dispatcher:
                                acceptance_criteria(issue.get('body'))),
                            acceptance_map=format_map(latest_map(pr.meta, pr.fixes)),
                            language=cfg.language)
-        result, failure, used, tested = self._write_turn(
+        result, failure, used, tested, local = self._write_turn(
             agent, prompt, 'fix', path, f'pr-{pr.number}-fix-r{latest["round"]}',
             where=(pr.number, 'fix'))
         if result['status'] == 'blocked':
@@ -2204,7 +2260,7 @@ class Dispatcher:
                 return self._escalate_protected(pr.number, protected, remove=[lb.changes])
             self.ws.push(path, pr.head_ref, auth=auth)
         fix = dict(result, head_sha=self.ws.head(path),
-                   profile=self._profile(agent.key, 'write', used))
+                   profile=self._profile(agent.key, 'write', used), local_tests=local)
         self._as(agent.key, PR_COMMENT).comment(
             pr.number, render_fix(fix, self.runner.header(used), latest['round']))
         self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.changes])
@@ -2251,7 +2307,7 @@ class Dispatcher:
                                base_branch=cfg.base_branch, conflicts=listed,
                                test_cmd=cfg.test_cmd, language=cfg.language)
             try:
-                result, failure, used, tested = self._write_turn(
+                result, failure, used, tested, _ = self._write_turn(
                     agent, prompt, 'sync', path, f'pr-{pr.number}-sync',
                     where=(pr.number, 'sync'))
             except AgentError as exc:

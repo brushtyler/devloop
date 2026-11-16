@@ -7,6 +7,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .localtests import MODES as LOCAL_TESTS_MODES
 from .policy import MAX_LEVEL, MIN_LEVEL, ReviewPolicy
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / 'config.toml'
@@ -126,6 +127,8 @@ class Config:
     # one at a time, in plan order.
     max_parallel_actions: int = 1
     implement_test_retries: int = 1
+    # Which tests run locally after a writing turn (#169): see ``localtests``.
+    local_tests: str = 'full'
     agent_timeout_seconds: int = 3600
     test_timeout_seconds: int = 3600
     agent_command_timeout_seconds: int = 600
@@ -426,6 +429,9 @@ def parse_config(data, root=INSTALL_ROOT):
     stall_action = data.get('agent_stall_action', Config.agent_stall_action)
     if stall_action not in STALL_ACTIONS:
         raise ConfigError(f'agent_stall_action: must be one of {STALL_ACTIONS}')
+    local_tests = data.get('local_tests', Config.local_tests)
+    if not isinstance(local_tests, str) or local_tests not in LOCAL_TESTS_MODES:
+        raise ConfigError(f'local_tests: must be one of {LOCAL_TESTS_MODES}')
     return Config(
         repo=_require(data, 'repo', str, 'config'),
         base_branch=data.get('base_branch', 'main'),
@@ -440,6 +446,7 @@ def parse_config(data, root=INSTALL_ROOT):
         priority_labels=_str_list(data, 'priority_labels', 'config', ('prerequisito',)),
         protected_paths=_str_list(data, 'protected_paths', 'config', ('.github/',)),
         apps=apps, app_key_dir=key_dir, agent_stall_action=stall_action,
+        local_tests=local_tests,
         review_policy=parse_review_policy(
             data.get('review_policy', {}), root,
             [(k, apps[k].slug if k in apps else None, agents[k].kind, agents[k].model,

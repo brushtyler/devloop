@@ -12,9 +12,9 @@ plans the next steps and runs them. A crashed tick is resumed by the next one.
 | Step | Trigger | Result |
 |---|---|---|
 | Start | A trusted user adds `agent:ready` to an issue | `agent:working`; the implementer works in a fresh worktree |
-| Implement | Changes made and local tests pass | Dispatcher commits, pushes `agent/issue-<n>`, opens a PR labelled `agent:review` |
+| Implement | Changes made and [local tests](#local-tests) pass | Dispatcher commits, pushes `agent/issue-<n>`, opens a PR labelled `agent:review` |
 | CI | Checks pending | Wait; failing checks become a review round sent back as `agent:changes` |
-| Review | CI passed or absent | The dispatcher computes the PR's [review level](#review-level-and-policy-receipt); at level 1 a **different** agent posts a structured verdict (see below), at level 2 two [independent reviewers](#level-2-two-independent-reviewers) do, one per action, and their verdicts are applied together |
+| Review | CI passed or absent (absent CI with `local_tests` other than `full`: the full suite first runs locally, see [Local tests](#local-tests)) | The dispatcher computes the PR's [review level](#review-level-and-policy-receipt); at level 1 a **different** agent posts a structured verdict (see below), at level 2 two [independent reviewers](#level-2-two-independent-reviewers) do, one per action, and their verdicts are applied together |
 | Fix | `agent:changes` | The implementer fixes or disputes every open finding of the round, then back to `agent:review` |
 | Sync | A PR in `agent:review` or `agent:ready-to-merge` conflicts with `main` | The implementer resolves the conflicts of a merge of `origin/main`; the dispatcher pushes the merge commit, back to `agent:review` (see below) |
 | Approve | Verdict `approve` from every reviewer the level requires | `agent:ready-to-merge`, only if no [finding](#findings-and-who-closes-them) is still open, the PR head is still the reviewed commit, CI passed and the policy receipt recomputed just before promotion matches the one of every approval (an earlier base is admitted only if `main` left the PR's files alone since, see [When `main` advances](#when-main-advances-during-a-round)) |
@@ -696,7 +696,7 @@ readiness check, on the PR for review, fix, sync and CI. They publish no receipt
 |---|---|---|
 | `request` | The issue goes from `agent:ready` to `agent:working` | SHA-256 of title and body, author and time of the trusted `labeled` event of `agent:ready`, ids of the trusted comments given to the implementer, time of the takeover. It is a snapshot **at the takeover**, not at the time of the label |
 | `turn` | Every invocation of an agent CLI, retries, fallback models and failures included: implement, fix, sync with an agent, review, readiness check | Kind, agent, GitHub identity (none: the operator's `gh` login), configured model and effort (for a fallback, the fallback model and the model it replaces), real model, start, end, duration, outcome (`success`, `failure`, `unavailable`), the error if any, telemetry |
-| `verification` | Every test command the dispatcher runs after a writing turn | Command, outcome, duration, the tree hash before and after the test, and the commit |
+| `verification` | Every test command the dispatcher runs after a writing turn (none when the [local tests](#local-tests) select nothing), and the full suite it runs before a review of a head without CI | Command, outcome, duration, the tree hash before and after the test, and the commit (none before a review) |
 | `event` | The CI of a head (`ci_round`): a failed CI round, the checks a review round saw whatever its verdict (`approve`, `request_changes` or `needs_human`), or the passing checks read again just before the PR is promoted to `agent:ready-to-merge` (also at level 0); a sync without an agent (`sync`) | For the CI, the head, the state (`fail`, `pass`, or `none` without checks), the review round (none at level 0) and each check with its outcome and the id of its GitHub Actions run (none for a commit status or a check outside Actions); the same checks read again for the same head and round are not recorded twice, a new run is. For a sync, the merged base commit and the old and new heads |
 
 **Telemetry** is what the CLI attests, not authenticated:
@@ -861,6 +861,43 @@ This repository sets 3: implement, fix, sync and review of different issues and 
   under a lock, and the telemetry of a turn (`last_report`) belongs to the thread that ran it.
   Each run of `test_cmd` gets a temporary directory of its own (`TMPDIR`), removed afterwards,
   so parallel test runs do not share one.
+
+### Local tests
+
+After every writing turn (implement, fix, sync with conflicts) the dispatcher runs tests in the
+worktree before committing (#169). `local_tests` says which:
+
+| `local_tests` | Local tests |
+|---|---|
+| `"full"` (default) | `test_cmd`, the whole suite, as before #169 |
+| `"changed"` (this repository) | Only the test modules pertinent to the diff, each with `python3 -m unittest discover -s tests -p '<module>'`, one after the other, stopping at the first that fails |
+| `"none"` | None |
+
+Any other value stops devloop at startup. With `"changed"` the diff is the whole one from the
+merge base with `origin/main` to the current content of the worktree: the branch's commits, the
+index, unstaged changes and new files git does not ignore, computed again after every attempt.
+The pertinent modules, among the `tests/test_*.py` files of the worktree, are:
+
+- every changed or added `tests/test_*.py`;
+- for every other changed `X.py` (or `pkg/X.py`), the modules `tests/test_X*.py`; for
+  `ssdlc_<name>.py` also `tests/test_<name>*.py` (`ssdlc_impact.py` selects `test_ssdlc_impact*.py`
+  and `test_impact*.py`);
+- for any file under `devloop/`, the modules `tests/test_devloop*.py`.
+
+When no module is pertinent, for example when only documentation changed, and with `"none"`,
+no test runs locally and the PR goes on to the CI. `implement_test_retries` applies to the tests
+that ran: a failure goes back to the implementer with the output, and after the last attempt the
+issue or PR goes to `agent:needs-human`, as with `"full"`.
+
+**The CI stays the gate.** A defect the local modules miss becomes a CI round. When the full suite
+did not run locally (`"changed"` or `"none"`), a review needs the CI passed: if the head has no
+CI at all, the first reviewer's action of the round runs `test_cmd` locally, in a disposable copy
+of the PR worktree, before the review, and a failure sends the PR to `agent:needs-human` without a
+review. With `"full"` the gate is unchanged: CI passed or absent.
+
+The mode and the modules run (`local_tests`: `{mode, modules}`, only `{mode}` with `"full"`) go to the tick log and, as
+information only, to the markers of implement and fix: they are not part of the policy receipt
+and no approval depends on them.
 
 ### agy permissions
 

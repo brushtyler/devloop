@@ -221,6 +221,20 @@ class Workspace:
         out = self._git('diff', '--name-only', '-z', '--no-renames', span, cwd=path)
         return [name for name in out.split('\0') if name]
 
+    def worktree_changes(self, path):
+        """Every path in which the content of ``path`` now differs from its merge base with
+        ``origin/<base>`` (#169): the branch's commits, the index, unstaged changes and new files
+        git does not ignore, deleted files included."""
+        base = self._git('merge-base', 'HEAD', f'origin/{self.base_branch}', cwd=path).strip()
+        tracked = self._git('diff', '--name-only', '-z', '--no-renames', base, cwd=path)
+        new = self._git('ls-files', '--others', '--exclude-standard', '-z', cwd=path)
+        return sorted({name for name in (tracked + '\0' + new).split('\0') if name})
+
+    def test_modules(self, path):
+        """The names of the ``tests/test_*.py`` files in ``path``."""
+        tests = Path(path) / 'tests'
+        return sorted(p.name for p in tests.glob('test_*.py') if p.is_file())
+
     def review_diff(self, branch):
         """``(base, head, changes)`` for the review policy: the latest base branch commit, the
         pushed head of ``branch``, and every path of the branch's full diff against the base

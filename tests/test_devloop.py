@@ -826,11 +826,13 @@ SHA3 = 'c' * 40
 
 class FakeWS:
     def __init__(self, head=SHA1, changes=True, tests=(True,), files=('x.py',),
-                 conflicts=('devloop/agents.py',), markers=()):
+                 conflicts=('devloop/agents.py',), markers=(), modules=('test_x.py',)):
         self._head = head
         self.changes = changes
         self.tests = list(tests)
+        self.commands = []  # every test command run, with its worktree
         self.files = list(files)
+        self.modules = list(modules)  # the tests/test_*.py of the worktree (#169)
         self.conflicts = conflicts  # None: the branch already contains the base
         self.markers = list(markers)  # files the agent left with conflict markers
         self.merging = None
@@ -892,7 +894,15 @@ class FakeWS:
         return self.changes
 
     def run_tests(self, path, command, timeout):
+        self.commands.append((path, command))
         return (self.tests.pop(0) if len(self.tests) > 1 else self.tests[0]), 'FAILED test_x'
+
+    # The worktree's diff against its merge base, recomputed by each call (#169): ``files``.
+    def worktree_changes(self, path):
+        return list(self.files)
+
+    def test_modules(self, path):
+        return list(self.modules)
 
     def start_merge(self, path, author=None):
         self.merge_authors.append(author)
@@ -979,7 +989,8 @@ class DispatcherTests(unittest.TestCase):
         impl = CFG.agent(IMPL)
         self.assertEqual(markdown.read_marker(created['body'], 'pr'), dict(META, profile={
             'identity': None, 'kind': impl.kind, 'model': impl.model, 'effort': impl.effort,
-            'args': list(impl.write_args)}, acceptance_map=[]))
+            'args': list(impl.write_args)}, acceptance_map=[],
+            local_tests={'mode': 'changed', 'modules': ['test_x.py']}))
         self.assertEqual(self.ws.pushes, [('agent/issue-7', True)])
         self.assertIn('Refs #7', self.ws.commits[0])
         prompt = runner.calls[0][3]
@@ -1171,7 +1182,7 @@ class DispatcherTests(unittest.TestCase):
         d._do_implement(7)
         meta = markdown.read_marker(self.gh.created[0]['body'], 'pr')
         self.assertEqual({k: v for k, v in meta.items()
-                          if k not in ('profile', 'acceptance_map')}, META)
+                          if k not in ('profile', 'acceptance_map', 'local_tests')}, META)
         self.assertEqual(self.gh.created[0]['body'].count('<!--'), 1)
 
     def test_reviewer_is_never_the_implementer_after_a_config_change(self):
