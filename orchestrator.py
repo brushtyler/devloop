@@ -5593,18 +5593,23 @@ class SSDLCOrchestrator:
 
         completion_disclosures = self._completion_disclosures() + self._limits_coverage_disclosure()
         canonical_ticket = self.repo_root / '.ssdlc' / self.ticket_id
+        summary = {}
         if (canonical_ticket / 'feedback/authority.json').exists():
+            # Only the feedback projections need the feedback workflow.
             from ssdlc_feedback import FeedbackStore
             from ssdlc_feedback_delivery import projection, ProjectionOutbox, metrics
             summary = dict(feedback=projection(FeedbackStore(canonical_ticket)),
                            metrics=metrics(FeedbackStore(canonical_ticket)),
                            publication=ProjectionOutbox(canonical_ticket).summary(), amendment_alone_grants_signoff=False)
-            # Additive keys: avoidable_omissions, profile_delta, manual_extension_pending_tasks.
-            from ssdlc_impact import summary_metrics
-            summary.update(summary_metrics(canonical_ticket))
-            path = self.ssdlc_root / 'feedback-summary.json'
-            atomic_json(path, summary); self.record_artifact('feedback-summary.json', path)
-            completion_disclosures += '\nFeedback provenance and counters: [feedback-summary.json](./feedback-summary.json).\n'
+        # Additive keys: avoidable_omissions, profile_delta, manual_extension_pending_tasks.
+        # Runs recovered only through manual contracts have no feedback workflow but still need them.
+        from ssdlc_impact import summary_metrics
+        summary.update(summary_metrics(canonical_ticket))
+        path = self.ssdlc_root / 'feedback-summary.json'
+        atomic_json(path, summary); self.record_artifact('feedback-summary.json', path)
+        completion_disclosures += ('\nFeedback provenance and counters: [feedback-summary.json](./feedback-summary.json).\n'
+                                   if 'feedback' in summary else
+                                   '\nImpact and limits metrics: [feedback-summary.json](./feedback-summary.json).\n')
 
         # QA shell_command reports remain separate from typed contract checks.
         artifact_rows = []
