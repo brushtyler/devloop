@@ -237,6 +237,17 @@ pinned checkout, see [Run from a pinned installation](#run-from-a-pinned-install
 from a PR branch, so a PR that changes `devloop/config.toml`, the prompts or the lists cannot
 apply weaker rules to itself. A list that cannot be read stops devloop at startup.
 
+The criterion for a sensitive path: **the code that decides permissions, fencing and
+authorizations goes to level 2**, besides devloop itself and the agents' instructions. So the
+repository's `config.toml` adds to the defaults above the ssdlc security modules (#171): writer
+fencing and locks (`ssdlc_writer_gate.py`, `ssdlc_role_fencing.py`,
+`ssdlc_container_holder.py`, `ssdlc_locks.py`), authorized transitions and gates
+(`ssdlc_transitions.py`, `ssdlc_replay_gate.py`, `ssdlc_grader.py`), delegations and
+admissions (`ssdlc_feedback_delegation.py`, `ssdlc_feedback_admission.py`,
+`ssdlc_usage_admission.py`) and the app tokens (`scripts/agent-token.py`). A PR that changes
+only other modules, such as `ssdlc_impact.py`, stays at level 1. An entry is only a path: a
+listed file that does not exist yet is no error, and a PR that adds it gets level 2.
+
 **Level 1** works as before: one reviewer, the PR's recorded reviewer or else the first of the
 pool, never the PR's implementer. **Level 2** needs two independent reviewers (#111, below).
 When the pool has not enough of them, the PR is neither reviewed nor promoted: it goes to

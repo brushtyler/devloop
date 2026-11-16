@@ -17,6 +17,12 @@ from test_devloop import (BASE, CFG, SHA1, FakeGH, FakeRunner, FakeWS, SnapshotG
 
 POLICY = CFG.review_policy
 DATA = tomllib.loads(config.DEFAULT_CONFIG.read_text())
+# The ssdlc modules that decide permissions, fencing and authorizations (#171).
+SECURITY_MODULES = {
+    'ssdlc_writer_gate.py', 'ssdlc_role_fencing.py', 'ssdlc_container_holder.py',
+    'ssdlc_locks.py', 'ssdlc_transitions.py', 'ssdlc_replay_gate.py', 'ssdlc_grader.py',
+    'ssdlc_feedback_delegation.py', 'ssdlc_feedback_admission.py', 'ssdlc_usage_admission.py',
+    'scripts/agent-token.py'}
 
 
 def changes(*paths, links=None):
@@ -37,14 +43,18 @@ class PolicyConfigTests(unittest.TestCase):
         self.assertEqual(POLICY.default_level, 1)
         self.assertEqual(POLICY.label, 'reviews:2')
         self.assertEqual(set(POLICY.sensitive_paths),
-                         {'devloop/', 'AGENTS.md', 'CLAUDE.md', '.github/', 'schemas/'})
+                         {'devloop/', 'AGENTS.md', 'CLAUDE.md', '.github/', 'schemas/'}
+                         | SECURITY_MODULES)
         baseline = json.loads((config.INSTALL_ROOT / 'schemas/recovery-grader-baseline.json')
                               .read_text())
         self.assertEqual(set(POLICY.sensitive_files), set(baseline['files']))
         self.assertIn('ssdlc_grader.py', POLICY.sensitive_files)
-        # Without the table the same defaults apply.
+        # Without the table the code defaults apply: the generic paths, without the ssdlc
+        # security modules that config.toml adds (#171).
         omitted = {k: v for k, v in DATA.items() if k != 'review_policy'}
-        self.assertEqual(config.parse_config(omitted).review_policy, POLICY)
+        self.assertEqual(config.parse_config(omitted).review_policy,
+                         dataclasses.replace(POLICY, sensitive_paths=policy.ReviewPolicy
+                                             .sensitive_paths))
 
     def test_policy_version_is_the_hash_of_the_loaded_policy(self):
         self.assertRegex(POLICY.version(), r'^[0-9a-f]{64}$')
@@ -98,6 +108,25 @@ class LevelTests(unittest.TestCase):
         self.assertEqual((result['level'], result['reviewers']), (1, ['codex']))
         self.assertEqual(result['reasons'], [{'kind': 'default', 'level': 1}])
         self.assertEqual(result['policy'], POLICY.version())
+
+    def test_security_modules_get_level_two(self):
+        # #171: the code that decides permissions, fencing and authorizations needs two reviews.
+        for path in sorted(SECURITY_MODULES):
+            with self.subTest(path=path):
+                result = self.level((path, 'docs/devloop.md'))
+                self.assertEqual(result['level'], 2)
+                self.assertEqual(result['reasons'][-1]['kind'], 'paths')
+        # A listed file that does not exist in the tree is just a path, never an error.
+        missing = 'ssdlc_not_yet_merged.py'
+        self.assertFalse((config.INSTALL_ROOT / missing).exists())
+        table = dict(DATA['review_policy'],
+                     sensitive_paths=DATA['review_policy']['sensitive_paths'] + [missing])
+        loaded = config.parse_config(dict(DATA, review_policy=table)).review_policy
+        self.assertEqual(self.level((missing,), pol=loaded)['level'], 2)
+        # Other ssdlc modules stay at level 1.
+        result = self.level(('ssdlc_impact.py',))
+        self.assertEqual((result['level'], result['reviewers']), (1, ['codex']))
+        self.assertEqual(result['reasons'], [{'kind': 'default', 'level': 1}])
 
     def test_deletions_renames_and_symlinks_count(self):
         # A deletion and both sides of a rename are paths of the diff (renames are not detected).

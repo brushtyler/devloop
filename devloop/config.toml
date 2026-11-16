@@ -63,8 +63,20 @@ protected_paths = [".github/"]
 [review_policy]
 default_level = 1
 label = "reviews:2"
-# Directory prefixes (ending in "/") or files, relative to the repository root.
-sensitive_paths = ["devloop/", "AGENTS.md", "CLAUDE.md", ".github/", "schemas/"]
+# Directory prefixes (ending in "/") or files, relative to the repository root. The code that
+# decides permissions, fencing and authorizations goes to level 2 (issue #171); a listed file
+# that does not exist yet is just a path.
+sensitive_paths = ["devloop/", "AGENTS.md", "CLAUDE.md", ".github/", "schemas/",
+                   # Writer fencing and locks.
+                   "ssdlc_writer_gate.py", "ssdlc_role_fencing.py",
+                   "ssdlc_container_holder.py", "ssdlc_locks.py",
+                   # Authorized transitions and gates.
+                   "ssdlc_transitions.py", "ssdlc_replay_gate.py", "ssdlc_grader.py",
+                   # Delegations and admissions.
+                   "ssdlc_feedback_delegation.py", "ssdlc_feedback_admission.py",
+                   "ssdlc_usage_admission.py",
+                   # App tokens.
+                   "scripts/agent-token.py"]
 # JSON files whose "files" object lists more sensitive paths, read at startup relative to the
 # root of the running devloop installation (a pinned checkout); a missing file stops devloop.
 sensitive_path_lists = ["schemas/recovery-grader-baseline.json"]
