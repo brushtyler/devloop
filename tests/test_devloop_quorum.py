@@ -6,8 +6,8 @@ import unittest
 
 from devloop import agents, config, markdown, policy, review
 from devloop.dispatcher import Action, Dispatcher, plan
-from test_devloop import (CFG, IMPL, SHA1, SHA2, FakeIdentities, FakeRunner, FakeWS, SnapshotGH,
-                          finding, fixed, raw_review)
+from helpers.devloop_fakes import FakeIdentities, SnapshotGH
+from test_devloop import (CFG, IMPL, SHA1, SHA2, FakeRunner, FakeWS, finding, fixed, raw_review)
 
 DATA = tomllib.loads(config.DEFAULT_CONFIG.read_text())
 # The pool of the default configuration: two reviewers with their own apps and models.

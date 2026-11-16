@@ -12,7 +12,8 @@ from devloop.dispatcher import Dispatcher
 from devloop.localtests import module_command, select_modules
 from devloop.workspace import Workspace
 
-from test_devloop import (CFG, FakeGH, FakeRunner, FakeWS, finding, fixed, implemented, norm, pr,
+from helpers.devloop_fakes import FakeGH
+from test_devloop import (CFG, FakeRunner, FakeWS, finding, fixed, implemented, norm, pr,
                           raw_review)
 
 MODULES = ['test_devloop.py', 'test_devloop_ledger.py', 'test_impact.py', 'test_impact_more.py',

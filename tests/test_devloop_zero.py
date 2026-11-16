@@ -9,8 +9,9 @@ from types import SimpleNamespace
 from devloop import config, markdown, policy
 from devloop.dispatcher import Action, Dispatcher, Snapshot, ensure_labels, plan
 from devloop.github import GitHub
-from test_devloop import (BASE, CFG, SHA1, SHA2, SHA3, FakeGH, FakeRunner, FakeWS, SnapshotGH,
-                          finding, norm, pr, raw_review, receipt)
+from helpers.devloop_fakes import FakeGH, SnapshotGH
+from test_devloop import (BASE, CFG, SHA1, SHA2, SHA3, FakeRunner, FakeWS, finding, norm, pr,
+                          raw_review, receipt)
 
 POLICY = CFG.review_policy
 DATA = tomllib.loads(config.DEFAULT_CONFIG.read_text())

@@ -78,7 +78,7 @@ from .acceptance import (acceptance_criteria, acceptance_findings, format_criter
                          latest_map, render_map)
 from .agents import AgentError, ModelsUnavailable, ModelUnavailable, PermissionDenied
 from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, PR_COMMENT, REVIEW
-from .github import GitHubError, merge_state, summarize_checks
+from .github import GitHubError
 from .ledger import entries as ledger_entries
 from .ledger import open_turns
 from .localtests import module_command, select_modules
@@ -88,6 +88,7 @@ from .policy import describe as describe_receipt
 from .policy import (BINDING, MAX_LISTED_PATHS, ZERO_LEVEL, agent_profile, changes_requested,
                      check_outcome, check_states, differences, distinct, evaluate, independent,
                      profile_of, receipt_of, recorded_level, zero_refused)
+from .ports import Backend, Tracker, summarize_checks
 from .review import (CI, FINDING_COMMAND, OPERATOR, ci_failure_review, current_round,
                      finding_commands, finding_key, finding_state, last_round, normalize_review,
                      open_findings, owner_of, round_verdict)
@@ -162,7 +163,7 @@ class PullRequest:
     # The same, written after the latest review of an earlier round: what a reviewer joining the
     # latest round sees, as the round's first reviewer did.
     round_comments: list = field(default_factory=list)
-    merge_state: str = 'clean'  # clean, conflict, unknown (see github.merge_state)
+    merge_state: str = 'clean'  # clean, conflict, unknown (see ports.CodeReview.merge_state)
     # Policy records the dispatcher wrote (``policy`` markers), and whether one written after
     # the latest review found that the approval's receipt no longer matches.
     policy: list = field(default_factory=list)
@@ -688,12 +689,13 @@ def format_previous_rounds(reviews, fixes, closures=()):
 
 
 class Dispatcher:
-    """``gh`` acts as the dispatcher. ``identities`` (``apps.Identities``) gives each agent its
-    own GitHub identity; without it every actor uses ``gh``. ``activity``
-    (``activity.Activity``) records the running action for ``devloop status``. ``ledger``
-    (``ledger.Ledger``) records evidence and telemetry of each step (#133)."""
+    """``gh`` acts as the dispatcher: it implements the ports of ``ports.Backend`` (tracker,
+    code review and CI), and the dispatcher uses nothing else of it. ``identities``
+    (``apps.Identities``) gives each agent its own GitHub identity; without it every actor uses
+    ``gh``. ``activity`` (``activity.Activity``) records the running action for ``devloop
+    status``. ``ledger`` (``ledger.Ledger``) records evidence and telemetry of each step (#133)."""
 
-    def __init__(self, cfg, gh, ws, runner, log=print, identities=None, activity=None,
+    def __init__(self, cfg, gh: Backend, ws, runner, log=print, identities=None, activity=None,
                  ledger=None):
         self.cfg = cfg
         self.gh = gh
@@ -706,7 +708,7 @@ class Dispatcher:
         self.ledger = ledger
 
     # Identities ------------------------------------------------------------
-    def _as(self, actor, permissions):
+    def _as(self, actor, permissions) -> Backend:
         """The GitHub client ``actor`` acts with, holding only ``permissions``."""
         return self.identities.github(actor, permissions) if self.identities else self.gh
 
@@ -826,8 +828,7 @@ class Dispatcher:
                            head_ref=ref, head_sha=raw['headRefOid'],
                            title=raw['title'], body=raw.get('body', ''),
                            labels=label_names(raw['labels']), meta=meta or {},
-                           merge_state=merge_state(raw.get('mergeable'),
-                                                   raw.get('mergeStateStatus')))
+                           merge_state=self.gh.merge_state(raw))
 
     def snapshot(self):
         lb = self.cfg.labels
@@ -2476,7 +2477,7 @@ def _format_conflicts(conflicts):
     return '\n'.join(lines) or '(none)'
 
 
-def ensure_labels(gh, labels, review_policy=None):
+def ensure_labels(gh: Tracker, labels, review_policy=None):
     for attr, (color, description) in LABEL_STYLE.items():
         gh.ensure_label(getattr(labels, attr), color, description)
     if review_policy is not None:

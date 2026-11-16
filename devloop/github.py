@@ -3,6 +3,9 @@
 Checks, labels, comments and pull request creation use the REST API through `gh api`, which
 behaves the same across `gh` versions. Porcelain commands are used only for reads whose `--json`
 output is long-standing (`issue list/view`, `pr list/view`).
+
+``GitHub`` is the concrete adapter of the ports of ``devloop.ports`` (``Tracker``,
+``CodeReview`` and ``CI``); the dispatcher depends on the ports, not on this class.
 """
 
 import json
@@ -10,6 +13,8 @@ import os
 import re
 import subprocess
 from urllib.parse import quote
+
+from .ports import summarize_checks
 
 _RUN_ID = re.compile(r'/actions/runs/(\d+)')
 _ISSUE_HISTORY = (
@@ -41,7 +46,9 @@ def author_login(author):
 
 
 class GitHub:
-    """``token``, when given, is a callable returning the token every call runs with; otherwise
+    """The adapter of ``ports.Tracker``, ``ports.CodeReview`` and ``ports.CI`` on GitHub.
+
+    ``token``, when given, is a callable returning the token every call runs with; otherwise
     the ambient ``gh`` login is used."""
 
     def __init__(self, repo, run=subprocess.run, token=None):
@@ -133,6 +140,10 @@ class GitHub:
                          '--json', 'number,title,body,labels,headRefName,headRefOid,author,'
                                    'isCrossRepository,mergeable,mergeStateStatus')
         return [dict(raw, author={'login': author_login(raw.get('author'))}) for raw in prs]
+
+    def merge_state(self, pr):
+        """``clean``, ``conflict`` or ``unknown`` for ``pr`` as :meth:`open_prs` returns it."""
+        return merge_state(pr.get('mergeable'), pr.get('mergeStateStatus'))
 
     def pr_comments(self, number):
         """Conversation comments, read with REST so that an app's login is ``<slug>[bot]``
@@ -284,15 +295,3 @@ def normalize_checks(check_runs, combined_status):
             checks.append({'name': 'commit status (aggregate)', 'bucket': aggregate, 'link': None,
                            'conclusion': combined_status.get('state'), 'run_id': None})
     return checks
-
-
-def summarize_checks(checks):
-    if not checks:
-        return 'none', [], []
-    failed = [c for c in checks if c.get('bucket') == 'fail']
-    if failed:
-        run_ids = sorted({m.group(1) for c in failed if (m := _RUN_ID.search(c.get('link') or ''))})
-        return 'fail', [c['name'] for c in failed], run_ids
-    if any(c.get('bucket') == 'pending' for c in checks):
-        return 'pending', [], []
-    return 'pass', [], []

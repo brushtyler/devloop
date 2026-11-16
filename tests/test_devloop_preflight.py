@@ -10,7 +10,8 @@ from types import SimpleNamespace
 from devloop import agents, config, markdown, schema
 from devloop.dispatcher import Dispatcher, Snapshot, plan, preflight_hash
 from devloop.workspace import Workspace
-from test_devloop import CFG, IMPL, REV, FakeGH, FakeRunner, FakeWS, implemented, pr
+from helpers.devloop_fakes import FakeGH
+from test_devloop import CFG, IMPL, REV, FakeRunner, FakeWS, implemented, pr
 
 # The checker is any agent other than the implementer; the distributed config leaves it off.
 PCFG = dataclasses.replace(CFG, preflight=REV)
@@ -59,9 +60,6 @@ class IssueGH(FakeGH):
 
     def labelers(self, number, label):
         return list(self.label_events) if label == NEEDS_HUMAN else super().labelers(number, label)
-
-    def last_labeler(self, number, label):
-        return 'brushtyler'
 
     def labeled_events(self, number):
         return [{'label': READY, 'by': 'brushtyler', 'at': '2026-11-13T10:00:00Z'}]
