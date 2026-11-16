@@ -101,8 +101,10 @@ at reservation stays at the dispatch boundary.
 Token counts reported by the adapter are stored on the row as `reported_tokens`,
 independently of any dollar cost: `claude` and OpenRouter report them with their
 cost, `codex` through the `turn.completed` events of `codex exec --json`
-(`input_tokens` already includes the cached input). `agy` reports no tokens. The
-same telemetry is kept for feedback consultations, in the captured response and
+(`input_tokens` already includes the cached input), `agy` through the `usage` of
+its `--output-format json` envelope (`input_tokens` excludes cache reads). The
+full telemetry of each call, with charges, estimates and token categories kept
+apart, is described in [Cost telemetry](cost-telemetry.md). The same telemetry is kept for feedback consultations, in the captured response and
 on the native row, also when a captured return is reconciled after a crash.
 Tokens are unauthenticated telemetry and the controller never converts them to
 dollars.

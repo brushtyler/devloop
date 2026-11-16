@@ -76,8 +76,11 @@ class PhaseBoundaryTests(RepositoryTests):
         self.assertTrue(boundary['worktree_clean'])
         self.assertEqual(git(self.orch.worktree_dir, 'status', '--porcelain'), '')
         self.assertEqual(boundary['completed_tasks'], ['T1'])
-        self.assertEqual(set(boundary['usage']), {'ledger_entries', 'reported_cost_usd', 'unknown_cost_rows', 'accounted_usd'})
+        self.assertEqual(set(boundary['usage']), {'ledger_entries', 'reported_cost_usd', 'unknown_cost_rows',
+                                                  'accounted_usd', 'cost_telemetry'})
         self.assertEqual(boundary['usage']['ledger_entries'], len(state['ledger']))
+        self.assertEqual(boundary['usage']['cost_telemetry']['schema_version'], 1)
+        self.assertFalse(boundary['usage']['cost_telemetry']['measures_summed_together'])
         # No readiness, sign-off, failure gate or evidence pack.
         self.assertFalse((self.orch.ssdlc_root / 'EVIDENCE_PACK.md').exists())
         self.assertTrue(all(g['passed'] for g in state['gate_history']))
