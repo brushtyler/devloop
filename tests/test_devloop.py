@@ -3,6 +3,7 @@ import http.server
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -15,6 +16,14 @@ from devloop.dispatcher import (Action, Dispatcher, PullRequest, Snapshot, Untru
                                 untrusted_change)
 from devloop.github import GitHub, GitHubError, author_login, normalize_checks, summarize_checks
 from devloop.workspace import Workspace, WorkspaceError
+
+# CI runs this module as `python3 -m unittest tests.test_devloop` from the repository root,
+# where tests/ is not on sys.path: add it so the shared fakes in tests/helpers/ import the same
+# way as under `discover -s tests`.
+_TESTS_DIR = str(Path(__file__).resolve().parent)
+if _TESTS_DIR not in sys.path:
+    sys.path.insert(0, _TESTS_DIR)
+
 from helpers.devloop_fakes import META, SHA1, FakeGH, FakeIdentities, SnapshotGH
 
 # The tests describe one action at a time (the default); parallel actions (#176) have their own
