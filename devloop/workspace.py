@@ -148,6 +148,16 @@ class Workspace:
         self._git('worktree', 'add', '--force', '-B', branch, str(path), f'origin/{branch}')
         return path
 
+    def base_copy(self, name):
+        """A disposable worktree detached at the latest remote base branch, for a read-only
+        turn such as the readiness check; removed with :meth:`remove`."""
+        self._git('fetch', 'origin', self.base_branch)
+        path = self.path(name)
+        self._fresh(path)
+        self._git('worktree', 'add', '--force', '--detach', str(path),
+                  f'origin/{self.base_branch}')
+        return path
+
     def review_copy(self, path):
         """``(name, path)`` of a disposable worktree for a reviewer, detached at the HEAD of
         ``path`` and sharing its refs, so that ``origin/<base>`` resolves. What the reviewer and

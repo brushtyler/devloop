@@ -120,8 +120,27 @@ def _valid_finding(f):
     return isinstance(closed, list) and bool(closed) and all(_valid_closure(c) for c in closed)
 
 
+GAP_KINDS = ('operator_decision', 'default_available', 'tool_unavailable')
+
+
+def _valid_gap(g):
+    return (isinstance(g, dict) and g.get('kind') in GAP_KINDS
+            and isinstance(g.get('description'), str) and isinstance(g.get('proposed_default'), str)
+            and isinstance(g.get('code_refs'), list)
+            and all(isinstance(ref, str) for ref in g['code_refs']))
+
+
+def _valid_preflight(p):
+    """A readiness check (#114): ``ready`` never with ``blocked``, which records that the check
+    added ``agent:needs-human`` after ``labeled`` earlier ``labeled`` events of that label."""
+    return (all(isinstance(p.get(k), str) for k in ('hash', 'agent', 'split'))
+            and all(isinstance(p.get(k), bool) for k in ('ready', 'blocked'))
+            and not (p['ready'] and p['blocked']) and _is_int(p.get('labeled'))
+            and isinstance(p.get('gaps'), list) and all(_valid_gap(g) for g in p['gaps']))
+
+
 _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy': _valid_policy,
-          'finding': _valid_finding, 'sync': _valid_sync}
+          'finding': _valid_finding, 'sync': _valid_sync, 'preflight': _valid_preflight}
 
 
 def read_marker(text, kind):
@@ -222,6 +241,46 @@ def render_fix(fix, head, round_no):
     if 'profile' in fix:
         payload['profile'] = fix['profile']  # who wrote the fix (#111)
     return publishable(head + '\n' + '\n'.join(parts), 'fix', payload)
+
+
+_GAP_TEXT = {'operator_decision': 'Decisione dell\'operatore',
+             'default_available': 'Default disponibile, da accettare',
+             'tool_unavailable': 'Strumento non disponibile'}
+PREFLIGHT_RESUME = (
+    'Per proseguire, un utente fidato risponde nella issue: decide i punti aperti o accetta i '
+    'default proposti in un commento, oppure modifica titolo o corpo. Il controllo si ripete al '
+    'tick successivo; per ripeterlo senza modifiche basta un commento con `/devloop recheck` '
+    'come prima riga. Se l\'esito è positivo devloop rimuove `agent:needs-human` che aveva messo '
+    'e l\'issue torna in coda.')
+
+
+def render_preflight(record, head, note=''):
+    """The comment of a readiness check (#114): ``record`` is its ``preflight`` marker."""
+    if record['ready']:
+        parts = ['## Controllo di prontezza superato', '',
+                 'L\'issue è implementabile in una RUN: l\'implementazione può partire.']
+    else:
+        parts = ['## Controllo di prontezza: issue non pronta', '',
+                 'L\'implementer non parte finché le lacune qui sotto non sono risolte.']
+        if record['gaps']:
+            parts += ['', '### Lacune', '']
+            for gap in record['gaps']:
+                parts.append(f'- **{_GAP_TEXT[gap["kind"]]}:** {gap["description"].strip()}'
+                             .replace('\n', '\n  '))
+                if gap['code_refs']:
+                    parts.append('  *Riferimenti:* ' + ', '.join(f'`{ref}`'
+                                                                 for ref in gap['code_refs']))
+                if gap['proposed_default'].strip():
+                    parts.append(f'  *Default proposto:* {gap["proposed_default"].strip()}'
+                                 .replace('\n', '\n  '))
+        if record['split'].strip():
+            parts += ['', '### Suddivisione proposta', '', record['split'].strip()]
+        if not record['gaps'] and not record['split'].strip():
+            parts += ['', 'Il controllo non ha indicato lacune né una suddivisione.']
+        parts += ['', PREFLIGHT_RESUME]
+    if note:
+        parts += ['', f'> {note}']
+    return publishable(head + '\n' + '\n'.join(parts), 'preflight', record)
 
 
 RESUME = ('Per riprendere: correggere la causa, **rimuovere `agent:needs-human`** e impostare la '

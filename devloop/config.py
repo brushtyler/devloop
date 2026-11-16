@@ -69,6 +69,8 @@ class Config:
     trusted_users: tuple
     # The reviewer pool, in order (``roles.reviewers``; ``roles.reviewer`` is a pool of one).
     reviewers: tuple = ()
+    # The agent of the readiness check before implement (#114), or '' when it is disabled.
+    preflight: str = ''
     max_open_prs: int = 2
     max_review_rounds: int = 3
     max_actions_per_tick: int = 3
@@ -192,6 +194,13 @@ def parse_config(data, root=INSTALL_ROOT):
     if implementer not in agents:
         raise ConfigError(f'roles.implementer: unknown agent {implementer!r}')
     pool = _reviewer_pool(roles, agents, implementer)
+    preflight = ''
+    if 'preflight' in data:
+        preflight = _require(data, 'preflight', str, 'config')
+        if preflight not in agents:
+            raise ConfigError(f'preflight: unknown agent {preflight!r}')
+        if preflight == implementer:
+            raise ConfigError('preflight: must be a different agent from the implementer')
     trusted = _str_list(data, 'trusted_users', 'config')
     if not trusted:
         raise ConfigError('trusted_users: at least one GitHub login is required')
@@ -235,6 +244,7 @@ def parse_config(data, root=INSTALL_ROOT):
         test_cmd=_require(data, 'test_cmd', str, 'config'),
         language=data.get('language', 'English'),
         implementer=implementer, reviewer=pool[0], reviewers=pool, agents=agents,
+        preflight=preflight,
         trusted_users=trusted,
         blocked_labels=_str_list(data, 'blocked_labels', 'config', ('bloccata',)),
         priority_labels=_str_list(data, 'priority_labels', 'config', ('prerequisito',)),

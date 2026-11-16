@@ -60,7 +60,8 @@ sync that fails (the implementer is blocked, tests still fail, markers are left,
 concluded or aborted by the agent, or the agent run failed) goes to `agent:needs-human` with a
 comment that lists the files in conflict and their commits.
 
-Any step can stop at `agent:needs-human` with a comment explaining why: the agent declared itself
+Any step can stop at `agent:needs-human` with a comment explaining why: the
+[readiness check](#readiness-check-before-implementation) found the issue not ready, the agent declared itself
 blocked, tests still fail after the retry, the reviewer asked for a decision, the round limit
 was reached, the reviewer pool has not enough independent reviewers for the review level, an approval left open a finding of another owner, the
 owner of a finding cannot be reconstructed from the markers, a sync with `main` failed, an agent, `gh` or `git` call failed or timed out, an agent
@@ -108,6 +109,63 @@ was opened, is put back into `agent:review`, and its issue loses `agent:working`
 Open devloop PRs are capped by `max_open_prs`, including PRs waiting for merge or for a human,
 so unattended work cannot outrun review capacity. New issues start in order: `priority_labels`
 first, then by number. Issues with a `blocked_labels` label are skipped.
+
+### Readiness check before implementation
+
+With `preflight = "<agent>"` in the configuration, an issue is checked before the implementer
+starts on it (#114). The distributed `devloop/config.toml` leaves it **disabled**, with a
+commented example: enabling it is the operator's decision. Without `preflight`, issues start as
+described above.
+
+The checker is a configured agent other than the implementer. It runs in review mode (the
+read-only arguments and sandbox of a reviewer, see [Configuration](#configuration)) in a
+disposable detached worktree at `origin/main`, `issue-<n>-preflight`, removed afterwards, and
+gets the implementer's context: title, body and the comments of `trusted_users`. Its answer
+follows [`devloop/schemas/preflight.json`](../devloop/schemas/preflight.json):
+
+- `ready`, a boolean;
+- `gaps`, each with a `kind` (`operator_decision`, `default_available` or `tool_unavailable`),
+  a `description`, the `code_refs` that show it and a `proposed_default` (`""` if none);
+- `split`, how to divide an issue too large for one run, `""` if not needed.
+
+An issue is ready only if the agent says so **and** lists no gap and no split: a
+`default_available` gap blocks too, until a trusted comment accepts the proposed default. A
+default the repository or the issue already prescribes is not a gap.
+
+The outcome is a comment on the issue, written with the checker's identity and header, whose
+marker records the outcome and a hash of the title, the body and the trusted users' comments.
+The hash leaves out text devloop publishes (comments that start with the attribution header,
+such as escalations and the checks themselves) and comments whose first line is a `/devloop`
+command. The outcome is reused while the hash stays the same:
+
+- **ready**: the issue starts on a later tick, in the usual order and within `max_open_prs`.
+  The implementer starts only if the hash read just before still matches;
+- **not ready**: the issue goes to `agent:needs-human` (it keeps `agent:ready`), and the comment
+  lists the gaps with the proposed defaults and the split. If `agent:needs-human` is removed
+  without changing the issue, the next tick blocks it again with the same outcome.
+
+An issue blocked by the check is examined again on every tick, even in `agent:needs-human`. A
+new check runs when the hash changed (a trusted user decided a point, accepted a default, or
+edited the issue) or when a trusted user wrote a comment whose **first line** is
+`/devloop recheck`. Each request starts one check: it counts only if written after the latest
+text devloop published on the issue. The command is ignored, and logged, when anyone outside
+`trusted_users` writes it. If the new check passes, the dispatcher removes `agent:needs-human`
+and the issue goes back in the queue.
+
+The dispatcher removes only a block that belongs to the check. The check owns
+`agent:needs-human` only if it added the label when the label was absent: its record keeps the
+number of earlier `labeled` events of the label, and the dispatcher must have written the only
+one since. The check loses the block, which then stays until a person removes it, if the label
+was removed and applied again, if a comment starting with the attribution header came after the
+check (another escalation, or anything that looks like one), or if the attribution is
+uncertain. A label already present when the
+check failed is never the check's. Rechecks run only for blocks the check owns.
+
+Each check is an agent action: it takes a slot of `max_actions_per_tick`, and a check of an
+issue that may start also takes one of the free PR slots of the tick. It runs under
+`agent_timeout_seconds`. A check that fails or times out sends the issue to
+`agent:needs-human` with a comment, removing `agent:ready` like any failed step, and the
+implementer does not start.
 
 ## Review level and policy receipt
 
@@ -462,7 +520,9 @@ the `implementer` and the `reviewers` pool (none of them the implementer, none l
 `reviewer = "<agent>"`, the form before #111, is a pool of one, and setting both is an error)
 and, for each agent, the
 model, reasoning effort and extra CLI arguments for writing and reviewing turns. Pass another file
-with `--config`. Among the limits, `agent_stall_seconds` (an integer of at least 1, default 900)
+with `--config`. `preflight` (absent by default) names the agent of the
+[readiness check](#readiness-check-before-implementation); it must be a configured agent other
+than the implementer. Among the limits, `agent_stall_seconds` (an integer of at least 1, default 900)
 and `agent_stall_action` (`"warn"`, the default, or `"abort"`) control the
 [stall check](#stalled-agents); other values stop devloop at startup. `[review_policy]` sets the
 [review level](#review-level-and-policy-receipt): `default_level` (1 or 2, default 1), the level

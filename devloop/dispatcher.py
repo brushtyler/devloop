@@ -35,9 +35,17 @@ closes it in a later review; the dispatcher closes CI findings when CI passes on
 head, and a trusted user can close any finding with ``/devloop finding <key> resolved|withdrawn
 <reason>``. Both closures are dispatcher ``finding`` records. An approval is not promoted while
 another owner's finding is open.
+
+Readiness check (#114, with ``preflight`` configured): before ``implement`` a read-only agent,
+other than the implementer, checks on a checkout of the base branch that the issue can be
+implemented in one run. Its outcome is a ``preflight`` record on the issue, bound to the hash of
+the title, the body and the trusted comments, and reused while that hash holds. An issue that is
+not ready goes to agent:needs-human; the check removes that label only if it added it itself.
 """
 
+import hashlib
 import itertools
+import json
 import string
 import time
 from contextlib import nullcontext
@@ -48,7 +56,7 @@ from .agents import AgentError
 from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, PR_COMMENT, REVIEW
 from .github import GitHubError, merge_state
 from .markdown import (RESUME, dispatcher_header, publishable, read_marker, render_escalation,
-                       render_fix, render_native_review, render_review)
+                       render_fix, render_native_review, render_preflight, render_review)
 from .policy import describe as describe_receipt
 from .policy import (BINDING, agent_profile, differences, distinct, evaluate, independent,
                      profile_of, receipt_of, recorded_level)
@@ -59,7 +67,8 @@ from .workspace import WorkspaceError
 
 PROMPT_DIR = Path(__file__).resolve().parent / 'prompts'
 REREVIEW_COMMAND = '/devloop rereview'
-EXPENSIVE = ('review', 'fix', 'implement', 'sync')
+RECHECK_COMMAND = '/devloop recheck'
+EXPENSIVE = ('review', 'fix', 'implement', 'sync', 'preflight')
 LABEL_STYLE = {
     'ready': ('0e8a16', 'devloop: pronta per essere implementata da un agent'),
     'working': ('fbca04', 'devloop: implementazione in corso'),
@@ -115,7 +124,9 @@ class PullRequest:
 @dataclass
 class Snapshot:
     prs: list
-    ready_issues: list   # dicts: number, title, labels (set), labeler
+    # dicts: number, title, labels (set), labeler, and with ``preflight`` configured, for the
+    # issues that may start or are blocked by the check, ``preflight`` (``_preflight_view``)
+    ready_issues: list
     working_issues: list  # issue numbers
 
 
@@ -227,7 +238,9 @@ def plan(snapshot, cfg):
                           else '')
                 actions.append(Action('review', pr.number, reason))
     free = cfg.max_open_prs - len(snapshot.prs)
-    if free > 0:
+    if cfg.preflight:
+        actions += _plan_preflight(snapshot, cfg, pr_issues, free)
+    elif free > 0:
         blocked = set(cfg.blocked_labels) | {lb.working, lb.needs_human}
         candidates = [i for i in snapshot.ready_issues
                       if not (i['labels'] & blocked) and i['number'] not in pr_issues
@@ -242,6 +255,81 @@ def plan(snapshot, cfg):
             spent += 1
         capped.append(action)
     return capped
+
+
+def _plan_preflight(snapshot, cfg, pr_issues, free):
+    """New work with the readiness check (#114). Issues start in the usual order, up to
+    ``free``: one whose check for its current text passed is implemented, one without a valid
+    check is checked first (implemented on a later tick if ready). A failed check that is still
+    valid blocks the issue again if its ``agent:needs-human`` was removed. An issue the check
+    blocked is checked again, whatever ``free``, when its text changed or a trusted user asked
+    for it; any other ``agent:needs-human`` is left alone."""
+    lb = cfg.labels
+    excluded = set(cfg.blocked_labels) | {lb.working}
+    issues = [i for i in snapshot.ready_issues
+              if not (i['labels'] & excluded) and i['number'] not in pr_issues
+              and i['labeler'] in cfg.trusted_users]
+    issues.sort(key=lambda i: (not (i['labels'] & set(cfg.priority_labels)), i['number']))
+    actions, taken = [], 0
+    for issue in issues:
+        view = issue.get('preflight')
+        if view is None:
+            continue  # not read by the snapshot: nothing is known about its check
+        state, reason = preflight_state(view)
+        if lb.needs_human in issue['labels']:
+            if view['owned'] and state == 'run':
+                actions.append(Action('preflight', issue['number'], reason))
+        elif state == 'not_ready':
+            actions.append(Action('preflight_block', issue['number'],
+                                  'the readiness check of the current text failed'))
+        elif taken < free:
+            taken += 1
+            actions.append(Action('implement', issue['number']) if state == 'ready'
+                           else Action('preflight', issue['number'], reason))
+    return actions
+
+
+def preflight_state(view):
+    """``(state, reason)`` of an issue's readiness check: ``run`` when a check is needed,
+    otherwise ``ready`` or ``not_ready``, the outcome of the latest check, which holds while the
+    issue text keeps its hash."""
+    record = view['record']
+    if view['recheck']:
+        return 'run', f'{RECHECK_COMMAND} by a trusted user'
+    if record is None:
+        return 'run', 'no readiness check yet'
+    if record['hash'] != view['hash']:
+        return 'run', 'the issue text changed since the readiness check'
+    return ('ready' if record['ready'] else 'not_ready'), ''
+
+
+def devloop_text(body):
+    """Text devloop or its agents published: it starts with the AGENTS.md header."""
+    return (body or '').lstrip().startswith('> [!NOTE]')
+
+
+def control_command(body):
+    """Whether a comment is a devloop command: its first line starts with ``/devloop``."""
+    lines = (body or '').strip().splitlines()
+    return bool(lines) and lines[0].split()[:1] == ['/devloop']
+
+
+def preflight_hash(title, body, comments, trusted_users):
+    """The hash that binds a readiness check to the issue text: title, body and the comments of
+    trusted users, without the text devloop publishes and without ``/devloop`` commands."""
+    kept = [[(c.get('author') or {}).get('login'), c.get('body') or ''] for c in comments
+            if (c.get('author') or {}).get('login') in trusted_users
+            and not devloop_text(c.get('body')) and not control_command(c.get('body'))]
+    data = json.dumps([title or '', body or '', kept], ensure_ascii=False, separators=(',', ':'))
+    return hashlib.sha256(data.encode('utf-8')).hexdigest()
+
+
+def normalize_preflight(raw):
+    """The outcome of a readiness check: ready only without gaps and without a split, whatever
+    the agent says (a ``default_available`` gap blocks too)."""
+    gaps = [dict(g, code_refs=list(g['code_refs'])) for g in raw['gaps']]
+    ready = bool(raw['ready']) and not gaps and not raw['split'].strip()
+    return {'ready': ready, 'gaps': gaps, 'split': raw['split']}
 
 
 def pending_reviewers(records):
@@ -532,12 +620,157 @@ class Dispatcher:
                 pr.checks, pr.failed_checks, pr.failed_runs = self.gh.checks(pr.head_sha)
             prs.append(pr)
         ready = []
+        pr_issues = {pr.issue for pr in prs}
+        skip = set(self.cfg.blocked_labels) | {lb.working}
         for raw in self.gh.issues_with_label(lb.ready):
-            ready.append({'number': raw['number'], 'title': raw['title'],
-                          'labels': label_names(raw['labels']),
-                          'labeler': self.gh.last_labeler(raw['number'], lb.ready)})
+            issue = {'number': raw['number'], 'title': raw['title'],
+                     'labels': label_names(raw['labels']),
+                     'labeler': self.gh.last_labeler(raw['number'], lb.ready)}
+            # The readiness check of the issues that may start or are blocked by it (#114).
+            if (self.cfg.preflight and issue['labeler'] in self.cfg.trusted_users
+                    and not issue['labels'] & skip and issue['number'] not in pr_issues):
+                issue['preflight'] = self._preflight_view(issue['number'], issue['labels'])
+            ready.append(issue)
         working = [raw['number'] for raw in self.gh.issues_with_label(lb.working)]
         return Snapshot(prs=prs, ready_issues=ready, working_issues=working)
+
+    # Readiness check (#114) ---------------------------------------------------
+    def _preflight_records(self, comments):
+        """``(position, record)`` of the readiness checks in ``comments``, each written by the
+        identity of the configured agent it names."""
+        found = []
+        for position, comment in enumerate(comments):
+            record = read_marker(comment.get('body', ''), 'preflight')
+            login = (comment.get('author') or {}).get('login')
+            if record and record['agent'] in self.cfg.agents and self._wrote(login, record['agent']):
+                found.append((position, record))
+        return found
+
+    def _recheck_requested(self, number, comments):
+        """Whether a trusted user asked in person for a new check with ``RECHECK_COMMAND`` as
+        the first line of a comment written after the latest text devloop published there: each
+        request starts one check. Requests from anyone else are ignored and logged."""
+        last = max((position for position, c in enumerate(comments)
+                    if devloop_text(c.get('body'))
+                    and self._writes_records((c.get('author') or {}).get('login'))), default=-1)
+        asked = False
+        for comment in comments[last + 1:]:
+            body = comment.get('body') or ''
+            lines = body.strip().splitlines()
+            if devloop_text(body) or not lines or lines[0].strip() != RECHECK_COMMAND:
+                continue
+            login = (comment.get('author') or {}).get('login')
+            if login in self.cfg.trusted_users:
+                asked = True
+            else:
+                self.log(f'  issue #{number}: ignored `{RECHECK_COMMAND}` by {login}: the author '
+                         'is not a trusted user')
+        return asked
+
+    def _owns_block(self, number, comments, records):
+        """Whether the issue's ``agent:needs-human`` belongs to the readiness check: the latest
+        check added it when the label was absent (its record says how many ``labeled`` events
+        of the label came before), the dispatcher wrote the only ``labeled`` event since, and
+        no other text devloop publishes (another escalation) came after that check. Anything
+        else, or anything uncertain, leaves the block to a human."""
+        if not records:
+            return False
+        position, record = records[-1]
+        if not record['blocked'] or any(devloop_text(c.get('body'))
+                                         for c in comments[position + 1:]):
+            return False
+        labelers = self.gh.labelers(number, self.cfg.labels.needs_human)
+        return (len(labelers) == record['labeled'] + 1
+                and self._wrote(labelers[-1], DISPATCHER))
+
+    def _preflight_view(self, number, labels):
+        """What planning needs about an issue's readiness check, read now from GitHub:
+        ``{hash, record, recheck, owned}``, ``record`` being the latest check or None."""
+        history = self.gh.issue_history(number)
+        comments = self.gh.issue_comments(number)
+        records = self._preflight_records(comments)
+        return {'hash': preflight_hash(history['title'], history['body'], comments,
+                                       self.cfg.trusted_users),
+                'record': records[-1][1] if records else None,
+                'recheck': self._recheck_requested(number, comments),
+                'owned': (self.cfg.labels.needs_human in labels
+                          and self._owns_block(number, comments, records))}
+
+    def _publish_preflight(self, number, outcome, digest, agent_key, note=''):
+        """Record a check's outcome on the issue and apply it to ``agent:needs-human``: add the
+        label when the check fails and the label is absent, remove it when the check passes and
+        the label belongs to the readiness check. A label someone else set stays."""
+        lb = self.cfg.labels
+        agent = self.cfg.agent(agent_key)
+        labels = label_names(self.gh.issue(number).get('labels') or [])
+        comments = self.gh.issue_comments(number)
+        records = self._preflight_records(comments)
+        present = lb.needs_human in labels
+        owned = present and self._owns_block(number, comments, records)
+        record = dict(outcome, hash=digest, agent=agent_key, blocked=False, labeled=0)
+        author = self._as(agent_key, ISSUE_COMMENT)
+        head = self.runner.header(agent)
+        if outcome['ready']:
+            if owned:
+                # Label first: if the comment is lost, the next tick checks the issue again.
+                self.gh.edit_labels(number, remove=[lb.needs_human])
+                note = note or 'Il blocco messo dal controllo di prontezza è stato rimosso.'
+            elif present:
+                note = ('`agent:needs-human` resta: non risulta messo dal controllo di prontezza, '
+                        'quindi lo rimuove una persona.')
+            author.comment(number, render_preflight(record, head, note))
+            self.log('  ready' + (', block removed' if owned else ''))
+            return
+        if owned:
+            record.update(blocked=True, labeled=records[-1][1]['labeled'])
+        elif present:
+            note = note or ('`agent:needs-human` era già presente e non è attribuito al controllo '
+                            'di prontezza: un nuovo esito positivo non lo rimuove.')
+        else:
+            record.update(blocked=True,
+                          labeled=len(self.gh.labelers(number, lb.needs_human)))
+        # Comment first: if the label is lost, the next tick blocks the issue again.
+        author.comment(number, render_preflight(record, head, note))
+        if record['blocked'] and not owned:
+            self.gh.edit_labels(number, add=[lb.needs_human])
+        self.log(f'  not ready: {len(record["gaps"])} gap(s)')
+
+    def _do_preflight(self, number):
+        """Run the readiness check on a checkout of the base branch, with the context the
+        implementer gets, then record and apply its outcome."""
+        cfg = self.cfg
+        agent = cfg.agent(cfg.preflight)
+        history = self.gh.issue_history(number)
+        reason = untrusted_change(history, cfg.labels.ready, cfg.trusted_users)
+        if reason:
+            raise UntrustedChange(f'issue #{number}: {reason}')
+        comments = self.gh.issue_comments(number)
+        digest = preflight_hash(history['title'], history['body'], comments, cfg.trusted_users)
+        prompt = _template('preflight', repo=cfg.repo, base_branch=cfg.base_branch,
+                           issue_number=number, issue_title=history['title'],
+                           issue_body=history['body'],
+                           issue_comments=_render_issue_comments(comments, cfg.trusted_users),
+                           language=cfg.language)
+        name = f'issue-{number}-preflight'
+        path = self.ws.base_copy(name)
+        try:
+            raw = self.runner.run(agent, 'review', prompt, 'preflight', path, name)
+        finally:
+            self.ws.remove(name)
+        self._publish_preflight(number, normalize_preflight(raw), digest, agent.key)
+
+    def _do_preflight_block(self, number):
+        """Block again an issue whose latest check, still valid for its text, failed, after its
+        ``agent:needs-human`` was removed: the outcome is reused, not recomputed."""
+        view = self._preflight_view(number, ())
+        if preflight_state(view)[0] != 'not_ready':
+            self.log('  the readiness check changed since the snapshot; next tick')
+            return
+        record = view['record']
+        outcome = {k: record[k] for k in ('ready', 'gaps', 'split')}
+        self._publish_preflight(number, outcome, view['hash'], record['agent'],
+                                note='Esito del controllo precedente, riusato: il testo '
+                                     'dell\'issue non è cambiato.')
 
     # Tick ----------------------------------------------------------------
     def tick(self, dry_run=False):
@@ -591,10 +824,7 @@ class Dispatcher:
         if reason:
             raise UntrustedChange(f'issue #{number}: {reason}')
         issue = dict(self.gh.issue(number), title=history['title'], body=history['body'])
-        comments = [c for c in issue.get('comments') or []
-                    if (c.get('author') or {}).get('login') in self.cfg.trusted_users]
-        rendered = '\n\n'.join(f'### Comment by {c["author"]["login"]}\n\n{c["body"]}' for c in comments)
-        return issue, ('## Issue comments\n\n' + rendered) if rendered else ''
+        return issue, _render_issue_comments(issue.get('comments') or [], self.cfg.trusted_users)
 
     def _write_turn(self, agent, prompt, schema, path, label):
         """Run a writing agent, then the tests; retry with the failures. Returns the output and
@@ -874,6 +1104,10 @@ class Dispatcher:
     def _do_implement(self, number):
         cfg, lb = self.cfg, self.cfg.labels
         agent = cfg.agent(cfg.implementer)
+        if cfg.preflight and preflight_state(self._preflight_view(number, ()))[0] != 'ready':
+            # The text changed, or a new check was asked, after the snapshot.
+            self.log('  the readiness check does not cover the current text; next tick')
+            return
         issue, comments = self._issue_context(number)
         self.gh.edit_labels(number, add=[lb.working], remove=[lb.ready])
         name, branch = f'issue-{number}', f'{cfg.branch_prefix}{number}'
@@ -1166,6 +1400,14 @@ def _open_findings_reason(findings):
             f'che contiene una riga `{FINDING_COMMAND} <round/reviewer/ID> resolved|withdrawn '
             '<motivazione>`, poi riportare la PR in `agent:review`: l\'approvazione registrata '
             'viene riapplicata senza una nuova review.')
+
+
+def _render_issue_comments(comments, trusted_users):
+    """The comments of trusted users as model input, or ''."""
+    rendered = '\n\n'.join(f'### Comment by {c["author"]["login"]}\n\n{c["body"]}'
+                           for c in comments
+                           if (c.get('author') or {}).get('login') in trusted_users)
+    return ('## Issue comments\n\n' + rendered) if rendered else ''
 
 
 def _format_conflicts(conflicts):

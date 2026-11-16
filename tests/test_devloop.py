@@ -832,6 +832,9 @@ class FakeWS:
 
     existing_branch = new_branch
 
+    def base_copy(self, name):
+        return Path('/wt') / name
+
     def review_copy(self, path):
         name = f'{Path(path).name}-review'
         return name, Path('/wt') / name
