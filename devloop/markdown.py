@@ -171,9 +171,22 @@ def _valid_ledger(r):
     return isinstance(r.get('event'), str)
 
 
+def _valid_merged(m):
+    """A merge devloop made (#172): the merged head, its receipt, level and merge mode."""
+    return (isinstance(m.get('head'), str) and m.get('mode') in ('strict', 'auto')
+            and _is_int(m.get('level')) and valid_receipt(m.get('receipt')))
+
+
+def _valid_hold(h):
+    """A hold or release command the dispatcher applied (#172), with its author and reason."""
+    return (h.get('event') in ('hold', 'release')
+            and all(isinstance(h.get(k), str) for k in ('by', 'reason')))
+
+
 _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy': _valid_policy,
           'finding': _valid_finding, 'sync': _valid_sync, 'preflight': _valid_preflight,
-          'notice': _valid_notice, 'ledger': _valid_ledger}
+          'notice': _valid_notice, 'ledger': _valid_ledger, 'merged': _valid_merged,
+          'hold': _valid_hold}
 
 
 def read_marker(text, kind):

@@ -278,7 +278,7 @@ python3 -I ssdlc_replay_gate.py --output recovery-benchmark.json # isolated A5 r
 - Docker test of the writer gate holder (opt-in, as root on the host): `SSDLC_DOCKER_TESTS=1 python3 -m unittest discover -s tests -p 'test_container_holder_docker.py' -v` ([Writer fencing](docs/writer-fencing.md#containers-the-pid-1-holder)).
 - When SSDLC develops itself, run a pinned controller checkout against a **separate** target checkout.
 - Agents contributing to this repository follow [AGENTS.md](AGENTS.md).
-- [devloop](docs/devloop.md) dispatches issues labelled `agent:ready` to an implementer agent and an independent reviewer agent, up to a PR that a human merges.
+- [devloop](docs/devloop.md) dispatches issues labelled `agent:ready` to an implementer agent and an independent reviewer agent, up to a PR that a human merges (devloop merges only when the operator enables a merge mode).
 
 ---
 

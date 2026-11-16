@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .localtests import MODES as LOCAL_TESTS_MODES
-from .policy import MAX_LEVEL, MIN_LEVEL, ReviewPolicy
+from .policy import MAX_LEVEL, MIN_LEVEL, ZERO_LEVEL, ReviewPolicy
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / 'config.toml'
 # The root of the running dispatcher's installation (a pinned checkout, see docs/devloop.md):
@@ -39,6 +39,44 @@ AGY_FORBIDDEN_ARGS = ('--dangerously-skip-permissions', '--settings')
 
 class ConfigError(ValueError):
     pass
+
+
+# Merge modes (#172), from the most restrictive: ``off`` (a person merges), ``strict`` (devloop
+# merges a ready PR that meets the merge directives), ``auto`` (as strict, and the supervisor may
+# hold a merge).
+MERGE_MODES = ('off', 'strict', 'auto')
+DEFAULT_OPERATOR_ONLY = ('docs/adr/', 'AGENTS.md', 'CLAUDE.md')
+
+
+@dataclass(frozen=True)
+class MergePolicy:
+    """``[merge]`` (#172): the mode, its overrides per review level and the paths whose PRs a
+    person always merges."""
+    mode: str = 'off'
+    # ``(level, mode)`` pairs from ``[merge.levels]``.
+    levels: tuple = ()
+    # Directory prefixes (``docs/adr/``) or files relative to the root (``AGENTS.md``).
+    operator_only_paths: tuple = DEFAULT_OPERATOR_ONLY
+
+    def enabled(self):
+        return self.mode != 'off'
+
+    def operator_only(self, path):
+        """Whether ``path`` is, or is under, an entry of ``operator_only_paths``."""
+        path = path.strip('/')
+        for entry in (e.strip().strip('/') for e in self.operator_only_paths):
+            if entry and (path == entry or path.startswith(entry + '/')):
+                return True
+        return False
+
+    def mode_for(self, level, paths):
+        """The mode of a PR at review ``level`` whose diff touches ``paths``: the most
+        restrictive of ``mode`` and the override of ``level``, and ``off`` when a path is
+        reserved to the operator."""
+        if any(self.operator_only(p) for p in paths):
+            return 'off'
+        modes = [self.mode] + [m for lvl, m in self.levels if lvl == level]
+        return min(modes, key=MERGE_MODES.index)
 
 
 @dataclass(frozen=True)
@@ -98,10 +136,11 @@ class Labels:
     changes: str = 'agent:changes'
     ready_to_merge: str = 'agent:ready-to-merge'
     needs_human: str = 'agent:needs-human'
+    merge_hold: str = 'agent:merge-hold'
 
     def all(self):
         return (self.ready, self.working, self.review, self.changes,
-                self.ready_to_merge, self.needs_human)
+                self.ready_to_merge, self.needs_human, self.merge_hold)
 
 
 @dataclass(frozen=True)
@@ -141,6 +180,10 @@ class Config:
     app_key_dir: str = '~/.ghapps'
     labels: Labels = field(default_factory=Labels)
     review_policy: ReviewPolicy = field(default_factory=ReviewPolicy)
+    merge: MergePolicy = field(default_factory=MergePolicy)
+    # The agent whose identity, besides trusted_users, may hold and release a merge in ``auto``
+    # mode (#172), or '' when none is configured.
+    supervisor: str = ''
 
     def agent(self, key):
         return self.agents[key]
@@ -335,6 +378,40 @@ def _zero_policy(table, level_label, default):
     return label, allowlist, tuple(expected)
 
 
+def parse_merge(table, supervisor):
+    """``[merge]`` (#172): ``auto``, also as the override of a level, needs
+    ``roles.supervisor``."""
+    where = 'merge'
+    if not isinstance(table, dict):
+        raise ConfigError(f'{where}: expected a table')
+    unknown = set(table) - {'mode', 'levels', 'operator_only_paths'}
+    if unknown:
+        raise ConfigError(f'{where}: unknown keys {sorted(unknown)}')
+    mode = table.get('mode', 'off')
+    if mode not in MERGE_MODES:
+        raise ConfigError(f'{where}.mode: must be one of {MERGE_MODES}')
+    raw = table.get('levels', {})
+    if not isinstance(raw, dict):
+        raise ConfigError(f'{where}.levels: expected a table of "<level>" = "<mode>"')
+    levels = []
+    for key, value in raw.items():
+        if key not in {str(n) for n in range(ZERO_LEVEL, MAX_LEVEL + 1)}:
+            raise ConfigError(f'{where}.levels: {key!r} is not a review level '
+                              f'({ZERO_LEVEL} to {MAX_LEVEL})')
+        if value not in MERGE_MODES:
+            raise ConfigError(f'{where}.levels.{key}: must be one of {MERGE_MODES}')
+        levels.append((int(key), value))
+    paths = _str_list(table, 'operator_only_paths', where, DEFAULT_OPERATOR_ONLY)
+    for entry in paths:
+        parts = entry.strip().rstrip('/').split('/')
+        if (entry.startswith('/') or any(p in ('', '.', '..') for p in parts)
+                or any(c in entry for c in '*?[]\\')):
+            raise ConfigError(f'{where}.operator_only_paths: invalid entry {entry!r}')
+    if 'auto' in (mode, *(m for _, m in levels)) and not supervisor:
+        raise ConfigError(f'{where}: "auto" needs roles.supervisor')
+    return MergePolicy(mode=mode, levels=tuple(sorted(levels)), operator_only_paths=paths)
+
+
 def _reviewer_pool(roles, agents, implementer):
     """``roles.reviewers``, or ``roles.reviewer`` as a pool of one: known agents, no repeats,
     never the implementer."""
@@ -387,6 +464,11 @@ def parse_config(data, root=INSTALL_ROOT):
     if implementer not in agents:
         raise ConfigError(f'roles.implementer: unknown agent {implementer!r}')
     pool = _reviewer_pool(roles, agents, implementer)
+    supervisor = ''
+    if 'supervisor' in roles:
+        supervisor = _require(roles, 'supervisor', str, 'roles')
+        if supervisor not in agents:
+            raise ConfigError(f'roles.supervisor: unknown agent {supervisor!r}')
     preflight = ''
     if 'preflight' in data:
         preflight = _require(data, 'preflight', str, 'config')
@@ -447,6 +529,7 @@ def parse_config(data, root=INSTALL_ROOT):
         protected_paths=_str_list(data, 'protected_paths', 'config', ('.github/',)),
         apps=apps, app_key_dir=key_dir, agent_stall_action=stall_action,
         local_tests=local_tests,
+        merge=parse_merge(data.get('merge', {}), supervisor), supervisor=supervisor,
         review_policy=parse_review_policy(
             data.get('review_policy', {}), root,
             [(k, apps[k].slug if k in apps else None, agents[k].kind, agents[k].model,
