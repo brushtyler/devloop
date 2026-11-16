@@ -1,5 +1,13 @@
-"""Read-only, explicitly requested greenfield eligibility and registered policy."""
+"""Read-only, explicitly requested greenfield eligibility and registered policy.
+
+Pre-development authority is persisted separately from the first-checkpoint
+exemption. ``PREPARATION`` is written once, before the absent-baseline contract,
+and lets recon/PO/design resume after verification. ``RESERVATION`` is created
+exclusively before the worktree, the task journal or any developer dispatch:
+once it exists, in any state, the exemption is spent for every later invocation.
+"""
 import configparser
+import os
 import shlex
 import tomllib
 import copy
@@ -9,10 +17,19 @@ import logging
 import re
 from pathlib import Path
 
-from ssdlc_tasks import PlanError, TaskError, TaskJournal, confined, digest, git, validate_document
+from ssdlc_tasks import PlanError, TaskError, TaskJournal, atomic_json, confined, digest, file_hash, git, validate_document
 
 CODES = ('profile_invalid', 'not_registered', 'existing_tests', 'dirty_tree',
-         'not_initial_commit', 'tree_mismatch', 'policy_conflict', 'interrupted', 'window_spent')
+         'not_initial_commit', 'tree_mismatch', 'policy_conflict', 'interrupted', 'window_spent',
+         'preparation_invalid', 'controller_changed', 'policy_changed', 'inputs_changed', 'limits_changed')
+PREPARATION = '00-recon/bootstrap-preparation.json'
+RESERVATION = '00-recon/bootstrap-first-attempt.json'
+PREPARATION_FORMAT = 'bootstrap-preparation-v1'
+RESERVATION_FORMAT = 'bootstrap-first-attempt-v1'
+# Any of these means the first development attempt may have started.
+DEVELOPMENT_EVIDENCE = (RESERVATION, 'worktree', '03-dev/tasks/task-journal.jsonl', '03-dev/implementation.diff')
+PREPARATION_KEYS = {'schema_version', 'format', 'ticket', 'status', 'contract_sha256', 'binding',
+                    'controller', 'limits_policy_sha256'}
 COUNTERS = {'bootstrap_eligible': 0, 'bootstrap_ineligible': 0}
 
 
@@ -84,16 +101,161 @@ def require_unproven_run_is_current(root, contract=None, *, first_invocation=Fal
         return
     if first_invocation:
         return
+    if proven(root):
+        return
+    require_preparation_resumable(root, contract)
+
+
+def proven(root):
     try:
-        path = confined(root, '03-dev/tasks/task-journal.jsonl', protect=False)
+        path = confined(Path(root), '03-dev/tasks/task-journal.jsonl', protect=False)
         raw = path.read_bytes() if path.exists() else b''
         complete = raw[:raw.rfind(b'\n') + 1]
         state, _, _ = TaskJournal._replay(complete)
-        if state and state.get('bootstrap', {}).get('status') == 'PROVEN':
-            return
+        return bool(state and state.get('bootstrap', {}).get('status') == 'PROVEN')
     except (OSError, ValueError, TaskError):
-        pass
-    raise _ineligible('interrupted', root.name)
+        return False
+
+
+def fault(point):
+    """Test hook at each persistence boundary of the preparation protocol."""
+
+
+def _exists(root, name):
+    path = Path(root) / name
+    return path.exists() or path.is_symlink()
+
+
+def development_started(root):
+    """A missing journal is never proof that no attempt started."""
+    return any(_exists(root, name) for name in DEVELOPMENT_EVIDENCE)
+
+
+def preparation_record(ticket, contract, controller, limits_policy_sha256):
+    return dict(schema_version='1.0', format=PREPARATION_FORMAT, ticket=ticket, status='PREPARING',
+                contract_sha256=digest(contract), binding=copy.deepcopy(contract['bootstrap']),
+                controller=copy.deepcopy(controller), limits_policy_sha256=limits_policy_sha256)
+
+
+def read_preparation(root):
+    """Return the persisted record, None when absent; refuse anything unrecognised."""
+    root = Path(root)
+    if not _exists(root, PREPARATION):
+        return None
+    try:
+        path = confined(root, PREPARATION, protect=False)
+        if path.is_symlink() or path.parent.is_symlink() or path.stat().st_size > 65536:
+            raise ValueError('unsafe preparation record')
+        record = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError, TaskError):
+        raise _ineligible('preparation_invalid', root.name) from None
+    if (not isinstance(record, dict) or set(record) != PREPARATION_KEYS
+            or record['schema_version'] != '1.0' or record['format'] != PREPARATION_FORMAT
+            or record['status'] != 'PREPARING' or not isinstance(record['binding'], dict)
+            or not isinstance(record['controller'], dict)):
+        raise _ineligible('preparation_invalid', root.name)
+    return record
+
+
+def require_preparation_resumable(root, contract):
+    """Read-only admission of a sealed contract whose first attempt never started."""
+    root = Path(root)
+    record = read_preparation(root)
+    if record is None:
+        # Historical contracts and interrupted exemptions are never converted.
+        raise _ineligible('interrupted', root.name)
+    if development_started(root):
+        raise _ineligible('window_spent', root.name)
+    if record['contract_sha256'] != digest(contract) or record['binding'] != contract.get('bootstrap'):
+        raise _ineligible('preparation_invalid', root.name)
+    return record
+
+
+def seal_preparation(root, record):
+    """Write the record once, before the contract; an interrupted seal rolls forward only if identical."""
+    root = Path(root)
+    if development_started(root):
+        raise _ineligible('window_spent', root.name)
+    existing = read_preparation(root)
+    if existing is not None:
+        if existing != record:
+            raise _ineligible('inputs_changed', root.name)
+        return
+    fault('before_preparation_record')
+    atomic_json(confined(root, PREPARATION, protect=False), record)
+    fault('after_preparation_record')
+
+
+def recover_unregistered_contract(root, contract):
+    """A contract written after its preparation record but before registration."""
+    try:
+        require_preparation_resumable(root, contract)
+    except BootstrapError:
+        return False
+    return True
+
+
+def verify_preparation(root, repo, contract, *, ticket, base_commit, controller,
+                       limits_policy_sha256, artifacts):
+    """Full check before resuming preparation or reserving the first attempt."""
+    root = Path(root)
+    record = require_preparation_resumable(root, contract)
+    binding = contract['bootstrap']
+    if record['ticket'] != ticket or binding.get('initial_commit') != base_commit:
+        raise _ineligible('preparation_invalid', ticket)
+    if record['controller'] != controller:
+        raise _ineligible('controller_changed', ticket)
+    if binding.get('profile_id') not in PROFILES or policy_sha256(binding['profile_id']) != binding.get('policy_sha256'):
+        raise _ineligible('policy_changed', ticket)
+    if record['limits_policy_sha256'] != limits_policy_sha256:
+        raise _ineligible('limits_changed', ticket)
+    for name, meta in sorted(artifacts.items()):
+        if not name.startswith(('00-recon/', '01-po/', '02-design/')):
+            continue
+        try:
+            path = confined(root, meta['path'], protect=False)
+            if path.is_symlink() or not path.is_file() or file_hash(path) != meta['sha256']:
+                raise ValueError(name)
+        except (OSError, ValueError, KeyError, TypeError, TaskError):
+            raise _ineligible('inputs_changed', ticket) from None
+    profile = load_profile(repo, run_id=ticket)
+    if profile is None:
+        raise _ineligible('profile_invalid', ticket)
+    if decide(repo, base_commit, profile, run_id=ticket) != binding:
+        raise _ineligible('inputs_changed', ticket)
+    return record
+
+
+def reserve_first_attempt(root, ticket):
+    """Exclusively claim the one exemption window before any development write."""
+    root = Path(root)
+    record = read_preparation(root)
+    if record is None:
+        raise _ineligible('interrupted', ticket)
+    path = confined(root, RESERVATION, protect=False)
+    data = json.dumps(dict(schema_version='1.0', format=RESERVATION_FORMAT, ticket=ticket,
+                           contract_sha256=record['contract_sha256'],
+                           preparation_sha256=file_hash(root / PREPARATION)), indent=2).encode() + b'\n'
+    fault('before_reservation')
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        raise _ineligible('window_spent', ticket) from None
+    try:
+        # The claim is the file's existence; a torn body still refuses renewal.
+        fault('reservation_created')
+        while data:
+            data = data[os.write(fd, data):]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    fault('after_reservation')
+    logging.getLogger(__name__).info('bootstrap stage=reservation decision=reserved reason=first_attempt run=%s txn=- preview=- tasks=-', _log_run_id(ticket))
 
 
 def decide(repo, base_commit, profile, *, run_id='-'):

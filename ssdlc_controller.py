@@ -9,7 +9,8 @@ from ssdlc_tasks import TaskError, digest, file_hash
 def _snapshot_git(root, *args):
     env = {key: value for key, value in os.environ.items()
            if not key.startswith('GIT_CONFIG_')}
-    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1')
+    # Observation only: status must not refresh the index (read-only preflight).
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1', GIT_OPTIONAL_LOCKS='0')
     proc = subprocess.run(['git', '--literal-pathspecs', '-c', 'core.excludesFile=',
                            '-c', 'core.fsmonitor=false', *args],
                           cwd=root, env=env, capture_output=True, text=True)

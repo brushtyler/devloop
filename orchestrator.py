@@ -537,12 +537,73 @@ def _bootstrap_run_invocation(method):
         bootstrap.require_unproven_run_is_current(self.ssdlc_root)
         self._bootstrap_invocation_active = True
         self._bootstrap_contract_captured = False
+        self._bootstrap_window_claimed = False
+        self._bootstrap_preparation_resumed = False
         try:
             return method(self, *args, **kwargs)
         finally:
             self._bootstrap_invocation_active = False
             self._bootstrap_contract_captured = False
+            self._bootstrap_window_claimed = False
+            self._bootstrap_preparation_resumed = False
     return wrapped
+
+
+BOOTSTRAP_REFUSALS = {
+    'interrupted': 'no resumable preparation record (historical contract or interrupted exemption); '
+                   'the exemption is not renewed',
+    'window_spent': 'the first development attempt was already reserved or started; the exemption is not renewed',
+    'preparation_invalid': 'the preparation record is unreadable or does not match the sealed contract',
+    'controller_changed': 'the executing controller differs from the one that sealed the preparation',
+    'policy_changed': 'the registered bootstrap policy differs from the sealed binding',
+    'inputs_changed': 'sealed inputs, approved artifacts or the initial commit/tree changed',
+    'limits_changed': 'the frozen limit policy differs from the one bound at preparation',
+}
+
+
+def bootstrap_refusal_message(reason):
+    detail = BOOTSTRAP_REFUSALS.get(reason)
+    return 'bootstrap_ineligible: ' + reason + ('; ' + detail if detail else '') + '; retained evidence is unchanged'
+
+
+def verify_bootstrap_preparation_readonly(repo_root, root, ticket):
+    """The controller's full preparation check, without locks, writes or a controller object.
+
+    Used by the shared CLI/supervisor preflight so that a drifted preparation is
+    refused before any supervisor state, lock or process exists.
+    """
+    root = Path(root)
+    path = root / '00-recon/quality-contract.json'
+    if not path.exists() and not path.is_symlink():
+        return None
+    try:
+        if path.is_symlink() or (root / 'state.json').is_symlink():
+            raise ValueError('symlinked preparation input')
+        quality = json.loads(path.read_text())
+        if not isinstance(quality, dict) or not quality.get('bootstrap') or bootstrap.proven(root):
+            return None
+        state = json.loads((root / 'state.json').read_text())
+        if not isinstance(state, dict) or not isinstance(state.get('artifacts', {}), dict):
+            raise ValueError('malformed run state')
+        base_commit = state['base_commit']
+    except (OSError, ValueError, KeyError, TypeError):
+        raise bootstrap.BootstrapError('preparation_invalid') from None
+    policy = root / 'limits/policy.json'
+    limits = None
+    if policy.exists() or policy.is_symlink():
+        try:
+            if policy.is_symlink():
+                raise ValueError('symlinked limit policy')
+            limits = digest(json.loads(policy.read_text())['policy'])
+        except (OSError, ValueError, KeyError, TypeError):
+            raise bootstrap.BootstrapError('limits_changed') from None
+    try:
+        controller = controller_snapshot(Path(__file__).resolve().parent)
+    except TaskError:
+        raise bootstrap.BootstrapError('controller_changed') from None
+    return bootstrap.verify_preparation(
+        root, Path(repo_root), quality, ticket=str(ticket), base_commit=base_commit,
+        controller=controller, limits_policy_sha256=limits, artifacts=state.get('artifacts', {}))
 
 
 def startup_preflight(repo_root, ticket, command, args=None):
@@ -552,6 +613,9 @@ def startup_preflight(repo_root, ticket, command, args=None):
         try:
             root = runtime_root(Path(repo_root) / '.ssdlc' / str(ticket))
             bootstrap.require_unproven_run_is_current(root)
+            # Full read-only verification: controller, policy, limits, initial
+            # commit/tree and approved artifacts, before any write or launch.
+            verify_bootstrap_preparation_readonly(repo_root, root, ticket)
         except bootstrap.BootstrapError as exc:
             return dict(ok=False, cls=result['cls'], code='bootstrap_ineligible', reason=exc.code)
         except PlanError:
@@ -3166,6 +3230,17 @@ class SSDLCOrchestrator:
         target = self.dir_recon / "quality-contract.json"
         if target.exists():
             meta = self.state.get("artifacts", {}).get("00-recon/quality-contract.json")
+            if meta is None:
+                # Roll forward only a contract sealed after its own preparation
+                # record and interrupted before registration.
+                try:
+                    written = json.loads(target.read_text())
+                except (OSError, ValueError):
+                    written = None
+                if (isinstance(written, dict) and written.get('bootstrap')
+                        and bootstrap.recover_unregistered_contract(self.ssdlc_root, written)):
+                    self.record_artifact("00-recon/quality-contract.json", target)
+                    meta = self.state.get("artifacts", {}).get("00-recon/quality-contract.json")
             if not meta or sha256_file(target) != meta["sha256"]:
                 raise PlanError("Quality snapshot is unregistered or changed; explicit migration required")
             return json.loads(target.read_text())
@@ -3173,6 +3248,9 @@ class SSDLCOrchestrator:
             raise PlanError("Registered quality contract disappeared; refusing regeneration")
         profile = bootstrap.load_profile(self.repo_root, run_id=getattr(self, 'ticket_id', '-'))
         binding = bootstrap.decide(self.repo_root, self.state['base_commit'], profile, run_id=getattr(self, 'ticket_id', '-')) if profile is not None else None
+        if binding is None and bootstrap.read_preparation(self.ssdlc_root) is not None:
+            # A started preparation cannot silently become a strict-baseline run.
+            raise bootstrap.BootstrapError('inputs_changed')
         if (git(self.repo_root, "rev-parse", "HEAD") != self.state["base_commit"]
                 or git(self.repo_root, "status", "--porcelain")):
             raise PlanError("Create a clean, committed baseline before capturing the quality contract")
@@ -3217,8 +3295,15 @@ class SSDLCOrchestrator:
             "QA shell commands are recorded separately and are not typed-check equivalents")
         validate_document("quality-contract", contract)
         if binding:
+            # Durable preparation authority precedes the contract it binds, so
+            # every interrupted write is either rolled forward or refused.
+            bootstrap.seal_preparation(self.ssdlc_root, bootstrap.preparation_record(
+                getattr(self, 'ticket_id', self.ssdlc_root.name), contract,
+                controller_snapshot(Path(__file__).resolve().parent), self._limits_policy_digest()))
             atomic_json(target, contract)
+            bootstrap.fault('after_contract')
             self.record_artifact("00-recon/quality-contract.json", target)
+            bootstrap.fault('after_contract_registration')
             self._bootstrap_contract_captured = True
             return contract
         baseline_dir = self.dir_recon / "baseline"
@@ -3763,12 +3848,60 @@ class SSDLCOrchestrator:
             self.record_artifact(name, path)
         return execution_contract(snapshot)
 
+    def _limits_policy_digest(self):
+        limits = getattr(_dispatch_local, 'limits', None)
+        return digest(limits._load(repair=False)[0]['policy']) if limits is not None else None
+
+    def _verify_bootstrap_preparation(self, quality=None):
+        """Resume an unproven absent-baseline run only with intact preparation authority.
+
+        Returns the verified record, or None when no bootstrap preparation applies.
+        """
+        if quality is None:
+            path = self.dir_recon / 'quality-contract.json'
+            if not path.exists():
+                return None
+            quality = json.loads(path.read_text())
+        if not isinstance(quality, dict) or not quality.get('bootstrap') or bootstrap.proven(self.ssdlc_root):
+            return None
+        return bootstrap.verify_preparation(
+            self.ssdlc_root, self.repo_root, quality,
+            ticket=getattr(self, 'ticket_id', self.ssdlc_root.name), base_commit=self.state['base_commit'],
+            controller=controller_snapshot(Path(__file__).resolve().parent),
+            limits_policy_sha256=self._limits_policy_digest(), artifacts=self.state.get('artifacts', {}))
+
+    def _approved_preparation_phases(self):
+        """Prefix of recon/PO/design whose last gate passed with registered output.
+
+        A verified pre-development resumption reuses these approvals instead of
+        dispatching the phase again; the first incomplete phase and the later
+        ones run normally.
+        """
+        artifacts = self.state.get('artifacts', {})
+        history = self.state.get('gate_history', [])
+
+        def passed(gate):
+            rows = [row for row in history if isinstance(row, dict) and row.get('gate') == gate]
+            return bool(rows) and rows[-1].get('passed') is True
+
+        design_refs = (('02-design/adr.md', '02-design/threat-model.md')
+                       if self.state.get('risk_tier') in ('M', 'L') else ())
+        approved = set()
+        for phase, gate, refs in (('00-recon', 'RECON_BLAST_RADIUS_GATE', ('00-recon/context-and-blast-radius.md',)),
+                                  ('01-po', 'PO_SPEC_GATE', ('01-po/requirements.md',)),
+                                  ('02-design', 'PAIR_DESIGN_GATE', design_refs)):
+            if not passed(gate) or any(ref not in artifacts for ref in refs):
+                break
+            approved.add(phase)
+        return approved
+
     @_bounded_entrypoint
     def resume_task_planning(self, review_repairs=None, recover_review=False) -> Path:
         """Resume only planning against sealed upstream artifacts; never execute code."""
         with ticket_lock(getattr(self, "ticket_lock_path", self.ssdlc_root / "ticket.lock")):
             self.state = self._load_or_init_state()
             _resume_plan_refusal(self.repo_root, self.ssdlc_root, self.state)
+            self._verify_bootstrap_preparation()
             self.state.pop("failure", None)
             self.state.update(current_phase="02-design", current_step="task-plan", status="IN_PROGRESS")
             self._save_state()
@@ -3790,12 +3923,21 @@ class SSDLCOrchestrator:
 
     def _make_task_scheduler(self, *, corrective_run=False):
         first = bool(getattr(self, '_bootstrap_invocation_active', False)
-                     and getattr(self, '_bootstrap_contract_captured', False))
+                     and (getattr(self, '_bootstrap_contract_captured', False)
+                          or getattr(self, '_bootstrap_window_claimed', False)))
         bootstrap.require_unproven_run_is_current(self.ssdlc_root, first_invocation=first)
         plan = self._ensure_task_plan()
         controller = self._ensure_controller_contract()
         quality = json.loads((self.dir_recon / "quality-contract.json").read_text())
         bootstrap.require_unproven_run_is_current(self.ssdlc_root, quality, first_invocation=first)
+        if quality.get('bootstrap') and not bootstrap.development_started(self.ssdlc_root):
+            # Preparation -> first development attempt: verify the sealed
+            # authority, then claim the window durably before the worktree,
+            # the journal or any dispatch. Later invocations cannot renew it.
+            self._verify_bootstrap_preparation(quality)
+            bootstrap.reserve_first_attempt(self.ssdlc_root, getattr(self, 'ticket_id', self.ssdlc_root.name))
+            if getattr(self, '_bootstrap_invocation_active', False):
+                self._bootstrap_window_claimed = True
         wt = self._ensure_worktree()
         context = build_task_context(self.ssdlc_root)
         validator = TaskPlanValidator(self.repo_root, context["01-po/requirements.md"], quality, self.ssdlc_root)
@@ -4546,6 +4688,7 @@ class SSDLCOrchestrator:
         with ticket_lock(getattr(self, 'ticket_lock_path', self.ssdlc_root / 'ticket.lock')):
             self.state = self._load_or_init_state()
             _resume_design_refusal(self.repo_root, self.ssdlc_root, self.state, read_git=git)
+            self._verify_bootstrap_preparation()
             self.state.update(status='IN_PROGRESS', current_phase='02-design', current_step='pair-design')
             self.state.pop('failure', None)
             self._save_state()
@@ -5668,6 +5811,10 @@ To **REJECT** and record feedback (free text authorizes no repair):
             bootstrap.require_unproven_run_is_current(self.ssdlc_root)
             # Reload state after acquiring the lock, not from a potentially stale constructor.
             self.state = self._load_or_init_state()
+            # Pre-development resumption keeps the sealed authority, history and
+            # consumption; any drift refuses before this invocation writes.
+            # Approved phases of a verified preparation are not dispatched again.
+            self._bootstrap_preparation_resumed = self._verify_bootstrap_preparation() is not None
             self.state["task_breakdown"] = True
             self._save_state()
             if os.environ.get("SSDLC_EXECUTION_MODE", "docker") == "docker" and not EngineRunner._should_spawn_role_container():
@@ -5726,21 +5873,24 @@ To **REJECT** and record feedback (free text authorizes no repair):
         if quality_path.exists() and candidate_reports.convergence_enabled(json.loads(quality_path.read_text())):
             candidate_reports.reconcile_candidate_store(self.ssdlc_root, self.state['artifacts'], self._register_new)
         start_idx = self.PHASE_ORDER.index(from_phase) if from_phase in self.PHASE_ORDER else 0
+        # Verified bootstrap preparation: keep approved phases and their artifacts.
+        prepared = (self._approved_preparation_phases()
+                    if getattr(self, '_bootstrap_preparation_resumed', False) else set())
 
-        if start_idx <= self.PHASE_ORDER.index("00-recon"):
+        if start_idx <= self.PHASE_ORDER.index("00-recon") and "00-recon" not in prepared:
             _, active_tier = self.run_phase_recon(goal, requested_tier=tier)
             self.check_budget_circuit_breaker()
         else:
             active_tier = self.state.get("risk_tier", tier if tier != "auto" else "M")
             print(f"    [RESUME] Skipping 00-recon (using existing risk_tier={active_tier})")
 
-        if start_idx <= self.PHASE_ORDER.index("01-po"):
+        if start_idx <= self.PHASE_ORDER.index("01-po") and "01-po" not in prepared:
             self.run_phase_po(goal)
             self.check_budget_circuit_breaker()
         else:
             print("    [RESUME] Skipping 01-po")
 
-        if start_idx <= self.PHASE_ORDER.index("02-design"):
+        if start_idx <= self.PHASE_ORDER.index("02-design") and "02-design" not in prepared:
             if active_tier in ("M", "L"):
                 self.run_phase_pair_design()
             else:
@@ -6186,10 +6336,10 @@ def _foreground_main(argv=None) -> int:
                 print(legacy_message(args.ticket), file=sys.stderr)
             else:
                 message = check['code']
-                if check['code'] in {'bootstrap_ineligible', 'initialization_not_ready'}:
+                if check['code'] == 'bootstrap_ineligible':
+                    message = bootstrap_refusal_message(check['reason'])
+                elif check['code'] == 'initialization_not_ready':
                     message += ': ' + check['reason']
-                    if check['reason'] == 'interrupted':
-                        message += '; first-invocation exemption is spent; retained evidence is unchanged'
                 print(message, file=sys.stderr)
             return 24 if check['code'] == 'bootstrap_ineligible' else 25 if check['code'] == 'approval_not_ready' else 23
     repo_path = Path(getattr(args, 'repo', '.')).resolve()
@@ -6244,7 +6394,11 @@ def _foreground_main(argv=None) -> int:
 
     if args.subcommand == "plan":
         orch = SSDLCOrchestrator(repo_path, args.ticket, sync_remote=False)
-        print(orch.resume_task_planning(review_repairs=args.review_repairs, recover_review=args.recover_review))
+        try:
+            print(orch.resume_task_planning(review_repairs=args.review_repairs, recover_review=args.recover_review))
+        except bootstrap.BootstrapError as exc:
+            print(bootstrap_refusal_message(exc.code), file=sys.stderr)
+            return 24
         return 0
 
     if args.subcommand == 'design' and args.import_from_ticket:
@@ -6258,7 +6412,11 @@ def _foreground_main(argv=None) -> int:
 
     if args.subcommand == 'design':
         orch = SSDLCOrchestrator(repo_path, args.ticket, sync_remote=False)
-        print(orch.resume_pair_design(round_limit=args.rounds, import_legacy=args.import_legacy))
+        try:
+            print(orch.resume_pair_design(round_limit=args.rounds, import_legacy=args.import_legacy))
+        except bootstrap.BootstrapError as exc:
+            print(bootstrap_refusal_message(exc.code), file=sys.stderr)
+            return 24
         return 0
 
     if args.subcommand == "run":
@@ -6268,13 +6426,17 @@ def _foreground_main(argv=None) -> int:
         recover_preparation(repo_path, args.ticket)
         orch = SSDLCOrchestrator(repo_path, args.ticket, sync_remote=sync_remote, issue_id=issue_id)
         effective_tier = args.tier or os.environ.get("SSDLC_DEFAULT_TIER", "auto")
-        orch.run_pipeline(
-            args.goal,
-            test_cmd=args.test_cmd,
-            tier=effective_tier,
-            from_phase=args.from_phase,
-            until_phase=args.until_phase,
-        )
+        try:
+            orch.run_pipeline(
+                args.goal,
+                test_cmd=args.test_cmd,
+                tier=effective_tier,
+                from_phase=args.from_phase,
+                until_phase=args.until_phase,
+            )
+        except bootstrap.BootstrapError as exc:
+            print(bootstrap_refusal_message(exc.code), file=sys.stderr)
+            return 24
         return 0
 
     if args.subcommand == "approve":
