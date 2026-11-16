@@ -323,6 +323,12 @@ class HoldTests(TicketCase):
         foreign.write_text(json.dumps({'ticket_id': 'T-1'}))
         cases = dict(missing=None, truncated='{"ticket_id": "T-', null='null', array='[]',
                      foreign_ticket=json.dumps({'ticket_id': 'T-2'}), symlink=foreign)
+        if os.geteuid() != 0:
+            # Without root the gate cannot be root-owned, so check_private would refuse
+            # first; test_new_gate_is_private_and_exposed_gates_are_refused covers it.
+            patcher = mock.patch.object(ch, 'check_private')
+            patcher.start()
+            self.addCleanup(patcher.stop)
         for name, content in cases.items():
             with self.subTest(name):
                 self.state.unlink(missing_ok=True)
