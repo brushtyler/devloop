@@ -170,7 +170,8 @@ number of earlier `labeled` events of the label, and the dispatcher must have wr
 one since. The check loses the block, which then stays until a person removes it, if the label
 was removed and applied again, if a comment starting with the attribution header, written by an
 identity allowed to write devloop records, came after the check (another escalation, or
-anything that may be one, marker or not), or if the attribution is uncertain. A comment from
+anything that may be one, marker or not; the dispatcher's [ledger records](#evidence-and-telemetry),
+such as the turn of a recheck, do not count), or if the attribution is uncertain. A comment from
 anyone else, header or not, never touches the attribution. A label already present when the
 check failed is never the check's. Rechecks run only for blocks the check owns.
 
@@ -641,8 +642,58 @@ example the next attempt of a turn. The reviewer works in a disposable copy of t
 `pr-<N>-review`, so `devloop follow pr-<N>` looks at both and follows the newest session: the
 reviewer's while a review runs, the fixer's while a fix runs. It reads local files only and needs no GitHub access. Ctrl-C
 stops it. Antigravity sessions are not supported. For this reason devloop runs `codex exec`
-without `--ephemeral`: Codex saves the session of every turn in `~/.codex/sessions`, and these
+without `--ephemeral` (and with `--json`, for the [telemetry](#evidence-and-telemetry)): Codex saves the session of every turn in `~/.codex/sessions`, and these
 transcripts stay there after the turn.
+
+### Evidence and telemetry
+
+The dispatcher records the evidence and the telemetry of every step for itself (#133), so that
+they no longer have to be pieced together from markers and logs. Each record is a dispatcher
+comment ending with a `ledger` marker, signed with the dispatcher's identity like its other
+records (only that identity's records count), on the issue for the implementation and the
+readiness check, on the PR for review, fix, sync and CI. They publish no receipt yet: that is
+#135.
+
+| Record | When | Content |
+|---|---|---|
+| `request` | The issue goes from `agent:ready` to `agent:working` | SHA-256 of title and body, author and time of the trusted `labeled` event of `agent:ready`, ids of the trusted comments given to the implementer, time of the takeover. It is a snapshot **at the takeover**, not at the time of the label |
+| `turn` | Every invocation of an agent CLI, retries, fallback models and failures included: implement, fix, sync with an agent, review, readiness check | Kind, agent, GitHub identity (none: the operator's `gh` login), configured model and effort (for a fallback, the fallback model and the model it replaces), real model, start, end, duration, outcome (`success`, `failure`, `unavailable`), the error if any, telemetry |
+| `verification` | Every test command the dispatcher runs after a writing turn | Command, outcome, duration, the tree hash before and after the test, and the commit |
+| `event` | The CI of a head (`ci_round`): a failed CI round, the checks a review round saw whatever its verdict (`approve`, `request_changes` or `needs_human`), or the passing checks read again just before the PR is promoted to `agent:ready-to-merge` (also at level 0); a sync without an agent (`sync`) | For the CI, the head, the state (`fail`, `pass`, or `none` without checks), the review round (none at level 0) and each check with its outcome and the id of its GitHub Actions run (none for a commit status or a check outside Actions); the same checks read again for the same head and round are not recorded twice, a new run is. For a sync, the merged base commit and the old and new heads |
+
+**Telemetry** is what the CLI attests, not authenticated:
+
+| CLI | Source | Fields |
+|---|---|---|
+| claude | `--output-format json` | `total_cost_usd`, `duration_ms`, `num_turns`, `usage` (input, output, cache read and cache creation tokens); the real model is the list of the keys of `modelUsage`, with no main model chosen |
+| codex | `codex exec --json`, which devloop now passes | input, output and cached input tokens, summed over the `turn.completed` events (input already includes the cached input). No cost, duration or model |
+| agy | none | every field null |
+
+A value that is not attested is `null`, never 0, and the comment shows `non riportato`; the real
+model stays `null` next to the configured one when the CLI attests none.
+
+**Turn persistence.** A turn's record is written before the CLI starts, as `open`; if that write
+fails the turn does not start and the step escalates like any `gh` failure. When the CLI ends the
+record is edited with end, duration, outcome and telemetry. A turn left without that closing
+write, because the dispatcher crashed or the edit failed, stays without end, outcome and
+telemetry: the next tick logs `incomplete turn on #<n>` and marks the record `incomplete` (only
+logs it with `--dry-run`). Where to look does not depend on labels, which change once a step
+ends: before writing a turn's record the dispatcher notes the issue or PR in
+`<state_dir>/ledger-open-turns.json`, and removes it when the turn is closed. If that note cannot
+be written, the turn does not start either. The next tick checks every issue or PR still noted,
+for example an issue whose PR is already open or a PR escalated to `agent:needs-human`, and then
+forgets it. In case the note is lost, it also looks at open devloop PRs not in
+`agent:needs-human`, issues in `agent:working` and issues waiting for a readiness check.
+
+**Tests and commits.** A passing test is bound to the commit created right after it only if the
+tree is the same at three points: before the test, after the test and in the commit. The tree is
+what the commit would contain (`git add -A`), computed on a copy of the index. If the test
+changed files headed for the commit, or anything else differs, the commit stays `null`; the
+attempts that failed, or that no commit followed, have commit `null` too.
+
+**Earlier work.** PRs and issues started before these records have none of them. Missing data
+is declared missing (`request` null, no turns), and is never reconstructed from the summaries
+written by agents.
 
 ### Stalled agents
 

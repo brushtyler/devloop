@@ -91,6 +91,68 @@ def unavailable_reason(agent, returncode, text):
     return None
 
 
+TELEMETRY_FIELDS = ('cost_usd', 'duration_ms', 'num_turns', 'input_tokens', 'output_tokens',
+                    'cache_read_input_tokens', 'cache_creation_input_tokens')
+
+
+def _count(value):
+    """A count the CLI reported, or None: never 0 for a value that is missing or not a count."""
+    return value if type(value) is int and value >= 0 else None
+
+
+def _amount(value):
+    return value if type(value) in (int, float) and value >= 0 else None
+
+
+def telemetry(kind, stdout):
+    """``(fields, models)`` that one turn's output attests (#133). ``fields`` has every key of
+    ``TELEMETRY_FIELDS``, None where the CLI did not report the value; ``models`` is the list of
+    model identifiers the CLI reports, or None. Nothing here is authenticated: it is what the
+    CLI wrote.
+
+    - claude (``--output-format json``): ``total_cost_usd``, ``duration_ms``, ``num_turns``,
+      ``usage`` and the keys of ``modelUsage``;
+    - codex (``--json``): the token usage of every ``turn.completed`` event, summed; its
+      ``input_tokens`` already includes the cached input (``cached_input_tokens``). No cost,
+      duration or model;
+    - agy: nothing known."""
+    fields = dict.fromkeys(TELEMETRY_FIELDS)
+    models = None
+    if kind == 'claude':
+        try:
+            envelope = json.loads(stdout or '')
+        except json.JSONDecodeError:
+            return fields, None
+        if not isinstance(envelope, dict):
+            return fields, None
+        fields['cost_usd'] = _amount(envelope.get('total_cost_usd'))
+        fields['duration_ms'] = _count(envelope.get('duration_ms'))
+        fields['num_turns'] = _count(envelope.get('num_turns'))
+        usage = envelope.get('usage') if isinstance(envelope.get('usage'), dict) else {}
+        for key in ('input_tokens', 'output_tokens', 'cache_read_input_tokens',
+                    'cache_creation_input_tokens'):
+            fields[key] = _count(usage.get(key))
+        used = envelope.get('modelUsage')
+        if isinstance(used, dict):
+            models = sorted(k for k in used if isinstance(k, str) and k) or None
+    elif kind == 'codex':
+        names = {'input_tokens': 'input_tokens', 'output_tokens': 'output_tokens',
+                 'cached_input_tokens': 'cache_read_input_tokens'}
+        for line in (stdout or '').splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if not (isinstance(event, dict) and event.get('type') == 'turn.completed'
+                    and isinstance(event.get('usage'), dict)):
+                continue
+            for source, target in names.items():
+                value = _count(event['usage'].get(source))
+                if value is not None:
+                    fields[target] = (fields[target] or 0) + value
+    return fields, models
+
+
 def build_command(agent, mode, prompt, *, schema_file, out_file):
     """Return ``(argv, stdin)`` for one headless agent turn in the current directory."""
     if mode not in MODES:
@@ -109,8 +171,9 @@ def build_command(agent, mode, prompt, *, schema_file, out_file):
         review = ['-c', 'sandbox_workspace_write.network_access=false',
                   '-c', 'sandbox_workspace_write.writable_roots=[]'] if mode == 'review' else []
         # Not --ephemeral: the session transcript in ~/.codex/sessions is what `devloop follow`
-        # reads while the turn runs.
-        argv = ['codex', 'exec', '-m', agent.model,
+        # reads while the turn runs. --json: the events on stdout carry the token usage (#133);
+        # the final message still comes from -o.
+        argv = ['codex', 'exec', '--json', '-m', agent.model,
                 '-c', f'model_reasoning_effort="{agent.effort}"', '-s', 'workspace-write',
                 *review, '--output-schema', str(schema_file), '-o', str(out_file), *extra, '-']
         return argv, prompt
@@ -251,7 +314,11 @@ def left_no_output(kind, stdout, out_file):
 
 class AgentRunner:
     """``on_turn(agent, prompt_path)``, if given, is called when a turn starts. ``stall``
-    (``stall.StallWatch``), if given, checks each turn for stalls while it runs."""
+    (``stall.StallWatch``), if given, checks each turn for stalls while it runs.
+
+    ``last_report`` is the ``telemetry`` of the latest turn, ``(fields, models)``, set whether
+    the turn succeeded or failed; None when the CLI did not complete (timeout, stall, failed
+    start), so that nothing is attested."""
 
     def __init__(self, log_dir, timeout, run=subprocess.run, env=None, on_turn=None, stall=None):
         self.log_dir = Path(log_dir)
@@ -261,6 +328,7 @@ class AgentRunner:
         self._on_turn = on_turn
         self._stall = stall
         self._versions = {}
+        self.last_report = None
 
     def version(self, agent):
         """The CLI version, cached once known; a failed lookup is retried on the next call."""
@@ -280,6 +348,7 @@ class AgentRunner:
 
     def run(self, agent, mode, prompt, schema_name, workdir, label):
         """Run one turn in ``workdir`` and return its schema-valid output."""
+        self.last_report = None
         self.log_dir.mkdir(parents=True, exist_ok=True)
         stem = self.log_dir / f'{time.strftime("%Y%m%dT%H%M%S")}-{label}-{agent.key}'
         out_file = stem.with_suffix('.last.json')
@@ -309,6 +378,7 @@ class AgentRunner:
             raise AgentError(f'{agent.key} timed out after {self.timeout}s', log) from exc
         except OSError as exc:
             raise AgentError(f'{agent.key} could not start: {exc}', log) from exc
+        self.last_report = telemetry(agent.kind, done.stdout)
         log.write_text(f'$ {argv[0]} ({mode})\nexit {done.returncode}\n--- stdout\n{done.stdout}'
                        f'\n--- stderr\n{done.stderr}', encoding='utf-8')
         text = f'{done.stdout}\n{done.stderr}'

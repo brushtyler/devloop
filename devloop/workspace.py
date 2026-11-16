@@ -6,6 +6,7 @@ import re
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -318,6 +319,25 @@ class Workspace:
             if _CONFLICT_MARKER.search(data):
                 left.append(name)
         return left
+
+    def tree(self, path):
+        """The tree :meth:`commit_all` would commit now in ``path``: everything ``git add -A``
+        stages, written from a copy of the index, so that the real index, a merge in progress
+        included, stays as it is."""
+        index = Path(path) / self._git('rev-parse', '--git-path', 'index', cwd=path).strip()
+        with tempfile.TemporaryDirectory() as tmp:
+            copy = Path(tmp) / 'index'
+            if index.exists():
+                shutil.copyfile(index, copy)
+            env = {'GIT_INDEX_FILE': str(copy)}
+            if not index.exists():
+                self._git('read-tree', 'HEAD', cwd=path, env=env)
+            self._git('add', '-A', cwd=path, env=env)
+            return self._git('write-tree', cwd=path, env=env).strip()
+
+    def commit_tree(self, path, commit):
+        """The tree of ``commit``."""
+        return self._git('rev-parse', f'{commit}^{{tree}}', cwd=path).strip()
 
     def commit_all(self, path, message, author=None):
         """Commit everything; ``author`` (``{name, email}``) is both author and committer."""

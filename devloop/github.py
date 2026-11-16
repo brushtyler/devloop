@@ -131,7 +131,7 @@ class GitHub:
         """Conversation comments, read with REST so that an app's login is ``<slug>[bot]``
         (`gh pr view` reports it as a bare ``<slug>``, indistinguishable from a user)."""
         return self._json_lines('api', '--paginate', f'repos/{self.repo}/issues/{number}/comments',
-                                '--jq', '.[] | {author: {login: .user.login}, body}')
+                                '--jq', '.[] | {id, author: {login: .user.login}, body}')
 
     def issue_comments(self, number):
         """An issue's comments, oldest first, read with REST as :meth:`pr_comments`."""
@@ -147,10 +147,15 @@ class GitHub:
         ``state`` is pass, fail, pending or none. Both check runs (Actions) and commit statuses
         count.
         """
+        return summarize_checks(self.check_details(sha))
+
+    def check_details(self, sha):
+        """Every check of commit ``sha`` as ``normalize_checks`` returns it: check runs and
+        commit statuses, each with its outcome and, for a GitHub Actions run, its run id."""
         runs = self._json_lines('api', '--paginate', f'repos/{self.repo}/commits/{sha}/check-runs',
                                 '--jq', '.check_runs[] | {name, status, conclusion, details_url}')
         combined = self._json('api', f'repos/{self.repo}/commits/{sha}/status?per_page=100')
-        return summarize_checks(normalize_checks(runs, combined or {}))
+        return normalize_checks(runs, combined or {})
 
     def check_runs(self, sha):
         """Every check run of commit ``sha``, superseded runs included, as ``{id, name, app_id,
@@ -188,7 +193,18 @@ class GitHub:
                 raise GitHubError(f'remove label {label} from #{number}: {done.stderr.strip()[:500]}')
 
     def comment(self, number, body):
-        self._gh('api', '-X', 'POST', f'repos/{self.repo}/issues/{number}/comments',
+        """Post a comment; returns its id, or None if the response does not carry one."""
+        done = self._gh('api', '-X', 'POST', f'repos/{self.repo}/issues/{number}/comments',
+                        '-F', 'body=@-', stdin=body)
+        try:
+            created = json.loads(done.stdout or 'null')
+        except json.JSONDecodeError:
+            return None
+        return created.get('id') if isinstance(created, dict) else None
+
+    def edit_comment(self, comment_id, body):
+        """Replace the body of comment ``comment_id`` of an issue or a PR."""
+        self._gh('api', '-X', 'PATCH', f'repos/{self.repo}/issues/comments/{int(comment_id)}',
                  '-F', 'body=@-', stdin=body)
 
     def create_pr(self, *, base, head, title, body):
@@ -227,7 +243,10 @@ def _status_bucket(state):
 
 
 def normalize_checks(check_runs, combined_status):
-    """Check runs and commit statuses as ``{name, bucket, link}`` (bucket: pass, fail, pending).
+    """Check runs and commit statuses as ``{name, bucket, link, conclusion, run_id}`` (bucket:
+    pass, fail, pending; conclusion: the run's conclusion, its status while it runs, or the
+    status's state). ``run_id`` is the GitHub Actions run of a check run, read from its link:
+    None for other check runs and for commit statuses.
 
     ``combined_status`` is the response of ``commits/<sha>/status``. Its ``statuses`` list is
     paginated, so the aggregate ``state`` is authoritative: if it is worse than every listed
@@ -242,15 +261,21 @@ def normalize_checks(check_runs, combined_status):
             bucket = 'fail'
         else:
             bucket = 'pass'
-        checks.append({'name': run.get('name'), 'bucket': bucket, 'link': run.get('details_url')})
+        run_id = _RUN_ID.search(run.get('details_url') or '')
+        checks.append({'name': run.get('name'), 'bucket': bucket, 'link': run.get('details_url'),
+                       'conclusion': (run.get('conclusion') if run.get('status') == 'completed'
+                                      else run.get('status')),
+                       'run_id': int(run_id.group(1)) if run_id else None})
     statuses = combined_status.get('statuses') or []
     listed = [{'name': s.get('context'), 'bucket': _status_bucket(s.get('state')),
-               'link': s.get('target_url')} for s in statuses]
+               'link': s.get('target_url'), 'conclusion': s.get('state'), 'run_id': None}
+              for s in statuses]
     checks += listed
     if combined_status.get('total_count', len(statuses)):
         aggregate = _status_bucket(combined_status.get('state'))
         if aggregate != 'pass' and not any(c['bucket'] == aggregate for c in listed):
-            checks.append({'name': 'commit status (aggregate)', 'bucket': aggregate, 'link': None})
+            checks.append({'name': 'commit status (aggregate)', 'bucket': aggregate, 'link': None,
+                           'conclusion': combined_status.get('state'), 'run_id': None})
     return checks
 
 

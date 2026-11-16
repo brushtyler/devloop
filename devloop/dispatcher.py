@@ -65,7 +65,9 @@ from .acceptance import (acceptance_criteria, acceptance_findings, format_criter
                          latest_map, render_map)
 from .agents import AgentError, ModelsUnavailable, ModelUnavailable
 from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, PR_COMMENT, REVIEW
-from .github import GitHubError, merge_state
+from .github import GitHubError, merge_state, summarize_checks
+from .ledger import entries as ledger_entries
+from .ledger import open_turns
 from .markdown import (RESUME, carries_record, dispatcher_header, publishable, read_marker,
                        render_escalation, render_fix, render_native_review, render_preflight, render_review)
 from .policy import describe as describe_receipt
@@ -148,6 +150,12 @@ class PullRequest:
     closures: list = field(default_factory=list)
     commands: list = field(default_factory=list)
     finding_problems: list = field(default_factory=list)
+    # CI events the dispatcher's ledger already recorded (#133), as ``(head, state, round,
+    # checks)``: reading the same checks again for the same head and round records nothing new.
+    ci_recorded: list = field(default_factory=list)
+    # With a ledger, every check of the head from the read that gave ``checks`` (#133): the CI
+    # a review round saw, recorded whatever its verdict. None when not read.
+    check_details: list = None
     # Why the acceptance map does not hold for an approval of the head that would be reused or
     # kept (#134), as the snapshot found re-checking it: the titles of the findings a review
     # would add. Empty when it holds or there is no such approval.
@@ -550,9 +558,11 @@ def format_previous_rounds(reviews, fixes, closures=()):
 class Dispatcher:
     """``gh`` acts as the dispatcher. ``identities`` (``apps.Identities``) gives each agent its
     own GitHub identity; without it every actor uses ``gh``. ``activity``
-    (``activity.Activity``) records the running action for ``devloop status``."""
+    (``activity.Activity``) records the running action for ``devloop status``. ``ledger``
+    (``ledger.Ledger``) records evidence and telemetry of each step (#133)."""
 
-    def __init__(self, cfg, gh, ws, runner, log=print, identities=None, activity=None):
+    def __init__(self, cfg, gh, ws, runner, log=print, identities=None, activity=None,
+                 ledger=None):
         self.cfg = cfg
         self.gh = gh
         self.ws = ws
@@ -560,6 +570,7 @@ class Dispatcher:
         self.log = log
         self.identities = identities
         self.activity = activity
+        self.ledger = ledger
 
     # Identities ------------------------------------------------------------
     def _as(self, actor, permissions):
@@ -707,6 +718,11 @@ class Dispatcher:
                 pr.commands = self._finding_commands(pr, comments, state)
                 policy = self._marker_entries(pr, comments, 'policy')
                 pr.policy = [record for _, record in policy]
+                if self.ledger is not None:
+                    pr.ci_recorded = [
+                        (r.get('head'), r.get('state'), r.get('round'), r.get('checks'))
+                        for _, r in ledger_entries(comments, self._signed)
+                        if r['type'] == 'event' and r.get('event') == 'ci_round']
                 last_review = max((position for position, _ in entries), default=-1)
                 if policy and policy[-1][0] > last_review:
                     record = policy[-1][1]
@@ -732,7 +748,12 @@ class Dispatcher:
             ci_open = lb.changes in pr.labels and any(
                 f['owner'] == CI for f in open_findings(pr.reviews, pr.closures))
             if pr.labels & {lb.review, lb.ready_to_merge} or ci_open:
-                pr.checks, pr.failed_checks, pr.failed_runs = self.gh.checks(pr.head_sha)
+                if self.ledger is not None:
+                    pr.check_details = self.gh.check_details(pr.head_sha)
+                    pr.checks, pr.failed_checks, pr.failed_runs = summarize_checks(
+                        pr.check_details)
+                else:
+                    pr.checks, pr.failed_checks, pr.failed_runs = self.gh.checks(pr.head_sha)
             if (lb.ready_to_merge in pr.labels and pr.zero_head is not None
                     and zero_labels_hold(pr, self.cfg.review_policy)):
                 pr.zero_problem = self._zero_problem(pr)
@@ -773,6 +794,11 @@ class Dispatcher:
         return (devloop_text(comment.get('body'))
                 and self._writes_records((comment.get('author') or {}).get('login')))
 
+    def _ledger_record(self, comment):
+        """Whether ``comment`` is a ledger record (#133) signed by the dispatcher."""
+        return (read_marker(comment.get('body', ''), 'ledger') is not None
+                and self._signed((comment.get('author') or {}).get('login')))
+
     def _automatic(self, comment):
         """Whether ``comment`` is one of devloop's own records: published text (``_published``)
         that ends with a valid devloop marker. Only these leave the readiness hash: any other
@@ -809,7 +835,10 @@ class Dispatcher:
         if not records:
             return False
         position, record = records[-1]
-        if not record['blocked'] or any(self._published(c) for c in comments[position + 1:]):
+        # The dispatcher's ledger records (#133), such as the turn of a recheck, are no
+        # escalation: they leave the block's attribution as it is.
+        if not record['blocked'] or any(self._published(c) and not self._ledger_record(c)
+                                        for c in comments[position + 1:]):
             return False
         labelers = self.gh.labelers(number, self.cfg.labels.needs_human)
         return (len(labelers) == record['labeled'] + 1
@@ -887,7 +916,14 @@ class Dispatcher:
         name = f'issue-{number}-preflight'
         path = self.ws.base_copy(name)
         try:
-            raw = self.runner.run(agent, 'review', prompt, 'preflight', path, name)
+            entry = self._open_turn((number, 'preflight'), agent, 'review', name)
+            try:
+                raw = self.runner.run(agent, 'review', prompt, 'preflight', path, name)
+            except AgentError as exc:
+                self._close_turn(entry, 'unavailable' if isinstance(exc, ModelUnavailable)
+                                 else 'failure', exc)
+                raise
+            self._close_turn(entry, 'success')
         finally:
             self.ws.remove(name)
         self._publish_preflight(number, normalize_preflight(raw), digest, agent.key)
@@ -908,6 +944,7 @@ class Dispatcher:
     # Tick ----------------------------------------------------------------
     def tick(self, dry_run=False):
         snap = self.snapshot()
+        self._flag_incomplete(snap, dry_run)
         actions = plan(snap, self.cfg)
         prs = {pr.number: pr for pr in snap.prs}
         for action in actions:
@@ -956,10 +993,128 @@ class Dispatcher:
         reason = untrusted_change(history, self.cfg.labels.ready, self.cfg.trusted_users)
         if reason:
             raise UntrustedChange(f'issue #{number}: {reason}')
-        issue = dict(self.gh.issue(number), title=history['title'], body=history['body'])
+        issue = dict(self.gh.issue(number), title=history['title'], body=history['body'],
+                     labeled=history['labeled'])
         return issue, _render_issue_comments(issue.get('comments') or [], self.cfg.trusted_users)
 
-    def _turn(self, models, mode, prompt, schema, path, label, allowed=None):
+    # Ledger (#133) -----------------------------------------------------------
+    def _signed(self, login):
+        """Whether ``login`` signs as the dispatcher, as its other records do."""
+        return self._wrote(login, DISPATCHER)
+
+    def _open_turn(self, where, candidate, mode, label):
+        """The ledger record of a turn about to start, or None without a ledger. A failed write
+        raises ``GitHubError``: the turn does not start."""
+        if self.ledger is None or where is None:
+            return None
+        number, kind = where
+        return self.ledger.open_turn(
+            number, kind=kind, agent=candidate.key, identity=self._app_login(candidate.key),
+            mode=mode, model=candidate.model, effort=candidate.effort,
+            fallback_for=candidate.fallback_for, label=label)
+
+    def _close_turn(self, entry, outcome, error=None):
+        """Close a turn's record with what the CLI attested. A failed write leaves the turn
+        open, and the next tick marks it incomplete."""
+        if entry is None:
+            return
+        try:
+            self.ledger.close_turn(entry, outcome, getattr(self.runner, 'last_report', None),
+                                   error)
+        except GitHubError as exc:
+            self.log(f'  turn record on #{entry.number} not closed: {exc}')
+
+    def _verify(self, where, path, attempt):
+        """Run the test command, recording it in the ledger with the tree tested; returns
+        ``(passed, tail, entry)``."""
+        if self.ledger is None or where is None:
+            return (*self.ws.run_tests(path, self.cfg.test_cmd, self.cfg.test_timeout_seconds),
+                    None)
+        before = self.ws.tree(path)
+        started = time.monotonic()
+        passed, tail = self.ws.run_tests(path, self.cfg.test_cmd, self.cfg.test_timeout_seconds)
+        duration = int((time.monotonic() - started) * 1000)
+        after = self.ws.tree(path)
+        entry = self.ledger.verification(where[0], kind=where[1], attempt=attempt,
+                                         command=self.cfg.test_cmd, passed=passed,
+                                         duration_ms=duration, tree_before=before,
+                                         tree_after=after)
+        return passed, tail, entry
+
+    def _bind_tested(self, tested, path, commit):
+        """Bind the passing test to ``commit`` when the committed tree is the one tested."""
+        if tested is None:
+            return
+        try:
+            if not self.ledger.bind_commit(tested, commit, self.ws.commit_tree(path, commit)):
+                self.log(f'  the tree of {commit[:12]} is not the one tested: commit not bound')
+        except GitHubError as exc:
+            self.log(f'  verification record on #{tested.number} not updated: {exc}')
+
+    def _ledger_event(self, number, event, **fields):
+        if self.ledger is not None:
+            self.ledger.event(number, event, **fields)
+
+    def _read_ci(self, head):
+        """``(state, checks)`` of ``head``'s CI: with a ledger, from the same read that gives
+        every check to record (``check_details``); without one, ``checks`` is None."""
+        if self.ledger is None:
+            return self.gh.checks(head)[0], None
+        details = self.gh.check_details(head)
+        return summarize_checks(details)[0], details
+
+    def _record_ci(self, pr, head, state, details, round_no):
+        """Record the CI of ``head`` as a ``ci_round`` event (#133), failed or passed: each
+        check with its outcome and, for a GitHub Actions run, its id (a commit status has none).
+        The same checks read again for the same head and round are not recorded twice."""
+        if self.ledger is None or details is None:
+            return
+        checks = [{'name': c['name'], 'outcome': c.get('conclusion') or c['bucket'],
+                   'run_id': c.get('run_id')} for c in details]
+        key = (head, state, round_no, checks)
+        if key in pr.ci_recorded:
+            return
+        # A level-0 promotion has no review round.
+        extra = {'round': round_no} if round_no is not None else {}
+        self.ledger.event(pr.number, 'ci_round', head=head, state=state, **extra,
+                          checks=checks)
+        pr.ci_recorded.append(key)
+
+    def _flag_incomplete(self, snap, dry_run):
+        """Report the turns a previous tick opened and never closed, and mark them incomplete:
+        no turn runs while a tick starts, since one dispatcher runs at a time.
+
+        It looks first where the ledger's trace (``Ledger.pending``) says a turn was opened and
+        not closed, whatever labels the issue or PR has now: an issue whose PR is open or that
+        was escalated, a PR in ``agent:needs-human``. Then, in case that trace was lost, open
+        devloop PRs not in ``agent:needs-human``, issues in ``agent:working`` and issues
+        waiting for a readiness check. A number leaves the trace once checked."""
+        if self.ledger is None:
+            return
+        lb = self.cfg.labels
+        try:
+            traced = self.ledger.pending()
+        except GitHubError as exc:
+            self.log(f'  trace of the open turns not readable: {exc}')
+            traced = []
+        numbers = list(traced)
+        numbers += [pr.number for pr in snap.prs if lb.needs_human not in pr.labels]
+        numbers += list(snap.working_issues)
+        numbers += [i['number'] for i in snap.ready_issues if 'preflight' in i]
+        for number in dict.fromkeys(numbers):
+            try:
+                for comment_id, record in open_turns(self.gh.issue_comments(number),
+                                                     self._signed):
+                    self.log(f'incomplete turn on #{number}: {record["kind"]} by '
+                             f'{record["agent"]}, started {record["started_at"]}, never closed')
+                    if not dry_run:
+                        self.ledger.flag_incomplete(number, comment_id, record)
+                if number in traced and not dry_run:
+                    self.ledger.settle(number)
+            except GitHubError as exc:
+                self.log(f'  turn records of #{number} not checked: {exc}')
+
+    def _turn(self, models, mode, prompt, schema, path, label, allowed=None, where=None):
         """Run one agent turn on the first of ``models`` (``Models``) that is available, and
         return its output and the agent configuration it ran with.
 
@@ -969,7 +1124,10 @@ class Dispatcher:
         the models tried or left out if any (``ModelsUnavailable`` with ``last_failed``). A model
         that ``allowed`` refuses leaves ``models`` without running. When none is left, an agent
         without fallback models fails as before #121; one with them fails listing the models
-        tried and why (``ModelsUnavailable``)."""
+        tried and why (``ModelsUnavailable``).
+
+        ``where``, ``(number, kind)``, is the issue or PR whose ledger records each CLI
+        invocation as a turn (#133): written before the CLI starts, closed when it ends."""
         failed = None
         while models.left:
             candidate = models.left.pop(0)
@@ -980,14 +1138,17 @@ class Dispatcher:
                 continue
             text = prompt + FALLBACK_NOTE[mode] if failed else prompt
             suffix = f'-{candidate.model}' if candidate.fallback_for else ''
+            entry = self._open_turn(where, candidate, mode, label + suffix)
             try:
                 output = self.runner.run(candidate, mode, text, schema, path, label + suffix)
             except ModelUnavailable as exc:
+                self._close_turn(entry, 'unavailable', exc)
                 models.tried.append((candidate.model, f'{exc} ({exc.reason})'))
                 self.log(f'  {candidate.key}: model {candidate.model} unavailable: {exc.reason}')
                 failed = exc
                 continue
             except AgentError as exc:
+                self._close_turn(entry, 'failure', exc)
                 if not models.tried:
                     raise
                 # Any other failure ends the turn as before, but after models were tried or left
@@ -995,6 +1156,7 @@ class Dispatcher:
                 models.tried.append((candidate.model, str(exc)))
                 raise ModelsUnavailable(models.agent.key, models.tried, exc.log,
                                         last_failed=True) from exc
+            self._close_turn(entry, 'success')
             models.left.insert(0, candidate)  # available: later attempts of the action use it
             if candidate.fallback_for:
                 self.log(f'  {candidate.key} ran on fallback model {candidate.model} '
@@ -1004,24 +1166,27 @@ class Dispatcher:
             raise failed  # an agent without fallback models: as before #121
         raise ModelsUnavailable(models.agent.key, models.tried, getattr(failed, 'log', None))
 
-    def _write_turn(self, agent, prompt, schema, path, label):
+    def _write_turn(self, agent, prompt, schema, path, label, where=None):
         """Run a writing agent, then the tests; retry with the failures. Returns the output,
-        ``None`` on success or a reason to escalate, and the agent configuration of the last
-        turn (``_turn``). A model found unavailable is not tried again in later attempts."""
+        ``None`` on success or a reason to escalate, the agent configuration of the last turn
+        (``_turn``) and the ledger record of the passing test, to bind to the commit that
+        follows (None without a ledger or without a passing test). A model found unavailable
+        is not tried again in later attempts."""
         models = Models(agent)
         for attempt in range(1 + self.cfg.implement_test_retries):
             result, used = self._turn(models, 'write', prompt, schema, path,
-                                      f'{label}-{attempt + 1}')
+                                      f'{label}-{attempt + 1}', where=where)
             if result['status'] == 'blocked':
-                return result, None, used
+                return result, None, used, None
             if not self.ws.has_changes(path) and schema == 'implement':
-                return result, ('Implementazione senza modifiche ai file.', ''), used
-            passed, tail = self.ws.run_tests(path, self.cfg.test_cmd, self.cfg.test_timeout_seconds)
+                return result, ('Implementazione senza modifiche ai file.', ''), used, None
+            passed, tail, tested = self._verify(where, path, attempt + 1)
             if passed:
-                return result, None, used
+                return result, None, used, tested
             prompt += ('\n\n## Test failures after your previous attempt\n\nThe test command failed. '
                        f'Fix the cause, then finish again.\n\n```text\n{tail}\n```\n')
-        return result, ('I test locali falliscono anche dopo i tentativi di correzione.', tail), used
+        return (result, ('I test locali falliscono anche dopo i tentativi di correzione.', tail),
+                used, None)
 
     def _commit_message(self, agent, message, issue):
         message = message.strip() + f'\n\nRefs #{issue}\n'
@@ -1056,10 +1221,11 @@ class Dispatcher:
         if head != review['head_sha']:
             self.log(f'  not promoted: head moved to {head[:12]} after the review')
             return False
-        state = self.gh.checks(head)[0]
+        state, details = self._read_ci(head)
         if state not in ('pass', 'none'):
             self.log(f'  not promoted: CI is {state}')
             return False
+        self._record_ci(pr, head, state, details, review['round'])
         return True
 
     # Review policy -----------------------------------------------------------
@@ -1285,10 +1451,11 @@ class Dispatcher:
         if head != receipt['head']:
             self.log(f'  not promoted: head moved to {head[:12]}')
             return
-        overall = self.gh.checks(head)[0]
+        overall, details = self._read_ci(head)
         if overall in ('pending', 'fail'):
             self.log(f'  not promoted: CI is {overall}')
             return
+        self._record_ci(pr, head, overall, details, None)
         states = check_states(self.cfg.review_policy.zero_checks, self.gh.check_runs(head))
         outcome = check_outcome(states)
         listed = '\n'.join(f'- `{s["name"]}` (app {s["app_id"]}): `{s["state"]}`' for s in states)
@@ -1514,6 +1681,15 @@ class Dispatcher:
             self.log('  the readiness check does not cover the current text; next tick')
             return
         issue, comments = self._issue_context(number)
+        if self.ledger is not None:
+            # The request as the implementer gets it, at the takeover (#133): not necessarily
+            # the text at the time of the label.
+            labeled = [(who, at) for name, who, at in issue['labeled']
+                       if name == lb.ready and who in cfg.trusted_users]
+            self.ledger.request(number, title=issue['title'], body=issue.get('body') or '',
+                                labeled=labeled[-1] if labeled else None,
+                                comments=_trusted_comments(issue.get('comments') or [],
+                                                           cfg.trusted_users))
         self.gh.edit_labels(number, add=[lb.working], remove=[lb.ready])
         name, branch = f'issue-{number}', f'{cfg.branch_prefix}{number}'
         path = self.ws.new_branch(name, branch)
@@ -1523,16 +1699,18 @@ class Dispatcher:
                            issue_body=issue.get('body') or '', issue_comments=comments,
                            acceptance_criteria=format_criteria(criteria),
                            test_cmd=cfg.test_cmd, language=cfg.language)
-        result, failure, used = self._write_turn(agent, prompt, 'implement', path,
-                                                 f'issue-{number}-implement')
+        result, failure, used, tested = self._write_turn(agent, prompt, 'implement', path,
+                                                         f'issue-{number}-implement',
+                                                         where=(number, 'implement'))
         if result['status'] == 'blocked':
             return self._blocked(number, used, result['blocked_reason'], remove=[lb.working],
                                  on_pr=False)
         if failure:
             return self._escalate(number, failure[0], failure[1], remove=[lb.working])
         auth = self._git_auth(agent.key, IMPLEMENT)
-        self.ws.commit_all(path, self._commit_message(agent, result['commit_message'], number),
-                           author=auth)
+        commit = self.ws.commit_all(
+            path, self._commit_message(agent, result['commit_message'], number), author=auth)
+        self._bind_tested(tested, path, commit)
         protected = self._protected_changes(path)
         if protected:
             return self._escalate_protected(number, protected, remove=[lb.working])
@@ -1573,6 +1751,10 @@ class Dispatcher:
                                    max_rounds=self._last_round_allowed(pr.reviews),
                                    head_sha=pr.head_sha)
         review['receipt'] = receipt
+        if self.ledger is not None:
+            details = self.gh.check_details(pr.head_sha)
+            self._record_ci(pr, pr.head_sha, summarize_checks(details)[0], details,
+                            review['round'])
         self.gh.comment(pr.number, render_review(review, dispatcher_header()))
         self._apply_round(pr, [review], announce=True, reviews=pr.reviews + [review])
 
@@ -1676,7 +1858,8 @@ class Dispatcher:
         copy_name, copy = self.ws.review_copy(path)
         try:
             raw, used = self._turn(Models(agent), 'review', prompt, 'review', copy,
-                                   f'pr-{pr.number}-review', allowed)
+                                   f'pr-{pr.number}-review', allowed,
+                                   where=(pr.number, 'review'))
         finally:
             self.ws.remove(copy_name)
         if not self.ws.pristine(path, pr.head_sha):
@@ -1707,6 +1890,9 @@ class Dispatcher:
                                           **render_native_review(review, self.runner.header(used)))
             except GitHubError as exc:
                 self.log(f'  native review not submitted: {exc}')
+        if pr.checks != 'pending':
+            # The CI the round reviewed, whatever its verdict (#133).
+            self._record_ci(pr, pr.head_sha, pr.checks, pr.check_details, round_no)
         records = done + [review]
         waiting = pending_reviewers(records)
         if not waiting:
@@ -1746,8 +1932,9 @@ class Dispatcher:
                                acceptance_criteria(issue.get('body'))),
                            acceptance_map=format_map(latest_map(pr.meta, pr.fixes)),
                            language=cfg.language)
-        result, failure, used = self._write_turn(agent, prompt, 'fix', path,
-                                                 f'pr-{pr.number}-fix-r{latest["round"]}')
+        result, failure, used, tested = self._write_turn(
+            agent, prompt, 'fix', path, f'pr-{pr.number}-fix-r{latest["round"]}',
+            where=(pr.number, 'fix'))
         if result['status'] == 'blocked':
             return self._blocked(pr.number, used, result['blocked_reason'], remove=[lb.changes],
                                  on_pr=True)
@@ -1755,8 +1942,9 @@ class Dispatcher:
             return self._escalate(pr.number, failure[0], failure[1], remove=[lb.changes])
         if self.ws.has_changes(path):
             auth = self._git_auth(agent.key, IMPLEMENT)
-            self.ws.commit_all(path, self._commit_message(agent, result['commit_message'], pr.issue),
-                               author=auth)
+            commit = self.ws.commit_all(
+                path, self._commit_message(agent, result['commit_message'], pr.issue), author=auth)
+            self._bind_tested(tested, path, commit)
             protected = self._protected_changes(path, since=latest['head_sha'])
             if protected:
                 return self._escalate_protected(pr.number, protected, remove=[lb.changes])
@@ -1796,6 +1984,7 @@ class Dispatcher:
         target = self.ws.merge_head(path)
         listed = _format_conflicts((f, self.ws.base_commits(path, f)) for f in files)
         message = f'Merge {base} into {pr.head_ref}'
+        tested = None
         if files:
             message += '\n\nConflicts resolved in:\n' + '\n'.join(f'- {f}' for f in files)
 
@@ -1808,8 +1997,9 @@ class Dispatcher:
                                base_branch=cfg.base_branch, conflicts=listed,
                                test_cmd=cfg.test_cmd, language=cfg.language)
             try:
-                result, failure, used = self._write_turn(agent, prompt, 'sync', path,
-                                                         f'pr-{pr.number}-sync')
+                result, failure, used, tested = self._write_turn(
+                    agent, prompt, 'sync', path, f'pr-{pr.number}-sync',
+                    where=(pr.number, 'sync'))
             except AgentError as exc:
                 return fail(f'Il passo `sync` è fallito: {_failure_text(exc)}'
                             f'{self._log_hint(exc)}')
@@ -1833,6 +2023,7 @@ class Dispatcher:
             message += f'\n\nRefs #{pr.issue}\n'
         auth = self._git_auth(agent.key, IMPLEMENT)
         head = self.ws.commit_all(path, message, author=auth)
+        self._bind_tested(tested, path, head)
         # The branch never differs from the base under protected_paths, and neither may the merge.
         protected = self._protected_changes(path, since=base)
         if protected:
@@ -1851,6 +2042,8 @@ class Dispatcher:
                                        {'head_sha': head,
                                         'profile': self._profile(agent.key, 'write', used)}))
         else:
+            # A sync without an agent is an event, not a turn (#133).
+            self._ledger_event(pr.number, 'sync', base=target, head=head, previous_head=pr.head_sha)
             self.gh.comment(pr.number, publishable(dispatcher_header() + text
                                                    + 'Il merge locale non aveva conflitti.'))
         self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.ready_to_merge, lb.changes])
@@ -1869,11 +2062,15 @@ def _open_findings_reason(findings):
             'viene riapplicata senza una nuova review.')
 
 
+def _trusted_comments(comments, trusted_users):
+    """The comments of trusted users: the ones that reach the prompts."""
+    return [c for c in comments if (c.get('author') or {}).get('login') in trusted_users]
+
+
 def _render_issue_comments(comments, trusted_users):
     """The comments of trusted users as model input, or ''."""
     rendered = '\n\n'.join(f'### Comment by {c["author"]["login"]}\n\n{c["body"]}'
-                           for c in comments
-                           if (c.get('author') or {}).get('login') in trusted_users)
+                           for c in _trusted_comments(comments, trusted_users))
     return ('## Issue comments\n\n' + rendered) if rendered else ''
 
 
