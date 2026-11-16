@@ -366,6 +366,40 @@ Findings get stable ids (`R<round>-<n>`). The fix step answers each one (`fixed`
 `not_applicable`), and the next round sees those answers. The comment shows the review in
 readable form and carries the full record in a hidden base64 marker for the next tick.
 
+### Acceptance criteria coverage
+
+The acceptance criteria of an issue are the items of a checkbox list (`- [ ]`, `- [x]`) or of a
+numbered list (`1.`, `1)`) in the first section whose Markdown heading is "Criteri di
+accettazione" or "Acceptance criteria" (any level, case-insensitive, an ending colon allowed).
+The section ends at the next heading of the same or a higher level. Indented lines continue the
+item above them; other bullets and text are not criteria. The dispatcher reads the issue text
+when it starts each turn, and gives the criteria it found to the implementer, the fixer and the
+reviewer.
+
+Implementer and fixer return `acceptance_map` in their structured output
+([`implement.json`](../devloop/schemas/implement.json), [`fix.json`](../devloop/schemas/fix.json)):
+one entry per criterion, in the order of the issue, with `criterion`, `tests` (`file` and `name`
+of each test that verifies it), `status` (`covered` or `not_covered`) and `reason`. The map of the
+implementer is recorded in the PR marker and shown in the PR description; each fix records the
+full map again in its `fix` marker and comment. The latest map holds: that of the latest fix
+that carries one, otherwise that of the PR. A sync carries no map, so the previous one still
+holds after it.
+
+The reviewer receives the criteria and the latest map, and must verify them: a criterion without
+real coverage, or with tests that do not actually verify it, is a blocking finding. A
+`not_covered` criterion with a reason is left to the reviewer's judgement. Independently of the
+verdict the reviewer proposes, `normalize_review()` adds a blocking finding, owned by that
+reviewer, for:
+
+- each `not_covered` criterion with an empty `reason`;
+- a missing map when the issue has recognisable criteria (a PR opened before #134, for example):
+  the next fix provides it;
+- a map whose number of entries differs from the number of criteria.
+
+So an `approve` with one of them becomes `request_changes`. An issue without recognisable
+criteria expects an empty map (`[]`), declared as such in the PR description, and blocks
+nothing; for it a missing map counts as an empty one.
+
 ### Findings and who closes them
 
 Every blocking finding has an owner, the reviewer that opened it, and its identity is the triple

@@ -7,7 +7,10 @@ verdict machine-actionable:
   unresolved (another owner's open finding is the dispatcher's to check);
 * ``request_changes`` only with at least one open finding to fix;
 * every blocking finding of earlier rounds is accounted for, and one the
-  reviewer does not assess stays open.
+  reviewer does not assess stays open;
+* the acceptance map of the PR (#134, :mod:`.acceptance`): a criterion ``not_covered`` without a
+  reason, a missing map while the issue has criteria, or a map that does not list every criterion
+  is a blocking finding of the review, whatever verdict the reviewer proposes.
 
 Every blocking finding has an owner and an identity, ``round/reviewer/ID`` (``2/codex/R2-1``),
 recorded in the marker. Only its owner closes it, in a later review. A finding of the reviewer
@@ -18,6 +21,7 @@ reviewer's assessment never closes a finding.
 
 import re
 
+from .acceptance import acceptance_findings
 from .schema import load_schema, validate
 
 VERDICTS = ('approve', 'request_changes', 'needs_human')
@@ -122,17 +126,26 @@ def open_findings(reviews, closures=()):
     return finding_state(reviews, closures).open
 
 
-def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, reviewer):
+def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, reviewer,
+                     criteria=(), acceptance_map=None):
     """Validate ``raw`` against the review schema and return a review record.
 
     ``previous_open`` comes from :func:`open_findings`. The reviewer may name a finding by its
     key or, when unambiguous, by its ID. Its assessment of a finding it does not own is
     recorded, but does not close it.
+
+    ``criteria`` are the acceptance criteria of the issue and ``acceptance_map`` the latest map of
+    the PR (None: none recorded). The findings ``acceptance_findings`` derives from them join
+    the reviewer's blocking findings, so an ``approve`` with one of them is corrected.
     """
     validate(raw, load_schema('review'))
     notes = []
+    derived = acceptance_findings(criteria, acceptance_map)
+    if derived:
+        notes.append(f'devloop ha aggiunto {len(derived)} finding bloccanti dalla mappa di '
+                     'copertura dei criteri di accettazione.')
     blocking = [dict(f, key=finding_key(round_no, reviewer, f['id']))
-                for f in _with_ids(raw['blocking_findings'], round_no, 1)]
+                for f in _with_ids(raw['blocking_findings'] + derived, round_no, 1)]
     non_blocking = _with_ids(raw['non_blocking_findings'], round_no, len(blocking) + 1)
     ids = [f['id'] for f in previous_open]
     by_ref = {f['id']: f for f in previous_open if ids.count(f['id']) == 1}

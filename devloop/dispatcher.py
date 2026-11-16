@@ -56,6 +56,8 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .acceptance import (acceptance_criteria, format_criteria, format_map, latest_map,
+                         render_map)
 from .agents import AgentError, ModelsUnavailable, ModelUnavailable
 from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, PR_COMMENT, REVIEW
 from .github import GitHubError, merge_state
@@ -1350,9 +1352,11 @@ class Dispatcher:
         self.gh.edit_labels(number, add=[lb.working], remove=[lb.ready])
         name, branch = f'issue-{number}', f'{cfg.branch_prefix}{number}'
         path = self.ws.new_branch(name, branch)
+        criteria = acceptance_criteria(issue.get('body'))
         prompt = _template('implement', repo=cfg.repo, base_branch=cfg.base_branch,
                            issue_number=number, issue_title=issue['title'],
                            issue_body=issue.get('body') or '', issue_comments=comments,
+                           acceptance_criteria=format_criteria(criteria),
                            test_cmd=cfg.test_cmd, language=cfg.language)
         result, failure, used = self._write_turn(agent, prompt, 'implement', path,
                                                  f'issue-{number}-implement')
@@ -1368,9 +1372,12 @@ class Dispatcher:
         if protected:
             return self._escalate_protected(number, protected, remove=[lb.working])
         self.ws.push(path, branch, replace=True, auth=auth)
+        # The marker keeps the map the reviewer checks until a fix replaces it (#134).
         meta = {'issue': number, 'implementer': agent.key, 'reviewer': cfg.reviewer,
-                'profile': self._profile(agent.key, 'write', used)}
+                'profile': self._profile(agent.key, 'write', used),
+                'acceptance_map': result['acceptance_map']}
         body = publishable(self.runner.header(used) + '\n' + result['pr_body'].strip()
+                           + '\n\n' + render_map(result['acceptance_map'])
                            + f'\n\nCloses #{number}', 'pr', meta)
         pr_number, url = self._as(agent.key, IMPLEMENT).create_pr(
             base=cfg.base_branch, head=branch, title=result['pr_title'], body=body)
@@ -1446,12 +1453,17 @@ class Dispatcher:
         # Each reviewer of a round judges the head on its own: earlier rounds only.
         earlier = [r for r in pr.reviews if r['round'] < round_no]
         previous_open = open_findings(earlier, pr.closures)
+        # The criteria of the issue text read now, and the latest map of the PR (#134).
+        criteria = acceptance_criteria(issue.get('body'))
+        acceptance_map = latest_map(pr.meta, pr.fixes)
         prompt = _template('review', repo=cfg.repo, base_branch=cfg.base_branch,
                            pr_number=pr.number, round=round_no, max_rounds=cfg.max_review_rounds,
                            implementer=pr.meta.get('implementer', cfg.implementer),
                            ci=pr.checks, test_cmd=cfg.test_cmd,
                            issue_number=pr.issue, issue_title=issue['title'],
                            issue_body=issue.get('body') or '', pr_body=pr.body,
+                           acceptance_criteria=format_criteria(criteria),
+                           acceptance_map=format_map(acceptance_map),
                            diff_stat=self.ws.diff_stat(path),
                            previous=format_previous_rounds(earlier, pr.fixes, pr.closures),
                            operator_comments=format_operator_comments(comments),
@@ -1485,7 +1497,8 @@ class Dispatcher:
             return
         review = normalize_review(raw, previous_open=previous_open, round_no=round_no,
                                   max_rounds=cfg.max_review_rounds, head_sha=pr.head_sha,
-                                  ci=pr.checks, reviewer=agent.key)
+                                  ci=pr.checks, reviewer=agent.key, criteria=criteria,
+                                  acceptance_map=acceptance_map)
         review['receipt'] = receipt
         review['profile'] = self._profile(agent.key, 'review', used)
         reviewer_gh = self._as(agent.key, REVIEW)
@@ -1533,6 +1546,9 @@ class Dispatcher:
         prompt = _template('fix', repo=cfg.repo, pr_number=pr.number, issue_number=pr.issue,
                            issue_title=issue['title'], issue_body=issue.get('body') or '',
                            findings=_format_findings(findings), test_cmd=cfg.test_cmd,
+                           acceptance_criteria=format_criteria(
+                               acceptance_criteria(issue.get('body'))),
+                           acceptance_map=format_map(latest_map(pr.meta, pr.fixes)),
                            language=cfg.language)
         result, failure, used = self._write_turn(agent, prompt, 'fix', path,
                                                  f'pr-{pr.number}-fix-r{latest["round"]}')

@@ -406,7 +406,7 @@ if '--ephemeral' not in argv:
                                          'content': [{'text': 'working on it'}]}}) + '\\n')
 with open(argv[argv.index('-o') + 1], 'w') as fh:
     json.dump({'status': 'completed', 'summary': 's', 'pr_title': 't', 'commit_message': 'c',
-               'pr_body': 'b', 'blocked_reason': ''}, fh)
+               'pr_body': 'b', 'acceptance_map': [], 'blocked_reason': ''}, fh)
 '''
 
 

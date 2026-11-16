@@ -1,7 +1,8 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["status", "summary", "commit_message", "responses", "blocked_reason"],
+  "required": ["status", "summary", "commit_message", "responses", "acceptance_map",
+               "blocked_reason"],
   "properties": {
     "status": {"type": "string", "enum": ["completed", "blocked"]},
     "summary": {"type": "string"},
@@ -16,6 +17,31 @@
           "finding_id": {"type": "string"},
           "action": {"type": "string", "enum": ["fixed", "disputed", "not_applicable"]},
           "note": {"type": "string"}
+        }
+      }
+    },
+    "acceptance_map": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["criterion", "tests", "status", "reason"],
+        "properties": {
+          "criterion": {"type": "string"},
+          "tests": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["file", "name"],
+              "properties": {
+                "file": {"type": "string"},
+                "name": {"type": "string"}
+              }
+            }
+          },
+          "status": {"type": "string", "enum": ["covered", "not_covered"]},
+          "reason": {"type": "string"}
         }
       }
     },
