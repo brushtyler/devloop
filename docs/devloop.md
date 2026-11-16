@@ -217,8 +217,9 @@ A head gets level 0 only when all of these hold:
   path, so `docs/` does not cover `docs/guide.md`. A symlink never counts. These are excluded
   even when listed: `AGENTS.md` and `CLAUDE.md` at any depth (for example `docs/AGENTS.md`, any
   case), `devloop/prompts/`, `standards/`, `.github/`, `schemas/` (with the replay gate
-  baseline) and every sensitive path. One path outside the allowlist keeps the level computed
-  above.
+  baseline) and every sensitive path. Paths are compared exactly as Git names them, spaces
+  included: only the configured entries are trimmed. One path outside the allowlist keeps the
+  level computed above.
 - **Not refused before.** The level is computed again on every head. When a receipt recorded on
   the PR refused the label (a fix widened the diff out of the allowlist, or a level 2 applied),
   that label event no longer counts, even if a later head is back inside the allowlist: the PR
@@ -244,8 +245,12 @@ The promotion is a dispatcher comment with a `policy` marker that records the re
 the label, who added it and when, the allowlist outcome) and the state of each expected check.
 **devloop never merges**: the merge stays the operator's. While the PR is ready, every tick
 checks that the head is still the promoted one, that `reviews:0` is still on the PR and
-`reviews:2` is not, and that CI is not running again or failing; otherwise readiness is revoked
-(or CI becomes a review round) and the level is computed again. A CI failure at level 0 is a
+`reviews:2` is not, and that CI is not running again or failing. It also recomputes the receipt
+from the running policy (the label history, every `reviews:2` event, the current allowlist),
+reads the expected check runs again with the strict rules above and the native reviews: if the
+level is no longer 0, if the most recent run of an expected check is not `success`, or if a
+trusted user's `REQUEST_CHANGES` now stands, or if any of this cannot be read, readiness is
+revoked (or CI becomes a review round) and the level is computed again. A CI failure at level 0 is a
 round like any other, and its fix goes back to level 0 only if the diff stays in the allowlist.
 
 ```toml

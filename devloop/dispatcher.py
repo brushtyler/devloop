@@ -113,6 +113,8 @@ class PullRequest:
     stale_receipt: bool = False
     # The head a level-0 promotion made ready (#107), when it is the latest record of the PR.
     zero_head: str = None
+    # Why that promotion no longer holds, as the snapshot found re-checking it (``''``: it holds).
+    zero_problem: str = ''
     # Findings (#110): closures the dispatcher recorded (``finding`` markers), closures asked by
     # trusted users' commands and not recorded yet, and why some finding has no owner.
     closures: list = field(default_factory=list)
@@ -136,6 +138,14 @@ class Action:
 
 def label_names(labels):
     return {label['name'] if isinstance(label, dict) else label for label in labels}
+
+
+def zero_labels_hold(pr, rp):
+    """Whether a level-0 promotion of ``pr`` still holds as far as its head and labels show:
+    the promoted head is the current one, level 0 is enabled, its label is there and the level-2
+    label is not."""
+    return (pr.zero_head == pr.head_sha and rp.zero_enabled()
+            and rp.zero_label in pr.labels and rp.label not in pr.labels)
 
 
 def plan(snapshot, cfg):
@@ -171,11 +181,11 @@ def plan(snapshot, cfg):
         rounds_left = last_round(pr.reviews) < cfg.max_review_rounds
         if lb.ready_to_merge in pr.labels:
             # Readiness belongs to the approved commit: re-check it on every tick. A level-0
-            # promotion belongs to its head and to the labels that allowed it.
+            # promotion belongs to its head and to the labels that allowed it, and the snapshot
+            # re-checks its receipt, expected checks and native reviews (``zero_problem``).
             rp = cfg.review_policy
             zero = pr.zero_head is not None
-            if zero and not (pr.zero_head == pr.head_sha and rp.zero_enabled()
-                             and rp.zero_label in pr.labels and rp.label not in pr.labels):
+            if zero and (pr.zero_problem or not zero_labels_hold(pr, rp)):
                 actions.append(Action('revoke', pr.number, 'the level 0 promotion no longer holds'))
             elif not zero and (verdict != 'approve' or head != pr.head_sha):
                 actions.append(Action('revoke', pr.number, 'head is not the approved commit'))
@@ -550,6 +560,9 @@ class Dispatcher:
                 f['owner'] == CI for f in open_findings(pr.reviews, pr.closures))
             if pr.labels & {lb.review, lb.ready_to_merge} or ci_open:
                 pr.checks, pr.failed_checks, pr.failed_runs = self.gh.checks(pr.head_sha)
+            if (lb.ready_to_merge in pr.labels and pr.zero_head is not None
+                    and zero_labels_hold(pr, self.cfg.review_policy)):
+                pr.zero_problem = self._zero_problem(pr)
             prs.append(pr)
         ready = []
         for raw in self.gh.issues_with_label(lb.ready):
@@ -833,6 +846,35 @@ class Dispatcher:
             'policy', {'event': 'promoted', 'receipt': receipt, 'checks': states}))
         self.gh.edit_labels(pr.number, add=[lb.ready_to_merge], remove=[lb.review, lb.changes])
 
+    def _zero_problem(self, pr):
+        """Why a PR ready at level 0 no longer is, or ``''``: on every tick its receipt is
+        recomputed from the running dispatcher's policy (label history, level-2 precedence,
+        allowlist), its expected check runs must still have succeeded on the head, and no
+        trusted user's native request for changes may stand. What cannot be verified does not
+        hold."""
+        try:
+            receipt = self._receipt(pr)
+            if receipt['head'] != pr.head_sha:
+                return f'il head è passato a `{receipt["head"][:12]}`'
+            if receipt['level'] != ZERO_LEVEL:
+                return ('la ricevuta di policy ricalcolata ora assegna il livello '
+                        f'{receipt["level"]}:\n\n' + describe_receipt(receipt))
+            states = check_states(self.cfg.review_policy.zero_checks,
+                                  self.gh.check_runs(pr.head_sha))
+            if check_outcome(states) != 'success':
+                return ('non tutti i controlli attesi risultano conclusi con `success` '
+                        'sull\'esecuzione più recente del head:\n\n'
+                        + '\n'.join(f'- `{s["name"]}` (app {s["app_id"]}): `{s["state"]}`'
+                                    for s in states))
+            blocking = changes_requested(self.gh.pr_reviews(pr.number), self.cfg.trusted_users)
+            if blocking:
+                return ('una richiesta di modifiche (`REQUEST_CHANGES`) di '
+                        + ', '.join(f'`{who}`' for who in blocking) + ' è ancora valida')
+        except (GitHubError, WorkspaceError) as exc:
+            self.log(f'  level 0 of #{pr.number} not verifiable: {exc}')
+            return 'non è stato possibile verificarlo di nuovo'
+        return ''
+
     def _refuse_zero(self, pr, receipt, why, states=()):
         """Level 0 holds but the head cannot be promoted: a human decides."""
         lb = self.cfg.labels
@@ -881,9 +923,13 @@ class Dispatcher:
                     else None)
         if pr.zero_head is not None:
             title = 'Livello 0 sospeso'
+            why = (pr.zero_problem.strip() if pr.zero_problem
+                   else 'il head, le label di livello o la CI sono cambiati')
+            # A list ends its own paragraph; a sentence needs its full stop.
+            end = '' if why.splitlines()[-1].startswith('- ') else '.'
             reason = (f'La PR era pronta per il merge al livello 0 sul commit '
-                      f'`{pr.zero_head[:12]}`, ma il head, le label di livello o la CI sono '
-                      'cambiati. La PR torna in review e il livello viene ricalcolato')
+                      f'`{pr.zero_head[:12]}`, ma {why}{end}\n\nLa PR torna in review e il '
+                      'livello viene ricalcolato')
         elif approved == pr.head_sha:
             title = 'Readiness sospesa'
             reason = (f'La CI del commit approvato `{approved[:12]}` è di nuovo in corso. La PR '

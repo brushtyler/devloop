@@ -153,18 +153,24 @@ def sensitive_changes(policy, changes):
 def zero_allowed(policy, change):
     """Whether a change of the diff (``{path, links}``) may be part of a level-0 PR: never a
     symlink, an excluded or sensitive path, nor a Markdown file that the allowlist does not
-    list by its exact path."""
-    path = _norm(change['path'])
-    low = path.lower()
-    if change.get('links') or not path:
+    list by its exact path.
+
+    The path is matched against the allowlist exactly as Git names it: only the configured
+    entries are normalized, so that a name with leading or trailing spaces is a different file
+    and never matches an entry. Exclusions, and the Markdown rule, are checked on both the exact
+    and the trimmed name, so that trimming can only refuse more."""
+    path = change['path']
+    if change.get('links') or not path or not _norm(path):
         return False
-    if posixpath.basename(low) in ZERO_EXCLUDED_NAMES or policy.covers(path):
-        return False
-    for entry in (_norm(e).lower() for e in ZERO_EXCLUDED):
-        if low == entry or low.startswith(entry + '/'):
+    for form in {path, _norm(path)}:
+        low = form.lower()
+        if posixpath.basename(low) in ZERO_EXCLUDED_NAMES or policy.covers(form):
             return False
+        for entry in (_norm(e).lower() for e in ZERO_EXCLUDED):
+            if low == entry or low.startswith(entry + '/'):
+                return False
     entries = [e for e in (_norm(e) for e in policy.zero_allowlist) if e]
-    if low.endswith(MARKDOWN):
+    if any(form.lower().endswith(MARKDOWN) for form in (path, _norm(path))):
         return path in entries
     return any(path == e or path.startswith(e + '/') for e in entries)
 

@@ -157,6 +157,19 @@ class ZeroLevelTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(self.level((path,))['level'], 1)
 
+    def test_paths_are_compared_exactly_as_git_names_them(self):
+        # Leading or trailing spaces make another file: never trimmed into an allowed entry.
+        for path in (' docs/a.txt', 'docs/guide.md ', ' docs/guide.md', 'docs/AGENTS.md ',
+                     ' .github/x.yml', 'docs/x.md '):
+            with self.subTest(path=path):
+                result = self.level(('docs/a.txt', path))
+                self.assertGreaterEqual(result['level'], 1)
+                self.assertEqual(zero_reason(result)['outside'], [path])
+        # Spaces inside a name under a listed directory are just part of the name.
+        for path in ('docs/a b.txt', 'docs/a.txt '):
+            with self.subTest(path=path):
+                self.assertEqual(self.level((path,))['level'], 0)
+
     def test_level_two_prevails(self):
         # The level-2 label, a level 2 recorded earlier, a sensitive path, a default of 2.
         for kwargs in ({'labelers': ['brushtyler']}, {'previous': 2},
@@ -486,6 +499,69 @@ class ZeroReadinessTests(unittest.TestCase):
         self.assertEqual(gh.labels[100], {'agent:ready-to-merge'})
         self.assertEqual(records(gh, 'policy')[-1]['receipt']['level'], 1)
         self.assertIsNone(d.snapshot().prs[0].zero_head)
+
+    def promoted(self, cfg=ZCFG):
+        """A dispatcher, its GitHub and its runner after a level-0 promotion of PR #100."""
+        gh = SnapshotGH([])
+        gh.labels[100] = set(ZERO_LABELS)
+        gh.zero_events, gh.runs = list(GRANT), list(SUCCESS)
+        ws = FakeWS()
+        ws.diff = changes('docs/a.txt')
+        runner = FakeRunner(raw_review())
+        d = Dispatcher(ZCFG, gh, ws, runner, log=lambda m: None)
+        self.assertEqual(d.tick(), [Action('review', 100)])
+        self.assertEqual(d.tick(), [])
+        self.assertEqual(gh.labels[100], {'reviews:0', 'agent:ready-to-merge'})
+        return Dispatcher(cfg, gh, ws, runner, log=lambda m: None), gh, runner
+
+    def assert_revoked(self, d, gh, why):
+        self.assertEqual(d.tick(), [Action('revoke', 100, 'the level 0 promotion no longer holds')])
+        self.assertIn('Livello 0 sospeso', published(gh)[-1])
+        self.assertIn(why, published(gh)[-1])
+        self.assertEqual(gh.labels[100], {'reviews:0', 'agent:review'})
+
+    def test_the_level_is_recomputed_on_every_tick(self):
+        # The label removed and added again by someone untrusted, the labels unchanged.
+        d, gh, runner = self.promoted()
+        gh.zero_events += [{'event': 'unlabeled', 'by': 'stranger', 'at': AT},
+                           {'event': 'labeled', 'by': 'stranger', 'at': AT}]
+        self.assert_revoked(d, gh, 'assegna il livello 1')
+        self.assertEqual(d.tick(), [Action('review', 100)])
+        self.assertEqual(len(runner.calls), 1)
+        self.assertEqual(records(gh, 'review')[-1]['receipt']['level'], 1)
+        # The level-2 label added by a trusted user, then removed: level 2 prevails.
+        d, gh, runner = self.promoted()
+        gh.level_labelers = ['brushtyler']
+        self.assert_revoked(d, gh, 'assegna il livello 2')
+        # The operator's configuration no longer lists the file.
+        narrower = dataclasses.replace(ZPOLICY, zero_allowlist=('tests/',))
+        d, gh, runner = self.promoted(dataclasses.replace(ZCFG, review_policy=narrower))
+        self.assert_revoked(d, gh, '`docs/a.txt`')
+
+    def test_expected_checks_are_rechecked_strictly(self):
+        for conclusion in ('neutral', 'skipped', None):
+            with self.subTest(conclusion=conclusion):
+                d, gh, runner = self.promoted()
+                # A newer run of the expected check: the summary of CI may still pass.
+                gh.runs.append(dict(SUCCESS[0], id=2, conclusion=conclusion,
+                                    status='completed' if conclusion else 'in_progress'))
+                state = conclusion or 'pending'
+                self.assert_revoked(d, gh, f'`unittest` (app {APP}): `{state}`')
+                if conclusion:
+                    # Still level 0, the check is no success: a human decides.
+                    self.assertEqual(d.tick(), [Action('review', 100)])
+                    self.assertEqual(gh.labels[100], {'reviews:0', 'agent:needs-human'})
+                    self.assertEqual(runner.calls, [])
+
+    def test_a_later_request_for_changes_revokes(self):
+        d, gh, runner = self.promoted()
+        gh.native_reviews = [{'login': 'stranger', 'state': 'CHANGES_REQUESTED'}]
+        self.assertEqual(d.tick(), [])
+        gh.native_reviews.append({'login': 'brushtyler', 'state': 'CHANGES_REQUESTED'})
+        self.assert_revoked(d, gh, '`REQUEST_CHANGES`')
+        self.assertEqual(d.tick(), [Action('review', 100)])
+        self.assertEqual(gh.labels[100], {'reviews:0', 'agent:needs-human'})
+        self.assertEqual(runner.calls, [])
 
 
 if __name__ == '__main__':
