@@ -1,7 +1,8 @@
 # devloop: agent dispatcher for this repository
 
 devloop moves issues through implementation, independent review and fixes, so that a human only
-decides what starts and what gets merged. It is development tooling for this repository, not part
+decides what starts and, unless a [merge mode](#merge-modes) lets devloop merge, what gets
+merged. It is development tooling for this repository, not part
 of the SSDLC orchestrator, and it never touches SSDLC runs or the main checkout's working tree.
 
 ## The loop
@@ -19,7 +20,7 @@ plans the next steps and runs them. A crashed tick is resumed by the next one.
 | Sync | A PR in `agent:review` or `agent:ready-to-merge` conflicts with `main` | The implementer resolves the conflicts of a merge of `origin/main`; the dispatcher pushes the merge commit, back to `agent:review` (see below) |
 | Approve | Verdict `approve` from every reviewer the level requires | `agent:ready-to-merge`, only if no [finding](#findings-and-who-closes-them) is still open, the PR head is still the reviewed commit, CI passed and the policy receipt recomputed just before promotion matches the one of every approval (an earlier base is admitted only if `main` left the PR's files alone since, see [When `main` advances](#when-main-advances-during-a-round)) |
 | Level 0 | A trusted user's `reviews:0`, the whole diff in the operator's allowlist, every expected check `success` | `agent:ready-to-merge` without a review (see [Level 0](#level-0-no-review)); off by default |
-| Merge | `agent:ready-to-merge` | **A human merges.** devloop never merges |
+| Merge | `agent:ready-to-merge` | **A human merges** with `[merge].mode = "off"`, the default. With `"strict"` or `"auto"` devloop merges once every merge directive holds again (see [Merge modes](#merge-modes)) |
 
 Readiness belongs to the approved commit. Every tick re-checks ready PRs:
 
@@ -408,7 +409,8 @@ At level 0 the dispatcher runs no reviewer. Before promoting it re-reads the hea
 
 The promotion is a dispatcher comment with a `policy` marker that records the receipt (level 0,
 the label, who added it and when, the allowlist outcome) and the state of each expected check.
-**devloop never merges**: the merge stays the operator's. While the PR is ready, every tick
+The merge stays the operator's, unless a [merge mode](#merge-modes) other than `"off"` applies to
+level 0, and then these same checks are repeated just before the merge. While the PR is ready, every tick
 checks that the head is still the promoted one, that `reviews:0` is still on the PR and
 `reviews:2` is not, and that CI is not running again or failing. It also recomputes the receipt
 from the running policy (the label history, every `reviews:2` event, the current allowlist),
@@ -452,6 +454,98 @@ even of the same head. That review is a
 round like any other and waits for CI. Approvals recorded before receipts existed have none:
 they are not promoted and need a new review; their rounds and open findings stay as they are. A
 PR already in `agent:ready-to-merge` keeps its label until something sends it back to review.
+
+## Merge modes
+
+`[merge].mode` decides who merges a PR in `agent:ready-to-merge` (#172):
+
+| `mode` | Who merges |
+|---|---|
+| `"off"` (default, and this repository's) | A person, as before |
+| `"strict"` | devloop, only when every merge directive below holds |
+| `"auto"` | As `"strict"`; in addition the supervisor can [hold a merge](#holding-a-merge) |
+
+- **Per level.** `[merge.levels]` gives a mode to a review level, for example `"2" = "off"`.
+  The most restrictive of that mode and `mode` applies: `off`, then `strict`, then `auto`. An
+  override never relaxes `mode`.
+- **Operator-only paths.** A PR whose full diff (the paths the review level reads: deletions and
+  both sides of a rename included) touches `operator_only_paths` behaves as `"off"`, whatever the
+  mode. The default is `docs/adr/`, `AGENTS.md` and `CLAUDE.md`; an entry is a directory prefix
+  or a file relative to the root, as for `sensitive_paths`.
+- **Merge directives.** The same in `"strict"` and `"auto"`. A tick plans a merge only for a
+  ready PR that meets them in its snapshot, and the merge reads them all again just before it
+  runs, reviews, finding closures and policy records included (read again from the comments,
+  with the same identity checks as the snapshot):
+  - the PR is open and in `agent:ready-to-merge`, without `agent:needs-human` or
+    `agent:merge-hold`, and no hold or release command waits to be applied;
+  - the head is the approved commit (at level 0, the promoted one), unchanged since the
+    snapshot;
+  - GitHub reports `mergeable` `MERGEABLE` and `mergeStateStatus` `CLEAN`;
+  - CI is `pass`: a head without CI is not merged;
+  - no blocking finding is open, and the [acceptance map](#acceptance-criteria-coverage) holds;
+  - the conditions of the promotion: the receipt recomputed now matches the approvals of every
+    reviewer the level requires (an earlier base is admitted as at promotion, see
+    [When `main` advances](#when-main-advances-during-a-round)); at level 0, the checks of its
+    promotion (level still 0, its labels, every expected check `success`, no standing
+    `REQUEST_CHANGES`).
+
+  When one is missing devloop does not merge, and the revocation already in place applies: a
+  moved head, CI running again or failing, or a level 0 that no longer holds is revoked as on
+  any tick of a ready PR; a receipt that no longer matches is recorded as `stale` and the PR goes
+  back to `agent:review` for a new review; an open finding sends it to `agent:needs-human`. A
+  PR that is `BLOCKED`, `BEHIND` or `UNSTABLE` stays ready and waits. **No mode, and no agent,
+  merges with CI not green, with blocking findings open or without the approvals required.**
+- **How.** `gh pr merge --merge --match-head-commit <approved head>`: a merge commit, only if
+  the head is still the approved one. It runs with the local `gh` login devloop runs with: no
+  GitHub App, the dispatcher's included, gets `contents=write`. The branch is kept. A merge that
+  GitHub refuses goes to `agent:needs-human` like any `gh` failure.
+- **Slot.** A merge takes a slot of `max_actions_per_tick` and runs alone, after the actions
+  planned before it and before those planned after it ([Parallel actions](#parallel-actions)).
+- **Record.** A dispatcher comment with a `merged` marker records the head, the receipt, the
+  level and the mode.
+
+### Holding a merge
+
+Only in `"auto"`. A PR comment whose first line, after the attribution header if any, is
+
+```text
+/devloop hold <reason>
+/devloop release
+```
+
+holds or releases the merge. `hold` adds `agent:merge-hold`: the PR stays ready and is not
+merged. `release` removes the label, and the PR is merged once the directives hold; removing the
+label by hand does the same. A hold needs a reason.
+
+The commands count only from the identity of `[roles].supervisor` (the GitHub App of that agent)
+and from `trusted_users`. The dispatcher applies a command with a dispatcher comment that carries
+a `hold` marker (event, author, reason, head, and in `comment` the id of the comment it applied),
+and that record spends the command it applied and every command written before it: a command
+written after it, even one that arrived while the record was being written, still waits to be
+applied. Among the commands that wait the latest wins. A command is applied before anything else
+on its PR in that tick, so no merge of the same tick overtakes it, and a merge about to run reads
+the comments again and stops if a command is waiting. A command is ignored, and written to the
+dispatcher log, when the merge mode of its PR is `"strict"` or `"off"` (the mode with the
+override of its level and its operator-only paths, so a PR at a level overridden to `"strict"`
+ignores it even with `mode = "auto"`), from anyone else, without a reason, and in text devloop
+publishes (a comment that ends with a devloop marker). As for
+`/devloop finding`, devloop reads the comments of a PR only while it is in `agent:review`,
+`agent:changes` or `agent:ready-to-merge`.
+
+`"auto"`, also as the override of a level, without `[roles].supervisor` stops devloop at
+startup. The supervisor names a configured agent; the escalations it decides are #182.
+
+```toml
+[roles]
+supervisor = "claude"
+
+[merge]
+mode = "auto"
+operator_only_paths = ["docs/adr/", "AGENTS.md", "CLAUDE.md"]
+
+[merge.levels]
+"2" = "off"
+```
 
 ## Structured review
 
@@ -810,6 +904,8 @@ than the implementer. Among the limits, `agent_stall_seconds` (an integer of at 
 and `agent_stall_action` (`"warn"`, the default, or `"abort"`) control the
 [stall check](#stalled-agents); other values stop devloop at startup. `max_parallel_actions`
 (default 1) sets how many actions of a tick run at once ([Parallel actions](#parallel-actions)).
+`[merge]` (`mode`, `levels`, `operator_only_paths`) and `roles.supervisor` set the
+[merge modes](#merge-modes); an unknown mode, level or key stops devloop at startup.
 `[review_policy]` sets the
 [review level](#review-level-and-policy-receipt): `default_level` (1 or 2, default 1), the level
 `label` (default `reviews:2`), `sensitive_paths` and `sensitive_path_lists`; changing any of them,
@@ -1033,7 +1129,9 @@ fallback_models = [
 
 ## Limits
 
-- **No automatic merge.** A human merges every PR.
+- **Merge off by default.** With `[merge].mode = "off"` a human merges every PR. The other
+  modes merge only under the [merge directives](#merge-modes), never a PR touching an
+  operator-only path or at a level whose override is `"off"`.
 - **Identities need apps.** An agent without a GitHub App publishes through the operator's `gh`
   login, and then cannot submit a native review of a PR opened with that same login.
 - **Trust comes from labels and identities.** Only issues whose `agent:ready` label was added by
