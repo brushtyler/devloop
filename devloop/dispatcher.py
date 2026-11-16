@@ -45,6 +45,10 @@ other than the implementer, checks on a checkout of the base branch that the iss
 implemented in one run. Its outcome is a ``preflight`` record on the issue, bound to the hash of
 the title, the body and the trusted comments, and reused while that hash holds. An issue that is
 not ready goes to agent:needs-human; the check removes that label only if it added it itself.
+
+Start order (#146): ready issues start by priority (``priority:high``, ``normal``, ``low``; a
+``priority_labels`` label counts as high), then by the oldest current ``agent:ready``, then by
+number. A priority label counts only if a trusted user added it.
 """
 
 import hashlib
@@ -85,6 +89,14 @@ LABEL_STYLE = {
     'needs_human': ('b60205', 'devloop: serve una decisione umana'),
 }
 LEVEL_LABEL_STYLE = ('5319e7', 'devloop: la PR richiede una review di livello 2')
+# Priority labels of ready issues (#146) and their rank: the lower, the earlier an issue starts.
+PRIORITY_LABELS = {'priority:high': 'high', 'priority:normal': 'normal', 'priority:low': 'low'}
+PRIORITY_RANK = {'high': 0, 'normal': 1, 'low': 2}
+PRIORITY_LABEL_STYLE = {
+    'priority:high': ('b60205', 'devloop: priorità alta, parte prima delle altre issue pronte'),
+    'priority:normal': ('c2e0c6', 'devloop: priorità normale (implicita)'),
+    'priority:low': ('c5def5', 'devloop: priorità bassa, parte dopo le altre issue pronte'),
+}
 ZERO_LABEL_STYLE = ('c5def5', 'devloop: livello 0, nessuna review se il diff è nell\'allowlist')
 _RECEIPT_FIELDS = {'pr': 'PR', 'base': 'commit di base', 'head': 'head',
                    'policy': 'versione della policy', 'level': 'livello',
@@ -152,8 +164,10 @@ class PullRequest:
 @dataclass
 class Snapshot:
     prs: list
-    # dicts: number, title, labels (set), labeler, and with ``preflight`` configured, for the
-    # issues that may start or are blocked by the check, ``preflight`` (``_preflight_view``)
+    # dicts: number, title, labels (set), labeler and ready_at (login and time of the latest
+    # ``labeled`` event of agent:ready), priority (``issue_priority``), and with ``preflight``
+    # configured, for the issues that may start or are blocked by the check, ``preflight``
+    # (``_preflight_view``)
     ready_issues: list
     working_issues: list  # issue numbers
 
@@ -167,6 +181,33 @@ class Action:
 
 def label_names(labels):
     return {label['name'] if isinstance(label, dict) else label for label in labels}
+
+
+def issue_priority(labels, events, trusted_users, priority_labels=()):
+    """The priority of a ready issue (#146): the highest among the priority labels it has now
+    whose latest ``labeled`` event comes from a trusted user, ``normal`` without any. Labels in
+    ``priority_labels`` count as ``high``. ``events`` are the issue's ``labeled`` events, oldest
+    first, as ``{label, by, at}``."""
+    names = dict(PRIORITY_LABELS, **{name: 'high' for name in priority_labels})
+    added_by = {event['label']: event['by'] for event in events}
+    valid = [names[name] for name in labels
+             if name in names and added_by.get(name) in trusted_users]
+    return min(valid, key=PRIORITY_RANK.__getitem__, default='normal')
+
+
+def start_order(issue):
+    """Sort key of the ready issues (#146): priority, the oldest current agent:ready, number."""
+    return (PRIORITY_RANK[issue.get('priority', 'normal')], issue.get('ready_at') or '',
+            issue['number'])
+
+
+def queue_lines(snapshot):
+    """The ready issues in start order, with priority and agent:ready time, as ``status`` and
+    ``tick --dry-run`` show them. Which of them start, and when, is up to ``plan``."""
+    return [f'ready {position}. #{issue["number"]} priority={issue.get("priority", "normal")} '
+            f'agent:ready={issue.get("ready_at") or "?"} labelled by {issue["labeler"]}: '
+            f'{issue["title"]}'
+            for position, issue in enumerate(sorted(snapshot.ready_issues, key=start_order), 1)]
 
 
 def zero_labels_hold(pr, rp):
@@ -295,7 +336,7 @@ def plan(snapshot, cfg):
         candidates = [i for i in snapshot.ready_issues
                       if not (i['labels'] & blocked) and i['number'] not in pr_issues
                       and i['labeler'] in cfg.trusted_users]
-        candidates.sort(key=lambda i: (not (i['labels'] & set(cfg.priority_labels)), i['number']))
+        candidates.sort(key=start_order)
         actions += [Action('implement', i['number']) for i in candidates[:free]]
     capped, spent = [], 0
     for action in actions:
@@ -319,7 +360,7 @@ def _plan_preflight(snapshot, cfg, pr_issues, free):
     issues = [i for i in snapshot.ready_issues
               if not (i['labels'] & excluded) and i['number'] not in pr_issues
               and i['labeler'] in cfg.trusted_users]
-    issues.sort(key=lambda i: (not (i['labels'] & set(cfg.priority_labels)), i['number']))
+    issues.sort(key=start_order)
     actions, taken = [], 0
     for issue in issues:
         view = issue.get('preflight')
@@ -695,9 +736,15 @@ class Dispatcher:
         pr_issues = {pr.issue for pr in prs}
         skip = set(self.cfg.blocked_labels) | {lb.working}
         for raw in self.gh.issues_with_label(lb.ready):
-            issue = {'number': raw['number'], 'title': raw['title'],
-                     'labels': label_names(raw['labels']),
-                     'labeler': self.gh.last_labeler(raw['number'], lb.ready)}
+            labels = label_names(raw['labels'])
+            events = self.gh.labeled_events(raw['number'])
+            # The latest agent:ready: its author admits the issue and its time is the issue's
+            # seniority in the queue (#146).
+            admitted = ([e for e in events if e['label'] == lb.ready] or [{}])[-1]
+            issue = {'number': raw['number'], 'title': raw['title'], 'labels': labels,
+                     'labeler': admitted.get('by'), 'ready_at': admitted.get('at'),
+                     'priority': issue_priority(labels, events, self.cfg.trusted_users,
+                                                self.cfg.priority_labels)}
             # The readiness check of the issues that may start or are blocked by it (#114).
             if (self.cfg.preflight and issue['labeler'] in self.cfg.trusted_users
                     and not issue['labels'] & skip and issue['number'] not in pr_issues):
@@ -862,6 +909,9 @@ class Dispatcher:
         snap = self.snapshot()
         actions = plan(snap, self.cfg)
         prs = {pr.number: pr for pr in snap.prs}
+        if dry_run:
+            for line in queue_lines(snap):
+                self.log(f'[dry-run] {line}')
         for action in actions:
             self.log(f'{"[dry-run] " if dry_run else ""}{action.kind} #{action.number}'
                      + (f': {action.reason}' if action.reason else ''))
@@ -1745,6 +1795,8 @@ def ensure_labels(gh, labels, review_policy=None):
         gh.ensure_label(review_policy.label, *LEVEL_LABEL_STYLE)
         if review_policy.zero_enabled():
             gh.ensure_label(review_policy.zero_label, *ZERO_LABEL_STYLE)
+    for name, (color, description) in PRIORITY_LABEL_STYLE.items():
+        gh.ensure_label(name, color, description)
 
 
 def run_forever(dispatcher, interval, sleep=time.sleep):

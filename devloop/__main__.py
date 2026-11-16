@@ -12,7 +12,7 @@ from . import activity, follow
 from .agents import AgentRunner, isolated_env
 from .apps import DISPATCHER, Identities
 from .config import ConfigError, load_config
-from .dispatcher import Dispatcher, ensure_labels, plan, run_forever
+from .dispatcher import Dispatcher, ensure_labels, plan, queue_lines, run_forever
 from .github import GitHubError
 from .review import last_round
 from .stall import StallWatch
@@ -150,8 +150,8 @@ def main(argv=None):
             conflict = ' CONFLICT with ' + cfg.base_branch if pr.merge_state == 'conflict' else ''
             log(f'PR #{pr.number} (issue #{pr.issue}) [{labels}] rounds={last_round(pr.reviews)} '
                 f'ci={pr.checks} merge={pr.merge_state}{conflict}')
-        for issue in snap.ready_issues:
-            log(f'ready #{issue["number"]} labelled by {issue["labeler"]}: {issue["title"]}')
+        for line in queue_lines(snap):
+            log(line)
         for action in plan(snap, cfg):
             log(f'next: {action.kind} #{action.number}')
         return

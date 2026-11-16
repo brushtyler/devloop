@@ -63,6 +63,9 @@ class IssueGH(FakeGH):
     def last_labeler(self, number, label):
         return 'brushtyler'
 
+    def labeled_events(self, number):
+        return [{'label': READY, 'by': 'brushtyler', 'at': '2026-11-13T10:00:00Z'}]
+
     def issues_with_label(self, label):
         if label in self.labels.get(7, ()):
             return [{'number': 7, 'title': 'Issue 7',
