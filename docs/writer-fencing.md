@@ -4,12 +4,14 @@ Automatic fencing (#45) lets a transition prove, with a kernel lock, that no wri
 of the canonical ticket is running. This page describes the protocol implemented in
 `ssdlc_writer_gate.py`.
 
-> **Status: parts (a) and (b) of #45.** The gate, its protocol, the in-container
-> holder (`ssdlc_container_holder.py`, see [Containers](#containers-the-pid-1-holder))
-> and their tests exist, but nothing uses them on real runs yet. Role containers still
-> start with `--init`; transitions, the supervisor and the delegated feedback flow
-> behave exactly as before. Part (c) wires the gate into them. Automatic fencing is not
-> declared reliable until the Docker test passes on the operator's host.
+> **Status: parts (a), (b) and (c1) of #45.** The gate, its protocol and the
+> in-container holder (`ssdlc_container_holder.py`, see
+> [Containers](#containers-the-pid-1-holder)) exist, and the operator's host passed the
+> Docker test of the holder on 2026-11-16. Part (c1) runs the role containers of
+> **admitted runs** under the holder (see [Role containers](#role-containers-activation-and-admission)).
+> Transitions, the supervisor and the delegated feedback handoff still use the manual
+> path: the versioned proof in the contracts, historical compatibility and the crash
+> tests are part (c2), #158.
 
 ## Invariants
 
@@ -269,6 +271,85 @@ SSDLC_DOCKER_TESTS=1 python3 -m unittest discover -s tests -p 'test_container_ho
 It needs root (the gate must be root-owned) and a local image with `python3`
 (`SSDLC_DOCKER_TEST_IMAGE`, default `ssdlc-runner:latest`).
 
+## Role containers: activation and admission
+
+Part (c1) of #45 (`ssdlc_role_fencing.py`). It changes only how role containers of
+admitted runs start; it activates nothing on runs already in progress.
+
+### Admission
+
+- A run is **admitted** only if its state was created with `"writer_fencing": "v1"`.
+  The orchestrator writes the marker only when it creates `state.json` for a new run.
+- **Existing runs and tickets stay on the manual path**, stopped or resumed: their
+  state has no marker, and nothing adds it later. Generations prepared from a run
+  without the marker inherit its state, so they stay manual too.
+- `open_gate()` never admits a run: an initialized gate, or one created by an admitted
+  run of the same ticket, changes nothing for a run without the marker.
+- The first refusal (below) is recorded in the run's state as
+  `writer_fencing_refusal` (`code`, `detail`, `refused_at`) **before** any container
+  starts without the holder. From then on the run is no longer admitted, even after a
+  resume or a later configuration change: one of its writers ran outside the gate.
+
+### Payload identity
+
+The operator sets the payload identity in `.ssdlc/project.env`:
+
+```bash
+export SSDLC_CONTAINER_PAYLOAD_USER="1000:1000"   # numeric UID:GID, never root
+```
+
+| Situation | Refusal code |
+| --- | --- |
+| Variable unset or empty | `CONTAINER_PAYLOAD_IDENTITY_MISSING` |
+| UID or GID 0 | `CONTAINER_PAYLOAD_PRIVILEGED` |
+| Not numeric `UID:GID` | `invalid_payload_user` |
+
+### Accesses
+
+**The operator prepares the accesses**: ownership and permissions of the worktree, the
+runtime directory (`.ssdlc/.runtime`, with `CODEX_HOME`, `CLAUDE_CONFIG_DIR` and the
+caches) and the credentials mounted into the container, for that identity. SSDLC
+**never changes** permissions, ownership or credentials of existing paths. It only gives
+the identity the directories it creates for one invocation: the role cache
+(`.ssdlc/.runtime/cache/roles/invocation-*`) and the verification scratch.
+
+Before each container, the host checks every host path bind-mounted into it, and the
+working directory: read and search for read-only mounts, read, write and search for
+writable ones (read, and write, for files). The check runs `/bin/sh` `test` with the
+payload UID and GID and no supplementary groups, as the holder runs the payload, so the
+kernel judges modes, owners and ACLs. The first path the identity cannot use is refused
+as `CONTAINER_PAYLOAD_ACCESS_DENIED: <path>`. Named Docker volumes and paths inside the
+image are not checked: host credentials mounted under `/root` and the shared caches
+`/root/.cache/uv` and `/root/.npm` are usable only if the image lets the identity reach
+them, which the operator's Docker run shows.
+
+### What the host checks, then starts
+
+For a container of an admitted run, `EngineRunner._wrap_in_role_container()`:
+
+1. reads the identity and checks the accesses (above);
+2. opens the canonical ticket's gate, creating it only on first initialization, and
+   refuses unless it is root-owned `0600` (`CONTAINER_GATE_EXPOSED`). The controller must
+   therefore run as root;
+3. reads the selected generation (`current_generation`) and refuses unless it is the
+   one the controller runs (`stale_generation`, `generation_invalid`);
+4. starts the container with `--entrypoint python3` and the holder command, without
+   `--init` and without `--user`, binding the gate identity (`--gate-identity`), the
+   generation and the payload identity. The canonical ticket is mounted read-only at
+   its host path, also in verification containers, where the rest of `.ssdlc` stays
+   masked. The payload is the usual resource wrapper with the role command.
+
+Any refusal in steps 1–3 is printed as
+`[writer-fencing] Automatic fencing refused (<code>: <detail>)`, recorded as above, and
+the container starts as before, with `--init` (the manual path). A refusal of the holder
+inside the container (exit 122 and `ssdlc-holder-refused`, without the
+`ssdlc-holder-ready` line) means that no payload ran: the role is not dispatched
+(`NotDispatched`, `ENVIRONMENT_BLOCKED`) and its exit code is never read as a result.
+
+Role containers are covered when a pipeline phase starts them. Verification containers
+of the transition commands (`continuation-prepare`, I2 limits preparation) belong to
+the manual transition path and start as before.
+
 ## Historical and non-conforming writers
 
 The gate only excludes writers that take it. Runs started before the gate existed, and
@@ -317,8 +398,10 @@ an authorized I2 generation without `state.json` is refused before anything is c
   Docker coverage probe; a container on another host cannot be fenced.
 - **Unprivileged payloads only.** The holder needs a root PID 1 and a non-root payload
   UID and GID; a payload that needs root is refused (`CONTAINER_PAYLOAD_PRIVILEGED`).
-  Part (c) must give role containers such a payload user, with access to the files the
-  role writes.
+  Role containers get it from `SSDLC_CONTAINER_PAYLOAD_USER`, and the operator gives it
+  access to the files the role uses ([Accesses](#accesses)).
+- **New runs only.** Runs created before part (c1), and runs refused once, stay on the
+  manual path ([Admission](#admission)).
 - **Host commands disable automatic fencing for their generation** until #132 covers
   their process trees with a kernel mechanism.
 - A deleted or replaced gate is detected through its anchor, the registry, a bound

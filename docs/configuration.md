@@ -134,8 +134,9 @@ Container limits:
 | `SSDLC_CONTAINER_CPUS` | `2` | |
 | `SSDLC_CONTAINER_PIDS_LIMIT` | `1024` (minimum 16) | |
 | `SSDLC_PREFLIGHT_MIN_FREE_MB` | `100` | Minimum free disk space checked by the supervisor preflight |
+| `SSDLC_CONTAINER_PAYLOAD_USER` | unset | Numeric `UID:GID`, never root, of role payloads under [automatic writer fencing](writer-fencing.md#role-containers-activation-and-admission). Unset: fencing is refused (`CONTAINER_PAYLOAD_IDENTITY_MISSING`) and the run stays on the manual path |
 
-Role containers use `--init` and a finite PID/thread limit. Before a container exits, a wrapper collects cgroup-v2 PID and memory counters into `.ssdlc/.runtime/resources/ssdlc-role-*.json`. Missing counters are reported as unavailable, never as zero.
+Role containers use `--init` and a finite PID/thread limit. Containers of runs admitted to automatic writer fencing use the PID 1 holder instead of `--init`, with the payload identity above; the operator gives that identity access to the worktree, runtime, caches and credentials, and SSDLC never changes them. Before a container exits, a wrapper collects cgroup-v2 PID and memory counters into `.ssdlc/.runtime/resources/ssdlc-role-*.json`. Missing counters are reported as unavailable, never as zero.
 
 When a PID or OOM event is measured, the AI output is blocked and the run raises `ENVIRONMENT_RESOURCE`, preserving the source for reconciliation:
 - read-only verification gets at most one retry, in a fresh container;

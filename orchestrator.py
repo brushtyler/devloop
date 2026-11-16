@@ -53,6 +53,8 @@ from ssdlc_catalogues import CatalogueError, requirement_catalogue
 from ssdlc_requirements import prepare_requirements
 from ssdlc_controller import assert_controller, controller_snapshot, execution_contract
 from ssdlc_transitions import runtime_root
+import ssdlc_role_fencing as role_fencing
+from ssdlc_writer_gate import GateError
 
 from ssdlc_tasks import (
     PlanError, TaskError, DevelopmentBlocked, ResourceLimitError, TaskPlanValidator, TaskScheduler, TaskJournal, atomic_json,
@@ -72,6 +74,24 @@ def _dispatch_context(task_id=None, attempt=None, phase=None):
         yield
     finally:
         _dispatch_local.context = previous
+
+
+@contextlib.contextmanager
+def _writer_fencing_scope(run):
+    """Role containers started in this scope belong to ``run`` (docs/writer-fencing.md).
+
+    Only the run's own state decides admission; without a scope a container keeps the
+    manual path.
+    """
+    previous = getattr(_dispatch_local, 'fencing', None)
+    if not (isinstance(getattr(run, 'state', None), dict) and isinstance(getattr(run, 'ssdlc_root', None), Path)
+            and isinstance(getattr(run, 'ticket_lock_path', None), Path)):
+        run = None
+    _dispatch_local.fencing = run
+    try:
+        yield
+    finally:
+        _dispatch_local.fencing = previous
 
 
 def _supervision_event(event_type, **fields):
@@ -274,7 +294,8 @@ def _supervised_phase(phase):
             with _dispatch_context(phase=phase):
                 _supervision_event('phase_started', phase=phase)
                 if args and isinstance(getattr(args[0], 'ssdlc_root', None), Path):
-                    result = _bounded_entrypoint(fn)(*args, **kwargs)
+                    with _writer_fencing_scope(args[0]):
+                        result = _bounded_entrypoint(fn)(*args, **kwargs)
                 else:
                     result = fn(*args, **kwargs)
                 _supervision_event('phase_finished', phase=phase)
@@ -1293,7 +1314,7 @@ KNOWN_PROJECT_ENV_VARS = ROLE_OVERRIDE_ENV_VARS | frozenset({
     "SSDLC_BUDGET_CAP_USD", "SSDLC_DEV_BUDGET_USD", "SSDLC_MAX_DEV_RETRIES", "SSDLC_MAX_DESIGN_ROUNDS",
     "SSDLC_DEV_TIMEOUT", "SSDLC_REVIEW_MAX_DIFF_CHARS", "SSDLC_SUPERVISOR_HARD_TIMEOUT",
     "SSDLC_PREFLIGHT_MIN_FREE_MB", "SSDLC_CONTAINER_MEMORY", "SSDLC_CONTAINER_CPUS",
-    "SSDLC_CONTAINER_PIDS_LIMIT",
+    "SSDLC_CONTAINER_PIDS_LIMIT", "SSDLC_CONTAINER_PAYLOAD_USER",
 })
 
 # Names that older templates generated but that have no effect. Value: replacement, or None to remove.
@@ -1402,6 +1423,25 @@ class EngineRunner:
         repo_root = cwd.resolve() if getattr(_dispatch_local, 'prepaid', None) else EngineRunner._find_repo_root(cwd)
         if auth_profile not in (None, "agy"):
             raise TaskError("Unsupported role authentication profile")
+        # Automatic fencing only for a run admitted at creation (docs/writer-fencing.md).
+        fencing_run = getattr(_dispatch_local, 'fencing', None)
+        payload_user = None
+        if fencing_run is not None and role_fencing.admitted(fencing_run.state):
+            try:
+                payload_user = role_fencing.payload_identity()
+            except GateError as exc:
+                EngineRunner._refuse_fencing(fencing_run, exc)
+
+        def give_payload(created: Path) -> None:
+            """Hand a directory created for this invocation only to the payload identity."""
+            nonlocal payload_user
+            if payload_user is None:
+                return
+            try:
+                os.chown(created, *payload_user, follow_symlinks=False)
+            except OSError:
+                payload_user = None
+                EngineRunner._refuse_fencing(fencing_run, GateError(role_fencing.ACCESS_DENIED, str(created)))
         runtime_dir = repo_root / ".ssdlc" / ".runtime"
         runtime_dir.mkdir(parents=True, exist_ok=True)
         ssdlc_home = Path(__file__).resolve().parent
@@ -1464,6 +1504,7 @@ class EngineRunner:
             cache_parent = runtime_dir / "cache" / "roles"
             cache_parent.mkdir(parents=True, exist_ok=True)
             role_cache = Path(tempfile.mkdtemp(prefix="invocation-", dir=cache_parent))
+            give_payload(role_cache)
             for key, value in {
                 "PYTHONPYCACHEPREFIX": str(role_cache / "pycache"),
                 "PYTEST_ADDOPTS": (os.environ.get("PYTEST_ADDOPTS", "") + f" -o cache_dir={role_cache / 'pytest'}").strip(),
@@ -1482,6 +1523,11 @@ class EngineRunner:
                     (writable_worktree is None or not cwd.resolve().is_relative_to(writable_worktree.resolve()))):
                 docker_cmd.extend(["-v", f"{cwd.resolve()}:{cwd.resolve()}:ro"])
             if verification_scratch is not None:
+                if payload_user is not None:
+                    # run_sandboxed_cmd created this scratch for this invocation only.
+                    scratch = Path(verification_scratch)
+                    for created in (scratch, *(p for p in scratch.iterdir() if p.is_dir() and not p.is_symlink())):
+                        give_payload(created)
                 docker_cmd.extend(["-v", f"{verification_scratch}:{verification_scratch}:rw"])
             for key, value in (verification_env or {}).items():
                 docker_cmd.extend(["-e", f"{key}={value}"])
@@ -1597,8 +1643,50 @@ class EngineRunner:
                    'else '
                    f'printf "{marker} %s=%s\\n" "$f" "$key" >&2; '
                    'fi; done < "/sys/fs/cgroup/$f"; fi; done; exit "$rc"')
-        docker_cmd.extend([EngineRunner.IMAGE_NAME, "-c", wrapper, "ssdlc-role", *inner_cmd])
+        fencing = None
+        if payload_user is not None:
+            try:
+                fencing = role_fencing.prepare(fencing_run.ticket_lock_path.parent, fencing_run.ssdlc_root,
+                                               *payload_user, EngineRunner._payload_needs(docker_cmd, cwd))
+            except GateError as exc:
+                EngineRunner._refuse_fencing(fencing_run, exc)
+        if fencing is None:
+            docker_cmd.extend([EngineRunner.IMAGE_NAME, "-c", wrapper, "ssdlc-role", *inner_cmd])
+            return docker_cmd
+        # The holder is PID 1 in place of --init; it runs the same wrapper as the payload.
+        entrypoint, command = fencing.command(["/bin/sh", "-c", wrapper, "ssdlc-role", *inner_cmd])
+        docker_cmd.remove("--init")
+        docker_cmd[docker_cmd.index("--entrypoint") + 1] = entrypoint[1]
+        ticket = fencing.ticket_root
+        if not any(docker_cmd[i - 1] in ("-v", "--tmpfs") and docker_cmd[i].split(":", 1)[0] == str(ticket)
+                   for i in range(1, len(docker_cmd))):
+            docker_cmd.extend(["-v", f"{ticket}:{ticket}:ro"])
+        docker_cmd.extend([EngineRunner.IMAGE_NAME, *command])
         return docker_cmd
+
+    @staticmethod
+    def _payload_needs(docker_cmd: List[str], cwd: Path) -> Dict[Path, Tuple[str, ...]]:
+        """Host paths bind-mounted for the payload, with the access each mount needs."""
+        needs: Dict[Path, Tuple[str, ...]] = {Path(cwd).resolve(): role_fencing.READ}
+        for flag, value in zip(docker_cmd, docker_cmd[1:]):
+            if flag != "-v" or not value.startswith("/"):
+                continue  # named volumes live in Docker, not on a host path
+            source, _, rest = value.partition(":")
+            writable = rest.rsplit(":", 1)[-1] == "rw"
+            if Path(source).is_dir():
+                tests = role_fencing.WRITE if writable else role_fencing.READ
+            else:
+                tests = role_fencing.WRITE_FILE if writable else role_fencing.READ_FILE
+            needs[Path(source)] = tuple(sorted(set(needs.get(Path(source), ())) | set(tests)))
+        return needs
+
+    @staticmethod
+    def _refuse_fencing(run, error: GateError) -> None:
+        """Record the refusal before any unfenced container starts: the run stays manual."""
+        run.state[role_fencing.REFUSAL_KEY] = role_fencing.refusal_record(error, utc_now())
+        run._save_state()
+        print(f"[writer-fencing] Automatic fencing refused ({role_fencing.describe(error)}); "
+              "this run stays on the manual path.", flush=True)
 
     @staticmethod
     def _run_role_command(cmd, *, cwd, env, timeout, input=None):
@@ -1670,6 +1758,13 @@ class EngineRunner:
                 if proc is not None:
                     proc.resource_failure = failed
                     proc.resource_evidence = str(path)
+        if docker and role_fencing.HOLDER_PATH in cmd:
+            refusal = role_fencing.holder_refusal(proc.returncode, proc.stderr)
+            if refusal is not None:
+                from ssdlc_recovery import NotDispatched
+                raise NotDispatched('ENVIRONMENT_BLOCKED', 'Writer gate holder refused the role container before '
+                                    'its payload started: ' + role_fencing.describe(refusal))
+            proc.stderr = role_fencing.strip_ready(proc.stderr or "")
         return proc
 
     @staticmethod
@@ -4113,6 +4208,8 @@ class SSDLCOrchestrator:
             return json.loads(self.state_file.read_text(encoding="utf-8"))
         state = {
             "task_engine_v1": True,
+            # Admission to automatic writer fencing: written only when a run is created.
+            role_fencing.MARKER_KEY: role_fencing.MARKER,
             "project_id": self.project_id,
             "ticket_id": self.ticket_id,
             "created_at": utc_now(),
