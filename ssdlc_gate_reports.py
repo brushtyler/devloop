@@ -1127,9 +1127,12 @@ def run_diagnosis(root, *, gate, finding, reviewed_commit, tree, evaluation_iden
         """The shared cost telemetry of the diagnosis call, from its own versioned artifact.
 
         None for a result written before this artifact existed, or by an adapter without
-        telemetry: the ledger then records the call with every measure unknown."""
+        telemetry: the ledger then records the call with every measure unknown. A registered
+        artifact that is gone is an integrity failure, never a historical result."""
         path = root / telemetry_ref
         if not (path.exists() or path.is_symlink()):
+            if telemetry_ref in artifacts:
+                raise TaskError('Diagnosis telemetry artifact missing or changed')
             return None
         try:
             data = _candidate_read(root, telemetry_ref, 'record')

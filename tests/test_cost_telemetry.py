@@ -466,6 +466,28 @@ class DiagnosisTelemetryTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskError, 'Diagnosis telemetry artifact missing or changed'):
             self.diagnose(('unused', 0.0, 0, 0, ''))
 
+    def test_registered_telemetry_lost_after_a_crash_before_the_ledger_is_refused(self):
+        from ssdlc_recovery import ReportedOutput
+        from ssdlc_tasks import TaskError
+
+        class Crash(BaseException):
+            pass
+
+        def crash(point):
+            if point == 'diagnosis.after_register_before_ledger':
+                raise Crash()
+        with patch.object(self.orch, '_diagnosis_fault', side_effect=crash):
+            with self.assertRaises(Crash):
+                self.diagnose(ReportedOutput(('advisory', 0.4213, 45012, 800, ''), None, t.from_claude(CLAUDE)))
+        self.assertEqual(self.diagnosis_rows(), [])
+        stored = next((self.root / 'diagnosis-telemetry').glob('*.json'))
+        self.assertIn(stored.relative_to(self.root).as_posix(), self.orch.state['artifacts'])
+        stored.unlink()
+        # The registered evidence is gone: resume refuses instead of rebuilding unknown measures.
+        with self.assertRaisesRegex(TaskError, 'Diagnosis telemetry artifact missing or changed'):
+            self.diagnose(('unused', 0.0, 0, 0, ''))
+        self.assertEqual(self.diagnosis_rows(), [])
+
     def test_historical_diagnosis_without_telemetry_is_a_completed_call_with_unknown_measures(self):
         self.diagnose(('advisory', 0.0, 0, 0, ''))
         self.assertFalse((self.root / 'diagnosis-telemetry').exists())
