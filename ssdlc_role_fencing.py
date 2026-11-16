@@ -17,7 +17,9 @@ For a container of an admitted run, the host:
 
 Then the container runs the PID 1 holder (``ssdlc_container_holder``) with that
 identity. Any refusal is a ``GateError`` with a stable code: the caller records it in
-the run's state and the run stays on the manual path.
+the run's state and the run stays on the manual path. A role of an admitted run that
+would run without a role container (local execution, Docker unavailable) is refused the
+same way (``ROLE_OUTSIDE_CONTAINER``) before it starts.
 """
 import os
 from pathlib import Path
@@ -34,6 +36,7 @@ REFUSAL_KEY = 'writer_fencing_refusal'
 PAYLOAD_USER_ENV = 'SSDLC_CONTAINER_PAYLOAD_USER'
 IDENTITY_MISSING = 'CONTAINER_PAYLOAD_IDENTITY_MISSING'
 ACCESS_DENIED = 'CONTAINER_PAYLOAD_ACCESS_DENIED'
+OUTSIDE_CONTAINER = 'ROLE_OUTSIDE_CONTAINER'
 HOLDER_PATH = f'/opt/ssdlc/{holder.HOLDER}'
 DETAIL_MAX = 500
 

@@ -346,7 +346,18 @@ inside the container (exit 122 and `ssdlc-holder-refused`, without the
 `ssdlc-holder-ready` line) means that no payload ran: the role is not dispatched
 (`NotDispatched`, `ENVIRONMENT_BLOCKED`) and its exit code is never read as a result.
 
-Role containers are covered when a pipeline phase starts them. Verification containers
+### Roles without a role container
+
+A role of an admitted run that would run without a role container, because local
+execution is selected (`SSDLC_EXECUTION_MODE=local`) or Docker or the runner image is
+unavailable, is a writer outside the gate. Before it starts, the refusal is recorded as
+above with code `ROLE_OUTSIDE_CONTAINER` (the detail names the execution mode) and
+printed the same way. The role then runs as before; the run stays on the manual path,
+also when it is later resumed with Docker.
+
+Role containers are covered when an orchestrator entrypoint starts them: the pipeline
+phases and the resumes (`resume_task_planning()`, `resume_pair_design()`), which
+start their roles for the same run. Verification containers
 of the transition commands (`continuation-prepare`, I2 limits preparation) belong to
 the manual transition path and start as before.
 

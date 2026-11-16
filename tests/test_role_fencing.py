@@ -53,7 +53,8 @@ class FencingTestCase(RepositoryTests):
         env = patch.dict(os.environ)
         env.start()
         self.addCleanup(env.stop)
-        for name in ('SSDLC_CONTAINER_PAYLOAD_USER', 'SSDLC_SUPERVISED_RUN_ID', 'SSDLC_AUTONOMOUS'):
+        for name in ('SSDLC_CONTAINER_PAYLOAD_USER', 'SSDLC_SUPERVISED_RUN_ID', 'SSDLC_AUTONOMOUS',
+                     'SSDLC_EXECUTION_MODE'):
             os.environ.pop(name, None)
         if os.geteuid() != 0:
             # Only root can own the gate or hand a new cache to the payload identity; the
@@ -191,6 +192,36 @@ class FencedContainerTests(FencingTestCase):
         self.assertIn(f'{self.repo / ".ssdlc"}:rw,size=16m', cmd[:image])
         self.assertIn(f'{self.ticket}:{self.ticket}:ro', cmd[:image])
 
+    def test_resumed_planning_runs_planner_and_reviewer_under_the_holder(self):
+        # Seed an approved design, so that only planning resumes.
+        for name, content in [('01-po/requirements.md', 'AC-1 SEC-1'), ('02-design/adr.md', '# Approved design'),
+                              ('02-design/threat-model.md', 'DESIGN_STATUS: APPROVED')]:
+            path = self.orch.ssdlc_root / name
+            path.write_text(content)
+            self.orch.record_artifact(name, path)
+        path = self.orch.dir_recon / 'quality-contract.json'
+        path.write_text(json.dumps(self.quality))
+        self.orch.record_artifact('00-recon/quality-contract.json', path)
+        self.orch.record_gate('PAIR_DESIGN_GATE', True, 'Approved')
+        runner = Runner()
+
+        def plan(**kwargs):
+            # The planner and reviewer roles the planning step dispatches.
+            EngineRunner.run_claude('Plan', self.orch.repo_root)
+            EngineRunner.run_codex('Review the plan', self.orch.repo_root)
+        with patch('orchestrator.subprocess.run', side_effect=runner), \
+                patch.object(rf, 'probe_access', return_value=None), \
+                patch.object(self.orch, '_ensure_task_plan', side_effect=plan), \
+                contextlib.redirect_stdout(io.StringIO()) as printed:
+            self.orch.resume_task_planning()
+        self.assertEqual(len(runner.calls), 2)
+        for cmd in runner.calls:
+            self.assertIn(rf.HOLDER_PATH, cmd)
+            self.assertNotIn('--init', cmd)
+        stored = self.stored_state()
+        self.assertNotIn(rf.REFUSAL_KEY, stored, printed.getvalue())
+        self.assertTrue(rf.admitted(stored))
+
     def test_holder_refusal_before_the_payload_is_not_a_role_result(self):
         refusal = holder.REFUSED_PREFIX + json.dumps(dict(code='stale_generation', detail='moved')) + '\n'
         with self.assertRaises(NotDispatched) as caught:
@@ -292,6 +323,36 @@ class RefusalTests(FencingTestCase):
         self.run_role(orch, runner)
         self.assertEqual(seen, [True])
 
+    def test_a_role_run_without_a_container_is_refused_and_a_docker_resume_stays_manual(self):
+        os.environ['SSDLC_CONTAINER_PAYLOAD_USER'] = PAYLOAD
+        seen = []
+
+        def local(cmd, **kwargs):
+            if cmd[:1] == ['claude']:
+                seen.append(self.stored_state().get(rf.REFUSAL_KEY, {}).get('code'))
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({'result': 'DONE'}), '')
+        for mode, docker in (('local', False), ('docker', False)):
+            with self.subTest(mode=mode):
+                shutil.rmtree(self.ticket, ignore_errors=True)
+                os.environ['SSDLC_EXECUTION_MODE'] = mode
+                orch, seen[:] = self.orchestrator(), []
+                with patch.object(EngineRunner, '_should_spawn_role_container', return_value=docker):
+                    result, probed, printed = self.run_role(orch, local)
+                self.assertEqual(result[:2], ('DONE', 0))
+                # Recorded before the role ran on the host.
+                self.assertEqual(seen, [rf.OUTSIDE_CONTAINER])
+                probed.assert_not_called()
+                stored = self.stored_state()
+                self.assertEqual(stored[rf.MARKER_KEY], rf.MARKER)
+                self.assertIn(f'SSDLC_EXECUTION_MODE={mode}', stored[rf.REFUSAL_KEY]['detail'])
+                self.assertIn(rf.OUTSIDE_CONTAINER, printed)
+                self.assertFalse(rf.admitted(stored))
+                # A later resume with Docker keeps the manual path.
+                os.environ['SSDLC_EXECUTION_MODE'] = 'docker'
+                runner = Runner()
+                self.run_role(self.orchestrator(), runner)
+                self.assert_manual(runner, rf.OUTSIDE_CONTAINER)
+
     def test_a_refusal_that_cannot_be_recorded_starts_nothing(self):
         orch = self.orchestrator()
         runner = Runner()
@@ -347,6 +408,7 @@ class DocumentationTests(unittest.TestCase):
             'ssdlc_role_fencing.py', '"writer_fencing": "v1"', 'writer_fencing_refusal',
             'SSDLC_CONTAINER_PAYLOAD_USER', 'CONTAINER_PAYLOAD_IDENTITY_MISSING',
             'CONTAINER_PAYLOAD_ACCESS_DENIED: <path>', 'never changes', 'stay on the manual path',
+            'ROLE_OUTSIDE_CONTAINER', 'resume_task_planning()',
         ], issues=(45, 158))
 
 

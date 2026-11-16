@@ -164,6 +164,11 @@ def _supervision_fault(point):
 def _bounded_entrypoint(fn):
     @functools.wraps(fn)
     def wrapped(self, *args, **kwargs):
+        # Every entrypoint, resumes included, starts its role containers for this run.
+        with _writer_fencing_scope(self):
+            return bounded(self, *args, **kwargs)
+
+    def bounded(self, *args, **kwargs):
         from ssdlc_recovery import LimitsStore, bounded_mode
         mode, recorded_mode, _ = bounded_mode(self.ssdlc_root)
         previous = getattr(_dispatch_local, 'limits', None)
@@ -294,8 +299,7 @@ def _supervised_phase(phase):
             with _dispatch_context(phase=phase):
                 _supervision_event('phase_started', phase=phase)
                 if args and isinstance(getattr(args[0], 'ssdlc_root', None), Path):
-                    with _writer_fencing_scope(args[0]):
-                        result = _bounded_entrypoint(fn)(*args, **kwargs)
+                    result = _bounded_entrypoint(fn)(*args, **kwargs)
                 else:
                     result = fn(*args, **kwargs)
                 _supervision_event('phase_finished', phase=phase)
@@ -1705,6 +1709,15 @@ class EngineRunner:
         timed_out = False
         cleanup_failed = False
         proc = None
+        fencing_run = getattr(_dispatch_local, 'fencing', None)
+        if (fencing_run is not None and role_fencing.admitted(fencing_run.state)
+                and not (docker and role_fencing.HOLDER_PATH in cmd)):
+            # A role of an admitted run about to run without a fenced container (local
+            # execution, Docker unavailable): recorded before it starts, the run stays manual.
+            mode = os.environ.get("SSDLC_EXECUTION_MODE", "docker")
+            EngineRunner._refuse_fencing(fencing_run, GateError(
+                role_fencing.OUTSIDE_CONTAINER,
+                f"a role command runs without a role container (SSDLC_EXECUTION_MODE={mode})"))
         try:
             proc = subprocess.run(cmd, cwd=str(cwd), env=env, capture_output=True,
                                   text=True, timeout=timeout, input=input)
