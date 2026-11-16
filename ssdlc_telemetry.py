@@ -110,6 +110,12 @@ def record(provider, *, outcome='completed', spend_measure=None, estimate_measur
     return result
 
 
+def provider_for(engine):
+    """The telemetry provider of an engine label: a CLI adapter, else the OpenRouter API."""
+    engine = str(engine or '').lower().strip()
+    return engine if engine in ADAPTERS else 'openrouter'
+
+
 def incomplete(provider, route=None):
     """A crash or an incomplete call: every measure is unknown."""
     return record(provider, outcome='incomplete', route=route)
@@ -199,15 +205,18 @@ def from_claude(envelope, route=None):
 def from_codex(usages, route=None):
     """``codex exec --json``: one ``turn.completed.usage`` per turn, summed here.
     ``input_tokens`` includes ``cached_input_tokens``; ``output_tokens`` includes
-    ``reasoning_output_tokens``. Codex reports no dollar value."""
+    ``reasoning_output_tokens``. Codex reports no dollar value.
+
+    A field is summed only when every turn reports it: if one turn does not, its share is
+    unknown and so is the field of the whole invocation, never a partial sum."""
     names = {'input': 'input_tokens', 'cached_input': 'cached_input_tokens',
              'output': 'output_tokens', 'reasoning': 'reasoning_output_tokens'}
+    usages = list(usages or ())
     counts = dict.fromkeys(names)
-    for usage in usages:
-        for field, name in names.items():
-            value = _count(usage.get(name))
-            if value is not None:
-                counts[field] = (counts[field] or 0) + value
+    for field, name in names.items():
+        values = [_count(usage.get(name)) if isinstance(usage, dict) else None for usage in usages]
+        if values and all(value is not None for value in values):
+            counts[field] = sum(values)
     return record('codex', route=route,
         token_measure=tokens(counts, scope='per_turn', source='codex_exec.turn.completed.usage',
                              turns=len(usages), contract=tuple(names),

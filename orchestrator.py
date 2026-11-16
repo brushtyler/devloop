@@ -1707,6 +1707,20 @@ class EngineRunner:
         return docker_cmd
 
     @staticmethod
+    def _container_env(docker_cmd: List[str]) -> Dict[str, str]:
+        """Variables a role container command passes to its process (`-e KEY=VALUE`).
+
+        Only Docker options before the image are read: what follows is the role command."""
+        options = (docker_cmd[:docker_cmd.index(EngineRunner.IMAGE_NAME)]
+                   if EngineRunner.IMAGE_NAME in docker_cmd else [])
+        passed: Dict[str, str] = {}
+        for flag, value in zip(options, options[1:]):
+            if flag == "-e" and "=" in value:
+                key, _, val = value.partition("=")
+                passed[key] = val
+        return passed
+
+    @staticmethod
     def _payload_needs(docker_cmd: List[str], cwd: Path) -> Dict[Path, Tuple[str, ...]]:
         """Host paths bind-mounted for the payload, with the access each mount needs."""
         needs: Dict[Path, Tuple[str, ...]] = {Path(cwd).resolve(): role_fencing.READ}
@@ -2126,7 +2140,8 @@ class EngineRunner:
         Token counts are unauthenticated CLI telemetry. Codex `input_tokens`
         already includes the cached input, so it is not added again. A count
         never reported stays None, never zero. The last value is the list of
-        `turn.completed.usage` objects, one per turn, for the shared telemetry.
+        `turn.completed.usage` objects, one per turn (empty when the turn reports
+        none), for the shared telemetry.
         """
         message, errors, usages = None, [], []
         tokens = {"input_tokens": None, "output_tokens": None}
@@ -2141,7 +2156,10 @@ class EngineRunner:
             if (kind == "item.completed" and isinstance(item, dict) and item.get("type") == "agent_message"
                     and isinstance(item.get("text"), str)):
                 message = item["text"]
-            elif kind == "turn.completed" and isinstance(event.get("usage"), dict):
+            elif kind == "turn.completed" and not isinstance(event.get("usage"), dict):
+                # A turn without usage leaves its share unknown in the shared telemetry.
+                usages.append({})
+            elif kind == "turn.completed":
                 usages.append(event["usage"])
                 for key in tokens:
                     value = event["usage"].get(key)
@@ -2170,10 +2188,8 @@ class EngineRunner:
     ) -> Tuple[str, int, float, int, int]:
         env = os.environ.copy()
         env["IS_SANDBOX"] = "1"
-        # The route is known only when this invocation configures it explicitly.
-        route = None
-        if use_openrouter and env.get("OPENROUTER_API_KEY"):
-            route = telemetry_schema.provenance("openrouter_api", "explicit_config")
+        openrouter_requested = bool(use_openrouter and env.get("OPENROUTER_API_KEY"))
+        if openrouter_requested:
             env["ANTHROPIC_BASE_URL"] = "https://openrouter.ai/api"
             env["ANTHROPIC_AUTH_TOKEN"] = env["OPENROUTER_API_KEY"]
             env["ANTHROPIC_API_KEY"] = env["OPENROUTER_API_KEY"]
@@ -2206,6 +2222,14 @@ class EngineRunner:
                 writable_worktree=(None if read_only else writable_worktree),
                 stdin=True,
             )
+        # The route is known only when this invocation configures it explicitly and the
+        # CLI process really receives that configuration: in a role container the CLI
+        # sees only the variables the Docker command passes, not this local env.
+        route = None
+        if openrouter_requested:
+            received = EngineRunner._container_env(cmd) if use_container else env
+            if received.get("ANTHROPIC_BASE_URL") == env["ANTHROPIC_BASE_URL"]:
+                route = telemetry_schema.provenance("openrouter_api", "explicit_config")
         dev_timeout = int(os.environ.get("SSDLC_DEV_TIMEOUT", "2400"))
         proc = EngineRunner._run_role_command(
             cmd,
@@ -3804,6 +3828,9 @@ class SSDLCOrchestrator:
                         wt, self.project_id, self.ticket_id, f'{phase}-diag', sandbox='read-only',
                         reasoning_effort=request.reasoning_effort)
                 def ledger(details):
+                    # The call's shared telemetry, read from its own persisted artifact; it
+                    # goes into the row's telemetry, not into its details.
+                    persisted = details.pop('telemetry', None)
                     if details['transition'] == 'result':
                         previous = [entry for entry in self.state.get('ledger', [])
                                     if entry.get('details', {}).get('diagnosis_request_id') == details['diagnosis_request_id']
@@ -3818,11 +3845,13 @@ class SSDLCOrchestrator:
                                 raise TaskError('Diagnosis ledger differs from its immutable result')
                             return
                     producer = details.get('producer', provider)
-                    # The diagnosis result record does not carry the shared telemetry: its
-                    # one completed call is recorded with every measure unknown.
-                    engine = str(producer['engine']).lower().strip()
-                    recorded = (telemetry_schema.record(engine if engine in telemetry_schema.ADAPTERS else 'openrouter')
-                                if details['transition'] == 'result' else None)
+                    # A result without a persisted telemetry artifact (written before it
+                    # existed, or by an adapter without telemetry) is one completed call
+                    # with every measure unknown.
+                    recorded = None
+                    if details['transition'] == 'result':
+                        recorded = persisted or telemetry_schema.record(
+                            telemetry_schema.provider_for(producer['engine']))
                     self.record_ledger(CostAndTelemetryEntry(f'{phase}-diag', 'Diagnosis', producer['engine'],
                         producer['model'], details['transition'], details.get('duration_sec', 0),
                         cost_usd=details.get('cost_usd', 0), tokens_in=details.get('tokens_in', 0),

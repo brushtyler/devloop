@@ -13,6 +13,7 @@ from dataclasses import dataclass, field, fields
 from ssdlc_catalogues import requirement_catalogue
 from ssdlc_findings import TrustedContext, NormalizedFinding, FindingsError, validate_report, assess_report
 from ssdlc_tasks import TaskError, confined
+import ssdlc_telemetry as cost_telemetry
 
 
 class ProtocolError(Exception):
@@ -621,7 +622,14 @@ class GateEvaluator:
                 self._write(f'invocation-{ordinal}.json', invocation)
             text = response_path.read_text()
             telemetry_path = self._path(f'invocation-{ordinal}.json')
-            telemetry = self._read(telemetry_path.name) if telemetry_path.exists() else {}
+            if telemetry_path.exists():
+                telemetry = self._read(telemetry_path.name)
+            else:
+                # A crash between the response and its telemetry: the reserved call is
+                # recorded as an incomplete one with unknown measures, never dropped. The
+                # evidence keeps the file missing (telemetry_missing); the ledger records
+                # this ordinal once, so a later resume adds no second row.
+                telemetry = dict(telemetry=cost_telemetry.incomplete(cost_telemetry.provider_for(request.engine)))
             try:
                 self._integrity()
             except (TaskError, OSError) as exc:
@@ -967,6 +975,10 @@ DIAGNOSIS_POINTS = (
     'diagnosis.after_result_before_register',
     'diagnosis.after_register_before_ledger',
 )
+# The shared cost telemetry of a diagnosis call, outside the closed diagnosis store.
+DIAGNOSIS_TELEMETRY_DIR = 'diagnosis-telemetry'
+DIAGNOSIS_TELEMETRY_SCHEMA = 'ssdlc.diagnosis-telemetry'
+DIAGNOSIS_TELEMETRY_VERSION = 1
 
 
 @contextmanager
@@ -1110,14 +1122,42 @@ def run_diagnosis(root, *, gate, finding, reviewed_commit, tree, evaluation_iden
     def adopt():
         for ref, path in _diagnosis_inventory(root, artifacts):
             register(ref, path)
+    telemetry_ref = f'{DIAGNOSIS_TELEMETRY_DIR}/{rid}.json'
+    def persisted_telemetry():
+        """The shared cost telemetry of the diagnosis call, from its own versioned artifact.
+
+        None for a result written before this artifact existed, or by an adapter without
+        telemetry: the ledger then records the call with every measure unknown."""
+        path = root / telemetry_ref
+        if not (path.exists() or path.is_symlink()):
+            return None
+        try:
+            data = _candidate_read(root, telemetry_ref, 'record')
+            if telemetry_ref in artifacts and _digest(data) != artifacts[telemetry_ref]['sha256']:
+                raise ValueError()
+            obj = json.loads(data, object_pairs_hook=_pairs)
+            if (data != canon(obj) or set(obj) != {'schema', 'schema_version', 'request_id', 'telemetry'}
+                    or (obj['schema'], obj['schema_version'], obj['request_id'])
+                    != (DIAGNOSIS_TELEMETRY_SCHEMA, DIAGNOSIS_TELEMETRY_VERSION, rid)):
+                raise ValueError()
+            recorded = cost_telemetry.validate(obj['telemetry'])
+        except (ProtocolError, ValueError, TypeError, AttributeError):
+            raise TaskError('Diagnosis telemetry artifact missing or changed') from None
+        if telemetry_ref not in artifacts:
+            register(telemetry_ref, path)  # a crash left it unregistered
+        return recorded
     def account_result(result):
         ref = base + '/result.json'
         dispatch = read(base + '/consumption.json')['dispatch']
-        ledger(dict(diagnosis_request_id=rid, transition='result', slot=consumption['slot'],
-                    result_ref=ref, result_sha256=artifacts[ref]['sha256'],
-                    producer=dict(result['producer'], reasoning_effort=dispatch['reasoning_effort']),
-                    cost_usd=result['cost_usd'], tokens_in=result['tokens_in'], tokens_out=result['tokens_out'],
-                    duration_sec=result.get('duration_sec', 0)))
+        details = dict(diagnosis_request_id=rid, transition='result', slot=consumption['slot'],
+                       result_ref=ref, result_sha256=artifacts[ref]['sha256'],
+                       producer=dict(result['producer'], reasoning_effort=dispatch['reasoning_effort']),
+                       cost_usd=result['cost_usd'], tokens_in=result['tokens_in'], tokens_out=result['tokens_out'],
+                       duration_sec=result.get('duration_sec', 0))
+        recorded = persisted_telemetry()
+        if recorded is not None:
+            details['telemetry'] = recorded
+        ledger(details)
         check_budget()
     def uncertain(reason, exc_type=None):
         obj = dict(kind='uncertain', request_id=rid, slot=consumption['slot'], reason=reason)
@@ -1178,10 +1218,25 @@ def run_diagnosis(root, *, gate, finding, reviewed_commit, tree, evaluation_iden
         fault(DIAGNOSIS_POINTS[3])
         started = time.monotonic()
         try:
-            text, cost, tin, tout, trace = invoke(DIAGNOSIS_SYSTEM, user)
+            reply = invoke(DIAGNOSIS_SYSTEM, user)
+            text, cost, tin, tout, trace = reply
         except Exception as exc:
             uncertain('dispatch_raised', type(exc).__name__)
         fault(DIAGNOSIS_POINTS[4])
+        # The call's shared telemetry is kept apart from the result, whose schema is closed
+        # and unchanged, and before it: a result always finds its telemetry on replay.
+        recorded = getattr(reply, 'telemetry', None)
+        if recorded is not None:
+            try:
+                write_exclusive(root / telemetry_ref, canon(dict(
+                    schema=DIAGNOSIS_TELEMETRY_SCHEMA, schema_version=DIAGNOSIS_TELEMETRY_VERSION,
+                    request_id=rid, telemetry=cost_telemetry.validate(recorded))), root=root)
+            except FileExistsError as exc:
+                raise GateTerminalError('integrity_blocked', rid, 'diagnosis_slot_conflict') from exc
+            except ValueError:
+                pass  # a malformed record is not kept: the call's measures stay unknown
+            else:
+                register(telemetry_ref, root / telemetry_ref)
         bounded = text[:DIAGNOSIS_TEXT_MAX_CHARS]
         write(base + '/result.json', dict(kind='result', request_id=rid, finding_id=finding['id'],
             text=bounded, text_sha256=_digest(bounded.encode()), truncated=len(text) > len(bounded), total_chars=len(text),

@@ -1,6 +1,7 @@
 """Issue #164 (part A of #14): shared cost telemetry schema, adapters, ledger and report."""
 import copy
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -111,11 +112,26 @@ class OverlapTests(unittest.TestCase):
     def test_codex_cached_input_and_reasoning_are_not_counted_twice(self):
         record = t.from_codex([e['usage'] for e in CODEX_EVENTS if e['type'] == 'turn.completed'])
         tokens = record['tokens']
+        # The second turn does not report reasoning: its share is unknown, so is the field.
         self.assertEqual(tokens['counts'], {'input': 1500, 'cached_input': 1000, 'cache_creation': None,
-                                            'output': 400, 'reasoning': 120})
+                                            'output': 400, 'reasoning': None})
         self.assertEqual((tokens['scope'], tokens['turns']), ('per_turn', 2))
         self.assertEqual(tokens['overlaps'], [['cached_input', 'input'], ['reasoning', 'output']])
         self.assertEqual(t.token_total(tokens), 1500 + 400)
+        complete = t.from_codex([{'input_tokens': 10, 'output_tokens': 5, 'reasoning_output_tokens': 2},
+                                 {'input_tokens': 20, 'output_tokens': 6, 'reasoning_output_tokens': 0}])
+        self.assertEqual(complete['tokens']['counts']['reasoning'], 2)
+
+    def test_codex_field_missing_in_one_turn_is_unknown_not_a_partial_sum(self):
+        tokens = t.from_codex([{'input_tokens': 100, 'output_tokens': 10}, {'output_tokens': 20}])['tokens']
+        self.assertEqual(tokens['counts'], {'input': None, 'cached_input': None, 'cache_creation': None,
+                                            'output': 30, 'reasoning': None})
+        self.assertEqual(tokens['availability'], 'reported')
+        self.assertIsNone(t.token_total(tokens))
+        # A turn without any usage leaves every field unknown for the whole call.
+        none = t.from_codex([{'input_tokens': 100, 'output_tokens': 10}, {}])['tokens']
+        self.assertEqual((none['availability'], set(none['counts'].values())), ('unknown', {None}))
+        self.assertEqual(t.from_codex([])['tokens']['availability'], 'unknown')
 
     def test_claude_cache_reads_and_creation_are_separate_and_thinking_is_in_output(self):
         tokens = t.from_claude(CLAUDE)['tokens']
@@ -166,6 +182,11 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(result.telemetry['outcome'], 'incomplete')
         result, _ = self.run_with(self.runner.run_codex, cli('plain text\n'), 'prompt', self.root)
         self.assertEqual(tuple(result), ('plain text', 0))
+        self.assertEqual(result.telemetry['tokens']['availability'], 'unknown')
+        # A turn.completed without usage is a turn whose tokens are unknown, not a missing turn.
+        bare = stdout + json.dumps({'type': 'turn.completed'}) + '\n'
+        result, _ = self.run_with(self.runner.run_codex, cli(bare), 'prompt', self.root)
+        self.assertEqual(tuple(result), ('final answer', 0))
         self.assertEqual(result.telemetry['tokens']['availability'], 'unknown')
         # invoke_role keeps its five values and carries the telemetry.
         result, _ = self.run_with(self.runner.invoke_role, cli(stdout), 'codex', 'm', 's', 'u', self.root, 'P', 'T', '03-dev')
@@ -223,6 +244,35 @@ class AdapterTests(unittest.TestCase):
         result, _ = self.run_with(self.runner.run_claude, cli(json.dumps(CLAUDE), 1), 'prompt', self.root)
         self.assertEqual(result.telemetry['outcome'], 'incomplete')
         self.assertEqual(result.telemetry['estimate']['availability'], 'unknown')
+
+    def test_claude_openrouter_route_follows_the_container_command(self):
+        (self.root / '.ssdlc').mkdir()
+        self.container.stop()
+        container = patch.object(self.runner, '_should_spawn_role_container', return_value=True)
+        container.start(); self.addCleanup(container.stop)
+        ambient = {k: v for k, v in os.environ.items()
+                   if k not in ('ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY')}
+        # The container reads its variables from the Docker command, not from the local env
+        # the invocation configured: it does not receive the OpenRouter route.
+        with patch.dict('os.environ', dict(ambient, OPENROUTER_API_KEY='k'), clear=True):
+            result, calls = self.run_with(self.runner.run_claude, cli(json.dumps(CLAUDE)), 'prompt', self.root,
+                                          use_openrouter=True)
+        docker = calls[0]
+        self.assertEqual(docker[:2], ['docker', 'run'])
+        self.assertNotIn('ANTHROPIC_BASE_URL', self.runner._container_env(docker))
+        self.assertEqual(result.telemetry['route'], {'value': None, 'provenance': 'unknown'})
+        # When the Docker command does pass the OpenRouter base URL, the route is attested.
+        with patch.dict('os.environ', dict(ambient, OPENROUTER_API_KEY='k',
+                                           ANTHROPIC_BASE_URL='https://openrouter.ai/api'), clear=True):
+            result, calls = self.run_with(self.runner.run_claude, cli(json.dumps(CLAUDE)), 'prompt', self.root,
+                                          use_openrouter=True)
+        self.assertEqual(self.runner._container_env(calls[0])['ANTHROPIC_BASE_URL'], 'https://openrouter.ai/api')
+        self.assertEqual(result.telemetry['route'], {'value': 'openrouter_api', 'provenance': 'explicit_config'})
+        # Without the explicit request, an ambient base URL is not a route of this invocation.
+        with patch.dict('os.environ', dict(ambient, OPENROUTER_API_KEY='k',
+                                           ANTHROPIC_BASE_URL='https://openrouter.ai/api'), clear=True):
+            result, _ = self.run_with(self.runner.run_claude, cli(json.dumps(CLAUDE)), 'prompt', self.root)
+        self.assertEqual(result.telemetry['route']['provenance'], 'unknown')
 
 
 class LedgerTests(unittest.TestCase):
@@ -296,6 +346,132 @@ class LedgerTests(unittest.TestCase):
     def test_replay_gate_baseline_is_unchanged(self):
         from ssdlc_grader import verify_baseline
         self.assertTrue(verify_baseline())
+
+
+from test_gate_reports import GateFixture, Crash  # noqa: E402
+from test_full_checkpoint_review import framed  # noqa: E402
+
+
+class GateCrashResumeTests(GateFixture):
+    def test_crash_between_response_and_telemetry_is_an_incomplete_call_on_resume(self):
+        import ssdlc_gate_reports as gates
+        from ssdlc_recovery import ReportedOutput
+        original = gates.GateEvaluator._write
+        def write(evaluator, name, value):
+            if name == 'invocation-1.json':
+                raise Crash()
+            return original(evaluator, name, value)
+        reply = lambda *a, **k: ReportedOutput((framed('review', self.orch), 0.42, 1, 2, 'fake'), None,
+                                               t.from_claude(CLAUDE))
+        with patch.object(gates.GateEvaluator, '_write', write), self.assertRaises(Crash):
+            self.run_review(reply)
+        slot = self.slots()[0]
+        self.assertTrue((slot / 'response-1.md').exists())
+        self.assertFalse((slot / 'invocation-1.json').exists())
+        # A real resume from the persisted state: no new provider call, one incomplete row.
+        self.orch.state = self.orch._load_or_init_state()
+        result, provider = self.run_review()
+        provider.assert_not_called()
+        self.assertTrue(result[0])
+        rows = [r for r in self.orch.state['ledger'] if r.get('phase') == '04-review-a1']
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['telemetry']['outcome'], 'incomplete')
+        self.assertFalse((slot / 'invocation-1.json').exists())  # the evidence still says missing
+        report = t.breakdown(self.orch.state['ledger'])
+        entry = report['providers'][t.provider_for(rows[0]['engine'])]
+        self.assertEqual(entry['invocations'], {'completed': 0, 'incomplete': 1})
+        self.assertEqual(entry['estimate_coverage'], {'available': 0, 'completed': 0, 'ratio': None,
+                                                      'incomplete_unknown': 1})
+        # A further resume records nothing new.
+        self.orch.state = self.orch._load_or_init_state()
+        _, provider = self.run_review()
+        provider.assert_not_called()
+        self.assertEqual(t.breakdown(self.orch.state['ledger']), report)
+
+
+class DiagnosisTelemetryTests(unittest.TestCase):
+    def setUp(self):
+        from types import SimpleNamespace
+        import ssdlc_gate_reports as gates
+        from orchestrator import SSDLCOrchestrator
+        from ssdlc_findings import TrustedContext
+        from unittest.mock import Mock
+        self.gates = gates
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        orch = self.orch = SSDLCOrchestrator.__new__(SSDLCOrchestrator)
+        orch.ssdlc_root = self.root
+        orch.state = dict(artifacts={}, ledger=[])
+        def register(ref, path):
+            digest = gates._digest(path.read_bytes())
+            if ref in orch.state['artifacts']:
+                self.assertEqual(digest, orch.state['artifacts'][ref]['sha256'])
+            orch.state['artifacts'][ref] = dict(sha256=digest)
+        orch._register_new = register
+        orch.project_id, orch.ticket_id = 'project', 'ticket'
+        orch.check_budget_circuit_breaker = Mock()
+        orch.record_gate = Mock()
+        orch.record_ledger = lambda entry: orch.state['ledger'].append(entry.to_dict())
+        self.request = gates.EvaluationRequest('review', 'claude', 'model', 1, 1, 'a' * 40, 'system', 'user',
+                                               TrustedContext('a' * 40, ['T1'], [], []), [], 'fingerprint', None, 'high')
+        finding = SimpleNamespace(id='F1', to_dict=lambda: dict(id='F1', task_attribution=['T1']))
+        self.result = gates.EvaluationResult('rejected_substantive', False,
+                                             assessment=SimpleNamespace(findings=[finding], diagnosis_required=['F1']))
+        self.candidate = gates.CandidateEvidence(quality=dict(checks=[dict(required=True, candidate_proof=True)]),
+                                                 block='catalogue')
+
+    def diagnose(self, reply):
+        from orchestrator import EngineRunner
+        with patch('orchestrator.git', return_value='tree'), \
+             patch.object(EngineRunner, 'invoke_role', return_value=reply) as invoke:
+            self.orch._diagnose_gate([self.request], [self.result], self.candidate, self.root, '04-review')
+        return invoke
+
+    def diagnosis_rows(self):
+        return [r for r in self.orch.state['ledger'] if r['phase'] == '04-review-diag' and r['status'] == 'result']
+
+    def test_diagnosis_keeps_the_reported_telemetry_and_replays_it_once(self):
+        from ssdlc_recovery import ReportedOutput
+        recorded = t.from_claude(CLAUDE)
+        invoke = self.diagnose(ReportedOutput(('advisory', 0.4213, 45012, 800, ''), None, recorded))
+        self.assertEqual(invoke.call_count, 1)
+        rows = self.diagnosis_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['telemetry'], json.loads(json.dumps(recorded)))
+        self.assertEqual(rows[0]['telemetry']['estimate']['amount'], 0.4213)
+        self.assertEqual(rows[0]['telemetry']['tokens']['counts']['cached_input'], 45000)
+        self.assertNotIn('telemetry', rows[0]['details'])
+        # A separate versioned artifact, registered; the closed result record is unchanged.
+        artifacts = sorted((self.root / 'diagnosis-telemetry').glob('*.json'))
+        self.assertEqual(len(artifacts), 1)
+        stored = json.loads(artifacts[0].read_text())
+        self.assertEqual((stored['schema'], stored['schema_version']), ('ssdlc.diagnosis-telemetry', 1))
+        self.assertIn(artifacts[0].relative_to(self.root).as_posix(), self.orch.state['artifacts'])
+        result = json.loads(next((self.root / 'diagnosis/requests').glob('*/result.json')).read_text())
+        self.assertNotIn('telemetry', result)
+        report = t.breakdown(self.orch.state['ledger'])
+        self.assertEqual(report['providers']['claude']['estimate_coverage']['available'], 1)
+        # Replay: no new call and no second row.
+        invoke = self.diagnose(ReportedOutput(('other', 0.0, 0, 0, ''), None, t.from_claude(dict(CLAUDE, total_cost_usd=9))))
+        invoke.assert_not_called()
+        self.assertEqual(t.breakdown(self.orch.state['ledger']), report)
+        # A ledger lost before the row was saved is rebuilt from the same persisted record.
+        self.orch.state['ledger'] = []
+        self.diagnose(('unused', 0.0, 0, 0, ''))
+        self.assertEqual(self.diagnosis_rows()[0]['telemetry'], rows[0]['telemetry'])
+        # A changed telemetry artifact is refused, not silently replaced.
+        artifacts[0].write_bytes(artifacts[0].read_bytes().replace(b'0.4213', b'0.0001'))
+        self.orch.state['ledger'] = []
+        from ssdlc_tasks import TaskError
+        with self.assertRaisesRegex(TaskError, 'Diagnosis telemetry artifact missing or changed'):
+            self.diagnose(('unused', 0.0, 0, 0, ''))
+
+    def test_historical_diagnosis_without_telemetry_is_a_completed_call_with_unknown_measures(self):
+        self.diagnose(('advisory', 0.0, 0, 0, ''))
+        self.assertFalse((self.root / 'diagnosis-telemetry').exists())
+        row = self.diagnosis_rows()[0]
+        self.assertEqual(row['telemetry']['outcome'], 'completed')
+        self.assertTrue(all(row['telemetry'][k]['availability'] == 'unknown' for k in ('spend', 'estimate', 'tokens')))
 
 
 class EvidencePackTests(unittest.TestCase):

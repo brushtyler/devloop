@@ -24,8 +24,11 @@ Each record also carries the provider, the adapter, the outcome (`completed` or
 come only from a verified signal (the OpenRouter HTTP adapter itself sent the
 request) or from an explicit configuration of the invocation (for example
 `SSDLC_DEV_USE_OPENROUTER=true`). The engine label or an API key in the
-environment is never enough: otherwise they are `unknown`. Billing mode is
-`unknown` for every route in this version.
+environment is never enough: otherwise they are `unknown`. The configuration
+counts only if the CLI process really receives it: in a role container, Claude
+sees only the variables the Docker command passes, so the OpenRouter route is
+`unknown` unless that command carries the OpenRouter `ANTHROPIC_BASE_URL`.
+Billing mode is `unknown` for every route in this version.
 
 A crash, a non-zero exit or a failed agy envelope is an `incomplete` call with
 every measure `unknown`.
@@ -47,7 +50,9 @@ never kept.
 
 The token total of a call adds only the fields the source defines that are not
 contained in another one. If one of them was not reported, the total is
-`unknown`.
+`unknown`. Codex sums a field over the turns only when every turn reports it: a
+turn without that field, or without usage, leaves the field `unknown` for the
+whole call, never a partial sum.
 
 ## Ledger, state and Evidence Pack
 
@@ -66,7 +71,16 @@ stay for compatibility; budgets and frozen limits are unchanged in this part.
 
 Each invocation has an `invocation_id`, and the breakdown counts it once. A gate
 evaluation persists the record in its `invocation-N.json`, so a resumed or
-replayed evaluation records the same invocation and is not counted twice.
+replayed evaluation records the same invocation and is not counted twice. If a
+crash falls between the response and that file, the resumed evaluation records
+the reserved call as `incomplete` with every measure `unknown`, once, and the
+evidence keeps reporting the telemetry as missing.
+
+A diagnosis call stores its record in `diagnosis-telemetry/<request>.json`
+(`ssdlc.diagnosis-telemetry`, version 1), written and registered before the
+result, whose closed schema is unchanged. The ledger and every replay read it
+from there. A result written before this artifact existed is a completed call
+with every measure `unknown`.
 
 ## Historical rows
 
