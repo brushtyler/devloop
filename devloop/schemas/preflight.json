@@ -1,0 +1,24 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ready", "gaps", "split"],
+  "properties": {
+    "ready": {"type": "boolean"},
+    "gaps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "description", "code_refs", "proposed_default"],
+        "properties": {
+          "kind": {"type": "string",
+                   "enum": ["operator_decision", "default_available", "tool_unavailable"]},
+          "description": {"type": "string"},
+          "code_refs": {"type": "array", "items": {"type": "string"}},
+          "proposed_default": {"type": "string"}
+        }
+      }
+    },
+    "split": {"type": "string"}
+  }
+}

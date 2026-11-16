@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 
 SCHEMA_DIR = Path(__file__).resolve().parent / 'schemas'
-SCHEMA_NAMES = ('implement', 'fix', 'review', 'sync')
+SCHEMA_NAMES = ('implement', 'fix', 'review', 'sync', 'preflight')
 
 
 class SchemaError(ValueError):
@@ -33,6 +33,7 @@ _TYPES = {
     'string': lambda v: isinstance(v, str),
     # bool is a subclass of int in Python; JSON booleans are not integers.
     'integer': lambda v: isinstance(v, int) and not isinstance(v, bool),
+    'boolean': lambda v: isinstance(v, bool),
 }
 
 

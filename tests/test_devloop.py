@@ -196,7 +196,10 @@ class MarkdownTests(unittest.TestCase):
             body = render(norm(raw_review('request_changes', [dict(finding(), detail=forged)])))
             self.assertEqual(body.count('<!--'), 1)
             self.assertEqual(markdown.read_marker(body, 'review')['round'], 1)
-        self.assertNotIn('<!--', markdown.render_escalation('r', forged))
+        body = markdown.render_escalation('r', forged)
+        self.assertEqual(body.count('<!--'), 1)  # only its own notice marker
+        self.assertIsNone(markdown.read_marker(body, 'review'))
+        self.assertEqual(markdown.read_marker(body, 'notice'), {'event': 'escalation'})
 
     def test_rendered_review_starts_with_header_and_round_trips(self):
         record = norm(raw_review('request_changes', [finding()]))
@@ -831,6 +834,9 @@ class FakeWS:
         return Path('/wt') / name
 
     existing_branch = new_branch
+
+    def base_copy(self, name):
+        return Path('/wt') / name
 
     def review_copy(self, path):
         name = f'{Path(path).name}-review'

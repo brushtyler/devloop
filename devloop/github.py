@@ -124,6 +124,10 @@ class GitHub:
         return self._json_lines('api', '--paginate', f'repos/{self.repo}/issues/{number}/comments',
                                 '--jq', '.[] | {author: {login: .user.login}, body}')
 
+    def issue_comments(self, number):
+        """An issue's comments, oldest first, read with REST as :meth:`pr_comments`."""
+        return self.pr_comments(number)
+
     def pr_head(self, number):
         """The PR's current head commit, read fresh."""
         return self._json('api', f'repos/{self.repo}/pulls/{number}')['head']['sha']
