@@ -211,7 +211,9 @@ Before any payload or inference, PID 1, which starts as root:
 5. rereads the generation from the authoritative source, following the selectors and
    precedence of `ssdlc_transitions.runtime_root()`, and compares it with the one the
    host passed (`--generation`). A different generation refuses (`stale_generation`),
-   a missing or invalid state too (`generation_invalid`).
+   a missing or invalid state too (`generation_invalid`): a pending or unbound
+   selector, or a `state.json` of the selected runtime that is missing, not a regular
+   file, not a JSON object or of another ticket.
 
 Every refusal exits with code 122 and a line `ssdlc-holder-refused {"code": …}` on
 stderr (`parse_refusal()`); the payload never starts. The holder never writes the

@@ -151,6 +151,8 @@ class TicketCase(unittest.TestCase):
         finally:
             os.close(fd)
         self.gate = self.ticket / wg.GATE_NAME
+        self.state = self.ticket / 'state.json'
+        self.state.write_text(json.dumps({'ticket_id': 'T-1', 'status': 'IN_PROGRESS'}))
 
     def initialize(self):
         open_gate(str(self.ticket)).close()
@@ -290,7 +292,7 @@ class HoldTests(TicketCase):
         with self.assertRaises(GateError) as caught:
             ch.hold(str(self.ticket), '.')
         self.assertEqual(caught.exception.code, 'gate_missing')
-        self.assertEqual(os.listdir(self.ticket), [])
+        self.assertEqual(os.listdir(self.ticket), ['state.json'])
 
     def test_unsupported_filesystem_is_refused(self):
         self.initialize()
@@ -314,6 +316,24 @@ class HoldTests(TicketCase):
         with self.assertRaises(GateError) as caught:
             ch.current_generation(self.ticket / 'missing')
         self.assertEqual(caught.exception.code, 'generation_invalid')
+
+    def test_missing_or_invalid_state_is_refused_before_the_payload(self):
+        self.initialize()
+        foreign = self.base / 'foreign.json'
+        foreign.write_text(json.dumps({'ticket_id': 'T-1'}))
+        cases = dict(missing=None, truncated='{"ticket_id": "T-', null='null', array='[]',
+                     foreign_ticket=json.dumps({'ticket_id': 'T-2'}), symlink=foreign)
+        for name, content in cases.items():
+            with self.subTest(name):
+                self.state.unlink(missing_ok=True)
+                if isinstance(content, Path):
+                    self.state.symlink_to(content)
+                elif content is not None:
+                    self.state.write_text(content)
+                with self.assertRaises(GateError) as caught:
+                    ch.hold(str(self.ticket), '.')
+                self.assertEqual(caught.exception.code, 'generation_invalid')
+                self.assertFalse(self.read_lock_held())
 
     def test_shared_lock_excludes_transitions_until_closed(self):
         self.initialize()
@@ -462,6 +482,14 @@ class NamespaceTests(TicketCase):
         self.assertEqual(ch.parse_refusal(child.stderr.read().decode()).code, 'stale_generation')
         self.assertFalse(marker.exists())
         self.assert_transition()
+
+    def test_missing_state_never_starts_the_payload(self):
+        marker = self.scratch / 'ran'
+        self.state.unlink()
+        child = self.holder(payload=['touch', str(marker)])
+        self.assertEqual(child.wait(timeout=30), ch.REFUSED_EXIT)
+        self.assertEqual(ch.parse_refusal(child.stderr.read().decode()).code, 'generation_invalid')
+        self.assertFalse(marker.exists())
 
     def test_ptrace_capable_container_is_refused(self):
         if not ch.capabilities()['CapBnd'] >> ch.CAP_SYS_PTRACE & 1:

@@ -131,9 +131,28 @@ def current_generation(ticket_root):
     except Exception as exc:
         raise GateError('generation_invalid', f'{type(exc).__name__}: {exc}') from None
     try:
-        return root.relative_to(ticket_root).as_posix()
+        generation = root.relative_to(ticket_root).as_posix()
     except ValueError:
         raise GateError('generation_invalid', 'selected runtime is outside the canonical ticket') from None
+    check_state(root, ticket_root.name)
+    return generation
+
+
+def check_state(root, ticket_id):
+    """The selected runtime's ``state.json``: a regular file holding this ticket's state.
+
+    ``runtime_root`` returns a legacy ticket without reading it, so a missing, truncated
+    or foreign state would otherwise let the payload start.
+    """
+    from ssdlc_transitions import _regular
+    try:
+        state = json.loads(_regular(Path(root), 'state.json').read_text(encoding='utf-8'))
+    except Exception as exc:
+        raise GateError('generation_invalid', f'state.json is unreadable: {type(exc).__name__}: {exc}') from None
+    if not isinstance(state, dict):
+        raise GateError('generation_invalid', 'state.json does not hold a JSON object')
+    if state.get('ticket_id') != ticket_id:
+        raise GateError('generation_invalid', 'state.json belongs to another ticket')
 
 
 def gate_identity(value):
