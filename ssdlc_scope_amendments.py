@@ -491,7 +491,11 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                 proposed_envelope = copy.deepcopy(source['envelope']); proposed_envelope['policy'] = profile_update
                 proposed_counters = dict(source['counters'],
                                          legacy_uncovered_invocations=reviewed['legacy_uncovered_invocations'])
-                limits.check_capacity(proposed_envelope, proposed_counters, '03-dev', '03-dev')
+                # Each admitted model's candidate reserve must already fit the
+                # remaining separate and combined caps: no admission beyond them.
+                from ssdlc_usage_admission import admitted_engines
+                for engine in admitted_engines(source['envelope']['policy'], profile_update) or [None]:
+                    limits.check_capacity(proposed_envelope, proposed_counters, '03-dev', '03-dev', engine)
             elif extension is None:
                 limits.check(source['counters'], source['envelope']['policy'])
                 limits.require_capacity('03-dev', '03-dev')
@@ -707,6 +711,9 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
             if verification_repair:
                 from ssdlc_verification_repair import finalize as finalize_verification
                 finalize_verification(ticket, proposal, recipe, selected)
+            if proposal['authorization_contract'] == USAGE_CONTRACT:
+                from ssdlc_usage_admission import finalize as finalize_usage
+                finalize_usage(ticket, proposal, recipe, selected)
             update(ticket, proposal['transition_id'], namespace='execution', status='ACTIVE')
             clear_pending(ticket, proposal['transition_id'], namespace='execution')
             return selected
@@ -777,13 +784,24 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
                     or _git_read(runtime / 'worktree', 'rev-parse', 'HEAD') != tasks['expected_head']):
                 raise TransitionError('Native amendment projection changed')
             limits = LimitsStore(runtime, clock)
-            limits.check(counters, envelope['policy']); limits.require_capacity('03-dev', '03-dev')
+            limits.check(counters, envelope['policy'])
+            engines = [None]
+            if proposal['authorization_contract'] == USAGE_CONTRACT:
+                from ssdlc_usage_admission import admitted_engines
+                engines = admitted_engines(source['envelope']['policy'], envelope['policy']) or [None]
+            for engine in engines:
+                limits.require_capacity('03-dev', '03-dev', engine)
             artifacts = {name: _regular(preparation, name).read_bytes() for name in proposal['artifacts']}
             if delegated:
                 delegation.check()
             if repair_delegated:
                 repair_session.check()
             result = store.publish(source['root'], proposal, authorization, source['projection'], projected, artifacts)
+            if proposal['authorization_contract'] == USAGE_CONTRACT:
+                from ssdlc_usage_admission import finalize as finalize_usage
+                fault('usage_admission_selector_published')
+                finalize_usage(ticket, proposal, recipe, result)
+                fault('usage_admission_reconciled')
             if verification_repair:
                 from ssdlc_verification_repair import finalize as finalize_verification
                 fault('verification_repair_selector_published')

@@ -39,13 +39,100 @@ def subject(source, plan, profile, reason):
         normalized['live_unknown_usage'] = copy.deepcopy(previous)
     if normalized != old:
         raise TaskError('Live-usage admission cannot change counters, caps, deadline or other profile fields')
-    return dict(schema_version=1, compatibility=CONTRACT, parent_selector=source['parent_selector'],
-                source_files_sha256=digest(source['files']), old_plan_sha256=digest(plan), new_plan_sha256=digest(plan),
-                scope_diff={}, task_id=source['task_id'], reason=reason,
-                counters_sha256=digest(source['counters']), journal_sha256=source['files']['03-dev/tasks/task-journal.jsonl'],
-                profile_sha256=digest(profile), old_profile_sha256=digest(old),
-                live_unknown_usage=copy.deepcopy(declared),
-                legacy_uncovered_invocations=legacy_uncovered(source['counters']))
+    value = dict(schema_version=1, compatibility=CONTRACT, parent_selector=source['parent_selector'],
+                 source_files_sha256=digest(source['files']), old_plan_sha256=digest(plan), new_plan_sha256=digest(plan),
+                 scope_diff={}, task_id=source['task_id'], reason=reason,
+                 counters_sha256=digest(source['counters']), journal_sha256=source['files']['03-dev/tasks/task-journal.jsonl'],
+                 profile_sha256=digest(profile), old_profile_sha256=digest(old),
+                 live_unknown_usage=copy.deepcopy(declared),
+                 legacy_uncovered_invocations=legacy_uncovered(source['counters']))
+    binding = feedback_binding(source)
+    if binding is not None:
+        value['feedback_binding'] = binding
+    return value
+
+
+def admitted_engines(old, profile):
+    """Engines whose live unknown-usage model this admission adds."""
+    previous = old.get('live_unknown_usage', {})
+    return sorted(engine for engine in profile.get('live_unknown_usage', {}) if engine not in previous)
+
+
+def feedback_binding(source):
+    """Bind an active feedback ledger, as the other native admissions do.
+
+    The source must be the generation the recording authority was frozen on,
+    or one it already admitted. An unknown role outcome is never carried.
+    """
+    from ssdlc_feedback import FeedbackStore
+    store = FeedbackStore(source['root'].parent.parent)
+    if not store.root.exists():
+        return None
+    from ssdlc_controller import execution_contract
+    from ssdlc_feedback_delegation import admitted
+    authority, state = store._read()
+    if state is None or authority['status'] != 'ACTIVE':
+        raise TaskError('Live-usage admission requires a complete feedback authority')
+    policy, envelope = authority['policy'], source['envelope']
+    frozen = (policy['limits_sha256'] == digest(envelope)
+              and policy['controller_sha256'] == digest(execution_contract(envelope['binding']['controller'])))
+    if not frozen and not admitted(state, source):
+        raise TaskError('Live-usage admission feedback source is outside admitted lineage')
+    if any(call['status'] == 'INTENT' for call in state['role_calls']):
+        raise TaskError('Unknown feedback outcome requires reconciliation before live-usage admission')
+    return dict(authority_sha256=digest(authority), state_sha256=digest(state))
+
+
+def _admission(proposal, recipe, projection):
+    return dict(transition_id=proposal['transition_id'], limits_sha256=digest(recipe['envelope']),
+                profile_sha256=digest(recipe['envelope']['policy']),
+                controller_sha256=proposal['new_controller_sha256'],
+                parent_selector=proposal['parent_selector'], projection_sha256=digest(projection))
+
+
+def finalize(ticket, proposal, recipe, projection):
+    """Admit the new generation to the feedback ledger after its selector publish.
+
+    Open requests bound to the parent generation, still unconsulted, are carried:
+    their next identical submission rebinds them to this generation. Recording
+    caps, consumed role calls and amendment quotas stay unchanged.
+    """
+    if proposal.get('authorization_contract') != CONTRACT or 'feedback_binding' not in recipe['subject']:
+        return
+    from ssdlc_feedback import FeedbackStore
+    from ssdlc_tasks import ticket_lock
+    store = FeedbackStore(ticket)
+    expected = _admission(proposal, recipe, projection)
+    with ticket_lock(store.root / 'feedback.lock'):
+        authority, state = store._read()
+        prior = state.get('admitted_generations', {}).get(proposal['transition_id'])
+        if prior is not None:
+            if {k: v for k, v in prior.items() if k != 'carried_requests'} != expected:
+                raise TaskError('Live-usage admission reconciliation changed')
+            return
+        if recipe['subject']['feedback_binding'] != dict(authority_sha256=digest(authority), state_sha256=digest(state)):
+            raise TaskError('Feedback changed before live-usage admission reconciliation')
+        consulted = {call['request_id'] for call in state['role_calls']}
+        expected['carried_requests'] = sorted(
+            identity for identity, row in state['requests'].items()
+            if row['status'] == 'REQUESTED' and identity not in consulted
+            and not row.get('source_reconciliation_required', True)
+            and row['binding']['parent_selector'] == proposal['parent_selector'])
+        state.setdefault('admitted_generations', {})[proposal['transition_id']] = expected
+        store._append('LIVE_USAGE_ADMISSION_APPLIED', state)
+
+
+def ensure_reconciled(ticket, projection, proposal):
+    """Dispatch stays fenced until the admitted generation is in the feedback ledger."""
+    from ssdlc_transitions import _regular
+    import json
+    recipe = json.loads(_regular(Path(ticket) / 'execution' / proposal['transition_id'], 'recipe.json').read_text())
+    if 'feedback_binding' not in recipe['subject']:
+        return
+    from ssdlc_feedback import FeedbackStore
+    entry = FeedbackStore(ticket).inspect().get('admitted_generations', {}).get(proposal['transition_id'])
+    if entry is None or {k: v for k, v in entry.items() if k != 'carried_requests'} != _admission(proposal, recipe, projection):
+        raise TaskError('Live-usage admission feedback reconciliation pending; dispatch is fenced')
 
 
 def prepare(ticket, repo, profile, reason, **kwargs):

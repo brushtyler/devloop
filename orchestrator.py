@@ -3860,11 +3860,15 @@ class SSDLCOrchestrator:
             self.check_budget_circuit_breaker()
             envelope, counters = limits._load(repair=False)
             limits.check(counters, envelope['policy'], for_dispatch=False)
-        def dispatch_budget():
+        def dispatch_budget(engine=None):
             if limits is None:
                 return self.check_budget_circuit_breaker()
             self.check_budget_circuit_breaker()
-            limits.require_capacity('03-dev', '03-dev')
+            limits.require_capacity('03-dev', '03-dev', engine)
+        def dispatch_engine(task, attempt):
+            # The same selection develop() makes for this attempt.
+            return SquadDispatcher.dispatch_role(
+                "03-dev", self.state.get("risk_tier", "M"), task["profile"], attempt=attempt)[0]
         history_authority = limits._load(repair=False)[0]['binding'].get('historical_capture_bindings_sha256') if limits is not None else None
         saved_scheduler = TaskJournal(self.dir_dev / 'tasks').peek()
         if (saved_scheduler is not None and not saved_scheduler.get('candidate_isolation')
@@ -3873,7 +3877,7 @@ class SSDLCOrchestrator:
                 'Pre-isolation execution requires explicit controller migration; new developer dispatch is refused')
         scheduler = TaskScheduler(
             wt, self.dir_dev / "tasks", plan, quality, context, develop,
-            verify, guard, verification_budget, dispatch_budget=dispatch_budget,
+            verify, guard, verification_budget, dispatch_budget=dispatch_budget, dispatch_engine=dispatch_engine,
             historical_task_floors=(limits._load(repair=False)[0]['binding'].get('task_floors', {}) if limits else {}),
             historical_capture_authority=history_authority,
             scope_reconciliations=(limits._load(repair=False)[0]['binding'].get('scope_reconciliations', {}) if limits else {}),

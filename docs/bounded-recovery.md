@@ -89,6 +89,15 @@ hash. It is never applied implicitly, and absent means "no rule", not zero:
   a returned or terminated call with no cost (including a reported 0) blocks the
   next dispatch with `LIMIT_REACHED`.
 
+The pre-flight capacity check validates the imminent call with the engine
+actually selected, using the same validation as the reservation: the engine rule
+and the candidate reserve in the separate and combined caps
+([issue #128](https://github.com/brushtyler/ssdlc/issues/128)). It runs before
+any state is saved: before a feedback role intent, and before the scheduler
+consumes a development attempt or starts the task. A refused call therefore
+leaves no intent, no consumed attempt and no task in `RUNNING`. The atomic check
+at reservation stays at the dispatch boundary.
+
 Token counts reported by the adapter are stored on the row as `reported_tokens`,
 independently of any dollar cost: `claude` and OpenRouter report them with their
 cost, `codex` through the `turn.completed` events of `codex exec --json`
@@ -120,6 +129,18 @@ already recorded with no cost and no rule. The authorization must repeat that
 list together with `profile_sha256`. The listed rows stop blocking but are not
 reclassified or priced: they stay visible as not covered. Any new uncovered
 row still blocks.
+
+Preparation and activation refuse with `LIMIT_REACHED` a profile whose added
+model's reserve does not fit the remaining separate and combined caps.
+
+With an active feedback workflow, the admission binds the feedback ledger and,
+after the selector publish, records the new generation in
+`admitted_generations`. Dispatch stays fenced until that record exists. Requests
+still `REQUESTED` on the parent generation, with no role call, are carried: on
+resume the same request, with the same task, plan, attempt and captured failure,
+is rebound to the new generation, without manual reconciliation. Recording
+caps, role calls and amendment quotas do not change. An unknown role outcome
+(`INTENT`) blocks the admission.
 
 The absolute UTC deadline includes preflight, execution and operator waits.
 Per-call subprocess timeouts are clamped to remaining ticket time and the frozen

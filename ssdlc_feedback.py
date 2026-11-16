@@ -185,6 +185,30 @@ def reserve_amendment(policy, state, row):
     row['quota_status'] = 'RESERVED'
 
 
+CARRIED_FIELDS = ('task_id', 'attempt', 'origin', 'plan_sha256', 'failure_sha256', 'capture_sha256')
+
+
+def carried_by(state, row, source):
+    """The admitting transition that carries an unconsulted request, or None.
+
+    Only an exact live-usage admission lists carried requests, and only those
+    still REQUESTED on its parent generation with no role call. The task, plan,
+    attempt and captured failure must be unchanged; nothing else is inherited.
+    """
+    from ssdlc_feedback_delegation import admitted
+    transition = (source.get('projection') or {}).get('transition_id')
+    entry = state.get('admitted_generations', {}).get(transition)
+    if (not entry or row['request_id'] not in entry.get('carried_requests', ()) or not admitted(state, source)
+            or row['status'] != 'REQUESTED' or row.get('source_reconciliation_required', True)
+            or row['binding']['parent_selector'] != entry['parent_selector']
+            or any(call['request_id'] == row['request_id'] for call in state['role_calls'])):
+        return None
+    current = source_binding(source)
+    if any(row['binding'][key] != current[key] for key in CARRIED_FIELDS):
+        return None
+    return transition
+
+
 def matches_source(state, row, source):
     """Allow exactly captured consultation accounting, never a new candidate."""
     current = source_binding(source)
@@ -328,10 +352,25 @@ class FeedbackStore:
             policy, state = self._active()
             if identity in state['requests']:
                 existing = state['requests'][identity]
+                carried = None
                 if not matches_source(state, existing, source):
-                    raise FeedbackError('Repeated cause with changed source requires explicit reconciliation')
-                if existing['request'] != request:
+                    carried = carried_by(state, existing, source)
+                    if carried is None:
+                        raise FeedbackError('Repeated cause with changed source requires explicit reconciliation')
+                if existing['request'] != request or carried is not None and existing['developer'] != developer:
                     raise FeedbackError('Repeated cause with changed classification or evidence requires reconciliation')
+                if carried is not None:
+                    # The admitted generation carries this unconsulted request
+                    # unchanged; only its source binding and anchor move.
+                    anchor = None
+                    if 'limits/task-journal.jsonl' in source['files']:
+                        from ssdlc_feedback_bindings import accounting_anchor
+                        anchor = accounting_anchor(source)
+                    existing.update(binding=binding, source_root_sha256=digest(str(Path(source['root']).resolve())),
+                                    accounting_anchor=anchor)
+                    existing['occurrences'].append(dict(binding=binding, developer=copy.deepcopy(developer),
+                                                        carried_by=carried))
+                    self._append('FEEDBACK_REQUEST_CARRIED', state)
                 return copy.deepcopy(existing)
             # Record an opposite-origin occurrence of the same cause without
             # inheriting the old source's authority. Native reconciliation is

@@ -104,7 +104,9 @@ class FundedFeedbackRoles:
                 raise FeedbackError('Feedback request has no bound development attempt')
             if source_attempt >= envelope['policy']['development_attempts']:
                 raise FeedbackError('No useful development attempt remains')
-            self.limits.require_capacity('feedback-' + role, 'feedback')
+            # The imminent call, with its selected engine and candidate reserve,
+            # must fit before any durable intent; reserve() rechecks atomically.
+            self.limits.require_capacity('feedback-' + role, 'feedback', metadata['engine'])
             call = self.feedback.reserve_role(request_id, role, metadata)
             fault('feedback_intent')
             invocation = self.limits.reserve('feedback-' + role, 'feedback', metadata['engine'])
