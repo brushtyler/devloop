@@ -7,7 +7,9 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 # The opening and closing lines git writes around a conflict (`=======` alone also underlines
@@ -91,13 +93,25 @@ def _identity_env(author):
             'GIT_COMMITTER_NAME': author['name'], 'GIT_COMMITTER_EMAIL': author['email']}
 
 
+# git commands that update state shared by every worktree of the repository (remote-tracking
+# refs, the list of worktrees): parallel actions (#176) run them one at a time.
+_SHARED_GIT = ('fetch', 'worktree')
+
+
 class Workspace:
-    def __init__(self, repo_root, state_dir, base_branch, run=subprocess.run, test_env=None):
+    """``private_tmp``: each run of the test command gets a temporary directory of its own
+    (``TMPDIR``), removed afterwards, so that test runs of parallel actions (#176) do not share
+    one."""
+
+    def __init__(self, repo_root, state_dir, base_branch, run=subprocess.run, test_env=None,
+                 private_tmp=False):
         self.repo_root = Path(repo_root)
         self.root = self.repo_root / state_dir / 'worktrees'
         self.base_branch = base_branch
         self._run = run
         self._test_env = test_env
+        self.private_tmp = private_tmp
+        self._shared = threading.RLock()
 
     def _git(self, *args, cwd=None, check=True, stdin=None, env=None, unset=()):
         return self._git_run(*args, cwd=cwd, check=check, stdin=stdin, env=env,
@@ -110,8 +124,9 @@ class Workspace:
             inherited = {k: v for k, v in os.environ.items() if k not in unset}
             kwargs['env'] = dict(inherited, **(env or {}))
         try:
-            done = self._run(['git', *args], cwd=cwd or self.repo_root, input=stdin,
-                             capture_output=True, text=True, timeout=600, **kwargs)
+            with self._shared if args[:1] and args[0] in _SHARED_GIT else nullcontext():
+                done = self._run(['git', *args], cwd=cwd or self.repo_root, input=stdin,
+                                 capture_output=True, text=True, timeout=600, **kwargs)
         except subprocess.TimeoutExpired as exc:
             raise WorkspaceError(f'git {" ".join(args[:2])}: timed out after {exc.timeout}s') from exc
         except OSError as exc:
@@ -159,12 +174,13 @@ class Workspace:
                   f'origin/{self.base_branch}')
         return path
 
-    def review_copy(self, path):
+    def review_copy(self, path, reviewer=None):
         """``(name, path)`` of a disposable worktree for a reviewer, detached at the HEAD of
         ``path`` and sharing its refs, so that ``origin/<base>`` resolves. What the reviewer and
         its tests write lands in the copy, which is removed with :meth:`remove`, not in
-        ``path``."""
-        name = f'{Path(path).name}-review'
+        ``path``. ``reviewer``: the key of the reviewer, for a copy of its own when several
+        review the same worktree at once (#176)."""
+        name = f'{Path(path).name}-review' + (f'-{reviewer}' if reviewer else '')
         copy = self.path(name)
         self._fresh(copy)
         self._git('worktree', 'add', '--force', '--detach', str(copy), self.head(path))
@@ -408,10 +424,15 @@ class Workspace:
         """``(passed, output_tail)`` for the project test command in ``path``."""
         kwargs = {'env': self._test_env} if self._test_env is not None else {}
         run = run_in_group if self._run is subprocess.run else self._run
-        try:
-            done = run(['bash', '-c', command], cwd=path, capture_output=True, text=True,
-                       timeout=timeout, **kwargs)
-        except subprocess.TimeoutExpired:
-            return False, f'Test command timed out after {timeout}s'
+        with (tempfile.TemporaryDirectory(prefix='devloop-tests-') if self.private_tmp
+              else nullcontext()) as tmp:
+            if tmp is not None:
+                base = os.environ if self._test_env is None else self._test_env
+                kwargs['env'] = dict(base, TMPDIR=tmp)
+            try:
+                done = run(['bash', '-c', command], cwd=path, capture_output=True, text=True,
+                           timeout=timeout, **kwargs)
+            except subprocess.TimeoutExpired:
+                return False, f'Test command timed out after {timeout}s'
         tail = '\n'.join((done.stdout + '\n' + done.stderr).strip().splitlines()[-60:])
         return done.returncode == 0, tail

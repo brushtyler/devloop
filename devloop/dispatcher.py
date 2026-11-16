@@ -54,14 +54,23 @@ not ready goes to agent:needs-human; the check removes that label only if it add
 Start order (#146): ready issues start by priority (``priority:high``, ``normal``, ``low``; a
 ``priority_labels`` label counts as high), then by the oldest current ``agent:ready``, then by
 number. A priority label counts only if a trusted user added it.
+
+Parallel actions (#176, ``max_parallel_actions`` above 1): the actions of a tick on different
+issues and PRs run at once, up to that many (``schedule``). Actions on the same number, or on a
+PR and its issue, run one after the other in plan order; a global action (``GLOBAL_ACTIONS``)
+runs alone. Each log line carries the number of its action (``TickLog``), a failed action does
+not stop the others, and a review action at level 2 runs together every reviewer its round
+still waits for.
 """
 
 import hashlib
 import itertools
 import json
 import string
+import threading
 import time
-from contextlib import nullcontext
+from concurrent.futures import ThreadPoolExecutor, wait
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -88,6 +97,10 @@ PROMPT_DIR = Path(__file__).resolve().parent / 'prompts'
 REREVIEW_COMMAND = '/devloop rereview'
 RECHECK_COMMAND = '/devloop recheck'
 EXPENSIVE = ('review', 'fix', 'implement', 'sync', 'preflight')
+# Actions that write to the base branch or to the whole repository (the merge of #172, the pin
+# of #174): with ``max_parallel_actions`` above 1 each runs alone, after the actions planned
+# before it and before those planned after it (#176).
+GLOBAL_ACTIONS = frozenset({'merge', 'pin'})
 LABEL_STYLE = {
     'ready': ('0e8a16', 'devloop: pronta per essere implementata da un agent'),
     'working': ('fbca04', 'devloop: implementazione in corso'),
@@ -191,6 +204,83 @@ class Action:
     kind: str
     number: int
     reason: str = ''
+
+
+def schedule(actions, issue_of):
+    """How ``max_parallel_actions`` above 1 runs ``actions`` (#176): a list of phases, run one
+    after the other, each a list of lanes that may run at once, each lane a list of
+    ``(position in actions, action)`` to run in that order.
+
+    Actions on the same number share a lane, in plan order, and so do an action on a PR and one
+    on its issue (``issue_of``: PR number to issue number). A global action
+    (``GLOBAL_ACTIONS``) is a phase of its own: it starts after every action planned before it
+    has ended, and those planned after it start once it has ended."""
+    phases, batch = [], []
+    for position, action in enumerate(actions):
+        if action.kind in GLOBAL_ACTIONS:
+            if batch:
+                phases.append(_lanes(batch, issue_of))
+            phases.append([[(position, action)]])
+            batch = []
+        else:
+            batch.append((position, action))
+    if batch:
+        phases.append(_lanes(batch, issue_of))
+    return phases
+
+
+def _lanes(batch, issue_of):
+    lanes = []  # [numbers, entries]
+    for position, action in batch:
+        numbers = {action.number}
+        if action.number in issue_of:
+            numbers.add(issue_of[action.number])
+        joined = [lane for lane in lanes if lane[0] & numbers]
+        lane = joined[0] if joined else [set(), []]
+        if not joined:
+            lanes.append(lane)
+        for other in joined[1:]:
+            lane[0] |= other[0]
+            lane[1] += other[1]
+            lanes.remove(other)
+        lane[0] |= numbers
+        lane[1].append((position, action))
+        lane[1].sort(key=lambda entry: entry[0])
+    return [entries for _, entries in lanes]
+
+
+class TickLog:
+    """The tick log, safe across threads: each message reaches ``sink`` whole, one at a time.
+    While a thread runs inside ``prefixed(prefix)``, each line of its messages is written on its
+    own, starting with ``prefix``, so that the lines of parallel actions never mix (#176).
+    Outside it a message reaches ``sink`` unchanged."""
+
+    def __init__(self, sink):
+        self.sink = sink
+        self._lock = threading.Lock()
+        self._local = threading.local()
+
+    @property
+    def prefix(self):
+        return getattr(self._local, 'prefix', '')
+
+    @contextmanager
+    def prefixed(self, prefix):
+        previous = self.prefix
+        self._local.prefix = prefix
+        try:
+            yield
+        finally:
+            self._local.prefix = previous
+
+    def __call__(self, message):
+        prefix = self.prefix
+        with self._lock:
+            if not prefix:
+                self.sink(message)
+                return
+            for line in str(message).split('\n'):
+                self.sink(f'{prefix} {line}')
 
 
 def label_names(labels):
@@ -609,7 +699,8 @@ class Dispatcher:
         self.gh = gh
         self.ws = ws
         self.runner = runner
-        self.log = log
+        # Shared by the threads of parallel actions (#176): one line at a time.
+        self.log = log if isinstance(log, TickLog) else TickLog(log)
         self.identities = identities
         self.activity = activity
         self.ledger = ledger
@@ -998,22 +1089,68 @@ class Dispatcher:
         if dry_run:
             for line in queue_lines(snap):
                 self.log(f'[dry-run] {line}')
+        if not dry_run and self.cfg.max_parallel_actions > 1:
+            self._run_parallel(actions, prs)
+            return actions
         for action in actions:
             self.log(f'{"[dry-run] " if dry_run else ""}{action.kind} #{action.number}'
                      + (f': {action.reason}' if action.reason else ''))
             if dry_run:
                 continue
-            handler = getattr(self, f'_do_{action.kind}')
-            # Recorded for `devloop status` while it runs, removed afterwards even on error.
-            running = (self.activity.action(action.kind, action.number) if self.activity
-                       else nullcontext())
-            with running:
-                try:
-                    handler(prs.get(action.number) or action.number)
-                except (AgentError, GitHubError, WorkspaceError, UntrustedChange) as exc:
-                    self.log(f'  failed: {exc}')
-                    self._escalate_failure(action, prs.get(action.number), exc)
+            self._run_action(action, prs)
         return actions
+
+    def _run_action(self, action, prs):
+        """Run one action; a failure of an agent, ``gh``, git or trust escalates its issue or
+        PR and is returned. Any other exception propagates."""
+        handler = getattr(self, f'_do_{action.kind}')
+        # Recorded for `devloop status` while it runs, removed afterwards even on error.
+        running = (self.activity.action(action.kind, action.number) if self.activity
+                   else nullcontext())
+        with running:
+            try:
+                handler(prs.get(action.number) or action.number)
+            except (AgentError, GitHubError, WorkspaceError, UntrustedChange) as exc:
+                self.log(f'  failed: {exc}')
+                self._escalate_failure(action, prs.get(action.number), exc)
+                return exc
+        return None
+
+    def _run_parallel(self, actions, prs):
+        """Run the actions of a tick as ``schedule`` arranges them, up to
+        ``max_parallel_actions`` at once (#176). A failed action does not stop the others: each
+        lane goes on with its next action, and the tick reports the outcome of every one."""
+        outcomes = {}
+        issue_of = {number: pr.issue for number, pr in prs.items()}
+        with ThreadPoolExecutor(max_workers=self.cfg.max_parallel_actions,
+                                thread_name_prefix='devloop-action') as pool:
+            for phase in schedule(actions, issue_of):
+                wait([pool.submit(self._run_lane, lane, prs, outcomes) for lane in phase])
+        for position, action in enumerate(actions):
+            self.log(f'outcome of {action.kind} #{action.number}: '
+                     + outcomes.get(position, 'not run'))
+
+    def _run_lane(self, lane, prs, outcomes):
+        """Run the actions of one lane in order, in a worker thread. An unexpected exception
+        of an action escalates its issue or PR, as a failure would, instead of stopping the
+        tick."""
+        for position, action in lane:
+            with self.log.prefixed(f'#{action.number}'):
+                self.log(f'{action.kind} #{action.number}'
+                         + (f': {action.reason}' if action.reason else ''))
+                try:
+                    failed = self._run_action(action, prs)
+                except Exception as exc:  # reported and escalated, never lost
+                    outcomes[position] = f'unexpected error: {type(exc).__name__}: {exc}'
+                    self.log(f'  unexpected error: {type(exc).__name__}: {exc}')
+                    try:
+                        self._escalate_failure(action, prs.get(action.number), RuntimeError(
+                            f'errore inatteso del dispatcher ({type(exc).__name__}: {exc})'))
+                    except Exception as again:
+                        self.log(f'  could not escalate: {again}')
+                    continue
+                first = (str(failed).strip().splitlines() or [type(failed).__name__])[0]
+                outcomes[position] = f'failed: {first}' if failed else 'done'
 
     # Helpers -------------------------------------------------------------
     def _escalate(self, number, reason, detail='', remove=()):
@@ -1859,6 +1996,13 @@ class Dispatcher:
         the same head under the same receipt. The round is applied once every required reviewer
         has reviewed; a review already recorded in it is never run again.
 
+        With ``max_parallel_actions`` above 1 (#176) the action runs at once every reviewer the
+        round still waits for, each in its own copy of the worktree and on the same prompt, and
+        records each verdict as before. A reviewer that fails leaves the others' verdicts
+        recorded, and the round waits only for it; its failure ends the action as before. A
+        fallback model must also be distinct from the profiles the other reviewers of the
+        action have reserved.
+
         When only the base changed since the round's reviews (#160), the round continues if no
         commit of the base branch in between reached the PR's files, and the review records the
         check (``bases``). Otherwise the round restarts, and the new one records which round it
@@ -1895,7 +2039,10 @@ class Dispatcher:
             return self._do_round_limit(pr)
         max_rounds = cfg.max_review_rounds + round_no - counted
         reviewed = {owner_of(r) for r in done}
-        agent = cfg.agent(next(key for key in receipt['reviewers'] if key not in reviewed))
+        waited = [key for key in receipt['reviewers'] if key not in reviewed]
+        # One reviewer per action, or with parallel actions (#176) every one the round waits
+        # for, each in a thread of its own.
+        keys = waited if cfg.max_parallel_actions > 1 else waited[:1]
         issue, _ = self._issue_context(pr.issue)
         name = f'pr-{pr.number}'
         path = self.ws.existing_branch(name, pr.head_ref)
@@ -1924,64 +2071,121 @@ class Dispatcher:
                            previous=format_previous_rounds(earlier, pr.fixes, pr.closures),
                            operator_comments=format_operator_comments(comments),
                            language=cfg.language)
-        allowed = None
-        if receipt['level'] > 1:
-            # A fallback model must keep the independence the pair was selected for: of who
-            # wrote the code, and of the round's other reviewers as their records show them.
-            authors = self._authors(pr) or []
-            peers = [p for p in map(profile_of, done) if p]
+        level2 = receipt['level'] > 1
+        authors = (self._authors(pr) or []) if level2 else []
+        peers = [p for p in map(profile_of, done) if p]
+        # The profile each reviewer of this action runs with, reserved before any turn starts
+        # and replaced atomically when a fallback model takes over (#176); a reviewer that
+        # fails gives its reservation up.
+        reserved = {key: self._profile(key, 'review') for key in keys}
+        reserving = threading.Lock()
+
+        def allowed_for(key):
+            if not level2:
+                return None
 
             def allowed(candidate):
-                p = self._profile(agent.key, 'review', candidate)
-                return (all(independent(p, a) for a in authors)
-                        and all(distinct(p, q) for q in peers))
-        # The reviewer works in a disposable copy, where its tests may write; the PR worktree
-        # must come out of the review untouched, or the verdict is discarded.
-        copy_name, copy = self.ws.review_copy(path)
-        try:
-            raw, used = self._turn(Models(agent), 'review', prompt, 'review', copy,
-                                   f'pr-{pr.number}-review', allowed,
-                                   where=(pr.number, 'review'))
-        finally:
-            self.ws.remove(copy_name)
+                # A fallback model must keep the independence the pair was selected for: of
+                # who wrote the code, of the round's other reviewers as their records show
+                # them, and of the reviewers running alongside it in this action.
+                p = self._profile(key, 'review', candidate)
+                with reserving:
+                    others = [q for k, q in reserved.items() if k != key]
+                    if not (all(independent(p, a) for a in authors)
+                            and all(distinct(p, q) for q in peers + others)):
+                        return False
+                    reserved[key] = p
+                    return True
+            return allowed
+
+        def review_turn(key):
+            # The reviewer works in a disposable copy, where its tests may write; the PR
+            # worktree must come out of the review untouched, or the verdict is discarded.
+            copy_name, copy = (self.ws.review_copy(path, key) if len(keys) > 1
+                               else self.ws.review_copy(path))
+            try:
+                return self._turn(Models(cfg.agent(key)), 'review', prompt, 'review', copy,
+                                  f'pr-{pr.number}-review', allowed_for(key),
+                                  where=(pr.number, 'review'))
+            except BaseException:
+                with reserving:
+                    reserved.pop(key, None)
+                raise
+            finally:
+                self.ws.remove(copy_name)
+
+        if len(keys) == 1:
+            turns = [(keys[0], review_turn(keys[0]), None)]
+        else:
+            turns = self._together(keys, review_turn)
+        failures = [(key, exc) for key, _, exc in turns if exc is not None]
+        for key, exc in failures:
+            self.log(f'  review by {key} failed: {exc}')
         if not self.ws.pristine(path, pr.head_sha):
             raise WorkspaceError(f'the worktree of PR #{pr.number} changed during the review; '
                                  'verdict discarded')
-        if receipt['level'] > 1 and self.gh.pr_head(pr.number) != pr.head_sha:
+        if level2 and self.gh.pr_head(pr.number) != pr.head_sha:
             # A verdict on a superseded head joins no round: the new head is reviewed afresh.
             self.log('  head moved during the review; verdict discarded')
             self.ws.remove(name)
+            if failures:
+                raise _review_failure(failures)
             return
-        review = normalize_review(raw, previous_open=previous_open, round_no=round_no,
-                                  max_rounds=max_rounds, head_sha=pr.head_sha,
-                                  ci=pr.checks, reviewer=agent.key, criteria=criteria,
-                                  acceptance_map=acceptance_map)
-        review['receipt'] = receipt
-        if joins and bases:
-            review['bases'] = bases  # the round's earlier bases, checked up to this one
-        if restarts:
-            review['restarts'] = restarts
-        review['profile'] = self._profile(agent.key, 'review', used)
-        reviewer_gh = self._as(agent.key, REVIEW)
-        reviewer_gh.comment(pr.number, render_review(review, self.runner.header(used)))
-        if self._app_login(agent.key):
-            # A native review under the reviewer's own identity, visible to branch protection.
-            # The marker comment above stays the record devloop reads.
-            try:
-                reviewer_gh.submit_review(pr.number, commit=pr.head_sha,
-                                          **render_native_review(review, self.runner.header(used)))
-            except GitHubError as exc:
-                self.log(f'  native review not submitted: {exc}')
-        if pr.checks != 'pending':
+        records = list(done)
+        for key, (raw, used), _ in (turn for turn in turns if turn[2] is None):
+            review = normalize_review(raw, previous_open=previous_open, round_no=round_no,
+                                      max_rounds=max_rounds, head_sha=pr.head_sha,
+                                      ci=pr.checks, reviewer=key, criteria=criteria,
+                                      acceptance_map=acceptance_map)
+            review['receipt'] = receipt
+            if joins and bases:
+                review['bases'] = bases  # the round's earlier bases, checked up to this one
+            if restarts:
+                review['restarts'] = restarts
+            review['profile'] = self._profile(key, 'review', used)
+            reviewer_gh = self._as(key, REVIEW)
+            reviewer_gh.comment(pr.number, render_review(review, self.runner.header(used)))
+            if self._app_login(key):
+                # A native review under the reviewer's own identity, visible to branch
+                # protection. The marker comment above stays the record devloop reads.
+                try:
+                    reviewer_gh.submit_review(pr.number, commit=pr.head_sha,
+                                              **render_native_review(review,
+                                                                     self.runner.header(used)))
+                except GitHubError as exc:
+                    self.log(f'  native review not submitted: {exc}')
+            records.append(review)
+        new = records[len(done):]
+        if new and pr.checks != 'pending':
             # The CI the round reviewed, whatever its verdict (#133).
             self._record_ci(pr, pr.head_sha, pr.checks, pr.check_details, round_no)
-        records = done + [review]
         waiting = pending_reviewers(records)
-        if not waiting:
+        if new and not waiting:
             self._apply_round(pr, records, announce=True, reviews=earlier + records)
         self.ws.remove(name)
-        self.log(f'  verdict of {agent.key}: {review["verdict"]}'
-                 + (f'; the round waits for {", ".join(waiting)}' if waiting else ''))
+        for position, review in enumerate(new):
+            last = position == len(new) - 1
+            self.log(f'  verdict of {review["reviewer"]}: {review["verdict"]}'
+                     + (f'; the round waits for {", ".join(waiting)}' if waiting and last
+                        else ''))
+        if failures:
+            # The verdicts above stay recorded: the round waits only for these reviewers.
+            raise _review_failure(failures)
+
+    def _together(self, keys, turn):
+        """``(key, result, exception)`` of ``turn(key)`` for each of ``keys``, in order, run
+        at once in threads of their own that share the action's log prefix (#176)."""
+        prefix = self.log.prefix
+
+        def call(key):
+            with self.log.prefixed(prefix):
+                try:
+                    return key, turn(key), None
+                except Exception as exc:  # returned to the action
+                    return key, None, exc
+        with ThreadPoolExecutor(max_workers=len(keys),
+                                thread_name_prefix='devloop-review') as pool:
+            return list(pool.map(call, keys))
 
     def _full_suite_without_ci(self, pr, path, name):
         """The CI gate when the local tests may not have covered the whole suite (#169): with
@@ -2166,6 +2370,15 @@ def _open_findings_reason(findings):
             f'che contiene una riga `{FINDING_COMMAND} <round/reviewer/ID> resolved|withdrawn '
             '<motivazione>`, poi riportare la PR in `agent:review`: l\'approvazione registrata '
             'viene riapplicata senza una nuova review.')
+
+
+def _review_failure(failures):
+    """The exception that ends a review action whose reviewers ``failures`` (``(key, exc)``)
+    failed: the only one, or one that lists them all when every one is an agent failure."""
+    if len(failures) == 1 or not all(isinstance(exc, AgentError) for _, exc in failures):
+        return failures[0][1]
+    return AgentError('; '.join(f'`{key}`: {str(exc).strip()}' for key, exc in failures),
+                      getattr(failures[0][1], 'log', None))
 
 
 def _trusted_comments(comments, trusted_users):

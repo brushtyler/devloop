@@ -116,10 +116,12 @@ def pending_call(path, limit=2_000_000):
 def worktrees(root, target):
     """The worktrees whose agents ``devloop follow <target>`` shows: ``issue-<N>`` for the
     implementer; ``pr-<N>`` for the fixer and its copy ``pr-<N>-review`` for the reviewer
-    (see :meth:`devloop.workspace.Workspace.review_copy`)."""
+    (see :meth:`devloop.workspace.Workspace.review_copy`), or the copies
+    ``pr-<N>-review-<reviewer>`` of the reviewers running at once (#176)."""
     paths = [Path(root) / target]
     if target.startswith('pr-'):
         paths.append(Path(root) / f'{target}-review')
+        paths += sorted(Path(root).glob(f'{target}-review-*'))
     return paths
 
 
