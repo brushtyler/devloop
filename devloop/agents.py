@@ -117,9 +117,38 @@ def build_command(agent, mode, prompt, *, schema_file, out_file):
     if agent.kind == 'agy':
         argv = ['agy', '-p', prompt, '--model', agent.model, '--effort', agent.effort,
                 '--output-format', 'json', '--json-schema', str(schema_file),
-                '--mode', 'accept-edits' if mode == 'write' else 'plan', *extra]
+                '--mode', 'accept-edits' if mode == 'write' else 'plan',
+                '--settings', json.dumps(agy_settings(agent, mode)), *extra]
         return argv, None
     raise ValueError(agent.kind)
+
+
+def agy_settings(agent, mode):
+    """The settings of one agy turn (issue #122), applied by ``--settings`` to that session only:
+    the operator's profile stays as it is. Only the configured command prefixes of the mode are
+    allowed; reads and edits stay inside the turn's working directory, which agy enforces
+    without rules."""
+    commands = agent.write_commands if mode == 'write' else agent.review_commands
+    return {'permissions': {'allow': [f'command({c})' for c in commands]}}
+
+
+NO_OUTPUT = 'jetski: no output produced'
+
+
+def no_output_reason(kind, stdout, stderr):
+    """Why an agy turn stopped without output, or None (issue #122): in headless mode a denied
+    permission ends the session with exit 0, no output and ``jetski: no output produced …`` on
+    stderr. The message counts only as a diagnostic of the CLI: anywhere on stderr, and on stdout
+    only as a line of its own, so that a structured answer quoting it is not taken for it."""
+    if kind != 'agy':
+        return None
+    lines = [line for line in (stderr or '').splitlines() if NO_OUTPUT in line]
+    lines += [line for line in (stdout or '').splitlines() if line.strip().startswith(NO_OUTPUT)]
+    if lines:
+        return lines[0].strip()[:500]
+    if not (stdout or '').strip():
+        return 'no output'
+    return None
 
 
 def envelope_error(kind, envelope):
@@ -239,8 +268,14 @@ class AgentRunner:
         log.write_text(f'$ {argv[0]} ({mode})\nexit {done.returncode}\n--- stdout\n{done.stdout}'
                        f'\n--- stderr\n{done.stderr}', encoding='utf-8')
         text = f'{done.stdout}\n{done.stderr}'
+        stopped = no_output_reason(agent.kind, done.stdout, done.stderr)
+        if done.returncode == 0 and stopped:
+            # Not an empty result: the turn failed, for example on a permission it could not ask.
+            raise AgentError(f'{agent.key} stopped without output: {stopped}', log)
         if done.returncode != 0:
             message = f'{agent.key} exited with {done.returncode}'
+            if stopped and stopped != 'no output':
+                message += f': {stopped}'
             if left_no_output(agent.kind, done.stdout, out_file):
                 reason = unavailable_reason(agent, done.returncode, text)
                 if reason:

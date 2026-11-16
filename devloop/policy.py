@@ -76,8 +76,9 @@ class ReviewPolicy:
     # Files listed by ``sensitive_path_lists``, read when the configuration is loaded.
     sensitive_files: tuple = ()
     # The configured reviewer pool, in order: ``(key, app slug or None, kind, model, effort,
-    # review_args[, fallback models])`` each, the fallback models as ``(model, effort)`` pairs
-    # (#121). A change to any of them changes the version, and so every receipt.
+    # review_args[, fallback models[, review commands]])`` each, the fallback models as
+    # ``(model, effort)`` pairs (#121), the review commands the command prefixes an agy reviewer
+    # may run (#122). A change to any of them changes the version, and so every receipt.
     reviewers: tuple = ()
     # Level 0 (#107): the label a trusted user adds, the allowlist (directory prefixes or files,
     # as ``sensitive_paths``) and the expected check runs, ``(name, app_id)`` each. Without an
@@ -98,8 +99,11 @@ class ReviewPolicy:
                 'sensitive_files': sorted({_norm(p) for p in self.sensitive_files}),
                 # A reviewer's fallback models, (model, effort) each, count only when it has
                 # some: without them the version is the one before #121.
+                # Its review commands (agy, #122) likewise count only when it has some, tagged
+                # so that they never read as fallback models.
                 'reviewers': [[*r[:5], list(r[5]), *([[list(f) for f in r[6]]]
-                                                     if len(r) > 6 and r[6] else [])]
+                                                     if len(r) > 6 and r[6] else []),
+                               *([{'commands': list(r[7])}] if len(r) > 7 and r[7] else [])]
                               for r in self.reviewers]}
         if self.zero_enabled():
             data['zero'] = {'label': self.zero_label,
@@ -261,10 +265,16 @@ def valid_profile(p):
 
 def agent_profile(agent, identity, mode):
     """The profile ``agent`` acts with in ``mode`` (``write`` or ``review``) under GitHub
-    ``identity``, as markers and receipts record it."""
-    return {'identity': identity, 'kind': agent.kind, 'model': agent.model,
-            'effort': agent.effort,
-            'args': list(agent.review_args if mode == 'review' else agent.write_args)}
+    ``identity``, as markers and receipts record it. An agy profile also records the command
+    prefixes its turns may run in ``mode`` (#122), passed with ``--settings``: a change to them
+    voids the approvals given with the old ones, even for a reviewer outside the pool."""
+    profile = {'identity': identity, 'kind': agent.kind, 'model': agent.model,
+               'effort': agent.effort,
+               'args': list(agent.review_args if mode == 'review' else agent.write_args)}
+    if agent.kind == 'agy':
+        profile['commands'] = list(agent.review_commands if mode == 'review'
+                                   else agent.write_commands)
+    return profile
 
 
 def profile_of(record):
