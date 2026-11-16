@@ -209,9 +209,20 @@ SCOPED_FILES = {
                             '    with mock.patch.object(api, "load"):\n        pass\n'),
     'pkg/nested.py': ('import pkg.api as api\n\n\nclass Holder:\n    def run(self):\n'
                       '        return [api.load(x) for x in "ab"]\n'),
+    # Reads after the file itself may have given the name back: an assignment,
+    # a patch allowed to create it and a setattr that does not raise.
+    'pkg/recreated.py': 'import pkg.api as api\n\napi.load = lambda path: path\nvalue = api.load("x")\n',
+    'tests/test_patched.py': ('from unittest.mock import patch\nimport pkg.api as api\n\n\ndef test():\n'
+                              '    with patch.object(api, "load", create=True):\n        api.load("x")\n'),
+    'tests/test_monkeypatched.py': ('import pkg.api as api\n\n\ndef test(monkeypatch):\n'
+                                    '    monkeypatch.setattr(api, "load", print, raising=False)\n'
+                                    '    api.load("x")\n'),
+    # An augmented assignment reads the attribute first: it does not recreate it.
+    'pkg/augmented.py': 'import pkg.api as api\n\napi.load += 1\n',
 }
+RECREATED = ['pkg/recreated.py', 'tests/test_monkeypatched.py', 'tests/test_patched.py']
 SURVIVING = ['pkg/assigns.py', 'pkg/checked.py', 'pkg/fallback.py', 'pkg/guarded.py', 'tests/test_created.py']
-BROKEN = ['pkg/nested.py', 'tests/test_alias.py']
+BROKEN = ['pkg/augmented.py', 'pkg/nested.py', 'tests/test_alias.py']
 
 
 class ConsumerIncompatibilityTests(ContractFixture):
@@ -254,11 +265,29 @@ class ConsumerIncompatibilityTests(ContractFixture):
             'pkg/guarded.py': ('NOT_DEMONSTRATED', 'IMPORT', 2),
             'tests/test_created.py': ('NOT_DEMONSTRATED', 'PATCH_TARGET', 4)})
         self.assertEqual(sorted(d['path'] for d in contracts['diagnoses']
-                                if d['reason'] == 'INCOMPATIBILITY_NOT_DEMONSTRATED'), SURVIVING)
+                                if d['reason'] == 'INCOMPATIBILITY_NOT_DEMONSTRATED'), sorted(SURVIVING + RECREATED))
         # Only unguarded uses through provable bindings are demonstrated breaks.
         self.assertEqual([(d['consumer'], d['via'], d['line']) for d in contracts['defects']],
-                         [('pkg/nested.py', 'ATTRIBUTE', 6), ('tests/test_alias.py', 'PATCH_TARGET', 6)])
+                         [('pkg/augmented.py', 'ATTRIBUTE', 3), ('pkg/nested.py', 'ATTRIBUTE', 6),
+                          ('tests/test_alias.py', 'PATCH_TARGET', 6)])
         self.assertEqual({p: consumers[p][0] for p in BROKEN}, dict.fromkeys(BROKEN, 'DEMONSTRATED'))
+
+    def test_reads_after_a_recreation_in_the_same_file_are_not_demonstrated(self):
+        contracts = self.contracts()
+        consumers = self.consumers(contracts)
+        # The read itself would fail, but the file may have created the name first.
+        self.assertEqual({p: consumers[p] for p in RECREATED}, {
+            'pkg/recreated.py': ('NOT_DEMONSTRATED', 'ATTRIBUTE', 3),
+            'tests/test_monkeypatched.py': ('NOT_DEMONSTRATED', 'ATTRIBUTE', 6),
+            'tests/test_patched.py': ('NOT_DEMONSTRATED', 'PATCH_TARGET', 6)})
+        self.assertFalse([d for d in contracts['defects'] if d['consumer'] in RECREATED])
+        # With the demonstrated consumers owned, the recreating files do not block the approval.
+        self.plan['tasks'][0]['target_files'] += BROKEN
+        self.assertEqual(self.contracts()['defects'], [])
+        self.assertEqual(self.validate_review(review([]))['verdict'], 'APPROVED')
+        # A recreation in another file does not hide a demonstrated break here.
+        self.plan['tasks'][0]['target_files'].remove('pkg/nested.py')
+        self.assertEqual([d['consumer'] for d in self.contracts()['defects']], ['pkg/nested.py'])
 
     def test_bindings_follow_scopes_and_unprovable_identities_stay_unknown(self):
         contracts = self.contracts()

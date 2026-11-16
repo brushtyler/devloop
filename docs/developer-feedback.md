@@ -636,7 +636,12 @@ rules as above and without running code. It adds `contracts` with:
   `TYPE_CHECKING` condition, `suppress` and annotations; `NOT_DEMONSTRATED`
   for every `INCOMPATIBLE` use (the base does not show the new shape, and a
   call such as `load("x")` may stay valid) and for uses that survive the
-  removal; `NOT_EXPECTED` for `COMPATIBLE` changes.
+  removal, including every use in a file that may give the producer the name
+  back (an assignment such as `api.load = ...`, any `setattr` of the name or
+  of a dynamic one, a `patch` with `create`): the file no longer shows which
+  reads need the original attribute. An augmented assignment reads the name
+  first and recreates nothing. A recreation in another file does not hide a
+  demonstrated break; `NOT_EXPECTED` for `COMPATIBLE` changes.
 - `defects`: one entry per consumer with a `DEMONSTRATED` incompatibility that
   is `UNCOVERED` (`gap: OWNER_OR_SCOPE`) or `UNORDERED` (`gap: ORDERING`),
   with `category: PLAN_DEFECT` and the declaring task's approved obligations:

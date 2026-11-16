@@ -570,18 +570,24 @@ def _scan_scopes(tree, on_import):
 
 
 def _contract_uses(path, tree, modules, producer, contract):
-    """Uses of ``producer.contract`` in ``path`` and the lines where that is not decidable.
+    """Uses of ``producer.contract`` in ``path``, the lines where that is not decidable and its recreations.
 
     Each use is ``(line, via, breaking)``: ``breaking`` when removing the name
     makes that use fail. A name is the producer only when every binding it may
     denote in its scope is the same import; otherwise the use is ``UNKNOWN``.
     The same holds for ``getattr`` (the builtin) and ``patch`` (``mock``'s).
+    Each recreation is the line of a write that may give the producer the name
+    back: an assignment, a ``setattr`` or a ``patch`` allowed to create it.
+    After one, a read of the same file no longer demonstrates that the
+    original attribute is required.
     """
     package = list(PurePosixPath(path).parts[:-1])
     targets = {name + '.' + contract for name in _module_names(producer)}
     patches = {'unittest.mock.patch'} | ({'mock.patch'} if 'mock' not in modules else set())
     objects = {p + '.object' for p in patches}
-    uses, unknown = [], []
+    uses, unknown, recreations = [], [], []
+    # ``api.load += f`` reads the attribute before writing it.
+    augmented = {id(n.target) for n in ast.walk(tree) if isinstance(n, ast.AugAssign)}
 
     def imported(node, guarded):
         bindings = []
@@ -664,8 +670,11 @@ def _contract_uses(path, tree, modules, producer, contract):
             if node.attr != contract:
                 continue
             state = reference(scope, node.value)
+            writes = isinstance(node.ctx, ast.Store) and id(node) not in augmented
+            if state and writes:
+                recreations.append(line)
             if state == 'PRODUCER':
-                uses.append((line, 'ATTRIBUTE', not guarded and not isinstance(node.ctx, ast.Store)))
+                uses.append((line, 'ATTRIBUTE', not guarded and not writes))
             elif state:
                 unknown.append((line, 'AMBIGUOUS_BINDING'))
             continue
@@ -674,7 +683,12 @@ def _contract_uses(path, tree, modules, producer, contract):
         name, parts = qualified(scope, node.func), (_dotted(node.func) or '').split('.')
         first = _literal(node.args[0])
         second = _literal(node.args[1]) if len(node.args) > 1 else None
-        if name == 'getattr' or parts == ['getattr']:
+        if parts[-1] == 'setattr':
+            # Any ``setattr`` (the builtin, ``monkeypatch``'s...) of the name, or of a dynamic one, may recreate it.
+            if first in targets or (len(node.args) > 1 and reference(scope, node.args[0])
+                                    and second in (None, contract)):
+                recreations.append(line)
+        elif name == 'getattr' or parts == ['getattr']:
             state = reference(scope, node.args[0])
             if len(node.args) < 2 or not state or second not in (None, contract):
                 continue
@@ -690,6 +704,8 @@ def _contract_uses(path, tree, modules, producer, contract):
         elif name in patches or parts[-1] == 'patch':
             if first not in targets:
                 continue
+            if creates(node, 3):
+                recreations.append(line)
             if name in patches:
                 uses.append((line, 'PATCH_TARGET', not guarded and not creates(node, 3)))
             else:
@@ -698,11 +714,13 @@ def _contract_uses(path, tree, modules, producer, contract):
             state = reference(scope, node.args[0])
             if not state or second != contract:
                 continue
+            if creates(node, 4):
+                recreations.append(line)
             if state == 'PRODUCER' and name in objects:
                 uses.append((line, 'PATCH_TARGET', not guarded and not creates(node, 4)))
             else:
                 unknown.append((line, 'UNRESOLVED_PATCH' if state == 'PRODUCER' else 'AMBIGUOUS_BINDING'))
-    return sorted(set(uses)), sorted(set(unknown))
+    return sorted(set(uses)), sorted(set(unknown)), sorted(set(recreations))
 
 
 def _related_tasks(tasks, task_id):
@@ -733,7 +751,8 @@ def _contract_analysis(plan, files, texts, modules):
     ``REMOVED`` name) and that no task covers, or that only a task unordered
     with the declaring one covers, is a defect bound to the declaring task's
     approved obligations. Without such obligations, for uses that may survive
-    the change (any ``INCOMPATIBLE`` use, guarded or fallback uses) and for
+    the change (any ``INCOMPATIBLE`` use, guarded or fallback uses, uses in a
+    file that may recreate the name) and for
     every undecidable case, the result is a non-blocking diagnosis.
     """
     tasks = {t['task_id']: t for t in plan['tasks']}
@@ -770,15 +789,17 @@ def _contract_analysis(plan, files, texts, modules):
             for path, tree in trees.items():
                 if path == producer:
                     continue
-                uses, unknown = _contract_uses(path, tree, modules, producer, contract)
+                uses, unknown, recreations = _contract_uses(path, tree, modules, producer, contract)
                 for line, why in unknown:
                     diagnoses.append(dict(subject, reason=why, path=path, line=line))
                 if not uses:
                     continue
-                breaking = [(line, via) for line, via, breaks in uses if breaks]
+                # A file that may give the producer the name back no longer shows
+                # which of its reads need the original one.
+                breaking = [(line, via) for line, via, breaks in uses if breaks and not recreations]
                 # Only a removal makes a use fail statically: the new shape of an
-                # INCOMPATIBLE contract is not known at the base, and a guarded or
-                # fallback use survives the removal.
+                # INCOMPATIBLE contract is not known at the base, and a guarded,
+                # fallback or recreated use survives the removal.
                 incompatibility = ('NOT_EXPECTED' if change not in BREAKING_CHANGES
                                    else 'DEMONSTRATED' if change == 'REMOVED' and breaking else 'NOT_DEMONSTRATED')
                 line, via = breaking[0] if incompatibility == 'DEMONSTRATED' else uses[0][:2]
