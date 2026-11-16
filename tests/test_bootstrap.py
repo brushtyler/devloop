@@ -1,4 +1,5 @@
 import contextlib
+import io
 import json
 import subprocess
 import tempfile
@@ -147,61 +148,95 @@ class BootstrapTests(unittest.TestCase):
         (self.repo / 'new.py').write_text('x=1')
         self.assert_refused('dirty_tree')
 
-    def sealed_unproven(self, registered=True):
+    # Non-resumable forms of a sealed, unproven absent-baseline contract:
+    # a historical contract without a preparation record is never converted,
+    # and a reserved first attempt spends the window even without a journal.
+    SPENT = (('historical', 'interrupted'), ('reserved', 'window_spent'))
+
+    def sealed_unproven(self, registered=True, spent='historical'):
         orch = self.contract_orchestrator()
         contract = orch._ensure_quality_contract()
         path = orch.dir_recon / 'quality-contract.json'
         state = dict(task_engine_v1=True, base_commit=self.base, status='IN_PROGRESS', artifacts={})
         if registered:
-            state['artifacts']['00-recon/quality-contract.json'] = {'sha256': orchestrator.sha256_file(path)}
+            state['artifacts']['00-recon/quality-contract.json'] = {
+                'path': '00-recon/quality-contract.json', 'sha256': orchestrator.sha256_file(path)}
         (orch.ssdlc_root / 'state.json').write_text(json.dumps(state))
+        orch.state = state
+        if spent == 'historical':
+            (orch.ssdlc_root / bootstrap.PREPARATION).unlink()
+        elif spent == 'reserved':
+            bootstrap.reserve_first_attempt(orch.ssdlc_root, 'T')
         self.assertEqual(git(self.repo, 'status', '--porcelain'), '')
         self.assertFalse((orch.ssdlc_root / 'worktree').exists())
         self.assertFalse((orch.ssdlc_root / '03-dev/tasks/task-journal.jsonl').exists())
         return orch, contract
 
     def test_registered_contract_without_journal_refuses_clean_cli_and_supervisor(self):
-        orch, contract = self.sealed_unproven()
-        before = self.snapshot()
-        for command in ('run', 'plan', 'design'):
-            result = orchestrator.startup_preflight(self.repo, 'T', command)
-            self.assertEqual((result['ok'], result['code'], result['reason']),
-                             (False, 'bootstrap_ineligible', 'interrupted'))
-        with patch.object(orchestrator, 'SSDLCOrchestrator', side_effect=AssertionError('constructor')) as constructor:
-            constructor.PHASE_ORDER = ['00-recon', '03-dev']
-            for suffix in ([], ['--detach']):
-                self.assertEqual(orchestrator.main(['run','--repo',str(self.repo),'--ticket','T','--goal','test']+suffix),24)
-        with patch.object(supervisor.RunStore,'prepare',side_effect=AssertionError('supervisor mutated')):
-            for entry in (supervisor.start,supervisor.resume):
-                self.assertEqual(entry(dict(repo=str(self.repo),ticket='T',goal='test'))['status_reason'],'bootstrap_ineligible')
-        self.assertEqual(self.snapshot(),before)
-        self.assertFalse((orch.ssdlc_root / 'ticket.lock').exists())
-        self.assertEqual(json.loads((orch.dir_recon/'quality-contract.json').read_text()),contract)
+        for spent, reason in self.SPENT:
+            with self.subTest(spent=spent):
+                self.reset_run()
+                orch, contract = self.sealed_unproven(spent=spent)
+                before = self.snapshot()
+                for command in ('run', 'plan', 'design'):
+                    result = orchestrator.startup_preflight(self.repo, 'T', command)
+                    self.assertEqual((result['ok'], result['code'], result['reason']),
+                                     (False, 'bootstrap_ineligible', reason))
+                with patch.object(orchestrator, 'SSDLCOrchestrator', side_effect=AssertionError('constructor')) as constructor:
+                    constructor.PHASE_ORDER = ['00-recon', '03-dev']
+                    for suffix in ([], ['--detach']):
+                        err = io.StringIO()
+                        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                            self.assertEqual(orchestrator.main(['run','--repo',str(self.repo),'--ticket','T','--goal','test']+suffix),24)
+                        if not suffix:
+                            self.assertIn('bootstrap_ineligible: ' + reason + '; ', err.getvalue())
+                            self.assertIn('not renewed', err.getvalue())
+                with patch.object(supervisor.RunStore,'prepare',side_effect=AssertionError('supervisor mutated')):
+                    for entry in (supervisor.start,supervisor.resume):
+                        result = entry(dict(repo=str(self.repo),ticket='T',goal='test'))
+                        self.assertEqual((result['status_reason'], result['bootstrap_reason']),
+                                         ('bootstrap_ineligible', reason))
+                self.assertEqual(self.snapshot(),before)
+                self.assertFalse((orch.ssdlc_root / 'ticket.lock').exists())
+                self.assertEqual(json.loads((orch.dir_recon/'quality-contract.json').read_text()),contract)
+
+    def reset_run(self):
+        import shutil
+        shutil.rmtree(self.repo / '.ssdlc/T', ignore_errors=True)
 
     def test_unregistered_contract_and_forged_ready_status_do_not_renew_exemption(self):
-        orch, _ = self.sealed_unproven(registered=False)
-        path=orch.ssdlc_root/'state.json'
-        state=json.loads(path.read_text());state.update(status='PLAN_READY',bootstrap_proven=True)
-        path.write_text(json.dumps(state));before=self.snapshot()
-        result=orchestrator.startup_preflight(self.repo,'T','run')
-        self.assertEqual(result['reason'],'interrupted')
-        self.assertEqual(before,self.snapshot())
+        for spent, reason in self.SPENT:
+            with self.subTest(spent=spent):
+                self.reset_run()
+                orch, _ = self.sealed_unproven(registered=False, spent=spent)
+                path=orch.ssdlc_root/'state.json'
+                state=json.loads(path.read_text());state.update(status='PLAN_READY',bootstrap_proven=True)
+                path.write_text(json.dumps(state));before=self.snapshot()
+                result=orchestrator.startup_preflight(self.repo,'T','run')
+                self.assertEqual(result['reason'],reason)
+                self.assertEqual(before,self.snapshot())
 
     def test_direct_pipeline_refuses_persisted_unproven_contract_before_writes(self):
-        orch, _ = self.sealed_unproven()
-        before=self.snapshot()
-        method=orchestrator._bootstrap_run_invocation(lambda owner: self.fail('pipeline entered'))
-        for _ in range(2):
-            with self.assertRaises(bootstrap.BootstrapError) as raised:method(orch)
-            self.assertEqual(raised.exception.code,'interrupted')
-            self.assertEqual(before,self.snapshot())
+        for spent, reason in self.SPENT:
+            with self.subTest(spent=spent):
+                self.reset_run()
+                orch, _ = self.sealed_unproven(spent=spent)
+                before=self.snapshot()
+                method=orchestrator._bootstrap_run_invocation(lambda owner: self.fail('pipeline entered'))
+                for _ in range(2):
+                    with self.assertRaises(bootstrap.BootstrapError) as raised:method(orch)
+                    self.assertEqual(raised.exception.code,reason)
+                    self.assertEqual(before,self.snapshot())
 
     def test_direct_scheduler_factory_refuses_unproven_contract_before_planning(self):
-        orch, _ = self.sealed_unproven()
-        before=self.snapshot()
-        with patch.object(orch,'_ensure_task_plan',side_effect=AssertionError('planning entered')):
-            with self.assertRaises(bootstrap.BootstrapError):orch._make_task_scheduler()
-        self.assertEqual(before,self.snapshot())
+        for spent, _ in self.SPENT:
+            with self.subTest(spent=spent):
+                self.reset_run()
+                orch, _ = self.sealed_unproven(spent=spent)
+                before=self.snapshot()
+                with patch.object(orch,'_ensure_task_plan',side_effect=AssertionError('planning entered')):
+                    with self.assertRaises(bootstrap.BootstrapError):orch._make_task_scheduler()
+                self.assertEqual(before,self.snapshot())
 
     def test_contract_sealed_while_waiting_for_lock_refuses_before_state_write(self):
         orch=self.contract_orchestrator()
@@ -209,11 +244,13 @@ class BootstrapTests(unittest.TestCase):
         @contextlib.contextmanager
         def lock(*args):
             orch._ensure_quality_contract()  # another controller's durable claim
+            bootstrap.reserve_first_attempt(orch.ssdlc_root, 'T')  # ... and its first attempt
             yield
         raw=orchestrator.SSDLCOrchestrator.run_pipeline.__wrapped__.__wrapped__
         with patch.object(orchestrator,'ticket_lock',side_effect=lock), \
              patch.object(orch,'_load_or_init_state',side_effect=AssertionError('state write')) as load:
-            with self.assertRaises(bootstrap.BootstrapError):raw(orch,'goal')
+            with self.assertRaises(bootstrap.BootstrapError) as raised:raw(orch,'goal')
+        self.assertEqual(raised.exception.code, 'window_spent')
         load.assert_not_called()
         self.assertFalse((orch.ssdlc_root/'state.json').exists())
 
@@ -223,13 +260,17 @@ class BootstrapTests(unittest.TestCase):
         def body(owner):
             owner._ensure_quality_contract()
             self.assertTrue(owner._bootstrap_contract_captured)
+            # The interruption follows the reservation of the first attempt.
+            bootstrap.reserve_first_attempt(owner.ssdlc_root, 'T')
             raise Crash()
         method=orchestrator._bootstrap_run_invocation(body)
         with self.assertRaises(Crash):method(orch)
         self.assertFalse(orch._bootstrap_invocation_active)
         self.assertFalse(orch._bootstrap_contract_captured)
+        self.assertFalse(orch._bootstrap_window_claimed)
         before=self.snapshot()
-        with self.assertRaises(bootstrap.BootstrapError):method(orch)
+        with self.assertRaises(bootstrap.BootstrapError) as raised:method(orch)
+        self.assertEqual(raised.exception.code, 'window_spent')
         self.assertEqual(before,self.snapshot())
 
     def test_registered_pytest_profile(self):

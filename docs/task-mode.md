@@ -255,26 +255,95 @@ commit/tree and registered policy. The first implementation must add real tests:
 `python3 -m unittest discover -s tests` must execute at least one passing test.
 Empty, failing, missing, timed-out or interrupted checks block. The one-task
 exemption becomes journaled `PROVEN`/post-bootstrap without rewriting the sealed
-contract. Restart before proof fails explicitly, including a journal stopped at
-`INITIALIZED` with bootstrap status `PENDING`; a profile cannot renew eligibility.
-Eligibility preflight is read-only and grants no exemption. Sealing the absent-baseline
-contract claims the window for the foreground invocation that creates it. A later
-invocation refuses an unproven contract even before a worktree or journal exists.
-Use one full run through the first checkpoint; phase-only preparation does not
-leave a renewable exemption for a later command. After `PROVEN`, normal strict
-resume remains supported. Missing run state with existing execution evidence is
-refused as historical corruption instead of being treated as a fresh ticket.
+contract. Restart after the first development attempt has been reserved and before
+proof fails explicitly, including a journal stopped at `INITIALIZED` with bootstrap
+status `PENDING`; a profile cannot renew eligibility. Eligibility preflight is
+read-only and grants no exemption. After `PROVEN`, normal strict resume remains
+supported. Missing run state with existing execution evidence is refused as
+historical corruption instead of being treated as a fresh ticket.
 Existing tests, dirty trees, shallow clones or later commits are ineligible (exit 24). Discovery includes unittest `test*.py`, configured pytest filename patterns and common Java/Ruby test filenames; malformed discovery inputs return `profile_invalid`, and a conflicting lint-only policy returns `policy_conflict`. Without an
 explicit profile, strict baseline rules apply. Protected paths and task checks
-remain enforced throughout. The refusal includes the bootstrap reason and, for an
-interrupted exemption, explains that the first-invocation window is spent. Safe
-pre-development bootstrap resumption is tracked separately in [#72](https://github.com/brushtyler/ssdlc/issues/72).
+remain enforced throughout.
+
+### Pre-development resumption
+
+Preparation (recon, PO, design) and the first development attempt use two
+separate engine-owned records under `.ssdlc/<ticket>/00-recon/`:
+
+1. **Preparation** (`bootstrap-preparation.json`, format `bootstrap-preparation-v1`)
+   is written once, atomically, *before* the absent-baseline contract. It binds the
+   ticket, the canonical contract digest, the bootstrap binding (profile, policy,
+   initial commit/tree), the executing controller snapshot and the frozen limit
+   policy digest. It is never rewritten.
+2. **First-attempt reservation** (`bootstrap-first-attempt.json`, format
+   `bootstrap-first-attempt-v1`) is created with an exclusive create, after full
+   verification and *before* the worktree, the task journal or any developer
+   dispatch. Its existence spends the exemption, even if its body is torn.
+
+A stop during recon, PO or design (no reservation, worktree, task journal or
+implementation diff) is resumable with the normal command:
+
+```bash
+python3 orchestrator.py run --repo . --ticket TKT-1 --goal "Scoped change" --tier S --no-sync-remote
+```
+
+Completed phases are skipped. Before any write, the engine verifies the
+preparation record against the sealed contract and re-checks the controller, the
+registered policy, the profile and initial commit/tree (`decide` must reproduce
+the sealed binding), every registered recon/PO/design artifact and the frozen
+limit policy. History, approvals, ledger and consumed limits are kept; nothing is
+regenerated. The same check runs again immediately before the reservation. The
+supervisor admits the same cases through its read-only compatibility check.
+
+The absence of a journal is never proof that no attempt started. Once the
+reservation, a worktree, a task journal or an implementation diff exists, every
+later invocation refuses until the journal is `PROVEN`. The first checkpoint still
+requires real, nonempty, passing tests.
+
+Interrupted writes are recovered as follows:
+
+| Interrupted after | Next invocation |
+| --- | --- |
+| nothing persisted | fresh eligibility decision and sealing |
+| preparation record, before the contract | contract regenerated and accepted only if its digest and binding equal the record; otherwise `inputs_changed` |
+| contract, before registration | registered only if it matches the record; then fully verified |
+| registration, before the reservation | resumable after verification |
+| reservation (created, written or fsynced) | refused: `window_spent` |
+| worktree, journal or dispatch | refused: `window_spent` (or the journal's `interrupted`) |
+
+Concurrent resumptions serialize on the ticket lock; the exclusive create of the
+reservation admits a single winner even without it. No resumption dispatches twice
+or renews the exemption.
+
+**Compatibility.** The quality contract format is unchanged and no sealed contract
+or historical run is converted. A sealed bootstrap contract without a preparation
+record (written before this format) stays non-resumable (`interrupted`). Earlier
+controllers ignore the new files and keep refusing every unproven bootstrap
+contract, so they fail safe. Unknown record formats are refused
+(`preparation_invalid`).
+
+Non-resumable cases exit **24** with `bootstrap_ineligible: <reason>` and a short
+explanation; supervisor results carry the same code in `bootstrap_reason`:
+
+| Reason | Meaning |
+| --- | --- |
+| `interrupted` | no resumable preparation record (historical contract or interrupted exemption) |
+| `window_spent` | the first development attempt was reserved or started |
+| `preparation_invalid` | the record is unreadable, of an unknown format, or does not match the contract or ticket |
+| `controller_changed` | the controller differs from the one that sealed the preparation |
+| `policy_changed` | the registered bootstrap policy differs from the sealed binding |
+| `inputs_changed` | a registered artifact, the profile or the binding changed |
+| `limits_changed` | the frozen limit policy differs from the one bound at preparation |
+
+Repository drift reports the eligibility reason (`dirty_tree`, `not_initial_commit`, …).
+Restoring the original inputs makes the run resumable again with its original authority.
 
 The offline suite executes these CLI/configuration behaviors through real entry
 points with fake providers and sandbox commands:
 
 ```bash
 python3 -m unittest discover -s tests -p test_unified_integration.py
+python3 -m unittest discover -s tests -p test_bootstrap_preparation.py   # pre-development resumption
 ```
 
 A non-bootstrap native run interrupted after creating its clean worktree but

@@ -818,6 +818,14 @@ def public(d, status=None, reason=None):
                             'repeat_cancel' if state == 'cancelling' else 'status')
 
 
+def unsupported(check):
+    result = public({}, 'unsupported', check['code'])
+    if check['code'] == 'bootstrap_ineligible':
+        # Bounded reason code (ssdlc_bootstrap.CODES) for a non-resumable bootstrap.
+        result['bootstrap_reason'] = check.get('reason')
+    return result
+
+
 def exit_code(result):
     if result.get('status_reason') == 'legacy_not_executable':
         return 23
@@ -1003,7 +1011,7 @@ def start(args, clock=None, fault=None):
     check = compatibility(a, build_project_env(a['repo'], os.environ))
     if not check['ok']:
         if check['code'] in {'legacy_not_executable', 'no_such_run', 'bootstrap_ineligible', 'initialization_not_ready'}:
-            return public({}, 'unsupported', check['code'])
+            return unsupported(check)
         return refusal(store)
     store.fault.hit('lock.before_acquire')
     store.prepare()
@@ -1122,7 +1130,7 @@ def resume(args, clock=None, fault=None):
     # supervisor state, which need not exist for such tickets.
     check = compatibility(a, build_project_env(a['repo'], os.environ))
     if not check['ok'] and check['code'] in {'legacy_not_executable', 'no_such_run', 'bootstrap_ineligible', 'initialization_not_ready'}:
-        return public({}, 'unsupported', check['code'])
+        return unsupported(check)
     store = RunStore(a['repo'], a['ticket'], a.get('run_id'), clock, fault)
     old = store.read() if store.run_id else store.current()
     if (Path(a['repo']) / '.ssdlc' / a['ticket'] / 'execution/pending.json').exists():
@@ -1133,7 +1141,7 @@ def resume(args, clock=None, fault=None):
     check = compatibility(a, build_project_env(a['repo'], os.environ))
     if not check['ok']:
         if check['code'] in {'legacy_not_executable', 'no_such_run', 'bootstrap_ineligible', 'initialization_not_ready'}:
-            return public({}, 'unsupported', check['code'])
+            return unsupported(check)
         return refusal(store)
     candidate = new_record(a, store)
     changes = fingerprint_changes(old, candidate, native_advance(a['repo'], a['ticket'], old, candidate))
