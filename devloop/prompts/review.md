@@ -17,6 +17,12 @@ Read `AGENTS.md` and the README section "Developing SSDLC".
 4. User-facing docs match the new behaviour and limits.
 5. This project's principles: explicit operator authority, frozen limits, evidence and integrity.
    A change that weakens them without the issue asking for it is blocking.
+6. The acceptance coverage map below. Verify every entry against the code and the tests: a
+   criterion without real coverage, or whose tests do not actually verify it, is a blocking
+   finding, whatever its `status` says. A `not_covered` criterion with a reason is yours to judge:
+   accept the reason only if it is sound. devloop already adds a blocking finding of its own for
+   a `not_covered` criterion without a reason, for a missing map while the issue has criteria, and
+   for a map that does not list every criterion: you need not repeat those.
 
 ## How to classify
 
@@ -48,6 +54,16 @@ $issue_body
 ## Pull request description
 
 $pr_body
+
+## Acceptance criteria coverage
+
+Acceptance criteria the dispatcher found in the issue:
+
+$acceptance_criteria
+
+Latest coverage map of the pull request, from the implementer or its latest fix:
+
+$acceptance_map
 
 ## Diff summary
 

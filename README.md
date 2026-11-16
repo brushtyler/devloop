@@ -244,7 +244,7 @@ All new runs use the task scheduler, including Tier S. See [unified execution an
 | [Developer feedback](docs/developer-feedback.md) | Scope diagnosis, reviewed feedback roles, delegated amendments, GitHub projections (#39) |
 | [Native gate convergence](docs/native-gate-convergence.md) | Candidate checks collected before the reviews that need them |
 | [Bounce preview](docs/bounce-preview.md) | Read-only preview of a targeted bounce from a gate |
-| [Writer fencing](docs/writer-fencing.md) | Writer gate protocol for automatic fencing (#45); not yet used by real runs |
+| [Writer fencing](docs/writer-fencing.md) | Writer gate protocol and in-container PID 1 holder for automatic fencing (#45); not yet used by real runs |
 
 ### Plans
 
@@ -275,6 +275,7 @@ python3 -I ssdlc_replay_gate.py --output recovery-benchmark.json # isolated A5 r
 
 - Running a single module: `python3 -m unittest discover -s tests -p 'test_name.py'` (works for every module; `python3 -m unittest tests.test_name` needs `PYTHONPATH=tests` for modules that import helpers from `tests/`).
 - Docker smoke tests: `python3 tests/docker_smoke.py --image <image> --suite` and `python3 tests/docker_pid_smoke.py --image <image>`.
+- Docker test of the writer gate holder (opt-in, as root on the host): `SSDLC_DOCKER_TESTS=1 python3 -m unittest discover -s tests -p 'test_container_holder_docker.py' -v` ([Writer fencing](docs/writer-fencing.md#containers-the-pid-1-holder)).
 - When SSDLC develops itself, run a pinned controller checkout against a **separate** target checkout.
 - Agents contributing to this repository follow [AGENTS.md](AGENTS.md).
 - [devloop](docs/devloop.md) dispatches issues labelled `agent:ready` to an implementer agent and an independent reviewer agent, up to a PR that a human merges.

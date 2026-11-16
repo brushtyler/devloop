@@ -56,6 +56,8 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .acceptance import (acceptance_criteria, acceptance_findings, format_criteria, format_map,
+                         latest_map, render_map)
 from .agents import AgentError, ModelsUnavailable, ModelUnavailable
 from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, PR_COMMENT, REVIEW
 from .github import GitHubError, merge_state, summarize_checks
@@ -149,6 +151,10 @@ class PullRequest:
     # With a ledger, every check of the head from the read that gave ``checks`` (#133): the CI
     # a review round saw, recorded whatever its verdict. None when not read.
     check_details: list = None
+    # Why the acceptance map does not hold for an approval of the head that would be reused or
+    # kept (#134), as the snapshot found re-checking it: the titles of the findings a review
+    # would add. Empty when it holds or there is no such approval.
+    acceptance: list = field(default_factory=list)
 
 
 @dataclass
@@ -220,6 +226,10 @@ def plan(snapshot, cfg):
                 actions.append(Action('revoke', pr.number, 'the level 0 promotion no longer holds'))
             elif not zero and (verdict != 'approve' or head != pr.head_sha):
                 actions.append(Action('revoke', pr.number, 'head is not the approved commit'))
+            elif not zero and pr.acceptance:
+                # An approval that did not see the acceptance map, e.g. one recorded before
+                # #134: back to review, where a new review adds the finding.
+                actions.append(Action('revoke', pr.number, 'the acceptance map does not hold'))
             elif pr.merge_state == 'conflict':
                 actions.append(Action('sync', pr.number, 'conflicts with the base branch'))
             elif pr.checks == 'fail':
@@ -256,6 +266,9 @@ def plan(snapshot, cfg):
             # An approval counts only with a policy receipt that still matched the last time
             # it was checked; one recorded before receipts existed needs a new review.
             unbound = replay and (any(receipt_of(r) is None for r in latest) or pr.stale_receipt)
+            # Nor is an approval reused when the acceptance map does not hold (#134): a new
+            # review adds the finding, as a new round within the usual limit.
+            unmapped = replay and verdict == 'approve' and bool(pr.acceptance)
             if replay and verdict != 'approve':
                 actions.append(Action('apply_review', pr.number, 'verdict already recorded'))
             elif pr.merge_state == 'conflict':
@@ -265,7 +278,7 @@ def plan(snapshot, cfg):
                 continue  # GitHub is still computing mergeability: next tick
             elif pr.checks == 'pending':
                 continue
-            elif replay and not unbound and pr.checks != 'fail':
+            elif replay and not unbound and not unmapped and pr.checks != 'fail':
                 actions.append(Action('apply_review', pr.number, 'approval already recorded'))
             elif partial and pr.checks != 'fail':
                 actions.append(Action('review', pr.number, 'the round waits for '
@@ -278,6 +291,7 @@ def plan(snapshot, cfg):
             else:
                 reason = ('new review requested by a trusted user' if pr.rereview
                           else 'the approval has no matching policy receipt' if unbound
+                          else 'the acceptance map does not hold' if unmapped
                           else 'every finding of the request for changes is closed' if settled
                           else '')
                 actions.append(Action('review', pr.number, reason))
@@ -695,6 +709,8 @@ class Dispatcher:
             if (lb.ready_to_merge in pr.labels and pr.zero_head is not None
                     and zero_labels_hold(pr, self.cfg.review_policy)):
                 pr.zero_problem = self._zero_problem(pr)
+            if pr.meta and pr.labels & {lb.review, lb.ready_to_merge} and pr.zero_head is None:
+                pr.acceptance = self._acceptance_problems(pr)
             prs.append(pr)
         ready = []
         pr_issues = {pr.issue for pr in prs}
@@ -1371,6 +1387,26 @@ class Dispatcher:
             return 'non è stato possibile verificarlo di nuovo'
         return ''
 
+    def _acceptance_problems(self, pr):
+        """Why the acceptance map of ``pr`` does not hold for the approval of its head that
+        would be reused or kept (#134): the titles of the findings :func:`acceptance_findings`
+        derives from the criteria of the issue text, read now, and the latest map. Empty without
+        such an approval. An approval recorded before #134 never saw the map: one of a PR without
+        it, whose issue has criteria, must not be promoted or stay ready. An issue text that is
+        not trusted cannot be checked: it does not hold, and the new review refuses it."""
+        latest = current_round(pr.reviews)
+        if not (latest and not pending_reviewers(latest) and round_verdict(latest) == 'approve'
+                and latest[0]['head_sha'] == pr.head_sha):
+            return []
+        # The issue text as ``_issue_context`` reads it, without the comments it does not need.
+        history = self.gh.issue_history(pr.issue)
+        reason = untrusted_change(history, self.cfg.labels.ready, self.cfg.trusted_users)
+        if reason:
+            return [f'testo dell\'issue non verificabile: {reason}']
+        found = acceptance_findings(acceptance_criteria(history['body']),
+                                    latest_map(pr.meta, pr.fixes))
+        return [f['title'] for f in found]
+
     def _refuse_zero(self, pr, receipt, why, states=()):
         """Level 0 holds but the head cannot be promoted: a human decides."""
         lb = self.cfg.labels
@@ -1426,6 +1462,13 @@ class Dispatcher:
             reason = (f'La PR era pronta per il merge al livello 0 sul commit '
                       f'`{pr.zero_head[:12]}`, ma {why}{end}\n\nLa PR torna in review e il '
                       'livello viene ricalcolato')
+        elif approved == pr.head_sha and pr.acceptance:
+            title = 'Approvazione sospesa'
+            reason = (f'L\'approvazione del commit `{approved[:12]}` non vale per la mappa di '
+                      'copertura dei criteri di accettazione (#134):\n\n'
+                      + '\n'.join(f'- {problem}' for problem in pr.acceptance)
+                      + '\n\nLa PR torna in review: una nuova review, che conta come un round, '
+                      'registra il finding bloccante')
         elif approved == pr.head_sha:
             title = 'Readiness sospesa'
             reason = (f'La CI del commit approvato `{approved[:12]}` è di nuovo in corso. La PR '
@@ -1526,9 +1569,11 @@ class Dispatcher:
         self.gh.edit_labels(number, add=[lb.working], remove=[lb.ready])
         name, branch = f'issue-{number}', f'{cfg.branch_prefix}{number}'
         path = self.ws.new_branch(name, branch)
+        criteria = acceptance_criteria(issue.get('body'))
         prompt = _template('implement', repo=cfg.repo, base_branch=cfg.base_branch,
                            issue_number=number, issue_title=issue['title'],
                            issue_body=issue.get('body') or '', issue_comments=comments,
+                           acceptance_criteria=format_criteria(criteria),
                            test_cmd=cfg.test_cmd, language=cfg.language)
         result, failure, used, tested = self._write_turn(agent, prompt, 'implement', path,
                                                          f'issue-{number}-implement',
@@ -1546,9 +1591,12 @@ class Dispatcher:
         if protected:
             return self._escalate_protected(number, protected, remove=[lb.working])
         self.ws.push(path, branch, replace=True, auth=auth)
+        # The marker keeps the map the reviewer checks until a fix replaces it (#134).
         meta = {'issue': number, 'implementer': agent.key, 'reviewer': cfg.reviewer,
-                'profile': self._profile(agent.key, 'write', used)}
+                'profile': self._profile(agent.key, 'write', used),
+                'acceptance_map': result['acceptance_map']}
         body = publishable(self.runner.header(used) + '\n' + result['pr_body'].strip()
+                           + '\n\n' + render_map(result['acceptance_map'])
                            + f'\n\nCloses #{number}', 'pr', meta)
         pr_number, url = self._as(agent.key, IMPLEMENT).create_pr(
             base=cfg.base_branch, head=branch, title=result['pr_title'], body=body)
@@ -1628,12 +1676,17 @@ class Dispatcher:
         # Each reviewer of a round judges the head on its own: earlier rounds only.
         earlier = [r for r in pr.reviews if r['round'] < round_no]
         previous_open = open_findings(earlier, pr.closures)
+        # The criteria of the issue text read now, and the latest map of the PR (#134).
+        criteria = acceptance_criteria(issue.get('body'))
+        acceptance_map = latest_map(pr.meta, pr.fixes)
         prompt = _template('review', repo=cfg.repo, base_branch=cfg.base_branch,
                            pr_number=pr.number, round=round_no, max_rounds=cfg.max_review_rounds,
                            implementer=pr.meta.get('implementer', cfg.implementer),
                            ci=pr.checks, test_cmd=cfg.test_cmd,
                            issue_number=pr.issue, issue_title=issue['title'],
                            issue_body=issue.get('body') or '', pr_body=pr.body,
+                           acceptance_criteria=format_criteria(criteria),
+                           acceptance_map=format_map(acceptance_map),
                            diff_stat=self.ws.diff_stat(path),
                            previous=format_previous_rounds(earlier, pr.fixes, pr.closures),
                            operator_comments=format_operator_comments(comments),
@@ -1668,7 +1721,8 @@ class Dispatcher:
             return
         review = normalize_review(raw, previous_open=previous_open, round_no=round_no,
                                   max_rounds=cfg.max_review_rounds, head_sha=pr.head_sha,
-                                  ci=pr.checks, reviewer=agent.key)
+                                  ci=pr.checks, reviewer=agent.key, criteria=criteria,
+                                  acceptance_map=acceptance_map)
         review['receipt'] = receipt
         review['profile'] = self._profile(agent.key, 'review', used)
         reviewer_gh = self._as(agent.key, REVIEW)
@@ -1719,6 +1773,9 @@ class Dispatcher:
         prompt = _template('fix', repo=cfg.repo, pr_number=pr.number, issue_number=pr.issue,
                            issue_title=issue['title'], issue_body=issue.get('body') or '',
                            findings=_format_findings(findings), test_cmd=cfg.test_cmd,
+                           acceptance_criteria=format_criteria(
+                               acceptance_criteria(issue.get('body'))),
+                           acceptance_map=format_map(latest_map(pr.meta, pr.fixes)),
                            language=cfg.language)
         result, failure, used, tested = self._write_turn(
             agent, prompt, 'fix', path, f'pr-{pr.number}-fix-r{latest["round"]}',

@@ -274,5 +274,125 @@ class NoOutputTests(unittest.TestCase):
         self.assertIn(f'agy stopped without output: {JETSKI}', gh.comments[-1][1])
 
 
+# What agy 1.5 printed on 2026-11-16 for a review stopped on a denied command (#155).
+DENIED = '[{"action":"command","display_name":"Bash"}]'
+DENIED_ENVELOPE = ('{"status":"SUCCESS","response":"","denied_actions":'
+                   '[{"action":"command","display_name":"Bash"}]}')
+
+
+class DeniedActionsTests(unittest.TestCase):
+    """A turn stopped on a denied command says which action was denied (#155)."""
+
+    def run_cli(self, code, out, err):
+        cli = FakeCLI(gemini_4_argon_high=(code, out, err))
+        with tempfile.TemporaryDirectory() as tmp, \
+                self.assertRaises(agents.AgentError) as ctx:
+            agents.AgentRunner(tmp, 10, run=cli).run(CFG.agent('agy'), 'review', 'p', 'review',
+                                                     tmp, 'pr-1')
+        self.assertEqual(cli.models(), [ARGON])
+        return ctx.exception
+
+    def test_the_real_envelope_gives_the_denied_actions(self):
+        exc = self.run_cli(0, DENIED_ENVELOPE, JETSKI)
+        self.assertNotIsInstance(exc, agents.ModelUnavailable)
+        self.assertEqual(str(exc),
+                         f'agy stopped without output: {JETSKI}; denied_actions: {DENIED}')
+        # Without the diagnostic on stderr the envelope still has no result.
+        exc = self.run_cli(0, DENIED_ENVELOPE, '')
+        self.assertNotIsInstance(exc, agents.ModelUnavailable)
+        self.assertEqual(str(exc), f'agy returned no structured_output; denied_actions: {DENIED}')
+        exc = self.run_cli(3, DENIED_ENVELOPE, JETSKI)
+        self.assertEqual(str(exc), f'agy exited with 3: {JETSKI}; denied_actions: {DENIED}')
+
+    def test_without_denied_actions_the_messages_are_unchanged(self):
+        self.assertEqual(str(self.run_cli(0, '{"status":"SUCCESS","response":""}', JETSKI)),
+                         f'agy stopped without output: {JETSKI}')
+        for out in ('{"status":"SUCCESS","denied_actions":[]}', 'not json', '[1]'):
+            self.assertIsNone(agents.denied_actions('agy', out))
+        self.assertIsNone(agents.denied_actions('claude', DENIED_ENVELOPE))
+        self.assertEqual(agents.denied_actions('agy', DENIED_ENVELOPE), DENIED)
+
+    def test_the_escalation_cites_them_without_fallback(self):
+        cli = FakeCLI(gemini_4_argon_high=(0, DENIED_ENVELOPE, JETSKI))
+        gh = FakeGH()
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Dispatcher(CFG, gh, FakeWS(), agents.AgentRunner(tmp, 10, run=cli),
+                           log=lambda _: None)
+            p = pr()
+            p.meta['reviewer'] = 'agy'
+            gh.labels[100] = set(p.labels)
+            d.snapshot = lambda: Snapshot([p], [], [])
+            self.assertEqual(d.tick(), [Action('review', 100)])
+        self.assertEqual(cli.models(), [ARGON])
+        self.assertEqual(gh.labels[100], {'agent:needs-human'})
+        self.assertIn(f'denied_actions: {DENIED}', gh.comments[-1][1])
+
+
+def block_commands(prompt):
+    """The command prefixes listed by the ``## Shell commands`` block at the end of ``prompt``."""
+    block = prompt[prompt.index('\n\n## Shell commands\n'):]
+    return [line[3:-1] for line in block.splitlines() if line.startswith('- `')]
+
+
+class PromptBlockTests(unittest.TestCase):
+    """agy is told, in its prompt, which commands it may run and how to read files (#155)."""
+
+    def run_agy(self, agent, mode, prompt='the prompt'):
+        cli = FakeCLI()
+        with tempfile.TemporaryDirectory() as tmp:
+            agents.AgentRunner(Path(tmp) / 'logs', 10, run=cli).run(
+                agent, mode, prompt, 'review', tmp, f'pr-1-{mode}')
+            logged = next((Path(tmp) / 'logs').glob('*.prompt.md')).read_text(encoding='utf-8')
+        sent = cli.calls[0][1]
+        self.assertEqual(logged, sent)
+        return sent
+
+    def test_both_modes_list_exactly_the_rules_of_settings(self):
+        custom = dataclasses.replace(CFG.agent('agy'), write_commands=('make check', 'git diff'),
+                                     review_commands=('git log',))
+        fallback = CFG.agent('agy').chain()[1]
+        for agent in (CFG.agent('agy'), custom, fallback):
+            for mode in agents.MODES:
+                with self.subTest(model=agent.model, mode=mode):
+                    sent = self.run_agy(agent, mode)
+                    self.assertTrue(sent.startswith('the prompt\n\n## Shell commands\n'))
+                    argv, _ = agents.build_command(agent, mode, sent,
+                                                   schema_file=schema.schema_path('review'),
+                                                   out_file='o')
+                    rules = settings(argv)['permissions']['allow']
+                    self.assertEqual([f'command({c})' for c in block_commands(sent)], rules)
+                    for text in ('own file tools', 'relative to the working directory',
+                                 '`grep`, `ls`, `cat`, `find`, `sed`', 'ends the turn with no '
+                                 'result'):
+                        self.assertIn(text, sent)
+        self.assertEqual(block_commands(self.run_agy(custom, 'write')), ['make check', 'git diff'])
+        self.assertEqual(block_commands(self.run_agy(custom, 'review')), ['git log'])
+        self.assertEqual(block_commands(self.run_agy(CFG.agent('agy'), 'review')),
+                         [rule[len('command('):-1] for rule in DEFAULT_RULES])
+
+    def test_no_commands_says_so(self):
+        agy = dataclasses.replace(CFG.agent('agy'), review_commands=())
+        sent = self.run_agy(agy, 'review')
+        self.assertEqual(block_commands(sent), [])
+        self.assertIn('You may run no shell command in this turn.', sent)
+
+    def test_other_agents_prompts_are_unchanged(self):
+        for key in ('claude', 'codex'):
+            for mode in agents.MODES:
+                with self.subTest(key=key, mode=mode), tempfile.TemporaryDirectory() as tmp:
+                    seen = []
+
+                    def run(argv, **kw):
+                        seen.append(kw.get('input'))
+                        raise OSError('not started')
+                    with self.assertRaises(agents.AgentError):
+                        agents.AgentRunner(Path(tmp) / 'logs', 10, run=run).run(
+                            CFG.agent(key), mode, 'the prompt', 'review', tmp, 'pr-1')
+                    self.assertEqual(seen, ['the prompt'])
+                    self.assertEqual(agents.agy_prompt_block(CFG.agent(key), mode), '')
+                    logged = next((Path(tmp) / 'logs').glob('*.prompt.md'))
+                    self.assertEqual(logged.read_text(encoding='utf-8'), 'the prompt')
+
+
 if __name__ == '__main__':
     unittest.main()
