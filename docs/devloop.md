@@ -372,9 +372,12 @@ The acceptance criteria of an issue are the items of a checkbox list (`- [ ]`, `
 numbered list (`1.`, `1)`) in the first section whose Markdown heading is "Criteri di
 accettazione" or "Acceptance criteria" (any level, case-insensitive, an ending colon allowed).
 The section ends at the next heading of the same or a higher level. Indented lines continue the
-item above them; other bullets and text are not criteria. The dispatcher reads the issue text
-when it starts each turn, and gives the criteria it found to the implementer, the fixer and the
-reviewer.
+item above them; other bullets and text are not criteria. Nothing inside a fenced code block
+counts, neither items nor headings: as in CommonMark, a block opened by a fence of backticks or
+tildes ends only at a line with the same character repeated at least as many times and nothing
+else, so a `` ``` `` example inside a ` ```` ` block stays in the block. The dispatcher reads
+the issue text when it starts each turn, and gives the criteria it found to the implementer, the
+fixer and the reviewer.
 
 Implementer and fixer return `acceptance_map` in their structured output
 ([`implement.json`](../devloop/schemas/implement.json), [`fix.json`](../devloop/schemas/fix.json)):
@@ -399,6 +402,17 @@ reviewer, for:
 So an `approve` with one of them becomes `request_changes`. An issue without recognisable
 criteria expects an empty map (`[]`), declared as such in the PR description, and blocks
 nothing; for it a missing map counts as an empty one.
+
+The same check guards an approval already recorded, which a review recorded before #134 gave
+without seeing a map. Before replaying an approval of the head from `agent:review`, and on every
+tick of a PR in `agent:ready-to-merge` (not at level 0, which has no review), the snapshot reads
+the issue text again and applies the rules above to the latest map. If one of them would add a
+finding, the approval is neither replayed nor kept: a ready PR goes back to `agent:review` with an
+"Approvazione sospesa" comment that lists why, and the PR gets a new review, whose
+`normalize_review()` adds the finding. That review is a new round: it counts against
+`max_review_rounds` like any other, and at the limit the PR goes to `agent:needs-human`. An issue
+text changed by someone outside `trusted_users` cannot be checked: the approval does not hold, and
+the new review escalates as for any untrusted change.
 
 ### Findings and who closes them
 

@@ -11,7 +11,8 @@ opened. A sync carries no map, so the previous one still holds after it.
 on its own, whatever the reviewer proposes: a criterion ``not_covered`` without a reason, a map
 missing while the issue has criteria, and a map with a different number of entries than the
 criteria. A ``not_covered`` criterion with a reason is for the reviewer to judge. An issue without
-recognisable criteria needs no map: a missing one counts as the empty map.
+recognisable criteria needs no map: a missing one counts as the empty map. The dispatcher applies
+the same findings before reusing or keeping an approval recorded without seeing the map.
 """
 
 import json
@@ -22,7 +23,22 @@ from .schema import SchemaError, load_schema, validate
 TITLES = ('criteri di accettazione', 'acceptance criteria')
 _HEADING = re.compile(r'(#{1,6})\s+(.*?)\s*#*\s*')
 _ITEM = re.compile(r'( {0,3})(?:[-*+]\s+\[[ xX]\]|\d{1,9}[.)])\s+(\S.*)')
-_FENCE = re.compile(r'\s{0,3}(```|~~~)')
+_FENCE = re.compile(r'\s{0,3}(`{3,}|~{3,})(.*)')
+
+
+def _opens(match):
+    """The fence ``match`` opens, or None: a backtick fence whose info string has a backtick
+    opens nothing (CommonMark)."""
+    if match is None or (match.group(1)[0] == '`' and '`' in match.group(2)):
+        return None
+    return match.group(1)
+
+
+def _closes(match, fence):
+    """Whether ``match`` closes the block ``fence`` opened: the same character, at least as
+    many times, and nothing else on the line (CommonMark)."""
+    return (match is not None and match.group(1)[0] == fence[0]
+            and len(match.group(1)) >= len(fence) and not match.group(2).strip())
 
 
 def acceptance_criteria(body):
@@ -31,10 +47,11 @@ def acceptance_criteria(body):
     for line in (body or '').splitlines():
         stripped = line.strip()
         fenced = _FENCE.match(line)
-        if fence is not None or fenced:
-            if fence is None:
-                fence = fenced.group(1)
-            elif stripped.startswith(fence):
+        if fence is None and _opens(fenced):
+            fence, current = _opens(fenced), None
+            continue
+        if fence is not None:
+            if _closes(fenced, fence):
                 fence = None
             current = None
             continue

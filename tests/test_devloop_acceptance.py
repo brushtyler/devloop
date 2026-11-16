@@ -3,9 +3,9 @@
 import unittest
 
 from devloop import acceptance, markdown, review, schema
-from devloop.dispatcher import PROMPT_DIR, Dispatcher
-from test_devloop import (CFG, META, REV, SHA1, FakeGH, FakeRunner, FakeWS, finding, fixed,
-                          implemented, pr, raw_review)
+from devloop.dispatcher import PROMPT_DIR, Action, Dispatcher, Snapshot, plan
+from test_devloop import (CFG, META, REV, SHA1, FakeGH, FakeRunner, FakeWS, SnapshotGH, finding,
+                          fixed, implemented, norm, pr, raw_review)
 
 ISSUE = """Motivation.
 
@@ -94,6 +94,19 @@ class CriteriaTests(unittest.TestCase):
                      '## Criteri di accettazione\n\n```\n- [ ] in a code block\n```\n'):
             with self.subTest(body=body):
                 self.assertEqual(acceptance.acceptance_criteria(body), [])
+
+    def test_a_fence_closes_only_with_the_same_character_at_least_as_long(self):
+        inner = '```'
+        body = ('## Criteri di accettazione\n\n1. First.\n\n````markdown\n' + inner + '\n'
+                '## Heading of the example\n\n- [ ] in the example\n' + inner + '\n````\n\n'
+                '2. Second.\n\n~~~~\n~~~\n```\n- [ ] still in the block\n~~~~~\n'
+                '3. Third.\n\n```\n- [ ] closed by a longer fence\n````\n4. Fourth.\n\n'
+                '``` not a closing fence\n- [ ] still in the block\n```\n5. Fifth.\n')
+        self.assertEqual(acceptance.acceptance_criteria(body),
+                         ['First.', 'Second.', 'Third.', 'Fourth.', 'Fifth.'])
+        # A backtick line whose info string has a backtick opens no block.
+        self.assertEqual(acceptance.acceptance_criteria(
+            '## Acceptance criteria\n\n``` a`b\n- [ ] One.\n'), ['One.'])
 
     def test_latest_map_is_the_latest_fix_that_carries_one(self):
         meta = dict(META, acceptance_map=[entry('a')])
@@ -233,6 +246,108 @@ class DispatcherTests(unittest.TestCase):
         self.assertIn(acceptance.format_map(fix['acceptance_map']), runner.calls[0][3])
         second = markdown.read_marker(self.gh.comments[0][1], 'review')
         self.assertEqual((second['round'], second['verdict']), (2, 'approve'))
+
+
+class SnapshotIssueGH(SnapshotGH):
+    """SnapshotGH whose issue has the given body, and whose PR has the marker ``meta``."""
+
+    meta = META
+
+    def __init__(self, body):
+        super().__init__([])
+        self.body = body
+
+    def open_prs(self):
+        return [dict(raw, body=markdown.publishable('b', 'pr', self.meta))
+                for raw in super().open_prs()]
+
+    def issue(self, number):
+        return dict(super().issue(number), body=self.body)
+
+    def issue_history(self, number):
+        return dict(super().issue_history(number), body=self.body)
+
+
+class ReusedApprovalTests(unittest.TestCase):
+    """An approval recorded without the map, e.g. before #134, is neither reused nor kept when
+    the issue has criteria and the PR has no map: a new review adds the finding."""
+
+    def kinds(self, *prs):
+        return [(a.kind, a.number, a.reason) for a in plan(Snapshot(list(prs), [], []), CFG)]
+
+    def test_plan_reviews_again_instead_of_reusing_or_keeping_the_approval(self):
+        done = norm(raw_review())
+        unmapped = ['Mappa di copertura dei criteri di accettazione assente']
+        for labels, expected in ((['agent:review'], 'review'),
+                                 (['agent:ready-to-merge'], 'revoke')):
+            with self.subTest(labels=labels):
+                p = pr(labels=labels, reviews=[done])
+                held = self.kinds(p)
+                p.acceptance = unmapped
+                self.assertNotEqual(held, self.kinds(p))
+                self.assertEqual(self.kinds(p),
+                                 [(expected, 100, 'the acceptance map does not hold')])
+
+    def test_the_new_review_counts_against_the_round_limit(self):
+        rounds = [dict(norm(raw_review(), round_no=i), round=i) for i in (1, 2, 3)]
+        p = pr(reviews=rounds)
+        p.acceptance = ['Mappa di copertura dei criteri di accettazione assente']
+        self.assertEqual([(a.kind, a.number) for a in plan(Snapshot([p], [], []), CFG)],
+                         [('round_limit', 100)])
+
+    def make(self, body, runner):
+        self.gh, self.runner = SnapshotIssueGH(body), runner
+        self.gh.labels[100] = {'agent:review'}
+        return Dispatcher(CFG, self.gh, FakeWS(), runner, log=lambda m: None)
+
+    def test_ready_pr_without_map_goes_back_to_review_and_gets_the_finding(self):
+        d = self.make('Do the thing.', FakeRunner(raw_review(), raw_review()))
+        d.tick()  # approved and promoted while the issue had no criteria: no map needed
+        self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
+        self.assertEqual(d.snapshot().prs[0].acceptance, [])
+        self.assertEqual(d.tick(), [])
+        # The issue now has criteria, and the PR still records no map.
+        self.gh.body = ISSUE
+        self.assertEqual(d.tick(), [Action('revoke', 100, 'the acceptance map does not hold')])
+        self.assertEqual(self.gh.labels[100], {'agent:review'})
+        revoked = self.gh.comments[-1][1]
+        self.assertIn('## Approvazione sospesa', revoked)
+        self.assertIn('- Mappa di copertura dei criteri di accettazione assente', revoked)
+        # The recorded approval is not replayed: a new review, round 2, adds the finding.
+        self.assertEqual(d.tick(), [Action('review', 100, 'the acceptance map does not hold')])
+        record = markdown.read_marker(self.gh.comments[-1][1], 'review')
+        self.assertEqual((record['round'], record['verdict']), (2, 'request_changes'))
+        self.assertIn('assente', record['blocking_findings'][0]['title'])
+        self.assertEqual(self.gh.labels[100], {'agent:changes'})
+
+    def test_recorded_approval_is_not_promoted_without_the_map(self):
+        d = self.make('Do the thing.', FakeRunner(raw_review(), raw_review()))
+        d.tick()
+        # CI re-runs on the approved commit: readiness suspended, the approval stays recorded.
+        self.gh.ci = 'pending'
+        self.assertEqual([a.kind for a in d.tick()], ['revoke'])
+        self.gh.ci = 'pass'
+        self.assertEqual(d.snapshot().prs[0].acceptance, [])
+        self.gh.body = ISSUE
+        self.assertEqual(d.tick(), [Action('review', 100, 'the acceptance map does not hold')])
+        self.assertEqual(self.gh.labels[100], {'agent:changes'})
+        self.assertEqual(len(self.runner.calls), 2)
+
+    def test_approval_with_a_map_that_holds_is_reused(self):
+        d = self.make(ISSUE, FakeRunner(raw_review()))
+        self.gh.meta = dict(META, acceptance_map=covered_map())
+        d.tick()
+        self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
+        self.assertEqual(d.snapshot().prs[0].acceptance, [])
+        self.assertEqual(d.tick(), [])
+
+    def test_untrusted_issue_text_does_not_hold(self):
+        d = self.make('Do the thing.', FakeRunner(raw_review()))
+        d.tick()
+        self.gh.edits = ('2026-11-14T10:00:00Z', 'stranger')
+        (problem,) = d.snapshot().prs[0].acceptance
+        self.assertIn('non verificabile', problem)
+        self.assertEqual([a.kind for a in d.tick()], ['revoke'])
 
 
 if __name__ == '__main__':
