@@ -1,11 +1,14 @@
 """devloop: the supervisor queues issues and sets priorities with its own identity (#178)."""
 
 import dataclasses
+import json
 import unittest
 from types import SimpleNamespace
 
-from devloop.dispatcher import Dispatcher, UntrustedChange, label_admitters, plan
-from devloop.github import GitHub
+import doc_contracts as docs
+from devloop.dispatcher import (Dispatcher, UntrustedChange, label_admitters, plan,
+                                ready_approval, untrusted_change)
+from devloop.github import _ISSUE_HISTORY, GitHub, graphql_login
 from test_devloop import CFG, FakeGH, FakeIdentities, FakeRunner, FakeWS, implemented
 
 READY, HIGH, LOW = 'agent:ready', 'priority:high', 'priority:low'
@@ -49,15 +52,32 @@ class QueueGH(FakeGH):
 
 
 class HistoryGH(FakeGH):
-    """``issue_history`` with a chosen author, ready labeller and editor."""
+    """``issue_history`` with a chosen author, ready labeller and editor; ``labeled``, when
+    given, replaces the single ready label."""
 
-    def __init__(self, author, labeler, edits=None):
+    def __init__(self, author, labeler, edits=None, labeled=None):
         super().__init__()
         self.author, self.labeler, self.edits = author, labeler, edits
+        self.labeled = labeled or [(READY, labeler, at(13))]
 
     def issue_history(self, number):
         return dict(super().issue_history(number), author=self.author,
-                    labeled=[(READY, self.labeler, at(13))])
+                    labeled=list(self.labeled))
+
+
+class Taken(Exception):
+    """Stops ``_do_implement`` at the ledger's request snapshot."""
+
+
+class RequestLedger:
+    """Records the request snapshot of the takeover, then stops the implementation."""
+
+    def __init__(self):
+        self.requests = []
+
+    def request(self, number, **fields):
+        self.requests.append(dict(fields, number=number))
+        raise Taken
 
 
 class QueueTests(unittest.TestCase):
@@ -156,6 +176,125 @@ class IssueContextTests(unittest.TestCase):
         d = self.make(HistoryGH('brushtyler', SUPERVISOR_LOGIN))
         d._do_implement(7)
         self.assertEqual(len(self.gh.created), 1)
+
+    def test_a_trusted_label_replaced_by_the_supervisor_after_planning_is_refused(self):
+        # A stranger's issue approved by a trusted user, then relabelled by the supervisor
+        # between the snapshot and the implementation: the latest agent:ready decides.
+        replaced = [(READY, 'brushtyler', at(13)), (READY, SUPERVISOR_LOGIN, at(14))]
+        gh = HistoryGH('stranger', None, labeled=replaced)
+        d = self.make(gh)
+        with self.assertRaisesRegex(UntrustedChange, 'nessuna label'):
+            d._issue_context(7)
+        with self.assertRaisesRegex(UntrustedChange, 'nessuna label'):
+            d._do_implement(7)
+        self.assertEqual(gh.created, [])
+        # The same replacement on a trusted author's issue still admits it.
+        issue, _ = self.make(HistoryGH('brushtyler', None, labeled=replaced))._issue_context(7)
+        self.assertEqual(issue['body'], 'Do the thing.')
+
+    def test_the_ledger_records_the_latest_ready_label(self):
+        gh = HistoryGH('brushtyler', None, labeled=[(READY, 'brushtyler', at(13)),
+                                                    (READY, SUPERVISOR_LOGIN, at(14))])
+        d = self.make(gh)
+        d.ledger = RequestLedger()
+        with self.assertRaises(Taken):
+            d._do_implement(7)
+        (request,) = d.ledger.requests
+        self.assertEqual(request['labeled'], (SUPERVISOR_LOGIN, at(14)))
+
+
+class UntrustedChangeTests(unittest.TestCase):
+    def check(self, labeled, admitters):
+        history = {'title': 't', 'body': 'b', 'author': 'stranger', 'last_edited_at': None,
+                   'editor': None, 'renamed': [], 'labeled': labeled}
+        return untrusted_change(history, READY, ['brushtyler'], admitters)
+
+    def test_the_latest_ready_label_decides(self):
+        trusted, supervisor = (READY, 'brushtyler', at(13)), (READY, SUPERVISOR_LOGIN, at(14))
+        self.assertIsNone(self.check([trusted], {'brushtyler'}))
+        self.assertIn('nessuna label', self.check([trusted, supervisor], {'brushtyler'}))
+        self.assertIsNone(self.check([trusted, supervisor], {'brushtyler', SUPERVISOR_LOGIN}))
+        # Other labels in between do not matter.
+        self.assertIsNone(self.check([trusted, (HIGH, SUPERVISOR_LOGIN, at(14))], {'brushtyler'}))
+        self.assertEqual(ready_approval([trusted, supervisor], READY, {'brushtyler'}), None)
+        self.assertEqual(ready_approval([supervisor, trusted], READY, {'brushtyler'}),
+                         ('brushtyler', at(13)))
+        self.assertIsNone(ready_approval([], READY, {'brushtyler'}))
+
+
+class IssueHistoryTests(unittest.TestCase):
+    """``GitHub.issue_history`` reads GraphQL, where an app's login is a bare ``<slug>``."""
+
+    def history(self, payload):
+        def fake_run(argv, **kw):
+            return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr='')
+        return GitHub('o/r', run=fake_run).issue_history(7)
+
+    @staticmethod
+    def bot(slug):
+        return {'__typename': 'Bot', 'login': slug}
+
+    def test_app_logins_are_in_rest_form(self):
+        slug = SUPERVISOR_LOGIN[:-len('[bot]')]
+        author = DEVLOOP_AUTHOR[:-len('[bot]')]
+        payload = {'data': {'repository': {'issue': {
+            'title': 'T', 'body': 'B', 'author': self.bot(author), 'lastEditedAt': at(14),
+            'editor': self.bot(slug), 'timelineItems': {'nodes': [
+                {'__typename': 'LabeledEvent', 'createdAt': at(13), 'actor': self.bot(slug),
+                 'label': {'name': READY}},
+                {'__typename': 'LabeledEvent', 'createdAt': at(13),
+                 'actor': {'__typename': 'User', 'login': 'brushtyler'},
+                 'label': {'name': HIGH}},
+                {'__typename': 'RenamedTitleEvent', 'createdAt': at(15),
+                 'actor': self.bot('brushtyler')},
+                {'__typename': 'RenamedTitleEvent', 'createdAt': at(15), 'actor': None}]}}}}}
+        history = self.history(payload)
+        self.assertEqual(history['author'], DEVLOOP_AUTHOR)
+        self.assertEqual(history['editor'], SUPERVISOR_LOGIN)
+        self.assertEqual(history['labeled'], [(READY, SUPERVISOR_LOGIN, at(13)),
+                                              (HIGH, 'brushtyler', at(13))])
+        # An app whose slug is a trusted user's login is not mistaken for that user.
+        self.assertEqual(history['renamed'], [('brushtyler[bot]', at(15)), (None, at(15))])
+        # The queried fields include each actor's type.
+        self.assertEqual(graphql_login({'__typename': 'Bot', 'login': 'x[bot]'}), 'x[bot]')
+        self.assertEqual(graphql_login({'__typename': 'User', 'login': 'x'}), 'x')
+        self.assertIsNone(graphql_login(None))
+        self.assertEqual(_ISSUE_HISTORY.count('__typename login'), 4)
+
+    def test_the_supervisors_app_label_starts_a_trusted_authors_issue(self):
+        # End to end from the GraphQL read: the app's bare slug becomes its REST login and the
+        # supervisor's label admits an issue opened by one of devloop's apps.
+        slug = SUPERVISOR_LOGIN[:-len('[bot]')]
+        payload = {'data': {'repository': {'issue': {
+            'title': 'Issue 7', 'body': 'Do the thing.',
+            'author': self.bot(DEVLOOP_AUTHOR[:-len('[bot]')]), 'lastEditedAt': None,
+            'editor': None, 'timelineItems': {'nodes': [
+                {'__typename': 'LabeledEvent', 'createdAt': at(13), 'actor': self.bot(slug),
+                 'label': {'name': READY}}]}}}}}
+        history = self.history(payload)
+        gh = HistoryGH(history['author'], None, labeled=history['labeled'])
+        d = Dispatcher(SCFG, gh, FakeWS(), FakeRunner(), log=lambda m: None,
+                       identities=FakeIdentities(gh))
+        issue, _ = d._issue_context(7)
+        self.assertEqual(issue['admitters'], {'brushtyler', SUPERVISOR_LOGIN})
+
+
+class DocumentationTests(unittest.TestCase):
+    def test_the_rule_is_documented(self):
+        section = docs.plan_section('docs/devloop.md', 'Labels from the supervisor',
+                                    root=docs.ROOT)
+        docs.assert_documented(self, section, [
+            '[roles].supervisor', 'agent:ready', 'priority:*', 'priority_labels',
+            "only on issues opened by a user in trusted_users or by one of devloop's apps",
+            "on an issue opened by anyone else only a trusted user's label counts",
+            'the latest labeled event of the label decides',
+            'changes the start order exactly as a trusted user\'s would',
+            'without [roles].supervisor', 'only trusted_users count, as before'], issues=(178,))
+        # The page is reachable from the README, and the start step links to the section.
+        self.assertIn('docs/devloop.md', docs.user_facing_docs().names)
+        page = 'devloop: agent dispatcher for this repository'
+        docs.assert_documented(self, docs.plan_section('docs/devloop.md', page, root=docs.ROOT),
+                               ['(#labels-from-the-supervisor)'])
 
 
 class LabelAdmittersTests(unittest.TestCase):

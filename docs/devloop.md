@@ -156,6 +156,7 @@ in [AGENTS.md](../AGENTS.md) ("Contenuti di autori non fidati").
 
 As for the other label checks, the latest `labeled` event of the label decides: a trusted
 user's `agent:ready` later replaced by the supervisor's on a stranger's issue no longer admits
+it, nor approves its text any longer, exactly as an untrusted edit after the label would void
 it. A supervisor's priority on an admitted issue changes the start order exactly as a trusted
 user's would. The label approves the title and the body as they are; an edit by anyone outside
 `trusted_users` afterwards, the supervisor included, voids it as usual.

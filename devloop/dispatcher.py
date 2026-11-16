@@ -673,21 +673,29 @@ class UntrustedChange(RuntimeError):
     """The issue text changed after a trusted user approved it with the ready label."""
 
 
+def ready_approval(labeled, ready_label, admitters):
+    """The ``(login, at)`` of the latest ``labeled`` event of ``ready_label`` in ``labeled``
+    (``(label, login, at)``, oldest first) when one of ``admitters`` added it, else None. The
+    latest event decides (#178), as for the queue: an approval replaced since by someone else's
+    label no longer counts."""
+    latest = [(who, at) for name, who, at in labeled if name == ready_label][-1:]
+    return latest[0] if latest and latest[0][0] in admitters else None
+
+
 def untrusted_change(history, ready_label, trusted_users, admitters=None):
     """Why the issue's title or body can no longer be trusted, or None.
 
     Trust comes from one of ``admitters`` (``label_admitters``, the trusted users by default)
-    adding ``ready_label``; a later change to the title or the body by anyone outside
-    ``trusted_users`` voids it until the label is added again. GitHub timestamps have one-second
-    granularity, so an untrusted change in the same second as the label cannot be proven to
-    precede it and voids trust too.
+    adding ``ready_label`` in its latest ``labeled`` event (``ready_approval``); a later change
+    to the title or the body by anyone outside ``trusted_users`` voids it until the label is
+    added again. GitHub timestamps have one-second granularity, so an untrusted change in the
+    same second as the label cannot be proven to precede it and voids trust too.
     """
     admitters = trusted_users if admitters is None else admitters
-    approved = [at for name, who, at in history['labeled']
-                if name == ready_label and who in admitters]
+    approved = ready_approval(history['labeled'], ready_label, admitters)
     if not approved:
         return f'nessuna label `{ready_label}` messa da un utente fidato'
-    since = approved[-1]
+    since = approved[1]
     edited = history['last_edited_at']
     if edited and edited >= since and history['editor'] not in trusted_users:
         return f'il testo è stato modificato da `{history["editor"]}` dopo la label `{ready_label}`'
@@ -2256,10 +2264,9 @@ class Dispatcher:
         if self.ledger is not None:
             # The request as the implementer gets it, at the takeover (#133): not necessarily
             # the text at the time of the label.
-            labeled = [(who, at) for name, who, at in issue['labeled']
-                       if name == lb.ready and who in issue['admitters']]
             self.ledger.request(number, title=issue['title'], body=issue.get('body') or '',
-                                labeled=labeled[-1] if labeled else None,
+                                labeled=ready_approval(issue['labeled'], lb.ready,
+                                                       issue['admitters']),
                                 comments=_trusted_comments(issue.get('comments') or [],
                                                            cfg.trusted_users))
         self.gh.edit_labels(number, add=[lb.working], remove=[lb.ready])
