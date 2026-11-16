@@ -1,4 +1,4 @@
-"""devloop command line: python3 -m devloop {setup,status,apps,tick,run,cleanup,follow}."""
+"""devloop command line: python3 -m devloop {setup,status,apps,tick,run,cleanup,follow,watch}."""
 
 import argparse
 import fcntl
@@ -8,7 +8,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import activity, follow
+from . import activity, follow, watch
 from .agents import AgentRunner, isolated_env
 from .apps import DISPATCHER, Identities
 from .config import ConfigError, load_config
@@ -88,6 +88,34 @@ def build(args):
     return cfg, state, dispatcher
 
 
+def run_watch(parser, args, github=GitHub):
+    """``devloop watch`` (#173). It reads GitHub with the ambient ``gh`` login: no app key is
+    needed."""
+    if args.interval < 1:
+        parser.error('watch: --interval must be at least 1 second')
+    if args.timeout is not None and args.timeout < 1:
+        parser.error('watch: --timeout must be a positive number of seconds')
+    if args.timeout is not None and args.exec_command is not None:
+        parser.error('watch: --timeout applies only to --until-change')
+    exec_argv = None
+    if args.exec_command is not None:
+        try:
+            exec_argv = watch.parse_exec(args.exec_command)
+        except ValueError as exc:
+            parser.error(f'watch: {exc}')
+    try:
+        cfg = load_config(args.config)
+    except ConfigError as exc:
+        sys.exit(f'devloop: invalid config: {exc}')
+    state = Path(args.state) if args.state else main_checkout() / cfg.state_dir / watch.STATE_FILE
+    watcher = watch.Watcher(github(cfg.repo), watch.Trust.from_config(cfg), state,
+                            interval=args.interval, timeout=args.timeout, exec_argv=exec_argv)
+    try:
+        return watcher.run()
+    except KeyboardInterrupt:
+        return 130
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog='devloop', description=__doc__)
     parser.add_argument('--config', help='TOML config (default: devloop/config.toml)')
@@ -104,8 +132,25 @@ def main(argv=None):
     follow_cmd = sub.add_parser('follow', help='follow live the agent working in a devloop worktree')
     follow_cmd.add_argument('target', help='the worktree: issue-<N> (implementer) or pr-<N> '
                                            '(reviewer or fixer)')
+    watch_cmd = sub.add_parser('watch', help='poll GitHub and report what changed, to wake the '
+                                             'agent that supervises devloop')
+    watch_cmd.add_argument('--interval', type=int, default=60,
+                           help='seconds between two reads of GitHub (default 60)')
+    mode = watch_cmd.add_mutually_exclusive_group()
+    mode.add_argument('--until-change', action='store_true',
+                      help='(default) exit 0 at the first round with news, printing its lines')
+    mode.add_argument('--exec', dest='exec_command', metavar='COMMAND',
+                      help='keep running and run COMMAND (no shell) with the lines of each round '
+                           'with news on its stdin, one at a time')
+    watch_cmd.add_argument('--timeout', type=int,
+                           help='with --until-change: exit 3 after this many seconds without '
+                                'news (default: wait forever)')
+    watch_cmd.add_argument('--state', help='state file (default: <state_dir>/watch-state.json in '
+                                           'the main checkout)')
     args = parser.parse_args(argv)
 
+    if args.command == 'watch':
+        sys.exit(run_watch(parser, args))
     if args.command == 'follow':
         # Local files only: no GitHub identities needed.
         if not follow.NAME.fullmatch(args.target):

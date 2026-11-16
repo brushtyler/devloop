@@ -90,6 +90,27 @@ class GitHub:
         return self._json('issue', 'view', str(number), '-R', self.repo,
                           '--json', 'number,title,body,labels,comments,state')
 
+    def open_issues(self, limit=300):
+        """Every open issue (pull requests excluded), up to ``limit``, as ``gh issue list``
+        reports it: ``{number, title, author, labels}``, with the author as ``author_login``
+        reads it."""
+        return self._json('issue', 'list', '-R', self.repo, '--state', 'open', '--limit',
+                          str(limit), '--json', 'number,title,author,labels')
+
+    def issue_state(self, number):
+        """``{state, stateReason}`` of issue ``number``, read fresh."""
+        return self._json('issue', 'view', str(number), '-R', self.repo,
+                          '--json', 'state,stateReason')
+
+    def comments_since(self, since):
+        """Conversation comments of every issue and PR created or edited at ``since`` (ISO 8601,
+        UTC) or later, as ``{id, login, number, body}``. Read with REST, so an app's login is
+        ``<slug>[bot]``."""
+        return self._json_lines('api', '--paginate',
+                                f'repos/{self.repo}/issues/comments?since={since}&per_page=100',
+                                '--jq', '.[] | {id, login: .user.login, body, '
+                                        'number: (.issue_url | split("/") | last | tonumber)}')
+
     def issue_history(self, number):
         """Title, body and who changed them, read in one query so that the text and its history
         match: ``{title, body, author, last_edited_at, editor, labeled, renamed}``. ``labeled`` is

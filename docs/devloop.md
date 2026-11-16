@@ -781,6 +781,7 @@ python3 -m devloop tick             # run one round
 python3 -m devloop run --interval 600
 python3 -m devloop cleanup          # remove worktrees left by failed steps
 python3 -m devloop follow issue-52  # follow live the implementer of issue #52 (pr-<N>: reviewer or fixer)
+python3 -m devloop watch --timeout 3600  # wait for the next change on GitHub, for the supervising agent
 ```
 
 Run it from any checkout of this repository. Worktrees, agent prompts and logs, and the lock that
@@ -812,6 +813,82 @@ reviewer's while a review runs, the fixer's while a fix runs. It reads local fil
 stops it. Antigravity sessions are not supported. For this reason devloop runs `codex exec`
 without `--ephemeral` (and with `--json`, for the [telemetry](#evidence-and-telemetry)): Codex saves the session of every turn in `~/.codex/sessions`, and these
 transcripts stay there after the turn.
+
+### Waking the supervising agent
+
+devloop works in ticks that someone starts. The agent that supervises it (Claude Code, Codex or
+Antigravity) needs to know when something changed on GitHub. `devloop watch` (#173) reads the
+repository every `--interval` seconds (default 60) and prints one line per change:
+
+```text
+HH:MM <type> #N <detail>
+```
+
+The time is UTC. A line carries no secret and no local path, and is a single line: titles and
+comment text are cut short and control characters removed. What it reports:
+
+| Change | Line |
+|---|---|
+| Issue or PR opened | `new PR #N [labels] title`, `new issue #N [labels] title` |
+| Issue or PR closed or merged | `PR #N merged: title`, `issue #N closed (completed): title` |
+| Labels added or removed | `PR #N labels +agent:changes -agent:review` |
+| New head of a PR | `PR #N new head abc1234` |
+| CI turning `pass` or `fail` on the head (the checks the dispatcher reads) | `PR #N CI pass @abc1234` |
+| devloop review: the valid `review` record in the conversation, from the identity that may write it (its native review is not reported again) | `PR #N review codex approve round 2 @abc1234` |
+| Native `APPROVED` or `CHANGES_REQUESTED` review of a trusted user | `PR #N review by brushtyler: APPROVED @abc1234` |
+| Comment of a trusted user or of a devloop app; one a trusted user wrote in person (no attribution header) is an `operator comment` | `issue #N operator comment by brushtyler: first line` |
+
+The [ledger](#evidence-and-telemetry) records (`## Registro devloop`) are not reported: they are
+too frequent. Trust follows [AGENTS.md](../AGENTS.md): an issue or PR counts if its author is in
+`trusted_users` or is one of devloop's apps (the `[apps]` logins). Anyone else's issue or PR
+produces only `new issue #N by an untrusted author (ignored)` (or `new PR`), with no title nor
+content, and nothing after it. The exception is an issue whose latest `agent:ready` was added by
+a user in `trusted_users`: from then on it is reported (`issue #N admitted with agent:ready by
+<login>`), its labels, closure and trusted comments, never its title. Labels, heads, CI and
+closures of a trusted issue or PR are reported whoever changed them; comments and reviews only
+when their author is trusted or a devloop app.
+
+Two modes:
+
+- **`--until-change`** (default): the command ends at the first round with news, exit code 0,
+  with its lines on stdout. With `--timeout <seconds>` it exits with code 3 once that many
+  seconds passed since it started without news, failed reads included (monotonic clock);
+  without `--timeout` it waits forever. It suits any agent that is woken when a command ends.
+  For Claude Code, run it as a background Bash command: Claude Code is woken when it exits, reads
+  the lines, acts and starts it again.
+
+  ```bash
+  python3 -m devloop watch --until-change --timeout 3600   # Bash tool, run_in_background: true
+  ```
+
+- **`--exec "<command>"`**: the watcher keeps running and, after each round with news, runs the
+  command with the lines on its stdin, and waits for it to end: never two at a time. The
+  command is split as a shell would (`shlex.split`) but runs without a shell. It suits agents
+  without a notification when a command ends, such as Codex or Antigravity resuming a session:
+
+  ```bash
+  python3 -m devloop watch --exec "codex exec resume --last -"   # "-": Codex reads the prompt from stdin
+  ```
+
+  A command that does not start or exits with an error is reported on stderr, and the watcher
+  goes on without delivering those lines again. `--timeout` is refused with `--exec`.
+
+The first run records the starting state and prints `watch baseline: N open PRs, M open issues`,
+which is not news. The state is saved in `state_dir/watch-state.json` of the main checkout
+(`--state <path>` for another file), atomically, after every successful round and **before** its
+lines are printed or delivered: a restarted watcher does not repeat lines, and the next run of
+`--until-change` reports at once what changed meanwhile. A state file that cannot be read gets a
+new baseline. Run one watcher per state file.
+
+A failed read of GitHub (a transient `gh` error) does not end the watcher: the round is retried
+after the interval and the state of the latest successful round is kept. After three consecutive
+failed rounds it emits one line, `watch error: 3 consecutive rounds could not read GitHub, the
+last valid state is kept`, without `gh`'s output; it counts as news (`--until-change` exits with
+0, `--exec` delivers it). A successful round resets the count.
+
+The watcher reads with the local `gh` login and needs no app key. Each round reads the open PRs
+and issues (`gh pr list`, up to 200, and `gh issue list`, up to 300), the comments since the
+previous round, and for each trusted open PR its checks and native reviews.
 
 ### Evidence and telemetry
 
@@ -1171,6 +1248,12 @@ fallback_models = [
 - **Single host.** One dispatcher runs at a time. With `max_parallel_actions = 1` (the
   default) a tick runs its actions one at a time; above 1, actions on different issues and PRs
   run in threads of that one process ([Parallel actions](#parallel-actions)).
+- **`devloop watch` compares states.** Each round compares what it reads with the latest
+  successful round, so a change undone between two reads (a label added and removed, an issue
+  opened and closed, a CI that fails and passes again on the same head) is not reported.
+  Comments and reviews have persistent ids: each one still there at the next read is reported.
+  The state is saved before the lines are delivered, so an interruption in between (the watcher
+  killed, an `--exec` command that fails) loses those lines rather than repeating them.
 - **`gh` compatibility.** Checks, labels, comments and PR creation go through the REST API
   (`gh api`), so devloop does not depend on newer porcelain flags such as `gh pr checks --json`.
   For commit statuses the aggregate state counts, including contexts beyond the first page.
