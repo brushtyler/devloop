@@ -56,11 +56,13 @@ class FencingTestCase(RepositoryTests):
         for name in ('SSDLC_CONTAINER_PAYLOAD_USER', 'SSDLC_SUPERVISED_RUN_ID', 'SSDLC_AUTONOMOUS'):
             os.environ.pop(name, None)
         if os.geteuid() != 0:
-            # Only root can own the gate; the ownership check has its own tests in
-            # test_container_holder. Here the host side is under test.
-            private = patch.object(rf.holder, 'check_private')
-            private.start()
-            self.addCleanup(private.stop)
+            # Only root can own the gate or hand a new cache to the payload identity; the
+            # ownership check has its own tests in test_container_holder and a failed
+            # handover its own test below. Here the host side is under test.
+            for target, name in ((rf.holder, 'check_private'), (o.os, 'chown')):
+                stub = patch.object(target, name)
+                setattr(self, f'stub_{name}', stub.start())
+                self.addCleanup(stub.stop)
 
     def orchestrator(self):
         runtime = self.repo / '.ssdlc/.runtime'
@@ -165,7 +167,9 @@ class FencedContainerTests(FencingTestCase):
         # The per-invocation cache is new and belongs to the payload.
         cache = next(Path(v.split('=', 1)[1]).parent for k, v in zip(cmd, cmd[1:])
                      if k == '-e' and v.startswith('PYTHONPYCACHEPREFIX='))
-        if os.geteuid() == 0:
+        if hasattr(self, 'stub_chown'):
+            self.assertIn(((cache, 1000, 1000), {'follow_symlinks': False}), self.stub_chown.call_args_list)
+        else:
             self.assertEqual((cache.stat().st_uid, cache.stat().st_gid), (1000, 1000))
         self.assertNotIn(rf.REFUSAL_KEY, self.stored_state())
         self.assertTrue(rf.admitted(self.stored_state()))
