@@ -215,6 +215,15 @@ def render_review(review, head):
                      f'`{receipt["base"][:12]}` · **Policy:** `{receipt["policy"][:12]}`')
     if review.get('note'):
         parts += ['', f'> {review["note"]}']
+    # #160: the base advanced during the round.
+    if review.get('bases'):
+        spans = ', '.join(f'`{c["from"][:12]}` → `{c["to"][:12]}`' for c in review['bases'])
+        parts += ['', f'> La base è avanzata durante il round ({spans}) senza toccare file della '
+                      'PR: le review già date restano valide e il round continua.']
+    if review.get('restarts'):
+        parts += ['', f'> Il round {review["restarts"]["round"]} è stato abbandonato perché la '
+                      'base è avanzata toccando file della PR, o senza che la non interferenza '
+                      'fosse dimostrabile: quel round non conta per il limite dei round.']
     parts += ['', review['summary'].strip()]
     if review['verdict'] == 'needs_human' and review['human_reason']:
         parts += ['', '### Decisione richiesta', '', review['human_reason'].strip()]

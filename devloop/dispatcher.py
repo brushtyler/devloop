@@ -30,6 +30,11 @@ whose pool has not enough independent reviewers goes to agent:needs-human. A rou
 only if every required reviewer approved the head with the receipt recomputed just before,
 otherwise a new review is needed.
 
+Base advancing (#160): a receipt that differs only in the commit of base still holds, both to
+join an open round and to promote, if no commit of the base branch in between touched a file of
+the PR's diff (``_base_check``). An open round abandoned only because the base touched the PR
+is replaced by a new one and does not count against ``max_review_rounds`` (``counted_rounds``).
+
 Level 0 (#107) needs no review: when a trusted user's label allows it and the whole diff is in
 the operator's allowlist, the head goes to ready-to-merge once every expected check run
 succeeded on it, no finding is open and no trusted user's request for changes stands.
@@ -64,9 +69,9 @@ from .github import GitHubError, merge_state
 from .markdown import (RESUME, carries_record, dispatcher_header, publishable, read_marker,
                        render_escalation, render_fix, render_native_review, render_preflight, render_review)
 from .policy import describe as describe_receipt
-from .policy import (BINDING, ZERO_LEVEL, agent_profile, changes_requested, check_outcome,
-                     check_states, differences, distinct, evaluate, independent, profile_of,
-                     receipt_of, recorded_level, zero_refused)
+from .policy import (BINDING, MAX_LISTED_PATHS, ZERO_LEVEL, agent_profile, changes_requested,
+                     check_outcome, check_states, differences, distinct, evaluate, independent,
+                     profile_of, receipt_of, recorded_level, zero_refused)
 from .review import (CI, FINDING_COMMAND, OPERATOR, ci_failure_review, current_round,
                      finding_commands, finding_key, finding_state, last_round, normalize_review,
                      open_findings, owner_of, round_verdict)
@@ -207,7 +212,7 @@ def plan(snapshot, cfg):
         pending = pending_reviewers(latest)
         verdict = round_verdict(latest) if latest and not pending else None
         head = latest[0]['head_sha'] if latest else None
-        rounds_left = last_round(pr.reviews) < cfg.max_review_rounds
+        rounds_left = counted_rounds(pr.reviews) < cfg.max_review_rounds
         if lb.ready_to_merge in pr.labels:
             # Readiness belongs to the approved commit: re-check it on every tick. A level-0
             # promotion belongs to its head and to the labels that allowed it, and the snapshot
@@ -392,6 +397,49 @@ def pending_reviewers(records):
         return []
     done = {owner_of(r) for r in records}
     return [key for key in receipt['reviewers'] if key not in done]
+
+
+def _round_records(reviews, number):
+    """The records of round ``number``, one per owner, as ``current_round`` reads the latest."""
+    records, owners = [], set()
+    for record in reviews:
+        if record['round'] == number and owner_of(record) not in owners:
+            owners.add(owner_of(record))
+            records.append(record)
+    return records
+
+
+def waived_rounds(reviews):
+    """The rounds that do not count against ``max_review_rounds`` (#160): each incomplete agent
+    round that a later round replaced only because the base branch advanced, as the later
+    round's records say (``restarts``)."""
+    waived = set()
+    for record in reviews:
+        restart = record.get('restarts')
+        number = restart.get('round') if isinstance(restart, dict) else None
+        if (isinstance(number, int) and not isinstance(number, bool) and number < record['round']
+                and pending_reviewers(_round_records(reviews, number))):
+            waived.add(number)
+    return waived
+
+
+def counted_rounds(reviews):
+    """How many rounds count against ``max_review_rounds``: every round, CI rounds and rereviews
+    included, except the waived ones (``waived_rounds``). Round numbers stay progressive."""
+    return len({r['round'] for r in reviews} - waived_rounds(reviews))
+
+
+def _parents(path):
+    return {path[:i] for i, c in enumerate(path) if c == '/'}
+
+
+def touched_by_base(paths, touched):
+    """The paths of a PR's diff that a change of the base branch, ``touched``, reaches (#160):
+    the same path, a directory above it or a path under it (a file replaced by a directory, or
+    the reverse, would conflict even with no file in common)."""
+    touched = set(touched)
+    dirs = set().union(*map(_parents, touched)) if touched else set()
+    return sorted({p for p in paths if p in touched or p in dirs or _parents(p) & touched})
 
 
 class Models:
@@ -1019,19 +1067,79 @@ class Dispatcher:
         """The policy receipt of the PR's pushed head, computed now from the running
         dispatcher's policy: the full diff against the latest base commit, every ``labeled``
         event of the level label on the PR, and the highest level already recorded on it."""
+        return self._receipt_and_paths(pr)[0]
+
+    def _receipt_and_paths(self, pr):
+        """``_receipt`` and every path of the diff it was computed on."""
         policy = self.cfg.review_policy
         base, head, changes = self.ws.review_diff(pr.head_ref)
         records = pr.reviews + pr.policy
         # Level 0 (#107): only read when enabled, so that without it nothing changes.
         zero = (self.gh.label_events(pr.number, policy.zero_label) if policy.zero_enabled()
                 else [])
-        return evaluate(policy, pr=pr.number, base=base, head=head, changes=changes,
-                        labelers=self.gh.labelers(pr.number, policy.label),
-                        trusted_users=self.cfg.trusted_users,
-                        previous_level=recorded_level(records),
-                        select=lambda level: self._select(pr, level)[0],
-                        profile=lambda key: self._profile(key, 'review'),
-                        zero_events=zero, refused=zero_refused(records))
+        receipt = evaluate(policy, pr=pr.number, base=base, head=head, changes=changes,
+                           labelers=self.gh.labelers(pr.number, policy.label),
+                           trusted_users=self.cfg.trusted_users,
+                           previous_level=recorded_level(records),
+                           select=lambda level: self._select(pr, level)[0],
+                           profile=lambda key: self._profile(key, 'review'),
+                           zero_events=zero, refused=zero_refused(records))
+        return receipt, sorted({c['path'] for c in changes})
+
+    def _base_check(self, old, new, paths):
+        """Whether the base branch moving from ``old`` to ``new`` left the PR alone (#160), as
+        a record: ``{from, to, outcome}``, the outcome ``disjoint``, ``touched`` (with
+        ``paths``, the files of the PR it reached) or ``unverifiable`` (the commits in between
+        cannot be listed). Every commit in between counts, not only their net diff.
+        ``_base_checks`` adds the mergeability on the current base."""
+        try:
+            touched = self.ws.base_paths(old, new)
+        except WorkspaceError as exc:
+            self.log(f'  base {old[:12]}..{new[:12]} not verifiable: {exc}')
+            return {'from': old, 'to': new, 'outcome': 'unverifiable'}
+        hits = touched_by_base(paths, touched)
+        if hits:
+            return {'from': old, 'to': new, 'outcome': 'touched',
+                    'paths': hits[:MAX_LISTED_PATHS]}
+        return {'from': old, 'to': new, 'outcome': 'disjoint'}
+
+    def _base_checks(self, records, current, paths):
+        """For records whose receipts differ from ``current`` in the base at most: the check of
+        each earlier base up to the current one (``_base_check``), ``[]`` when no base
+        differs. None when a receipt is missing or differs in anything else.
+
+        A base that left the PR's files alone is accepted only if the receipt's head also
+        merges into the current base without conflicts, verified on these two exact commits:
+        otherwise its check becomes ``conflict`` (with ``paths``, the files in conflict) or
+        ``unverifiable``. The mergeability GitHub reported in the snapshot may predate the
+        base."""
+        checks, seen = [], set()
+        for record in records:
+            changed = differences(receipt_of(record), current)
+            if changed and changed != ['base']:
+                return None
+            old = receipt_of(record)['base']
+            if changed and old not in seen:
+                seen.add(old)
+                checks.append(self._base_check(old, current['base'], paths))
+        if any(c['outcome'] == 'disjoint' for c in checks):
+            merge = self._merge_check(current['base'], current['head'])
+            if merge['outcome'] != 'clean':
+                checks = [dict(c, **merge) if c['outcome'] == 'disjoint' else c for c in checks]
+        return checks
+
+    def _merge_check(self, base, head):
+        """Whether ``head`` merges into ``base`` without conflicts: ``{outcome}``, ``clean``,
+        ``conflict`` (with ``paths``) or ``unverifiable``."""
+        try:
+            clean, files = self.ws.merge_check(base, head)
+        except WorkspaceError as exc:
+            self.log(f'  merge of {head[:12]} into {base[:12]} not verifiable: {exc}')
+            return {'outcome': 'unverifiable'}
+        if clean:
+            return {'outcome': 'clean'}
+        self.log(f'  {head[:12]} conflicts with the base {base[:12]}')
+        return {'outcome': 'conflict', 'paths': files[:MAX_LISTED_PATHS]}
 
     def _profile(self, key, mode, used=None):
         """The identity and tuple agent ``key`` acts with now in ``mode`` (``write`` or
@@ -1089,10 +1197,14 @@ class Dispatcher:
                     '(kind, model, effort, review_args), e nessuno può avere l\'identità o il '
                     'modello (kind, model, effort) dell\'implementer o di chi ha corretto la PR')
 
-    def _policy_comment(self, pr, title, text, receipt, event):
+    def _policy_comment(self, pr, title, text, receipt, event, bases=()):
+        """A dispatcher ``policy`` record; ``bases``: the base checks it relied on (#160)."""
+        payload = {'event': event, 'receipt': receipt}
+        if bases:
+            payload['bases'] = list(bases)
         self.gh.comment(pr.number, publishable(
             dispatcher_header() + f'\n## {title}\n\n{text.strip()}\n\n'
-            + describe_receipt(receipt), 'policy', {'event': event, 'receipt': receipt}))
+            + describe_receipt(receipt), 'policy', payload))
 
     def _escalate_level(self, pr, receipt):
         """Not enough independent reviewers for the level: no review, no promotion, a human
@@ -1114,34 +1226,46 @@ class Dispatcher:
         recomputed now requires approved the head with that same receipt. Otherwise record why
         and leave the PR in review for a new review of the same head."""
         lb = self.cfg.labels
-        current = self._receipt(pr)
+        current, paths = self._receipt_and_paths(pr)
         if current['level'] == ZERO_LEVEL:
             return self._promote_zero(pr, current)
         if len(current['reviewers']) < current['level']:
             return self._escalate_level(pr, current)
         changed = [k for k in BINDING
                    if any(k in differences(receipt_of(r), current) for r in records)]
+        # An approval given on an earlier base holds only if no commit of the base branch since
+        # then reached the PR's files (#160).
+        bases = self._base_checks(records, current, paths) if changed == ['base'] else []
+        if bases and all(c['outcome'] == 'disjoint' for c in bases):
+            changed = []
         approved = {owner_of(r) for r in records if r['verdict'] == 'approve'}
         missing = [key for key in current['reviewers'] if key not in approved]
+        branch = self.cfg.base_branch
         if changed or missing:
             what = ('l\'approvazione non ha una ricevuta di policy'
                     if any(receipt_of(r) is None for r in records)
                     else 'cambiati: ' + ', '.join(_RECEIPT_FIELDS[k] for k in changed) if changed
                     else 'manca l\'approvazione di ' + ', '.join(f'`{k}`' for k in missing))
+            detail = (f'\n\nCommit di `{branch}` fra la base dell\'approvazione e quella '
+                      'corrente:\n\n' + _describe_bases(bases, branch)) if bases else ''
             self._policy_comment(
                 pr, 'Approvazione non valida per la promozione',
                 f'La ricevuta di policy ricalcolata prima della promozione non coincide con '
                 f'quella dell\'approvazione ({what}). La PR resta in review: serve una nuova '
-                'review, anche dello stesso commit. Round e finding aperti restano invariati.',
-                current, 'stale')
+                'review, anche dello stesso commit. Round e finding aperti restano invariati.'
+                + detail, current, 'stale', bases)
             self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.changes, lb.ready_to_merge])
             return
         by = ', '.join(f'`{key}`' for key in current['reviewers'])
+        revalidated = (f'\n\nLe approvazioni date su una base precedente restano valide sulla '
+                       f'base corrente: i commit intermedi di `{branch}` non toccano file della '
+                       'PR.\n\n' + _describe_bases(bases, branch)) if bases else ''
         self._policy_comment(
             pr, 'Pronta per il merge',
             f'Approvazione del commit `{records[0]["head_sha"][:12]}` da parte di {by} '
-            'confermata: la ricevuta di policy ricalcolata coincide con quella della review.',
-            current, 'promoted')
+            'confermata: la ricevuta di policy ricalcolata coincide con quella della review'
+            + (', a parte la base' if bases else '') + '.' + revalidated,
+            current, 'promoted', bases)
         self.gh.edit_labels(pr.number, add=[lb.ready_to_merge], remove=[lb.review, lb.changes])
 
     def _promote_zero(self, pr, receipt):
@@ -1270,7 +1394,7 @@ class Dispatcher:
                 self._promote(pr, records)
         elif verdict == 'needs_human':
             self.gh.edit_labels(pr.number, add=[lb.needs_human], remove=transient)
-        elif records[0]['round'] >= self.cfg.max_review_rounds:
+        elif counted_rounds(reviews) >= self.cfg.max_review_rounds:
             if announce:
                 self.gh.comment(pr.number, render_escalation(
                     f'Raggiunto il limite di {self.cfg.max_review_rounds} round di review con '
@@ -1428,15 +1552,16 @@ class Dispatcher:
         self.log(f'  opened {url}')
 
     def _current_receipt(self, pr):
-        """The receipt of the snapshot's head, or None (logged) when the head moved since."""
-        receipt = self._receipt(pr)
+        """``(receipt, paths)`` of the snapshot's head (see ``_receipt_and_paths``), or
+        ``(None, None)`` (logged) when the head moved since."""
+        receipt, paths = self._receipt_and_paths(pr)
         if receipt['head'] != pr.head_sha:
             self.log('  head moved since the snapshot; retrying next tick')
-            return None
-        return receipt
+            return None, None
+        return receipt, paths
 
     def _do_ci_failed(self, pr):
-        receipt = self._current_receipt(pr)
+        receipt, _ = self._current_receipt(pr)
         if receipt is None:
             return
         if receipt['level'] > 1 and len(receipt['reviewers']) < receipt['level']:
@@ -1445,31 +1570,41 @@ class Dispatcher:
         review = ci_failure_review(failed_checks=pr.failed_checks, log_tail=log_tail,
                                    previous_open=open_findings(pr.reviews, pr.closures),
                                    round_no=last_round(pr.reviews) + 1,
-                                   max_rounds=self.cfg.max_review_rounds, head_sha=pr.head_sha)
+                                   max_rounds=self._last_round_allowed(pr.reviews),
+                                   head_sha=pr.head_sha)
         review['receipt'] = receipt
         self.gh.comment(pr.number, render_review(review, dispatcher_header()))
         self._apply_round(pr, [review], announce=True, reviews=pr.reviews + [review])
 
+    def _last_round_allowed(self, reviews):
+        """The number of the last round ``max_review_rounds`` allows, given the waived rounds
+        among ``reviews``: what records and prompts show as the limit."""
+        return self.cfg.max_review_rounds + len(waived_rounds(reviews))
+
     def _do_apply_review(self, pr):
         self._apply_round(pr, current_round(pr.reviews), announce=False, reviews=pr.reviews)
 
-    def _continues(self, pr, records, receipt):
-        """Whether the round ``records`` is still in progress for this head and ``receipt``:
-        an agent round of the same head, not answered by a fix nor voided by a rereview
-        request, with the same receipt, still waiting for a reviewer."""
+    def _open_round(self, pr, records):
+        """Whether the round ``records`` is still open for this head: an agent round of the
+        same head, not answered by a fix nor voided by a rereview request, still waiting for a
+        reviewer. Whether a new review joins it depends on the receipt (``_do_review``)."""
         return (bool(records) and records[0]['source'] == 'agent'
                 and records[0]['head_sha'] == pr.head_sha and not pr.rereview
                 and not any(f['round'] == records[0]['round'] for f in pr.fixes)
-                and not any(differences(receipt_of(r), receipt) for r in records)
                 and bool(pending_reviewers(records)))
 
     def _do_review(self, pr):
         """One review by one reviewer: each review call is an action of its own. The first
         reviewer of a round opens it; the next ones, on later actions, join it while it reviews
         the same head under the same receipt. The round is applied once every required reviewer
-        has reviewed; a review already recorded in it is never run again."""
+        has reviewed; a review already recorded in it is never run again.
+
+        When only the base changed since the round's reviews (#160), the round continues if no
+        commit of the base branch in between reached the PR's files, and the review records the
+        check (``bases``). Otherwise the round restarts, and the new one records which round it
+        replaces (``restarts``): that round does not count against ``max_review_rounds``."""
         cfg = self.cfg
-        receipt = self._current_receipt(pr)
+        receipt, paths = self._current_receipt(pr)
         if receipt is None:
             return
         if receipt['level'] == ZERO_LEVEL:
@@ -1477,12 +1612,28 @@ class Dispatcher:
         if len(receipt['reviewers']) < receipt['level']:
             return self._escalate_level(pr, receipt)
         latest = current_round(pr.reviews)
-        if self._continues(pr, latest, receipt):
+        bases = self._base_checks(latest, receipt, paths) if self._open_round(pr, latest) else None
+        if bases and any(c['outcome'] == 'conflict' for c in bases):
+            # Neither continued nor restarted: the sync merges the base and changes the head,
+            # once GitHub reports the conflict too.
+            self.log('  the PR conflicts with the new base; no review until the sync')
+            return
+        joins = bases is not None and all(c['outcome'] == 'disjoint' for c in bases)
+        restarts = None
+        if joins:
             round_no, done, comments = latest[0]['round'], latest, pr.round_comments
+            counted = counted_rounds(pr.reviews)
         else:
             round_no, done, comments = last_round(pr.reviews) + 1, [], pr.operator_comments
-        if round_no > cfg.max_review_rounds:
+            counted = counted_rounds(pr.reviews) + 1
+            if bases:
+                # Abandoned only because the base advanced: the round does not count.
+                restarts = {'round': latest[0]['round'], 'bases': bases}
+                counted -= 1
+                self.log(f'  round {latest[0]["round"]} restarts: the base touched the PR')
+        if counted > cfg.max_review_rounds:
             return self._do_round_limit(pr)
+        max_rounds = cfg.max_review_rounds + round_no - counted
         reviewed = {owner_of(r) for r in done}
         agent = cfg.agent(next(key for key in receipt['reviewers'] if key not in reviewed))
         issue, _ = self._issue_context(pr.issue)
@@ -1498,7 +1649,7 @@ class Dispatcher:
         criteria = acceptance_criteria(issue.get('body'))
         acceptance_map = latest_map(pr.meta, pr.fixes)
         prompt = _template('review', repo=cfg.repo, base_branch=cfg.base_branch,
-                           pr_number=pr.number, round=round_no, max_rounds=cfg.max_review_rounds,
+                           pr_number=pr.number, round=round_no, max_rounds=max_rounds,
                            implementer=pr.meta.get('implementer', cfg.implementer),
                            ci=pr.checks, test_cmd=cfg.test_cmd,
                            issue_number=pr.issue, issue_title=issue['title'],
@@ -1537,10 +1688,14 @@ class Dispatcher:
             self.ws.remove(name)
             return
         review = normalize_review(raw, previous_open=previous_open, round_no=round_no,
-                                  max_rounds=cfg.max_review_rounds, head_sha=pr.head_sha,
+                                  max_rounds=max_rounds, head_sha=pr.head_sha,
                                   ci=pr.checks, reviewer=agent.key, criteria=criteria,
                                   acceptance_map=acceptance_map)
         review['receipt'] = receipt
+        if joins and bases:
+            review['bases'] = bases  # the round's earlier bases, checked up to this one
+        if restarts:
+            review['restarts'] = restarts
         review['profile'] = self._profile(agent.key, 'review', used)
         reviewer_gh = self._as(agent.key, REVIEW)
         reviewer_gh.comment(pr.number, render_review(review, self.runner.header(used)))
@@ -1727,6 +1882,29 @@ def _failure_text(exc):
     with a list (``ModelsUnavailable``) a blank line."""
     text = str(exc).rstrip()
     return text + ('\n\n' if '\n' in text else '.')
+
+
+def _describe_bases(checks, branch):
+    """The base checks of ``_base_check`` as a Markdown list."""
+    lines = []
+    for check in checks:
+        span = f'`{check["from"][:12]}` → `{check["to"][:12]}`'
+        if check['outcome'] == 'disjoint':
+            lines.append(f'- {span}: nessun commit intermedio di `{branch}` tocca file della PR.')
+        elif check['outcome'] == 'touched':
+            lines.append(f'- {span}: i commit intermedi di `{branch}` toccano file della PR: '
+                         + ', '.join(f'`{p}`' for p in check['paths']) + '.')
+        elif check['outcome'] == 'conflict':
+            files = ', '.join(f'`{p}`' for p in check.get('paths') or [])
+            lines.append(f'- {span}: i commit intermedi di `{branch}` non toccano file della PR, '
+                         'ma la PR non si unisce senza conflitti alla base corrente'
+                         + (f' ({files})' if files else '') + ': serve una sincronizzazione.')
+        else:
+            lines.append(f'- {span}: non è stato possibile elencare i file toccati dai commit '
+                         f'intermedi (per esempio `{branch}` è stato riscritto), o verificare '
+                         'che la PR si unisca senza conflitti alla base corrente: la non '
+                         'interferenza non è dimostrata.')
+    return '\n'.join(lines)
 
 
 def _format_conflicts(conflicts):
