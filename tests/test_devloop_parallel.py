@@ -437,11 +437,14 @@ class SharedStateTests(unittest.TestCase):
         self.assertEqual(calls, [{'HOME': '/h'}])
 
     def test_review_copies_of_parallel_reviewers_have_their_own_names(self):
-        ws = Workspace('/repo', '.state', 'main',
-                       run=lambda argv, **kw: SimpleNamespace(returncode=0, stdout='a' * 40,
-                                                              stderr=''))
-        self.assertEqual(ws.review_copy('/wt/pr-5')[0], 'pr-5-review')
-        self.assertEqual(ws.review_copy('/wt/pr-5', 'agy')[0], 'pr-5-review-agy')
+        # A real root: review_copy creates the parent of the copy, which outside a temporary
+        # directory needs permissions the CI runner does not have.
+        with tempfile.TemporaryDirectory() as repo:
+            ws = Workspace(repo, '.state', 'main',
+                           run=lambda argv, **kw: SimpleNamespace(returncode=0,
+                                                                  stdout='a' * 40, stderr=''))
+            self.assertEqual(ws.review_copy('/wt/pr-5')[0], 'pr-5-review')
+            self.assertEqual(ws.review_copy('/wt/pr-5', 'agy')[0], 'pr-5-review-agy')
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             for name in ('pr-5-review-agy', 'pr-5-review-codex', 'pr-50-review-agy'):
