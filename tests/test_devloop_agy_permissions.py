@@ -12,6 +12,7 @@ from devloop import agents, config, markdown, policy, schema
 from devloop.dispatcher import Action, Dispatcher, Snapshot, plan
 from test_devloop import CFG, FakeGH, FakeRunner, FakeWS, norm, pr, raw_review
 from test_devloop_fallback import ARGON, DATA, HYDROGEN, QUOTA, FakeCLI, with_agent
+from test_devloop_preflight import IssueGH, checked
 
 JETSKI = ('jetski: no output produced — a tool required the "command" permission that headless '
           'mode cannot prompt for, so it was auto-denied.')
@@ -452,6 +453,65 @@ class PermissionRetryTests(unittest.TestCase):
                 body = self.gh.comments[-1][1]
                 self.assertIn(f'Il passo `review` è fallito: {message}', body)
                 self.assertNotIn('after one retry', body)
+                self.assertNotIn('retrying once', log)
+
+
+class PreflightPermissionRetryTests(unittest.TestCase):
+    """The readiness check run by agy gets the same single retry on a denied permission (#180)."""
+
+    def tick(self, *outputs):
+        cfg = dataclasses.replace(CFG, preflight='agy')
+        self.assertNotEqual(cfg.implementer, 'agy')
+        self.gh, self.ws, self.logs, self.labels = IssueGH(), FakeWS(), [], []
+        self.runner = FakeRunner(*outputs)
+        run = self.runner.run
+
+        def recording(agent, mode, prompt, schema_name, workdir, label):
+            self.labels.append(label)  # the label names the turn's log
+            return run(agent, mode, prompt, schema_name, workdir, label)
+        self.runner.run = recording
+        d = Dispatcher(cfg, self.gh, self.ws, self.runner, log=self.logs.append)
+        self.assertEqual([a.kind for a in d.tick()], ['preflight'])
+        return '\n'.join(self.logs)
+
+    @staticmethod
+    def denied():
+        return agents.PermissionDenied(f'agy stopped without output: {READ_JETSKI}', None,
+                                       'read_file', READ_TARGET)
+
+    def test_a_denied_check_is_retried_once_in_the_same_checkout(self):
+        log = self.tick(self.denied(), checked(True))
+        self.assertEqual([c[:3] for c in self.runner.calls], [('agy', 'review', 'preflight')] * 2)
+        self.assertEqual(self.runner.calls[0][3], self.runner.calls[1][3])  # the same prompt
+        self.assertEqual(self.runner.workdirs, [self.runner.workdirs[0]] * 2)
+        self.assertEqual(self.labels, ['issue-7-preflight', 'issue-7-preflight-retry'])
+        self.assertIn(f'agy: model {CFG.agent("agy").model} denied the "read_file" permission '
+                      f'({READ_TARGET}); retrying once', log)
+        self.assertIn('issue-7-preflight', self.ws.removed)
+        self.assertNotIn('agent:needs-human', self.gh.labels[7])
+        record = markdown.read_marker(self.gh.thread[-1]['body'], 'preflight')
+        self.assertTrue(record['ready'])
+
+    def test_a_second_denial_escalates_citing_the_permission(self):
+        log = self.tick(self.denied(), self.denied())
+        self.assertEqual(len(self.runner.calls), 2)
+        self.assertEqual(self.labels, ['issue-7-preflight', 'issue-7-preflight-retry'])
+        self.assertIn('agent:needs-human', self.gh.labels[7])
+        body = self.gh.thread[-1]['body']
+        self.assertIn(f'agy stopped without output: {READ_JETSKI}', body)
+        self.assertIn('permission `read_file` denied again after one retry', body)
+        self.assertIn(f'denied the "read_file" permission again ({READ_TARGET})', log)
+        self.assertIn('issue-7-preflight', self.ws.removed)
+
+    def test_other_failures_of_the_check_are_not_retried(self):
+        for error in (agents.AgentError(f'agy exited with 3: {READ_JETSKI}'),
+                      agents.AgentError('agy stopped without output: no output'),
+                      agents.ModelUnavailable('agy model unavailable', None, 'quota')):
+            with self.subTest(error=str(error)):
+                log = self.tick(error)
+                self.assertEqual(len(self.runner.calls), 1)
+                self.assertIn('agent:needs-human', self.gh.labels[7])
+                self.assertNotIn('after one retry', self.gh.thread[-1]['body'])
                 self.assertNotIn('retrying once', log)
 
 

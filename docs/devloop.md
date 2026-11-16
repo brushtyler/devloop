@@ -205,7 +205,8 @@ Each check is an agent action: it takes a slot of `max_actions_per_tick`, and a 
 issue that may start also takes one of the free PR slots of the tick. It runs under
 `agent_timeout_seconds`. A check that fails or times out sends the issue to
 `agent:needs-human` with a comment, removing `agent:ready` like any failed step, and the
-implementer does not start.
+implementer does not start. An agy check stopped on a denied permission is first run once more
+([agy permissions](#agy-permissions), #180).
 
 ## Review level and policy receipt
 
@@ -910,7 +911,9 @@ each agy turn its minimal permissions, and treats a stop without output as a fai
   ``permission `<name>` denied again after one retry``. Any other failure (an unavailable
   model, a non-zero exit, a stop that names no permission, invalid output, a timeout) is not
   retried: it escalates or starts the fallback as before. After a fallback, the next model gets
-  its own single retry.
+  its own single retry. The [readiness check](#readiness-check-before-implementation), which
+  has no fallback, gets the same single retry, in the same checkout, with its own log and turn
+  record (`issue-<n>-preflight-retry`).
 
 ```toml
 [agents.agy]

@@ -964,14 +964,23 @@ class Dispatcher:
         name = f'issue-{number}-preflight'
         path = self.ws.base_copy(name)
         try:
-            entry = self._open_turn((number, 'preflight'), agent, 'review', name)
-            try:
-                raw = self.runner.run(agent, 'review', prompt, 'preflight', path, name)
-            except AgentError as exc:
-                self._close_turn(entry, 'unavailable' if isinstance(exc, ModelUnavailable)
-                                 else 'failure', exc)
-                raise
-            self._close_turn(entry, 'success')
+            # A denied permission is retried once, in the same checkout (#180), as in ``_turn``.
+            for label in (name, f'{name}-retry'):
+                entry = self._open_turn((number, 'preflight'), agent, 'review', label)
+                try:
+                    raw = self.runner.run(agent, 'review', prompt, 'preflight', path, label)
+                except PermissionDenied as exc:
+                    self._close_turn(entry, 'failure', exc)
+                    error = self._permission_denied(agent, exc, retry=label == name)
+                    if error is None:
+                        continue
+                    raise error from exc
+                except AgentError as exc:
+                    self._close_turn(entry, 'unavailable' if isinstance(exc, ModelUnavailable)
+                                     else 'failure', exc)
+                    raise
+                self._close_turn(entry, 'success')
+                break
         finally:
             self.ws.remove(name)
         self._publish_preflight(number, normalize_preflight(raw), digest, agent.key)
@@ -1188,6 +1197,20 @@ class Dispatcher:
             except GitHubError as exc:
                 self.log(f'  turn records of #{number} not checked: {exc}')
 
+    def _permission_denied(self, candidate, exc, retry):
+        """Log an agy turn stopped on a denied permission (``PermissionDenied``, #180) with the
+        permission and its target. Returns None when ``retry``, the turn being run once more;
+        otherwise the error to escalate, which names the permission denied again."""
+        target = exc.target or 'target non riportato da agy'
+        if retry:
+            self.log(f'  {candidate.key}: model {candidate.model} denied the '
+                     f'"{exc.permission}" permission ({target}); retrying once')
+            return None
+        self.log(f'  {candidate.key}: model {candidate.model} denied the '
+                 f'"{exc.permission}" permission again ({target})')
+        return PermissionDenied(f'{exc}; permission `{exc.permission}` denied again after one '
+                                'retry', exc.log, exc.permission, exc.target)
+
     def _turn(self, models, mode, prompt, schema, path, label, allowed=None, where=None):
         """Run one agent turn on the first of ``models`` (``Models``) that is available, and
         return its output and the agent configuration it ran with.
@@ -1231,17 +1254,12 @@ class Dispatcher:
                 continue
             except PermissionDenied as exc:
                 self._close_turn(entry, 'failure', exc)
-                target = exc.target or 'target non riportato da agy'
-                if candidate.model not in retried:
+                error = self._permission_denied(candidate, exc,
+                                                retry=candidate.model not in retried)
+                if error is None:
                     retried.add(candidate.model)
-                    self.log(f'  {candidate.key}: model {candidate.model} denied the '
-                             f'"{exc.permission}" permission ({target}); retrying once')
                     models.left.insert(0, candidate)
                     continue
-                self.log(f'  {candidate.key}: model {candidate.model} denied the '
-                         f'"{exc.permission}" permission again ({target})')
-                error = PermissionDenied(f'{exc}; permission `{exc.permission}` denied again '
-                                         'after one retry', exc.log, exc.permission, exc.target)
                 if not models.tried:
                     raise error from exc
                 models.tried.append((candidate.model, str(error)))
