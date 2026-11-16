@@ -40,11 +40,16 @@ class Activity:
                         'started_at': _iso(self._clock()), 'pid': self._pid}
         self._write()
 
-    def turn(self, agent, prompt):
-        """An agent turn of the current action started, with the prompt saved at ``prompt``."""
+    def turn(self, agent, prompt, fallback=None):
+        """An agent turn of the current action started, with the prompt saved at ``prompt``;
+        ``fallback`` is the model it runs on when that is a fallback model (#121)."""
         if self._record is None:
             return
         self._record.update(agent=agent, prompt=str(prompt))
+        if fallback:
+            self._record['fallback'] = fallback
+        else:
+            self._record.pop('fallback', None)
         self._record.pop('stalled', None)
         self._write()
 
@@ -144,6 +149,8 @@ def describe(state_dir, now=None, alive=pid_alive, held=lock_held):
     what = f'{record.get("kind")} #{record.get("number")}'
     if record.get('agent'):
         what += f' with {record["agent"]}'
+        if record.get('fallback'):
+            what += f' on fallback model {record["fallback"]}'
     now = time.time() if now is None else now
     started = record.get('started_at')
     elapsed = _since(started, now)

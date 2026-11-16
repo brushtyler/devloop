@@ -95,9 +95,18 @@ effort = "high"
 [agents.agy]
 kind = "agy"
 display_name = "Antigravity"
-model = "gemini-3.8-flash-high"
-model_label = "Gemini 3.8 Flash"
+model = "gemini-4-argon-high"
+model_label = "Gemini 4 Argon"
 effort = "high"
+# Argon has a budget of its own: when a turn fails because the model is unavailable (quota or
+# budget exhausted, model not available, rate limit), the same turn runs again on the next
+# fallback model, each at most once per action (issue #121). A fallback inherits `effort` when
+# it sets none, and never reasons below high. What counts as unavailable: `unavailable_patterns`
+# (default "RESOURCE_EXHAUSTED", "quota", "429", "model .* not available") in the output of a
+# failed turn, or an exit code in `unavailable_exit_codes` (default none).
+fallback_models = [
+    { model = "gemini-4-hydrogen-high", model_label = "Gemini 4 Hydrogen" },
+]
 
 # GitHub Apps (issue #65): one per agent and one for the dispatcher. App ids and slugs are not
 # secret. Private keys are read from key_dir (or $DEVLOOP_APP_KEY_DIR) as

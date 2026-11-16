@@ -72,7 +72,8 @@ def build(args):
     stall = StallWatch(cfg.agent_stall_seconds, cfg.agent_stall_action, log=log,
                        activity=current, home=agent_env.get('HOME'))
     runner = AgentRunner(state / 'logs', cfg.agent_timeout_seconds, env=agent_env,
-                         on_turn=lambda agent, prompt: current.turn(agent.key, prompt),
+                         on_turn=lambda agent, prompt: current.turn(
+                             agent.key, prompt, agent.model if agent.fallback_for else None),
                          stall=stall)
     dispatcher = Dispatcher(cfg, identities.github(DISPATCHER), ws, runner, log=log,
                             identities=identities, activity=current)
