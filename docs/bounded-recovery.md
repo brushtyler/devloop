@@ -136,11 +136,16 @@ model's reserve does not fit the remaining separate and combined caps.
 With an active feedback workflow, the admission binds the feedback ledger and,
 after the selector publish, records the new generation in
 `admitted_generations`. Dispatch stays fenced until that record exists. Requests
-still `REQUESTED` on the parent generation, with no role call, are carried: on
-resume the same request, with the same task, plan, attempt and captured failure,
-is rebound to the new generation, without manual reconciliation. Recording
-caps, role calls and amendment quotas do not change. An unknown role outcome
-(`INTENT`) blocks the admission.
+on the parent generation still `REQUESTED`, or `PROPOSED` without a review, are
+carried: on resume the same request, with the same task, plan, attempt and
+captured failure, is rebound to the new generation, without manual
+reconciliation. A planner consultation already `RETURNED` is carried too. The
+record lists its previous native binding, and the call is rebound to the new
+generation, which holds the same invocation row. Its receipt is reused and the
+planner is never relaunched. The proposal hash binds the new source, and the
+request's accounting anchor still precedes the carried call, so the call stays
+charged exactly once. Recording caps, role calls and amendment quotas do not
+change. An unknown role outcome (`INTENT`) blocks the admission.
 
 The absolute UTC deadline includes preflight, execution and operator waits.
 Per-call subprocess timeouts are clamped to remaining ticket time and the frozen

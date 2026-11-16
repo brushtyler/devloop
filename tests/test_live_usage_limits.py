@@ -547,6 +547,108 @@ class FeedbackLedgerAdmissionTests(unittest.TestCase):
         planner = [row for row in rows.values() if row['role'] == 'feedback-planner']
         self.assertEqual(planner[0]['conservative_usage'], {'metered_usd': 0.5, 'cli_estimate_usd': 0.5})
 
+    def test_resume_after_admission_carries_a_returned_planner_without_repeating_it(self):
+        """R1-1: the planner returned without cost, the stop came before the reviewer."""
+        from ssdlc_feedback import FeedbackStore
+        from ssdlc_tasks import atomic_json
+        from ssdlc_transitions import runtime_root
+        case = self.case
+        # A fresh case without the legacy row: the planner's own row is the first without cost.
+        self.case = case = type(case)(); case.initialize(); self.addCleanup(case.doCleanups)
+        runner = case.runner
+        def costless(source, limits, prompt, effort):
+            call = runner(source, limits, prompt, effort)
+            def wrapped(metadata, invocation):
+                value = call(metadata, invocation)
+                if metadata['identity'] == 'feedback-planner':
+                    value['usage'] = dict(metered_usd=None, cli_estimate_usd=None)
+                return value
+            return wrapped
+        case.runner = costless
+        with self.assertRaisesRegex(RecoveryStop, 'not counted as zero') as caught:
+            case.run_flow()
+        self.assertEqual(caught.exception.category, 'LIMIT_REACHED')
+        feedback = FeedbackStore(case.case.ticket)
+        stopped = feedback.inspect()
+        (request_id,) = stopped['requests']
+        self.assertEqual(stopped['requests'][request_id]['status'], 'PROPOSED')
+        (planner,) = stopped['role_calls']
+        self.assertEqual((planner['role'], planner['status']), ('planner', 'RETURNED'))
+        self.assertEqual([name for name, _ in case.calls], ['feedback-planner'])
+        transition = self.admit()
+        state = feedback.inspect()
+        entry = state['admitted_generations'][transition]
+        self.assertEqual(entry['carried_requests'], [request_id])
+        # The previous native binding is recorded; the call is rebound to the admitted generation.
+        self.assertEqual(entry['carried_role_calls'], {planner['operation_id']: planner['native']})
+        self.assertEqual(state['requests'], stopped['requests'])
+        (carried,) = state['role_calls']
+        self.assertEqual(carried['native'], dict(planner['native'], limits_sha256=entry['limits_sha256']))
+        self.assertEqual({k: v for k, v in carried.items() if k != 'native'},
+                         {k: v for k, v in planner.items() if k != 'native'})
+        # The receipt and the native invocation row are unchanged.
+        root = runtime_root(case.case.ticket)
+        envelope, counters = LimitsStore(root)._load(repair=False)
+        self.assertEqual(entry['limits_sha256'], digest(envelope))
+        self.assertEqual(counters['invocations'][planner['native']['invocation_id']],
+                         LimitsStore(case.source['root'])._load(repair=False)[1]['invocations'][
+                             planner['native']['invocation_id']])
+        outer = json.loads((root / 'state.json').read_text())
+        outer.update(status='ESCALATED_TO_SUPERVISOR', current_step='feedback')
+        atomic_json(root / 'state.json', outer)
+        result = case.run_flow()
+        self.assertEqual(result['disposition'], 'APPLIED')
+        # The planner is never repeated: only the reviewer is consulted after the admission.
+        self.assertEqual([name for name, _ in case.calls], ['feedback-planner', 'feedback-reviewer'])
+        state = feedback.inspect()
+        self.assertEqual(state['requests'][request_id]['occurrences'][-1]['carried_by'], transition)
+        row = state['requests'][request_id]
+        # The planner's proposal is unchanged; its hash binds the new source, and the review binds that hash.
+        self.assertEqual((row['proposal'], row['planner']),
+                         (stopped['requests'][request_id]['proposal'], stopped['requests'][request_id]['planner']))
+        self.assertNotEqual(row['proposal_sha256'], stopped['requests'][request_id]['proposal_sha256'])
+        self.assertEqual(row['review']['proposal_sha256'], row['proposal_sha256'])
+        self.assertEqual([call['role'] for call in state['role_calls']], ['planner', 'reviewer'])
+
+    def test_carried_planner_receipt_resumes_under_the_admitted_generation(self):
+        """A captured planner return whose proposal was not yet recorded is replayed, not redispatched."""
+        from ssdlc_feedback import FeedbackStore
+        from ssdlc_tasks import atomic_json
+        from ssdlc_transitions import runtime_root
+        case = self.case
+        self.case = case = type(case)(); case.initialize(); self.addCleanup(case.doCleanups)
+        runner = case.runner
+        def costless(source, limits, prompt, effort):
+            call = runner(source, limits, prompt, effort)
+            def wrapped(metadata, invocation):
+                value = call(metadata, invocation)
+                value['usage'] = dict(metered_usd=None, cli_estimate_usd=None)
+                return value
+            return wrapped
+        case.runner = costless
+        import ssdlc_feedback
+        with patch.object(ssdlc_feedback.FeedbackStore, 'propose', side_effect=OSError('crash before proposal')):
+            with self.assertRaises(OSError):
+                case.run_flow()
+        feedback = FeedbackStore(case.case.ticket)
+        stopped = feedback.inspect()
+        (request_id,) = stopped['requests']
+        self.assertEqual(stopped['requests'][request_id]['status'], 'REQUESTED')
+        self.assertEqual([call['status'] for call in stopped['role_calls']], ['RETURNED'])
+        transition = self.admit()
+        self.assertEqual(feedback.inspect()['admitted_generations'][transition]['carried_requests'], [request_id])
+        root = runtime_root(case.case.ticket)
+        outer = json.loads((root / 'state.json').read_text())
+        outer.update(status='ESCALATED_TO_SUPERVISOR', current_step='feedback')
+        atomic_json(root / 'state.json', outer)
+        result = case.run_flow()
+        self.assertEqual(result['disposition'], 'APPLIED')
+        # The planner response was reused from its receipt; only the reviewer was launched.
+        self.assertEqual([name for name, _ in case.calls], ['feedback-planner', 'feedback-reviewer'])
+        state = feedback.inspect()
+        self.assertEqual(state['requests'][request_id]['occurrences'][-1]['carried_by'], transition)
+        self.assertEqual([call['role'] for call in state['role_calls']], ['planner', 'reviewer'])
+
     def test_admission_is_fenced_until_the_feedback_ledger_is_reconciled(self):
         import ssdlc_usage_admission as admission
         from ssdlc_reconciliation import resolve_execution

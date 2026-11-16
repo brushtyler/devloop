@@ -90,12 +90,23 @@ def _admission(proposal, recipe, projection):
                 parent_selector=proposal['parent_selector'], projection_sha256=digest(projection))
 
 
+CARRIED = ('carried_requests', 'carried_role_calls')
+
+
+def _core(entry):
+    return {k: v for k, v in entry.items() if k not in CARRIED}
+
+
 def finalize(ticket, proposal, recipe, projection):
     """Admit the new generation to the feedback ledger after its selector publish.
 
-    Open requests bound to the parent generation, still unconsulted, are carried:
-    their next identical submission rebinds them to this generation. Recording
-    caps, consumed role calls and amendment quotas stay unchanged.
+    Open requests bound to the parent generation, still REQUESTED or PROPOSED
+    without a review, are carried: their next identical submission rebinds
+    them to this generation. A planner call already RETURNED is carried with
+    its receipt unchanged: the entry lists its previous native binding and the
+    call is rebound to this generation, which holds the same invocation row.
+    The captured response is reused, never redispatched. Recording caps,
+    consumed role calls and amendment quotas stay unchanged.
     """
     if proposal.get('authorization_contract') != CONTRACT or 'feedback_binding' not in recipe['subject']:
         return
@@ -107,17 +118,30 @@ def finalize(ticket, proposal, recipe, projection):
         authority, state = store._read()
         prior = state.get('admitted_generations', {}).get(proposal['transition_id'])
         if prior is not None:
-            if {k: v for k, v in prior.items() if k != 'carried_requests'} != expected:
+            if _core(prior) != expected:
                 raise TaskError('Live-usage admission reconciliation changed')
             return
         if recipe['subject']['feedback_binding'] != dict(authority_sha256=digest(authority), state_sha256=digest(state)):
             raise TaskError('Feedback changed before live-usage admission reconciliation')
-        consulted = {call['request_id'] for call in state['role_calls']}
-        expected['carried_requests'] = sorted(
-            identity for identity, row in state['requests'].items()
-            if row['status'] == 'REQUESTED' and identity not in consulted
-            and not row.get('source_reconciliation_required', True)
-            and row['binding']['parent_selector'] == proposal['parent_selector'])
+        carried, calls, limits = [], {}, digest(recipe['envelope'])
+        for identity, row in state['requests'].items():
+            consulted = [call for call in state['role_calls'] if call['request_id'] == identity]
+            # Only a captured planner return is carried: its proposal has no
+            # review yet. An INTENT was refused at preparation.
+            if (row['status'] in ('REQUESTED', 'PROPOSED')
+                    and not row.get('source_reconciliation_required', True)
+                    and row['binding']['parent_selector'] == proposal['parent_selector']
+                    and (len(consulted) == 1 if row['status'] == 'PROPOSED' else len(consulted) <= 1)
+                    and all(call['role'] == 'planner' and call['status'] == 'RETURNED' and 'native' in call
+                            for call in consulted)):
+                carried.append(identity)
+                for call in consulted:
+                    # Counters are carried unchanged: the same native invocation
+                    # now belongs to the admitted generation. The receipt stays.
+                    calls[call['operation_id']] = copy.deepcopy(call['native'])
+                    call['native'] = dict(call['native'], limits_sha256=limits)
+        expected['carried_requests'] = sorted(carried)
+        expected['carried_role_calls'] = calls
         state.setdefault('admitted_generations', {})[proposal['transition_id']] = expected
         store._append('LIVE_USAGE_ADMISSION_APPLIED', state)
 
@@ -131,7 +155,7 @@ def ensure_reconciled(ticket, projection, proposal):
         return
     from ssdlc_feedback import FeedbackStore
     entry = FeedbackStore(ticket).inspect().get('admitted_generations', {}).get(proposal['transition_id'])
-    if entry is None or {k: v for k, v in entry.items() if k != 'carried_requests'} != _admission(proposal, recipe, projection):
+    if entry is None or _core(entry) != _admission(proposal, recipe, projection):
         raise TaskError('Live-usage admission feedback reconciliation pending; dispatch is fenced')
 
 
