@@ -114,8 +114,34 @@ above it, but the marker must stay the last line. A PR whose marker is missing s
 was opened, is put back into `agent:review`, and its issue loses `agent:working`.
 
 Open devloop PRs are capped by `max_open_prs`, including PRs waiting for merge or for a human,
-so unattended work cannot outrun review capacity. New issues start in order: `priority_labels`
-first, then by number. Issues with a `blocked_labels` label are skipped.
+so unattended work cannot outrun review capacity. Issues with a `blocked_labels` label are
+skipped.
+
+### Start order of ready issues
+
+New issues start in this order (#146):
+
+1. priority, highest first: `priority:high`, then `priority:normal` (the default, also without
+   any priority label), then `priority:low`. A label listed in `priority_labels` (`prerequisito`
+   in the distributed configuration) counts as `priority:high`;
+2. with the same priority, the oldest `agent:ready`: the time of the **latest** `labeled` event
+   of that label, the one behind the current admission. Removing the label and adding it again
+   sends the issue to the back of its priority;
+3. then the issue number.
+
+A priority label counts only if the latest `labeled` event of that label on the issue comes from
+a user in `trusted_users`, as for `agent:ready`. Only the labels the issue has now count: a
+priority label removed since is ignored, as is one added by anyone else, and the issue keeps the
+highest priority among the valid ones (`normal` when none is left). The same order applies with
+the [readiness check](#readiness-check-before-implementation). `devloop setup` creates the three
+priority labels.
+
+`devloop status` and `devloop tick --dry-run` list the ready issues in this order, each with its
+position, priority, time of `agent:ready` and who added it, for example
+`ready 1. #122 priority=high agent:ready=2026-11-16T09:12:00Z labelled by brushtyler: …`. The
+list covers every issue labelled `agent:ready`; the planned actions that follow it say which ones
+start on this tick (free PR slots, `blocked_labels`, `agent:needs-human` and an untrusted
+`agent:ready` still apply).
 
 ### Readiness check before implementation
 
@@ -609,10 +635,10 @@ needs a dedicated system user or a container.
 ## Usage
 
 ```bash
-python3 -m devloop setup            # create the agent:* labels and the review level labels (reviews:0 only when level 0 is on)
-python3 -m devloop status           # running action, devloop PRs (with merge state and conflicts), ready issues, planned actions
+python3 -m devloop setup            # create the agent:* labels, the priority:* labels and the review level labels (reviews:0 only when level 0 is on)
+python3 -m devloop status           # running action, devloop PRs (with merge state and conflicts), ready issues in start order with their priority, planned actions
 python3 -m devloop apps             # check the GitHub App of each actor
-python3 -m devloop tick --dry-run   # print the plan, change nothing
+python3 -m devloop tick --dry-run   # print the ready issues in start order and the plan, change nothing
 python3 -m devloop tick             # run one round
 python3 -m devloop run --interval 600
 python3 -m devloop cleanup          # remove worktrees left by failed steps

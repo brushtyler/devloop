@@ -543,9 +543,10 @@ def pr(number=100, issue=7, labels=('agent:review',), reviews=(), fixes=(), chec
                        failed_runs=['42'] if checks == 'fail' else [], merge_state=merge)
 
 
-def ready(number, labels=(), labeler='brushtyler'):
+def ready(number, labels=(), labeler='brushtyler', priority='normal', ready_at=None):
+    """A ready issue as the snapshot reads it: ``priority`` is the one its trusted labels give."""
     return {'number': number, 'title': f'issue {number}', 'labels': {'agent:ready', *labels},
-            'labeler': labeler}
+            'labeler': labeler, 'priority': priority, 'ready_at': ready_at}
 
 
 class PlanTests(unittest.TestCase):
@@ -554,7 +555,7 @@ class PlanTests(unittest.TestCase):
 
     def test_new_work_respects_wip_trust_blocks_and_priority(self):
         snap = Snapshot(prs=[], working_issues=[], ready_issues=[
-            ready(5), ready(3, labeler='stranger'), ready(9, ['prerequisito']),
+            ready(5), ready(3, labeler='stranger'), ready(9, ['prerequisito'], priority='high'),
             ready(2, ['bloccata']), ready(4, ['agent:needs-human'])])
         self.assertEqual(self.kinds(snap), [('implement', 9), ('implement', 5)])
         snap.prs = [pr(number=100, labels=['agent:ready-to-merge'], reviews=[norm(raw_review())])]

@@ -116,6 +116,13 @@ class GitHub:
                                 '--jq', f'.[] | {select} | '
                                         '{event, by: .actor.login, at: .created_at}')
 
+    def labeled_events(self, number):
+        """Every ``labeled`` event on issue or PR ``number``, oldest first, as ``{label, by,
+        at}``, including events of labels removed since."""
+        return self._json_lines('api', '--paginate', f'repos/{self.repo}/issues/{number}/events',
+                                '--jq', '.[] | select(.event == "labeled") | '
+                                        '{label: .label.name, by: .actor.login, at: .created_at}')
+
     def last_labeler(self, number, label):
         """Login of whoever most recently added ``label`` to issue ``number``."""
         logins = self.labelers(number, label)

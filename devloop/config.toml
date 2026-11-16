@@ -39,6 +39,9 @@ agent_stall_seconds = 900
 agent_stall_action = "warn"
 
 blocked_labels = ["bloccata"]
+# Ready issues start by priority (priority:high, priority:normal, priority:low), then by the
+# latest agent:ready, then by number (issue #146). These labels count as priority:high. Every
+# priority label counts only if a user in trusted_users added it.
 priority_labels = ["prerequisito"]
 
 # Changes under these paths are never pushed by devloop: a workflow or a local action pushed to
