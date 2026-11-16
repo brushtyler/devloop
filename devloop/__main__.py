@@ -78,7 +78,7 @@ def build(args):
                          stall=stall)
     gh = identities.github(DISPATCHER)
     dispatcher = Dispatcher(cfg, gh, ws, runner, log=log, identities=identities,
-                            activity=current, ledger=Ledger(gh))
+                            activity=current, ledger=Ledger(gh, state_dir=state))
     return cfg, state, dispatcher
 
 

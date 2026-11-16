@@ -13,8 +13,8 @@ from devloop.dispatcher import Dispatcher, Snapshot
 from devloop.github import GitHub, GitHubError, normalize_checks
 from devloop.ledger import Ledger
 from devloop.workspace import Workspace
-from test_devloop import (CFG, IMPL, REV, SHA1, SHA2, FakeGH, FakeRunner, FakeWS, implemented,
-                          pr, raw_review)
+from test_devloop import (CFG, IMPL, META, REV, SHA1, SHA2, FakeGH, FakeRunner, FakeWS,
+                          implemented, pr, raw_review)
 from test_devloop_preflight import PCFG, READY, NEEDS_HUMAN, IssueGH, checked, gap
 
 NULLS = dict.fromkeys(agents.TELEMETRY_FIELDS)
@@ -29,6 +29,13 @@ CLAUDE_ENVELOPE = {
 def ledger_records(comments, kind=None):
     found = [r for c in comments if (r := markdown.read_marker(c['body'], 'ledger'))]
     return [r for r in found if kind is None or r['type'] == kind]
+
+
+GREEN = normalize_checks(
+    [{'name': 'Unit Tests', 'status': 'completed', 'conclusion': 'success',
+      'details_url': 'https://github.com/o/r/actions/runs/43/job/8'}],
+    {'state': 'success', 'total_count': 1,
+     'statuses': [{'context': 'ext', 'state': 'success', 'target_url': 'https://ci.example'}]})
 
 
 class LedgerGH(FakeGH):
@@ -82,6 +89,10 @@ class LedgerGH(FakeGH):
                 for n in self.working] if label == 'agent:working' else []
 
     def check_details(self, sha):
+        """The checks of every head, consistent with ``ci``: an Actions run and a commit
+        status."""
+        if self.ci != 'fail':
+            return [dict(c) for c in GREEN]
         return normalize_checks(
             [{'name': 'Unit Tests', 'status': 'completed', 'conclusion': 'failure',
               'details_url': 'https://github.com/o/r/actions/runs/42/job/7'}],
@@ -337,6 +348,7 @@ class LedgerDispatcherTests(unittest.TestCase):
 
     def test_a_ci_round_is_an_event_with_its_checks(self):
         d = self.make(number=100)
+        self.gh.ci = 'fail'
         d._do_ci_failed(pr(checks='fail'))
         self.assertEqual(self.gh.records(100, 'turn'), [])
         (event,) = self.gh.records(100, 'event')
@@ -345,6 +357,67 @@ class LedgerDispatcherTests(unittest.TestCase):
         self.assertEqual(event['checks'], [
             {'name': 'Unit Tests', 'outcome': 'failure', 'run_id': 42},
             {'name': 'ext', 'outcome': 'error', 'run_id': None}])
+
+    def test_a_turn_left_open_is_flagged_whatever_labels_follow(self):
+        # The trace is in state_dir: a dispatcher started again, with labels that no longer
+        # point to the issue or the PR, still finds the turn.
+        with tempfile.TemporaryDirectory() as tmp:
+            cases = {
+                # The closing write fails, the implementation opens the PR anyway: the issue
+                # is no longer in agent:working, the turn is on the issue.
+                'implementation with its PR open': (7, lambda d: d._do_implement(7),
+                                                   implemented()),
+                # The review ends with needs_human: the PR is out of the scan of the labels.
+                'review escalated to needs_human': (
+                    100, lambda d: d._do_review(pr()),
+                    raw_review('needs_human', human='decisione di prodotto')),
+            }
+            for name, (number, step, output) in cases.items():
+                with self.subTest(name):
+                    state = Path(tmp) / name.replace(' ', '-')
+                    d = self.make(output, number=number)
+                    d.ledger = Ledger(self.gh, state_dir=state)
+                    self.gh.labels[100] = {'agent:review'}
+                    self.gh.fail_edits = True
+                    step(d)
+                    if number == 100:
+                        self.assertIn('agent:needs-human', self.gh.labels[100])
+                    else:
+                        self.assertEqual(self.gh.created[0]['head'], 'agent/issue-7')
+                    self.assertEqual(self.gh.records(number, 'turn')[0]['state'], 'open')
+                    self.gh.fail_edits = False
+                    restarted = Dispatcher(CFG, self.gh, self.ws, self.runner,
+                                           log=self.logs.append,
+                                           ledger=Ledger(self.gh, state_dir=state))
+                    # Nothing left for the labels to point to.
+                    empty = Snapshot(prs=[], ready_issues=[], working_issues=[])
+                    restarted._flag_incomplete(empty, dry_run=True)
+                    self.assertEqual(self.gh.records(number, 'turn')[0]['state'], 'open')
+                    self.assertEqual(restarted.ledger.pending(), [number])
+                    restarted._flag_incomplete(empty, dry_run=False)
+                    self.assertEqual(self.gh.records(number, 'turn')[0]['state'], 'incomplete')
+                    self.assertTrue(any(f'incomplete turn on #{number}' in m for m in self.logs))
+                    # Flagged once: the trace is spent.
+                    self.assertEqual(restarted.ledger.pending(), [])
+
+    def test_closed_turns_leave_no_trace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self.make(implemented())
+            d.ledger = Ledger(self.gh, state_dir=tmp)
+            d._do_implement(7)
+            self.assertEqual(self.gh.records(7, 'turn')[0]['state'], 'closed')
+            self.assertEqual(d.ledger.pending(), [])
+
+    def test_a_turn_does_not_start_if_its_trace_cannot_be_written(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            blocker = Path(tmp) / 'file'
+            blocker.write_text('')
+            d = self.make(raw_review(), number=100)
+            d.ledger = Ledger(self.gh, state_dir=blocker / 'state')  # not a directory
+            with self.assertRaises(GitHubError):
+                d._do_review(pr())
+            self.assertEqual(self.runner.calls, [])
+            self.assertEqual(self.gh.records(100, 'turn'), [])
 
     def test_a_sync_without_an_agent_is_an_event_not_a_turn(self):
         d = self.make(ws=TreeWS(conflicts=()), number=100)
@@ -362,6 +435,66 @@ class LedgerDispatcherTests(unittest.TestCase):
         found = ledger.collect(comments, lambda login: login == 'brushtyler')
         self.assertEqual(found, {'request': None, 'turns': [], 'verifications': [],
                                  'events': []})
+
+
+class SnapLedgerGH(LedgerGH):
+    """LedgerGH with the reads of a snapshot: PR #100 for issue 7 at SHA1, whose comments are
+    the thread; ``details`` are the checks of every head."""
+
+    def __init__(self):
+        super().__init__()
+        self.details = list(GREEN)
+
+    def open_prs(self):
+        return [{'number': 100, 'title': 't', 'body': markdown.publishable('b', 'pr', META),
+                 'labels': [{'name': name} for name in sorted(self.labels.get(100, ()))],
+                 'headRefName': 'agent/issue-7', 'headRefOid': SHA1,
+                 'author': {'login': 'brushtyler'}, 'isCrossRepository': False,
+                 'mergeable': 'MERGEABLE', 'mergeStateStatus': 'CLEAN'}]
+
+    def check_details(self, sha):
+        return [dict(c) for c in self.details]
+
+
+class GreenCILedgerTests(unittest.TestCase):
+    """The checks of a passing CI are recorded too, on the way to agent:ready-to-merge."""
+
+    def make(self):
+        self.gh = SnapLedgerGH()
+        self.gh.labels[100] = {'agent:review'}
+        return Dispatcher(CFG, self.gh, FakeWS(), FakeRunner(raw_review()),
+                          log=lambda m: None, ledger=Ledger(self.gh))
+
+    def ci_events(self):
+        return [r for r in self.gh.records(100, 'event') if r['event'] == 'ci_round']
+
+    def test_passing_checks_are_recorded_before_the_promotion_and_not_repeated(self):
+        d = self.make()
+        d.tick()
+        self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
+        (event,) = self.ci_events()
+        self.assertEqual((event['head'], event['state'], event['round']), (SHA1, 'pass', 1))
+        self.assertEqual(event['checks'], [
+            {'name': 'Unit Tests', 'outcome': 'success', 'run_id': 43},
+            {'name': 'ext', 'outcome': 'success', 'run_id': None}])
+        # The recorded approval replayed: the same checks read again are not recorded twice.
+        self.gh.labels[100] = {'agent:review'}
+        self.assertEqual([a.kind for a in d.tick()], ['apply_review'])
+        self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
+        self.assertEqual(len(self.ci_events()), 1)
+        # A new run on the same head is new evidence.
+        self.gh.labels[100] = {'agent:review'}
+        self.gh.details[0]['link'] = 'https://github.com/o/r/actions/runs/44/job/9'
+        self.gh.details[0]['run_id'] = 44
+        d.tick()
+        self.assertEqual([e['checks'][0]['run_id'] for e in self.ci_events()], [43, 44])
+
+    def test_pending_checks_are_not_recorded_and_do_not_promote(self):
+        d = self.make()
+        self.gh.details = [dict(GREEN[0], bucket='pending', conclusion='in_progress')]
+        d._do_review(d.snapshot().prs[0])
+        self.assertEqual(self.ci_events(), [])
+        self.assertEqual(self.gh.labels[100], {'agent:review'})
 
 
 def _review():

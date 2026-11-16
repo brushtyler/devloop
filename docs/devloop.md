@@ -556,7 +556,7 @@ readiness check, on the PR for review, fix, sync and CI. They publish no receipt
 | `request` | The issue goes from `agent:ready` to `agent:working` | SHA-256 of title and body, author and time of the trusted `labeled` event of `agent:ready`, ids of the trusted comments given to the implementer, time of the takeover. It is a snapshot **at the takeover**, not at the time of the label |
 | `turn` | Every invocation of an agent CLI, retries, fallback models and failures included: implement, fix, sync with an agent, review, readiness check | Kind, agent, GitHub identity (none: the operator's `gh` login), configured model and effort (for a fallback, the fallback model and the model it replaces), real model, start, end, duration, outcome (`success`, `failure`, `unavailable`), the error if any, telemetry |
 | `verification` | Every test command the dispatcher runs after a writing turn | Command, outcome, duration, the tree hash before and after the test, and the commit |
-| `event` | A CI round (`ci_round`), a sync without an agent (`sync`) | For a CI round, the head, the round and each check with its outcome and the id of its GitHub Actions run (none for a commit status or a check outside Actions); for a sync, the merged base commit and the old and new heads |
+| `event` | The CI of a head (`ci_round`): a failed CI round, or the passing checks read just before the PR is promoted to `agent:ready-to-merge` (also at level 0); a sync without an agent (`sync`) | For the CI, the head, the state (`fail`, `pass`, or `none` without checks), the review round (none at level 0) and each check with its outcome and the id of its GitHub Actions run (none for a commit status or a check outside Actions); the same checks read again for the same head and round are not recorded twice, a new run is. For a sync, the merged base commit and the old and new heads |
 
 **Telemetry** is what the CLI attests, not authenticated:
 
@@ -574,8 +574,13 @@ fails the turn does not start and the step escalates like any `gh` failure. When
 record is edited with end, duration, outcome and telemetry. A turn left without that closing
 write, because the dispatcher crashed or the edit failed, stays without end, outcome and
 telemetry: the next tick logs `incomplete turn on #<n>` and marks the record `incomplete` (only
-logs it with `--dry-run`). It looks at open devloop PRs not in `agent:needs-human`, issues in
-`agent:working` and issues waiting for a readiness check.
+logs it with `--dry-run`). Where to look does not depend on labels, which change once a step
+ends: before writing a turn's record the dispatcher notes the issue or PR in
+`<state_dir>/ledger-open-turns.json`, and removes it when the turn is closed. If that note cannot
+be written, the turn does not start either. The next tick checks every issue or PR still noted,
+for example an issue whose PR is already open or a PR escalated to `agent:needs-human`, and then
+forgets it. In case the note is lost, it also looks at open devloop PRs not in
+`agent:needs-human`, issues in `agent:working` and issues waiting for a readiness check.
 
 **Tests and commits.** A passing test is bound to the commit created right after it only if the
 tree is the same at three points: before the test, after the test and in the commit. The tree is

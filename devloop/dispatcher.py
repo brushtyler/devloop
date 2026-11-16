@@ -58,7 +58,8 @@ from pathlib import Path
 
 from .agents import AgentError, ModelsUnavailable, ModelUnavailable
 from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, PR_COMMENT, REVIEW
-from .github import GitHubError, merge_state
+from .github import GitHubError, merge_state, summarize_checks
+from .ledger import entries as ledger_entries
 from .ledger import open_turns
 from .markdown import (RESUME, carries_record, dispatcher_header, publishable, read_marker,
                        render_escalation, render_fix, render_native_review, render_preflight, render_review)
@@ -142,6 +143,9 @@ class PullRequest:
     closures: list = field(default_factory=list)
     commands: list = field(default_factory=list)
     finding_problems: list = field(default_factory=list)
+    # CI events the dispatcher's ledger already recorded (#133), as ``(head, state, round,
+    # checks)``: reading the same checks again for the same head and round records nothing new.
+    ci_recorded: list = field(default_factory=list)
 
 
 @dataclass
@@ -649,6 +653,11 @@ class Dispatcher:
                 pr.commands = self._finding_commands(pr, comments, state)
                 policy = self._marker_entries(pr, comments, 'policy')
                 pr.policy = [record for _, record in policy]
+                if self.ledger is not None:
+                    pr.ci_recorded = [
+                        (r.get('head'), r.get('state'), r.get('round'), r.get('checks'))
+                        for _, r in ledger_entries(comments, self._signed)
+                        if r['type'] == 'event' and r.get('event') == 'ci_round']
                 last_review = max((position for position, _ in entries), default=-1)
                 if policy and policy[-1][0] > last_review:
                     record = policy[-1][1]
@@ -974,13 +983,50 @@ class Dispatcher:
         if self.ledger is not None:
             self.ledger.event(number, event, **fields)
 
+    def _read_ci(self, head):
+        """``(state, checks)`` of ``head``'s CI: with a ledger, from the same read that gives
+        every check to record (``check_details``); without one, ``checks`` is None."""
+        if self.ledger is None:
+            return self.gh.checks(head)[0], None
+        details = self.gh.check_details(head)
+        return summarize_checks(details)[0], details
+
+    def _record_ci(self, pr, head, state, details, round_no):
+        """Record the CI of ``head`` as a ``ci_round`` event (#133), failed or passed: each
+        check with its outcome and, for a GitHub Actions run, its id (a commit status has none).
+        The same checks read again for the same head and round are not recorded twice."""
+        if self.ledger is None or details is None:
+            return
+        checks = [{'name': c['name'], 'outcome': c.get('conclusion') or c['bucket'],
+                   'run_id': c.get('run_id')} for c in details]
+        key = (head, state, round_no, checks)
+        if key in pr.ci_recorded:
+            return
+        # A level-0 promotion has no review round.
+        extra = {'round': round_no} if round_no is not None else {}
+        self.ledger.event(pr.number, 'ci_round', head=head, state=state, **extra,
+                          checks=checks)
+        pr.ci_recorded.append(key)
+
     def _flag_incomplete(self, snap, dry_run):
         """Report the turns a previous tick opened and never closed, and mark them incomplete:
-        no turn runs while a tick starts, since one dispatcher runs at a time."""
+        no turn runs while a tick starts, since one dispatcher runs at a time.
+
+        It looks first where the ledger's trace (``Ledger.pending``) says a turn was opened and
+        not closed, whatever labels the issue or PR has now: an issue whose PR is open or that
+        was escalated, a PR in ``agent:needs-human``. Then, in case that trace was lost, open
+        devloop PRs not in ``agent:needs-human``, issues in ``agent:working`` and issues
+        waiting for a readiness check. A number leaves the trace once checked."""
         if self.ledger is None:
             return
         lb = self.cfg.labels
-        numbers = [pr.number for pr in snap.prs if lb.needs_human not in pr.labels]
+        try:
+            traced = self.ledger.pending()
+        except GitHubError as exc:
+            self.log(f'  trace of the open turns not readable: {exc}')
+            traced = []
+        numbers = list(traced)
+        numbers += [pr.number for pr in snap.prs if lb.needs_human not in pr.labels]
         numbers += list(snap.working_issues)
         numbers += [i['number'] for i in snap.ready_issues if 'preflight' in i]
         for number in dict.fromkeys(numbers):
@@ -991,6 +1037,8 @@ class Dispatcher:
                              f'{record["agent"]}, started {record["started_at"]}, never closed')
                     if not dry_run:
                         self.ledger.flag_incomplete(number, comment_id, record)
+                if number in traced and not dry_run:
+                    self.ledger.settle(number)
             except GitHubError as exc:
                 self.log(f'  turn records of #{number} not checked: {exc}')
 
@@ -1101,10 +1149,11 @@ class Dispatcher:
         if head != review['head_sha']:
             self.log(f'  not promoted: head moved to {head[:12]} after the review')
             return False
-        state = self.gh.checks(head)[0]
+        state, details = self._read_ci(head)
         if state not in ('pass', 'none'):
             self.log(f'  not promoted: CI is {state}')
             return False
+        self._record_ci(pr, head, state, details, review['round'])
         return True
 
     # Review policy -----------------------------------------------------------
@@ -1254,10 +1303,11 @@ class Dispatcher:
         if head != receipt['head']:
             self.log(f'  not promoted: head moved to {head[:12]}')
             return
-        overall = self.gh.checks(head)[0]
+        overall, details = self._read_ci(head)
         if overall in ('pending', 'fail'):
             self.log(f'  not promoted: CI is {overall}')
             return
+        self._record_ci(pr, head, overall, details, None)
         states = check_states(self.cfg.review_policy.zero_checks, self.gh.check_runs(head))
         outcome = check_outcome(states)
         listed = '\n'.join(f'- `{s["name"]}` (app {s["app_id"]}): `{s["state"]}`' for s in states)
@@ -1520,12 +1570,9 @@ class Dispatcher:
                                    max_rounds=self.cfg.max_review_rounds, head_sha=pr.head_sha)
         review['receipt'] = receipt
         if self.ledger is not None:
-            # The CI round as an event (#133): each check with its outcome and, for a GitHub
-            # Actions run, its id; a commit status has none.
-            checks = [{'name': c['name'], 'outcome': c.get('conclusion') or c['bucket'],
-                       'run_id': c.get('run_id')} for c in self.gh.check_details(pr.head_sha)]
-            self.ledger.event(pr.number, 'ci_round', head=pr.head_sha, round=review['round'],
-                              checks=checks)
+            details = self.gh.check_details(pr.head_sha)
+            self._record_ci(pr, pr.head_sha, summarize_checks(details)[0], details,
+                            review['round'])
         self.gh.comment(pr.number, render_review(review, dispatcher_header()))
         self._apply_round(pr, [review], announce=True, reviews=pr.reviews + [review])
 

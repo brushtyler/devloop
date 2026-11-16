@@ -10,7 +10,9 @@ on the PR (review, fix, sync, CI):
   time of the label;
 - ``turn``: one invocation of an agent CLI, retries and failures included. It is written before
   the CLI starts (if that write fails the CLI does not start) and edited when it ends; a turn
-  never closed stays ``open`` until the next tick marks it ``incomplete``;
+  never closed stays ``open`` until the next tick marks it ``incomplete``. Where turns may be
+  left open is also kept in ``state_dir`` (``PENDING``), whatever labels the issue or PR has
+  later, so that the next tick finds them;
 - ``verification``: a test command the dispatcher ran, bound to the commit created right after
   only when the tree before the test, after it and in the commit is the same;
 - ``event``: what happens without a CLI, such as a CI round or a sync without conflicts.
@@ -22,15 +24,18 @@ missing.
 
 import hashlib
 import json
+import os
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .agents import TELEMETRY_FIELDS
 from .github import GitHubError
 from .markdown import dispatcher_header, publishable, read_marker
 
 NOT_REPORTED = 'non riportato'
+PENDING = 'ledger-open-turns.json'  # in state_dir: issues and PRs with turns not closed
 TURN_KINDS = ('implement', 'fix', 'sync', 'review', 'preflight')
 _COMMENT_URL = re.compile(r'#issuecomment-(\d+)$')
 
@@ -63,14 +68,73 @@ class Entry:
     started: float = field(default=None, repr=False)  # monotonic time a turn started
 
 
+class LedgerError(GitHubError):
+    """The local trace of the turns left open cannot be read or written."""
+
+
 class Ledger:
     """Writes ledger records with ``gh``, the dispatcher's client (``comment`` returns the new
-    comment's id, ``edit_comment`` replaces a body)."""
+    comment's id, ``edit_comment`` replaces a body).
 
-    def __init__(self, gh, clock=time.time, monotonic=time.monotonic):
+    ``state_dir`` keeps, in ``PENDING``, the issues and PRs where a turn was opened and not
+    closed yet, with how many: a number is counted before the turn's record is written and
+    uncounted when the turn is closed; a tick that has marked its turns incomplete forgets it.
+    The trace does not depend on labels, which change once a step ends (``agent:working``
+    removed, ``agent:needs-human`` added). Without ``state_dir`` it lasts as long as the
+    process."""
+
+    def __init__(self, gh, clock=time.time, monotonic=time.monotonic, state_dir=None):
         self.gh = gh
         self._clock = clock
         self._monotonic = monotonic
+        self._path = Path(state_dir) / PENDING if state_dir is not None else None
+        self._memory = {}
+
+    # Turns left open -------------------------------------------------------
+    def _load(self):
+        if self._path is None:
+            return dict(self._memory)
+        try:
+            data = json.loads(self._path.read_text(encoding='utf-8'))
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as exc:
+            raise LedgerError(f'{self._path}: not readable: {exc}') from exc
+        if not isinstance(data, dict):
+            raise LedgerError(f'{self._path}: not a JSON object')
+        return {str(k): v for k, v in data.items()
+                if isinstance(v, int) and not isinstance(v, bool) and v > 0}
+
+    def _store(self, data):
+        if self._path is None:
+            self._memory = dict(data)
+            return
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._path.with_name(f'.{self._path.name}.{os.getpid()}.tmp')
+            tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+            os.replace(tmp, self._path)
+        except OSError as exc:
+            raise LedgerError(f'{self._path}: not written: {exc}') from exc
+
+    def _count(self, number, delta):
+        data = self._load()
+        left = data.get(str(number), 0) + delta
+        if left > 0:
+            data[str(number)] = left
+        else:
+            data.pop(str(number), None)
+        self._store(data)
+
+    def pending(self):
+        """The issues and PRs where a turn may have been left open."""
+        return [int(k) for k in self._load()]
+
+    def settle(self, number):
+        """Forget ``number``: a tick found no turn left open there, or marked them incomplete."""
+        data = self._load()
+        if data.pop(str(number), None) is not None:
+            self._store(data)
 
     def _now(self):
         return timestamp(self._clock)
@@ -99,7 +163,10 @@ class Ledger:
     def open_turn(self, number, *, kind, agent, identity, mode, model, effort, fallback_for,
                   label):
         """Write the record of a turn about to start; raises ``GitHubError`` if it cannot, and
-        then the turn must not start."""
+        then the turn must not start. ``number`` is traced first (``PENDING``), so that a crash
+        right after the record is written still leaves the trace; if the trace cannot be
+        written, ``LedgerError`` (a ``GitHubError``) and the turn does not start either."""
+        self._count(number, +1)
         entry = self._post(number, {
             'type': 'turn', 'state': 'open', 'kind': kind, 'agent': agent, 'identity': identity,
             'mode': mode, 'model': model, 'effort': effort, 'fallback_for': fallback_for or None,
@@ -119,6 +186,8 @@ class Ledger:
                    outcome=outcome, error=(str(error)[:300] if error else None),
                    telemetry={k: fields.get(k) for k in TELEMETRY_FIELDS},
                    model_real=list(models) if models else None)
+        # Only a closed turn leaves the trace: a failed edit above keeps it for the next tick.
+        self._count(entry.number, -1)
 
     def verification(self, number, *, kind, attempt, command, passed, duration_ms, tree_before,
                      tree_after):
