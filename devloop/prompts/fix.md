@@ -29,11 +29,25 @@ Return only the structured result:
 - `responses`: one entry per open finding, with `finding_id` (its identifier as listed below,
   for example `2/codex/R2-1`), `action` (`fixed`, `disputed`
   or `not_applicable`) and a short `note` in $language.
+- `acceptance_map`: the full coverage map after your changes, which replaces the current one
+  below. One entry per acceptance criterion listed below, in the same order, with `criterion`
+  (its text), `tests` (the `file` and `name` of each test that verifies it), `status` (`covered`
+  or `not_covered`) and `reason` (why it is not covered, in $language; empty when it is). A
+  `not_covered` criterion without a reason always blocks the review. An empty list (`[]`) when
+  the issue has no recognisable acceptance criteria.
 - `blocked_reason`: empty unless `status` is `blocked`.
 
 ## Open findings
 
 $findings
+
+## Acceptance criteria
+
+$acceptance_criteria
+
+Current acceptance map of the pull request:
+
+$acceptance_map
 
 ## Issue #$issue_number: $issue_title
 

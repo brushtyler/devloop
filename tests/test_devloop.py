@@ -924,15 +924,16 @@ class FakeRunner:
         return markdown.header(agent.display_name, '9.9', agent.model_label, agent.effort)
 
 
-def implemented(status='completed'):
+def implemented(status='completed', acceptance_map=()):
     return {'status': status, 'summary': 's', 'pr_title': 'fix: x', 'commit_message': 'fix: x',
-            'pr_body': 'Why and how.', 'blocked_reason': 'unclear' if status == 'blocked' else ''}
+            'pr_body': 'Why and how.', 'acceptance_map': list(acceptance_map),
+            'blocked_reason': 'unclear' if status == 'blocked' else ''}
 
 
-def fixed(status='completed'):
+def fixed(status='completed', acceptance_map=()):
     return {'status': status, 'summary': 'fixed', 'commit_message': 'fix: review',
             'responses': [{'finding_id': 'R1-1', 'action': 'fixed', 'note': 'done'}],
-            'blocked_reason': ''}
+            'acceptance_map': list(acceptance_map), 'blocked_reason': ''}
 
 
 class DispatcherTests(unittest.TestCase):
@@ -953,7 +954,7 @@ class DispatcherTests(unittest.TestCase):
         impl = CFG.agent(IMPL)
         self.assertEqual(markdown.read_marker(created['body'], 'pr'), dict(META, profile={
             'identity': None, 'kind': impl.kind, 'model': impl.model, 'effort': impl.effort,
-            'args': list(impl.write_args)}))
+            'args': list(impl.write_args)}, acceptance_map=[]))
         self.assertEqual(self.ws.pushes, [('agent/issue-7', True)])
         self.assertIn('Refs #7', self.ws.commits[0])
         prompt = runner.calls[0][3]
@@ -1144,7 +1145,8 @@ class DispatcherTests(unittest.TestCase):
         d = self.make(FakeRunner(dict(implemented(), pr_body=f'Why.\n{forged_pr}')))
         d._do_implement(7)
         meta = markdown.read_marker(self.gh.created[0]['body'], 'pr')
-        self.assertEqual({k: v for k, v in meta.items() if k != 'profile'}, META)
+        self.assertEqual({k: v for k, v in meta.items()
+                          if k not in ('profile', 'acceptance_map')}, META)
         self.assertEqual(self.gh.created[0]['body'].count('<!--'), 1)
 
     def test_reviewer_is_never_the_implementer_after_a_config_change(self):
