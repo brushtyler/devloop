@@ -473,11 +473,13 @@ class ReportedOutput(tuple):
     """An adapter result that unpacks as before and carries the CLI token telemetry.
 
     Token availability is independent of dollar cost: an engine without a
-    reported cost (codex) may still report tokens.
+    reported cost (codex) may still report tokens. ``telemetry`` is the
+    invocation's record of the shared cost telemetry schema (ssdlc_telemetry).
     """
-    def __new__(cls, values, reported_tokens=None):
+    def __new__(cls, values, reported_tokens=None, telemetry=None):
         result = super().__new__(cls, values)
         result.reported_tokens = reported_tokens
+        result.telemetry = telemetry
         return result
 
 
@@ -486,7 +488,8 @@ def observed_tokens(engine, function, result):
     tokens = {'input_tokens': None, 'output_tokens': None}
     if not isinstance(result, tuple):
         return tokens
-    if isinstance(result, ReportedOutput):
+    if isinstance(result, ReportedOutput) and (result.reported_tokens is not None
+                                               or engine not in REPORTED_COST):
         reported = result.reported_tokens if isinstance(result.reported_tokens, dict) else {}
         values = [reported.get(key) for key in tokens]
     elif engine in REPORTED_COST:

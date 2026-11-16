@@ -605,14 +605,20 @@ class GateEvaluator:
                             kind='initial' if ordinal == 1 else 'correction', prompt_sha256=_digest(canon(prompt))))
                 started = self.now()
                 try:
-                    text, cost, tin, tout, trace = self.invoke(request, prompt['system'], prompt['user'])
+                    result = self.invoke(request, prompt['system'], prompt['user'])
+                    text, cost, tin, tout, trace = result
                 except Exception as exc:
                     self._ledger(ordinal, 'interrupted')
                     self._finish('interrupted', diagnostics=[{'code': 'engine_error', 'message': str(exc)}])
                     raise GateTerminalError('interrupted', self.identity, str(exc)) from exc
                 self._write(f'response-{ordinal}.md', text)
-                self._write(f'invocation-{ordinal}.json', dict(cost_usd=cost, tokens_in=tin, tokens_out=tout,
-                            trace_user=trace, duration_sec=self.now() - started))
+                # The shared cost telemetry is persisted with the invocation, so a resumed
+                # evaluation records the same invocation, never a second one.
+                invocation = dict(cost_usd=cost, tokens_in=tin, tokens_out=tout,
+                                  trace_user=trace, duration_sec=self.now() - started)
+                if getattr(result, 'telemetry', None) is not None:
+                    invocation['telemetry'] = result.telemetry
+                self._write(f'invocation-{ordinal}.json', invocation)
             text = response_path.read_text()
             telemetry_path = self._path(f'invocation-{ordinal}.json')
             telemetry = self._read(telemetry_path.name) if telemetry_path.exists() else {}
