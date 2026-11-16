@@ -15,7 +15,7 @@ from unittest import mock
 from devloop import watch
 from devloop.__main__ import main
 from devloop.config import load_config
-from devloop.github import GitHub, GitHubError
+from devloop.github import GitHub, GitHubError, GitHubNotFound
 from devloop.markdown import marker
 
 OPERATOR = 'brushtyler'
@@ -37,14 +37,23 @@ class FakeGitHub:
 
     def __init__(self):
         self.prs, self.issues, self.ci, self.reviews = {}, {}, {}, {}
-        self.events, self.states, self.comments = {}, {}, []
+        self.events, self.states, self.comments, self.authors = {}, {}, [], {}
         self.failing = False
         self.calls = []
+        self.on_call = None  # run with the name of each read, e.g. to move the clock
 
     def _call(self, name):
         self.calls.append(name)
+        if self.on_call:
+            self.on_call(name)
         if self.failing:
             raise GitHubError('gh api: HTTP 502 at /home/operator/secret-path token=ghs_x')
+
+    def _state(self, number):
+        state = self.states[number]
+        if isinstance(state, Exception):
+            raise state
+        return state
 
     def open_prs(self):
         self._call('open_prs')
@@ -72,11 +81,18 @@ class FakeGitHub:
 
     def pr_state(self, number):
         self._call('pr_state')
-        return self.states[number]
+        return self._state(number)
 
     def issue_state(self, number):
         self._call('issue_state')
-        return self.states[number]
+        return self._state(number)
+
+    def issue_author(self, number):
+        self._call('issue_author')
+        if number not in self.authors:
+            raise GitHubNotFound('gh api repos/o/r/issues: Not Found (HTTP 404)')
+        login, is_pr = self.authors[number]
+        return {'login': login, 'pull_request': is_pr}
 
     # Helpers for the tests
     def add_pr(self, number, author=CLAUDE, labels=('agent:review',), head=HEAD1, title=None):
@@ -195,6 +211,61 @@ class UntilChangeTest(unittest.TestCase):
         self.assertEqual(h.out, [])
         self.assertFalse(h.path.exists())
 
+    def test_a_round_that_ends_after_the_timeout_is_dropped(self):
+        h = Harness(self)
+        h.gh.add_pr(10)
+        h.run(timeout=1)
+        before = h.path.read_text()
+        h.out.clear()
+        h.gh.set_labels(10, 'agent:changes')
+        clock = Clock()
+
+        def slow(name):
+            if name == 'open_prs':
+                clock.t += 15  # gh answers after the timeout
+
+        h.gh.on_call = slow
+        self.assertEqual(h.watcher(clock, timeout=10).run(), watch.NOTHING_NEW)
+        self.assertEqual(clock.sleeps, [])
+        self.assertEqual(h.out, [])
+        self.assertEqual(h.path.read_text(), before)  # nothing saved: the change is not lost
+        h.gh.on_call = None
+        self.assertEqual(h.run()[0], 0)
+        self.assertEqual(h.lines(), ['PR #10 labels +agent:changes -agent:review'])
+
+    def test_a_failed_read_that_ends_after_the_timeout_exits_3(self):
+        h = Harness(self)
+        h.gh.add_pr(10)
+        clock = Clock()
+
+        def slow_failure(name):
+            clock.t += 15
+            raise GitHubError('gh: timed out')
+
+        h.gh.on_call = slow_failure
+        self.assertEqual(h.watcher(clock, timeout=10).run(), 3)
+        self.assertEqual((clock.t, h.out, h.err), (15, [], []))
+        self.assertFalse(h.path.exists())
+
+    def test_the_watcher_gives_gh_calls_the_time_left(self):
+        clock = Clock()
+        timeouts = []
+
+        def run(args, **kwargs):
+            timeouts.append(kwargs['timeout'])
+            clock.t += 4
+            out = '[]' if args[1] in ('pr', 'issue') else ''
+            return SimpleNamespace(returncode=0, stdout=out, stderr='')
+
+        h = Harness(self, gh=GitHub('o/r', run=run))
+        watcher = h.watcher(clock, timeout=10)
+        h.gh.time_left = watcher.time_left
+        self.assertEqual(watcher.run(), 3)
+        # pr list at 0, issue list at 4, comments at 8: none outlasts the timeout, and the
+        # baseline that ended after it is dropped.
+        self.assertEqual(timeouts, [10, 6, 2])
+        self.assertFalse(h.path.exists())
+
     def test_changes_made_while_no_watcher_ran_are_reported_at_once(self):
         h = Harness(self)
         h.gh.add_pr(10)
@@ -245,6 +316,54 @@ class ChangesTest(unittest.TestCase):
         gh.states[5] = {'state': 'CLOSED', 'stateReason': 'COMPLETED'}
         self.assertEqual(self.news(), ['PR #10 merged: PR 10',
                                        'issue #5 closed (completed): issue 5'])
+
+    def test_a_failed_closure_read_keeps_the_state_and_is_asked_again(self):
+        gh = self.h.gh
+        del gh.prs[10]
+        gh.states[10] = GitHubError('gh pr view 10: HTTP 502')
+        self.assertEqual(self.news(), [])
+        self.assertEqual(self.h.err[-1], 'devloop watch: round failed (GitHubError)')
+        self.assertIn('10', json.loads(self.h.path.read_text())['prs'])
+        gh.states[10] = {'state': 'MERGED'}
+        self.assertEqual(self.news(), ['PR #10 merged: PR 10'])
+
+    def test_only_an_explicit_not_found_reports_an_object_gone(self):
+        gh = self.h.gh
+        del gh.issues[5]
+        gh.states[5] = GitHubNotFound('gh issue view 5: GraphQL: Could not resolve to an issue')
+        self.assertEqual(self.news(), ['issue #5 no longer open: issue 5'])
+        self.assertEqual(self.news(), [])
+
+    def test_a_pr_opened_and_reviewed_between_two_rounds_reports_its_reviews(self):
+        gh = self.h.gh
+        gh.add_pr(11, author=OPERATOR, labels=(), title='Docs')
+        gh.reviews[11] = [{'id': 7, 'login': OPERATOR, 'state': 'APPROVED'}]
+        self.assertEqual(self.news(), ['new PR #11 [] Docs',
+                                       'PR #11 review by brushtyler: APPROVED @aaaaaaa'])
+        self.assertEqual(self.news(), [])
+
+    def test_comments_on_objects_closed_before_the_baseline(self):
+        gh = self.h.gh
+        gh.authors[40] = (OPERATOR, False)  # a trusted issue, closed before the baseline
+        gh.authors[41] = (STRANGER, False)  # an external issue, never admitted
+        gh.authors[42] = (STRANGER, False)  # an external issue admitted by the operator
+        gh.authors[43] = (CODEX, True)  # a devloop PR
+        gh.events[42] = [{'label': 'agent:ready', 'by': OPERATOR, 'at': '2026-11-16T09:00:00Z'}]
+        gh.comment(801, 40, OPERATOR, 'reopening later')
+        gh.comment(802, 41, OPERATOR, 'thanks')
+        gh.comment(803, 42, CLAUDE, 'done')
+        gh.comment(804, 43, OPERATOR, 'why closed?')
+        gh.comment(805, 44, OPERATOR, 'deleted since')  # GitHub has no #44 any more
+        gh.comment(806, 40, STRANGER, SECRET)
+        self.assertEqual(self.news(), ['issue #40 operator comment by brushtyler: reopening later',
+                                       'issue #42 comment by dl-claude[bot]: done',
+                                       'PR #43 operator comment by brushtyler: why closed?'])
+        # Each object is read once, then remembered.
+        gh.comment(807, 40, OPERATOR, 'again')
+        gh.comment(808, 41, OPERATOR, 'again')
+        self.assertEqual(self.news(), ['issue #40 operator comment by brushtyler: again'])
+        self.assertEqual(gh.calls.count('issue_author'), 5)
+        self.assertNotIn(SECRET, self.h.path.read_text())
 
     def test_an_issue_beyond_the_listing_limit_is_not_reported_closed(self):
         gh = self.h.gh
@@ -353,6 +472,43 @@ class UntrustedTest(unittest.TestCase):
         self.assertEqual(h.lines(), ['issue #30 closed (completed)'])
         self.assertNotIn(SECRET, '\n'.join(h.out) + h.path.read_text())
 
+    def test_an_issue_admitted_before_the_baseline_and_already_working_is_admitted(self):
+        h = Harness(self)
+        gh = h.gh
+        gh.add_issue(30, author=STRANGER, title=SECRET, labels=('agent:working',))
+        gh.events[30] = [{'label': 'agent:ready', 'by': OPERATOR, 'at': '2026-11-16T09:00:00Z'},
+                         {'label': 'agent:working', 'by': DISPATCH,
+                          'at': '2026-11-16T09:01:00Z'}]
+        h.run(timeout=1)
+        h.out.clear()
+        gh.comment(901, 30, OPERATOR, 'please also cover X')
+        gh.set_labels(30, 'agent:review')
+        self.assertEqual(h.run(timeout=1)[0], 0)
+        self.assertEqual(h.lines(), ['issue #30 labels +agent:review -agent:working',
+                                     'issue #30 operator comment by brushtyler: please also '
+                                     'cover X'])
+        self.assertNotIn(SECRET, '\n'.join(h.out) + h.path.read_text())
+
+    def test_a_later_agent_ready_by_someone_else_ends_the_admission(self):
+        h = Harness(self)
+        gh = h.gh
+        gh.add_issue(30, author=STRANGER, labels=('agent:ready',))
+        gh.events[30] = [{'label': 'agent:ready', 'by': OPERATOR, 'at': '2026-11-16T09:00:00Z'}]
+        h.run(timeout=1)
+        gh.set_labels(30, 'agent:working')
+        self.assertEqual(h.run(timeout=1)[0], 0)
+        h.out.clear()
+        # The supervisor's app adds agent:ready again: the latest labeled event decides.
+        gh.set_labels(30, 'agent:ready')
+        gh.events[30].append({'label': 'agent:ready', 'by': CLAUDE,
+                              'at': '2026-11-16T10:30:00Z'})
+        self.assertEqual(h.run(timeout=1)[0], 3)
+        gh.comment(902, 30, OPERATOR, 'hidden now')
+        gh.set_labels(30, 'agent:ready', 'bug')
+        self.assertEqual(h.run(timeout=1)[0], 3)
+        self.assertEqual(h.out, [])
+        self.assertFalse(json.loads(h.path.read_text())['issues']['30']['admitted'])
+
     def test_admission_events_are_read_only_when_the_labels_change(self):
         h = Harness(self)
         gh = h.gh
@@ -381,7 +537,7 @@ class StateTest(unittest.TestCase):
         self.assertEqual(saved['prs']['10']['labels'], ['agent:changes'])
 
     def test_a_corrupt_state_file_gets_a_new_baseline(self):
-        for content in ('{not json', '[]', '{"version": 1, "prs": []}', '{"version": 99}'):
+        for content in ('{not json', '[]', '{"version": 2, "prs": []}', '{"version": 99}'):
             with self.subTest(content=content):
                 h = Harness(self)
                 h.gh.add_pr(10)
@@ -390,6 +546,43 @@ class StateTest(unittest.TestCase):
                 self.assertEqual(h.run(timeout=1)[0], 3)
                 self.assertEqual(h.lines(), ['watch baseline: 1 open PRs, 0 open issues'])
                 self.assertIn('state file is unreadable', h.err[0])
+                self.assertTrue(watch.valid_state(json.loads(h.path.read_text())))
+
+    def test_a_state_corrupt_inside_gets_a_new_baseline(self):
+        def corrupt(state, where, value):
+            *path, last = where
+            for key in path:
+                state = state[key]
+            state[last] = value
+
+        good = Harness(self)
+        good.gh.add_pr(10)
+        good.gh.add_issue(5)
+        good.gh.add_issue(6, author=STRANGER)
+        good.run(timeout=1)
+        valid = json.loads(good.path.read_text())
+        self.assertTrue(watch.valid_state(valid))
+        for where, value in ((('prs', '10', 'labels'), [{}]),
+                             (('prs', '10', 'reviews'), [[1]]),
+                             (('prs', '10', 'head'), None),
+                             (('issues', '5', 'title'), 7),
+                             (('issues', '6', 'admitted'), 'yes'),
+                             (('issues', '6', 'by'), ['x']),
+                             (('issues', 'x'), {'trusted': True, 'labels': [], 'title': ''}),
+                             (('closed', '3'), 'wiki'),
+                             (('comments', 'seen'), ['1']),
+                             (('comments', 'floor'), True),
+                             (('comments', 'since'), 'yesterday')):
+            with self.subTest(where=where):
+                state = json.loads(json.dumps(valid))
+                corrupt(state, where, value)
+                self.assertFalse(watch.valid_state(state))
+                h = Harness(self)
+                h.gh.add_pr(10)
+                h.path.parent.mkdir(parents=True)
+                h.path.write_text(json.dumps(state))
+                self.assertEqual(h.run(timeout=1)[0], 3)
+                self.assertEqual(h.lines(), ['watch baseline: 1 open PRs, 0 open issues'])
                 self.assertTrue(watch.valid_state(json.loads(h.path.read_text())))
 
     def test_the_state_is_written_atomically(self):
@@ -577,7 +770,8 @@ class CommandLineTest(unittest.TestCase):
 
         def fake_run(self):
             seen.update(trust=self.trust, path=self.state_path, timeout=self.timeout,
-                        interval=self.interval, exec_argv=self.exec_argv)
+                        interval=self.interval, exec_argv=self.exec_argv,
+                        bounded=self.gh.time_left == self.time_left)
             return 3
 
         with mock.patch.object(watch.Watcher, 'run', fake_run), \
@@ -588,6 +782,7 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual(seen['path'], tmp / 's.json')
         self.assertEqual((seen['timeout'], seen['interval'], seen['exec_argv']), (30, 5, None))
         self.assertIn('brushtyler', seen['trust'].users)
+        self.assertTrue(seen['bounded'])  # each gh call gets at most the time left
 
     def test_trust_comes_from_the_configuration_without_app_keys(self):
         cfg = load_config()
@@ -632,6 +827,45 @@ class GitHubReadsTest(unittest.TestCase):
         gh.open_issues()
         self.assertEqual(calls[-1][1:3], ['issue', 'list'])
         self.assertIn('number,title,author,labels', calls[-1])
+        gh.issue_author(3)
+        self.assertEqual(calls[-1][1:3], ['api', 'repos/o/r/issues/3'])
+
+    def test_time_left_bounds_each_call(self):
+        timeouts = []
+
+        def run(args, **kwargs):
+            timeouts.append(kwargs['timeout'])
+            return SimpleNamespace(returncode=0, stdout='{}', stderr='')
+
+        left = [7.5]
+        gh = GitHub('o/r', run=run, time_left=lambda: left[0])
+        gh.issue_state(1)
+        left[0] = 1000
+        gh.issue_state(1)
+        left[0] = None
+        gh.issue_state(1)
+        self.assertEqual(timeouts, [7.5, 300, 300])
+        left[0] = 0
+        with self.assertRaises(GitHubError):
+            gh.issue_state(1)
+        self.assertEqual(len(timeouts), 3)  # no call started without time left
+
+    def test_not_found_is_an_explicit_result(self):
+        for stderr, error in (
+                ('GraphQL: Could not resolve to a PullRequest with the number of 9.',
+                 GitHubNotFound),
+                ('GraphQL: Could not resolve to an issue or pull request with the number of 9.',
+                 GitHubNotFound),
+                ('gh: Not Found (HTTP 404)', GitHubNotFound),
+                ('gh: This issue was deleted (HTTP 410)', GitHubNotFound),
+                ('gh: Server Error (HTTP 502)', GitHubError),
+                ('error connecting to api.github.com', GitHubError)):
+            with self.subTest(stderr=stderr):
+                gh = GitHub('o/r', run=lambda args, **kw: SimpleNamespace(
+                    returncode=1, stdout='', stderr=stderr))
+                with self.assertRaises(GitHubError) as raised:
+                    gh.pr_state(9)
+                self.assertIs(type(raised.exception), error)
 
 
 if __name__ == '__main__':

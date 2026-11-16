@@ -108,8 +108,10 @@ def run_watch(parser, args, github=GitHub):
     except ConfigError as exc:
         sys.exit(f'devloop: invalid config: {exc}')
     state = Path(args.state) if args.state else main_checkout() / cfg.state_dir / watch.STATE_FILE
-    watcher = watch.Watcher(github(cfg.repo), watch.Trust.from_config(cfg), state,
+    gh = github(cfg.repo)
+    watcher = watch.Watcher(gh, watch.Trust.from_config(cfg), state,
                             interval=args.interval, timeout=args.timeout, exec_argv=exec_argv)
+    gh.time_left = watcher.time_left  # no gh call outlasts --timeout
     try:
         return watcher.run()
     except KeyboardInterrupt:

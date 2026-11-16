@@ -22,10 +22,18 @@ _ISSUE_HISTORY = (
 _FAILED_CONCLUSIONS = {'failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure',
                        'stale'}
 _FAILED_STATUSES = {'failure', 'error'}
+# What `gh` reports for an issue or PR that does not exist (deleted, transferred): GraphQL for
+# `gh pr view` and `gh issue view`, the HTTP status for `gh api`.
+_NOT_FOUND = re.compile(r'Could not resolve to an? (?:PullRequest|issue)\b|\(HTTP (?:404|410)\)')
 
 
 class GitHubError(RuntimeError):
     pass
+
+
+class GitHubNotFound(GitHubError):
+    """GitHub answered that the object asked for does not exist: an explicit result, unlike a
+    failed call."""
 
 
 def _login(who):
@@ -52,27 +60,39 @@ def author_login(author):
 
 class GitHub:
     """``token``, when given, is a callable returning the token every call runs with; otherwise
-    the ambient ``gh`` login is used."""
+    the ambient ``gh`` login is used. ``time_left``, when given, is a callable returning the
+    seconds the calls may still take (None: no limit): each call gets at most that long, and
+    none starts once it is spent."""
 
-    def __init__(self, repo, run=subprocess.run, token=None):
+    timeout = 300  # seconds, for each call
+
+    def __init__(self, repo, run=subprocess.run, token=None, time_left=None):
         self.repo = repo
         self._run = run
         self._token = token
+        self.time_left = time_left
 
     def _gh(self, *args, stdin=None, check=True):
         kwargs = {}
         if self._token is not None:
             env = {k: v for k, v in os.environ.items() if k not in ('GITHUB_TOKEN', 'GH_TOKEN')}
             kwargs['env'] = dict(env, GH_TOKEN=self._token())
+        timeout = self.timeout
+        left = self.time_left() if self.time_left is not None else None
+        if left is not None:
+            if left <= 0:
+                raise GitHubError(f'gh {" ".join(args[:3])}: no time left')
+            timeout = min(timeout, left)
         try:
             done = self._run(['gh', *args], input=stdin, capture_output=True, text=True,
-                             timeout=300, **kwargs)
+                             timeout=timeout, **kwargs)
         except subprocess.TimeoutExpired as exc:
             raise GitHubError(f'gh {" ".join(args[:3])}: timed out after {exc.timeout}s') from exc
         except OSError as exc:
             raise GitHubError(f'gh could not start: {exc}') from exc
         if check and done.returncode != 0:
-            raise GitHubError(f'gh {" ".join(args[:3])}: {done.stderr.strip()[:500]}')
+            error = GitHubNotFound if _NOT_FOUND.search(done.stderr or '') else GitHubError
+            raise error(f'gh {" ".join(args[:3])}: {done.stderr.strip()[:500]}')
         return done
 
     def _json(self, *args):
@@ -101,6 +121,12 @@ class GitHub:
         """``{state, stateReason}`` of issue ``number``, read fresh."""
         return self._json('issue', 'view', str(number), '-R', self.repo,
                           '--json', 'state,stateReason')
+
+    def issue_author(self, number):
+        """``{login, pull_request}`` of issue or PR ``number``, whatever its state: its author's
+        login in REST form and whether it is a PR."""
+        return self._json('api', f'repos/{self.repo}/issues/{int(number)}', '--jq',
+                          '{login: .user.login, pull_request: (.pull_request != null)}')
 
     def comments_since(self, since):
         """Conversation comments of every issue and PR created or edited at ``since`` (ISO 8601,

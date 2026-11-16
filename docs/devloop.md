@@ -843,17 +843,23 @@ too frequent. Trust follows [AGENTS.md](../AGENTS.md): an issue or PR counts if 
 `trusted_users` or is one of devloop's apps (the `[apps]` logins). Anyone else's issue or PR
 produces only `new issue #N by an untrusted author (ignored)` (or `new PR`), with no title nor
 content, and nothing after it. The exception is an issue whose latest `agent:ready` was added by
-a user in `trusted_users`: from then on it is reported (`issue #N admitted with agent:ready by
-<login>`), its labels, closure and trusted comments, never its title. Labels, heads, CI and
-closures of a trusted issue or PR are reported whoever changed them; comments and reviews only
-when their author is trusted or a devloop app.
+a user in `trusted_users`, whether the label is still there or the dispatcher already replaced it
+with `agent:working`: while so it is reported (`issue #N admitted with agent:ready by <login>`),
+its labels, closure and trusted comments, never its title. A later `agent:ready` added by anyone
+else ends the admission. The labeled events of an external issue are read when it is first seen
+and whenever its labels change. Labels, heads, CI and closures of a trusted issue or PR are
+reported whoever changed them; comments and reviews only when their author is trusted or a
+devloop app. A trusted comment on an issue or PR outside the open listings (closed before the
+baseline, say) is reported too: the watcher reads its author once and remembers it.
 
 Two modes:
 
 - **`--until-change`** (default): the command ends at the first round with news, exit code 0,
   with its lines on stdout. With `--timeout <seconds>` it exits with code 3 once that many
-  seconds passed since it started without news, failed reads included (monotonic clock);
-  without `--timeout` it waits forever. It suits any agent that is woken when a command ends.
+  seconds passed since it started without news, failed reads included (monotonic clock): each
+  `gh` call gets at most the time left, and a round that ends after the timeout is dropped
+  without saving, so what it read is reported by the next run. Without `--timeout` it waits
+  forever. It suits any agent that is woken when a command ends.
   For Claude Code, run it as a background Bash command: Claude Code is woken when it exits, reads
   the lines, acts and starts it again.
 
@@ -884,11 +890,14 @@ A failed read of GitHub (a transient `gh` error) does not end the watcher: the r
 after the interval and the state of the latest successful round is kept. After three consecutive
 failed rounds it emits one line, `watch error: 3 consecutive rounds could not read GitHub, the
 last valid state is kept`, without `gh`'s output; it counts as news (`--until-change` exits with
-0, `--exec` delivers it). A successful round resets the count.
+0, `--exec` delivers it). A successful round resets the count. This includes the read of an issue
+or PR that left the open listings: only GitHub's answer that it does not exist (deleted or
+transferred) gives `no longer open`.
 
 The watcher reads with the local `gh` login and needs no app key. Each round reads the open PRs
 and issues (`gh pr list`, up to 200, and `gh issue list`, up to 300), the comments since the
-previous round, and for each trusted open PR its checks and native reviews.
+previous round, for each trusted open PR its checks and native reviews, and the labeled events
+of an external issue whose labels changed.
 
 ### Evidence and telemetry
 
@@ -1250,7 +1259,8 @@ fallback_models = [
   run in threads of that one process ([Parallel actions](#parallel-actions)).
 - **`devloop watch` compares states.** Each round compares what it reads with the latest
   successful round, so a change undone between two reads (a label added and removed, an issue
-  opened and closed, a CI that fails and passes again on the same head) is not reported.
+  opened and closed, a CI that fails and passes again on the same head, an `agent:ready` removed
+  and added again by someone else on an external issue) is not reported.
   Comments and reviews have persistent ids: each one still there at the next read is reported.
   The state is saved before the lines are delivered, so an interruption in between (the watcher
   killed, an `--exec` command that fails) loses those lines rather than repeating them.

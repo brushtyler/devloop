@@ -16,20 +16,24 @@ changed into lines ``HH:MM <type> #N <detail>`` (UTC):
 
 Trust follows AGENTS.md. An issue or PR counts if its author is in ``trusted_users`` or is one of
 devloop's apps. Anyone else's produces only ``new <type> #N by an untrusted author (ignored)``
-and nothing after it, except an issue whose latest ``agent:ready`` a trusted user added: from then
-on its labels, closure and trusted comments are reported, never its title. Labels, heads, CI and
-closures of trusted objects are reported whoever changed them; comments and reviews only when
-their author is trusted or one of devloop's apps.
+and nothing after it, except an issue whose latest ``agent:ready`` a trusted user added, still
+there or replaced since: while so its labels, closure and trusted comments are reported, never its
+title. Labels, heads, CI and closures of trusted objects are reported whoever changed them;
+comments and reviews only when their author is trusted or one of devloop's apps. A trusted comment
+on an issue or PR outside the open listings (closed before the baseline) is reported too: its
+author is read once.
 
 Rounds compare states, so a change undone between two reads (a label added and removed) is not
 seen. Comments and reviews have persistent ids: each one still there is seen.
 
 Two modes. ``until_change`` (default) ends at the first round with news, printing its lines:
 exit 0; with a ``timeout`` it exits with ``NOTHING_NEW`` once that many seconds passed since the
-start (monotonic clock, failed rounds included) without news. ``exec`` keeps running and, after
-each round with news, runs a command (``shlex.split``, no shell) with the lines on its stdin,
-waiting for it to end: one at a time. The state is saved, atomically, before the lines are
-printed or delivered, so a line is never repeated but an interruption in between loses it.
+start (monotonic clock, failed rounds included) without news. Each ``gh`` call gets at most the
+time left, and a round that ends after the timeout is dropped unsaved. ``exec`` keeps running
+and, after each round with news, runs a command (``shlex.split``, no shell) with the lines on
+its stdin, waiting for it to end: one at a time. The state is saved, atomically, before the
+lines are printed or delivered, so a line is never repeated but an interruption in between
+loses it.
 
 Three consecutive failed rounds give one ``ERROR_LINE``, which counts as news; the state of the
 latest successful round stays, and a successful round resets the count.
@@ -48,12 +52,13 @@ from pathlib import Path
 
 from .apps import DISPATCHER, AppAuth, Identities
 from .dispatcher import label_names, ready_approval
-from .github import GitHubError, author_login
+from .github import GitHubError, GitHubNotFound, author_login
 from .markdown import read_marker
 
-STATE_VERSION = 1
+STATE_VERSION = 2
 STATE_FILE = 'watch-state.json'
 NOTHING_NEW = 3  # exit code of --until-change at --timeout
+EXPIRED = object()  # a round that ended after the timeout
 ERROR_ROUNDS = 3
 ERROR_LINE = 'watch error: 3 consecutive rounds could not read GitHub, the last valid state is kept'
 VERDICTS = ('APPROVED', 'CHANGES_REQUESTED')
@@ -135,22 +140,73 @@ def _labels(labels):
     return '[' + ','.join(labels) + ']'
 
 
-def valid_state(state):
-    """Whether ``state`` has the structure the watcher writes."""
-    try:
-        if state.get('version') != STATE_VERSION:
-            return False
-        for kind in ('prs', 'issues'):
-            for number, entry in state[kind].items():
-                int(number)
-                if not isinstance(entry['trusted'], bool) or not isinstance(entry['labels'], list):
-                    return False
-        comments = state['comments']
-        return (isinstance(comments['floor'], int) and isinstance(comments['since'], str)
-                and all(isinstance(i, int) for i in comments['seen'])
-                and isinstance(state['closed'], dict))
-    except (AttributeError, KeyError, TypeError, ValueError):
+def _review_lines(number, cur, known_reviews):
+    """Lines for the native reviews of PR ``cur`` whose id is not among ``known_reviews``."""
+    known = {review[0] for review in known_reviews}
+    return [f'PR #{number} review by {login}: {verdict} @{cur["head"][:7]}'
+            for rid, login, verdict in cur['reviews'] if rid not in known]
+
+
+def _is_int(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_strings(value):
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _is_number(key):
+    return isinstance(key, str) and key.isascii() and key.isdigit()
+
+
+def _valid_entry(kind, entry):
+    """Whether ``entry`` is an issue or PR as ``Watcher._read_prs`` and ``_read_issues`` write
+    it, down to the types the comparison uses."""
+    if not (isinstance(entry, dict) and isinstance(entry.get('trusted'), bool)
+            and _is_strings(entry.get('labels'))):
         return False
+    if entry['trusted']:
+        if not isinstance(entry.get('title'), str):
+            return False
+        if kind == 'issues':
+            return True
+        reviews = entry.get('reviews')
+        return (isinstance(entry.get('head'), str) and isinstance(entry.get('ci'), str)
+                and isinstance(reviews, list)
+                and all(isinstance(review, list) and len(review) == 3 and _is_int(review[0])
+                        and isinstance(review[1], str) and isinstance(review[2], str)
+                        for review in reviews))
+    if kind == 'prs':
+        return True
+    admitted = entry.get('admitted')
+    return isinstance(admitted, bool) and isinstance(entry.get('by'),
+                                                     str if admitted else (str, type(None)))
+
+
+def valid_state(state):
+    """Whether ``state`` has the structure the watcher writes, down to the types of the items
+    the comparison reads: a state that passes cannot make every round fail."""
+    if not isinstance(state, dict) or state.get('version') != STATE_VERSION:
+        return False
+    prs, issues, closed, comments = (state.get(key)
+                                     for key in ('prs', 'issues', 'closed', 'comments'))
+    if not all(isinstance(part, dict) for part in (prs, issues, closed, comments)):
+        return False
+    if not all(_is_number(number) for part in (prs, issues, closed) for number in part):
+        return False
+    if not (all(_valid_entry('prs', entry) for entry in prs.values())
+            and all(_valid_entry('issues', entry) for entry in issues.values())
+            and all(kind in ('PR', 'issue', None) for kind in closed.values())):
+        return False
+    seen, since = comments.get('seen'), comments.get('since')
+    if not (_is_int(comments.get('floor')) and isinstance(seen, list)
+            and all(_is_int(cid) for cid in seen) and isinstance(since, str)):
+        return False
+    try:
+        datetime.strptime(since, '%Y-%m-%dT%H:%M:%SZ')
+    except ValueError:
+        return False
+    return True
 
 
 def load_state(path):
@@ -159,7 +215,7 @@ def load_state(path):
         state = json.loads(Path(path).read_text(encoding='utf-8'))
     except (OSError, ValueError):
         return None
-    return state if isinstance(state, dict) and valid_state(state) else None
+    return state if valid_state(state) else None
 
 
 def save_state(path, state):
@@ -202,18 +258,31 @@ class Watcher:
         self._out = out or (lambda line: print(line, flush=True))
         self._err = err or (lambda line: print(line, file=sys.stderr, flush=True))
         self.state = None
+        self._deadline = None
+
+    def time_left(self):
+        """Seconds left before the ``timeout`` (None without one). ``github.GitHub`` bounds each
+        ``gh`` call with it (``time_left``) and starts none once it is spent."""
+        return None if self._deadline is None else self._deadline - self._clock()
+
+    def _expired(self):
+        left = self.time_left()
+        return left is not None and left <= 0
 
     # Loop ----------------------------------------------------------------
     def run(self):
         """``until_change``: 0 at the first round with news, ``NOTHING_NEW`` at the timeout.
         ``exec``: runs until interrupted."""
         start = self._clock()
+        self._deadline = start + self.timeout if self.timeout else None
         self.state = load_state(self.state_path)
         if self.state is None and self.state_path.exists():
             self._err('devloop watch: the state file is unreadable, a new baseline replaces it')
         failures = 0
         while True:
             lines = self.round()
+            if lines is EXPIRED:
+                return NOTHING_NEW
             if lines is None:
                 failures += 1
                 lines = [ERROR_LINE] if failures == ERROR_ROUNDS else []
@@ -247,22 +316,29 @@ class Watcher:
             self._err(f'devloop watch: the --exec command exited with {done.returncode}')
 
     def round(self):
-        """One round: its lines (empty without news), or None when it failed. The state is
-        saved before the lines are returned; a failed round changes nothing."""
+        """One round: its lines (empty without news), None when it failed, ``EXPIRED`` when
+        the timeout passed before it ended. The state is saved before the lines are returned;
+        a failed or expired round changes nothing, so what it read is reported by a later
+        run."""
         started = self._now()
+        summary = None
         try:
             if self.state is None:
                 state, summary = self._baseline(started)
-                save_state(self.state_path, state)
-                self.state = state
-                self._out(f'{started:%H:%M} {summary}')
-                return []
-            lines, state = self._compare(started)
+                lines = []
+            else:
+                lines, state = self._compare(started)
+            if self._expired():
+                return EXPIRED
             save_state(self.state_path, state)
         except (GitHubError, OSError, ValueError, KeyError, TypeError) as exc:
+            if self._expired():
+                return EXPIRED
             self._err(f'devloop watch: round failed ({type(exc).__name__})')
             return None
         self.state = state
+        if summary:
+            self._out(f'{started:%H:%M} {summary}')
         return lines
 
     # Reads -----------------------------------------------------------------
@@ -297,22 +373,22 @@ class Watcher:
         return issues
 
     def _admission(self, number, labels, previous):
-        """Whether an issue of an untrusted author was admitted: the latest ``labeled`` event
-        of ``agent:ready`` comes from a trusted user. Once admitted it stays so. The events are
-        read again only while the ready label is there and the labels changed since the
-        previous read."""
-        if previous.get('admitted'):
-            return {'admitted': True, 'by': previous.get('by')}
-        if self.trust.ready_label not in labels:
-            return {}
-        if previous.get('checked') == labels:
-            return {'checked': labels}
+        """Whether an issue of an untrusted author is admitted: the latest ``labeled`` event of
+        ``agent:ready`` comes from a trusted user, whether the label is still there or was
+        replaced since (``agent:working``). A new ``agent:ready`` changes the labels, so the
+        events are read when the issue is first seen and whenever its labels differ from the
+        previous read; a label removed and added again between two reads is not seen."""
+        if 'admitted' in previous and previous.get('labels') == labels:
+            return {'admitted': previous['admitted'], 'by': previous.get('by')}
+        approved = self._approved(number)
+        return {'admitted': bool(approved), 'by': approved[0] if approved else None}
+
+    def _approved(self, number):
+        """``(login, at)`` of the trusted user who added the latest ``agent:ready`` of issue
+        ``number``, or None."""
         events = self.gh.labeled_events(int(number))
-        approved = ready_approval([(e.get('label'), e.get('by'), e.get('at')) for e in events],
-                                  self.trust.ready_label, self.trust.users)
-        if approved:
-            return {'admitted': True, 'by': approved[0]}
-        return {'checked': labels}
+        return ready_approval([(e.get('label'), e.get('by'), e.get('at')) for e in events],
+                              self.trust.ready_label, self.trust.users)
 
     def _read_comments(self, since):
         return sorted(self.gh.comments_since(since), key=lambda c: c['id'])
@@ -353,9 +429,12 @@ class Watcher:
         for number, cur in new.items():
             prev = old.get(number)
             if prev is None:
-                lines.append(f'new PR #{number} {_labels(cur["labels"])} {cur["title"]}'
-                             if cur['trusted'] else
-                             f'new PR #{number} by an untrusted author (ignored)')
+                if not cur['trusted']:
+                    lines.append(f'new PR #{number} by an untrusted author (ignored)')
+                    continue
+                # Opened since the previous round: its reviews are new too.
+                lines.append(f'new PR #{number} {_labels(cur["labels"])} {cur["title"]}')
+                lines += _review_lines(number, cur, ())
                 continue
             if not (cur['trusted'] and prev['trusted']):
                 continue
@@ -365,10 +444,7 @@ class Watcher:
             if (cur['ci'] in ('pass', 'fail')
                     and (cur['ci'], cur['head']) != (prev.get('ci'), prev.get('head'))):
                 lines.append(f'PR #{number} CI {cur["ci"]} @{cur["head"][:7]}')
-            known = {review[0] for review in prev.get('reviews') or []}
-            for rid, login, verdict in cur['reviews']:
-                if rid not in known:
-                    lines.append(f'PR #{number} review by {login}: {verdict} @{cur["head"][:7]}')
+            lines += _review_lines(number, cur, prev.get('reviews') or ())
         return lines
 
     def _issue_lines(self, old, new):
@@ -396,7 +472,9 @@ class Watcher:
 
     def _closed_lines(self, kind, old, new, closed):
         """Lines for the visible issues or PRs no longer open. One still open but beyond the
-        listing's limit stays in the state as it was."""
+        listing's limit stays in the state as it was. Only GitHub's answer that the object does
+        not exist (deleted, transferred) gives ``no longer open``; a failed read fails the
+        round, so the next one asks again."""
         lines = []
         for number, prev in old.items():
             if number in new or not _visible(prev):
@@ -409,8 +487,8 @@ class Watcher:
                     outcome = (read.get('state') or '').lower()
                     if outcome == 'closed' and read.get('stateReason'):
                         outcome += f' ({read["stateReason"].lower()})'
-            except GitHubError:
-                outcome = 'no longer open'  # deleted or transferred, or unreadable now
+            except GitHubNotFound:
+                outcome = 'no longer open'  # deleted or transferred
             if outcome == 'open':
                 new[number] = prev
                 continue
@@ -434,7 +512,7 @@ class Watcher:
             number = str(comment['number'])
             kind = self._object_kind(number, old, prs, issues, closed)
             if kind is None:
-                continue  # an untrusted author's issue or PR, or one never seen
+                continue  # an untrusted author's issue or PR, not admitted
             line = self._comment_line(kind, number, login, comment.get('body') or '')
             if line:
                 lines.append(line)
@@ -444,14 +522,30 @@ class Watcher:
             kept = kept[-MAX_COMMENT_IDS:]
         return lines, {'floor': floor, 'seen': kept}
 
-    @staticmethod
-    def _object_kind(number, old, prs, issues, closed):
-        """``PR`` or ``issue`` for a visible issue or PR, None otherwise."""
+    def _object_kind(self, number, old, prs, issues, closed):
+        """``PR`` or ``issue`` for a visible issue or PR, None otherwise. One outside the open
+        listings and the state (closed before the baseline, beyond the listing's limit) is read
+        once and remembered in ``closed``."""
         for kind, current, before in (('PR', prs, old['prs']), ('issue', issues, old['issues'])):
             entry = current.get(number) or before.get(number)
             if entry is not None:
                 return kind if _visible(entry) else None
-        return closed.get(number)
+        if number not in closed:
+            closed[number] = self._resolve(number)
+        return closed[number]
+
+    def _resolve(self, number):
+        """``PR`` or ``issue`` when issue or PR ``number`` is visible: a trusted author, or an
+        issue admitted by its latest ``agent:ready``. None otherwise, or when it does not
+        exist."""
+        try:
+            read = self.gh.issue_author(int(number))
+        except GitHubNotFound:
+            return None
+        kind = 'PR' if read.get('pull_request') else 'issue'
+        if self.trust.trusted(read.get('login')):
+            return kind
+        return kind if kind == 'issue' and self._approved(number) else None
 
     def _comment_line(self, kind, number, login, body):
         if read_marker(body, 'ledger') is not None or first_line(body).startswith(LEDGER_TITLE):
