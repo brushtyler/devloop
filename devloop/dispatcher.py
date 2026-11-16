@@ -78,7 +78,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .acceptance import (acceptance_criteria, acceptance_findings, format_criteria, format_map,
@@ -871,34 +871,103 @@ class Dispatcher:
         return login in self.cfg.trusted_users or bool(supervisor and login == supervisor)
 
     def _hold_command(self, pr, comments):
-        """The hold or release command still to apply (#172), ``{event, by, reason}`` or None:
-        the latest valid one written after the dispatcher's latest ``hold`` record. Commands are
-        accepted only with ``[merge].mode = "auto"`` and from ``_may_hold``; any other, and a
-        hold without a reason, is ignored and logged. devloop's own records are never
-        commands."""
-        last = max((position for position, comment in enumerate(comments)
-                    if read_marker(comment.get('body', ''), 'hold') is not None
-                    and self._wrote((comment.get('author') or {}).get('login'), DISPATCHER)),
-                   default=-1)
+        """The hold or release command still to apply (#172), ``{event, by, reason, comment}``
+        or None: the latest valid one not spent yet. A dispatcher ``hold`` record spends the
+        command it applied, whose comment id it carries, and every command before it (GitHub's
+        comment ids grow with time): a command written after that one stays to apply even when
+        it precedes the record. Commands are accepted only when the merge mode of the PR, with
+        the override of its level and its operator-only paths, is ``auto``, and from
+        ``_may_hold``; any other, and a hold without a reason, is ignored and logged. devloop's
+        own records are never commands."""
+        spent, last = None, -1
+        for position, comment in enumerate(comments):
+            record = read_marker(comment.get('body', ''), 'hold')
+            if record is None or not self._wrote((comment.get('author') or {}).get('login'),
+                                                 DISPATCHER):
+                continue
+            applied = record.get('comment')
+            if isinstance(applied, int) and not isinstance(applied, bool):
+                spent = applied if spent is None else max(spent, applied)
+            else:
+                last = position  # a record without the id spends what precedes it
+        mode = None
         found = None
         for comment in comments[last + 1:]:
             body = comment.get('body') or ''
             parsed = None if carries_record(body) else merge_command(body)
             if parsed is None:
                 continue
+            number = comment.get('id')
+            if spent is not None and (not isinstance(number, int) or number <= spent):
+                continue
             event, reason = parsed
             login = (comment.get('author') or {}).get('login')
-            why = (f'merge mode is "{self.cfg.merge.mode}", not "auto"'
-                   if self.cfg.merge.mode != 'auto'
-                   else 'the author is neither the supervisor nor a trusted user'
-                   if not self._may_hold(login)
-                   else f'malformed, expected `{HOLD_COMMAND} <reason>`' if reason is None
-                   else None)
+            if self.cfg.merge.mode != 'auto':
+                # Overrides only restrict: without "auto" in [merge] no PR is in "auto".
+                why = f'merge mode is "{self.cfg.merge.mode}", not "auto"'
+            elif not self._may_hold(login):
+                why = 'the author is neither the supervisor nor a trusted user'
+            elif reason is None:
+                why = f'malformed, expected `{HOLD_COMMAND} <reason>`'
+            else:
+                if mode is None:
+                    mode = self._merge_mode(pr) or 'unknown'
+                why = (None if mode == 'auto'
+                       else 'the merge mode of this PR is not computable now' if mode == 'unknown'
+                       else f'merge mode of this PR is "{mode}", not "auto"')
             if why:
                 self.log(f'  PR #{pr.number}: ignored `/devloop {event}` by {login}: {why}')
                 continue
-            found = {'event': event, 'by': login, 'reason': reason}
+            found = {'event': event, 'by': login, 'reason': reason, 'comment': number}
         return found
+
+    def _read_thread(self, pr, comments):
+        """Fill ``pr`` with what its conversation records, from the identities allowed to write
+        it: reviews, fixes, syncs, finding closures and commands, policy records, and the hold
+        or release command still to apply (#172). The snapshot reads it once per tick; the merge
+        reads it again just before merging, so that it never relies on an older view."""
+        problems = []
+        entries = sorted(self._marker_entries(pr, comments, 'review', problems),
+                         key=lambda e: (e[1]['round'], e[0]))
+        pr.reviews = [record for _, record in entries]
+        pr.fixes = self._markers(pr, comments, 'fix')
+        pr.syncs = self._markers(pr, comments, 'sync')
+        pr.closures = [c for record in self._markers(pr, comments, 'finding')
+                       for c in record['closed']]
+        state = finding_state(pr.reviews, pr.closures)
+        pr.finding_problems = problems + state.problems
+        pr.commands = self._finding_commands(pr, comments, state)
+        policy = self._marker_entries(pr, comments, 'policy')
+        pr.policy = [record for _, record in policy]
+        if self.ledger is not None:
+            pr.ci_recorded = [
+                (r.get('head'), r.get('state'), r.get('round'), r.get('checks'))
+                for _, r in ledger_entries(comments, self._signed)
+                if r['type'] == 'event' and r.get('event') == 'ci_round']
+        last_review = max((position for position, _ in entries), default=-1)
+        if policy and policy[-1][0] > last_review:
+            record = policy[-1][1]
+            if (record['event'] == 'promoted'
+                    and record['receipt']['level'] == ZERO_LEVEL):
+                pr.zero_head = record['receipt']['head']
+        if entries:
+            last = max(position for position, _ in entries)
+            # A receipt found stale after the latest review voids its approval.
+            pr.stale_receipt = any(position > last and record['event'] == 'stale'
+                                   for position, record in policy)
+            # Only what trusted users wrote after the latest verdict can void it.
+            since = comments[last + 1:]
+            pr.operator_comments = operator_comments(since, self.cfg.trusted_users)
+            pr.rereview = any(requests_rereview(c.get('body'))
+                              for c in pr.operator_comments)
+            latest = entries[-1][1]['round']
+            before = max((position for position, record in entries
+                          if record['round'] < latest), default=-1)
+            pr.round_comments = operator_comments(comments[before + 1:],
+                                                  self.cfg.trusted_users)
+        # Last: whether a command is accepted depends on the merge mode of the PR, which its
+        # review and policy records determine (#172).
+        pr.hold = self._hold_command(pr, comments)
 
     def _merge_mode(self, pr):
         """The merge mode of ``pr`` now (#172): ``[merge]`` with the override of its review
@@ -948,47 +1017,7 @@ class Dispatcher:
             if pr is None:
                 continue
             if pr.meta and pr.labels & {lb.review, lb.changes, lb.ready_to_merge}:
-                comments = self.gh.pr_comments(pr.number)
-                problems = []
-                entries = sorted(self._marker_entries(pr, comments, 'review', problems),
-                                 key=lambda e: (e[1]['round'], e[0]))
-                pr.reviews = [record for _, record in entries]
-                pr.fixes = self._markers(pr, comments, 'fix')
-                pr.syncs = self._markers(pr, comments, 'sync')
-                pr.closures = [c for record in self._markers(pr, comments, 'finding')
-                               for c in record['closed']]
-                state = finding_state(pr.reviews, pr.closures)
-                pr.finding_problems = problems + state.problems
-                pr.commands = self._finding_commands(pr, comments, state)
-                pr.hold = self._hold_command(pr, comments)
-                policy = self._marker_entries(pr, comments, 'policy')
-                pr.policy = [record for _, record in policy]
-                if self.ledger is not None:
-                    pr.ci_recorded = [
-                        (r.get('head'), r.get('state'), r.get('round'), r.get('checks'))
-                        for _, r in ledger_entries(comments, self._signed)
-                        if r['type'] == 'event' and r.get('event') == 'ci_round']
-                last_review = max((position for position, _ in entries), default=-1)
-                if policy and policy[-1][0] > last_review:
-                    record = policy[-1][1]
-                    if (record['event'] == 'promoted'
-                            and record['receipt']['level'] == ZERO_LEVEL):
-                        pr.zero_head = record['receipt']['head']
-                if entries:
-                    last = max(position for position, _ in entries)
-                    # A receipt found stale after the latest review voids its approval.
-                    pr.stale_receipt = any(position > last and record['event'] == 'stale'
-                                           for position, record in policy)
-                    # Only what trusted users wrote after the latest verdict can void it.
-                    since = comments[last + 1:]
-                    pr.operator_comments = operator_comments(since, self.cfg.trusted_users)
-                    pr.rereview = any(requests_rereview(c.get('body'))
-                                      for c in pr.operator_comments)
-                    latest = entries[-1][1]['round']
-                    before = max((position for position, record in entries
-                                  if record['round'] < latest), default=-1)
-                    pr.round_comments = operator_comments(comments[before + 1:],
-                                                          self.cfg.trusted_users)
+                self._read_thread(pr, self.gh.pr_comments(pr.number))
             # In agent:changes CI matters only to close an open CI finding (``plan``).
             ci_open = lb.changes in pr.labels and any(
                 f['owner'] == CI for f in open_findings(pr.reviews, pr.closures))
@@ -1976,7 +2005,8 @@ class Dispatcher:
 
     def _do_merge(self, pr):
         """Merge a ready PR (#172), with a merge commit on the approved head, with the local
-        ``gh`` login. Every merge directive is read again just before: the PR still open,
+        ``gh`` login. Every merge directive is read again just before, with reviews, closures,
+        policy records and commands rebuilt from the comments read now: the PR still open,
         ``agent:ready-to-merge`` without ``agent:needs-human`` nor ``agent:merge-hold``, no hold
         or release command waiting, the head unchanged, ``MERGEABLE`` and ``CLEAN``, CI
         ``pass``, no open finding, the merge mode of the recomputed receipt, and the conditions
@@ -2001,8 +2031,19 @@ class Dispatcher:
         status = (fresh.get('mergeable'), fresh.get('mergeStateStatus'))
         if status != ('MERGEABLE', 'CLEAN'):
             return skip('GitHub reports {} / {}'.format(*status))
-        if self._hold_command(pr, self.gh.pr_comments(pr.number)):
+        # Reviews, closures, policy records and commands as the conversation shows them now,
+        # with the same identity checks as the snapshot: never the snapshot's older view.
+        pr = replace(pr, labels=labels, reviews=[], fixes=[], syncs=[], closures=[],
+                     commands=[], finding_problems=[], policy=[], zero_head=None,
+                     zero_problem='', stale_receipt=False, operator_comments=[],
+                     rereview=False, round_comments=[], acceptance=[], hold=None)
+        self._read_thread(pr, self.gh.pr_comments(pr.number))
+        if pr.hold:
             return skip('a hold or release command waits to be applied')
+        if pr.finding_problems:
+            return skip('findings whose owner cannot be reconstructed')
+        if pr.stale_receipt:
+            return skip('a policy record found the receipt of the approval stale')
         ci, _ = self._read_ci(head)
         if ci != 'pass':
             return skip(f'CI is {ci}')
@@ -2010,7 +2051,7 @@ class Dispatcher:
         if left:
             return self._escalate(pr.number, _open_findings_reason(left),
                                   remove=[lb.review, lb.changes, lb.ready_to_merge])
-        if pr.acceptance:
+        if pr.zero_head is None and self._acceptance_problems(pr):
             return skip('the acceptance map does not hold')
         current, paths = self._receipt_and_paths(pr)
         if current['head'] != head:

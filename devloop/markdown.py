@@ -178,7 +178,8 @@ def _valid_merged(m):
 
 
 def _valid_hold(h):
-    """A hold or release command the dispatcher applied (#172), with its author and reason."""
+    """A hold or release command the dispatcher applied (#172), with its author and reason,
+    and in ``comment`` the id of the comment that carried it (the commands it spends)."""
     return (h.get('event') in ('hold', 'release')
             and all(isinstance(h.get(k), str) for k in ('by', 'reason')))
 

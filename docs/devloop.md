@@ -473,7 +473,8 @@ PR already in `agent:ready-to-merge` keeps its label until something sends it ba
   or a file relative to the root, as for `sensitive_paths`.
 - **Merge directives.** The same in `"strict"` and `"auto"`. A tick plans a merge only for a
   ready PR that meets them in its snapshot, and the merge reads them all again just before it
-  runs:
+  runs, reviews, finding closures and policy records included (read again from the comments,
+  with the same identity checks as the snapshot):
   - the PR is open and in `agent:ready-to-merge`, without `agent:needs-human` or
     `agent:merge-hold`, and no hold or release command waits to be applied;
   - the head is the approved commit (at level 0, the promoted one), unchanged since the
@@ -517,12 +518,16 @@ label by hand does the same. A hold needs a reason.
 
 The commands count only from the identity of `[roles].supervisor` (the GitHub App of that agent)
 and from `trusted_users`. The dispatcher applies a command with a dispatcher comment that carries
-a `hold` marker (event, author, reason, head), and that comment spends it: only commands written
-after devloop's latest `hold` record count, and the latest of them wins. A command is applied
-before anything else on its PR in that tick, so no merge of the same tick overtakes it, and a
-merge about to run reads the comments again and stops if a command is waiting. A command is
-ignored, and written to the dispatcher log, in `"strict"` and `"off"`, from anyone else, without
-a reason, and in text devloop publishes (a comment that ends with a devloop marker). As for
+a `hold` marker (event, author, reason, head, and in `comment` the id of the comment it applied),
+and that record spends the command it applied and every command written before it: a command
+written after it, even one that arrived while the record was being written, still waits to be
+applied. Among the commands that wait the latest wins. A command is applied before anything else
+on its PR in that tick, so no merge of the same tick overtakes it, and a merge about to run reads
+the comments again and stops if a command is waiting. A command is ignored, and written to the
+dispatcher log, when the merge mode of its PR is `"strict"` or `"off"` (the mode with the
+override of its level and its operator-only paths, so a PR at a level overridden to `"strict"`
+ignores it even with `mode = "auto"`), from anyone else, without a reason, and in text devloop
+publishes (a comment that ends with a devloop marker). As for
 `/devloop finding`, devloop reads the comments of a PR only while it is in `agent:review`,
 `agent:changes` or `agent:ready-to-merge`.
 

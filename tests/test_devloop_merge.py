@@ -10,7 +10,7 @@ from devloop.config import MergePolicy
 from devloop.dispatcher import Action, Dispatcher, Snapshot, ensure_labels, merge_command, plan
 from devloop.github import GitHub
 from test_devloop import (CFG, IMPL_NAME, REV, REV_NAME, SHA1, SHA2, FakeRunner, FakeWS,
-                          SnapshotGH, norm, pr, raw_review, receipt)
+                          SnapshotGH, finding, norm, pr, raw_review, receipt)
 from test_devloop_zero import GRANT, SUCCESS, ZCFG, ZERO_LABELS, changes
 
 DATA = tomllib.loads(config.DEFAULT_CONFIG.read_text())
@@ -36,17 +36,21 @@ class MergeGH(SnapshotGH):
     def __init__(self):
         approval = markdown.render_review(norm(raw_review()), header(REV_NAME))
         super().__init__([])
-        self.thread = [{'author': {'login': 'brushtyler'}, 'body': approval}]
+        self.thread = []
+        self.say('brushtyler', approval)
         self.labels[100] = {READY}
         self.mergeable, self.status, self.state = 'MERGEABLE', 'CLEAN', 'OPEN'
         self.merged = []
 
     def say(self, login, body):
-        self.thread.append({'author': {'login': login}, 'body': body})
+        """A comment with an id larger than every earlier one, as GitHub assigns them."""
+        number = max((c['id'] for c in self.thread), default=1000) + 1
+        self.thread.append({'id': number, 'author': {'login': login}, 'body': body})
+        return number
 
     def comment(self, number, body):
         super().comment(number, body)
-        self.thread.append({'author': {'login': 'brushtyler'}, 'body': body})
+        self.say('brushtyler', body)
 
     def pr_comments(self, number):
         return [dict(c) for c in self.thread]
@@ -269,12 +273,14 @@ class StrictTests(Case):
 class AutoTests(Case):
     def test_the_supervisor_holds_and_releases(self):
         d = self.make(AUTO)
-        self.gh.say(SUPERVISOR_LOGIN, header() + '/devloop hold aspetto la decisione su #182')
+        command = self.gh.say(SUPERVISOR_LOGIN,
+                              header() + '/devloop hold aspetto la decisione su #182')
         self.assertEqual(d.tick(), [Action('hold', 100, f'hold by {SUPERVISOR_LOGIN}')])
         self.assertEqual(self.gh.labels[100], {READY, HOLD})
         (record,) = records(self.gh, 'hold')
         self.assertEqual(record, {'event': 'hold', 'by': SUPERVISOR_LOGIN,
-                                  'reason': 'aspetto la decisione su #182', 'head': SHA1})
+                                  'reason': 'aspetto la decisione su #182', 'head': SHA1,
+                                  'comment': command})
         # The command is spent, and the held PR is not merged.
         self.assertIsNone(d.snapshot().prs[0].hold)
         self.assertEqual(d.tick(), [])
@@ -328,6 +334,45 @@ class AutoTests(Case):
         self.gh.say(SUPERVISOR_LOGIN, header() + '/devloop hold aspetta')
         d._do_merge(p)
         self.assert_not_merged()
+
+    def test_a_hold_written_while_a_release_is_applied_stays_to_apply(self):
+        d = self.make(AUTO)
+        self.gh.say(SUPERVISOR_LOGIN, header() + '/devloop hold aspetto')
+        d.tick()
+        release = self.gh.say(SUPERVISOR_LOGIN, header() + '/devloop release')
+        p = d.snapshot().prs[0]
+        self.assertEqual(p.hold['event'], 'release')
+        # A new hold arrives after the snapshot, before the release is recorded.
+        hold = self.gh.say(SUPERVISOR_LOGIN, header() + '/devloop hold di nuovo')
+        d._do_hold(p)
+        self.assertEqual(records(self.gh, 'hold')[-1]['comment'], release)
+        self.assertNotIn(HOLD, self.gh.labels[100])
+        # The record spends the release, not the hold written after it.
+        self.assertEqual(d.tick(), [Action('hold', 100, f'hold by {SUPERVISOR_LOGIN}')])
+        self.assertEqual(records(self.gh, 'hold')[-1]['comment'], hold)
+        self.assertIn(HOLD, self.gh.labels[100])
+        self.assertEqual(d.tick(), [])
+        self.assert_not_merged()
+
+    def test_commands_follow_the_merge_mode_of_the_pr(self):
+        """With "auto" in [merge], a level override or an operator-only path that makes the PR
+        strict or off makes its hold and release ignored, and logged."""
+        strict = dataclasses.replace(
+            AUTO, merge=MergePolicy(mode='auto', levels=((1, 'strict'),)))
+        for cfg, diff, mode, merges in ((strict, ['x.py'], 'strict', True),
+                                        (AUTO, ['x.py', 'AGENTS.md'], 'off', False)):
+            with self.subTest(mode=mode):
+                ws = FakeWS()
+                ws.diff = changes(*diff)
+                d = self.make(cfg, ws=ws)
+                self.gh.say(SUPERVISOR_LOGIN, header() + '/devloop hold aspetto')
+                actions = d.tick()
+                self.assertNotIn(HOLD, self.gh.labels[100])
+                self.assertEqual(records(self.gh, 'hold'), [])
+                self.assertTrue(any('ignored `/devloop hold`' in line
+                                    and f'merge mode of this PR is "{mode}"' in line
+                                    for line in self.logs))
+                self.assertEqual([a.kind for a in actions], ['merge'] if merges else [])
 
 
 class DirectiveTests(Case):
@@ -412,13 +457,57 @@ class DirectiveTests(Case):
         for cfg in self.MODES:
             with self.subTest(mode=cfg.merge.mode):
                 d = self.make(cfg)
-                p = pr(labels=[READY], reviews=[ci, approval])
+                self.gh.thread = []
+                for record in (ci, approval):
+                    self.gh.say('brushtyler', markdown.render_review(record, header(REV_NAME)))
+                p = d.snapshot().prs[0]
+                self.assertEqual([r['round'] for r in p.reviews], [1, 2])
                 p.mergeable, p.merge_status, p.merge_mode = 'MERGEABLE', 'CLEAN', cfg.merge.mode
                 self.assertEqual(plan(Snapshot([p], [], []), cfg), [])
                 d._do_merge(p)
                 self.assert_not_merged()
                 self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
                 self.assertIn('1/ci/R1-1', self.gh.comments[-1][1])
+
+    def test_reviews_written_after_the_snapshot_count(self):
+        """The merge reads reviews, closures and policy records again: a finding or a
+        revoked approval recorded after the snapshot stops it, with the same identity checks."""
+        blocking = markdown.render_review(
+            norm(raw_review('request_changes', blocking=[finding()]), round_no=2),
+            header(REV_NAME))
+        ci = markdown.render_review(
+            review.ci_failure_review(failed_checks=['Unit Tests'], log_tail='boom',
+                                     previous_open=[], round_no=2, max_rounds=3, head_sha=SHA1),
+            header(REV_NAME))
+        for cfg in self.MODES:
+            for name, login, body in (('finding', 'brushtyler', blocking),
+                                      ('ci finding', 'brushtyler', ci)):
+                with self.subTest(mode=cfg.merge.mode, change=name):
+                    d, p = self.ready(cfg)
+                    self.gh.say(login, body)
+                    d._do_merge(p)
+                    self.assert_not_merged()
+                    self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+            with self.subTest(mode=cfg.merge.mode, change='new round not approved yet'):
+                # A second round that has not approved the head: the approval no longer stands.
+                d, p = self.ready(cfg)
+                self.gh.say('brushtyler', markdown.render_review(
+                    norm(raw_review(), round_no=2, head=SHA2), header(REV_NAME)))
+                d._do_merge(p)
+                self.assert_not_merged()
+            with self.subTest(mode=cfg.merge.mode, change='stale receipt'):
+                d, p = self.ready(cfg)
+                self.gh.say('brushtyler', markdown.publishable(
+                    markdown.dispatcher_header() + '\n## Ricevuta non valida',
+                    'policy', {'event': 'stale', 'receipt': receipt()}))
+                d._do_merge(p)
+                self.assert_not_merged()
+            with self.subTest(mode=cfg.merge.mode, change='review by an untrusted author'):
+                # Someone else's review record is not a review: the merge goes ahead.
+                d, p = self.ready(cfg)
+                self.gh.say('stranger', blocking)
+                d._do_merge(p)
+                self.assertEqual(self.gh.merged, [(100, SHA1)])
 
 
 class LevelZeroTests(unittest.TestCase):
