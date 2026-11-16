@@ -789,6 +789,21 @@ class FakeGH:
     def labelers(self, number, label):
         return list(self.level_labelers) if label == 'reviews:2' else []
 
+    # Level 0 (#107): events of the level-0 label, check runs of a head, native PR reviews.
+    zero_events = ()
+    runs = ()
+    native_reviews = ()
+
+    def label_events(self, number, label):
+        self.zero_reads = getattr(self, 'zero_reads', 0) + 1
+        return [dict(e) for e in self.zero_events] if label == 'reviews:0' else []
+
+    def check_runs(self, sha):
+        return [dict(r) for r in self.runs]
+
+    def pr_reviews(self, number):
+        return [dict(r) for r in self.native_reviews]
+
     # Snapshot reads: ``open`` holds the raw open PRs, as `gh pr list` returns them.
     open = ()
 

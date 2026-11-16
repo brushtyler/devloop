@@ -12,7 +12,20 @@ The effective level of a head is the highest of:
 - level 2 when the PR's full diff against the base touches a sensitive path;
 - the highest level already recorded on the PR by an earlier receipt.
 
-Nothing lowers a level, and nothing takes it below 1.
+Nothing lowers a level, and nothing takes it below 1, except level 0.
+
+Level 0 (#107, part 2 of #66) needs no review. It is off unless the operator configures both an
+allowlist of paths and the expected CI check runs, and it applies only when:
+
+- the latest ``labeled`` or ``unlabeled`` event of ``zero_label`` on the PR added it, and a user
+  in ``trusted_users`` wrote it;
+- the level computed above is exactly 1: the level-2 label, a sensitive path and a level 2
+  already recorded always prevail;
+- the whole diff is in the allowlist (``zero_allowed``);
+- no receipt recorded on the PR refused that label event already: once a head left the
+  allowlist, only a newer label brings the PR back to level 0.
+
+The expected check runs are a condition of the promotion, not of the level (``check_outcome``).
 
 A level asks for as many independent reviewers (#111): one at level 1, two at level 2. Two
 reviewers are distinct only if both their GitHub identity and their tuple ``(kind, model, effort,
@@ -31,6 +44,14 @@ from dataclasses import dataclass
 POLICY_SCHEMA = 2  # 2: level 2 runs two independent reviewers (#111)
 MIN_LEVEL, MAX_LEVEL = 1, 2
 SENSITIVE_LEVEL = 2
+ZERO_LEVEL = 0
+# Never in the level-0 allowlist, even when listed (#107): devloop's prompts, the standards, CI
+# workflows and schemas (the replay gate baseline among them), besides the sensitive paths; and
+# agent instructions at any depth, compared without case.
+ZERO_EXCLUDED = ('devloop/prompts/', 'standards/', '.github/', 'schemas/')
+ZERO_EXCLUDED_NAMES = ('agents.md', 'claude.md')
+# Markdown files are in the allowlist only when listed by their exact path.
+MARKDOWN = ('.md', '.markdown', '.mdx')
 # What a ``policy`` marker records: a PR stopped at a level devloop cannot review yet, an
 # approval whose receipt no longer matches, or a promotion.
 EVENTS = ('level', 'stale', 'promoted')
@@ -58,9 +79,19 @@ class ReviewPolicy:
     # review_args[, fallback models])`` each, the fallback models as ``(model, effort)`` pairs
     # (#121). A change to any of them changes the version, and so every receipt.
     reviewers: tuple = ()
+    # Level 0 (#107): the label a trusted user adds, the allowlist (directory prefixes or files,
+    # as ``sensitive_paths``) and the expected check runs, ``(name, app_id)`` each. Without an
+    # allowlist or without expected checks level 0 is off.
+    zero_label: str = 'reviews:0'
+    zero_allowlist: tuple = ()
+    zero_checks: tuple = ()
+
+    def zero_enabled(self):
+        return bool(self.zero_allowlist) and bool(self.zero_checks)
 
     def version(self):
-        """Deterministic version of the loaded policy: the SHA-256 of its canonical form."""
+        """Deterministic version of the loaded policy: the SHA-256 of its canonical form. Level
+        0 enters it only when enabled, so a policy without it keeps the version of part 1."""
         data = {'schema': POLICY_SCHEMA, 'default_level': self.default_level,
                 'label': self.label, 'sensitive_level': SENSITIVE_LEVEL,
                 'sensitive_paths': sorted({_norm(p) for p in self.sensitive_paths}),
@@ -70,6 +101,12 @@ class ReviewPolicy:
                 'reviewers': [[*r[:5], list(r[5]), *([[list(f) for f in r[6]]]
                                                      if len(r) > 6 and r[6] else [])]
                               for r in self.reviewers]}
+        if self.zero_enabled():
+            data['zero'] = {'label': self.zero_label,
+                            'allowlist': sorted({_norm(p) for p in self.zero_allowlist}),
+                            'checks': sorted([name, app] for name, app in self.zero_checks),
+                            'excluded': sorted(ZERO_EXCLUDED + ZERO_EXCLUDED_NAMES),
+                            'markdown': sorted(MARKDOWN)}
         text = json.dumps(data, sort_keys=True, separators=(',', ':'))
         return hashlib.sha256(text.encode()).hexdigest()
 
@@ -118,15 +155,69 @@ def sensitive_changes(policy, changes):
     return sorted(hits)
 
 
+def zero_allowed(policy, change):
+    """Whether a change of the diff (``{path, links}``) may be part of a level-0 PR: never a
+    symlink, an excluded or sensitive path, nor a Markdown file that the allowlist does not
+    list by its exact path.
+
+    The path is matched against the allowlist exactly as Git names it: only the configured
+    entries are normalized, so that a name with leading or trailing spaces is a different file
+    and never matches an entry. Exclusions, and the Markdown rule, are checked on both the exact
+    and the trimmed name, so that trimming can only refuse more."""
+    path = change['path']
+    if change.get('links') or not path or not _norm(path):
+        return False
+    for form in {path, _norm(path)}:
+        low = form.lower()
+        if posixpath.basename(low) in ZERO_EXCLUDED_NAMES or policy.covers(form):
+            return False
+        for entry in (_norm(e).lower() for e in ZERO_EXCLUDED):
+            if low == entry or low.startswith(entry + '/'):
+                return False
+    entries = [e for e in (_norm(e) for e in policy.zero_allowlist) if e]
+    if any(form.lower().endswith(MARKDOWN) for form in (path, _norm(path))):
+        return path in entries
+    return any(path == e or path.startswith(e + '/') for e in entries)
+
+
+def outside_allowlist(policy, changes):
+    """The changed paths that keep a PR out of level 0, sorted."""
+    return sorted({c['path'] for c in changes if not zero_allowed(policy, c)})
+
+
+def zero_grant(events, trusted_users):
+    """``{by, at}`` of the label event that asks for level 0, or None: the latest ``labeled``
+    or ``unlabeled`` event of the label must add it, and a trusted user must have written it.
+    ``events`` are ``{event, by, at}``, oldest first."""
+    last = events[-1] if events else None
+    if (isinstance(last, dict) and last.get('event') == 'labeled'
+            and last.get('by') in trusted_users and isinstance(last.get('at'), str)
+            and last['at']):
+        return {'by': last['by'], 'at': last['at']}
+    return None
+
+
+def zero_refused(records):
+    """The time of the latest level-0 label event that a receipt among ``records`` refused, or
+    None. That event, and any earlier one, no longer lowers the level."""
+    times = [reason['at'] for receipt in map(receipt_of, records) if receipt
+             for reason in receipt['reasons']
+             if reason.get('kind') == 'zero' and reason.get('applied') is False
+             and isinstance(reason.get('at'), str)]
+    return max(times, default=None)
+
+
 def evaluate(policy, *, pr, base, head, changes, labelers, trusted_users, previous_level,
-             select, profile=lambda key: None):
+             select, profile=lambda key: None, zero_events=(), refused=None):
     """The receipt of head ``head`` of PR ``pr`` against base commit ``base``.
 
     ``labelers`` are the logins of every ``labeled`` event of ``policy.label`` on the PR,
     oldest first; ``previous_level`` the highest level recorded on the PR so far (0 if none);
     ``select(level)`` the reviewers that level requires, in order: as many as the level, or
     none when the pool has not enough independent ones; ``profile(key)`` the identity and
-    tuple reviewer ``key`` reviews with now."""
+    tuple reviewer ``key`` reviews with now. ``zero_events`` are the ``labeled`` and
+    ``unlabeled`` events of ``policy.zero_label`` (see ``zero_grant``) and ``refused`` the
+    ``zero_refused`` time of the PR's records; both count only when level 0 is enabled."""
     level = max(MIN_LEVEL, policy.default_level)
     reasons = [{'kind': 'default', 'level': level}]
     by = next((who for who in labelers if who in trusted_users), None)
@@ -143,7 +234,18 @@ def evaluate(policy, *, pr, base, head, changes, labelers, trusted_users, previo
         level = previous_level
         reasons.append({'kind': 'previous', 'level': previous_level})
     level = min(level, MAX_LEVEL)
-    reviewers = list(select(level))
+    grant = zero_grant(list(zero_events), trusted_users) if policy.zero_enabled() else None
+    if grant:
+        outside = outside_allowlist(policy, changes)
+        why = [w for w, failed in (('level', level > MIN_LEVEL),
+                                   ('refused', refused is not None and grant['at'] <= refused),
+                                   ('allowlist', bool(outside))) if failed]
+        reasons.append({'kind': 'zero', 'level': ZERO_LEVEL, 'label': policy.zero_label,
+                        'by': grant['by'], 'at': grant['at'], 'applied': not why, 'why': why,
+                        'outside': outside[:MAX_LISTED_PATHS], 'count': len(outside)})
+        if not why:
+            level = ZERO_LEVEL
+    reviewers = list(select(level)) if level else []
     return {'pr': pr, 'base': base, 'head': head, 'policy': policy.version(), 'level': level,
             'reasons': reasons, 'reviewers': reviewers,
             'profiles': [profile(key) for key in reviewers]}
@@ -197,7 +299,7 @@ def _is_int(value, low, high=None):
 def valid_receipt(r):
     return (isinstance(r, dict) and _is_int(r.get('pr'), 1)
             and all(isinstance(r.get(k), str) and r.get(k) for k in ('base', 'head', 'policy'))
-            and _is_int(r.get('level'), MIN_LEVEL, MAX_LEVEL)
+            and _is_int(r.get('level'), ZERO_LEVEL, MAX_LEVEL)
             and isinstance(r.get('reviewers'), list)
             and all(isinstance(x, str) for x in r['reviewers'])
             and isinstance(r.get('reasons'), list)
@@ -244,6 +346,72 @@ def describe(receipt):
         elif kind == 'previous':
             lines.append(f'- Livello {reason.get("level")} già richiesto in precedenza su questa '
                          'PR: il livello non scende.')
-    reviewers = ', '.join(f'`{r}`' for r in receipt['reviewers']) or 'nessun agent indipendente'
+        elif kind == 'zero':
+            lines.append(_describe_zero(reason))
+    reviewers = (', '.join(f'`{r}`' for r in receipt['reviewers'])
+                 or ('nessuno (livello 0)' if receipt['level'] == ZERO_LEVEL
+                     else 'nessun agent indipendente'))
     lines.append(f'- Reviewer richiesti: {reviewers}.')
     return '\n'.join(lines)
+
+
+_ZERO_WHY = {'level': 'il livello calcolato è 2, e la label deroga solo al livello 1',
+             'refused': 'un ricalcolo precedente ha già escluso questa label: per tornare al '
+                        'livello 0 serve una nuova label di un utente fidato'}
+
+
+def _describe_zero(reason):
+    text = (f'- Label `{reason.get("label")}` messa da `{reason.get("by")}` il '
+            f'`{reason.get("at")}`')
+    if reason.get('applied'):
+        return text + ': livello 0, il diff è interamente nell\'allowlist.'
+    why = [_ZERO_WHY[w] for w in reason.get('why') or () if w in _ZERO_WHY]
+    if 'allowlist' in (reason.get('why') or ()):
+        paths = reason.get('outside') or []
+        more = (reason.get('count') or len(paths)) - len(paths)
+        why.append('il diff esce dall\'allowlist del livello 0: '
+                   + ', '.join(f'`{p}`' for p in paths) + (f' e altri {more}' if more > 0 else ''))
+    return text + ', non applicata: ' + '; '.join(why) + '.'
+
+
+def check_states(expected, runs):
+    """The state of each expected check run on a head: ``{name, app_id, state}``, where state
+    is ``missing``, ``pending`` or the conclusion of the most recent run (highest id) with that
+    exact name and app. Commit statuses never count."""
+    states = []
+    for name, app_id in expected:
+        mine = [r for r in runs if r.get('name') == name and r.get('app_id') == app_id]
+        if not mine:
+            state = 'missing'
+        else:
+            latest = max(mine, key=lambda r: r.get('id') or 0)
+            state = ((latest.get('conclusion') or 'unknown')
+                     if latest.get('status') == 'completed' else 'pending')
+        states.append({'name': name, 'app_id': app_id, 'state': state})
+    return states
+
+
+def check_outcome(states):
+    """``success`` when every expected check succeeded; ``failed`` when one is missing or
+    ended otherwise (skipped, neutral, cancelled and a filtered workflow are no success);
+    otherwise ``pending``. No expected check at all is never a success."""
+    if not states or any(s['state'] not in ('success', 'pending') for s in states):
+        return 'failed'
+    return 'pending' if any(s['state'] == 'pending' for s in states) else 'success'
+
+
+def changes_requested(reviews, trusted_users):
+    """The trusted users whose native ``REQUEST_CHANGES`` still stands, sorted. A later
+    approval of the same user withdraws it, and so does a dismissal (the review becomes
+    ``DISMISSED``); a comment or a new commit does not. ``reviews`` are ``{login, state}``,
+    oldest first."""
+    standing = set()
+    for review in reviews:
+        who = review.get('login')
+        if who not in trusted_users:
+            continue
+        if review.get('state') == 'APPROVED':
+            standing.discard(who)
+        elif review.get('state') == 'CHANGES_REQUESTED':
+            standing.add(who)
+    return sorted(standing)
