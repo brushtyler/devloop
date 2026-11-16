@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -48,6 +49,48 @@ class AgentError(RuntimeError):
         self.log = log
 
 
+class EnvelopeError(AgentError):
+    """The CLI's JSON envelope says, explicitly, that the turn failed."""
+
+
+class ModelUnavailable(AgentError):
+    """A failed turn whose output says that the model is unavailable (issue #121). The message
+    is the one the plain failure would have; ``reason`` says what matched."""
+
+    def __init__(self, message, log=None, reason=''):
+        super().__init__(message, log)
+        self.reason = reason
+
+
+class ModelsUnavailable(AgentError):
+    """Every model of an agent's chain was unavailable, or left out, in one action; or, with
+    ``last_failed``, the last model tried failed otherwise after the others had been. ``tried``:
+    ``(model, why)`` pairs, in order."""
+
+    def __init__(self, key, tried, log=None, last_failed=False):
+        listed = '\n'.join(f'- `{model}`: {why}' for model, why in tried)
+        headline = (f'the last model tried for `{key}` failed' if last_failed
+                    else f'no model of `{key}` was available')
+        super().__init__(f'{headline}; models tried:\n\n{listed}', log)
+        self.tried = list(tried)
+
+
+def unavailable_reason(agent, returncode, text):
+    """Why a failed turn of ``agent`` counts as its model being unavailable, or None. Call it
+    only for a non-zero exit (``returncode``) or an explicit error envelope (``returncode``
+    None); a valid result, a parse or schema error and a timeout never count."""
+    if returncode is not None and returncode in agent.unavailable_exit_codes:
+        return f'exit code {returncode}'
+    for pattern in agent.unavailable_patterns:
+        match = re.search(pattern, text or '', re.IGNORECASE)
+        if match:
+            start = text.rfind('\n', 0, match.start()) + 1
+            end = text.find('\n', match.end())
+            line = text[start:end if end >= 0 else len(text)].strip()
+            return f'`{pattern}` in "{line[:200]}"'
+    return None
+
+
 def build_command(agent, mode, prompt, *, schema_file, out_file):
     """Return ``(argv, stdin)`` for one headless agent turn in the current directory."""
     if mode not in MODES:
@@ -79,6 +122,16 @@ def build_command(agent, mode, prompt, *, schema_file, out_file):
     raise ValueError(agent.kind)
 
 
+def envelope_error(kind, envelope):
+    """The message of an envelope (a dict) that says, explicitly, that the turn failed, or None."""
+    if kind == 'claude' and envelope.get('is_error'):
+        return (f'claude reported an error: {envelope.get("subtype")}: '
+                f'{str(envelope.get("result"))[:500]}')
+    if kind == 'agy' and envelope.get('status') not in (None, 'SUCCESS'):
+        return f'agy status {envelope.get("status")}: {str(envelope.get("response"))[:500]}'
+    return None
+
+
 def extract_output(kind, stdout, out_file):
     """The structured final message of one agent turn, before schema validation."""
     if kind == 'codex':
@@ -91,15 +144,37 @@ def extract_output(kind, stdout, out_file):
         envelope = json.loads(stdout)
     except json.JSONDecodeError as exc:
         raise AgentError(f'{kind} output is not JSON: {exc}') from exc
-    if kind == 'claude' and envelope.get('is_error'):
-        raise AgentError(f'claude reported an error: {envelope.get("subtype")}: '
-                         f'{str(envelope.get("result"))[:500]}')
-    if kind == 'agy' and envelope.get('status') not in (None, 'SUCCESS'):
-        raise AgentError(f'agy status {envelope.get("status")}: {str(envelope.get("response"))[:500]}')
+    if not isinstance(envelope, dict):
+        raise AgentError(f'{kind} output is not a JSON object: {type(envelope).__name__}')
+    error = envelope_error(kind, envelope)
+    if error:
+        raise EnvelopeError(error)
     output = envelope.get('structured_output')
     if output is None:
         raise AgentError(f'{kind} returned no structured_output')
     return output
+
+
+def left_no_output(kind, stdout, out_file):
+    """Whether a failed invocation left no output at all, or only an explicit error envelope:
+    only then may its text say that the model is unavailable (#121). A structured result, valid
+    against the schema or not, and output that cannot be parsed (not JSON, or not an object
+    where the CLI writes an envelope) take precedence over any text match."""
+    if kind == 'codex':
+        try:
+            text = Path(out_file).read_text(encoding='utf-8')
+        except OSError:
+            return True
+        return not text.strip()
+    if not (stdout or '').strip():
+        return True
+    try:
+        envelope = json.loads(stdout)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(envelope, dict):
+        return False
+    return bool(envelope_error(kind, envelope)) or envelope.get('structured_output') is None
 
 
 class AgentRunner:
@@ -163,11 +238,24 @@ class AgentRunner:
             raise AgentError(f'{agent.key} could not start: {exc}', log) from exc
         log.write_text(f'$ {argv[0]} ({mode})\nexit {done.returncode}\n--- stdout\n{done.stdout}'
                        f'\n--- stderr\n{done.stderr}', encoding='utf-8')
+        text = f'{done.stdout}\n{done.stderr}'
         if done.returncode != 0:
-            raise AgentError(f'{agent.key} exited with {done.returncode}', log)
+            message = f'{agent.key} exited with {done.returncode}'
+            if left_no_output(agent.kind, done.stdout, out_file):
+                reason = unavailable_reason(agent, done.returncode, text)
+                if reason:
+                    raise ModelUnavailable(message, log, reason)
+            # A result or a parse error: the turn failed, but not for lack of a model (#121).
+            raise AgentError(message, log)
         try:
             output = extract_output(agent.kind, done.stdout, out_file)
             return validate(output, load_schema(schema_name))
+        except EnvelopeError as exc:
+            reason = unavailable_reason(agent, None, text)
+            if reason:
+                raise ModelUnavailable(str(exc), log, reason) from exc
+            exc.log = log
+            raise
         except AgentError as exc:
             exc.log = log
             raise

@@ -1,6 +1,8 @@
 """Dispatcher configuration (TOML)."""
 
+import dataclasses
 import json
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,10 +16,25 @@ INSTALL_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SENSITIVE_LISTS = ('schemas/recovery-grader-baseline.json',)
 AGENT_KINDS = ('claude', 'codex', 'agy')
 STALL_ACTIONS = ('warn', 'abort')
+# A fallback model never reasons below ``high`` (issue #121).
+FALLBACK_EFFORTS = ('high', 'xhigh', 'max')
+# agy model names end with their reasoning level: these suffixes are below ``high``.
+AGY_LOW_SUFFIXES = ('minimal', 'low', 'medium')
+# What tells a failed turn that its model is unavailable (quota or budget exhausted, model not
+# available, rate limit), searched case-insensitively in the CLI's stdout and stderr.
+DEFAULT_UNAVAILABLE_PATTERNS = ('RESOURCE_EXHAUSTED', 'quota', '429', 'model .* not available')
 
 
 class ConfigError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class FallbackModel:
+    """A model an agent falls back to when the ones before it are unavailable (issue #121)."""
+    model: str
+    model_label: str
+    effort: str
 
 
 @dataclass(frozen=True)
@@ -32,6 +49,22 @@ class AgentConfig:
     write_args: tuple = ()
     review_args: tuple = ()
     commit_trailer: str = ''
+    # Tried in order, each at most once per action, only when the models before it are
+    # unavailable: a failed turn whose output matches ``unavailable_patterns`` or whose exit
+    # code is in ``unavailable_exit_codes`` (issue #121).
+    fallback_models: tuple = ()
+    unavailable_patterns: tuple = DEFAULT_UNAVAILABLE_PATTERNS
+    unavailable_exit_codes: tuple = ()
+    # Set on the configurations ``chain`` derives for fallback models: the configured model.
+    fallback_for: str = ''
+
+    def chain(self):
+        """The agent with its configured model, then with each fallback model in order: same
+        key, CLI and arguments, with the fallback's model, label and effort."""
+        return [self] + [dataclasses.replace(self, model=f.model, model_label=f.model_label,
+                                             effort=f.effort, fallback_models=(),
+                                             fallback_for=self.model)
+                         for f in self.fallback_models]
 
 
 @dataclass(frozen=True)
@@ -108,6 +141,56 @@ def _str_list(table, key, where, default=()):
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
         raise ConfigError(f'{where}.{key}: expected a list of strings')
     return tuple(value)
+
+
+def _fallback_models(table, where, kind, model, effort):
+    """``fallback_models``: an ordered list of ``{model, model_label, effort}`` tables. A
+    missing effort is the agent's. Every effort must be ``high`` or above, and so must, for agy,
+    the level its model name ends with."""
+    value = table.get('fallback_models', [])
+    where = f'{where}.fallback_models'
+    if not isinstance(value, list):
+        raise ConfigError(f'{where}: expected a list of tables')
+    models, seen = [], {model}
+    for position, item in enumerate(value):
+        at = f'{where}[{position}]'
+        if not isinstance(item, dict):
+            raise ConfigError(f'{at}: expected a table with model, model_label and effort')
+        unknown = set(item) - {'model', 'model_label', 'effort'}
+        if unknown:
+            raise ConfigError(f'{at}: unknown keys {sorted(unknown)}')
+        name = _require(item, 'model', str, at)
+        label = _require(item, 'model_label', str, at)
+        level = item.get('effort', effort)
+        if not name.strip() or not label.strip():
+            raise ConfigError(f'{at}: model and model_label must not be empty')
+        if level not in FALLBACK_EFFORTS:
+            raise ConfigError(f'{at}.effort: {level!r} is not allowed for a fallback, use one '
+                              f'of {FALLBACK_EFFORTS}')
+        if kind == 'agy' and name.lower().rsplit('-', 1)[-1] in AGY_LOW_SUFFIXES:
+            raise ConfigError(f'{at}.model: {name!r} reasons below high')
+        if name in seen:
+            raise ConfigError(f'{at}.model: {name!r} is already the agent\'s model or a fallback')
+        seen.add(name)
+        models.append(FallbackModel(model=name, model_label=label, effort=level))
+    return tuple(models)
+
+
+def _unavailable(table, where):
+    """``(unavailable_patterns, unavailable_exit_codes)`` of an agent."""
+    patterns = _str_list(table, 'unavailable_patterns', where, DEFAULT_UNAVAILABLE_PATTERNS)
+    for pattern in patterns:
+        if not pattern:
+            raise ConfigError(f'{where}.unavailable_patterns: empty pattern')
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise ConfigError(f'{where}.unavailable_patterns: {pattern!r}: {exc}') from exc
+    codes = table.get('unavailable_exit_codes', [])
+    if (not isinstance(codes, list)
+            or not all(isinstance(c, int) and not isinstance(c, bool) and c != 0 for c in codes)):
+        raise ConfigError(f'{where}.unavailable_exit_codes: expected a list of non-zero integers')
+    return patterns, tuple(codes)
 
 
 def _listed_files(name, root):
@@ -214,16 +297,21 @@ def parse_config(data, root=INSTALL_ROOT):
         kind = _require(table, 'kind', str, where)
         if kind not in AGENT_KINDS:
             raise ConfigError(f'{where}.kind: must be one of {AGENT_KINDS}')
+        model = _require(table, 'model', str, where)
+        effort = _require(table, 'effort', str, where)
+        patterns, codes = _unavailable(table, where)
         agents[key] = AgentConfig(
             key=key, kind=kind,
             display_name=_require(table, 'display_name', str, where),
-            model=_require(table, 'model', str, where),
+            model=model,
             model_label=_require(table, 'model_label', str, where),
-            effort=_require(table, 'effort', str, where),
+            effort=effort,
             version_cmd=_str_list(table, 'version_cmd', where, (kind, '--version')),
             write_args=_str_list(table, 'write_args', where),
             review_args=_str_list(table, 'review_args', where),
-            commit_trailer=table.get('commit_trailer', ''))
+            commit_trailer=table.get('commit_trailer', ''),
+            fallback_models=_fallback_models(table, where, kind, model, effort),
+            unavailable_patterns=patterns, unavailable_exit_codes=codes)
     roles = data.get('roles') or {}
     implementer = _require(roles, 'implementer', str, 'roles')
     if implementer not in agents:
@@ -280,7 +368,8 @@ def parse_config(data, root=INSTALL_ROOT):
         review_policy=parse_review_policy(
             data.get('review_policy', {}), root,
             [(k, apps[k].slug if k in apps else None, agents[k].kind, agents[k].model,
-              agents[k].effort, agents[k].review_args) for k in pool]),
+              agents[k].effort, agents[k].review_args,
+              tuple((f.model, f.effort) for f in agents[k].fallback_models)) for k in pool]),
         **ints)
 
 

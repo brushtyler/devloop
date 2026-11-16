@@ -1,6 +1,6 @@
 # ADR 0001: un unico prodotto, con le fasi su issue e PR e il backend come porta
 
-- **Stato:** proposto. Il merge di questa PR da parte dell'operatore vale come approvazione della direzione, dei vincoli e del piano. Non vale per le decisioni elencate in "Decisioni riservate all'operatore", che restano aperte finché l'operatore non le prende in modo esplicito.
+- **Stato:** approvato dall'operatore con il merge di PR #137 (2026-11-16). Le decisioni riservate sono state prese il 2026-11-16 (vedi la sezione relativa).
 - **Fase:** design (#126, `phase:design`). È la prima fase di design eseguita nella forma che devloop dovrà automatizzare: issue di design, conclave come review, PR con ADR, merge dell'operatore.
 - **Data:** 2026-11-15.
 - **Revisione:** la versione 2 corregge la prima stesura dopo una verifica di fedeltà ai voti, fatta da Codex.
@@ -58,10 +58,10 @@ I voti completi sono nei commenti di #126 e prevalgono su questa sintesi in caso
    - Nessun redispatch senza la prova che i writer sono terminati: un timeout non è una prova.
    - Gli esecutori conservano la modalità Docker di ssdlc: sorgente in sola lettura, `.ssdlc` coperto da tmpfs in verifica, nessuna credenziale dell'host. Conservano anche la separazione delle credenziali e il controllo dell'installazione fissata e verificata.
    - Tutto questo è obbligatorio prima di eseguire più tick in parallelo e prima di affidare alle fasi esecuzioni che sostituiscono ssdlc. Riferimenti: #115–#117, #132.
-6. **Il confine di #59 non si rompe in silenzio.** devloop oggi importa solo la stdlib e sé stesso (`tests/test_devloop_boundary.py`). Se e quando revocarlo è una **decisione esplicita dell'operatore**. Qualunque sia la decisione, restano queste condizioni dei voti:
+6. **Il confine di #59 non si rompe in silenzio.** devloop oggi importa solo la stdlib e sé stesso (`tests/test_devloop_boundary.py`). L'operatore lo ha revocato in modo limitato il 2026-11-16 (decisione 1 della sezione "Decisioni riservate all'operatore"), alle condizioni dei voti:
    - nel passo delle fasi si riusano **solo validatori puri** (catalogo dei requisiti, validazione del piano), **senza** innestare cicli stateful (`DesignSession`, `orchestrator.py`) (Antigravity);
    - il codice condiviso va in un pacchetto `core` dichiarato e **aggiunto alla allowlist del test di confine**. **Mai** import diretti di `ssdlc_*`, che è il candidato sotto test del replay gate (Claude).
-   - *Proposta di Claude*, non una condizione: riusare prompt e schemi come dati copiati nell'installazione fissata. Resta una proposta, da valutare nella decisione esplicita dell'operatore sul confine di #59.
+   - prompt e schemi si riusano come dati, copiati nell'installazione fissata. Era una proposta di Claude, approvata dall'operatore con la decisione 1.
 7. **L'approvazione del piano genera issue proposte,** ma non ne autorizza l'esecuzione: `agent:ready` resta un atto dell'operatore.
 8. **Evidenze.**
    - Artefatti completi, con digest e riferimenti durevoli.
@@ -158,15 +158,22 @@ Ops e documentazione diventano criteri dei task (Claude). Fermarsi sempre a `03-
 | Perimetro (`SCOPE_REQUIRED`) | Blocco del candidato fuori scope prima dell'adozione (vincolo 4) |
 | Più tentativi sulla stessa issue | Entità "tentativo" prima della convergenza (vincolo 3). Come rappresentarli, per esempio branch e PR per variante, è una proposta ulteriore da decidere al passo 2 |
 
-## Decisioni riservate all'operatore (aperte)
+## Decisioni riservate all'operatore
 
-1. **Confine di #59:** se e come revocarlo (vincolo 6).
-2. **Divulgazione.** Il repository è pubblico: threat model STRIDE e finding AppSec su vulnerabilità non ancora corrette **non** devono diventare issue o PR pubbliche per default. Va deciso cosa resta locale o redatto prima del passo 3.
-3. **Revisioni della baseline del replay gate:** lo scorporo del workflow per i filtri della CI (vincolo 10) ed eventuali nuove versioni dell'oracolo A5 (vincolo 1).
-4. **Attivazione, migrazione e #4:** attivazione delle fasi sulle run reali, migrazione delle run esistenti, chiusura di #4 (passo 6).
-5. **Estensioni di budget e di round.**
-6. **Merge e label:** il merge, e le label di attivazione e di riapertura da parte degli utenti fidati.
-7. **Profilo di fiducia:** l'eventuale scelta di un profilo più debole sul backend filesystem.
+Decise dall'operatore il 2026-11-16, accettando le raccomandazioni proposte in sessione:
+
+1. **Confine di #59: revocato in modo limitato.** devloop può riusare codice di ssdlc **solo** attraverso un pacchetto `core` dichiarato, aggiunto alla allowlist di `tests/test_devloop_boundary.py`. Valgono queste condizioni:
+   - solo validatori puri, senza cicli stateful (`DesignSession`, `orchestrator.py`);
+   - prompt e schemi riusati come dati;
+   - **mai** import diretti di `ssdlc_*`.
+2. **Divulgazione.** Threat model e finding AppSec su vulnerabilità **non ancora corrette** restano **locali per default**. Sul tracker pubblico vanno solo un riepilogo redatto, l'hash dell'artefatto e lo stato. Il testo completo diventa pubblico solo dopo il merge della correzione.
+3. **Baseline del replay gate.** Lo scorporo di `.github/workflows/test.yml` dagli elementi fissati è **approvato in linea di principio**. Si farà come revisione `i2-fixtures-v6` in una PR dedicata, insieme al lavoro sui filtri della CI. Ogni nuova versione dell'oracolo A5 resta una decisione da prendere caso per caso.
+4. **Attivazione, migrazione e #4: non ora.** Se ne riparla dopo la parità, al passo 6. #4 resta aperta come assorbita da questo ADR.
+5. **Estensioni di budget e di round.** Restano dell'operatore, **caso per caso**, senza delega.
+6. **Merge e label di attivazione e di riapertura.** Restano atti dell'operatore, come oggi.
+7. **Profilo di fiducia più debole sul backend filesystem: no**, per ora.
+
+**Chiarimento sul vincolo 1.** "Motore locale invariato fino al passo 6" significa che le sue garanzie **non vengono tolte né sostituite** prima della parità. Non congela lo sviluppo: correzioni e miglioramenti del motore locale (per esempio #115–#117, #118–#120, #128, #72) proseguono normalmente.
 
 ## Precedenti
 

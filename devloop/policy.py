@@ -76,7 +76,8 @@ class ReviewPolicy:
     # Files listed by ``sensitive_path_lists``, read when the configuration is loaded.
     sensitive_files: tuple = ()
     # The configured reviewer pool, in order: ``(key, app slug or None, kind, model, effort,
-    # review_args)`` each. A change to any of them changes the version, and so every receipt.
+    # review_args[, fallback models])`` each, the fallback models as ``(model, effort)`` pairs
+    # (#121). A change to any of them changes the version, and so every receipt.
     reviewers: tuple = ()
     # Level 0 (#107): the label a trusted user adds, the allowlist (directory prefixes or files,
     # as ``sensitive_paths``) and the expected check runs, ``(name, app_id)`` each. Without an
@@ -95,7 +96,11 @@ class ReviewPolicy:
                 'label': self.label, 'sensitive_level': SENSITIVE_LEVEL,
                 'sensitive_paths': sorted({_norm(p) for p in self.sensitive_paths}),
                 'sensitive_files': sorted({_norm(p) for p in self.sensitive_files}),
-                'reviewers': [[*r[:5], list(r[5])] for r in self.reviewers]}
+                # A reviewer's fallback models, (model, effort) each, count only when it has
+                # some: without them the version is the one before #121.
+                'reviewers': [[*r[:5], list(r[5]), *([[list(f) for f in r[6]]]
+                                                     if len(r) > 6 and r[6] else [])]
+                              for r in self.reviewers]}
         if self.zero_enabled():
             data['zero'] = {'label': self.zero_label,
                             'allowlist': sorted({_norm(p) for p in self.zero_allowlist}),
