@@ -63,6 +63,18 @@ class ModelUnavailable(AgentError):
         self.reason = reason
 
 
+class PermissionDenied(AgentError):
+    """An agy turn that exited 0 with no output because headless mode denied a permission it
+    cannot ask for (issue #180): a failure of the tool, not of the change. ``permission`` is the
+    denied one, as agy names it; ``target`` the last action agy's JSON lists as denied, as
+    compact JSON, or None when agy does not report it."""
+
+    def __init__(self, message, log=None, permission='', target=None):
+        super().__init__(message, log)
+        self.permission = permission
+        self.target = target
+
+
 class ModelsUnavailable(AgentError):
     """Every model of an agent's chain was unavailable, or left out, in one action; or, with
     ``last_failed``, the last model tried failed otherwise after the others had been. ``tried``:
@@ -216,7 +228,12 @@ def agy_prompt_block(agent, mode):
             '\nRead and search files only with your own file tools, using paths relative to the '
             'working directory. Do not use `grep`, `ls`, `cat`, `find`, `sed` or any other shell '
             'command to read or search files. Any command not in the list above is denied, and '
-            'a denied command ends the turn with no result.\n')
+            'a denied command ends the turn with no result.\n'
+            '\nRun commands so that their output stays short and complete: for example a single '
+            'test module at a time, with `-q`. If an output is truncated, run the command again '
+            'on a narrower scope. Never read logs or files outside the working directory, '
+            'including the logs of your own background tasks: reading them needs a permission '
+            'this session cannot ask for, and ends the turn with no result.\n')
 
 
 def turn_prompt(agent, mode, prompt):
@@ -240,6 +257,31 @@ def denied_actions(kind, stdout):
     if not denied:
         return None
     return json.dumps(denied, ensure_ascii=False, separators=(',', ':'))[:500]
+
+
+PERMISSION = re.compile(r'a tool required the "([^"]+)" permission')
+
+
+def denied_permission(stopped):
+    """The permission named by agy's ``jetski: no output produced`` diagnostic (``stopped``, from
+    ``no_output_reason``), for example ``read_file``, or None (issue #180)."""
+    match = PERMISSION.search(stopped or '')
+    return match.group(1) if match else None
+
+
+def denied_target(kind, stdout):
+    """The last action agy's JSON envelope lists in ``denied_actions``, with the arguments agy
+    reports for it, as compact JSON, or None (issue #180)."""
+    if kind != 'agy':
+        return None
+    try:
+        envelope = json.loads(stdout or '')
+    except json.JSONDecodeError:
+        return None
+    denied = envelope.get('denied_actions') if isinstance(envelope, dict) else None
+    if not isinstance(denied, list) or not denied:
+        return None
+    return json.dumps(denied[-1], ensure_ascii=False, separators=(',', ':'))[:500]
 
 
 def no_output_reason(kind, stdout, stderr):
@@ -397,7 +439,12 @@ class AgentRunner:
         denied = f'; denied_actions: {denied}' if denied else ''
         if done.returncode == 0 and stopped:
             # Not an empty result: the turn failed, for example on a permission it could not ask.
-            raise AgentError(f'{agent.key} stopped without output: {stopped}{denied}', log)
+            message = f'{agent.key} stopped without output: {stopped}{denied}'
+            permission = denied_permission(stopped)
+            if permission:
+                raise PermissionDenied(message, log, permission,
+                                       denied_target(agent.kind, done.stdout))
+            raise AgentError(message, log)
         if done.returncode != 0:
             message = f'{agent.key} exited with {done.returncode}'
             if stopped and stopped != 'no output':

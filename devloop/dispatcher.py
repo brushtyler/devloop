@@ -76,7 +76,7 @@ from pathlib import Path
 
 from .acceptance import (acceptance_criteria, acceptance_findings, format_criteria, format_map,
                          latest_map, render_map)
-from .agents import AgentError, ModelsUnavailable, ModelUnavailable
+from .agents import AgentError, ModelsUnavailable, ModelUnavailable, PermissionDenied
 from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, PR_COMMENT, REVIEW
 from .github import GitHubError, merge_state, summarize_checks
 from .ledger import entries as ledger_entries
@@ -1055,14 +1055,23 @@ class Dispatcher:
         name = f'issue-{number}-preflight'
         path = self.ws.base_copy(name)
         try:
-            entry = self._open_turn((number, 'preflight'), agent, 'review', name)
-            try:
-                raw = self.runner.run(agent, 'review', prompt, 'preflight', path, name)
-            except AgentError as exc:
-                self._close_turn(entry, 'unavailable' if isinstance(exc, ModelUnavailable)
-                                 else 'failure', exc)
-                raise
-            self._close_turn(entry, 'success')
+            # A denied permission is retried once, in the same checkout (#180), as in ``_turn``.
+            for label in (name, f'{name}-retry'):
+                entry = self._open_turn((number, 'preflight'), agent, 'review', label)
+                try:
+                    raw = self.runner.run(agent, 'review', prompt, 'preflight', path, label)
+                except PermissionDenied as exc:
+                    self._close_turn(entry, 'failure', exc)
+                    error = self._permission_denied(agent, exc, retry=label == name)
+                    if error is None:
+                        continue
+                    raise error from exc
+                except AgentError as exc:
+                    self._close_turn(entry, 'unavailable' if isinstance(exc, ModelUnavailable)
+                                     else 'failure', exc)
+                    raise
+                self._close_turn(entry, 'success')
+                break
         finally:
             self.ws.remove(name)
         self._publish_preflight(number, normalize_preflight(raw), digest, agent.key)
@@ -1325,6 +1334,20 @@ class Dispatcher:
             except GitHubError as exc:
                 self.log(f'  turn records of #{number} not checked: {exc}')
 
+    def _permission_denied(self, candidate, exc, retry):
+        """Log an agy turn stopped on a denied permission (``PermissionDenied``, #180) with the
+        permission and its target. Returns None when ``retry``, the turn being run once more;
+        otherwise the error to escalate, which names the permission denied again."""
+        target = exc.target or 'target non riportato da agy'
+        if retry:
+            self.log(f'  {candidate.key}: model {candidate.model} denied the '
+                     f'"{exc.permission}" permission ({target}); retrying once')
+            return None
+        self.log(f'  {candidate.key}: model {candidate.model} denied the '
+                 f'"{exc.permission}" permission again ({target})')
+        return PermissionDenied(f'{exc}; permission `{exc.permission}` denied again after one '
+                                'retry', exc.log, exc.permission, exc.target)
+
     def _turn(self, models, mode, prompt, schema, path, label, allowed=None, where=None):
         """Run one agent turn on the first of ``models`` (``Models``) that is available, and
         return its output and the agent configuration it ran with.
@@ -1337,9 +1360,15 @@ class Dispatcher:
         without fallback models fails as before #121; one with them fails listing the models
         tried and why (``ModelsUnavailable``).
 
+        An agy turn stopped on a permission headless mode cannot ask (``PermissionDenied``) is a
+        failure of the tool (#180): the same model runs the same turn once more, in the same
+        directory, with ``-retry`` in its label. A second denial on the same model fails as any
+        other error, naming the permission.
+
         ``where``, ``(number, kind)``, is the issue or PR whose ledger records each CLI
         invocation as a turn (#133): written before the CLI starts, closed when it ends."""
         failed = None
+        retried = set()  # the models already denied a permission in this call
         while models.left:
             candidate = models.left.pop(0)
             if allowed is not None and not allowed(candidate):
@@ -1349,6 +1378,8 @@ class Dispatcher:
                 continue
             text = prompt + FALLBACK_NOTE[mode] if failed else prompt
             suffix = f'-{candidate.model}' if candidate.fallback_for else ''
+            if candidate.model in retried:
+                suffix += '-retry'  # its own log: the first attempt's stays as it was
             entry = self._open_turn(where, candidate, mode, label + suffix)
             try:
                 output = self.runner.run(candidate, mode, text, schema, path, label + suffix)
@@ -1358,6 +1389,19 @@ class Dispatcher:
                 self.log(f'  {candidate.key}: model {candidate.model} unavailable: {exc.reason}')
                 failed = exc
                 continue
+            except PermissionDenied as exc:
+                self._close_turn(entry, 'failure', exc)
+                error = self._permission_denied(candidate, exc,
+                                                retry=candidate.model not in retried)
+                if error is None:
+                    retried.add(candidate.model)
+                    models.left.insert(0, candidate)
+                    continue
+                if not models.tried:
+                    raise error from exc
+                models.tried.append((candidate.model, str(error)))
+                raise ModelsUnavailable(models.agent.key, models.tried, exc.log,
+                                        last_failed=True) from exc
             except AgentError as exc:
                 self._close_turn(entry, 'failure', exc)
                 if not models.tried:
