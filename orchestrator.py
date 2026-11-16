@@ -1672,6 +1672,10 @@ class EngineRunner:
         if not any(docker_cmd[i - 1] in ("-v", "--tmpfs") and docker_cmd[i].split(":", 1)[0] == str(ticket)
                    for i in range(1, len(docker_cmd))):
             docker_cmd.extend(["-v", f"{ticket}:{ticket}:ro"])
+        # Root keeps owning the shared workspaces: Git run by the payload trusts them in
+        # this container only, without touching host Git configuration.
+        for key, value in role_fencing.git_trust(needs).items():
+            docker_cmd.extend(["-e", f"{key}={value}"])
         docker_cmd.extend([EngineRunner.IMAGE_NAME, *command])
         return docker_cmd
 

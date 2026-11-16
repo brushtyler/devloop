@@ -323,8 +323,13 @@ identity, and the disposable workspaces, shared with its group:
 A workspace keeps root as owner, so host Git still trusts the checkout. Its content
 gets the payload GID with group read and search (and write where the container mounts it
 read-write); its `.git` is not shared, and links and files with other hard links are not
-changed. The private temporary directory around it gets group search only. This happens
-only for a container of an admitted run: other runs keep root-only workspaces.
+changed. The private temporary directory around it gets group search only. Git run by
+the payload would refuse a root-owned checkout as of dubious ownership: the container
+gets `safe.directory` for each workspace it uses, and for nothing else, in Git's command
+scope (`GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>`, `GIT_CONFIG_VALUE_<n>`). These variables
+exist only in that container; host Git configuration, global or system, is not changed.
+This happens only for a container of an admitted run: other runs keep root-only
+workspaces.
 
 Before each container, the host checks every host path bind-mounted into it, and the
 working directory: read and search for read-only mounts, read, write and search for

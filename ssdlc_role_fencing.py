@@ -23,7 +23,8 @@ same way (``ROLE_OUTSIDE_CONTAINER``) before it starts.
 
 The only paths SSDLC prepares for the identity are those it creates for one invocation:
 the role cache, the verification scratch and the disposable workspaces declared with
-``disposable_workspace`` (``share_disposable``).
+``disposable_workspace`` (``share_disposable``). Git run by the payload trusts those
+workspaces, and only them, through the container's environment (``git_trust``).
 """
 import contextlib
 import os
@@ -174,6 +175,29 @@ def share_disposable(gid, used, writable):
         except OSError:
             return str(path)
     return None
+
+
+def git_trust(used):
+    """Container environment that lets Git, as the payload, use the declared workspaces it uses.
+
+    A shared workspace stays owned by root, so Git run by the payload identity would
+    refuse it as of dubious ownership. Each used workspace, and nothing else, gets
+    ``safe.directory`` in Git's command scope through ``GIT_CONFIG_COUNT``. The variables
+    live only in that container's environment: host Git configuration, global or system,
+    is never changed, and host Git keeps trusting the checkout because root owns it.
+    """
+    used = [Path(p) for p in used]
+    trusted = []
+    for workspace, _ in getattr(_declared, 'workspaces', ()):
+        if workspace not in trusted and any(_within(p, workspace) for p in used):
+            trusted.append(workspace)
+    if not trusted:
+        return {}
+    env = {'GIT_CONFIG_COUNT': str(len(trusted))}
+    for index, workspace in enumerate(trusted):
+        env[f'GIT_CONFIG_KEY_{index}'] = 'safe.directory'
+        env[f'GIT_CONFIG_VALUE_{index}'] = str(workspace)
+    return env
 
 
 class Fencing:

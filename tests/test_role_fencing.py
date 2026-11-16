@@ -42,6 +42,19 @@ def operator_probe(seen=None):
     return probe
 
 
+def container_git_env(cmd):
+    """The Git configuration a role container passes to its payload with ``-e``."""
+    values = [cmd[i + 1] for i, flag in enumerate(cmd[:-1]) if flag == '-e']
+    return dict(value.split('=', 1) for value in values if value.startswith('GIT_CONFIG_'))
+
+
+def payload_git(workspace, env):
+    """Real ``git status`` as the payload identity, with a HOME and a system config that trust nothing."""
+    return REAL_RUN(['git', 'status', '--porcelain'], cwd=workspace, user=1000, group=1000, extra_groups=[],
+                    env={'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent', 'GIT_CONFIG_NOSYSTEM': '1', **env},
+                    capture_output=True, text=True)
+
+
 def ready(generation='.'):
     return holder.READY_PREFIX + json.dumps(dict(generation=generation, device=1, inode=2)) + '\n'
 
@@ -397,7 +410,20 @@ class DisposableWorkspaceTests(FencingTestCase):
             os.chown(path, 1000, 1000, follow_symlinks=False)
 
     def test_developer_and_isolated_verification_run_under_the_holder(self):
-        written, verified, seen = [], [], []
+        written, verified, seen, gits = [], [], [], []
+
+        def git_as_payload(workspace):
+            # Root still owns the checkout: Git as the payload trusts it only with the
+            # configuration of its own container, and only that workspace.
+            env = container_git_env(docker.calls[-1])
+            self.assertEqual(env, {'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'safe.directory',
+                                   'GIT_CONFIG_VALUE_0': str(workspace.resolve())})
+            untrusted = payload_git(workspace, {})
+            self.assertEqual(untrusted.returncode, 128, untrusted.stderr)
+            self.assertIn('dubious ownership', untrusted.stderr)
+            trusted = payload_git(workspace, env)
+            self.assertEqual(trusted.returncode, 0, trusted.stderr)
+            gits.append(workspace)
 
         def develop(task, attempt, prompt, workspace):
             result = EngineRunner.run_claude(prompt, cwd=workspace, read_only=False,
@@ -405,6 +431,7 @@ class DisposableWorkspaceTests(FencingTestCase):
             # What the payload does in its container, with its identity.
             REAL_RUN(['/bin/sh', '-c', 'printf "value = 1\\n" > app.py && : > scratch.txt && rm scratch.txt'],
                      cwd=workspace, user=1000, group=1000, extra_groups=[], check=True)
+            git_as_payload(workspace)
             written.append(workspace)
             return {'output': 'TASK_DEV_STATUS: COMPLETE', 'exit_code': result[1], 'engine': 'claude',
                     'model': 'test', 'quiescent': True}
@@ -414,6 +441,7 @@ class DisposableWorkspaceTests(FencingTestCase):
             out, err, rc = EngineRunner.run_sandboxed_cmd(argv, cwd, timeout, verification_worktree=workspace)
             REAL_RUN(['/bin/sh', '-c', ': > generated.txt && rm generated.txt'], cwd=workspace,
                      user=1000, group=1000, extra_groups=[], check=True)
+            git_as_payload(workspace)
             return out, err, rc
 
         def runner(cmd, **kwargs):
@@ -434,6 +462,7 @@ class DisposableWorkspaceTests(FencingTestCase):
         self.assertTrue(rf.admitted(stored))
         self.assertEqual(len(written), 1)
         self.assertTrue(verified)
+        self.assertCountEqual(gits, [*written, *verified])
         self.assertEqual(len(docker.calls), 1 + len(verified))
         for cmd in docker.calls:
             self.assertIn(rf.HOLDER_PATH, cmd)
@@ -465,6 +494,7 @@ class DisposableWorkspaceTests(FencingTestCase):
                 contextlib.redirect_stdout(io.StringIO()):
             o._supervised_phase('03-dev')(phase)(self.orch)
         self.assertIn('--init', runner.calls[0])
+        self.assertEqual(container_git_env(runner.calls[0]), {})
         self.assertEqual(owners(), before)
 
 
@@ -528,6 +558,16 @@ class ShareDisposableTests(unittest.TestCase):
             rf.share_disposable(self.gid, [self.scratch.parent], [self.scratch.parent])
         self.assertEqual(self.mode(''), 0o700)
         self.assertEqual(stat.S_IMODE(os.stat(self.scratch).st_mode), 0o700)
+
+    def test_git_trusts_only_the_declared_workspaces_a_container_uses(self):
+        other = self.scratch / 'other'
+        other.mkdir()
+        self.assertEqual(rf.git_trust([self.workspace]), {})
+        with rf.disposable_workspace(self.workspace, scratch=self.scratch), rf.disposable_workspace(other):
+            self.assertEqual(rf.git_trust([self.workspace / 'pkg', self.workspace, self.scratch.parent]),
+                             {'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'safe.directory',
+                              'GIT_CONFIG_VALUE_0': str(self.workspace.resolve())})
+            self.assertEqual(rf.git_trust([self.scratch.parent]), {})
 
     def test_a_path_that_cannot_be_shared_is_reported(self):
         with rf.disposable_workspace(self.workspace), \
