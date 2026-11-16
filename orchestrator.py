@@ -36,7 +36,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from ssdlc_planning import PlanRepair
+from ssdlc_planning import PlanRepair, describe_no_progress
 from ssdlc_design import DesignSession
 from ssdlc_gate_reports import (GateEvaluator, EvaluationRequest, GateTerminalError,
     build_trusted_context, fingerprint, UNTRUSTED_DATA_INSTRUCTION, untrusted_data,
@@ -3405,14 +3405,23 @@ class SSDLCOrchestrator:
                 initial = previous_candidate.read_text()
             plan = repair.run(initial_candidate=initial)
         except PlanError as exc:
-            self.record_gate("TASK_PLAN_GATE", False, str(exc))
+            details = str(exc)
+            try:
+                counter = repair.no_progress()
+            except (OSError, ValueError):
+                counter = None  # The failure may concern the session evidence itself.
+            # STAGNATION already reports the counter in its message.
+            if counter and describe_no_progress(counter) not in details:
+                details += '; ' + describe_no_progress(counter)
+            self.record_gate("TASK_PLAN_GATE", False, details)
             raise
         for path in sorted(repair.root.glob("*")):
             if path.is_file():
                 self.record_artifact(str(path.relative_to(self.ssdlc_root)), path)
         atomic_json(plan_path, plan)
         self.record_artifact("02-design/plan.json", plan_path)
-        self.record_gate("TASK_PLAN_GATE", True, "Validated plan and independent semantic review")
+        self.record_gate("TASK_PLAN_GATE", True, "Validated plan and independent semantic review; "
+                         + describe_no_progress(repair.no_progress()))
         return plan
 
     def _candidate_fault(self, point):

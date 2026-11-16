@@ -986,6 +986,45 @@ class OrchestratorBootstrapTests(RepositoryTests):
         self.assertEqual(git(orch.repo_root, 'rev-parse', 'HEAD'), head)
         self.assertTrue(orch.state_file.exists())
 
+    def test_failed_plan_gate_summary_carries_the_no_progress_counter(self):
+        blocker = {'finding_id': 'F1', 'status': 'OPEN', 'severity': 'BLOCKING', 'category': 'PLAN_DEFECT',
+                   'requirement_refs': ['AC-1'], 'task_ids': [self.plan['tasks'][0]['task_id']],
+                   'message': 'Missing recovery assertion', 'evidence': 'No recovery assertion',
+                   'requested_change': 'Assert recovery', 'new_issue_reason': 'INITIAL_REVIEW'}
+        (self.repo / 'tests').mkdir()
+        (self.repo / 'tests' / 'test_app.py').write_text('import unittest\n')
+        git(self.repo, 'add', 'tests/test_app.py')
+        git(self.repo, 'commit', '-m', 'project test convention')
+        with patch.dict(os.environ, {'SSDLC_ENABLE_TASK_BREAKDOWN': 'true'}):
+            orch = self.make_orchestrator()
+            self.plan['base_commit'] = orch.state['base_commit']
+            requirements = orch.dir_po / 'requirements.md'
+            requirements.write_text('AC-1 SEC-1')
+            orch.record_artifact('01-po/requirements.md', requirements)
+            planned = copy.deepcopy(self.plan)
+            planned['tasks'][0]['verification']['quality_check_refs'] = ['CHECK-TESTS']
+            def invoke(engine, model, system, user, *args, **kwargs):
+                if args[-1] == '02-design-task-plan':
+                    return json.dumps(planned), 0, 0, 0, 'test-trace'
+                return json.dumps({'verdict': 'REVISION_REQUIRED', 'findings': [blocker]}), 0, 0, 0, 'test-trace'
+            def dispatch(role, *args, **kwargs):
+                return ('openrouter', 'reviewer' if role.endswith('sec') else 'planner', 'low', 'test')
+            with patch('orchestrator.EngineRunner.run_sandboxed_cmd', return_value=('Ran 1 test\nOK', '', 0)), \
+                    patch('orchestrator.SquadDispatcher.dispatch_role', side_effect=dispatch), \
+                    patch('orchestrator.EngineRunner.invoke_role', side_effect=invoke):
+                with self.assertRaisesRegex(PlanError, 'Semantic plan repair exhausted'):
+                    orch._ensure_task_plan(review_repairs=1)
+                failed = [g for g in orch.state['gate_history'] if g['gate'] == 'TASK_PLAN_GATE']
+                # Exhausted repairs still report the persisted counter in the gate (and evidence pack) summary.
+                self.assertEqual([(g['passed'], g['details']) for g in failed], [(False,
+                    'Semantic plan repair exhausted; no-progress passes 1/2 at candidate 2 (open blockers: F1)')])
+                # STAGNATION already carries the counter: the summary does not repeat it.
+                with self.assertRaises(PlanError):
+                    orch._ensure_task_plan(review_repairs=2)
+            details = [g['details'] for g in orch.state['gate_history'] if g['gate'] == 'TASK_PLAN_GATE'][-1]
+            self.assertIn('STAGNATION; no-progress passes 2/2 at candidate 3', details)
+            self.assertEqual(details.count('no-progress passes'), 1)
+
     def test_baseline_and_plan_generation_include_the_complete_schema_and_context(self):
         tests_dir = self.repo / 'tests'
         tests_dir.mkdir()
@@ -1041,6 +1080,9 @@ class OrchestratorBootstrapTests(RepositoryTests):
             # The possible omission did not change approval or the approved plan.
             self.assertTrue(any(g['gate'] == 'TASK_PLAN_GATE' and g['passed']
                                 for g in orch.state['gate_history']))
+            # The gate summary carries the persisted no-progress counter of the planning session.
+            self.assertTrue(any(g['gate'] == 'TASK_PLAN_GATE' and g['details'].endswith(
+                'no-progress passes 0/2 at candidate 1 (open blockers: none)') for g in orch.state['gate_history']))
             # Feedback attribution reads the report that normal planning registered.
             from ssdlc_feedback_analysis import historical_impact
             from ssdlc_reconciliation import _files
