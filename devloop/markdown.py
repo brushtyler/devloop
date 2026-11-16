@@ -13,6 +13,7 @@ import base64
 import json
 import re
 
+from .acceptance import render_map
 from .policy import EVENTS, valid_receipt
 
 UNKNOWN = 'non noto'
@@ -263,6 +264,10 @@ def render_fix(fix, head, round_no):
             note = r['note'].replace('|', '\\|').replace('\n', ' ')
             parts.append(f'| {r["finding_id"]} | {_ACTION_TEXT[r["action"]]} | {note} |')
     payload = {'round': round_no, 'head_sha': fix['head_sha'], 'responses': fix['responses']}
+    if 'acceptance_map' in fix:
+        # The latest map of the PR from now on (#134).
+        parts += ['', render_map(fix['acceptance_map'])]
+        payload['acceptance_map'] = fix['acceptance_map']
     if 'profile' in fix:
         payload['profile'] = fix['profile']  # who wrote the fix (#111)
     return publishable(head + '\n' + '\n'.join(parts), 'fix', payload)

@@ -32,7 +32,19 @@ Return only the structured result:
 - `commit_message`: subject line plus an optional body. Do not add trailers.
 - `pr_body`: the pull request description in Markdown, in $language: motivation, changes, tests run.
   Do not include the attribution header or a "Closes" line; the dispatcher adds both.
+- `acceptance_map`: one entry per acceptance criterion listed below, in the same order, with
+  `criterion` (its text), `tests` (the `file` and `name` of each test that verifies it),
+  `status` (`covered` or `not_covered`) and `reason` (why it is not covered, in $language; empty
+  when it is). A `not_covered` criterion without a reason always blocks the review. An empty
+  list (`[]`) when the issue has no recognisable acceptance criteria.
 - `blocked_reason`: empty unless `status` is `blocked`.
+
+## Acceptance criteria
+
+The dispatcher found these acceptance criteria in the issue. The reviewer checks your map
+against them.
+
+$acceptance_criteria
 
 ## Issue #$issue_number: $issue_title
 
