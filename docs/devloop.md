@@ -297,10 +297,12 @@ waits for its second reviewer, and the head, the policy version, the level, the 
 their profiles are unchanged, the dispatcher checks whether the new commits of `main` interfere
 with the PR (#160):
 
-- it lists the paths changed by **every** commit of `main` after the round's base, up to the
-  current one, each commit on its own: a change later reverted still counts, a rename counts
-  with both paths, a merge is compared with its first parent. The net diff between the two bases
-  is not used;
+- it lists the paths changed by **every** commit of the first-parent chain of `main` after the
+  round's base, up to the current one, each commit on its own: a change later reverted still
+  counts, a rename counts with both paths, a merge is compared with its first parent, so it
+  counts the net diff it brought to `main`. The commits of a merged branch are not walked
+  (#179): one that merged `main` into the branch would bring back changes the old base already
+  had. The net diff between the two bases is not used;
 - `main` interferes when one of those paths is a file of the PR's diff (added, changed, deleted
   or renamed, both sides), a directory above one, or a path under one (a file replaced by a
   directory, or the reverse);

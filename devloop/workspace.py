@@ -253,14 +253,18 @@ class Workspace:
 
     def base_paths(self, old, new):
         """Every path that a commit of the base branch after ``old``, up to ``new``, changed
-        (#160): the union over each commit of the range on its own, so a change later reverted
-        still counts, with both the old and the new path of a rename and a merge compared with
-        its first parent. Raises WorkspaceError when it cannot be listed, e.g. ``old`` is not an
-        ancestor of ``new`` (the base branch was rewritten) or a commit is missing."""
+        (#160): the union over each commit of the first-parent chain of ``new`` back to ``old``
+        on its own, so a change later reverted still counts, with both the old and the new path
+        of a rename and a merge compared with its first parent, i.e. the net diff it brought to
+        the base. The commits of a merged branch are not walked (#179): those that merged the
+        base into it would bring back changes the old base already had. Raises WorkspaceError
+        when it cannot be listed, e.g. ``old`` is not an ancestor of ``new`` (the base branch was
+        rewritten) or a commit is missing."""
         if self._git_run('merge-base', '--is-ancestor', old, new, check=False).returncode:
             raise WorkspaceError(f'{old[:12]} is not an ancestor of {new[:12]}')
         touched = set()
-        for line in self._git('rev-list', '--parents', f'{old}..{new}').splitlines():
+        for line in self._git('rev-list', '--first-parent', '--parents',
+                              f'{old}..{new}').splitlines():
             commit, *parents = line.split()
             # A root commit (unrelated history merged in) adds every path it has.
             span = parents[:1] + [commit] if parents else ['--root', '--no-commit-id', commit]

@@ -289,6 +289,48 @@ class BasePathsTests(unittest.TestCase):
             with self.assertRaises(WorkspaceError):
                 ws.base_paths('f' * 40, new)
 
+    def test_a_merged_branch_that_merged_the_base_counts_its_net_diff_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / 'repo'
+            self.git('init', '-q', '-b', 'main', str(repo), cwd=tmp)
+            self.commit(repo, 'root', write=[('a.py', 'a\n'), ('b.py', 'b\n')])
+            # A PR branch forked here; main then advances on its own, up to the old base.
+            self.git('checkout', '-q', '-b', 'pr', cwd=repo)
+            self.commit(repo, 'pr work', write=[('pr/p.py', 'p\n')])
+            self.git('checkout', '-q', 'main', cwd=repo)
+            self.commit(repo, 'main moves', write=[('a.py', 'changed\n'),
+                                                   ('main/m.py', 'm\n')])
+            old = self.git('rev-parse', 'HEAD', cwd=repo)
+            # The PR syncs with main (a merge of main into the branch), changes more, and is
+            # merged into main.
+            self.git('checkout', '-q', 'pr', cwd=repo)
+            self.git('merge', '-q', '--no-ff', '-m', 'Merge main into pr', 'main', cwd=repo)
+            self.commit(repo, 'pr more', write=[('b.py', 'pr\n')])
+            self.git('checkout', '-q', 'main', cwd=repo)
+            self.git('merge', '-q', '--no-ff', '-m', 'Merge pr', 'pr', cwd=repo)
+            new = self.git('rev-parse', 'HEAD', cwd=repo)
+            ws = Workspace(repo, '.state', 'main')
+            # The sync merge, against its first parent (the branch), would add a.py and
+            # main/m.py, already in the old base: only the net diff of the merge counts.
+            self.assertEqual(ws.base_paths(old, new), ['b.py', 'pr/p.py'])
+            self.assertEqual(ws.base_paths(old, new),
+                             sorted(self.git('diff', '--name-only', old, new,
+                                             cwd=repo).split()))
+
+    def test_an_old_base_not_ancestor_of_the_new_one_is_not_listable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / 'repo'
+            self.git('init', '-q', '-b', 'main', str(repo), cwd=tmp)
+            root = self.commit(repo, 'root', write=[('a.py', 'a\n')])
+            old = self.commit(repo, 'old base', write=[('b.py', 'b\n')])
+            # main rewritten: the new base forks from root and does not contain old.
+            self.git('reset', '-q', '--hard', root, cwd=repo)
+            new = self.commit(repo, 'rewritten', write=[('c.py', 'c\n')])
+            ws = Workspace(repo, '.state', 'main')
+            with self.assertRaises(WorkspaceError):
+                ws.base_paths(old, new)
+            self.assertEqual(ws.base_paths(root, new), ['c.py'])
+
     def test_a_directory_renamed_by_the_base_conflicts_with_a_file_the_pr_adds(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / 'repo'
