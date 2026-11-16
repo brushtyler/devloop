@@ -4,9 +4,12 @@ Automatic fencing (#45) lets a transition prove, with a kernel lock, that no wri
 of the canonical ticket is running. This page describes the protocol implemented in
 `ssdlc_writer_gate.py`.
 
-> **Status: part (a) of #45.** The gate, its protocol and its tests exist, but
-> nothing uses them on real runs yet. Transitions, the supervisor and the delegated
-> feedback flow behave exactly as before. Part (c) wires the gate into them.
+> **Status: parts (a) and (b) of #45.** The gate, its protocol, the in-container
+> holder (`ssdlc_container_holder.py`, see [Containers](#containers-the-pid-1-holder))
+> and their tests exist, but nothing uses them on real runs yet. Role containers still
+> start with `--init`; transitions, the supervisor and the delegated feedback flow
+> behave exactly as before. Part (c) wires the gate into them. Automatic fencing is not
+> declared reliable until the Docker test passes on the operator's host.
 
 ## Invariants
 
@@ -40,7 +43,8 @@ The gate is created once. A complete record (`ssdlc-writer-gate-v1`, holding the
 gate's own inode number) is written to a temporary file and published with `link(2)`,
 which never replaces an existing path, first as the anchor `writer-gate.anchor` and
 then as `writer.gate`. The anchor is a second hard link to the same inode: it keeps the
-canonical identity outside the gate path and marks the ticket as initialized.
+canonical identity outside the gate path and marks the ticket as initialized. The inode
+is created with mode `0600`, so only its owner (and root) can open it.
 
 Creation happens only on **first initialization**: under a short `flock` on a private
 descriptor of the ticket directory (bounded wait, 5 s), with neither the gate, the
@@ -186,6 +190,83 @@ A transition also refuses automatic fencing (`uncovered_execution`) whenever a c
 coverage probe reports an execution tree not covered by the gate, for example a role
 container.
 
+## Containers: the PID 1 holder
+
+A lock held by the controller or by the `docker run` client does not cover a
+container: if the client dies while the create request is in flight, the daemon can
+start the container after the check. The trusted holder of the lock therefore runs
+**inside** the container, as its PID 1, in place of `--init`/tini:
+`ssdlc_container_holder.py`, started with `--entrypoint python3` and
+`holder_command()`.
+
+Before any payload or inference, PID 1, which starts as root:
+
+1. refuses unless it is PID 1 (`CONTAINER_HOLDER_NOT_PID1`), runs as root
+   (`CONTAINER_HOLDER_NOT_ROOT`) and the host requirements below hold;
+2. makes itself non-dumpable;
+3. opens the gate, mounted read-only, `O_RDONLY | O_CLOEXEC`, with the identity checks
+   above and without creating or writing anything (`gate_missing` if it is absent).
+   The gate inode must be **root-owned 0600** (`CONTAINER_GATE_EXPOSED` otherwise);
+4. takes `LOCK_SH`, with a bounded wait (`writer_wait_timeout`);
+5. rereads the generation from the authoritative source, following the selectors and
+   precedence of `ssdlc_transitions.runtime_root()`, and compares it with the one the
+   host passed (`--generation`). A different generation refuses (`stale_generation`),
+   a missing or invalid state too (`generation_invalid`).
+
+Every refusal exits with code 122 and a line `ssdlc-holder-refused {"code": …}` on
+stderr (`parse_refusal()`); the payload never starts. The holder never writes the
+diagnostic registry, which stays the host's.
+
+**UID separation instead of masking the mount** (operator decision, 2026-11-16). No
+capability is added, no custom seccomp profile and no user namespace is used. PID 1
+runs the payload with the unprivileged numeric UID and GID given by `--payload-user`,
+after dropping the whole bounding set, clearing ambient and inheritable capabilities
+and supplementary groups, and setting `no_new_privs`; it verifies the result before
+`exec`. The payload cannot open the gate or its anchor through any mount, because the
+inode is root-owned `0600`: it can neither take `LOCK_EX`, nor hold `LOCK_SH`, nor
+release the lock. A payload that must run as root (no payload user, or UID or GID 0)
+is refused with `CONTAINER_PAYLOAD_PRIVILEGED`, and the manual path stays available.
+
+**The descriptor stays with PID 1.** It is `O_CLOEXEC`, and the child closes every
+descriptor but stdio before `exec`: whoever shares the open file description could
+unlock it for everybody. A payload that tries `LOCK_EX` or `LOCK_UN` on its own
+descriptors does not change PID 1's lock.
+
+PID 1 forwards `SIGTERM`, `SIGINT`, `SIGHUP`, `SIGQUIT`, `SIGUSR1`, `SIGUSR2`,
+`SIGWINCH` and `SIGALRM` to the payload and reaps zombies. When the payload ends, it
+kills and reaps the rest of its PID namespace, and only then releases the lock by
+exiting with the payload's status.
+
+**Exit of PID 1 is not proof that the container ended.** Linux closes PID 1's files
+before it kills the rest of the namespace, and `docker kill` or processes entered with
+`docker exec` escape the reaping above. After `LOCK_EX`, a transition therefore still
+checks with Docker that no container of the run is created, running, paused or
+restarting, through the coverage probe `running_containers(label)`. It lists only
+containers with the run's label, never signals any container, and treats a Docker
+failure as a refusal (`uncovered_execution`).
+
+**Host requirements, checked at start:** Linux with a local filesystem (as above),
+and no `CAP_SYS_PTRACE` in any capability set of PID 1 (`CONTAINER_PTRACE_CAPABLE`),
+which is already Docker's default. Yama and seccomp are never changed globally.
+
+**Mounts.** The ticket is mounted read-only at its host path: it holds the gate, the
+anchor and the generation sources. The same inodes must not be reachable by the payload
+with weaker permissions through other mounts of the repository; since the permission
+belongs to the inode, the gate and its anchor are `0600` root through any path.
+
+**Docker test.** `tests/test_container_holder_docker.py` covers a container that
+outlives a controller killed with `SIGKILL` (no false exclusivity), the death of a host
+process that held the lock for a container (no false proof), foreign containers (never
+touched), a payload trying to reach the gate, late or stale containers, and the
+refusals. It is opt-in and skipped without Docker; the operator runs it on the host:
+
+```bash
+SSDLC_DOCKER_TESTS=1 python3 -m unittest discover -s tests -p 'test_container_holder_docker.py' -v
+```
+
+It needs root (the gate must be root-owned) and a local image with `python3`
+(`SSDLC_DOCKER_TEST_IMAGE`, default `ssdlc-runner:latest`).
+
 ## Historical and non-conforming writers
 
 The gate only excludes writers that take it. Runs started before the gate existed, and
@@ -230,8 +311,12 @@ an authorized I2 generation without `state.json` is refused before anything is c
   ZFS or bcachefs. NFS, SMB/CIFS, FUSE, 9p, Ceph, cluster filesystems, overlayfs and
   unknown types are refused, because their locks are not enforced by this kernel for
   every opener.
-- **Docker on the same host.** Containers are covered only through the host controller
-  and coverage probes; a container on another host cannot be fenced.
+- **Docker on the same host.** Containers are covered by their PID 1 holder and by the
+  Docker coverage probe; a container on another host cannot be fenced.
+- **Unprivileged payloads only.** The holder needs a root PID 1 and a non-root payload
+  UID and GID; a payload that needs root is refused (`CONTAINER_PAYLOAD_PRIVILEGED`).
+  Part (c) must give role containers such a payload user, with access to the files the
+  role writes.
 - **Host commands disable automatic fencing for their generation** until #132 covers
   their process trees with a kernel mechanism.
 - A deleted or replaced gate is detected through its anchor, the registry, a bound
