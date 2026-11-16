@@ -17,6 +17,8 @@ from helpers.devloop_fakes import ActingAs, FakeGH, FakeIdentities, SnapshotGH
 from test_devloop_acceptance import IssueGH as AcceptanceIssueGH
 from test_devloop_acceptance import SnapshotIssueGH
 from test_devloop_ledger import LedgerGH, SnapLedgerGH
+from test_devloop_merge import Identities as MergeIdentities
+from test_devloop_merge import MergeGH
 from test_devloop_preflight import IssueGH as PreflightIssueGH
 from test_devloop_priority import QueueGH
 from test_devloop_quorum import Identities as QuorumIdentities
@@ -37,11 +39,11 @@ EXPECTED = {
 }
 # Fakes defined as classes: their methods are compared as the adapter's, unbound.
 FAKE_CLASSES = (FakeGH, SnapshotGH, AcceptanceIssueGH, SnapshotIssueGH, LedgerGH, SnapLedgerGH,
-                PreflightIssueGH, QueueGH, QuorumGH, TrackerGH)
+                PreflightIssueGH, QueueGH, QuorumGH, TrackerGH, MergeGH)
 # The same fakes as the tests build them: an instance attribute must not hide a port method.
 FAKE_INSTANCES = (FakeGH, lambda: SnapshotGH([]), lambda: AcceptanceIssueGH('body'),
                   lambda: SnapshotIssueGH('body'), LedgerGH, SnapLedgerGH, PreflightIssueGH,
-                  lambda: QueueGH({}), QuorumGH, TrackerGH)
+                  lambda: QueueGH({}), QuorumGH, TrackerGH, MergeGH)
 
 
 def called_attributes(path):
@@ -128,7 +130,8 @@ class ConformanceTests(unittest.TestCase):
         fake, quorum = FakeGH(), QuorumGH()
         for instance in (ActingAs(fake, 'claude', None),
                          FakeIdentities(fake).github('codex', {'issues': 'write'}),
-                         QuorumIdentities(quorum).github('claude', {'issues': 'write'})):
+                         QuorumIdentities(quorum).github('claude', {'issues': 'write'}),
+                         MergeIdentities(MergeGH()).github('agy', {'issues': 'write'})):
             with self.subTest(fake=type(instance).__name__):
                 self.assert_conforms(instance, bound=True)
         # The quorum's client still writes with its actor's login, and reaches only the ports.
