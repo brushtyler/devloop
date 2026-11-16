@@ -14,6 +14,7 @@ from .apps import DISPATCHER, Identities
 from .config import ConfigError, load_config
 from .dispatcher import Dispatcher, ensure_labels, plan, run_forever
 from .github import GitHubError
+from .review import last_round
 from .stall import StallWatch
 from .workspace import Workspace
 
@@ -144,7 +145,7 @@ def main(argv=None):
         for pr in snap.prs:
             labels = ', '.join(sorted(l for l in pr.labels if l.startswith('agent:')))
             conflict = ' CONFLICT with ' + cfg.base_branch if pr.merge_state == 'conflict' else ''
-            log(f'PR #{pr.number} (issue #{pr.issue}) [{labels}] rounds={len(pr.reviews)} '
+            log(f'PR #{pr.number} (issue #{pr.issue}) [{labels}] rounds={last_round(pr.reviews)} '
                 f'ci={pr.checks} merge={pr.merge_state}{conflict}')
         for issue in snap.ready_issues:
             log(f'ready #{issue["number"]} labelled by {issue["labeler"]}: {issue["title"]}')
