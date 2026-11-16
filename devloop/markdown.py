@@ -149,9 +149,30 @@ def _valid_notice(n):
     return n.get('event') in NOTICES
 
 
+LEDGER_TYPES = ('request', 'turn', 'event', 'verification')
+TURN_STATES = ('open', 'closed', 'incomplete')
+
+
+def _valid_ledger(r):
+    """A dispatcher record of evidence and telemetry (#133). A turn that is not closed has no
+    end, outcome nor telemetry: they are null, never guessed."""
+    if r.get('type') not in LEDGER_TYPES:
+        return False
+    if r['type'] == 'turn':
+        return (r.get('state') in TURN_STATES
+                and all(isinstance(r.get(k), str) for k in ('kind', 'agent', 'started_at'))
+                and (r['state'] == 'closed'
+                     or all(r.get(k) is None for k in ('ended_at', 'outcome', 'telemetry'))))
+    if r['type'] == 'request':
+        return isinstance(r.get('hash'), str) and isinstance(r.get('comments'), list)
+    if r['type'] == 'verification':
+        return isinstance(r.get('command'), str) and r.get('outcome') in ('pass', 'fail')
+    return isinstance(r.get('event'), str)
+
+
 _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy': _valid_policy,
           'finding': _valid_finding, 'sync': _valid_sync, 'preflight': _valid_preflight,
-          'notice': _valid_notice}
+          'notice': _valid_notice, 'ledger': _valid_ledger}
 
 
 def read_marker(text, kind):

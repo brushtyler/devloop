@@ -14,6 +14,7 @@ from .apps import DISPATCHER, Identities
 from .config import ConfigError, load_config
 from .dispatcher import Dispatcher, ensure_labels, plan, run_forever
 from .github import GitHubError
+from .ledger import Ledger
 from .review import last_round
 from .stall import StallWatch
 from .workspace import Workspace
@@ -75,8 +76,9 @@ def build(args):
                          on_turn=lambda agent, prompt: current.turn(
                              agent.key, prompt, agent.model if agent.fallback_for else None),
                          stall=stall)
-    dispatcher = Dispatcher(cfg, identities.github(DISPATCHER), ws, runner, log=log,
-                            identities=identities, activity=current)
+    gh = identities.github(DISPATCHER)
+    dispatcher = Dispatcher(cfg, gh, ws, runner, log=log, identities=identities,
+                            activity=current, ledger=Ledger(gh))
     return cfg, state, dispatcher
 
 
