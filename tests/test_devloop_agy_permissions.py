@@ -11,7 +11,7 @@ from unittest import mock
 from devloop import agents, config, markdown, policy, schema
 from devloop.dispatcher import Action, Dispatcher, Snapshot, plan
 from test_devloop import CFG, FakeGH, FakeRunner, FakeWS, norm, pr, raw_review
-from test_devloop_fallback import ARGON, DATA, HYDROGEN, FakeCLI, with_agent
+from test_devloop_fallback import ARGON, DATA, HYDROGEN, QUOTA, FakeCLI, with_agent
 
 JETSKI = ('jetski: no output produced — a tool required the "command" permission that headless '
           'mode cannot prompt for, so it was auto-denied.')
@@ -268,7 +268,8 @@ class NoOutputTests(unittest.TestCase):
             gh.labels[100] = set(p.labels)
             d.snapshot = lambda: Snapshot([p], [], [])
             self.assertEqual(d.tick(), [Action('review', 100)])
-        self.assertEqual(cli.models(), [ARGON])  # not an unavailable model: no fallback
+        # Not an unavailable model: no fallback, one retry on the same model (#180).
+        self.assertEqual(cli.models(), [ARGON, ARGON])
         self.assertNotIn(HYDROGEN, gh.comments[-1][1])
         self.assertEqual(gh.labels[100], {'agent:needs-human'})
         self.assertIn(f'agy stopped without output: {JETSKI}', gh.comments[-1][1])
@@ -323,9 +324,135 @@ class DeniedActionsTests(unittest.TestCase):
             gh.labels[100] = set(p.labels)
             d.snapshot = lambda: Snapshot([p], [], [])
             self.assertEqual(d.tick(), [Action('review', 100)])
-        self.assertEqual(cli.models(), [ARGON])
+        self.assertEqual(cli.models(), [ARGON, ARGON])  # one retry (#180), no fallback
         self.assertEqual(gh.labels[100], {'agent:needs-human'})
         self.assertIn(f'denied_actions: {DENIED}', gh.comments[-1][1])
+
+
+# The stop of the level-2 review of PR #159 (#180): agy read the log of its own background task.
+READ_JETSKI = ('jetski: no output produced — a tool required the "read_file" permission that '
+               'headless mode cannot prompt for, so it was auto-denied.')
+READ_TARGET = '{"action":"read_file","display_name":"Read","path":"/home/op/.gemini/tasks/t1.log"}'
+READ_ENVELOPE = ('{"status":"SUCCESS","response":"","denied_actions":[{"action":"command",'
+                 f'"display_name":"Bash"}},{READ_TARGET}]}}')
+
+
+class SequenceCLI(FakeCLI):
+    """``FakeCLI`` where a model given a list answers, call after call, with the next reply of
+    the list, and with a valid review once the list is exhausted."""
+
+    def __init__(self, **replies):
+        super().__init__(**{k: v for k, v in replies.items() if not isinstance(v, list)})
+        self.queues = {k: list(v) for k, v in replies.items() if isinstance(v, list)}
+
+    def __call__(self, argv, **kw):
+        if argv[-1] != '--version':
+            model = argv[argv.index('--model') + 1].replace('-', '_')
+            queue = self.queues.get(model)
+            if queue:
+                self.replies[model] = queue.pop(0)
+            elif queue is not None:
+                self.replies.pop(model, None)
+        return super().__call__(argv, **kw)
+
+
+class PermissionRetryTests(unittest.TestCase):
+    """A turn agy ends on a denied permission, with no output, is a failure of the tool: the same
+    model runs it once more before the escalation (#180)."""
+
+    def tick(self, cli):
+        self.gh, self.logs = FakeGH(), []
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Dispatcher(CFG, self.gh, FakeWS(), agents.AgentRunner(tmp, 10, run=cli),
+                           log=self.logs.append)
+            p = pr()
+            p.meta['reviewer'] = 'agy'
+            self.gh.labels[100] = set(p.labels)
+            d.snapshot = lambda: Snapshot([p], [], [])
+            self.assertEqual(d.tick(), [Action('review', 100)])
+            self.log_files = sorted(f.name for f in Path(tmp).glob('*.log'))
+        return '\n'.join(self.logs)
+
+    def test_the_runner_classifies_the_denial(self):
+        cli = FakeCLI(gemini_4_argon_high=(0, '', READ_JETSKI))
+        with tempfile.TemporaryDirectory() as tmp, \
+                self.assertRaises(agents.PermissionDenied) as ctx:
+            agents.AgentRunner(tmp, 10, run=cli).run(CFG.agent('agy'), 'review', 'p', 'review',
+                                                     tmp, 'pr-1')
+        self.assertEqual((ctx.exception.permission, ctx.exception.target), ('read_file', None))
+        self.assertEqual(str(ctx.exception), f'agy stopped without output: {READ_JETSKI}')
+        cli = FakeCLI(gemini_4_argon_high=(0, READ_ENVELOPE, READ_JETSKI))
+        with tempfile.TemporaryDirectory() as tmp, \
+                self.assertRaises(agents.PermissionDenied) as ctx:
+            agents.AgentRunner(tmp, 10, run=cli).run(CFG.agent('agy'), 'review', 'p', 'review',
+                                                     tmp, 'pr-1')
+        self.assertEqual(ctx.exception.target, READ_TARGET)  # the last action denied
+        self.assertEqual(agents.denied_permission(JETSKI), 'command')
+        self.assertIsNone(agents.denied_permission('no output'))
+        self.assertIsNone(agents.denied_target('claude', READ_ENVELOPE))
+
+    def test_a_denied_permission_is_retried_once_on_the_same_model(self):
+        cli = SequenceCLI(gemini_4_argon_high=[(0, '', READ_JETSKI)])
+        log = self.tick(cli)
+        self.assertEqual(cli.models(), [ARGON, ARGON])
+        self.assertEqual(cli.calls[0][1], cli.calls[1][1])  # the same prompt
+        self.assertNotIn('Previous attempt on another model', cli.calls[1][1])
+        self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
+        body = self.gh.comments[0][1]
+        self.assertEqual(markdown.read_marker(body, 'review')['verdict'], 'approve')
+        self.assertIn('> **Model:** Gemini 4 Argon\n', body)
+        self.assertIn(f'agy: model {ARGON} denied the "read_file" permission '
+                      '(target non riportato da agy); retrying once', log)
+        # Each attempt keeps its own log.
+        self.assertEqual(len(self.log_files), 2)
+        self.assertEqual(sum('-retry-' in name for name in self.log_files), 1)
+
+    def test_a_second_denial_escalates_citing_the_permission(self):
+        cli = FakeCLI(gemini_4_argon_high=(0, READ_ENVELOPE, READ_JETSKI))
+        log = self.tick(cli)
+        self.assertEqual(cli.models(), [ARGON, ARGON])  # once more, then no fallback
+        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        body = self.gh.comments[-1][1]
+        self.assertIn(f'Il passo `review` è fallito: agy stopped without output: {READ_JETSKI}',
+                      body)
+        self.assertIn('permission `read_file` denied again after one retry', body)
+        self.assertNotIn(HYDROGEN, body)
+        self.assertIn(f'denied the "read_file" permission ({READ_TARGET}); retrying once', log)
+        self.assertIn(f'denied the "read_file" permission again ({READ_TARGET})', log)
+
+    def test_a_denial_on_the_fallback_model_is_retried_too(self):
+        cli = SequenceCLI(gemini_4_argon_high=(1, '', QUOTA),
+                          gemini_4_hydrogen_high=[(0, '', READ_JETSKI), (0, '', READ_JETSKI)])
+        self.tick(cli)
+        self.assertEqual(cli.models(), [ARGON, HYDROGEN, HYDROGEN])
+        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        body = self.gh.comments[-1][1]
+        self.assertIn('the last model tried for `agy` failed', body)
+        self.assertIn(f'- `{HYDROGEN}`: agy stopped without output: {READ_JETSKI}; permission '
+                      '`read_file` denied again after one retry', body)
+
+    def test_other_failures_keep_todays_path(self):
+        # Quota: the fallback, no retry on the model.
+        cli = FakeCLI(gemini_4_argon_high=(1, '', QUOTA))
+        log = self.tick(cli)
+        self.assertEqual(cli.models(), [ARGON, HYDROGEN])
+        self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
+        self.assertNotIn('retrying once', log)
+        # A non-zero exit, even with the denial on stderr, or a stop without a named permission:
+        # escalation at the first failure.
+        cases = {'exit 3': ((3, '', READ_JETSKI), f'agy exited with 3: {READ_JETSKI}'),
+                 'exit 1': ((1, '', 'segmentation fault'), 'agy exited with 1.'),
+                 'silent': ((0, '', ''), 'agy stopped without output: no output.')}
+        for name, (reply, message) in cases.items():
+            with self.subTest(name):
+                cli = FakeCLI(gemini_4_argon_high=reply)
+                log = self.tick(cli)
+                self.assertEqual(cli.models(), [ARGON])
+                self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+                body = self.gh.comments[-1][1]
+                self.assertIn(f'Il passo `review` è fallito: {message}', body)
+                self.assertNotIn('after one retry', body)
+                self.assertNotIn('retrying once', log)
 
 
 def block_commands(prompt):
@@ -369,6 +496,25 @@ class PromptBlockTests(unittest.TestCase):
         self.assertEqual(block_commands(self.run_agy(custom, 'review')), ['git log'])
         self.assertEqual(block_commands(self.run_agy(CFG.agent('agy'), 'review')),
                          [rule[len('command('):-1] for rule in DEFAULT_RULES])
+
+    def test_the_block_keeps_output_short_and_reads_inside_the_workdir(self):
+        """The instructions of #180 come in the same block as the commands, in every mode."""
+        custom = dataclasses.replace(CFG.agent('agy'), review_commands=())
+        for agent in (CFG.agent('agy'), custom):
+            for mode in agents.MODES:
+                with self.subTest(commands=bool(agents.agy_commands(agent, mode)), mode=mode):
+                    sent = self.run_agy(agent, mode)
+                    block = sent[sent.index('\n\n## Shell commands\n'):]
+                    self.assertEqual(block, agents.agy_prompt_block(agent, mode))
+                    for text in ('output stays short and complete',
+                                 'a single test module at a time, with `-q`',
+                                 'If an output is truncated, run the command again on a narrower '
+                                 'scope',
+                                 'Never read logs or files outside the working directory',
+                                 'including the logs of your own background tasks'):
+                        self.assertIn(text, block)
+                    self.assertGreater(block.index('Never read logs'),
+                                       block.index('Shell commands'))
 
     def test_no_commands_says_so(self):
         agy = dataclasses.replace(CFG.agent('agy'), review_commands=())

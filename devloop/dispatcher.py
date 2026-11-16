@@ -67,7 +67,7 @@ from pathlib import Path
 
 from .acceptance import (acceptance_criteria, acceptance_findings, format_criteria, format_map,
                          latest_map, render_map)
-from .agents import AgentError, ModelsUnavailable, ModelUnavailable
+from .agents import AgentError, ModelsUnavailable, ModelUnavailable, PermissionDenied
 from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, PR_COMMENT, REVIEW
 from .github import GitHubError, merge_state, summarize_checks
 from .ledger import entries as ledger_entries
@@ -1200,9 +1200,15 @@ class Dispatcher:
         without fallback models fails as before #121; one with them fails listing the models
         tried and why (``ModelsUnavailable``).
 
+        An agy turn stopped on a permission headless mode cannot ask (``PermissionDenied``) is a
+        failure of the tool (#180): the same model runs the same turn once more, in the same
+        directory, with ``-retry`` in its label. A second denial on the same model fails as any
+        other error, naming the permission.
+
         ``where``, ``(number, kind)``, is the issue or PR whose ledger records each CLI
         invocation as a turn (#133): written before the CLI starts, closed when it ends."""
         failed = None
+        retried = set()  # the models already denied a permission in this call
         while models.left:
             candidate = models.left.pop(0)
             if allowed is not None and not allowed(candidate):
@@ -1212,6 +1218,8 @@ class Dispatcher:
                 continue
             text = prompt + FALLBACK_NOTE[mode] if failed else prompt
             suffix = f'-{candidate.model}' if candidate.fallback_for else ''
+            if candidate.model in retried:
+                suffix += '-retry'  # its own log: the first attempt's stays as it was
             entry = self._open_turn(where, candidate, mode, label + suffix)
             try:
                 output = self.runner.run(candidate, mode, text, schema, path, label + suffix)
@@ -1221,6 +1229,24 @@ class Dispatcher:
                 self.log(f'  {candidate.key}: model {candidate.model} unavailable: {exc.reason}')
                 failed = exc
                 continue
+            except PermissionDenied as exc:
+                self._close_turn(entry, 'failure', exc)
+                target = exc.target or 'target non riportato da agy'
+                if candidate.model not in retried:
+                    retried.add(candidate.model)
+                    self.log(f'  {candidate.key}: model {candidate.model} denied the '
+                             f'"{exc.permission}" permission ({target}); retrying once')
+                    models.left.insert(0, candidate)
+                    continue
+                self.log(f'  {candidate.key}: model {candidate.model} denied the '
+                         f'"{exc.permission}" permission again ({target})')
+                error = PermissionDenied(f'{exc}; permission `{exc.permission}` denied again '
+                                         'after one retry', exc.log, exc.permission, exc.target)
+                if not models.tried:
+                    raise error from exc
+                models.tried.append((candidate.model, str(error)))
+                raise ModelsUnavailable(models.agent.key, models.tried, exc.log,
+                                        last_failed=True) from exc
             except AgentError as exc:
                 self._close_turn(entry, 'failure', exc)
                 if not models.tried:

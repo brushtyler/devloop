@@ -888,8 +888,11 @@ each agy turn its minimal permissions, and treats a stop without output as a fai
   prefixes allowed in that mode, the instruction to read and search files only with agy's own
   file tools, with paths relative to the working directory and without `grep`, `ls`, `cat`,
   `find`, `sed` or other shell commands, and the warning that a command outside the list ends
-  the turn with no result. The prompt file in the turn's log includes it. The other agents'
-  prompts do not get it.
+  the turn with no result. The same block (#180) asks to run commands so that their output stays
+  short and complete (one test module at a time, with `-q`; a truncated output is rerun on a
+  narrower scope) and never to read logs or files outside the working directory, the logs of
+  agy's own background tasks included. The prompt file in the turn's log includes it. The other
+  agents' prompts do not get it.
 - **No output is an error.** An agy turn that exits with no output, or with
   `jetski: no output produced`, fails with `<agent> stopped without output: <message>`, which
   goes to the turn's log and to the `agent:needs-human` comment. When agy's JSON lists
@@ -898,6 +901,16 @@ each agy turn its minimal permissions, and treats a stop without output as a fai
   unavailable model either, so it does not start the fallback. The message counts as the CLI's
   diagnostic on stderr, or on stdout only as a line of its own: a structured answer that quotes
   it is still a valid answer.
+- **A denied permission is retried once.** When that diagnostic names the permission (`a tool
+  required the "read_file" permission …`) and the turn exited 0, the failure is the tool's,
+  not the change's (#180): the same model runs the same turn once more, in the same directory
+  and tick, with `-retry` in its log name. devloop's log reports the permission and the last
+  action agy's JSON lists in `denied_actions`, or `target non riportato da agy` when there is
+  none. A second denial on the same model escalates as before, and the comment ends with
+  ``permission `<name>` denied again after one retry``. Any other failure (an unavailable
+  model, a non-zero exit, a stop that names no permission, invalid output, a timeout) is not
+  retried: it escalates or starts the fallback as before. After a fallback, the next model gets
+  its own single retry.
 
 ```toml
 [agents.agy]
