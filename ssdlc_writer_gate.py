@@ -9,7 +9,8 @@ generation before it executes, and that mark refuses automatic fencing for the
 generation (``HOST_TREE_UNVERIFIABLE``), because no kernel mechanism here proves
 that its process tree has ended. Process scans are never used as evidence.
 
-Nothing in this module is wired into real runs yet; integration is part (c).
+Role containers of admitted runs take the gate through their PID 1 holder
+(``ssdlc_role_fencing``, part c1); transitions do not use it yet (part c2).
 """
 import contextlib
 import ctypes

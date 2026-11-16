@@ -1861,6 +1861,7 @@ class TaskScheduler:
         self._assert_prompt_bound(prompt)
         from ssdlc_candidates import CandidateStore, CandidateError, checkout, git_identity, inventory, overlay
         from ssdlc_recovery import NotDispatched
+        from ssdlc_role_fencing import disposable_workspace
         workspace = attempt_dir / 'developer-workspace'
         try:
             baseline = checkout(self.wt, workspace, record['start_commit'])
@@ -1873,7 +1874,8 @@ class TaskScheduler:
                 self._dispatch_capacity(task, record['attempts'])
             try:
                 self._assert_prompt_bound(prompt)
-                result = self.developer(task, record['attempts'], prompt, workspace)
+                with disposable_workspace(workspace):
+                    result = self.developer(task, record['attempts'], prompt, workspace)
                 result = dict(result, termination='returned')
             except NotDispatched:
                 record['status'] = 'DISPATCH_RESERVED'
@@ -1982,6 +1984,7 @@ class TaskScheduler:
 
     def _isolated_check(self, check, cwd):
         from ssdlc_candidates import CandidateError, checkout, git_identity, git_metadata, inventory, overlay
+        from ssdlc_role_fencing import disposable_workspace
         parent = self.directory / '.verification'
         parent.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='check-', dir=parent) as name:
@@ -1991,8 +1994,9 @@ class TaskScheduler:
                 overlay(self.wt, workspace, self._changed())
                 before = inventory(workspace)
                 metadata = git_identity(workspace)
-                result = self.verifier(check['argv'], workspace / cwd.relative_to(self.wt),
-                                       check['timeout_sec'], workspace)
+                with disposable_workspace(workspace, scratch=name):
+                    result = self.verifier(check['argv'], workspace / cwd.relative_to(self.wt),
+                                           check['timeout_sec'], workspace)
                 after = inventory(workspace)
                 if (any(after.get(path) != entry for path, entry in before.items())
                         or git_metadata(workspace) != metadata['metadata']

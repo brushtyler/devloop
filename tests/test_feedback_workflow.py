@@ -183,6 +183,48 @@ class FeedbackWorkflowTests(unittest.TestCase):
             self.assertEqual(receipt['raw_output']['text'],json.dumps(response))
             self.assertEqual(receipt['tokens'], {'input_tokens':120,'output_tokens':30})
 
+    @unittest.skipUnless(os.geteuid() == 0 and os.path.exists('/bin/sh'), 'the real access probe needs root')
+    def test_feedback_snapshot_reaches_the_payload_of_an_admitted_run(self):
+        """The disposable snapshot is reachable by the payload; the source stays read-only."""
+        import ssdlc_role_fencing as rf
+        from test_role_fencing import operator_probe
+        seen, commands = [], []
+        run = SimpleNamespace(state={rf.MARKER_KEY: rf.MARKER}, ssdlc_root=self.source['root'],
+                              ticket_lock_path=self.case.ticket / 'ticket.lock', _save_state=lambda: None)
+        cli = subprocess.CompletedProcess(['claude'], 0, json.dumps({'result': json.dumps(
+            dict(route='REJECTED', requested_files=[], reason_code='do_not_weaken_test'))}), '')
+
+        def provider(cmd, **kwargs):
+            commands.append(list(cmd))
+            return cli
+        with self.host(), delegated.fenced(self.case.ticket, Path(__file__).parent.parent,
+                                           self.snapshot, self.identity) as owner:
+            store = flow.bootstrap(owner, self.source)
+            row = store.submit(self.source, flow.intake(self.source), flow.developer_actor(self.source))
+            limits = LimitsStore(self.source['root'])
+            metadata = flow.role_actor(config(), row['request_id'], 'planner')
+            runner = flow.ReadOnlyRoleRunner(self.source, limits, flow.role_prompt(self.source, row, 'planner'), 'low')
+            with (patch.dict(os.environ, {rf.PAYLOAD_USER_ENV: '1000:1000'}),
+                  patch.object(orch_module.EngineRunner, '_should_spawn_role_container', return_value=True),
+                  patch.object(orch_module.EngineRunner, '_run_role_command', side_effect=provider),
+                  patch.object(rf, 'probe_access', side_effect=operator_probe(seen)),
+                  patch.object(rf.holder, 'current_generation',
+                               return_value=self.source['root'].relative_to(self.case.ticket).as_posix()),
+                  orch_module._writer_fencing_scope(run)):
+                FundedFeedbackRoles(store, limits, guard=owner.check).run(row['request_id'], 'planner', metadata, runner)
+        self.assertNotIn(rf.REFUSAL_KEY, run.state)
+        self.assertEqual(len(commands), 1)
+        cmd = commands[0]
+        self.assertIn(rf.HOLDER_PATH, cmd)
+        self.assertNotIn('--init', cmd)
+        workspace = Path(cmd[cmd.index('-w') + 1])
+        self.assertEqual(workspace.name, 'source')
+        self.assertTrue(workspace.parent.name.startswith('ssdlc-feedback-'))
+        self.assertIn(f'{workspace}:{workspace}:ro', cmd)
+        # The real probe judged the snapshot as the payload identity.
+        self.assertEqual(seen[0][workspace], rf.READ)
+        self.assertEqual(seen[0][workspace / '.ssdlc/.runtime'], rf.WRITE)
+
     def test_cli_format_error_retains_raw_response_and_known_cost_without_retry(self):
         with self.host(), delegated.fenced(self.case.ticket, Path(__file__).parent.parent,
                                            self.snapshot, self.identity) as owner:

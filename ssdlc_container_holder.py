@@ -21,7 +21,8 @@ Linux closes PID 1's files before it kills the rest of the namespace, so the loc
 does not prove that a container has ended: a transition also checks with Docker
 (``running_containers``) that no container of the run is running.
 
-Nothing here is wired into real runs yet; integration is part (c).
+Role containers of runs admitted to automatic fencing start this holder
+(``ssdlc_role_fencing``, part c1); every other container keeps ``--init``.
 """
 import argparse
 import ctypes
