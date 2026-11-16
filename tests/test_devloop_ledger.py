@@ -14,7 +14,7 @@ from devloop.github import GitHub, GitHubError, normalize_checks
 from devloop.ledger import Ledger
 from devloop.workspace import Workspace
 from test_devloop import (CFG, IMPL, META, REV, SHA1, SHA2, FakeGH, FakeRunner, FakeWS,
-                          implemented, pr, raw_review)
+                          finding, implemented, pr, raw_review)
 from test_devloop_preflight import PCFG, READY, NEEDS_HUMAN, IssueGH, checked, gap
 
 NULLS = dict.fromkeys(agents.TELEMETRY_FIELDS)
@@ -443,7 +443,7 @@ class SnapLedgerGH(LedgerGH):
 
     def __init__(self):
         super().__init__()
-        self.details = list(GREEN)
+        self.details = [dict(c) for c in GREEN]
 
     def open_prs(self):
         return [{'number': 100, 'title': 't', 'body': markdown.publishable('b', 'pr', META),
@@ -459,10 +459,10 @@ class SnapLedgerGH(LedgerGH):
 class GreenCILedgerTests(unittest.TestCase):
     """The checks of a passing CI are recorded too, on the way to agent:ready-to-merge."""
 
-    def make(self):
+    def make(self, raw=None):
         self.gh = SnapLedgerGH()
         self.gh.labels[100] = {'agent:review'}
-        return Dispatcher(CFG, self.gh, FakeWS(), FakeRunner(raw_review()),
+        return Dispatcher(CFG, self.gh, FakeWS(), FakeRunner(raw or raw_review()),
                           log=lambda m: None, ledger=Ledger(self.gh))
 
     def ci_events(self):
@@ -488,6 +488,27 @@ class GreenCILedgerTests(unittest.TestCase):
         self.gh.details[0]['run_id'] = 44
         d.tick()
         self.assertEqual([e['checks'][0]['run_id'] for e in self.ci_events()], [43, 44])
+
+    def test_passing_checks_are_recorded_whatever_the_verdict(self):
+        for raw, labels in ((raw_review('request_changes', blocking=[finding()]),
+                             {'agent:changes'}),
+                            (raw_review('needs_human', human='a product decision'),
+                             {'agent:needs-human'})):
+            with self.subTest(verdict=raw['verdict']):
+                d = self.make(raw)
+                d.tick()
+                self.assertEqual(self.gh.labels[100], labels)
+                (event,) = self.ci_events()
+                self.assertEqual((event['head'], event['state'], event['round']),
+                                 (SHA1, 'pass', 1))
+                self.assertEqual(event['checks'], [
+                    {'name': 'Unit Tests', 'outcome': 'success', 'run_id': 43},
+                    {'name': 'ext', 'outcome': 'success', 'run_id': None}])
+                # The same checks read again for the same head and round record nothing new.
+                self.gh.labels[100] = {'agent:review'}
+                again = d.snapshot().prs[0]
+                d._record_ci(again, SHA1, again.checks, again.check_details, 1)
+                self.assertEqual(len(self.ci_events()), 1)
 
     def test_pending_checks_are_not_recorded_and_do_not_promote(self):
         d = self.make()

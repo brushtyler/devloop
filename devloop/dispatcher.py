@@ -146,6 +146,9 @@ class PullRequest:
     # CI events the dispatcher's ledger already recorded (#133), as ``(head, state, round,
     # checks)``: reading the same checks again for the same head and round records nothing new.
     ci_recorded: list = field(default_factory=list)
+    # With a ledger, every check of the head from the read that gave ``checks`` (#133): the CI
+    # a review round saw, recorded whatever its verdict. None when not read.
+    check_details: list = None
 
 
 @dataclass
@@ -683,7 +686,12 @@ class Dispatcher:
             ci_open = lb.changes in pr.labels and any(
                 f['owner'] == CI for f in open_findings(pr.reviews, pr.closures))
             if pr.labels & {lb.review, lb.ready_to_merge} or ci_open:
-                pr.checks, pr.failed_checks, pr.failed_runs = self.gh.checks(pr.head_sha)
+                if self.ledger is not None:
+                    pr.check_details = self.gh.check_details(pr.head_sha)
+                    pr.checks, pr.failed_checks, pr.failed_runs = summarize_checks(
+                        pr.check_details)
+                else:
+                    pr.checks, pr.failed_checks, pr.failed_runs = self.gh.checks(pr.head_sha)
             if (lb.ready_to_merge in pr.labels and pr.zero_head is not None
                     and zero_labels_hold(pr, self.cfg.review_policy)):
                 pr.zero_problem = self._zero_problem(pr)
@@ -1673,6 +1681,9 @@ class Dispatcher:
                                           **render_native_review(review, self.runner.header(used)))
             except GitHubError as exc:
                 self.log(f'  native review not submitted: {exc}')
+        if pr.checks != 'pending':
+            # The CI the round reviewed, whatever its verdict (#133).
+            self._record_ci(pr, pr.head_sha, pr.checks, pr.check_details, round_no)
         records = done + [review]
         waiting = pending_reviewers(records)
         if not waiting:
