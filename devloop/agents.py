@@ -128,11 +128,54 @@ def agy_settings(agent, mode):
     the operator's profile stays as it is. Only the configured command prefixes of the mode are
     allowed; reads and edits stay inside the turn's working directory, which agy enforces
     without rules."""
-    commands = agent.write_commands if mode == 'write' else agent.review_commands
-    return {'permissions': {'allow': [f'command({c})' for c in commands]}}
+    return {'permissions': {'allow': [f'command({c})' for c in agy_commands(agent, mode)]}}
+
+
+def agy_commands(agent, mode):
+    """The command prefixes an agy turn of ``mode`` may run: those of its ``--settings``."""
+    return agent.write_commands if mode == 'write' else agent.review_commands
+
+
+def agy_prompt_block(agent, mode):
+    """What an agy turn is told about its shell commands (issue #155), generated from the same
+    list as its ``--settings``: headless agy cannot ask for a permission, and a command outside
+    the list ends the turn with no result. Empty for the other agents."""
+    if agent.kind != 'agy':
+        return ''
+    commands = agy_commands(agent, mode)
+    if commands:
+        allowed = ('The only shell commands you may run in this turn are those that start with '
+                   'one of these prefixes:\n\n' + ''.join(f'- `{c}`\n' for c in commands))
+    else:
+        allowed = 'You may run no shell command in this turn.\n'
+    return ('\n\n## Shell commands\n\nThis session cannot ask for permissions. ' + allowed +
+            '\nRead and search files only with your own file tools, using paths relative to the '
+            'working directory. Do not use `grep`, `ls`, `cat`, `find`, `sed` or any other shell '
+            'command to read or search files. Any command not in the list above is denied, and '
+            'a denied command ends the turn with no result.\n')
+
+
+def turn_prompt(agent, mode, prompt):
+    """The prompt one turn of ``agent`` runs with: for agy, followed by its command block."""
+    return prompt + agy_prompt_block(agent, mode)
 
 
 NO_OUTPUT = 'jetski: no output produced'
+
+
+def denied_actions(kind, stdout):
+    """The ``denied_actions`` of an agy JSON envelope, as compact JSON, or None (issue #155):
+    the actions headless agy denied, for example ``[{"action":"command",...}]``."""
+    if kind != 'agy':
+        return None
+    try:
+        envelope = json.loads(stdout or '')
+    except json.JSONDecodeError:
+        return None
+    denied = envelope.get('denied_actions') if isinstance(envelope, dict) else None
+    if not denied:
+        return None
+    return json.dumps(denied, ensure_ascii=False, separators=(',', ':'))[:500]
 
 
 def no_output_reason(kind, stdout, stderr):
@@ -240,6 +283,7 @@ class AgentRunner:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         stem = self.log_dir / f'{time.strftime("%Y%m%dT%H%M%S")}-{label}-{agent.key}'
         out_file = stem.with_suffix('.last.json')
+        prompt = turn_prompt(agent, mode, prompt)
         argv, stdin = build_command(agent, mode, prompt, schema_file=schema_path(schema_name),
                                     out_file=out_file)
         prompt_file = stem.with_suffix('.prompt.md')
@@ -269,13 +313,16 @@ class AgentRunner:
                        f'\n--- stderr\n{done.stderr}', encoding='utf-8')
         text = f'{done.stdout}\n{done.stderr}'
         stopped = no_output_reason(agent.kind, done.stdout, done.stderr)
+        denied = denied_actions(agent.kind, done.stdout)
+        denied = f'; denied_actions: {denied}' if denied else ''
         if done.returncode == 0 and stopped:
             # Not an empty result: the turn failed, for example on a permission it could not ask.
-            raise AgentError(f'{agent.key} stopped without output: {stopped}', log)
+            raise AgentError(f'{agent.key} stopped without output: {stopped}{denied}', log)
         if done.returncode != 0:
             message = f'{agent.key} exited with {done.returncode}'
             if stopped and stopped != 'no output':
                 message += f': {stopped}'
+            message += denied
             if left_no_output(agent.kind, done.stdout, out_file):
                 reason = unavailable_reason(agent, done.returncode, text)
                 if reason:
@@ -289,9 +336,13 @@ class AgentRunner:
             reason = unavailable_reason(agent, None, text)
             if reason:
                 raise ModelUnavailable(str(exc), log, reason) from exc
+            if denied:
+                raise EnvelopeError(f'{exc}{denied}', log) from exc
             exc.log = log
             raise
         except AgentError as exc:
+            if denied:
+                raise AgentError(f'{exc}{denied}', log) from exc
             exc.log = log
             raise
         except (SchemaError, json.JSONDecodeError) as exc:
