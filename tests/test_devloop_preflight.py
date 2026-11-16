@@ -298,6 +298,7 @@ class PreflightTests(unittest.TestCase):
         cfg = dataclasses.replace(PCFG, max_open_prs=10, max_actions_per_tick=2)
         views = {'hash': 'h', 'record': None, 'recheck': False, 'owned': False}
         issues = [{'number': n, 'title': 't', 'labels': {READY}, 'labeler': 'brushtyler',
+                   'admitted': True,
                    'preflight': dict(views)} for n in (1, 2, 3)]
         actions = [(a.kind, a.number) for a in plan(Snapshot([], issues, []), cfg)]
         self.assertEqual(actions, [('preflight', 1), ('preflight', 2)])

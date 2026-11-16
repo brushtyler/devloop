@@ -54,6 +54,7 @@ from ssdlc_requirements import prepare_requirements
 from ssdlc_controller import assert_controller, controller_snapshot, execution_contract
 from ssdlc_transitions import runtime_root
 import ssdlc_role_fencing as role_fencing
+import ssdlc_telemetry as telemetry_schema
 from ssdlc_writer_gate import GateError
 
 from ssdlc_tasks import (
@@ -985,6 +986,20 @@ class ProjectRuntimeIsolation:
         }
 
 
+def _telemetry_of(result) -> Optional[Dict[str, Any]]:
+    """The shared cost telemetry an engine adapter attached to its result, if any."""
+    return getattr(result, "telemetry", None)
+
+
+def _with_incomplete_telemetry(details: Dict[str, Any], telemetry: Dict[str, Any]) -> Dict[str, Any]:
+    """An engine call that raised has unknown telemetry, recorded as an incomplete call."""
+    if details.get('outcome_class') != 'interrupted' or 'telemetry' in telemetry:
+        return telemetry
+    engine = str(details.get('engine', '')).lower().strip()
+    provider = engine if engine in telemetry_schema.ADAPTERS else 'openrouter'
+    return dict(telemetry, telemetry=telemetry_schema.incomplete(provider))
+
+
 class CostAndTelemetryEntry:
     def __init__(
         self,
@@ -1000,7 +1015,16 @@ class CostAndTelemetryEntry:
         trace_user: str = "",
         reasoning_effort: str = "medium",
         details: Optional[Dict[str, Any]] = None,
+        telemetry: Optional[Dict[str, Any]] = None,
     ):
+        # The shared cost telemetry of the engine call, when the row records one.
+        # cost_usd/tokens_in/tokens_out stay for compatibility; the telemetry tells
+        # charges, estimates and tokens apart, and unknown from zero. A malformed record
+        # is not kept: the row then has no telemetry, which the report shows as unknown.
+        try:
+            self.telemetry = telemetry_schema.validate(telemetry) if telemetry is not None else None
+        except ValueError:
+            self.telemetry = None
         self.details = details
         self.phase = phase
         self.role = role
@@ -1028,7 +1052,10 @@ class CostAndTelemetryEntry:
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
             "trace_user": self.trace_user,
+            "telemetry_schema_version": telemetry_schema.SCHEMA_VERSION,
         }
+        if self.telemetry is not None:
+            result["telemetry"] = self.telemetry
 
         if self.details is not None:
             result["details"] = self.details
@@ -1680,6 +1707,20 @@ class EngineRunner:
         return docker_cmd
 
     @staticmethod
+    def _container_env(docker_cmd: List[str]) -> Dict[str, str]:
+        """Variables a role container command passes to its process (`-e KEY=VALUE`).
+
+        Only Docker options before the image are read: what follows is the role command."""
+        options = (docker_cmd[:docker_cmd.index(EngineRunner.IMAGE_NAME)]
+                   if EngineRunner.IMAGE_NAME in docker_cmd else [])
+        passed: Dict[str, str] = {}
+        for flag, value in zip(options, options[1:]):
+            if flag == "-e" and "=" in value:
+                key, _, val = value.partition("=")
+                passed[key] = val
+        return passed
+
+    @staticmethod
     def _payload_needs(docker_cmd: List[str], cwd: Path) -> Dict[Path, Tuple[str, ...]]:
         """Host paths bind-mounted for the payload, with the access each mount needs."""
         needs: Dict[Path, Tuple[str, ...]] = {Path(cwd).resolve(): role_fencing.READ}
@@ -1861,10 +1902,12 @@ class EngineRunner:
             if getattr(_dispatch_local, 'limits', None) is not None:
                 from ssdlc_recovery import NotDispatched
                 raise NotDispatched('AUTH_MISSING', 'Bounded API route cannot silently fall back to another provider')
-            out, c, ti, to = EngineRunner.call_cli_fallback(
+            fallback = EngineRunner.call_cli_fallback(
                 model, system_prompt, user_prompt, reasoning_effort=reasoning_effort
             )
-            return out, c, ti, to, trace_user
+            out, c, ti, to = fallback
+            from ssdlc_recovery import ReportedOutput
+            return ReportedOutput((out, c, ti, to, trace_user), None, getattr(fallback, "telemetry", None))
 
         url = "https://openrouter.ai/api/v1/chat/completions"
         or_effort = "high" if reasoning_effort == "xhigh" else reasoning_effort
@@ -1917,7 +1960,9 @@ class EngineRunner:
         tokens_in = int(usage.get("prompt_tokens", 0))
         tokens_out = int(usage.get("completion_tokens", 0))
         cost_usd = float(usage.get("cost", 0.0) or 0.0)
-        return content, cost_usd, tokens_in, tokens_out, trace_user
+        from ssdlc_recovery import ReportedOutput
+        return ReportedOutput((content, cost_usd, tokens_in, tokens_out, trace_user), None,
+                              telemetry_schema.from_openrouter(usage))
 
     @staticmethod
     def call_cli_fallback(
@@ -1926,25 +1971,29 @@ class EngineRunner:
         user_prompt: str,
         reasoning_effort: str = "medium",
     ) -> Tuple[str, float, int, int]:
+        from ssdlc_recovery import ReportedOutput
         full_prompt = f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nTASK:\n{user_prompt}"
         if "claude" in model_hint.lower() and shutil.which("claude"):
-            out, _, c, ti, to = EngineRunner.run_claude(
+            result = EngineRunner.run_claude(
                 full_prompt, cwd=Path.cwd(), read_only=True, model=model_hint, reasoning_effort=reasoning_effort
             )
-            return out, c, ti, to
+            out, _, c, ti, to = result
+            return ReportedOutput((out, c, ti, to), None, getattr(result, "telemetry", None))
         if shutil.which("codex"):
-            out, _ = EngineRunner.run_codex(
+            result = EngineRunner.run_codex(
                 full_prompt,
                 cwd=Path.cwd(),
                 sandbox="read-only",
                 reasoning_effort=reasoning_effort,
             )
-            return out, 0.0, 0, 0
+            out, _ = result
+            return ReportedOutput((out, 0.0, 0, 0), None, getattr(result, "telemetry", None))
         if shutil.which("claude"):
-            out, _, c, ti, to = EngineRunner.run_claude(
+            result = EngineRunner.run_claude(
                 full_prompt, cwd=Path.cwd(), read_only=True, model=model_hint, reasoning_effort=reasoning_effort
             )
-            return out, c, ti, to
+            out, _, c, ti, to = result
+            return ReportedOutput((out, c, ti, to), None, getattr(result, "telemetry", None))
         raise RuntimeError(
             "Neither OPENROUTER_API_KEY nor local 'codex'/'claude' CLI is available."
         )
@@ -1973,6 +2022,8 @@ class EngineRunner:
             target_model,
             "--effort",
             effort,
+            "--output-format",
+            "json",
             "--dangerously-skip-permissions",
         ]
         if EngineRunner._should_spawn_role_container():
@@ -1987,8 +2038,37 @@ class EngineRunner:
         )
         if getattr(proc, "resource_failure", False):
             raise ResourceLimitError(f"ENVIRONMENT_RESOURCE: container limit reached; code correction not requested. Evidence: {proc.resource_evidence}")
-        combined = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
-        return combined.strip(), proc.returncode
+        response, envelope = EngineRunner._agy_result(proc.stdout or "")
+        combined = response + ("\n" + proc.stderr if proc.stderr else "")
+        from ssdlc_recovery import ReportedOutput
+        # A failed exit or a failed envelope is an incomplete call: unknown telemetry.
+        recorded = (telemetry_schema.incomplete("agy") if proc.returncode != 0 or envelope is False
+                    else telemetry_schema.from_agy(envelope))
+        counts = recorded["tokens"]["counts"]
+        tokens = ({"input_tokens": counts["input"], "output_tokens": counts["output"]}
+                  if recorded["tokens"]["availability"] == "reported" else None)
+        return ReportedOutput((combined.strip(), proc.returncode), tokens, recorded)
+
+    @staticmethod
+    def _agy_result(stdout: str):
+        """The answer of `agy --output-format json` and its envelope, as devloop reads it.
+
+        The answer is the `response` of a successful envelope. Any other output, an
+        envelope reporting a failed status included, is returned unchanged, so the
+        error text stays what the CLI printed. The envelope is None when the output is
+        not one, and False when it reports a failed status. Its identifiers are never kept.
+        """
+        try:
+            envelope = json.loads(stdout)
+        except ValueError:
+            return stdout, None
+        if not isinstance(envelope, dict):
+            return stdout, None
+        if envelope.get("status") not in (None, "SUCCESS"):
+            return stdout, False
+        if not isinstance(envelope.get("response"), str):
+            return stdout, None
+        return envelope["response"], envelope
 
     @staticmethod
     @_supervised_dispatch
@@ -2017,8 +2097,11 @@ class EngineRunner:
             "-c",
             f'model_reasoning_effort="{reasoning_effort}"',
         ]
+        # The route is known only when this invocation configures it explicitly.
+        route = None
         if use_openrouter and os.environ.get("OPENROUTER_API_KEY"):
             cmd.extend(["-c", 'model_provider="openrouter"'])
+            route = telemetry_schema.provenance("openrouter_api", "explicit_config")
         if model:
             cmd.extend(["-m", model])
         cmd.append("-")
@@ -2037,15 +2120,18 @@ class EngineRunner:
         if getattr(proc, "resource_failure", False):
             raise ResourceLimitError(f"ENVIRONMENT_RESOURCE: container limit reached; code correction not requested. Evidence: {proc.resource_evidence}")
         from ssdlc_recovery import ReportedOutput
-        message, errors, tokens = EngineRunner._codex_exec_events(proc.stdout or "")
+        message, errors, tokens, usages = EngineRunner._codex_exec_events(proc.stdout or "")
         if message is None and not errors:
             # Not a JSONL event stream: keep the raw output, report no tokens.
             stdout = (proc.stdout or "").strip()
         else:
             stdout = "\n".join(errors) if proc.returncode != 0 and errors else (message or "")
         combined = stdout + ("\n" + proc.stderr if proc.stderr else "")
+        recorded = (telemetry_schema.incomplete("codex", route) if proc.returncode != 0
+                    else telemetry_schema.from_codex(usages, route))
         # Successful stdout is the phase result; stderr contains tool transcripts.
-        return ReportedOutput((stdout.strip() if proc.returncode == 0 else combined.strip(), proc.returncode), tokens)
+        return ReportedOutput((stdout.strip() if proc.returncode == 0 else combined.strip(), proc.returncode),
+                              tokens, recorded)
 
     @staticmethod
     def _codex_exec_events(stdout: str):
@@ -2053,9 +2139,11 @@ class EngineRunner:
 
         Token counts are unauthenticated CLI telemetry. Codex `input_tokens`
         already includes the cached input, so it is not added again. A count
-        never reported stays None, never zero.
+        never reported stays None, never zero. The last value is the list of
+        `turn.completed.usage` objects, one per turn (empty when the turn reports
+        none), for the shared telemetry.
         """
-        message, errors = None, []
+        message, errors, usages = None, [], []
         tokens = {"input_tokens": None, "output_tokens": None}
         for line in stdout.splitlines():
             try:
@@ -2068,7 +2156,11 @@ class EngineRunner:
             if (kind == "item.completed" and isinstance(item, dict) and item.get("type") == "agent_message"
                     and isinstance(item.get("text"), str)):
                 message = item["text"]
-            elif kind == "turn.completed" and isinstance(event.get("usage"), dict):
+            elif kind == "turn.completed" and not isinstance(event.get("usage"), dict):
+                # A turn without usage leaves its share unknown in the shared telemetry.
+                usages.append({})
+            elif kind == "turn.completed":
+                usages.append(event["usage"])
                 for key in tokens:
                     value = event["usage"].get(key)
                     if type(value) is int and value >= 0:
@@ -2079,7 +2171,7 @@ class EngineRunner:
                           else error.get("message") if isinstance(error, dict) else None)
                 if isinstance(detail, str):
                     errors.append(detail)
-        return message, errors, tokens
+        return message, errors, tokens, usages
 
     @staticmethod
     @_supervised_dispatch
@@ -2096,7 +2188,8 @@ class EngineRunner:
     ) -> Tuple[str, int, float, int, int]:
         env = os.environ.copy()
         env["IS_SANDBOX"] = "1"
-        if use_openrouter and env.get("OPENROUTER_API_KEY"):
+        openrouter_requested = bool(use_openrouter and env.get("OPENROUTER_API_KEY"))
+        if openrouter_requested:
             env["ANTHROPIC_BASE_URL"] = "https://openrouter.ai/api"
             env["ANTHROPIC_AUTH_TOKEN"] = env["OPENROUTER_API_KEY"]
             env["ANTHROPIC_API_KEY"] = env["OPENROUTER_API_KEY"]
@@ -2129,6 +2222,14 @@ class EngineRunner:
                 writable_worktree=(None if read_only else writable_worktree),
                 stdin=True,
             )
+        # The route is known only when this invocation configures it explicitly and the
+        # CLI process really receives that configuration: in a role container the CLI
+        # sees only the variables the Docker command passes, not this local env.
+        route = None
+        if openrouter_requested:
+            received = EngineRunner._container_env(cmd) if use_container else env
+            if received.get("ANTHROPIC_BASE_URL") == env["ANTHROPIC_BASE_URL"]:
+                route = telemetry_schema.provenance("openrouter_api", "explicit_config")
         dev_timeout = int(os.environ.get("SSDLC_DEV_TIMEOUT", "2400"))
         proc = EngineRunner._run_role_command(
             cmd,
@@ -2144,9 +2245,11 @@ class EngineRunner:
         tokens_in = 0
         tokens_out = 0
         result_text = combined.strip()
+        envelope = None
         try:
             parsed = json.loads(proc.stdout.strip())
             if isinstance(parsed, dict):
+                envelope = parsed
                 result_text = parsed.get("result", "") or combined.strip()
                 cost_usd = float(parsed.get("total_cost_usd", 0.0) or 0.0)
                 usage = parsed.get("usage", {})
@@ -2154,7 +2257,11 @@ class EngineRunner:
                 tokens_out = int(usage.get("output_tokens", 0))
         except Exception:
             pass
-        return result_text, proc.returncode, cost_usd, tokens_in, tokens_out
+        # total_cost_usd is labelled as an API-equivalent estimate, never as a charge.
+        recorded = (telemetry_schema.incomplete("claude", route) if proc.returncode != 0
+                    else telemetry_schema.from_claude(envelope, route))
+        from ssdlc_recovery import ReportedOutput
+        return ReportedOutput((result_text, proc.returncode, cost_usd, tokens_in, tokens_out), None, recorded)
 
     @staticmethod
     @_supervised_dispatch
@@ -2174,21 +2281,25 @@ class EngineRunner:
         trace_user = f"{project_id}:{ticket_id}:{phase}"
         full_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
 
+        from ssdlc_recovery import ReportedOutput
         if engine == "agy":
-            out, rc = EngineRunner.run_agy(
+            result = EngineRunner.run_agy(
                 full_prompt, cwd=cwd, model=model, reasoning_effort=reasoning_effort
             )
+            out, rc = result
             if rc != 0:
                 raise RuntimeError(f"agy exited with code {rc}:\n{out}")
-            return out, 0.0, 0, 0, trace_user
+            return ReportedOutput((out, 0.0, 0, 0, trace_user), getattr(result, "reported_tokens", None),
+                                  getattr(result, "telemetry", None))
 
         if engine == "claude":
-            out, rc, cost, tin, tout = EngineRunner.run_claude(
+            result = EngineRunner.run_claude(
                 full_prompt, cwd=cwd, read_only=(sandbox == "read-only"), model=model, reasoning_effort=reasoning_effort
             )
+            out, rc, cost, tin, tout = result
             if rc != 0:
                 raise RuntimeError(f"claude exited with code {rc}:\n{out}")
-            return out, cost, tin, tout, trace_user
+            return ReportedOutput((out, cost, tin, tout, trace_user), None, getattr(result, "telemetry", None))
 
         if engine == "codex":
             result = EngineRunner.run_codex(
@@ -2202,8 +2313,8 @@ class EngineRunner:
             if rc != 0:
                 raise RuntimeError(f"codex exited with code {rc}:\n{out}")
             # The nested dispatch does not record; carry the CLI tokens to the outer one.
-            from ssdlc_recovery import ReportedOutput
-            return ReportedOutput((out, 0.0, 0, 0, trace_user), getattr(result, "reported_tokens", None))
+            return ReportedOutput((out, 0.0, 0, 0, trace_user), getattr(result, "reported_tokens", None),
+                                  getattr(result, "telemetry", None))
 
         return EngineRunner.call_openrouter(
             model,
@@ -3541,14 +3652,15 @@ class SSDLCOrchestrator:
                 raise PlanError("Planner changed ticket identity or base_commit")
         def generate(attempt, inputs, previous):
             t0 = time.time()
-            out, cost, tin, tout, trace = EngineRunner.invoke_role(
+            result = EngineRunner.invoke_role(
                 engine, model, prompt, json.dumps({**context, "repair": previous} if previous else context, indent=2),
                 self.repo_root, self.project_id, self.ticket_id,
                 "02-design-task-plan", reasoning_effort=effort,
             )
+            out, cost, tin, tout, trace = result
             self.record_ledger(CostAndTelemetryEntry(
                 f"02-design-task-plan-a{attempt}", "Task Planner", engine, model, "GENERATED",
-                time.time() - t0, cost, tin, tout, trace, effort))
+                time.time() - t0, cost, tin, tout, trace, effort, telemetry=_telemetry_of(result)))
             return out
         review_schema = (Path(__file__).parent / "schemas" / "task-plan-review.schema.json").read_text()
         review_prompt = (
@@ -3612,15 +3724,16 @@ class SSDLCOrchestrator:
         def review(plan, history):
             impact = impact_report(plan)
             t0 = time.time()
-            out, cost, tin, tout, trace = EngineRunner.invoke_role(
+            result = EngineRunner.invoke_role(
                 rev_engine, rev_model,
                 review_prompt,
                 json.dumps({"context": context, "plan": plan, "review_history": history, "impact_report": impact}), self.repo_root,
                 self.project_id, self.ticket_id, "02-design-task-plan-review", reasoning_effort=rev_effort,
             )
+            out, cost, tin, tout, trace = result
             self.record_ledger(CostAndTelemetryEntry(
                 "02-design-task-plan-review", "Plan Reviewer", rev_engine, rev_model, "REVIEWED",
-                time.time() - t0, cost, tin, tout, trace, rev_effort))
+                time.time() - t0, cost, tin, tout, trace, rev_effort, telemetry=_telemetry_of(result)))
             return out
         repair = PlanRepair(self.dir_design,
                             {"context": context, "schema": schema, "prompt": prompt, "review_prompt": review_prompt,
@@ -3715,6 +3828,9 @@ class SSDLCOrchestrator:
                         wt, self.project_id, self.ticket_id, f'{phase}-diag', sandbox='read-only',
                         reasoning_effort=request.reasoning_effort)
                 def ledger(details):
+                    # The call's shared telemetry, read from its own persisted artifact; it
+                    # goes into the row's telemetry, not into its details.
+                    persisted = details.pop('telemetry', None)
                     if details['transition'] == 'result':
                         previous = [entry for entry in self.state.get('ledger', [])
                                     if entry.get('details', {}).get('diagnosis_request_id') == details['diagnosis_request_id']
@@ -3729,11 +3845,18 @@ class SSDLCOrchestrator:
                                 raise TaskError('Diagnosis ledger differs from its immutable result')
                             return
                     producer = details.get('producer', provider)
+                    # A result without a persisted telemetry artifact (written before it
+                    # existed, or by an adapter without telemetry) is one completed call
+                    # with every measure unknown.
+                    recorded = None
+                    if details['transition'] == 'result':
+                        recorded = persisted or telemetry_schema.record(
+                            telemetry_schema.provider_for(producer['engine']))
                     self.record_ledger(CostAndTelemetryEntry(f'{phase}-diag', 'Diagnosis', producer['engine'],
                         producer['model'], details['transition'], details.get('duration_sec', 0),
                         cost_usd=details.get('cost_usd', 0), tokens_in=details.get('tokens_in', 0),
                         tokens_out=details.get('tokens_out', 0), reasoning_effort=producer['reasoning_effort'],
-                        details=details))
+                        details=details, telemetry=recorded))
                 candidate_reports.run_diagnosis(self.ssdlc_root, gate=request.gate, finding=finding,
                     reviewed_commit=request.reviewed_commit, tree=tree, evaluation_identity=identity,
                     attempt=request.attempt, candidate_records=[r['record_id'] for r in candidate.records],
@@ -4088,24 +4211,27 @@ class SSDLCOrchestrator:
                 if engine == "claude":
                     tier_budget = {"S": 1.0, "M": 2.5, "L": 8.0}.get(self.state.get("risk_tier", "M"), 2.5)
                     dev_budget = float(os.environ.get("SSDLC_DEV_BUDGET_USD") or tier_budget)
-                    out, rc, cost, tin, tout = EngineRunner.run_claude(
+                    result = EngineRunner.run_claude(
                         prompt, cwd=workspace, read_only=False, use_openrouter=use_or,
                         writable_worktree=workspace, model=model, reasoning_effort=effort,
                         max_budget_usd=dev_budget,
                         require_container=True,
                     )
+                    out, rc, cost, tin, tout = result
                 elif engine == "codex":
-                    out, rc = EngineRunner.run_codex(
+                    result = EngineRunner.run_codex(
                         prompt, cwd=workspace, sandbox="workspace-write", model=model,
                         reasoning_effort=effort, use_openrouter=use_or, writable_worktree=workspace,
                         require_container=True,
                     )
+                    out, rc = result
                 else:
                     raise TaskError(f"Unsupported bootstrap developer engine: {engine}")
             self.record_ledger(CostAndTelemetryEntry(
                 f"03-dev-{task['task_id']}-a{attempt}", "Task Developer", engine, model,
                 "GENERATED" if rc == 0 else f"RC_{rc}", time.time() - t0, cost, tin, tout,
                 f"{self.project_id}:{self.ticket_id}:{task['task_id']}", effort,
+                telemetry=_telemetry_of(result),
             ))
             return {"output": out, "exit_code": rc, "engine": engine, "model": model,
                     "effort": effort, "reason": reason, "quiescent": True}
@@ -4380,7 +4506,7 @@ class SSDLCOrchestrator:
         user_prompt = f"REPO CONTEXT:\n{repo_ctx}\n\nGOAL:\n{goal}"
 
         t0 = time.time()
-        out, cost, tin, tout, trace_user = EngineRunner.invoke_role(
+        result = EngineRunner.invoke_role(
             engine,
             model,
             sys_prompt,
@@ -4391,6 +4517,7 @@ class SSDLCOrchestrator:
             "00-recon",
             reasoning_effort=effort,
         )
+        out, cost, tin, tout, trace_user = result
         dur = time.time() - t0
 
         recon_file = self.dir_recon / "context-and-blast-radius.md"
@@ -4427,6 +4554,7 @@ class SSDLCOrchestrator:
                 tout,
                 trace_user,
                 reasoning_effort=effort,
+                telemetry=_telemetry_of(result),
             )
         )
         self.record_gate(
@@ -4597,7 +4725,7 @@ class SSDLCOrchestrator:
         user_prompt = f"CODEBASE RECON & BLAST RADIUS:\n{recon_text}\n\nUSER GOAL:\n{goal}"
 
         t0 = time.time()
-        out, cost, tin, tout, trace_user = EngineRunner.invoke_role(
+        result = EngineRunner.invoke_role(
             engine,
             model,
             sys_prompt,
@@ -4608,6 +4736,7 @@ class SSDLCOrchestrator:
             "01-po",
             reasoning_effort=effort,
         )
+        out, cost, tin, tout, trace_user = result
         dur = time.time() - t0
 
         req_file = self.dir_po / "requirements.md"
@@ -4626,6 +4755,7 @@ class SSDLCOrchestrator:
                 tout,
                 trace_user,
                 reasoning_effort=effort,
+                telemetry=_telemetry_of(result),
             )
         )
 
@@ -4738,11 +4868,13 @@ class SSDLCOrchestrator:
             effort = routing[role][2][rnd - 1] if role in routing else routing['02-design-sec'][2][0]
             print(f'[02-design] {role} round {rnd}: {engine}:{model}, reasoning={effort}', flush=True)
             start = time.time()
-            out, cost, tin, tout, trace = EngineRunner.invoke_role(
+            result = EngineRunner.invoke_role(
                 engine, model, system, json.dumps(user, indent=2), self.repo_root,
                 self.project_id, self.ticket_id, f'{role}-r{rnd}', reasoning_effort=effort)
+            out, cost, tin, tout, trace = result
             self.record_ledger(CostAndTelemetryEntry(f'{role}-r{rnd}', role, engine, model, 'GENERATED',
-                                                    time.time() - start, cost, tin, tout, trace, effort))
+                                                    time.time() - start, cost, tin, tout, trace, effort,
+                                                    telemetry=_telemetry_of(result)))
             return out
         def architect(rnd, previous, history):
             return invoke('02-design-arch', arch_engine, arch_model, arch_prompt,
@@ -5036,6 +5168,7 @@ class SSDLCOrchestrator:
             status = {'integrity_blocked': 'INPUT_CHANGED', 'interrupted': 'ENGINE_ERROR',
                       'protocol_error': 'INVALID_VERDICT', 'approved': 'APPROVED',
                       'rejected_substantive': 'CHANGES_REQUESTED'}.get(outcome, outcome)
+            telemetry = _with_incomplete_telemetry(details, telemetry)
             self.record_ledger(CostAndTelemetryEntry(f'04-review-a{attempt}', 'Code Reviewer', details['engine'],
                     details['model'], status, telemetry.get('duration_sec', 0), reasoning_effort=effort,
                     details=details, **{k: v for k, v in telemetry.items() if k != 'duration_sec'}))
@@ -5345,6 +5478,7 @@ class SSDLCOrchestrator:
             status = {'integrity_blocked': 'INPUT_CHANGED', 'protocol_error': 'INVALID_VERDICT',
                       'interrupted': 'ENGINE_ERROR', 'approved': 'PASSED' if gate == 'qa' else 'SECURE',
                       'rejected_substantive': 'FAILED' if gate == 'qa' else 'VULNERABLE'}[details['outcome_class']]
+            telemetry = _with_incomplete_telemetry(details, telemetry)
             self.record_ledger(CostAndTelemetryEntry(f'{phase}-a{attempt}', gate, engine, model, status,
                 telemetry.get('duration_sec', 0), reasoning_effort=effort, details=details,
                 **{k: v for k, v in telemetry.items() if k != 'duration_sec'}))
@@ -5558,7 +5692,7 @@ class SSDLCOrchestrator:
             sys_prompt += '\n' + UNTRUSTED_DATA_INSTRUCTION + '\n' + OPS_DOCS_COVERAGE_NOTE
 
         t0 = time.time()
-        ops_out, cost, tin, tout, trace_user = EngineRunner.invoke_role(
+        result = EngineRunner.invoke_role(
             ops_engine,
             ops_model,
             sys_prompt,
@@ -5570,6 +5704,7 @@ class SSDLCOrchestrator:
             sandbox="read-only",
             reasoning_effort=ops_effort,
         )
+        ops_out, cost, tin, tout, trace_user = result
         if verified_context:
             self._verify_ops_docs_after(diff_text)
         dur = time.time() - t0
@@ -5579,7 +5714,8 @@ class SSDLCOrchestrator:
         self.record_artifact("06-ops/release-and-rollback.md", ops_path)
         self.record_ledger(
             CostAndTelemetryEntry(
-                "06-ops", "DevSecOps Engineer", ops_engine, ops_model, "READY", dur, cost, tin, tout, trace_user, reasoning_effort=ops_effort
+                "06-ops", "DevSecOps Engineer", ops_engine, ops_model, "READY", dur, cost, tin, tout, trace_user, reasoning_effort=ops_effort,
+                telemetry=_telemetry_of(result),
             )
         )
         self.record_gate("DEVSECOPS_RELEASE_GATE", True, f"Generated release & rollback runbook (reasoning={ops_effort}).")
@@ -5620,7 +5756,7 @@ class SSDLCOrchestrator:
             sys_prompt += '\n' + UNTRUSTED_DATA_INSTRUCTION + '\n' + OPS_DOCS_COVERAGE_NOTE
 
         t0 = time.time()
-        docs_out, cost, tin, tout, trace_user = EngineRunner.invoke_role(
+        result = EngineRunner.invoke_role(
             docs_engine,
             docs_model,
             sys_prompt,
@@ -5632,6 +5768,7 @@ class SSDLCOrchestrator:
             sandbox="read-only",
             reasoning_effort=docs_effort,
         )
+        docs_out, cost, tin, tout, trace_user = result
         if verified_context:
             self._verify_ops_docs_after(diff_text)
         dur = time.time() - t0
@@ -5641,7 +5778,8 @@ class SSDLCOrchestrator:
         self.record_artifact("07-docs/documentation-and-changelog.md", docs_path)
         self.record_ledger(
             CostAndTelemetryEntry(
-                "07-docs", "Documentation Steward", docs_engine, docs_model, "UPDATED", dur, cost, tin, tout, trace_user, reasoning_effort=docs_effort
+                "07-docs", "Documentation Steward", docs_engine, docs_model, "UPDATED", dur, cost, tin, tout, trace_user, reasoning_effort=docs_effort,
+                telemetry=_telemetry_of(result),
             )
         )
         self.record_gate("DOCS_STEWARD_GATE", True, f"Generated changelog and API/contract documentation (reasoning={docs_effort}).")
@@ -5697,14 +5835,14 @@ class SSDLCOrchestrator:
         def observed(row, key):
             value = row.get(key)
             return value if type(value) in (int,float) and math.isfinite(value) and value >= 0 else None
-        total_cost = sum(observed(item,'cost_usd') or 0 for item in self.state['ledger'])
         total_dur = sum(observed(item,'duration_sec') or 0 for item in self.state['ledger'])
-        unknown_cost_rows = sum(observed(item,'cost_usd') is None for item in self.state['ledger'])
+        # Charges, API-equivalent estimates and tokens are reported apart, never summed.
+        cost_telemetry = telemetry_schema.breakdown(self.state['ledger'])
 
         ledger_rows = []
         for item in self.state["ledger"]:
-            cost = observed(item,'cost_usd'); duration = observed(item,'duration_sec')
-            cost_text = f'${cost:.4f}' if cost is not None else 'unknown'
+            duration = observed(item,'duration_sec')
+            cost_text = telemetry_schema.row_cost_text(item)
             duration_text = f'{duration}s' if duration is not None else 'unknown'
             ledger_rows.append(
                 f"| `{item.get('phase','historical-unknown')}` | {item.get('role','Historical (unclassified)')} | "
@@ -5761,7 +5899,7 @@ class SSDLCOrchestrator:
 - **Base Commit**: `{self.state['base_commit']}`
 - **Isolated Worktree Branch**: `{self.state['dev_branch']}`
 - **Total Duration**: `{total_dur:.1f}s`
-- **Reported Ledger Cost (known numeric values)**: `${total_cost:.4f} USD`; rows with unknown cost: `{unknown_cost_rows}`
+- **Cost Telemetry**: charges, API-equivalent estimates and tokens by provider in section 3; they are never added together
 {completion_disclosures}
 ---
 
@@ -5790,9 +5928,13 @@ class SSDLCOrchestrator:
 
 ## 3. Role Execution, Reasoning Effort, Trace Tag & Cost Ledger
 
-| Phase | Role | Engine / Model | Reasoning | Trace Tag (`user`) | Status | Duration | Cost (USD) |
+| Phase | Role | Engine / Model | Reasoning | Trace Tag (`user`) | Status | Duration | Cost telemetry |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 {chr(10).join(ledger_rows)}
+
+### Cost Telemetry by Provider and Measure Type
+
+{telemetry_schema.render(cost_telemetry)}
 
 ---
 
@@ -6153,7 +6295,9 @@ To **REJECT** and record feedback (free text authorizes no repair):
                  if type(row.get('cost_usd')) in (int, float) and math.isfinite(row['cost_usd']) and row['cost_usd'] >= 0]
         usage = dict(ledger_entries=len(ledger), reported_cost_usd=sum(known),
                      unknown_cost_rows=len(ledger) - len(known),
-                     accounted_usd=self._corrective_accounted_spend())
+                     accounted_usd=self._corrective_accounted_spend(),
+                     # reported_cost_usd mixes kinds of telemetry; this breakdown keeps them apart.
+                     cost_telemetry=telemetry_schema.breakdown(ledger))
         self.state.update(status=PAUSED_AT_PHASE_BOUNDARY, current_phase=phase, current_step='phase-boundary',
                           phase_boundary=dict(checkpoint, phase=phase, next_phase=UNTIL_PHASES[phase],
                                               usage=usage, paused_at=utc_now()))

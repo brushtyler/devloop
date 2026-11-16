@@ -230,6 +230,7 @@ All new runs use the task scheduler, including Tier S. See [unified execution an
 | [Architecture](docs/architecture.md) | Phases, tiers, isolation, run layout, controller contract, integrity model |
 | [Task mode](docs/task-mode.md) | PO validation, design sessions, task planning, scheduler, repair, gate reports |
 | [Supervision](docs/supervision.md) | Detached runs, resume, cancel, recovery matrix |
+| [Cost telemetry](docs/cost-telemetry.md) | Charges, API-equivalent estimates and tokens per provider; Evidence Pack breakdown |
 | [Troubleshooting](docs/troubleshooting.md) | Memory/OOM, resuming, deploy keys, common stops |
 
 ### Recovery and continuation

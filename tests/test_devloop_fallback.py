@@ -366,7 +366,7 @@ class FallbackTurnTests(unittest.TestCase):
         runner = FakeRunner(unavailable('claude'))
         d = self.make(runner)
         d.snapshot = lambda: Snapshot([], [{'number': 7, 'title': 't', 'labels': {'agent:ready'},
-                                            'labeler': 'brushtyler'}], [])
+                                            'labeler': 'brushtyler', 'admitted': True}], [])
         self.assertEqual(d.tick(), [Action('implement', 7)])
         self.assertEqual(len(runner.calls), 1)
         self.assertEqual(self.gh.labels[7], {'agent:needs-human'})
