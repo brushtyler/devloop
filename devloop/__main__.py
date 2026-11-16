@@ -118,7 +118,9 @@ def main(argv=None):
 
     if args.command == 'setup':
         ensure_labels(dispatcher.gh, cfg.labels, cfg.review_policy)
-        log('labels ready: ' + ', '.join((*cfg.labels.all(), cfg.review_policy.label)))
+        rp = cfg.review_policy
+        log('labels ready: ' + ', '.join((*cfg.labels.all(), rp.label,
+                                          *((rp.zero_label,) if rp.zero_enabled() else ()))))
         return
     if args.command == 'apps':
         failed = False

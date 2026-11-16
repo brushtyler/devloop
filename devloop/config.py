@@ -144,8 +144,45 @@ def parse_review_policy(table, root, reviewers=()):
     files = []
     for name in _str_list(table, 'sensitive_path_lists', where, DEFAULT_SENSITIVE_LISTS):
         files += _listed_files(name, root)
+    zero_label, allowlist, checks = _zero_policy(table.get('zero', {}), label, default)
     return ReviewPolicy(default_level=level, label=label, sensitive_paths=paths,
-                        sensitive_files=tuple(files), reviewers=tuple(reviewers))
+                        sensitive_files=tuple(files), reviewers=tuple(reviewers),
+                        zero_label=zero_label, zero_allowlist=allowlist, zero_checks=checks)
+
+
+def _zero_policy(table, level_label, default):
+    """``(label, allowlist, checks)`` of ``[review_policy.zero]`` (#107). An entry of the
+    allowlist is a directory prefix or a file relative to the root, never the root itself, an
+    absolute path, a ``.`` or ``..`` segment or a pattern. A check is ``{name, app_id}``."""
+    where = 'review_policy.zero'
+    if not isinstance(table, dict):
+        raise ConfigError(f'{where}: expected a table')
+    label = table.get('label', default.zero_label)
+    if not isinstance(label, str) or not label.strip():
+        raise ConfigError(f'{where}.label: expected a non-empty string')
+    if label == level_label:
+        raise ConfigError(f'{where}.label: must differ from review_policy.label')
+    allowlist = _str_list(table, 'allowlist', where)
+    for entry in allowlist:
+        parts = entry.strip().rstrip('/').split('/')
+        if (entry.startswith('/') or any(p in ('', '.', '..') for p in parts)
+                or any(c in entry for c in '*?[]\\')):
+            raise ConfigError(f'{where}.allowlist: invalid entry {entry!r}')
+    checks = table.get('checks', [])
+    if not isinstance(checks, list):
+        raise ConfigError(f'{where}.checks: expected a list of {{name, app_id}} tables')
+    expected = []
+    for check in checks:
+        if not isinstance(check, dict) or set(check) != {'name', 'app_id'}:
+            raise ConfigError(f'{where}.checks: expected a list of {{name, app_id}} tables')
+        name, app_id = check['name'], check['app_id']
+        if (not isinstance(name, str) or not name.strip() or not isinstance(app_id, int)
+                or isinstance(app_id, bool) or app_id < 1):
+            raise ConfigError(f'{where}.checks: a check needs a non-empty name and an app_id')
+        expected.append((name, app_id))
+    if len(set(expected)) != len(expected):
+        raise ConfigError(f'{where}.checks: a check is listed twice')
+    return label, allowlist, tuple(expected)
 
 
 def _reviewer_pool(roles, agents, implementer):

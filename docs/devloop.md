@@ -18,6 +18,7 @@ plans the next steps and runs them. A crashed tick is resumed by the next one.
 | Fix | `agent:changes` | The implementer fixes or disputes every open finding of the round, then back to `agent:review` |
 | Sync | A PR in `agent:review` or `agent:ready-to-merge` conflicts with `main` | The implementer resolves the conflicts of a merge of `origin/main`; the dispatcher pushes the merge commit, back to `agent:review` (see below) |
 | Approve | Verdict `approve` from every reviewer the level requires | `agent:ready-to-merge`, only if no [finding](#findings-and-who-closes-them) is still open, the PR head is still the reviewed commit, CI passed and the policy receipt recomputed just before promotion matches the one of every approval |
+| Level 0 | A trusted user's `reviews:0`, the whole diff in the operator's allowlist, every expected check `success` | `agent:ready-to-merge` without a review (see [Level 0](#level-0-no-review)); off by default |
 | Merge | `agent:ready-to-merge` | **A human merges.** devloop never merges |
 
 Readiness belongs to the approved commit. Every tick re-checks ready PRs:
@@ -62,7 +63,9 @@ comment that lists the files in conflict and their commits.
 
 Any step can stop at `agent:needs-human` with a comment explaining why: the agent declared itself
 blocked, tests still fail after the retry, the reviewer asked for a decision, the round limit
-was reached, the reviewer pool has not enough independent reviewers for the review level, an approval left open a finding of another owner, the
+was reached, the reviewer pool has not enough independent reviewers for the review level, a
+[level 0](#level-0-no-review) head misses an expected check, has an open finding or a standing
+request for changes, an approval left open a finding of another owner, the
 owner of a finding cannot be reconstructed from the markers, a sync with `main` failed, an agent, `gh` or `git` call failed or timed out, an agent
 stalled with `agent_stall_action = "abort"` (see [Stalled agents](#stalled-agents)), the issue text was changed by an
 untrusted user after `agent:ready`, or the PR body lost its marker. While `agent:needs-human` is
@@ -126,8 +129,9 @@ highest of:
 - the highest level already recorded on the PR by an earlier receipt. A fix that widens the
   diff to the core raises the level, and a later head that narrows it again does not lower it.
 
-Nothing lowers a level, and nothing takes it below 1. The level is computed again on every new
-head, before each review, CI round and promotion.
+Nothing lowers a level, and nothing takes it below 1, except the operator's `reviews:0` label
+(see [Level 0](#level-0-no-review)). The level is computed again on every new head, before each
+review, CI round and promotion.
 
 Sensitive paths are configurable under `[review_policy]`: `sensitive_paths` (default `devloop/`,
 `AGENTS.md`, `CLAUDE.md`, `.github/`, `schemas/`; an entry is a directory or a file at the root)
@@ -191,6 +195,66 @@ A round at level 2 works as follows:
   that a fix answered or that a `/devloop rereview` request voided is closed: the next review
   opens a new round.
 
+### Level 0: no review
+
+Level 0 (#107, second step of #66) promotes a PR to `agent:ready-to-merge` without any review.
+Only a trusted user lowers a level: no heuristic, plan or agent can. It is **off by default**,
+and stays off unless `[review_policy.zero]` in `config.toml` has both a non-empty `allowlist`
+and a non-empty `checks`. While it is off, everything works as described above, and the policy
+version does not change.
+
+A head gets level 0 only when all of these hold:
+
+- **The label.** The latest `labeled` or `unlabeled` event of `reviews:0` (`zero.label`) on the
+  PR added it, and a user in `trusted_users` wrote it. A label added by anyone else is ignored;
+  removing the label, or someone else adding it again, takes level 0 away.
+- **Only level 1.** The label lowers level 1 only. The `reviews:2` label from a trusted user
+  (any event in the PR's history), a level 2 already recorded on the PR, a sensitive path and
+  `default_level = 2` always prevail.
+- **The allowlist.** Every path of the PR's full diff against the base (as for the level: both
+  sides of a rename, deletions) is in `allowlist`: under a listed directory (`docs/`) or a
+  listed file. A Markdown file (`.md`, `.markdown`, `.mdx`) counts only when listed by its exact
+  path, so `docs/` does not cover `docs/guide.md`. A symlink never counts. These are excluded
+  even when listed: `AGENTS.md` and `CLAUDE.md` at any depth (for example `docs/AGENTS.md`, any
+  case), `devloop/prompts/`, `standards/`, `.github/`, `schemas/` (with the replay gate
+  baseline) and every sensitive path. One path outside the allowlist keeps the level computed
+  above.
+- **Not refused before.** The level is computed again on every head. When a receipt recorded on
+  the PR refused the label (a fix widened the diff out of the allowlist, or a level 2 applied),
+  that label event no longer counts, even if a later head is back inside the allowlist: the PR
+  stays at least at level 1 until a trusted user adds the label again (remove it, add it back).
+
+At level 0 the dispatcher runs no reviewer. Before promoting it re-reads the head and checks:
+
+- **Expected CI.** Each check in `checks` is a check run identified by its exact `name` and the
+  `app_id` of the GitHub App that produces it; commit statuses do not count. For each, the most
+  recent run on the current head decides, and only `success` is a success. While one is still
+  running the PR waits; a check that is missing (also a filtered workflow), `skipped`,
+  `neutral`, `cancelled` or failed sends the PR to `agent:needs-human`. The test command is
+  `test_cmd` of the running dispatcher and the workflows are under `.github/`, which a PR cannot
+  change at level 0; still, do not list in the allowlist files that the CI runs as its own
+  harness (for example `scripts/run-tests.py`).
+- **No open finding.** A blocking finding still open from an earlier round sends the PR to
+  `agent:needs-human`; the operator can close it with a `/devloop finding` command.
+- **No standing request for changes.** A native `REQUEST_CHANGES` review from a user in
+  `trusted_users` blocks, also after new commits, until it is dismissed or the same user
+  approves; a comment does not withdraw it. It sends the PR to `agent:needs-human`.
+
+The promotion is a dispatcher comment with a `policy` marker that records the receipt (level 0,
+the label, who added it and when, the allowlist outcome) and the state of each expected check.
+**devloop never merges**: the merge stays the operator's. While the PR is ready, every tick
+checks that the head is still the promoted one, that `reviews:0` is still on the PR and
+`reviews:2` is not, and that CI is not running again or failing; otherwise readiness is revoked
+(or CI becomes a review round) and the level is computed again. A CI failure at level 0 is a
+round like any other, and its fix goes back to level 0 only if the diff stays in the allowlist.
+
+```toml
+[review_policy.zero]
+label = "reviews:0"
+allowlist = ["docs/", "docs/guide.md", "tests/fixtures/"]
+checks = [{ name = "unittest", app_id = 15368 }]  # 15368: GitHub Actions
+```
+
 ### Receipts
 
 Every agent review, CI round and promotion records a **receipt** in its marker:
@@ -199,8 +263,8 @@ Every agent review, CI round and promotion records a **receipt** in its marker:
 |---|---|
 | `pr`, `base`, `head` | The PR, the base branch commit and the head the level was computed for |
 | `policy` | The policy version: the SHA-256 of the loaded policy configuration, including key, app, kind, model, effort and `review_args` of every reviewer of the pool |
-| `level`, `reasons` | The effective level and why: default, label with its author, sensitive paths, earlier level |
-| `reviewers` | The reviewers the level requires, in order (none when the pool has not enough independent ones) |
+| `level`, `reasons` | The effective level and why: default, label with its author, sensitive paths, earlier level, and with level 0 enabled the `reviews:0` label with its author, time, whether it applied and the paths outside the allowlist |
+| `reviewers` | The reviewers the level requires, in order (none at level 0, or when the pool has not enough independent ones) |
 | `profiles` | The identity and tuple `(kind, model, effort, review_args)` each required reviewer reviews with now. At level 1 the PR's recorded reviewer stays required even when it is no longer in the pool, so the policy version does not cover it: its profile does |
 
 Promotions and escalations for a pool without enough independent reviewers are dispatcher
@@ -370,7 +434,7 @@ needs a dedicated system user or a container.
 ## Usage
 
 ```bash
-python3 -m devloop setup            # create the agent:* labels and the review level label
+python3 -m devloop setup            # create the agent:* labels and the review level labels (reviews:0 only when level 0 is on)
 python3 -m devloop status           # running action, devloop PRs (with merge state and conflicts), ready issues, planned actions
 python3 -m devloop apps             # check the GitHub App of each actor
 python3 -m devloop tick --dry-run   # print the plan, change nothing

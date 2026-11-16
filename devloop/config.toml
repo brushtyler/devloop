@@ -54,6 +54,20 @@ sensitive_paths = ["devloop/", "AGENTS.md", "CLAUDE.md", ".github/", "schemas/"]
 # root of the running devloop installation (a pinned checkout); a missing file stops devloop.
 sensitive_path_lists = ["schemas/recovery-grader-baseline.json"]
 
+# Level 0 (issue #107): no review. It applies only when a trusted user added `label` to the PR
+# (the latest event of that label added it), the level computed above is 1, and the PR's full
+# diff is inside `allowlist`. The head then goes to agent:ready-to-merge (never merged) once
+# every check run in `checks` concluded `success` on it; a missing, pending, skipped, neutral
+# or cancelled check is not a success. An empty allowlist or an empty `checks` (the default)
+# turns level 0 off. Allowlist entries are directories ("docs/") or files; a Markdown file
+# counts only when listed by its exact path. AGENTS.md and CLAUDE.md at any depth,
+# devloop/prompts/, standards/, .github/, schemas/ and the sensitive paths are never allowed.
+[review_policy.zero]
+label = "reviews:0"
+allowlist = []
+# Check runs by exact name and GitHub App id, e.g. { name = "unittest", app_id = 15368 }.
+checks = []
+
 [roles]
 implementer = "claude"
 # The reviewer pool, in order; none may be the implementer. Level 1 uses the PR's recorded

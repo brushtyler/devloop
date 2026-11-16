@@ -107,6 +107,15 @@ class GitHub:
                                 ' | .actor.login')
         return done.stdout.split()
 
+    def label_events(self, number, label):
+        """The ``labeled`` and ``unlabeled`` events of ``label`` on issue or PR ``number``,
+        oldest first, as ``{event, by, at}``."""
+        select = (f'select((.event == "labeled" or .event == "unlabeled") '
+                  f'and .label.name == {json.dumps(label)})')
+        return self._json_lines('api', '--paginate', f'repos/{self.repo}/issues/{number}/events',
+                                '--jq', f'.[] | {select} | '
+                                        '{event, by: .actor.login, at: .created_at}')
+
     def last_labeler(self, number, label):
         """Login of whoever most recently added ``label`` to issue ``number``."""
         logins = self.labelers(number, label)
@@ -138,6 +147,22 @@ class GitHub:
                                 '--jq', '.check_runs[] | {name, status, conclusion, details_url}')
         combined = self._json('api', f'repos/{self.repo}/commits/{sha}/status?per_page=100')
         return summarize_checks(normalize_checks(runs, combined or {}))
+
+    def check_runs(self, sha):
+        """Every check run of commit ``sha``, superseded runs included, as ``{id, name, app_id,
+        status, conclusion}``. Commit statuses are not check runs and are not listed."""
+        return self._json_lines('api', '--paginate',
+                                f'repos/{self.repo}/commits/{sha}/check-runs?filter=all'
+                                '&per_page=100',
+                                '--jq', '.check_runs[] | {id, name, app_id: .app.id, status, '
+                                        'conclusion}')
+
+    def pr_reviews(self, number):
+        """The native reviews of PR ``number``, oldest first, as ``{id, login, state}`` (state:
+        APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING)."""
+        return self._json_lines('api', '--paginate',
+                                f'repos/{self.repo}/pulls/{number}/reviews?per_page=100',
+                                '--jq', '.[] | {id, login: .user.login, state}')
 
     def failed_log(self, run_id, max_lines=80):
         done = self._gh('run', 'view', str(run_id), '-R', self.repo, '--log-failed', check=False)
