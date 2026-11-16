@@ -1074,7 +1074,8 @@ class Dispatcher:
         """Whether the base branch moving from ``old`` to ``new`` left the PR alone (#160), as
         a record: ``{from, to, outcome}``, the outcome ``disjoint``, ``touched`` (with
         ``paths``, the files of the PR it reached) or ``unverifiable`` (the commits in between
-        cannot be listed). Every commit in between counts, not only their net diff."""
+        cannot be listed). Every commit in between counts, not only their net diff.
+        ``_base_checks`` adds the mergeability on the current base."""
         try:
             touched = self.ws.base_paths(old, new)
         except WorkspaceError as exc:
@@ -1089,7 +1090,13 @@ class Dispatcher:
     def _base_checks(self, records, current, paths):
         """For records whose receipts differ from ``current`` in the base at most: the check of
         each earlier base up to the current one (``_base_check``), ``[]`` when no base
-        differs. None when a receipt is missing or differs in anything else."""
+        differs. None when a receipt is missing or differs in anything else.
+
+        A base that left the PR's files alone is accepted only if the receipt's head also
+        merges into the current base without conflicts, verified on these two exact commits:
+        otherwise its check becomes ``conflict`` (with ``paths``, the files in conflict) or
+        ``unverifiable``. The mergeability GitHub reported in the snapshot may predate the
+        base."""
         checks, seen = [], set()
         for record in records:
             changed = differences(receipt_of(record), current)
@@ -1099,7 +1106,24 @@ class Dispatcher:
             if changed and old not in seen:
                 seen.add(old)
                 checks.append(self._base_check(old, current['base'], paths))
+        if any(c['outcome'] == 'disjoint' for c in checks):
+            merge = self._merge_check(current['base'], current['head'])
+            if merge['outcome'] != 'clean':
+                checks = [dict(c, **merge) if c['outcome'] == 'disjoint' else c for c in checks]
         return checks
+
+    def _merge_check(self, base, head):
+        """Whether ``head`` merges into ``base`` without conflicts: ``{outcome}``, ``clean``,
+        ``conflict`` (with ``paths``) or ``unverifiable``."""
+        try:
+            clean, files = self.ws.merge_check(base, head)
+        except WorkspaceError as exc:
+            self.log(f'  merge of {head[:12]} into {base[:12]} not verifiable: {exc}')
+            return {'outcome': 'unverifiable'}
+        if clean:
+            return {'outcome': 'clean'}
+        self.log(f'  {head[:12]} conflicts with the base {base[:12]}')
+        return {'outcome': 'conflict', 'paths': files[:MAX_LISTED_PATHS]}
 
     def _profile(self, key, mode, used=None):
         """The identity and tuple agent ``key`` acts with now in ``mode`` (``write`` or
@@ -1541,6 +1565,11 @@ class Dispatcher:
             return self._escalate_level(pr, receipt)
         latest = current_round(pr.reviews)
         bases = self._base_checks(latest, receipt, paths) if self._open_round(pr, latest) else None
+        if bases and any(c['outcome'] == 'conflict' for c in bases):
+            # Neither continued nor restarted: the sync merges the base and changes the head,
+            # once GitHub reports the conflict too.
+            self.log('  the PR conflicts with the new base; no review until the sync')
+            return
         joins = bases is not None and all(c['outcome'] == 'disjoint' for c in bases)
         restarts = None
         if joins:
@@ -1808,9 +1837,15 @@ def _describe_bases(checks, branch):
         elif check['outcome'] == 'touched':
             lines.append(f'- {span}: i commit intermedi di `{branch}` toccano file della PR: '
                          + ', '.join(f'`{p}`' for p in check['paths']) + '.')
+        elif check['outcome'] == 'conflict':
+            files = ', '.join(f'`{p}`' for p in check.get('paths') or [])
+            lines.append(f'- {span}: i commit intermedi di `{branch}` non toccano file della PR, '
+                         'ma la PR non si unisce senza conflitti alla base corrente'
+                         + (f' ({files})' if files else '') + ': serve una sincronizzazione.')
         else:
             lines.append(f'- {span}: non è stato possibile elencare i file toccati dai commit '
-                         f'intermedi (per esempio `{branch}` è stato riscritto): la non '
+                         f'intermedi (per esempio `{branch}` è stato riscritto), o verificare '
+                         'che la PR si unisca senza conflitti alla base corrente: la non '
                          'interferenza non è dimostrata.')
     return '\n'.join(lines)
 

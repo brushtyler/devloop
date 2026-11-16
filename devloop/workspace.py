@@ -253,6 +253,26 @@ class Workspace:
             touched.update(name for name in out.split('\0') if name)
         return sorted(touched)
 
+    def merge_check(self, base, head):
+        """``(clean, files)``: whether ``head`` merges into ``base`` without conflicts, computed
+        by git on these two exact commits without touching any worktree (#160), and the files
+        git reports in conflict. Disjoint paths do not imply a clean merge: a directory the base
+        renamed, where the PR adds a file, is a conflict on the file's location. Raises
+        WorkspaceError when git cannot tell (a missing commit, a git without ``merge-tree
+        --write-tree``)."""
+        for commit in (base, head):
+            if self._git_run('rev-parse', '-q', '--verify', f'{commit}^{{commit}}',
+                             check=False).returncode:
+                raise WorkspaceError(f'{commit[:12]} is not a known commit')
+        done = self._git_run('merge-tree', '--write-tree', '--no-messages', '--name-only', '-z',
+                             base, head, check=False)
+        # The tree written first, then the files in conflict. Exit status 1 means conflicts
+        # only with a tree written: git also exits 1 on some errors.
+        tree, *rest = done.stdout.split('\0')
+        if done.returncode not in (0, 1) or not re.fullmatch(r'[0-9a-f]{40,64}', tree):
+            raise WorkspaceError(f'git merge-tree: {done.stderr.strip()[:500]}')
+        return done.returncode == 0, sorted({name for name in rest if name})
+
     def start_merge(self, path, author=None):
         """Merge ``origin/<base>`` into the branch in ``path`` without committing.
 

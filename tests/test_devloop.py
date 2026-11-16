@@ -857,6 +857,16 @@ class FakeWS:
         return (sorted(c['path'] for c in self.diff) if self.base_touched is None
                 else list(self.base_touched))
 
+    # The files in conflict when the head merges into a base: none by default, or an
+    # exception to raise when git cannot tell.
+    base_conflicts = ()
+
+    def merge_check(self, base, head):
+        self.merge_spans = getattr(self, 'merge_spans', []) + [(base, head)]
+        if isinstance(self.base_conflicts, Exception):
+            raise self.base_conflicts
+        return not self.base_conflicts, list(self.base_conflicts)
+
     def new_branch(self, name, branch):
         return Path('/wt') / name
 

@@ -47,6 +47,29 @@ class BaseAdvanceTests(Quorum):
         self.assertEqual(promoted['bases'], [{'from': BASE, 'to': NEW, 'outcome': 'disjoint'}])
         self.assertIn('a parte la base', self.gh.comments[-1][1])
         self.assertEqual(self.ws.base_spans, [(BASE, NEW), (BASE, NEW)])
+        # Both the continuation and the promotion merged the exact head into the new base.
+        self.assertEqual(self.ws.merge_spans, [(NEW, self.ws._head)] * 2)
+
+    def test_a_base_that_conflicts_with_the_pr_neither_continues_nor_restarts(self):
+        # main renamed a directory where the PR adds a file: no path in common, but the merge
+        # conflicts on the file's location. The snapshot still reports the PR mergeable.
+        self.first_review_then_base_moves(['old/existing.py', 'new/existing.py'], raw_review())
+        self.ws.base_conflicts = ['new/added.py']
+        self.d.tick()
+        # No review: the sync follows once GitHub reports the conflict, and changes the head.
+        self.assertEqual(self.reviewed(), [FIRST])
+        self.assertEqual(len(self.records('review')), 1)
+        self.assertEqual(self.gh.labels[100], {'agent:review'})
+        self.assertEqual(self.ws.merge_spans, [(NEW, self.ws._head)])
+
+    def test_a_merge_that_cannot_be_verified_restarts_the_round(self):
+        self.first_review_then_base_moves(['README.md'], raw_review())
+        self.ws.base_conflicts = WorkspaceError('git merge-tree: unknown option')
+        self.d.tick()
+        self.assertEqual(self.reviewed(), [FIRST, FIRST])
+        restarted = self.records('review')[-1]
+        self.assertEqual(restarted['restarts'], {'round': 1, 'bases': [
+            {'from': BASE, 'to': NEW, 'outcome': 'unverifiable'}]})
 
     def test_a_base_that_touches_a_pr_file_restarts_the_round(self):
         self.first_review_then_base_moves([PR_FILE], raw_review(), raw_review())
@@ -132,6 +155,25 @@ class BaseAdvanceTests(Quorum):
                     self.d.tick()
                     reviews = self.d.snapshot().prs[0].reviews
                     self.assertEqual((reviews[-1]['round'], counted_rounds(reviews)), (2, 2))
+
+    def test_a_base_that_conflicts_during_the_last_review_blocks_the_promotion(self):
+        # Disjoint paths, but the head conflicts with the base the promotion recomputes.
+        self.make(raw_review(), raw_review())
+        self.d.tick()
+        bases = iter([BASE, NEW, NEW])
+        diff = self.ws.review_diff
+        self.ws.review_diff = lambda branch: (next(bases), *diff(branch)[1:])
+        self.ws.base_touched = ['old/existing.py', 'new/existing.py']
+        self.ws.base_conflicts = ['new/added.py']
+        self.d.tick()
+        self.assertEqual(self.reviewed(), [FIRST, SECOND])
+        self.assertEqual(self.gh.labels[100], {'agent:review'})
+        (record,) = self.records('policy')
+        self.assertEqual(record['event'], 'stale')
+        self.assertEqual(record['bases'], [{'from': BASE, 'to': NEW, 'outcome': 'conflict',
+                                            'paths': ['new/added.py']}])
+        self.assertIn('non si unisce senza conflitti', self.gh.comments[-1][1])
+        self.assertEqual(self.ws.merge_spans, [(NEW, self.ws._head)])
 
     def test_a_replayed_approval_on_an_earlier_base_is_revalidated(self):
         self.make(raw_review(), raw_review())
@@ -246,6 +288,35 @@ class BasePathsTests(unittest.TestCase):
                 ws.base_paths(new, old)
             with self.assertRaises(WorkspaceError):
                 ws.base_paths('f' * 40, new)
+
+    def test_a_directory_renamed_by_the_base_conflicts_with_a_file_the_pr_adds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / 'repo'
+            self.git('init', '-q', '-b', 'main', str(repo), cwd=tmp)
+            old = self.commit(repo, 'root', write=[('old/existing.py', 'e\n'),
+                                                   ('other.py', 'o\n')])
+            self.git('checkout', '-q', '-b', 'pr', cwd=repo)
+            head = self.commit(repo, 'pr', write=[('old/added.py', 'a\n')])
+            self.git('checkout', '-q', 'main', cwd=repo)
+            self.git('mv', 'old', 'new', cwd=repo)
+            new = self.commit(repo, 'rename')
+            ws = Workspace(repo, '.state', 'main')
+            # No path of the PR among those main changed...
+            touched = ws.base_paths(old, new)
+            self.assertEqual(touched, ['new/existing.py', 'old/existing.py'])
+            self.assertEqual(touched_by_base(['old/added.py'], touched), [])
+            # ...yet the merge conflicts on the location of the added file.
+            clean, files = ws.merge_check(new, head)
+            self.assertFalse(clean)
+            self.assertTrue(files)
+            # On the old base, or with a change elsewhere, the merge is clean.
+            self.assertEqual(ws.merge_check(old, head), (True, []))
+            self.git('mv', 'new', 'old', cwd=repo)
+            self.commit(repo, 'back')
+            elsewhere = self.commit(repo, 'other', write=[('other.py', 'changed\n')])
+            self.assertEqual(ws.merge_check(elsewhere, head), (True, []))
+            with self.assertRaises(WorkspaceError):
+                ws.merge_check('f' * 40, head)
 
 
 if __name__ == '__main__':

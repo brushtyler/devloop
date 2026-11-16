@@ -278,13 +278,21 @@ with the PR (#160):
   or renamed, both sides), a directory above one, or a path under one (a file replaced by a
   directory, or the reverse);
 - when the commits cannot be listed (the old base is not an ancestor of the new one, because
-  `main` was rewritten, or a commit is missing), non-interference is not proven.
+  `main` was rewritten, or a commit is missing), non-interference is not proven;
+- when `main` left the PR's files alone, the PR must also still merge into the new base without
+  conflicts. Disjoint paths do not imply it: a directory renamed by `main`, where the PR adds a
+  file, is a conflict on the file's location. The dispatcher merges the receipt's head into the
+  new base with `git merge-tree --write-tree`, on these two exact commits, because the
+  mergeability GitHub reported in the snapshot may predate the new base. A conflict turns the
+  check's `outcome` into `conflict` (with `paths`, the files in conflict); a merge git cannot
+  compute (a missing commit, a git older than 2.38) into `unverifiable`.
 
 If `main` did not interfere, the round **continues**: only the missing reviewer reviews, with the
 receipt of the new base, and the verdicts already given stay valid for the round. Its review
 record also carries `bases`, the check from each earlier base of the round to the new one
-(`from`, `to`, `outcome`). A PR in conflict with the new base is synced first, as usual, and the
-sync changes the head.
+(`from`, `to`, `outcome`). A PR in conflict with the new base is neither reviewed nor promoted:
+the round waits for the sync, which runs as usual once GitHub reports the conflict and changes
+the head.
 
 Otherwise the round **restarts**, as before #160: every reviewer reviews again on the new base.
 The first review of the new round records `restarts`, the round it replaces and the failed
@@ -299,8 +307,9 @@ Promotion recomputes the receipt on the current base, as for any approval. An ap
 an earlier base, also when `main` advanced during the last review of a round already complete,
 is admitted only if the same check passes from its base to the current one. The original review
 records stay as they are, and the promotion's `policy` record carries `bases` with the checks
-it relied on. If `main` interfered, or non-interference is not proven, the approval is not
-promoted (a `stale` record lists the checks) and a new round follows, which counts.
+it relied on. If `main` interfered, the PR conflicts with the current base, or non-interference
+is not proven, the approval is not promoted (a `stale` record lists the checks): a conflict is
+synced first, as usual, and a new round follows, which counts.
 
 ### Level 0: no review
 
