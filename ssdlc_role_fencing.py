@@ -20,10 +20,17 @@ identity. Any refusal is a ``GateError`` with a stable code: the caller records 
 the run's state and the run stays on the manual path. A role of an admitted run that
 would run without a role container (local execution, Docker unavailable) is refused the
 same way (``ROLE_OUTSIDE_CONTAINER``) before it starts.
+
+The only paths SSDLC prepares for the identity are those it creates for one invocation:
+the role cache, the verification scratch and the disposable workspaces declared with
+``disposable_workspace`` (``share_disposable``).
 """
+import contextlib
 import os
 from pathlib import Path
+import stat
 import subprocess
+import threading
 
 import ssdlc_container_holder as holder
 import ssdlc_writer_gate as wg
@@ -84,6 +91,89 @@ def probe_access(uid, gid, needs, *, run=subprocess.run):
     if done.returncode != 0:
         raise GateError(ACCESS_DENIED, f'access probe failed as {uid}:{gid} with exit code {done.returncode}')
     return done.stdout.strip() or None
+
+
+_declared = threading.local()
+
+
+@contextlib.contextmanager
+def disposable_workspace(workspace, scratch=None):
+    """Declare ``workspace``, a checkout SSDLC created for the role invocations in the block.
+
+    ``scratch`` is the private temporary directory that holds it, if any. Declaring
+    changes nothing: only a container of an admitted run shares the workspace with the
+    payload identity (``share_disposable``); other runs keep it root-only.
+    """
+    entry = (Path(workspace).resolve(), None if scratch is None else Path(scratch).resolve())
+    previous = getattr(_declared, 'workspaces', ())
+    _declared.workspaces = previous + (entry,)
+    try:
+        yield
+    finally:
+        _declared.workspaces = previous
+
+
+def _within(path, root):
+    return path == root or root in path.parents
+
+
+def _grant(path, gid, directory_bits, file_bits):
+    """Group ``gid`` and the given group bits on ``path``; never a link or a shared file."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        if stat.S_ISDIR(info.st_mode):
+            bits = directory_bits
+        elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+            # Executable files stay executable, the others stay not executable.
+            bits = file_bits | (0o010 if info.st_mode & 0o100 else 0)
+        else:
+            return
+        os.fchown(fd, -1, gid)
+        os.fchmod(fd, stat.S_IMODE(info.st_mode) | bits)
+    finally:
+        os.close(fd)
+
+
+def _tree(workspace):
+    """The workspace and what it contains, without following links and without ``.git``."""
+    for directory, dirs, files in os.walk(workspace, followlinks=False):
+        if Path(directory) == workspace and '.git' in dirs:
+            dirs.remove('.git')
+        yield Path(directory)
+        for name in files:
+            if not os.path.islink(os.path.join(directory, name)):
+                yield Path(directory, name)
+
+
+def share_disposable(gid, used, writable):
+    """Give group ``gid`` the access a container needs to the declared workspaces it uses.
+
+    ``used`` are the host paths the container works in or mounts, ``writable`` those it
+    mounts read-write. A used workspace and its content get group ``gid`` with group
+    read and search, plus write below a writable mount; the private scratch around it
+    gets group search only. The owner stays root, so host Git keeps trusting the
+    checkout; ``.git`` is not shared, and links and files with other hard links are
+    never changed. Returns the first path that could not be shared, or None.
+    """
+    used = [Path(p) for p in used]
+    writable = [Path(p) for p in writable]
+    for workspace, scratch in getattr(_declared, 'workspaces', ()):
+        if not any(_within(p, workspace) for p in used):
+            continue
+        path = workspace
+        try:
+            if scratch is not None:
+                for path in [p for p in workspace.parents if _within(p, scratch)]:
+                    _grant(path, gid, 0o010, 0)
+            for path in _tree(workspace):
+                if any(_within(path, w) for w in writable):
+                    _grant(path, gid, 0o070, 0o060)
+                else:
+                    _grant(path, gid, 0o050, 0o040)
+        except OSError:
+            return str(path)
+    return None
 
 
 class Fencing:

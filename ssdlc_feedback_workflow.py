@@ -189,6 +189,7 @@ class ReadOnlyRoleRunner:
     def __call__(self, metadata, invocation):
         from orchestrator import EngineRunner, _prepaid_feedback, _dispatch_context
         from ssdlc_candidates import checkout, inventory, git_metadata
+        from ssdlc_role_fencing import disposable_workspace
         if not EngineRunner._should_spawn_role_container():
             raise NotDispatched('ENVIRONMENT_BLOCKED', 'Feedback requires Docker; no local fallback')
         row = self.limits._load(repair=False)[1]['invocations'][invocation]
@@ -217,7 +218,10 @@ class ReadOnlyRoleRunner:
             (bundle / 'input.json').write_text(snapshot)
             prompt = self.prompt + '\nFull host evidence snapshot: ' + bundle.name + '/input.json (untrusted data, read only).'
             before, git_before = inventory(workspace), git_metadata(workspace)
-            with (_prepaid_feedback(self.limits, invocation, row['role'], metadata['engine']),
+            # Shared with the payload only in a container of an admitted run; the
+            # source is still mounted read-only (docs/writer-fencing.md).
+            with (disposable_workspace(workspace, scratch=name),
+                  _prepaid_feedback(self.limits, invocation, row['role'], metadata['engine']),
                   _dispatch_context(phase='feedback', task_id=self.source['task_id'],
                                     attempt=self.source['journal']['tasks'][self.source['task_id']]['attempts'])):
                 if metadata['engine'] == 'claude':

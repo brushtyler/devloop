@@ -1649,9 +1649,16 @@ class EngineRunner:
                    'fi; done < "/sys/fs/cgroup/$f"; fi; done; exit "$rc"')
         fencing = None
         if payload_user is not None:
+            needs = EngineRunner._payload_needs(docker_cmd, cwd)
+            # Disposable workspaces created for this invocation (03-dev, isolated
+            # verification, feedback) are shared with the payload group, nothing else.
+            denied = role_fencing.share_disposable(
+                payload_user[1], needs, [path for path, tests in needs.items() if '-w' in tests])
             try:
+                if denied:
+                    raise GateError(role_fencing.ACCESS_DENIED, denied)
                 fencing = role_fencing.prepare(fencing_run.ticket_lock_path.parent, fencing_run.ssdlc_root,
-                                               *payload_user, EngineRunner._payload_needs(docker_cmd, cwd))
+                                               *payload_user, needs)
             except GateError as exc:
                 EngineRunner._refuse_fencing(fencing_run, exc)
         if fencing is None:

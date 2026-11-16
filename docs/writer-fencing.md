@@ -311,7 +311,20 @@ runtime directory (`.ssdlc/.runtime`, with `CODEX_HOME`, `CLAUDE_CONFIG_DIR` and
 caches) and the credentials mounted into the container, for that identity. SSDLC
 **never changes** permissions, ownership or credentials of existing paths. It only gives
 the identity the directories it creates for one invocation: the role cache
-(`.ssdlc/.runtime/cache/roles/invocation-*`) and the verification scratch.
+(`.ssdlc/.runtime/cache/roles/invocation-*`) and the verification scratch, owned by the
+identity, and the disposable workspaces, shared with its group:
+
+- the 03-dev `developer-workspace` of the attempt, writable;
+- the isolated verification checkout (`03-dev/tasks/.verification/check-*/source`),
+  writable;
+- the feedback snapshot (`ssdlc-feedback-*/source`), readable only and still mounted
+  read-only, except its `.ssdlc/.runtime`.
+
+A workspace keeps root as owner, so host Git still trusts the checkout. Its content
+gets the payload GID with group read and search (and write where the container mounts it
+read-write); its `.git` is not shared, and links and files with other hard links are not
+changed. The private temporary directory around it gets group search only. This happens
+only for a container of an admitted run: other runs keep root-only workspaces.
 
 Before each container, the host checks every host path bind-mounted into it, and the
 working directory: read and search for read-only mounts, read, write and search for

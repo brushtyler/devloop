@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -21,6 +22,24 @@ from replay.repository_fixtures import RepositoryTests
 
 
 PAYLOAD = '1000:1000'
+REAL_RUN = subprocess.run
+REAL_PROBE = rf.probe_access
+
+
+def operator_probe(seen=None):
+    """The real access probe, on the paths a test can prepare as the operator would.
+
+    The toolkit checkout and the host credentials mounted into every role container live
+    outside the temporary directory: their accesses belong to the operator's host.
+    """
+    root = tempfile.gettempdir().rstrip(os.sep) + os.sep
+
+    def probe(uid, gid, needs):
+        mine = {path: tests for path, tests in needs.items() if str(path).startswith(root)}
+        if seen is not None:
+            seen.append(mine)
+        return REAL_PROBE(uid, gid, mine)
+    return probe
 
 
 def ready(generation='.'):
@@ -60,7 +79,7 @@ class FencingTestCase(RepositoryTests):
             # Only root can own the gate or hand a new cache to the payload identity; the
             # ownership check has its own tests in test_container_holder and a failed
             # handover its own test below. Here the host side is under test.
-            for target, name in ((rf.holder, 'check_private'), (o.os, 'chown')):
+            for target, name in ((rf.holder, 'check_private'), (o.os, 'chown'), (o.os, 'fchown')):
                 stub = patch.object(target, name)
                 setattr(self, f'stub_{name}', stub.start())
                 self.addCleanup(stub.stop)
@@ -359,6 +378,161 @@ class RefusalTests(FencingTestCase):
         with patch.object(orch, '_save_state', side_effect=OSError('read-only')), self.assertRaises(OSError):
             self.run_role(orch, runner)
         self.assertEqual(runner.calls, [])
+
+
+@unittest.skipUnless(os.geteuid() == 0 and os.path.exists('/bin/sh'), 'the real access probe needs root')
+class DisposableWorkspaceTests(FencingTestCase):
+    """03-dev and isolated verification of an admitted run, judged by the real probe."""
+
+    def setUp(self):
+        super().setUp()
+        os.environ['SSDLC_CONTAINER_PAYLOAD_USER'] = PAYLOAD
+        self.orch = self.orchestrator()
+        self.wt = self.worktree()
+        # What the operator prepares: a reachable project and a runtime for the identity.
+        os.chmod(self.tmp.name, 0o755)
+        runtime = self.repo / '.ssdlc/.runtime'
+        runtime.mkdir(parents=True, exist_ok=True)
+        for path in [runtime, *runtime.rglob('*')]:
+            os.chown(path, 1000, 1000, follow_symlinks=False)
+
+    def test_developer_and_isolated_verification_run_under_the_holder(self):
+        written, verified, seen = [], [], []
+
+        def develop(task, attempt, prompt, workspace):
+            result = EngineRunner.run_claude(prompt, cwd=workspace, read_only=False,
+                                             writable_worktree=workspace, require_container=True)
+            # What the payload does in its container, with its identity.
+            REAL_RUN(['/bin/sh', '-c', 'printf "value = 1\\n" > app.py && : > scratch.txt && rm scratch.txt'],
+                     cwd=workspace, user=1000, group=1000, extra_groups=[], check=True)
+            written.append(workspace)
+            return {'output': 'TASK_DEV_STATUS: COMPLETE', 'exit_code': result[1], 'engine': 'claude',
+                    'model': 'test', 'quiescent': True}
+
+        def verify(argv, cwd, timeout, workspace):
+            verified.append(workspace)
+            out, err, rc = EngineRunner.run_sandboxed_cmd(argv, cwd, timeout, verification_worktree=workspace)
+            REAL_RUN(['/bin/sh', '-c', ': > generated.txt && rm generated.txt'], cwd=workspace,
+                     user=1000, group=1000, extra_groups=[], check=True)
+            return out, err, rc
+
+        def runner(cmd, **kwargs):
+            if cmd[:1] == ['git']:
+                return REAL_RUN(cmd, **kwargs)
+            return docker(cmd, **kwargs)
+        docker = Runner(stdout=json.dumps({'result': 'DONE'}))
+
+        def phase(orch):
+            return self.scheduler(develop, verify, isolate_candidates=True).run(self.plan['tasks'])
+        with patch('orchestrator.subprocess.run', side_effect=runner), \
+                patch.object(rf, 'probe_access', side_effect=operator_probe(seen)), \
+                contextlib.redirect_stdout(io.StringIO()) as printed:
+            result = o._supervised_phase('03-dev')(phase)(self.orch)
+        self.assertEqual(result['tasks']['T1']['status'], 'COMPLETED')
+        stored = self.stored_state()
+        self.assertNotIn(rf.REFUSAL_KEY, stored, printed.getvalue())
+        self.assertTrue(rf.admitted(stored))
+        self.assertEqual(len(written), 1)
+        self.assertTrue(verified)
+        self.assertEqual(len(docker.calls), 1 + len(verified))
+        for cmd in docker.calls:
+            self.assertIn(rf.HOLDER_PATH, cmd)
+            self.assertNotIn('--init', cmd)
+        # The probe judged the disposable workspaces themselves, as writable.
+        workspaces = [written[0], *verified]
+        for workspace in workspaces:
+            self.assertTrue(any(needs.get(workspace.resolve()) == rf.WRITE for needs in seen), workspace)
+        # Root still owns the checkout, so host Git trusted it for capture and checks.
+        self.assertEqual((self.wt / 'app.py').read_text(), 'value = 1\n')
+        self.assertEqual(os.stat(written[0]).st_uid, 0)
+        self.assertEqual(os.stat(written[0] / '.git').st_gid, 0)
+
+    def test_a_workspace_of_a_manual_run_is_not_shared(self):
+        self.orch.state[rf.REFUSAL_KEY] = rf.refusal_record(wg.GateError(rf.ACCESS_DENIED, 'x'), 'now')
+        self.orch._save_state()
+        workspace = Path(self.tmp.name) / 'disposable'
+        workspace.mkdir(mode=0o700)
+        (workspace / 'a.py').write_text('')
+        def owners():
+            return {p: ((s := os.lstat(p)).st_mode, s.st_uid, s.st_gid) for p in (workspace, workspace / 'a.py')}
+        before = owners()
+
+        def phase(orch):
+            with rf.disposable_workspace(workspace):
+                return EngineRunner.run_claude('Develop', workspace, read_only=False, writable_worktree=workspace)
+        runner = Runner()
+        with patch('orchestrator.subprocess.run', side_effect=runner), \
+                contextlib.redirect_stdout(io.StringIO()):
+            o._supervised_phase('03-dev')(phase)(self.orch)
+        self.assertIn('--init', runner.calls[0])
+        self.assertEqual(owners(), before)
+
+
+class ShareDisposableTests(unittest.TestCase):
+    """What sharing a disposable workspace changes, with the caller's own group."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.scratch = Path(temp.name) / 'scratch'
+        self.scratch.mkdir(mode=0o700)
+        os.chmod(self.scratch, 0o700)
+        self.workspace = self.scratch / 'source'
+        for directory in ('', 'pkg', '.git', 'out'):
+            (self.workspace / directory).mkdir(exist_ok=True)
+            os.chmod(self.workspace / directory, 0o700)
+        for name, mode in (('app.py', 0o600), ('run.sh', 0o700), ('.git/config', 0o600), ('pkg/m.py', 0o600)):
+            (self.workspace / name).write_text('x')
+            os.chmod(self.workspace / name, mode)
+        os.symlink('/etc/hostname', self.workspace / 'link')
+        os.link(self.workspace / 'app.py', Path(temp.name) / 'elsewhere')
+        (self.workspace / 'single.py').write_text('y')
+        os.chmod(self.workspace / 'single.py', 0o600)
+        self.gid = os.getgid()
+
+    def mode(self, name):
+        return stat.S_IMODE(os.lstat(self.workspace / name).st_mode)
+
+    def test_a_used_workspace_is_shared_with_the_payload_group_only(self):
+        uid = os.lstat(self.workspace).st_uid
+        link = os.lstat(self.workspace / 'link')
+        with rf.disposable_workspace(self.workspace, scratch=self.scratch):
+            denied = rf.share_disposable(self.gid, [self.workspace], [self.workspace / 'out'])
+        self.assertIsNone(denied)
+        self.assertEqual(stat.S_IMODE(os.stat(self.scratch).st_mode), 0o710)
+        self.assertEqual(self.mode(''), 0o750)
+        self.assertEqual(self.mode('pkg'), 0o750)
+        self.assertEqual(self.mode('out'), 0o770)
+        self.assertEqual(self.mode('single.py'), 0o640)
+        self.assertEqual(self.mode('run.sh'), 0o750)
+        self.assertEqual(self.mode('pkg/m.py'), 0o640)
+        # Git metadata, links and files with other hard links stay as they are.
+        self.assertEqual(self.mode('.git'), 0o700)
+        self.assertEqual(self.mode('.git/config'), 0o600)
+        self.assertEqual(self.mode('app.py'), 0o600)
+        self.assertEqual(os.lstat(self.workspace / 'link'), link)
+        self.assertEqual(os.lstat(self.workspace).st_uid, uid)
+        self.assertEqual(os.lstat(self.workspace).st_gid, self.gid)
+
+    def test_writable_mounts_get_group_write(self):
+        with rf.disposable_workspace(self.workspace):
+            rf.share_disposable(self.gid, [self.workspace], [self.workspace])
+        self.assertEqual(self.mode(''), 0o770)
+        self.assertEqual(self.mode('single.py'), 0o660)
+        self.assertEqual(self.mode('run.sh'), 0o770)
+        self.assertEqual(stat.S_IMODE(os.stat(self.scratch).st_mode), 0o700)
+
+    def test_nothing_is_shared_unless_declared_and_used(self):
+        rf.share_disposable(self.gid, [self.workspace], [self.workspace])
+        with rf.disposable_workspace(self.workspace, scratch=self.scratch):
+            rf.share_disposable(self.gid, [self.scratch.parent], [self.scratch.parent])
+        self.assertEqual(self.mode(''), 0o700)
+        self.assertEqual(stat.S_IMODE(os.stat(self.scratch).st_mode), 0o700)
+
+    def test_a_path_that_cannot_be_shared_is_reported(self):
+        with rf.disposable_workspace(self.workspace), \
+                patch.object(rf.os, 'fchown', side_effect=PermissionError('not root')):
+            self.assertEqual(rf.share_disposable(self.gid, [self.workspace], []), str(self.workspace))
 
 
 class ProbeTests(unittest.TestCase):
