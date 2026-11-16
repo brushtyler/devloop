@@ -666,10 +666,19 @@ each agy turn its minimal permissions, and treats a stop without output as a fai
 - **Files.** Reads and edits stay inside the turn's working directory, which agy enforces
   without rules; `read_file(...)` rules are not used, since they did not restrict reads in the
   tests on agy 1.5.9.
+- **Told in the prompt.** The prompt of every agy turn, write and review, ends with a
+  `## Shell commands` block (#155) generated from the same list as `--settings`: the exact
+  prefixes allowed in that mode, the instruction to read and search files only with agy's own
+  file tools, with paths relative to the working directory and without `grep`, `ls`, `cat`,
+  `find`, `sed` or other shell commands, and the warning that a command outside the list ends
+  the turn with no result. The prompt file in the turn's log includes it. The other agents'
+  prompts do not get it.
 - **No output is an error.** An agy turn that exits with no output, or with
   `jetski: no output produced`, fails with `<agent> stopped without output: <message>`, which
-  goes to the turn's log and to the `agent:needs-human` comment. It is never an empty result;
-  with exit 0 it never counts as an unavailable model either. The message counts as the CLI's
+  goes to the turn's log and to the `agent:needs-human` comment. When agy's JSON lists
+  `denied_actions`, the message ends with `; denied_actions: [...]` (#155), so the escalation
+  says which action was denied. It is never an empty result; with exit 0 it never counts as an
+  unavailable model either, so it does not start the fallback. The message counts as the CLI's
   diagnostic on stderr, or on stdout only as a line of its own: a structured answer that quotes
   it is still a valid answer.
 
