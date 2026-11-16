@@ -291,6 +291,8 @@ def render_fix(fix, head, round_no):
         payload['acceptance_map'] = fix['acceptance_map']
     if 'profile' in fix:
         payload['profile'] = fix['profile']  # who wrote the fix (#111)
+    if 'local_tests' in fix:
+        payload['local_tests'] = fix['local_tests']  # informative only (#169)
     return publishable(head + '\n' + '\n'.join(parts), 'fix', payload)
 
 

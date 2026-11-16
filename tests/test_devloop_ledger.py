@@ -12,6 +12,7 @@ from devloop.agents import AgentError
 from devloop.dispatcher import Dispatcher, Snapshot
 from devloop.github import GitHub, GitHubError, normalize_checks
 from devloop.ledger import Ledger
+from devloop.localtests import module_command
 from devloop.workspace import Workspace
 from test_devloop import (CFG, IMPL, META, REV, SHA1, SHA2, FakeGH, FakeRunner, FakeWS,
                           finding, implemented, pr, raw_review)
@@ -259,7 +260,8 @@ class LedgerDispatcherTests(unittest.TestCase):
         checks = self.gh.records(7, 'verification')
         self.assertEqual([(v['outcome'], v['commit']) for v in checks],
                          [('fail', None), ('pass', SHA2)])
-        self.assertEqual(checks[1]['command'], CFG.test_cmd)
+        # The command run (#169): with local_tests = "changed", the module of the changed x.py.
+        self.assertEqual(checks[1]['command'], module_command(['test_x.py']))
 
     def test_the_commit_is_bound_only_to_the_tree_tested(self):
         for name, ws in (('the test changed the tree', TreeWS(trees=('t1', 't2'))),
