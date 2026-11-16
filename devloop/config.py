@@ -23,6 +23,17 @@ AGY_LOW_SUFFIXES = ('minimal', 'low', 'medium')
 # What tells a failed turn that its model is unavailable (quota or budget exhausted, model not
 # available, rate limit), searched case-insensitively in the CLI's stdout and stderr.
 DEFAULT_UNAVAILABLE_PATTERNS = ('RESOURCE_EXHAUSTED', 'quota', '429', 'model .* not available')
+# Commands an agy turn may run besides ``test_cmd`` (issue #122): agy matches a
+# ``command(<prefix>)`` rule by token prefix. The write prompts ask for no `git add` nor
+# `git commit` (the dispatcher commits), so write turns get the same list as reviews.
+AGY_DEFAULT_COMMANDS = ('python3 -m unittest', 'git status', 'git diff', 'git log', 'git show')
+# A command made of one of these alone allows any program or git subcommand: never allowed.
+BARE_COMMANDS = re.compile(r'(python[0-9.]*|bash|sh|dash|zsh|ksh|fish|env|node|perl|ruby|'
+                           r'sudo|xargs|exec|eval|command|git)')
+# Shell syntax, quotes and pattern characters have no place in a token-prefix rule.
+UNSAFE_COMMAND_CHARS = frozenset('*?()[]{};&|<>$`\\\'"\n\r\t#~')
+# Arguments that would replace or bypass the per-turn permissions devloop passes to agy.
+AGY_FORBIDDEN_ARGS = ('--dangerously-skip-permissions', '--settings')
 
 
 class ConfigError(ValueError):
@@ -57,6 +68,10 @@ class AgentConfig:
     unavailable_exit_codes: tuple = ()
     # Set on the configurations ``chain`` derives for fallback models: the configured model.
     fallback_for: str = ''
+    # agy only (issue #122): the command prefixes its write and review turns may run, passed
+    # each turn as ``permissions.allow`` rules with ``--settings``.
+    write_commands: tuple = ()
+    review_commands: tuple = ()
 
     def chain(self):
         """The agent with its configured model, then with each fallback model in order: same
@@ -195,6 +210,49 @@ def _unavailable(table, where):
     return patterns, tuple(codes)
 
 
+def _command(value, where):
+    """``value`` as a token-prefix command (its tokens joined by one space), or ConfigError when
+    it is empty, contains shell, quoting or pattern syntax, or is a bare interpreter, shell or
+    git, which would allow any command."""
+    if any(c in UNSAFE_COMMAND_CHARS for c in value):
+        raise ConfigError(f'{where}: {value!r} is not a plain command prefix')
+    tokens = value.split()
+    if not tokens:
+        raise ConfigError(f'{where}: empty command')
+    if len(tokens) == 1 and BARE_COMMANDS.fullmatch(tokens[0]):
+        raise ConfigError(f'{where}: {value!r} alone would allow any command')
+    return ' '.join(tokens)
+
+
+def _agy_commands(table, where, kind, test_cmd):
+    """``(write_commands, review_commands)`` of an agent (issue #122). Only agy has them: by
+    default the tokens of ``test_cmd`` followed by ``AGY_DEFAULT_COMMANDS``, for both modes.
+    ``write_args`` and ``review_args`` may not bypass or replace them."""
+    keys = ('write_commands', 'review_commands')
+    if kind != 'agy':
+        for key in keys:
+            if key in table:
+                raise ConfigError(f'{where}.{key}: only agy agents take command permissions')
+        return (), ()
+    for key in ('write_args', 'review_args'):
+        for arg in _str_list(table, key, where):
+            if arg.split('=', 1)[0] in AGY_FORBIDDEN_ARGS:
+                raise ConfigError(f'{where}.{key}: {arg.split("=", 1)[0]} is not allowed: '
+                                  'devloop passes the permissions of each turn itself')
+    lists = []
+    for key in keys:
+        configured = key in table
+        raw = _str_list(table, key, where) if configured else (test_cmd, *AGY_DEFAULT_COMMANDS)
+        commands = []
+        for value in raw:
+            command = _command(value, f'{where}.{key}' if configured else
+                               f'{where}.{key} (default from test_cmd)')
+            if command not in commands:
+                commands.append(command)
+        lists.append(tuple(commands))
+    return tuple(lists)
+
+
 def _listed_files(name, root):
     """The keys of the ``files`` object of the JSON file ``name`` (relative to ``root``)."""
     where = f'review_policy.sensitive_path_lists: {name}'
@@ -293,6 +351,7 @@ def _reviewer_pool(roles, agents, implementer):
 
 def parse_config(data, root=INSTALL_ROOT):
     """``root`` is where relative ``review_policy.sensitive_path_lists`` are read."""
+    test_cmd = _require(data, 'test_cmd', str, 'config')
     agents = {}
     for key, table in (data.get('agents') or {}).items():
         where = f'agents.{key}'
@@ -302,6 +361,7 @@ def parse_config(data, root=INSTALL_ROOT):
         model = _require(table, 'model', str, where)
         effort = _require(table, 'effort', str, where)
         patterns, codes = _unavailable(table, where)
+        write_commands, review_commands = _agy_commands(table, where, kind, test_cmd)
         agents[key] = AgentConfig(
             key=key, kind=kind,
             display_name=_require(table, 'display_name', str, where),
@@ -313,7 +373,8 @@ def parse_config(data, root=INSTALL_ROOT):
             review_args=_str_list(table, 'review_args', where),
             commit_trailer=table.get('commit_trailer', ''),
             fallback_models=_fallback_models(table, where, kind, model, effort),
-            unavailable_patterns=patterns, unavailable_exit_codes=codes)
+            unavailable_patterns=patterns, unavailable_exit_codes=codes,
+            write_commands=write_commands, review_commands=review_commands)
     roles = data.get('roles') or {}
     implementer = _require(roles, 'implementer', str, 'roles')
     if implementer not in agents:
@@ -366,7 +427,7 @@ def parse_config(data, root=INSTALL_ROOT):
         base_branch=data.get('base_branch', 'main'),
         branch_prefix=data.get('branch_prefix', 'agent/issue-'),
         state_dir=data.get('state_dir', '.ssdlc/devloop'),
-        test_cmd=_require(data, 'test_cmd', str, 'config'),
+        test_cmd=test_cmd,
         language=data.get('language', 'English'),
         implementer=implementer, reviewer=pool[0], reviewers=pool, agents=agents,
         preflight=preflight,

@@ -630,13 +630,46 @@ an ignored one; otherwise the verdict is discarded and the PR goes to `agent:nee
 |---|---|
 | codex | `workspace-write` sandbox: writes only in the copy and in the temporary directory, no extra `writable_roots`, network disabled |
 | claude | no edit tools; Bash limited to `git diff`, `git log`, `git show` and `python3 -m unittest tests.*` (`review_args`) |
-| agy | `plan` mode |
+| agy | `plan` mode; commands limited to `review_commands` (see [agy permissions](#agy-permissions)) |
 
 Only codex has an OS-level sandbox. claude and agy are limited by their tools and modes, not by
 the system: the tests they run can still reach the network and write outside the copy, as any
 code running as the same user. For them, the copy and the final check catch writes to the
 reviewed tree, not access to the rest of the system. With the network disabled, codex cannot run tests
 that open TCP sockets, even on loopback.
+
+### agy permissions
+
+In headless mode (`agy -p`) agy cannot ask for a permission: a denied tool ends the session with
+exit 0, no output and `jetski: no output produced …` on stderr (#122). devloop therefore gives
+each agy turn its minimal permissions, and treats a stop without output as a failure.
+
+- **Per turn, not in the profile.** Every turn gets `--settings '{"permissions": {"allow": [...]}}'`,
+  which agy applies to that session only. The operator's `~/.gemini/antigravity-cli/settings.json`,
+  the authentication and `HOME` are not touched.
+- **Commands.** The rules are `command(<prefix>)`, which agy matches by token prefix:
+  `command(python3 -m unittest)` allows `python3 -m unittest …` and not `python3 -c …`. The
+  prefixes come from `review_commands` (review and readiness check turns) and `write_commands`
+  (implement, fix and sync turns) of the agy agent. Both default to the tokens of `test_cmd`,
+  `python3 -m unittest`, `git status`, `git diff`, `git log` and `git show`; write turns get no
+  `git add` nor `git commit`, because the dispatcher commits.
+- **Never.** devloop refuses at startup a prefix that is a bare interpreter, shell or `git`
+  (`python3`, `bash`, `sh`, …), one with wildcards, quotes or shell syntax (`*`, `;`, `&&`, `|`,
+  `$`, …), and `--dangerously-skip-permissions` or `--settings` in `write_args` or `review_args`.
+  A `test_cmd` that cannot be a prefix, such as `make test && lint`, needs explicit lists.
+  The two lists are accepted only for agy agents.
+- **Files.** Reads and edits stay inside the turn's working directory, which agy enforces
+  without rules; `read_file(...)` rules are not used, since they did not restrict reads in the
+  tests on agy 1.5.9.
+- **No output is an error.** An agy turn that exits with no output, or with
+  `jetski: no output produced`, fails with `<agent> stopped without output: <message>`, which
+  goes to the turn's log and to the `agent:needs-human` comment. It is never an empty result;
+  with exit 0 it never counts as an unavailable model either.
+
+```toml
+[agents.agy]
+review_commands = ["python3 scripts/run-tests.py", "python3 -m unittest", "git diff", "git log"]
+```
 
 ### Fallback models
 
