@@ -171,10 +171,14 @@ writing. **Process scans are never quiescence evidence**: they appear only in
 diagnostics (`holders()`). A transition therefore refuses automatic fencing with
 `HOST_TREE_UNVERIFIABLE` whenever the current generation has a host marker, or a marker
 whose generation cannot be read, even after the command and every process it started
-are gone. The manual path stays available. Covering host trees with a kernel mechanism
+are gone. A generation is readable only if it is the canonical encoding produced by
+`generation_key()` and the marker's name is the one derived from it: a missing, empty,
+non-canonical or mismatched generation refuses like the current one. If `run_host` finds
+its marker name already taken by anything but a valid marker of its own generation, it
+refuses (`registry_invalid`) before the command executes. The manual path stays available. Covering host trees with a kernel mechanism
 (cgroup v2 `cgroup.events` `populated 0`, or a subreaper) is issue #132.
 
-A marker of an earlier generation no longer refuses: the generation could only have
+A well-formed marker of an earlier generation no longer refuses: the generation could only have
 moved through a path that accounted for every writer, the manual one with its operator
 attestation that every writer is stopped. The marker stays as a diagnostic.
 

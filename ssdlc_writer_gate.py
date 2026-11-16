@@ -369,18 +369,54 @@ def host_marker_name(key):
     return f'h-{hashlib.sha256(key.encode()).hexdigest()[:32]}.json'
 
 
+def _historical_key(record, name):
+    """The generation of a well-formed host marker, or None when it cannot be trusted.
+
+    A marker records a past generation only when its generation is a canonical
+    encoding produced by ``generation_key`` and the marker name is the one derived
+    from it. Anything else is unreadable and refuses like a current-generation one.
+    """
+    key = record.get('generation')
+    if not isinstance(key, str):
+        return None
+    try:
+        if generation_key(json.loads(key)) != key:
+            return None
+    except (ValueError, GateError):
+        return None
+    return key if name == host_marker_name(key) else None
+
+
+def _read_entry(rfd, name):
+    """One registry record, or None when it is not a readable regular JSON file."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=rfd)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return None
+            return json.loads(os.read(fd, RECORD_MAX + 1))
+        finally:
+            os.close(fd)
+    except (OSError, ValueError):
+        return None
+
+
 def _mark_host(gate, key, leader, controller):
     """Durably mark that a host command runs in generation ``key``. Never removed here."""
-    created = _publish(gate, host_marker_name(key), dict(role='host', generation=key, identity=leader,
-                                                        controller=controller, recorded_at=time.time()))
+    name = host_marker_name(key)
+    created = _publish(gate, name, dict(role='host', generation=key, identity=leader,
+                                        controller=controller, recorded_at=time.time()))
     if not created:
+        # An existing marker is accepted only if it is a valid marker of this very
+        # generation: a malformed or inconsistent one is never taken as ours.
         rfd = _registry(gate)
         try:
-            marked = _lstat(rfd, host_marker_name(key))
+            record = _read_entry(rfd, name)
         finally:
             os.close(rfd)
-        if marked is None or not stat.S_ISREG(marked.st_mode):
-            raise GateError('registry_invalid', 'host marker exists but is not a regular file')
+        if (not isinstance(record, dict) or record.get('role') != 'host'
+                or _historical_key(record, name) != key):
+            raise GateError('registry_invalid', f'host marker {name} exists but is not a valid marker of this generation')
 
 
 def _records(gate):
@@ -391,16 +427,7 @@ def _records(gate):
         for name in sorted(os.listdir(rfd)):
             if name.startswith('.') and name.endswith('.tmp'):
                 continue  # an unpublished record: link(2) has not made it visible yet
-            try:
-                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=rfd)
-                try:
-                    if not stat.S_ISREG(os.fstat(fd).st_mode):
-                        raise ValueError(name)
-                    record = json.loads(os.read(fd, RECORD_MAX + 1))
-                finally:
-                    os.close(fd)
-            except (OSError, ValueError):
-                record = None
+            record = _read_entry(rfd, name)
             role = record.get('role') if isinstance(record, dict) else None
             if role == 'writer' and name.startswith('w-'):
                 found.append(dict(record, name=name, live=is_live(record.get('identity'))))
@@ -571,8 +598,9 @@ def _refuse_uncovered(gate, key, coverage):
     records, malformed = _records(gate)
     if malformed:
         raise GateError('registry_corrupt', f'unreadable registry entries {malformed}; an operator must inspect them')
-    marked = [r for r in records if r['role'] == 'host' and (not isinstance(r.get('generation'), str)
-                                                              or r['generation'] == key)]
+    # Only a well-formed marker of another generation is history; a marker whose
+    # generation is missing, not canonical or inconsistent with its name refuses.
+    marked = [r for r in records if r['role'] == 'host' and _historical_key(r, r['name']) in (None, key)]
     if marked:
         # A host tree's end is not provable by the kernel here: no process scan stands in.
         raise GateError(HOST_TREE_UNVERIFIABLE,

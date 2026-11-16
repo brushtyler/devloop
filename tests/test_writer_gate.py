@@ -499,6 +499,48 @@ class HostWriterTests(GateCase):
         marker.write_text(json.dumps(dict(role='host', identity=wg.self_identity()[0])))
         self.assert_refused(UNVERIFIABLE)
 
+    def test_marker_with_an_undecodable_or_inconsistent_generation_refuses(self):
+        registry = self.ticket / wg.REGISTRY_NAME
+        current = wg.host_marker_name(wg.generation_key('gen-1'))
+        identity = wg.self_identity()[0]
+        cases = [(current, ''), (current, 'gen-1'), (current, '"gen-1" '), (current, wg.generation_key('gen-0')),
+                 (wg.host_marker_name(wg.generation_key('gen-0')), ''),
+                 ('h-other.json', wg.generation_key('gen-0'))]
+        with transition(str(self.ticket), self.read):
+            pass
+        for name, generation in cases:
+            with self.subTest(name=name, generation=generation):
+                for entry in registry.iterdir():
+                    entry.unlink()
+                (registry / name).write_text(json.dumps(dict(role='host', generation=generation, identity=identity)))
+                self.assert_refused(UNVERIFIABLE)
+        # A well-formed marker of a past generation is history, not a refusal.
+        for entry in registry.iterdir():
+            entry.unlink()
+        past = wg.generation_key('gen-0')
+        (registry / wg.host_marker_name(past)).write_text(json.dumps(dict(role='host', generation=past,
+                                                                          identity=identity)))
+        with transition(str(self.ticket), self.read) as proof:
+            proof.check()
+
+    def test_preexisting_malformed_marker_stops_the_host_command(self):
+        """The reviewer's case: h-<current digest>.json with generation '' never lets the command run."""
+        ran = self.ticket.parent / 'ran'
+        registry = self.ticket / wg.REGISTRY_NAME
+        with transition(str(self.ticket), self.read):
+            pass
+        marker = registry / wg.host_marker_name(wg.generation_key('gen-1'))
+        for generation in ('', wg.generation_key('gen-0')):
+            with self.subTest(generation=generation):
+                marker.write_text(json.dumps(dict(role='host', generation=generation,
+                                                  identity=wg.self_identity()[0])))
+                with writer(str(self.ticket), 'gen-1', self.read) as lease:
+                    with self.assertRaises(GateError) as raised:
+                        run_host(lease, [sys.executable, '-c', 'import sys; open(sys.argv[1], "w")', str(ran)])
+                    self.assertEqual(raised.exception.code, 'registry_invalid')
+                self.assertFalse(ran.exists(), 'the command ran on a malformed marker')
+                self.assert_refused(UNVERIFIABLE)
+
     def test_grandchild_spawned_between_pid_listing_and_state_reads_still_refuses(self):
         """The race of PR #127: a process scan misses the grandchild, the gate does not."""
         work = self.ticket.parent
