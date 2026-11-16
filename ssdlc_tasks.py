@@ -719,7 +719,8 @@ class TaskScheduler:
                  max_attempts: int = 3, isolate_candidates: bool = False,
                  runtime_identity: dict | None = None, recover_timeouts: bool = False,
                  historical_capture_authority=None, dispatch_budget=None, historical_task_floors=None,
-                 scope_reconciliations=None, feedback_enabled=False, bootstrap: dict | None = None):
+                 scope_reconciliations=None, feedback_enabled=False, bootstrap: dict | None = None,
+                 dispatch_engine: Callable | None = None):
         self.bootstrap = copy.deepcopy(bootstrap)
         self.wt = worktree
         self.directory = directory
@@ -738,6 +739,7 @@ class TaskScheduler:
         self.scope_reconciliations = copy.deepcopy(scope_reconciliations or {})
         self.feedback_enabled = feedback_enabled
         self.dispatch_budget = dispatch_budget or budget
+        self.dispatch_engine = dispatch_engine
         self.runtime_identity = copy.deepcopy(runtime_identity or {})
         from ssdlc_grader import protected_paths
         self.grader_paths = protected_paths(worktree, plan['base_commit'])
@@ -1831,7 +1833,7 @@ class TaskScheduler:
         """A reserved invocation has never crossed TASK_STARTED/provider dispatch."""
         self._assert_reserved_source(record)
         self.guard()
-        self.dispatch_budget()
+        self._dispatch_capacity(task, record['attempts'])
         if not self._changed():
             self._restore_candidate(task, record)
         attempt_dir = self._attempt_directory(task, record)
@@ -1846,6 +1848,15 @@ class TaskScheduler:
         result = self._capture_developer(task, record, self._developer_prompt(task, record, corrective), attempt_dir)
         self._finish_attempt(task, record, result, attempt_dir, strict_scope=corrective is not None)
 
+    def _dispatch_capacity(self, task, attempt):
+        """Pre-flight check of the imminent developer call with its selected engine.
+
+        It writes nothing; the atomic reservation at the dispatch boundary stays.
+        """
+        if self.dispatch_engine is None:
+            return self.dispatch_budget()
+        return self.dispatch_budget(self.dispatch_engine(task, attempt))
+
     def _capture_developer(self, task, record, prompt, attempt_dir):
         self._assert_prompt_bound(prompt)
         from ssdlc_candidates import CandidateStore, CandidateError, checkout, git_identity, inventory, overlay
@@ -1859,7 +1870,7 @@ class TaskScheduler:
             record['status'] = 'RUNNING'
             self._save('TASK_STARTED')
             if getattr(self, 'corrective_boundary', None):
-                self.dispatch_budget()
+                self._dispatch_capacity(task, record['attempts'])
             try:
                 self._assert_prompt_bound(prompt)
                 result = self.developer(task, record['attempts'], prompt, workspace)
@@ -2371,7 +2382,8 @@ class TaskScheduler:
         while record['attempts'] < self.max_attempts:
             self._assert_tree()
             self.guard()
-            self.dispatch_budget()
+            # Before the attempt is consumed and before TASK_STARTED.
+            self._dispatch_capacity(task, record['attempts'] + 1)
             repair = self._repair_context(record)
             if record.get('failed_attempts', [])[record.get('failed_floor', 0):]:
                 self._restore_candidate(task, record)
@@ -2399,7 +2411,7 @@ class TaskScheduler:
             else:
                 self._assert_prompt_bound(prompt)
                 if getattr(self, 'corrective_boundary', None):
-                    self.dispatch_budget()
+                    self._dispatch_capacity(task, attempt)
                 result = self.developer(task, attempt, prompt)
             fault = getattr(self, 'corrective_fault', None)
             if fault:

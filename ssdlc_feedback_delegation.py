@@ -358,6 +358,11 @@ def ensure_reconciled(ticket, projection, proposal):
         from ssdlc_verification_repair import ensure_reconciled as verification_reconciled
         verification_reconciled(ticket, projection, proposal)
         return
+    from ssdlc_usage_admission import CONTRACT as USAGE_CONTRACT
+    if proposal.get('authorization_contract') == USAGE_CONTRACT:
+        from ssdlc_usage_admission import ensure_reconciled as usage_reconciled
+        usage_reconciled(ticket, projection, proposal)
+        return
     from ssdlc_owner_revalidation import ensure_reconciled as owners_reconciled
     owners_reconciled(ticket, projection, proposal)
     if proposal.get('authorization_contract') != CONTRACT:

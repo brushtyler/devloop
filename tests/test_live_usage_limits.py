@@ -384,6 +384,282 @@ class LiveUsageAdmissionTests(unittest.TestCase):
         with self.assertRaises(TaskError):
             self.stage(copy.deepcopy(self.source['envelope']['policy']))
 
+    def test_admission_refuses_a_reserve_beyond_the_remaining_budget(self):
+        """Issue #128: 3 dollars of claude on 9.27 accounted under a combined cap of 10."""
+        from ssdlc_transitions import runtime_root
+        import ssdlc_usage_admission as admission
+        selected = runtime_root(self.case.ticket)
+        envelope, counters = LimitsStore(self.source['root'])._load(repair=False)
+        accounted = LimitsStore.accounted_total(counters, envelope['policy'])
+        self.assertGreater(accounted + 3, counters['combined_reported_usd_cap'])
+        self.assertLessEqual(accounted + 0.5, counters['combined_reported_usd_cap'])
+        excessive = copy.deepcopy(self.source['envelope']['policy'])
+        excessive['live_unknown_usage'].update(reserve_model(3, 'claude'))
+        with self.assertRaisesRegex(RecoveryStop, 'reserve would exceed') as caught:
+            self.stage(excessive)
+        self.assertEqual(caught.exception.category, 'LIMIT_REACHED')
+        self.assertEqual(runtime_root(self.case.ticket), selected)
+        # A preparation that skipped the check is still refused at activation.
+        with patch.object(LimitsStore, 'check_capacity', lambda *args, **kwargs: None):
+            staged = self.stage(excessive)
+        active = (self.case.ticket / 'execution/active.json').read_bytes()
+        with self.assertRaisesRegex(RecoveryStop, 'reserve would exceed'):
+            admission.activate(self.case.ticket, staged['preparation'], self.auth(staged))
+        # The selector never moved; the refused preparation stays pending and fenced.
+        self.assertEqual((self.case.ticket / 'execution/active.json').read_bytes(), active)
+        self.assertEqual(LimitsStore(selected)._load(repair=False)[1], counters)
+
+
+class ImminentCallCapacityTests(unittest.TestCase):
+    """Issue #128: the imminent call is validated before any durable state is written."""
+
+    def feedback_case(self, live):
+        import test_feedback_roles as fixtures
+        def profile(**overrides):
+            value = policy(**overrides)
+            value['live_unknown_usage'] = live
+            return value
+        case = fixtures.FundedFeedbackRoleTests()
+        with patch.object(fixtures, 'policy', profile):
+            case.initialize()
+        self.addCleanup(case.doCleanups)
+        # Eight dollars already spent under the ten-dollar caps.
+        spent = case.limits.reserve('03-dev', '03-dev', 'claude')
+        case.limits.finish(spent, 'returned', {'metered_usd': None, 'cli_estimate_usd': 8})
+        return case
+
+    def test_feedback_consultation_is_refused_before_its_role_intent(self):
+        agy = {'agy': {'model': 'unmetered_quota', 'reason': REASON}}
+        for name, live, message in (('reserve', dict(agy, **reserve_model(3, 'codex')), 'reserve would exceed'),
+                                    ('undeclared', agy, 'refused before launch')):
+            with self.subTest(name):
+                case = self.feedback_case(live)
+                before = case.limits._load(repair=False)[1]['invocations']
+                with self.assertRaisesRegex(RecoveryStop, message) as caught:
+                    case.run_role()
+                self.assertEqual(caught.exception.category, 'LIMIT_REACHED')
+                self.assertEqual(case.calls, [])
+                self.assertEqual(case.fixture.store.inspect()['role_calls'], [])
+                self.assertEqual(case.limits._load(repair=False)[1]['invocations'], before)
+
+    def test_scheduler_refuses_before_consuming_an_attempt_or_starting_the_task(self):
+        import test_reconciliation as fixtures
+        from ssdlc_tasks import TaskJournal, TaskScheduler
+        from ssdlc_transitions import runtime_root
+        f = fixtures.ReconciliationTests(); f.setUp(); self.addCleanup(f.doCleanups)
+        f.request['profile']['live_unknown_usage'].pop('codex')
+        f.identity['environment'] = dict(mode='role_container', image_id='offline')
+        f.select(f.stage())
+        root = runtime_root(f.target)
+        limits = LimitsStore(root)
+        envelope, counters = limits._load(repair=False)
+        journal = TaskJournal(root / '03-dev/tasks')
+        before = journal.peek()
+        developed, selected = [], []
+        def developer(task, attempt, prompt, workspace):
+            developed.append(attempt)
+            raise AssertionError('No developer may be dispatched')
+        def dispatch_engine(task, attempt):
+            selected.append((task['task_id'], attempt))
+            return 'codex'
+        scheduler = TaskScheduler(root / 'worktree', root / '03-dev/tasks',
+            json.loads((root / '02-design/plan.json').read_text()),
+            json.loads((root / '00-recon/quality-contract.json').read_text()), f.context,
+            developer, f.verify, max_attempts=envelope['policy']['development_attempts'], isolate_candidates=True,
+            runtime_identity=before['candidate_runtime'], recover_timeouts=True,
+            historical_capture_authority=envelope['binding']['historical_capture_bindings_sha256'],
+            historical_task_floors=envelope['binding'].get('task_floors'),
+            scope_reconciliations=envelope['binding'].get('scope_reconciliations'),
+            dispatch_budget=lambda engine=None: limits.require_capacity('03-dev', '03-dev', engine),
+            dispatch_engine=dispatch_engine)
+        with self.assertRaisesRegex(RecoveryStop, 'refused before launch') as caught:
+            scheduler.run(f.new_plan['tasks'])
+        self.assertEqual(caught.exception.category, 'LIMIT_REACHED')
+        self.assertEqual(developed, [])
+        self.assertTrue(selected)
+        task_id, attempt = selected[0]
+        self.assertEqual(attempt, before['tasks'][task_id]['attempts'] + 1)
+        # No attempt consumed, no DISPATCH_RESERVED or TASK_STARTED, no reservation.
+        self.assertEqual(journal.peek()['tasks'], before['tasks'])
+        self.assertEqual(limits._load(repair=False)[1], counters)
+
+
+class FeedbackLedgerAdmissionTests(unittest.TestCase):
+    """Issue #128 P2: a live-usage admission reconciles an active feedback ledger."""
+
+    def setUp(self):
+        import test_feedback_workflow as fixtures
+        self.case = case = fixtures.FeedbackWorkflowTests()
+        case.initialize(); self.addCleanup(case.doCleanups)
+        # A live claude row returned without a cost, and claude has no declared model.
+        store = LimitsStore(case.source['root'])
+        self.legacy = store.reserve('03-dev', '03-dev', 'claude')
+        store.finish(self.legacy, 'returned')
+
+    def admit(self):
+        import ssdlc_usage_admission as admission
+        from ssdlc_scope_amendments import inspect
+        case = self.case
+        profile = copy.deepcopy(inspect(case.case.ticket, allow_host_hints=True)['envelope']['policy'])
+        profile['live_unknown_usage'].update(reserve_model(0.5, 'claude'))
+        with case.host():
+            staged = admission.prepare(case.case.ticket, case.case.repo, profile, 'Declare the live claude reserve',
+                                       runtime_identity=case.identity, controller_snapshot=case.snapshot)
+            p = staged['proposal']
+            admission.activate(case.case.ticket, staged['preparation'], dict(
+                schema_version=1, transition_id=p['transition_id'], proposal_sha256=digest(p), authorized=True,
+                source_fenced=True, old_controller_sha256=p['old_controller_sha256'],
+                new_controller_sha256=p['new_controller_sha256'], profile_sha256=p['profile_sha256'],
+                legacy_uncovered_invocations=p['legacy_uncovered_invocations']))
+        return p['transition_id']
+
+    def test_resume_after_admission_needs_no_manual_feedback_reconciliation(self):
+        from ssdlc_feedback import FeedbackStore
+        from ssdlc_reconciliation import resolve_execution
+        from ssdlc_tasks import atomic_json
+        from ssdlc_transitions import runtime_root
+        case = self.case
+        with self.assertRaisesRegex(RecoveryStop, 'not counted as zero'):
+            case.run_flow()
+        feedback = FeedbackStore(case.case.ticket)
+        stopped = feedback.inspect()
+        (request_id,) = stopped['requests']
+        self.assertEqual(stopped['role_calls'], [])
+        self.assertEqual(case.calls, [])
+        transition = self.admit()
+        state = feedback.inspect()
+        entry = state['admitted_generations'][transition]
+        self.assertEqual(entry['carried_requests'], [request_id])
+        self.assertEqual(state['requests'], stopped['requests'])
+        root = runtime_root(case.case.ticket)
+        self.assertEqual(resolve_execution(case.case.ticket), root)
+        # The orchestrator escalates the resumed generation to feedback again.
+        outer = json.loads((root / 'state.json').read_text())
+        outer.update(status='ESCALATED_TO_SUPERVISOR', current_step='feedback')
+        atomic_json(root / 'state.json', outer)
+        result = case.run_flow()
+        self.assertEqual(result['disposition'], 'APPLIED')
+        self.assertEqual([name for name, _ in case.calls], ['feedback-planner', 'feedback-reviewer'])
+        state = feedback.inspect()
+        self.assertEqual(list(state['requests']), [request_id])
+        self.assertEqual(state['requests'][request_id]['occurrences'][-1]['carried_by'], transition)
+        rows = LimitsStore(Path(result['runtime']))._load(repair=False)[1]['invocations']
+        planner = [row for row in rows.values() if row['role'] == 'feedback-planner']
+        self.assertEqual(planner[0]['conservative_usage'], {'metered_usd': 0.5, 'cli_estimate_usd': 0.5})
+
+    def test_resume_after_admission_carries_a_returned_planner_without_repeating_it(self):
+        """R1-1: the planner returned without cost, the stop came before the reviewer."""
+        from ssdlc_feedback import FeedbackStore
+        from ssdlc_tasks import atomic_json
+        from ssdlc_transitions import runtime_root
+        case = self.case
+        # A fresh case without the legacy row: the planner's own row is the first without cost.
+        self.case = case = type(case)(); case.initialize(); self.addCleanup(case.doCleanups)
+        runner = case.runner
+        def costless(source, limits, prompt, effort):
+            call = runner(source, limits, prompt, effort)
+            def wrapped(metadata, invocation):
+                value = call(metadata, invocation)
+                if metadata['identity'] == 'feedback-planner':
+                    value['usage'] = dict(metered_usd=None, cli_estimate_usd=None)
+                return value
+            return wrapped
+        case.runner = costless
+        with self.assertRaisesRegex(RecoveryStop, 'not counted as zero') as caught:
+            case.run_flow()
+        self.assertEqual(caught.exception.category, 'LIMIT_REACHED')
+        feedback = FeedbackStore(case.case.ticket)
+        stopped = feedback.inspect()
+        (request_id,) = stopped['requests']
+        self.assertEqual(stopped['requests'][request_id]['status'], 'PROPOSED')
+        (planner,) = stopped['role_calls']
+        self.assertEqual((planner['role'], planner['status']), ('planner', 'RETURNED'))
+        self.assertEqual([name for name, _ in case.calls], ['feedback-planner'])
+        transition = self.admit()
+        state = feedback.inspect()
+        entry = state['admitted_generations'][transition]
+        self.assertEqual(entry['carried_requests'], [request_id])
+        # The previous native binding is recorded; the call is rebound to the admitted generation.
+        self.assertEqual(entry['carried_role_calls'], {planner['operation_id']: planner['native']})
+        self.assertEqual(state['requests'], stopped['requests'])
+        (carried,) = state['role_calls']
+        self.assertEqual(carried['native'], dict(planner['native'], limits_sha256=entry['limits_sha256']))
+        self.assertEqual({k: v for k, v in carried.items() if k != 'native'},
+                         {k: v for k, v in planner.items() if k != 'native'})
+        # The receipt and the native invocation row are unchanged.
+        root = runtime_root(case.case.ticket)
+        envelope, counters = LimitsStore(root)._load(repair=False)
+        self.assertEqual(entry['limits_sha256'], digest(envelope))
+        self.assertEqual(counters['invocations'][planner['native']['invocation_id']],
+                         LimitsStore(case.source['root'])._load(repair=False)[1]['invocations'][
+                             planner['native']['invocation_id']])
+        outer = json.loads((root / 'state.json').read_text())
+        outer.update(status='ESCALATED_TO_SUPERVISOR', current_step='feedback')
+        atomic_json(root / 'state.json', outer)
+        result = case.run_flow()
+        self.assertEqual(result['disposition'], 'APPLIED')
+        # The planner is never repeated: only the reviewer is consulted after the admission.
+        self.assertEqual([name for name, _ in case.calls], ['feedback-planner', 'feedback-reviewer'])
+        state = feedback.inspect()
+        self.assertEqual(state['requests'][request_id]['occurrences'][-1]['carried_by'], transition)
+        row = state['requests'][request_id]
+        # The planner's proposal is unchanged; its hash binds the new source, and the review binds that hash.
+        self.assertEqual((row['proposal'], row['planner']),
+                         (stopped['requests'][request_id]['proposal'], stopped['requests'][request_id]['planner']))
+        self.assertNotEqual(row['proposal_sha256'], stopped['requests'][request_id]['proposal_sha256'])
+        self.assertEqual(row['review']['proposal_sha256'], row['proposal_sha256'])
+        self.assertEqual([call['role'] for call in state['role_calls']], ['planner', 'reviewer'])
+
+    def test_carried_planner_receipt_resumes_under_the_admitted_generation(self):
+        """A captured planner return whose proposal was not yet recorded is replayed, not redispatched."""
+        from ssdlc_feedback import FeedbackStore
+        from ssdlc_tasks import atomic_json
+        from ssdlc_transitions import runtime_root
+        case = self.case
+        self.case = case = type(case)(); case.initialize(); self.addCleanup(case.doCleanups)
+        runner = case.runner
+        def costless(source, limits, prompt, effort):
+            call = runner(source, limits, prompt, effort)
+            def wrapped(metadata, invocation):
+                value = call(metadata, invocation)
+                value['usage'] = dict(metered_usd=None, cli_estimate_usd=None)
+                return value
+            return wrapped
+        case.runner = costless
+        import ssdlc_feedback
+        with patch.object(ssdlc_feedback.FeedbackStore, 'propose', side_effect=OSError('crash before proposal')):
+            with self.assertRaises(OSError):
+                case.run_flow()
+        feedback = FeedbackStore(case.case.ticket)
+        stopped = feedback.inspect()
+        (request_id,) = stopped['requests']
+        self.assertEqual(stopped['requests'][request_id]['status'], 'REQUESTED')
+        self.assertEqual([call['status'] for call in stopped['role_calls']], ['RETURNED'])
+        transition = self.admit()
+        self.assertEqual(feedback.inspect()['admitted_generations'][transition]['carried_requests'], [request_id])
+        root = runtime_root(case.case.ticket)
+        outer = json.loads((root / 'state.json').read_text())
+        outer.update(status='ESCALATED_TO_SUPERVISOR', current_step='feedback')
+        atomic_json(root / 'state.json', outer)
+        result = case.run_flow()
+        self.assertEqual(result['disposition'], 'APPLIED')
+        # The planner response was reused from its receipt; only the reviewer was launched.
+        self.assertEqual([name for name, _ in case.calls], ['feedback-planner', 'feedback-reviewer'])
+        state = feedback.inspect()
+        self.assertEqual(state['requests'][request_id]['occurrences'][-1]['carried_by'], transition)
+        self.assertEqual([call['role'] for call in state['role_calls']], ['planner', 'reviewer'])
+
+    def test_admission_is_fenced_until_the_feedback_ledger_is_reconciled(self):
+        import ssdlc_usage_admission as admission
+        from ssdlc_reconciliation import resolve_execution
+        with self.assertRaises(RecoveryStop):
+            self.case.run_flow()
+        with patch.object(admission, 'finalize', side_effect=OSError('crash after selector publish')):
+            with self.assertRaises(OSError):
+                self.admit()
+        with self.assertRaisesRegex(TaskError, 'reconciliation pending'):
+            resolve_execution(self.case.case.ticket)
+
 
 if __name__ == '__main__':
     unittest.main()

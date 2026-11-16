@@ -312,12 +312,18 @@ class LimitsStore:
         if allowed is not None and name not in allowed:
             raise DevelopmentBlocked('SCOPE_REQUIRED', 'Reconciled continuation cannot restart earlier planning/design phases')
 
-    def require_capacity(self, role, phase):
+    def require_capacity(self, role, phase, engine=None):
         envelope, state = self._load(repair=False)
-        return self.check_capacity(envelope, state, role, phase)
+        return self.check_capacity(envelope, state, role, phase, engine)
 
-    def check_capacity(self, envelope, state, role, phase):
-        """Pure capacity validation, also used on an unselected proposal."""
+    def check_capacity(self, envelope, state, role, phase, engine=None):
+        """Pure validation of the imminent call, also used on an unselected proposal.
+
+        With the selected engine it is the same validation reserve() applies:
+        the engine needs a reported cost or a declared live unknown-usage model,
+        and its candidate reserve must fit the separate and combined dollar
+        caps. It returns that candidate row and writes nothing.
+        """
         p = envelope['policy']
         self.check(state, p)
         allowed = envelope['binding'].get('allowed_phases')
@@ -330,30 +336,27 @@ class LimitsStore:
                 or sum(row['role'] == role for row in rows) >= p['role_invocations'][role]
                 or sum(row['phase'] == phase for row in rows) >= p['phase_invocations'][phase]):
             raise RecoveryStop('LIMIT_REACHED', 'Frozen invocation allowance exhausted')
+        if engine is None:
+            return None
+        rule = p.get('live_unknown_usage', {}).get(engine)
+        if rule is None and engine not in REPORTED_COST:
+            raise RecoveryStop('LIMIT_REACHED', 'Engine reports no dollar cost and the profile declares no live '
+                               'unknown-usage model; dispatch refused before launch')
+        row = {'role': role, 'phase': phase, 'engine': engine, 'status': 'reserved',
+               'usage': {'metered_usd': None, 'cli_estimate_usd': None}}
+        if rule is not None:
+            row['usage_model'] = rule['model']
+        if rule is not None and rule['model'] == RESERVE:
+            row['conservative_usage'] = {kind: rule[kind] for kind in COST_KINDS}
+            self._check_dollars(state, p, [*rows, row], reserving=True)
+        return row
 
     def reserve(self, role, phase, engine):
         with ticket_lock(self.root / 'limits/limits.lock'):
             envelope, state = self._load()
-            p = envelope['policy']
-            self.require_capacity(role, phase)
-            invocations = list(state['invocations'].values())
-            if role not in p['role_invocations'] or phase not in p['phase_invocations']:
-                raise RecoveryStop('LIMIT_REACHED', 'Missing explicit role/phase invocation cap')
-            if (len(invocations) >= p['invocations']
-                    or sum(v['role'] == role for v in invocations) >= p['role_invocations'][role]
-                    or sum(v['phase'] == phase for v in invocations) >= p['phase_invocations'][phase]):
-                raise RecoveryStop('LIMIT_REACHED', 'Frozen invocation allowance exhausted')
-            rule = p.get('live_unknown_usage', {}).get(engine)
-            if rule is None and engine not in REPORTED_COST:
-                raise RecoveryStop('LIMIT_REACHED', 'Engine reports no dollar cost and the profile declares no live '
-                                   'unknown-usage model; dispatch refused before launch')
-            row = {'role': role, 'phase': phase, 'engine': engine, 'status': 'reserved',
-                   'usage': {'metered_usd': None, 'cli_estimate_usd': None}}
-            if rule is not None:
-                row['usage_model'] = rule['model']
-            if rule is not None and rule['model'] == RESERVE:
-                row['conservative_usage'] = {kind: rule[kind] for kind in COST_KINDS}
-                self._check_dollars(state, p, [*invocations, row], reserving=True)
+            # The atomic check at the dispatch boundary: the same validation as
+            # the pre-flight one, under the lock, on the repaired journal.
+            row = self.check_capacity(envelope, state, role, phase, engine)
             identity = uuid.uuid4().hex
             state['invocations'][identity] = row
             self.journal.append('INVOCATION_RESERVED', state)
