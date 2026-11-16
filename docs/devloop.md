@@ -303,8 +303,10 @@ Every text devloop publishes starts with the header that [AGENTS.md](../AGENTS.m
 values come from the configured agent: CLI version from its `--version`, model and reasoning level
 as passed on the command line. A known version is cached for the life of the process; a failed
 `--version` is retried at the next publication, and the header says `CLI non noto` only for texts
-published while it keeps failing. Text the dispatcher writes on its own, such as escalations and CI
-rounds, names `devloop dispatcher` as the agent and no model.
+published while it keeps failing. When a turn ran on a [fallback model](#fallback-models), the
+header names that model and its reasoning level, not the configured ones. Text the dispatcher
+writes on its own, such as escalations and CI rounds, names `devloop dispatcher` as the agent and
+no model.
 
 ## GitHub identities
 
@@ -387,9 +389,10 @@ in the main checkout.
 ### Watching a tick
 
 While a tick runs an action it records it in `state_dir/activity.json`: the action, the issue or
-PR, the agent and the path of its prompt once an agent turn starts, the start time and the
-dispatcher's process id. The record is removed when the action ends, also when it fails.
-`devloop status` shows it first, with how long it has been running. If no dispatcher holds the
+PR, the agent and the path of its prompt once an agent turn starts, the model when the turn runs
+on a [fallback model](#fallback-models), the start time and the dispatcher's process id. The
+record is removed when the action ends, also when it fails. `devloop status` shows it first, with
+how long it has been running and, for a fallback, `on fallback model <model>`. If no dispatcher holds the
 lock, or the recorded process is gone, the action is reported as `interrupted`: the tick was
 killed before it could clean up, and the next tick overwrites the record when it starts an action.
 
@@ -467,8 +470,8 @@ and `agent_stall_action` (`"warn"`, the default, or `"abort"`) control the
 [stall check](#stalled-agents); other values stop devloop at startup. `[review_policy]` sets the
 [review level](#review-level-and-policy-receipt): `default_level` (1 or 2, default 1), the level
 `label` (default `reviews:2`), `sensitive_paths` and `sensitive_path_lists`; changing any of them,
-or the reviewers of the pool (their order, app, kind, model, effort or `review_args`), changes
-the policy version, so pending approvals need a new review.
+or the reviewers of the pool (their order, app, kind, model, effort, `review_args` or
+`fallback_models`), changes the policy version, so pending approvals need a new review.
 
 Each PR records its implementer and the first reviewer of the pool when it is opened, so
 changing the roles does not affect the level-1 reviewer of open PRs. If the recorded reviewer is
@@ -500,6 +503,50 @@ code running as the same user. For them, the copy and the final check catch writ
 reviewed tree, not access to the rest of the system. With the network disabled, codex cannot run tests
 that open TCP sockets, even on loopback.
 
+### Fallback models
+
+An agent may list `fallback_models`, in order, for when its model is unavailable (#121). agy runs
+on `gemini-4-argon-high`, which has a budget of its own, and falls back to
+`gemini-4-hydrogen-high`:
+
+```toml
+[agents.agy]
+model = "gemini-4-argon-high"
+model_label = "Gemini 4 Argon"
+effort = "high"
+fallback_models = [
+    { model = "gemini-4-hydrogen-high", model_label = "Gemini 4 Hydrogen" },
+]
+```
+
+- **Schema.** Each entry has `model`, `model_label` and optionally `effort`, which otherwise is
+  the agent's. A fallback reasons at `high`, `xhigh` or `max`: any other level, or for agy a
+  model whose name ends with `-minimal`, `-low` or `-medium`, stops devloop at startup, as does a
+  model listed twice or equal to the agent's own. The list is optional: an agent without it
+  behaves as before.
+- **When.** Only when the turn failed because the model is unavailable: the CLI exited with a
+  non-zero code, or its JSON envelope is explicitly an error (claude `is_error`, agy `status`
+  other than `SUCCESS`), and its stdout or stderr matches one of `unavailable_patterns`
+  (regular expressions, case-insensitive; default `RESOURCE_EXHAUSTED`, `quota`, `429`,
+  `model .* not available`), or the exit code is in `unavailable_exit_codes` (default none). A
+  valid result, output that is not JSON or does not match the schema, a timeout and a stall
+  never count, whatever the text, and follow the usual path to `agent:needs-human`.
+- **Once.** Each model is tried at most once per action: a rate limit the CLI reports as
+  terminal counts as persistent, and a model found unavailable is not tried again by the later
+  attempts of the same action (`implement_test_retries`). When the last model fails too, the
+  issue or PR goes to `agent:needs-human` with a comment listing the models tried and why.
+- **Worktree.** The fallback is a new session with the same prompt and worktree. Partial changes
+  of the previous attempt, and the merge in progress of a sync, stay as they are, without any
+  rollback; the prompt tells the agent that the worktree may contain them.
+- **Traceability.** The model actually used goes into the attribution header of the text
+  published for the turn, into the profile of the `pr`, `review`, `fix` or `sync` marker, into
+  the tick log (`<agent> ran on fallback model <model>`) and, while the turn runs, into
+  `devloop status`. The policy receipt keeps binding the configured reviewers.
+- **Independence.** At level 2 a reviewer's fallback model runs only if it is still independent
+  of who wrote the code (including the implementer's own fallback models) and distinct from the
+  other reviewers of the round, as their records show them; otherwise it is skipped and listed
+  as such.
+
 ## Limits
 
 - **No automatic merge.** A human merges every PR.
@@ -513,7 +560,9 @@ that open TCP sockets, even on loopback.
   `agent:needs-human` until a trusted user adds `agent:ready` again. Issue text is still model
   input: do not label untrusted content.
 - **Failures escalate immediately.** A timeout or a transient error of an agent, `gh` or `git`
-  goes to `agent:needs-human` rather than being retried.
+  goes to `agent:needs-human` rather than being retried. The only exception is an unavailable
+  model of an agent with [fallback models](#fallback-models), which runs the turn again on the
+  next one.
 - **Single host, sequential.** One tick runs actions one at a time.
 - **`gh` compatibility.** Checks, labels, comments and PR creation go through the REST API
   (`gh api`), so devloop does not depend on newer porcelain flags such as `gh pr checks --json`.
