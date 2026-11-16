@@ -55,8 +55,8 @@ from pathlib import Path
 from .agents import AgentError
 from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, PR_COMMENT, REVIEW
 from .github import GitHubError, merge_state
-from .markdown import (RESUME, dispatcher_header, publishable, read_marker, render_escalation,
-                       render_fix, render_native_review, render_preflight, render_review)
+from .markdown import (RESUME, carries_record, dispatcher_header, publishable, read_marker,
+                       render_escalation, render_fix, render_native_review, render_preflight, render_review)
 from .policy import describe as describe_receipt
 from .policy import (BINDING, agent_profile, differences, distinct, evaluate, independent,
                      profile_of, receipt_of, recorded_level)
@@ -314,12 +314,13 @@ def control_command(body):
     return bool(lines) and lines[0].split()[:1] == ['/devloop']
 
 
-def preflight_hash(title, body, comments, trusted_users):
+def preflight_hash(title, body, comments, trusted_users, automatic):
     """The hash that binds a readiness check to the issue text: title, body and the comments of
-    trusted users, without the text devloop publishes and without ``/devloop`` commands."""
+    trusted users, without devloop's own records (``automatic(comment)``) and without
+    ``/devloop`` commands. Any other trusted comment counts, header or not."""
     kept = [[(c.get('author') or {}).get('login'), c.get('body') or ''] for c in comments
             if (c.get('author') or {}).get('login') in trusted_users
-            and not devloop_text(c.get('body')) and not control_command(c.get('body'))]
+            and not automatic(c) and not control_command(c.get('body'))]
     data = json.dumps([title or '', body or '', kept], ensure_ascii=False, separators=(',', ':'))
     return hashlib.sha256(data.encode('utf-8')).hexdigest()
 
@@ -646,13 +647,25 @@ class Dispatcher:
                 found.append((position, record))
         return found
 
+    def _published(self, comment):
+        """Whether ``comment`` may be text devloop published: the AGENTS.md header, from an
+        identity allowed to write devloop records. Without GitHub Apps that is the operator's
+        login too, so this alone cannot tell devloop from the operator."""
+        return (devloop_text(comment.get('body'))
+                and self._writes_records((comment.get('author') or {}).get('login')))
+
+    def _automatic(self, comment):
+        """Whether ``comment`` is one of devloop's own records: published text (``_published``)
+        that ends with a valid devloop marker. Only these leave the readiness hash: any other
+        trusted comment, even one starting with the header, may carry a requirement."""
+        return self._published(comment) and carries_record(comment.get('body'))
+
     def _recheck_requested(self, number, comments):
         """Whether a trusted user asked in person for a new check with ``RECHECK_COMMAND`` as
-        the first line of a comment written after the latest text devloop published there: each
-        request starts one check. Requests from anyone else are ignored and logged."""
-        last = max((position for position, c in enumerate(comments)
-                    if devloop_text(c.get('body'))
-                    and self._writes_records((c.get('author') or {}).get('login'))), default=-1)
+        the first line of a comment written after devloop's latest record there: each request
+        starts one check. Requests from anyone else are ignored and logged."""
+        last = max((position for position, c in enumerate(comments) if self._automatic(c)),
+                   default=-1)
         asked = False
         for comment in comments[last + 1:]:
             body = comment.get('body') or ''
@@ -671,13 +684,13 @@ class Dispatcher:
         """Whether the issue's ``agent:needs-human`` belongs to the readiness check: the latest
         check added it when the label was absent (its record says how many ``labeled`` events
         of the label came before), the dispatcher wrote the only ``labeled`` event since, and
-        no other text devloop publishes (another escalation) came after that check. Anything
-        else, or anything uncertain, leaves the block to a human."""
+        no other text devloop may have published (another escalation, ``_published``) came
+        after that check: an identity that writes no devloop record cannot void the block's
+        attribution. Anything else, or anything uncertain, leaves the block to a human."""
         if not records:
             return False
         position, record = records[-1]
-        if not record['blocked'] or any(devloop_text(c.get('body'))
-                                         for c in comments[position + 1:]):
+        if not record['blocked'] or any(self._published(c) for c in comments[position + 1:]):
             return False
         labelers = self.gh.labelers(number, self.cfg.labels.needs_human)
         return (len(labelers) == record['labeled'] + 1
@@ -690,7 +703,7 @@ class Dispatcher:
         comments = self.gh.issue_comments(number)
         records = self._preflight_records(comments)
         return {'hash': preflight_hash(history['title'], history['body'], comments,
-                                       self.cfg.trusted_users),
+                                       self.cfg.trusted_users, self._automatic),
                 'record': records[-1][1] if records else None,
                 'recheck': self._recheck_requested(number, comments),
                 'owned': (self.cfg.labels.needs_human in labels
@@ -745,7 +758,8 @@ class Dispatcher:
         if reason:
             raise UntrustedChange(f'issue #{number}: {reason}')
         comments = self.gh.issue_comments(number)
-        digest = preflight_hash(history['title'], history['body'], comments, cfg.trusted_users)
+        digest = preflight_hash(history['title'], history['body'], comments, cfg.trusted_users,
+                                self._automatic)
         prompt = _template('preflight', repo=cfg.repo, base_branch=cfg.base_branch,
                            issue_number=number, issue_title=history['title'],
                            issue_body=history['body'],
@@ -851,7 +865,8 @@ class Dispatcher:
     def _blocked(self, number, agent, reason, remove, on_pr):
         author = self._as(agent.key, PR_COMMENT if on_pr else ISSUE_COMMENT)
         author.comment(number, publishable(self.runner.header(agent) + '\n## Lavoro bloccato\n\n'
-                                           + reason.strip() + '\n\n' + RESUME))
+                                           + reason.strip() + '\n\n' + RESUME,
+                                           'notice', {'event': 'blocked'}))
         self.gh.edit_labels(number, add=[self.cfg.labels.needs_human], remove=remove)
 
     def _protected_changes(self, path, since=None):

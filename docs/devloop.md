@@ -134,9 +134,14 @@ default the repository or the issue already prescribes is not a gap.
 
 The outcome is a comment on the issue, written with the checker's identity and header, whose
 marker records the outcome and a hash of the title, the body and the trusted users' comments.
-The hash leaves out text devloop publishes (comments that start with the attribution header,
-such as escalations and the checks themselves) and comments whose first line is a `/devloop`
-command. The outcome is reused while the hash stays the same:
+The hash leaves out devloop's own records and comments whose first line is a `/devloop`
+command. A record is recognised by its provenance and its metadata together: it starts with the
+attribution header, it is written by an identity allowed to write devloop records (an agent's or
+the dispatcher's app, or a trusted user for an actor without an app), and it ends with a valid
+devloop marker. Escalations, agents that stop (`Lavoro bloccato`) and the checks themselves
+carry one. Any other trusted comment counts, even one that starts with the header: without
+GitHub Apps devloop and the operator share a login, and the header alone would hide a
+requirement the check never saw. The outcome is reused while the hash stays the same:
 
 - **ready**: the issue starts on a later tick, in the usual order and within `max_open_prs`.
   The implementer starts only if the hash read just before still matches;
@@ -147,8 +152,8 @@ command. The outcome is reused while the hash stays the same:
 An issue blocked by the check is examined again on every tick, even in `agent:needs-human`. A
 new check runs when the hash changed (a trusted user decided a point, accepted a default, or
 edited the issue) or when a trusted user wrote a comment whose **first line** is
-`/devloop recheck`. Each request starts one check: it counts only if written after the latest
-text devloop published on the issue. The command is ignored, and logged, when anyone outside
+`/devloop recheck`. Each request starts one check: it counts only if written after devloop's
+latest record on the issue. The command is ignored, and logged, when anyone outside
 `trusted_users` writes it. If the new check passes, the dispatcher removes `agent:needs-human`
 and the issue goes back in the queue.
 
@@ -156,9 +161,10 @@ The dispatcher removes only a block that belongs to the check. The check owns
 `agent:needs-human` only if it added the label when the label was absent: its record keeps the
 number of earlier `labeled` events of the label, and the dispatcher must have written the only
 one since. The check loses the block, which then stays until a person removes it, if the label
-was removed and applied again, if a comment starting with the attribution header came after the
-check (another escalation, or anything that looks like one), or if the attribution is
-uncertain. A label already present when the
+was removed and applied again, if a comment starting with the attribution header, written by an
+identity allowed to write devloop records, came after the check (another escalation, or
+anything that may be one, marker or not), or if the attribution is uncertain. A comment from
+anyone else, header or not, never touches the attribution. A label already present when the
 check failed is never the check's. Rechecks run only for blocks the check owns.
 
 Each check is an agent action: it takes a slot of `max_actions_per_tick`, and a check of an

@@ -139,8 +139,19 @@ def _valid_preflight(p):
             and isinstance(p.get('gaps'), list) and all(_valid_gap(g) for g in p['gaps']))
 
 
+NOTICES = ('escalation', 'blocked')
+
+
+def _valid_notice(n):
+    """A text devloop publishes without a record of its own (#114): an escalation to a human,
+    or an agent that stopped. Its marker tells it apart from the operator's own text when both
+    are written with the same login."""
+    return n.get('event') in NOTICES
+
+
 _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy': _valid_policy,
-          'finding': _valid_finding, 'sync': _valid_sync, 'preflight': _valid_preflight}
+          'finding': _valid_finding, 'sync': _valid_sync, 'preflight': _valid_preflight,
+          'notice': _valid_notice}
 
 
 def read_marker(text, kind):
@@ -157,6 +168,11 @@ def read_marker(text, kind):
     except (ValueError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) and _VALID[kind](data) else None
+
+
+def carries_record(text):
+    """Whether ``text`` ends with a valid devloop marker, of any kind."""
+    return any(read_marker(text, kind) is not None for kind in _VALID)
 
 
 _VERDICT_TEXT = {
@@ -293,4 +309,4 @@ def render_escalation(reason, detail=''):
             + RESUME + '\n')
     if detail:
         body += '\n```text\n' + detail.strip()[-6000:].replace('```', "'''") + '\n```\n'
-    return publishable(body)
+    return publishable(body, 'notice', {'event': 'escalation'})

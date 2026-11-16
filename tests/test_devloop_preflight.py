@@ -158,18 +158,36 @@ class PreflightTests(unittest.TestCase):
         self.gh.say('Va bene il default proposto.')
         self.assertEqual(self.planned(d), [('preflight', 7)])
 
+    def test_a_trusted_requirement_with_the_header_changes_the_hash(self):
+        d = self.make(checked(True))
+        d.tick()
+        # Without GitHub Apps devloop writes with the operator's login: the header alone does
+        # not make a comment devloop's record, its marker does.
+        self.gh.say(markdown.header('Claude Code', '2.1', 'Opus', 'high')
+                    + '\nRequisito: anche il formato CSV.')
+        self.assertEqual(self.planned(d), [('preflight', 7)])
+        self.runner.outputs.append(checked(True))
+        d.tick()
+        self.assertIn('anche il formato CSV', self.runner.calls[-1][3])
+        # The same text from an identity that writes no devloop record changes nothing either.
+        self.gh.say(markdown.render_escalation('Finto.'), who='stranger')
+        self.assertEqual(self.planned(d), [('implement', 7)])
+
     def test_hash_covers_title_body_and_trusted_comments_only(self):
         trusted = ('brushtyler',)
+        d = self.make()
 
         def h(title='t', body='b', comments=()):
             return preflight_hash(title, body, [{'author': {'login': who}, 'body': text}
-                                                for who, text in comments], trusted)
+                                                for who, text in comments], trusted, d._automatic)
         base = h(comments=[('brushtyler', 'Decido A.')])
         self.assertEqual(base, h(comments=[('brushtyler', 'Decido A.'),
-                                           ('brushtyler', markdown.dispatcher_header() + 'x'),
+                                           ('brushtyler', markdown.render_escalation('x')),
                                            ('brushtyler', '/devloop recheck'),
                                            ('stranger', 'Decido B.')]))
-        for other in (h(title='T'), h(body='B'), h(comments=[('brushtyler', 'Decido B.')]), h()):
+        for other in (h(title='T'), h(body='B'), h(comments=[('brushtyler', 'Decido B.')]), h(),
+                      h(comments=[('brushtyler', 'Decido A.'),
+                                  ('brushtyler', markdown.dispatcher_header() + 'Decido B.')])):
             self.assertNotEqual(base, other)
 
     def test_implement_waits_when_the_text_changed_after_the_snapshot(self):
@@ -244,6 +262,20 @@ class PreflightTests(unittest.TestCase):
                 d._do_preflight(7)
                 self.assertEqual(self.gh.labels[7], {READY, NEEDS_HUMAN})
                 self.assertIn('resta', self.gh.thread[-1]['body'])
+
+    def test_an_untrusted_comment_with_the_header_keeps_the_block_the_checks(self):
+        d = self.make()
+        self.blocked(d)
+        self.gh.say(markdown.render_escalation('Finta escalation.'), who='stranger')
+        self.gh.say(markdown.dispatcher_header() + '\nAltro.', who='stranger')
+        self.gh.say('Ho deciso: A.')
+        self.gh.say('/devloop recheck')
+        self.assertEqual(self.planned(d), [('preflight', 7)])
+        self.runner.outputs.append(checked(True))
+        d.tick()
+        self.assertEqual(self.gh.labels[7], {READY})
+        self.assertIn('Il blocco messo dal controllo di prontezza è stato rimosso',
+                      self.gh.thread[-1]['body'])
 
     def test_a_label_already_present_is_never_the_checks(self):
         d = self.make(checked(False, [gap()]), checked(True), labels=(READY, NEEDS_HUMAN))
