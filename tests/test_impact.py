@@ -369,7 +369,7 @@ class SummaryMetricTests(ImpactFixture):
         ticket = self.ticket()
         (ticket / 'execution').mkdir()
         identity = 'a' * 32
-        for selector in ([], dict(transition_id='b' * 32)):
+        for selector in (None, [], dict(transition_id='b' * 32)):
             with self.subTest(selector=selector):
                 atomic_json(ticket / 'execution/active.json', selector)
                 self.assert_lineage_unknown(ticket)

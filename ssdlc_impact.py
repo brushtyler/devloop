@@ -907,6 +907,10 @@ def _transitions(ticket):
         return []
     store, chain, seen = TransitionStore(store_root), [], set()
     pointer = _read_json(store_root / 'active.json')
+    # The active selector must name a generation; only the oldest generation's
+    # missing parent selector ends the walk.
+    if not isinstance(pointer, dict):
+        raise TaskError('Execution lineage is interrupted')
     # Only the oldest generation has no parent selector; every other pointer must resolve.
     while pointer is not None:
         if not isinstance(pointer, dict) or not (store_root / str(pointer.get('transition_id', ''))).is_dir():
