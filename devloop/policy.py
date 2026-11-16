@@ -55,7 +55,8 @@ class ReviewPolicy:
     # Files listed by ``sensitive_path_lists``, read when the configuration is loaded.
     sensitive_files: tuple = ()
     # The configured reviewer pool, in order: ``(key, app slug or None, kind, model, effort,
-    # review_args)`` each. A change to any of them changes the version, and so every receipt.
+    # review_args[, fallback models])`` each, the fallback models as ``(model, effort)`` pairs
+    # (#121). A change to any of them changes the version, and so every receipt.
     reviewers: tuple = ()
 
     def version(self):
@@ -64,7 +65,11 @@ class ReviewPolicy:
                 'label': self.label, 'sensitive_level': SENSITIVE_LEVEL,
                 'sensitive_paths': sorted({_norm(p) for p in self.sensitive_paths}),
                 'sensitive_files': sorted({_norm(p) for p in self.sensitive_files}),
-                'reviewers': [[*r[:5], list(r[5])] for r in self.reviewers]}
+                # A reviewer's fallback models, (model, effort) each, count only when it has
+                # some: without them the version is the one before #121.
+                'reviewers': [[*r[:5], list(r[5]), *([[list(f) for f in r[6]]]
+                                                     if len(r) > 6 and r[6] else [])]
+                              for r in self.reviewers]}
         text = json.dumps(data, sort_keys=True, separators=(',', ':'))
         return hashlib.sha256(text.encode()).hexdigest()
 

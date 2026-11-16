@@ -52,7 +52,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .agents import AgentError
+from .agents import AgentError, ModelsUnavailable, ModelUnavailable
 from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, PR_COMMENT, REVIEW
 from .github import GitHubError, merge_state
 from .markdown import (RESUME, carries_record, dispatcher_header, publishable, read_marker,
@@ -83,6 +83,18 @@ _RECEIPT_FIELDS = {'pr': 'PR', 'base': 'commit di base', 'head': 'head',
                    'reviewers': 'reviewer richiesti',
                    'profiles': 'identità, modello, effort o argomenti dei reviewer'}
 _CLOSED_TEXT = {'resolved': 'risolto', 'withdrawn': 'ritirato'}
+# Appended to the prompt of a turn that runs on a fallback model after another model of the
+# same turn was unavailable (#121): its session may have changed the working directory.
+FALLBACK_NOTE = {
+    'write': ('\n\n## Previous attempt on another model\n\nAn earlier attempt at this turn, on '
+              'another model, stopped because that model was unavailable. The worktree may '
+              'contain its partial work, and a merge in progress stays in progress: check '
+              '`git status` and `git diff` first, keep what is correct and finish the task.\n'),
+    'review': ('\n\n## Previous attempt on another model\n\nAn earlier attempt at this review, on '
+               'another model, stopped because that model was unavailable. The working directory '
+               'may contain files that attempt left: they are not part of the pull request, '
+               'which is what `git diff` against the base shows.\n'),
+}
 
 
 @dataclass
@@ -342,6 +354,16 @@ def pending_reviewers(records):
         return []
     done = {owner_of(r) for r in records}
     return [key for key in receipt['reviewers'] if key not in done]
+
+
+class Models:
+    """The models one action may still run ``agent`` with (``AgentConfig.chain``), in order, and
+    those it tried or left out, as ``(model, why)`` pairs (#121)."""
+
+    def __init__(self, agent):
+        self.agent = agent
+        self.left = agent.chain()
+        self.tried = []
 
 
 class UntrustedChange(RuntimeError):
@@ -819,7 +841,7 @@ class Dispatcher:
 
     def _escalate_failure(self, action, pr, exc):
         lb = self.cfg.labels
-        reason = f'Il passo `{action.kind}` è fallito: {exc}.{self._log_hint(exc)}'
+        reason = f'Il passo `{action.kind}` è fallito: {_failure_text(exc)}{self._log_hint(exc)}'
         try:
             if pr is not None:
                 self._escalate(pr.number, reason,
@@ -840,21 +862,69 @@ class Dispatcher:
         issue = dict(self.gh.issue(number), title=history['title'], body=history['body'])
         return issue, _render_issue_comments(issue.get('comments') or [], self.cfg.trusted_users)
 
+    def _turn(self, models, mode, prompt, schema, path, label, allowed=None):
+        """Run one agent turn on the first of ``models`` (``Models``) that is available, and
+        return its output and the agent configuration it ran with.
+
+        A model whose turn fails as unavailable (``ModelUnavailable``) leaves ``models``, so the
+        action never tries it again, and the next one runs with the same prompt and worktree,
+        plus a note about the partial work. Every other failure ends the turn as before, listing
+        the models tried or left out if any (``ModelsUnavailable`` with ``last_failed``). A model
+        that ``allowed`` refuses leaves ``models`` without running. When none is left, an agent
+        without fallback models fails as before #121; one with them fails listing the models
+        tried and why (``ModelsUnavailable``)."""
+        failed = None
+        while models.left:
+            candidate = models.left.pop(0)
+            if allowed is not None and not allowed(candidate):
+                models.tried.append((candidate.model, 'not independent of the authors of the PR '
+                                                      'or of the other reviewers of the round'))
+                self.log(f'  {candidate.key}: model {candidate.model} skipped: not independent')
+                continue
+            text = prompt + FALLBACK_NOTE[mode] if failed else prompt
+            suffix = f'-{candidate.model}' if candidate.fallback_for else ''
+            try:
+                output = self.runner.run(candidate, mode, text, schema, path, label + suffix)
+            except ModelUnavailable as exc:
+                models.tried.append((candidate.model, f'{exc} ({exc.reason})'))
+                self.log(f'  {candidate.key}: model {candidate.model} unavailable: {exc.reason}')
+                failed = exc
+                continue
+            except AgentError as exc:
+                if not models.tried:
+                    raise
+                # Any other failure ends the turn as before, but after models were tried or left
+                # out the escalation lists them all, this one included.
+                models.tried.append((candidate.model, str(exc)))
+                raise ModelsUnavailable(models.agent.key, models.tried, exc.log,
+                                        last_failed=True) from exc
+            models.left.insert(0, candidate)  # available: later attempts of the action use it
+            if candidate.fallback_for:
+                self.log(f'  {candidate.key} ran on fallback model {candidate.model} '
+                         f'({candidate.model_label}) instead of {candidate.fallback_for}')
+            return output, candidate
+        if failed is not None and not models.agent.fallback_models:
+            raise failed  # an agent without fallback models: as before #121
+        raise ModelsUnavailable(models.agent.key, models.tried, getattr(failed, 'log', None))
+
     def _write_turn(self, agent, prompt, schema, path, label):
-        """Run a writing agent, then the tests; retry with the failures. Returns the output and
-        ``None`` on success, or the output and a reason to escalate."""
+        """Run a writing agent, then the tests; retry with the failures. Returns the output,
+        ``None`` on success or a reason to escalate, and the agent configuration of the last
+        turn (``_turn``). A model found unavailable is not tried again in later attempts."""
+        models = Models(agent)
         for attempt in range(1 + self.cfg.implement_test_retries):
-            result = self.runner.run(agent, 'write', prompt, schema, path, f'{label}-{attempt + 1}')
+            result, used = self._turn(models, 'write', prompt, schema, path,
+                                      f'{label}-{attempt + 1}')
             if result['status'] == 'blocked':
-                return result, None
+                return result, None, used
             if not self.ws.has_changes(path) and schema == 'implement':
-                return result, ('Implementazione senza modifiche ai file.', '')
+                return result, ('Implementazione senza modifiche ai file.', ''), used
             passed, tail = self.ws.run_tests(path, self.cfg.test_cmd, self.cfg.test_timeout_seconds)
             if passed:
-                return result, None
+                return result, None, used
             prompt += ('\n\n## Test failures after your previous attempt\n\nThe test command failed. '
                        f'Fix the cause, then finish again.\n\n```text\n{tail}\n```\n')
-        return result, ('I test locali falliscono anche dopo i tentativi di correzione.', tail)
+        return result, ('I test locali falliscono anche dopo i tentativi di correzione.', tail), used
 
     def _commit_message(self, agent, message, issue):
         message = message.strip() + f'\n\nRefs #{issue}\n'
@@ -909,10 +979,26 @@ class Dispatcher:
                         select=lambda level: self._select(pr, level)[0],
                         profile=lambda key: self._profile(key, 'review'))
 
-    def _profile(self, key, mode):
+    def _profile(self, key, mode, used=None):
         """The identity and tuple agent ``key`` acts with now in ``mode`` (``write`` or
-        ``review``), as markers record them."""
-        return agent_profile(self.cfg.agent(key), self._app_login(key), mode)
+        ``review``), as markers record them. ``used``: the configuration a turn actually ran
+        with, on a fallback model (#121), instead of the configured one."""
+        return agent_profile(used or self.cfg.agent(key), self._app_login(key), mode)
+
+    def _authors(self, pr):
+        """The profiles of who wrote code on the PR, or may write it next, or None when a
+        marker does not record who wrote the code: the implementer, every fixer and every
+        agent that resolved conflicts in a sync, as their markers record them, and the agent
+        configured now under the implementer's key, which runs fixes and syncs, with each of
+        its models (#121)."""
+        authors = [profile_of(pr.meta), *map(profile_of, pr.fixes + pr.syncs)]
+        if None in authors:
+            return None
+        implementer = pr.meta['implementer']
+        if implementer in self.cfg.agents:
+            authors += [self._profile(implementer, 'write', used)
+                        for used in self.cfg.agent(implementer).chain()]
+        return authors
 
     def _select(self, pr, level):
         """``(reviewers, problem)``: the reviewers ``level`` requires on the PR, in order, or
@@ -923,7 +1009,7 @@ class Dispatcher:
         configuration order, that is distinct and independent of everyone who wrote code on
         the PR: the implementer, every fixer and every agent that resolved conflicts in a sync,
         as their markers record them, and the agent configured now under the implementer's
-        key, which runs fixes and syncs. When a marker does not record who wrote the code,
+        key, which runs fixes and syncs, with each of its models (#121). When a marker does not record who wrote the code,
         independence cannot be verified."""
         cfg, implementer = self.cfg, pr.meta['implementer']
         if level == 1:
@@ -932,13 +1018,11 @@ class Dispatcher:
                     return [key], ''
             return [], (f'nessun reviewer configurato è diverso dall\'implementer della PR '
                         f'(`{implementer}`)')
-        authors = [profile_of(pr.meta), *map(profile_of, pr.fixes + pr.syncs)]
-        if None in authors:
+        authors = self._authors(pr)
+        if authors is None:
             return [], ('non è verificabile che i reviewer siano indipendenti da chi ha scritto '
                         'il codice: la PR, una sua correzione o una risoluzione di conflitti '
                         'non registra identità e tupla dell\'agent (marker precedenti a #111)')
-        if implementer in cfg.agents:
-            authors.append(self._profile(implementer, 'write'))
         candidates = [(key, self._profile(key, 'review')) for key in cfg.pool()
                       if key in cfg.agents and key != implementer]
         candidates = [(key, p) for key, p in candidates if all(independent(p, a) for a in authors)]
@@ -1131,9 +1215,10 @@ class Dispatcher:
                            issue_number=number, issue_title=issue['title'],
                            issue_body=issue.get('body') or '', issue_comments=comments,
                            test_cmd=cfg.test_cmd, language=cfg.language)
-        result, failure = self._write_turn(agent, prompt, 'implement', path, f'issue-{number}-implement')
+        result, failure, used = self._write_turn(agent, prompt, 'implement', path,
+                                                 f'issue-{number}-implement')
         if result['status'] == 'blocked':
-            return self._blocked(number, agent, result['blocked_reason'], remove=[lb.working],
+            return self._blocked(number, used, result['blocked_reason'], remove=[lb.working],
                                  on_pr=False)
         if failure:
             return self._escalate(number, failure[0], failure[1], remove=[lb.working])
@@ -1145,8 +1230,8 @@ class Dispatcher:
             return self._escalate_protected(number, protected, remove=[lb.working])
         self.ws.push(path, branch, replace=True, auth=auth)
         meta = {'issue': number, 'implementer': agent.key, 'reviewer': cfg.reviewer,
-                'profile': self._profile(agent.key, 'write')}
-        body = publishable(self.runner.header(agent) + '\n' + result['pr_body'].strip()
+                'profile': self._profile(agent.key, 'write', used)}
+        body = publishable(self.runner.header(used) + '\n' + result['pr_body'].strip()
                            + f'\n\nCloses #{number}', 'pr', meta)
         pr_number, url = self._as(agent.key, IMPLEMENT).create_pr(
             base=cfg.base_branch, head=branch, title=result['pr_title'], body=body)
@@ -1230,11 +1315,23 @@ class Dispatcher:
                            previous=format_previous_rounds(earlier, pr.fixes, pr.closures),
                            operator_comments=format_operator_comments(comments),
                            language=cfg.language)
+        allowed = None
+        if receipt['level'] > 1:
+            # A fallback model must keep the independence the pair was selected for: of who
+            # wrote the code, and of the round's other reviewers as their records show them.
+            authors = self._authors(pr) or []
+            peers = [p for p in map(profile_of, done) if p]
+
+            def allowed(candidate):
+                p = self._profile(agent.key, 'review', candidate)
+                return (all(independent(p, a) for a in authors)
+                        and all(distinct(p, q) for q in peers))
         # The reviewer works in a disposable copy, where its tests may write; the PR worktree
         # must come out of the review untouched, or the verdict is discarded.
         copy_name, copy = self.ws.review_copy(path)
         try:
-            raw = self.runner.run(agent, 'review', prompt, 'review', copy, f'pr-{pr.number}-review')
+            raw, used = self._turn(Models(agent), 'review', prompt, 'review', copy,
+                                   f'pr-{pr.number}-review', allowed)
         finally:
             self.ws.remove(copy_name)
         if not self.ws.pristine(path, pr.head_sha):
@@ -1249,15 +1346,15 @@ class Dispatcher:
                                   max_rounds=cfg.max_review_rounds, head_sha=pr.head_sha,
                                   ci=pr.checks, reviewer=agent.key)
         review['receipt'] = receipt
-        review['profile'] = self._profile(agent.key, 'review')
+        review['profile'] = self._profile(agent.key, 'review', used)
         reviewer_gh = self._as(agent.key, REVIEW)
-        reviewer_gh.comment(pr.number, render_review(review, self.runner.header(agent)))
+        reviewer_gh.comment(pr.number, render_review(review, self.runner.header(used)))
         if self._app_login(agent.key):
             # A native review under the reviewer's own identity, visible to branch protection.
             # The marker comment above stays the record devloop reads.
             try:
                 reviewer_gh.submit_review(pr.number, commit=pr.head_sha,
-                                          **render_native_review(review, self.runner.header(agent)))
+                                          **render_native_review(review, self.runner.header(used)))
             except GitHubError as exc:
                 self.log(f'  native review not submitted: {exc}')
         records = done + [review]
@@ -1296,10 +1393,10 @@ class Dispatcher:
                            issue_title=issue['title'], issue_body=issue.get('body') or '',
                            findings=_format_findings(findings), test_cmd=cfg.test_cmd,
                            language=cfg.language)
-        result, failure = self._write_turn(agent, prompt, 'fix', path,
-                                           f'pr-{pr.number}-fix-r{latest["round"]}')
+        result, failure, used = self._write_turn(agent, prompt, 'fix', path,
+                                                 f'pr-{pr.number}-fix-r{latest["round"]}')
         if result['status'] == 'blocked':
-            return self._blocked(pr.number, agent, result['blocked_reason'], remove=[lb.changes],
+            return self._blocked(pr.number, used, result['blocked_reason'], remove=[lb.changes],
                                  on_pr=True)
         if failure:
             return self._escalate(pr.number, failure[0], failure[1], remove=[lb.changes])
@@ -1311,9 +1408,10 @@ class Dispatcher:
             if protected:
                 return self._escalate_protected(pr.number, protected, remove=[lb.changes])
             self.ws.push(path, pr.head_ref, auth=auth)
-        fix = dict(result, head_sha=self.ws.head(path), profile=self._profile(agent.key, 'write'))
+        fix = dict(result, head_sha=self.ws.head(path),
+                   profile=self._profile(agent.key, 'write', used))
         self._as(agent.key, PR_COMMENT).comment(
-            pr.number, render_fix(fix, self.runner.header(agent), latest['round']))
+            pr.number, render_fix(fix, self.runner.header(used), latest['round']))
         self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.changes])
         self.ws.remove(name)
 
@@ -1357,12 +1455,13 @@ class Dispatcher:
                                base_branch=cfg.base_branch, conflicts=listed,
                                test_cmd=cfg.test_cmd, language=cfg.language)
             try:
-                result, failure = self._write_turn(agent, prompt, 'sync', path,
-                                                   f'pr-{pr.number}-sync')
+                result, failure, used = self._write_turn(agent, prompt, 'sync', path,
+                                                         f'pr-{pr.number}-sync')
             except AgentError as exc:
-                return fail(f'Il passo `sync` è fallito: {exc}.{self._log_hint(exc)}')
+                return fail(f'Il passo `sync` è fallito: {_failure_text(exc)}'
+                            f'{self._log_hint(exc)}')
             if result['status'] == 'blocked':
-                return self._blocked(pr.number, agent, result['blocked_reason'].strip()
+                return self._blocked(pr.number, used, result['blocked_reason'].strip()
                                      + f'\n\nFile in conflitto con `{cfg.base_branch}`:\n\n'
                                      + listed, remove=remove, on_pr=True)
             if failure:
@@ -1395,9 +1494,9 @@ class Dispatcher:
             # Who resolved the conflicts wrote code on the PR: the marker keeps its profile,
             # so a later change of configuration cannot make it a reviewer of its own code.
             self._as(agent.key, PR_COMMENT).comment(
-                pr.number, publishable(self.runner.header(agent) + text, 'sync',
+                pr.number, publishable(self.runner.header(used) + text, 'sync',
                                        {'head_sha': head,
-                                        'profile': self._profile(agent.key, 'write')}))
+                                        'profile': self._profile(agent.key, 'write', used)}))
         else:
             self.gh.comment(pr.number, publishable(dispatcher_header() + text
                                                    + 'Il merge locale non aveva conflitti.'))
@@ -1423,6 +1522,13 @@ def _render_issue_comments(comments, trusted_users):
                            for c in comments
                            if (c.get('author') or {}).get('login') in trusted_users)
     return ('## Issue comments\n\n' + rendered) if rendered else ''
+
+
+def _failure_text(exc):
+    """``exc`` as the end of a sentence: a one-line message gets its full stop, one that ends
+    with a list (``ModelsUnavailable``) a blank line."""
+    text = str(exc).rstrip()
+    return text + ('\n\n' if '\n' in text else '.')
 
 
 def _format_conflicts(conflicts):

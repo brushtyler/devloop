@@ -430,7 +430,8 @@ class ConfigTests(unittest.TestCase):
     def test_the_policy_version_covers_the_reviewers(self):
         version = CFG.review_policy.version()
         agents_table = DATA['agents']
-        for change in ({'model': 'other'}, {'effort': 'low'}, {'review_args': ['--x']}):
+        # agy's fallback inherits its effort, which may not go below high (#121).
+        for change in ({'model': 'other'}, {'effort': 'xhigh'}, {'review_args': ['--x']}):
             with self.subTest(change=change):
                 data = dict(DATA, agents=dict(agents_table, agy=dict(agents_table['agy'],
                                                                      **change)))
