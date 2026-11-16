@@ -21,7 +21,8 @@ there or replaced since: while so its labels, closure and trusted comments are r
 title. Labels, heads, CI and closures of trusted objects are reported whoever changed them;
 comments and reviews only when their author is trusted or one of devloop's apps. A trusted comment
 on an issue or PR outside the open listings (closed before the baseline) is reported too: its
-author is read once.
+author is read once; on an external issue the latest ``agent:ready`` is read again in each round
+with a new trusted comment on it, since the admission can change while the issue stays closed.
 
 Rounds compare states, so a change undone between two reads (a label added and removed) is not
 seen. Comments and reviews have persistent ids: each one still there is seen.
@@ -55,7 +56,9 @@ from .dispatcher import label_names, ready_approval
 from .github import GitHubError, GitHubNotFound, author_login
 from .markdown import read_marker
 
-STATE_VERSION = 2
+STATE_VERSION = 3
+# In the state's ``closed``: an issue of an untrusted author, whose admission is read again.
+EXTERNAL = 'external'
 STATE_FILE = 'watch-state.json'
 NOTHING_NEW = 3  # exit code of --until-change at --timeout
 EXPIRED = object()  # a round that ended after the timeout
@@ -196,7 +199,7 @@ def valid_state(state):
         return False
     if not (all(_valid_entry('prs', entry) for entry in prs.values())
             and all(_valid_entry('issues', entry) for entry in issues.values())
-            and all(kind in ('PR', 'issue', None) for kind in closed.values())):
+            and all(kind in ('PR', 'issue', EXTERNAL, None) for kind in closed.values())):
         return False
     seen, since = comments.get('seen'), comments.get('since')
     if not (_is_int(comments.get('floor')) and isinstance(seen, list)
@@ -494,12 +497,14 @@ class Watcher:
                 continue
             title = f': {prev["title"]}' if prev.get('title') else ''
             lines.append(f'{kind} #{number} {outcome or "no longer open"}{title}')
-            closed[number] = kind
+            # An admitted external issue keeps its admission open to a later agent:ready.
+            closed[number] = kind if prev.get('trusted') else EXTERNAL
         return lines
 
     def _comment_lines(self, previous, comments, old, prs, issues, closed):
         floor = previous['floor']
         seen = set(previous['seen'])
+        approvals = {}  # admissions of closed external issues read in this round
         lines = []
         for comment in comments:
             cid = comment['id']
@@ -510,7 +515,7 @@ class Watcher:
             if not self.trust.trusted(login):
                 continue
             number = str(comment['number'])
-            kind = self._object_kind(number, old, prs, issues, closed)
+            kind = self._object_kind(number, old, prs, issues, closed, approvals)
             if kind is None:
                 continue  # an untrusted author's issue or PR, not admitted
             line = self._comment_line(kind, number, login, comment.get('body') or '')
@@ -522,22 +527,29 @@ class Watcher:
             kept = kept[-MAX_COMMENT_IDS:]
         return lines, {'floor': floor, 'seen': kept}
 
-    def _object_kind(self, number, old, prs, issues, closed):
-        """``PR`` or ``issue`` for a visible issue or PR, None otherwise. One outside the open
-        listings and the state (closed before the baseline, beyond the listing's limit) is read
-        once and remembered in ``closed``."""
+    def _object_kind(self, number, old, prs, issues, closed, approvals):
+        """``PR`` or ``issue`` for a visible issue or PR, None otherwise. For one outside the
+        open listings and the state (closed before the baseline, beyond the listing's limit)
+        type and author are read once and remembered in ``closed``; the admission of an
+        external issue is not, since a later ``agent:ready`` can grant or end it: it is read
+        again, once per round (``approvals``)."""
         for kind, current, before in (('PR', prs, old['prs']), ('issue', issues, old['issues'])):
             entry = current.get(number) or before.get(number)
             if entry is not None:
                 return kind if _visible(entry) else None
         if number not in closed:
             closed[number] = self._resolve(number)
-        return closed[number]
+        kind = closed[number]
+        if kind != EXTERNAL:
+            return kind
+        if number not in approvals:
+            approvals[number] = bool(self._approved(number))
+        return 'issue' if approvals[number] else None
 
     def _resolve(self, number):
-        """``PR`` or ``issue`` when issue or PR ``number`` is visible: a trusted author, or an
-        issue admitted by its latest ``agent:ready``. None otherwise, or when it does not
-        exist."""
+        """``PR`` or ``issue`` for issue or PR ``number`` of a trusted author, ``EXTERNAL`` for
+        an issue of an untrusted author (its admission is read apart), None for an untrusted
+        author's PR or when it does not exist."""
         try:
             read = self.gh.issue_author(int(number))
         except GitHubNotFound:
@@ -545,7 +557,7 @@ class Watcher:
         kind = 'PR' if read.get('pull_request') else 'issue'
         if self.trust.trusted(read.get('login')):
             return kind
-        return kind if kind == 'issue' and self._approved(number) else None
+        return EXTERNAL if kind == 'issue' else None
 
     def _comment_line(self, kind, number, login, body):
         if read_marker(body, 'ledger') is not None or first_line(body).startswith(LEDGER_TITLE):

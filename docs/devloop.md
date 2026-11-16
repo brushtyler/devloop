@@ -850,7 +850,9 @@ else ends the admission. The labeled events of an external issue are read when i
 and whenever its labels change. Labels, heads, CI and closures of a trusted issue or PR are
 reported whoever changed them; comments and reviews only when their author is trusted or a
 devloop app. A trusted comment on an issue or PR outside the open listings (closed before the
-baseline, say) is reported too: the watcher reads its author once and remembers it.
+baseline, say) is reported too: the watcher reads its author once and remembers it. On such an
+external issue the admission can change while it stays closed, so the watcher reads its latest
+`agent:ready` again in every round with a new trusted comment on it.
 
 Two modes:
 
@@ -897,7 +899,8 @@ transferred) gives `no longer open`.
 The watcher reads with the local `gh` login and needs no app key. Each round reads the open PRs
 and issues (`gh pr list`, up to 200, and `gh issue list`, up to 300), the comments since the
 previous round, for each trusted open PR its checks and native reviews, and the labeled events
-of an external issue whose labels changed.
+of an external issue whose labels changed or, outside the open listings, with a new trusted
+comment.
 
 ### Evidence and telemetry
 

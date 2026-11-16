@@ -365,6 +365,32 @@ class ChangesTest(unittest.TestCase):
         self.assertEqual(gh.calls.count('issue_author'), 5)
         self.assertNotIn(SECRET, self.h.path.read_text())
 
+    def test_the_admission_of_a_closed_external_issue_is_read_again(self):
+        # Every news() starts a new watcher on the saved state: each step follows a restart.
+        gh = self.h.gh
+        gh.authors[41] = (STRANGER, False)  # an external issue, closed before the baseline
+        gh.comment(811, 41, OPERATOR, 'not yet')
+        self.assertEqual(self.news(), [])
+        self.assertEqual(json.loads(self.h.path.read_text())['closed']['41'], watch.EXTERNAL)
+        # The operator admits it later: its new trusted comments are reported.
+        gh.events[41] = [{'label': 'agent:ready', 'by': OPERATOR, 'at': '2026-11-16T10:10:00Z'}]
+        gh.comment(812, 41, OPERATOR, 'admitted now')
+        gh.comment(813, 41, CLAUDE, 'on it')
+        calls = gh.calls.count('labeled_events')
+        self.assertEqual(self.news(), ['issue #41 operator comment by brushtyler: admitted now',
+                                       'issue #41 comment by dl-claude[bot]: on it'])
+        self.assertEqual(gh.calls.count('labeled_events'), calls + 1)  # once per round
+        # A later agent:ready by someone not in trusted_users ends the admission.
+        gh.events[41].append({'label': 'agent:ready', 'by': CLAUDE,
+                              'at': '2026-11-16T10:20:00Z'})
+        gh.comment(814, 41, OPERATOR, 'hidden now')
+        self.assertEqual(self.news(), [])
+        self.assertEqual(gh.calls.count('issue_author'), 1)  # type and author read once
+        # Without new comments on it, its events are not read.
+        calls = gh.calls.count('labeled_events')
+        self.assertEqual(self.news(), [])
+        self.assertEqual(gh.calls.count('labeled_events'), calls)
+
     def test_an_issue_beyond_the_listing_limit_is_not_reported_closed(self):
         gh = self.h.gh
         del gh.issues[5]
@@ -508,6 +534,33 @@ class UntrustedTest(unittest.TestCase):
         self.assertEqual(h.run(timeout=1)[0], 3)
         self.assertEqual(h.out, [])
         self.assertFalse(json.loads(h.path.read_text())['issues']['30']['admitted'])
+
+    def test_an_admitted_issue_closed_since_keeps_its_admission_open(self):
+        h = Harness(self)
+        gh = h.gh
+        gh.add_issue(30, author=STRANGER, title=SECRET, labels=('agent:ready',))
+        gh.events[30] = [{'label': 'agent:ready', 'by': OPERATOR, 'at': '2026-11-16T09:00:00Z'}]
+        h.run(timeout=1)
+        h.out.clear()
+        del gh.issues[30]
+        gh.states[30] = {'state': 'CLOSED', 'stateReason': 'COMPLETED'}
+        self.assertEqual(h.run(timeout=1)[0], 0)
+        self.assertEqual(h.lines(), ['issue #30 closed (completed)'])
+        h.out.clear()
+        self.assertEqual(h.run(timeout=1)[0], 3)  # it leaves the state's open issues
+        self.assertEqual(json.loads(h.path.read_text())['closed']['30'], watch.EXTERNAL)
+        gh.comment(911, 30, OPERATOR, 'thanks')
+        self.assertEqual(h.run(timeout=1)[0], 0)
+        self.assertEqual(h.lines(), ['issue #30 operator comment by brushtyler: thanks'])
+        h.out.clear()
+        # After a restart, a later agent:ready by someone else ends the admission.
+        gh.events[30].append({'label': 'agent:ready', 'by': CLAUDE,
+                              'at': '2026-11-16T10:30:00Z'})
+        gh.comment(912, 30, OPERATOR, 'hidden now')
+        self.assertEqual(h.run(timeout=1)[0], 3)
+        self.assertEqual(h.out, [])
+        self.assertNotIn('issue_author', gh.calls)
+        self.assertNotIn(SECRET, h.path.read_text())
 
     def test_admission_events_are_read_only_when_the_labels_change(self):
         h = Harness(self)
