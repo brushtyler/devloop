@@ -17,7 +17,7 @@ plans the next steps and runs them. A crashed tick is resumed by the next one.
 | Review | CI passed or absent | The dispatcher computes the PR's [review level](#review-level-and-policy-receipt); at level 1 a **different** agent posts a structured verdict (see below), at level 2 two [independent reviewers](#level-2-two-independent-reviewers) do, one per action, and their verdicts are applied together |
 | Fix | `agent:changes` | The implementer fixes or disputes every open finding of the round, then back to `agent:review` |
 | Sync | A PR in `agent:review` or `agent:ready-to-merge` conflicts with `main` | The implementer resolves the conflicts of a merge of `origin/main`; the dispatcher pushes the merge commit, back to `agent:review` (see below) |
-| Approve | Verdict `approve` from every reviewer the level requires | `agent:ready-to-merge`, only if no [finding](#findings-and-who-closes-them) is still open, the PR head is still the reviewed commit, CI passed and the policy receipt recomputed just before promotion matches the one of every approval |
+| Approve | Verdict `approve` from every reviewer the level requires | `agent:ready-to-merge`, only if no [finding](#findings-and-who-closes-them) is still open, the PR head is still the reviewed commit, CI passed and the policy receipt recomputed just before promotion matches the one of every approval (an earlier base is admitted only if `main` left the PR's files alone since, see [When `main` advances](#when-main-advances-during-a-round)) |
 | Level 0 | A trusted user's `reviews:0`, the whole diff in the operator's allowlist, every expected check `success` | `agent:ready-to-merge` without a review (see [Level 0](#level-0-no-review)); off by default |
 | Merge | `agent:ready-to-merge` | **A human merges.** devloop never merges |
 
@@ -79,7 +79,11 @@ level requires (one at level 1, two at level 2), whatever the number of reviewer
 limit (`max_review_rounds`) is checked before every new round, whether a review or a CI failure,
 so a PR whose head keeps moving cannot be reviewed indefinitely. Replaying a verdict that is
 already recorded is not a new round, and neither is a sync with `main` nor the second review of
-a round already open.
+a round already open. A round that `main` advancing interrupted before it was complete does not
+count either (see [When `main` advances](#when-main-advances-during-a-round)): the round that
+replaces it counts once. Round numbers stay progressive, because they also name the findings
+(`round/reviewer/ID`), so the round shown as the limit (`round 4 of at most 4`, `round 4/4`) is
+`max_review_rounds` plus the rounds that did not count.
 
 ### Resuming after a `needs_human` verdict without code changes
 
@@ -257,7 +261,46 @@ A round at level 2 works as follows:
   a reviewer works, its verdict is discarded without being published, and the new head is
   reviewed in a new round by both reviewers. A round whose head moved, whose receipt changed,
   that a fix answered or that a `/devloop rereview` request voided is closed: the next review
-  opens a new round.
+  opens a new round. A receipt that changed only in the commit of base is the exception below.
+
+### When `main` advances during a round
+
+An approval holds only for the base it was given on (#106). When `main` advances while a round
+waits for its second reviewer, and the head, the policy version, the level, the reviewers and
+their profiles are unchanged, the dispatcher checks whether the new commits of `main` interfere
+with the PR (#160):
+
+- it lists the paths changed by **every** commit of `main` after the round's base, up to the
+  current one, each commit on its own: a change later reverted still counts, a rename counts
+  with both paths, a merge is compared with its first parent. The net diff between the two bases
+  is not used;
+- `main` interferes when one of those paths is a file of the PR's diff (added, changed, deleted
+  or renamed, both sides), a directory above one, or a path under one (a file replaced by a
+  directory, or the reverse);
+- when the commits cannot be listed (the old base is not an ancestor of the new one, because
+  `main` was rewritten, or a commit is missing), non-interference is not proven.
+
+If `main` did not interfere, the round **continues**: only the missing reviewer reviews, with the
+receipt of the new base, and the verdicts already given stay valid for the round. Its review
+record also carries `bases`, the check from each earlier base of the round to the new one
+(`from`, `to`, `outcome`). A PR in conflict with the new base is synced first, as usual, and the
+sync changes the head.
+
+Otherwise the round **restarts**, as before #160: every reviewer reviews again on the new base.
+The first review of the new round records `restarts`, the round it replaces and the failed
+check. That replaced round does not count against `max_review_rounds`; the new one does. The
+exception covers only an incomplete round abandoned for the base alone: CI rounds, rounds
+restarted for a new head, a change of policy, level or reviewers, or a `/devloop rereview` keep
+counting. For example, with `max_review_rounds = 3`: round 1 is completed; round 2 is abandoned
+for the base and does not count; round 3 replaces it and counts as the second; one more round,
+number 4, is left.
+
+Promotion recomputes the receipt on the current base, as for any approval. An approval given on
+an earlier base, also when `main` advanced during the last review of a round already complete,
+is admitted only if the same check passes from its base to the current one. The original review
+records stay as they are, and the promotion's `policy` record carries `bases` with the checks
+it relied on. If `main` interfered, or non-interference is not proven, the approval is not
+promoted (a `stale` record lists the checks) and a new round follows, which counts.
 
 ### Level 0: no review
 
@@ -340,7 +383,10 @@ Promotions and escalations for a pool without enough independent reviewers are d
 comments with a `policy` marker, read only from the dispatcher's identity. Before promoting a
 round the dispatcher recomputes the receipt. The approvals count only if each required reviewer
 approved and the commit of base, the policy version, the level, the required reviewers and their
-profiles (and the head) all match: when the base branch advanced, the policy or the
+profiles (and the head) all match. A different commit of base is admitted only when the commits
+of `main` in between left the PR's files alone (see
+[When `main` advances](#when-main-advances-during-a-round)). When the base branch advanced
+onto the PR's files, the policy or the
 configuration of the pool or of a required reviewer (apps, models, efforts, `review_args`)
 changed, or the level rose, the PR stays in
 `agent:review`, a dispatcher comment says what changed, and the next tick runs a new review,
