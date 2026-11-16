@@ -213,13 +213,14 @@ def _unavailable(table, where):
 def _command(value, where):
     """``value`` as a token-prefix command (its tokens joined by one space), or ConfigError when
     it is empty, contains shell, quoting or pattern syntax, or is a bare interpreter, shell or
-    git, which would allow any command."""
+    git, which would allow any command. An executable given by path (``/usr/bin/python3``,
+    ``venv/bin/python``) is judged by its name."""
     if any(c in UNSAFE_COMMAND_CHARS for c in value):
         raise ConfigError(f'{where}: {value!r} is not a plain command prefix')
     tokens = value.split()
     if not tokens:
         raise ConfigError(f'{where}: empty command')
-    if len(tokens) == 1 and BARE_COMMANDS.fullmatch(tokens[0]):
+    if len(tokens) == 1 and BARE_COMMANDS.fullmatch(tokens[0].rsplit('/', 1)[-1]):
         raise ConfigError(f'{where}: {value!r} alone would allow any command')
     return ' '.join(tokens)
 
@@ -440,7 +441,8 @@ def parse_config(data, root=INSTALL_ROOT):
             data.get('review_policy', {}), root,
             [(k, apps[k].slug if k in apps else None, agents[k].kind, agents[k].model,
               agents[k].effort, agents[k].review_args,
-              tuple((f.model, f.effort) for f in agents[k].fallback_models)) for k in pool]),
+              tuple((f.model, f.effort) for f in agents[k].fallback_models),
+              agents[k].review_commands) for k in pool]),
         **ints)
 
 

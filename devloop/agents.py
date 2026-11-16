@@ -138,12 +138,14 @@ NO_OUTPUT = 'jetski: no output produced'
 def no_output_reason(kind, stdout, stderr):
     """Why an agy turn stopped without output, or None (issue #122): in headless mode a denied
     permission ends the session with exit 0, no output and ``jetski: no output produced …`` on
-    stderr."""
+    stderr. The message counts only as a diagnostic of the CLI: anywhere on stderr, and on stdout
+    only as a line of its own, so that a structured answer quoting it is not taken for it."""
     if kind != 'agy':
         return None
-    for line in f'{stderr}\n{stdout}'.splitlines():
-        if NO_OUTPUT in line:
-            return line.strip()[:500]
+    lines = [line for line in (stderr or '').splitlines() if NO_OUTPUT in line]
+    lines += [line for line in (stdout or '').splitlines() if line.strip().startswith(NO_OUTPUT)]
+    if lines:
+        return lines[0].strip()[:500]
     if not (stdout or '').strip():
         return 'no output'
     return None

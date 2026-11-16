@@ -130,8 +130,9 @@ fallback_models = [
 # Headless agy cannot ask for a permission (issue #122): each turn gets, with --settings, only
 # `command(<prefix>)` rules for these command prefixes. Default for both lists: test_cmd,
 # "python3 -m unittest", "git status", "git diff", "git log", "git show". A bare interpreter,
-# shell or git, wildcards and shell syntax stop devloop at startup, and so do
-# --dangerously-skip-permissions and --settings in write_args or review_args.
+# shell or git (also by path, as /bin/sh), wildcards and shell syntax stop devloop at startup,
+# and so do --dangerously-skip-permissions and --settings in write_args or review_args.
+# Changing review_commands voids agy's earlier approvals, as a change of model would.
 # review_commands = ["python3 scripts/run-tests.py", "python3 -m unittest", "git diff"]
 # write_commands = [...]
 

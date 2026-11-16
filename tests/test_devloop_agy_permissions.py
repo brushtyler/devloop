@@ -8,9 +8,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from devloop import agents, config, schema
-from devloop.dispatcher import Action, Dispatcher, Snapshot
-from test_devloop import CFG, FakeGH, FakeWS, pr
+from devloop import agents, config, markdown, policy, schema
+from devloop.dispatcher import Action, Dispatcher, Snapshot, plan
+from test_devloop import CFG, FakeGH, FakeRunner, FakeWS, norm, pr, raw_review
 from test_devloop_fallback import ARGON, DATA, HYDROGEN, FakeCLI, with_agent
 
 JETSKI = ('jetski: no output produced — a tool required the "command" permission that headless '
@@ -97,9 +97,20 @@ class AgyConfigTests(unittest.TestCase):
             for key in ('review_commands', 'write_commands'):
                 with self.subTest(key=key, value=value), self.assertRaises(config.ConfigError):
                     config.parse_config(with_agent('agy', **{key: [value]}))
-        for test_cmd in ('python3', 'bash', 'make test && make lint', 'pytest -k "x"'):
+        # An interpreter, shell or git given by path is still bare.
+        for value in ('/usr/bin/python3', '/bin/sh', '/bin/bash', '/usr/bin/env', '/usr/bin/git',
+                      './python3', 'venv/bin/python', '.venv/bin/python3.12'):
+            for key in ('review_commands', 'write_commands'):
+                with self.subTest(key=key, value=value), self.assertRaises(config.ConfigError):
+                    config.parse_config(with_agent('agy', **{key: [value]}))
+        for test_cmd in ('python3', 'bash', 'make test && make lint', 'pytest -k "x"',
+                         '/usr/bin/python3', '/bin/sh', 'venv/bin/python'):
             with self.subTest(test_cmd=test_cmd), self.assertRaises(config.ConfigError):
                 config.parse_config(dict(DATA, test_cmd=test_cmd))
+        # A path with arguments is a prefix like any other.
+        cfg = config.parse_config(dict(DATA, test_cmd='/usr/bin/python3 scripts/run-tests.py'))
+        self.assertEqual(cfg.agent('agy').review_commands[0],
+                         '/usr/bin/python3 scripts/run-tests.py')
         # An explicit list does not need a usable test_cmd.
         config.parse_config(dict(with_agent('agy', review_commands=['git diff'],
                                             write_commands=['git diff']),
@@ -114,6 +125,65 @@ class AgyConfigTests(unittest.TestCase):
         for key in ('claude', 'codex'):
             with self.subTest(key), self.assertRaises(config.ConfigError):
                 config.parse_config(with_agent(key, review_commands=['git diff']))
+
+
+def with_pool(*keys, **agy):
+    """The default configuration with the reviewer pool ``keys`` and ``[agents.agy]`` updated."""
+    data = with_agent('agy', **agy)
+    return config.parse_config(dict(data, roles=dict(data['roles'], reviewers=list(keys))))
+
+
+class ApprovalBindingTests(unittest.TestCase):
+    """The review commands of agy bind its approvals like its model and arguments (#122)."""
+
+    def test_commands_enter_the_profile_and_the_policy_version(self):
+        before, after = with_pool('agy'), with_pool('agy', review_commands=['git diff'])
+        self.assertNotEqual(before.review_policy.version(), after.review_policy.version())
+        profile = policy.agent_profile(before.agent('agy'), None, 'review')
+        self.assertEqual(profile['commands'], list(before.agent('agy').review_commands))
+        self.assertTrue(policy.valid_profile(profile))
+        self.assertNotEqual(policy.agent_profile(after.agent('agy'), None, 'review'), profile)
+        self.assertEqual(policy.agent_profile(before.agent('agy'), None, 'write')['commands'],
+                         list(before.agent('agy').write_commands))
+        # The other agents, and a pool without agy commands, keep their profile and version.
+        self.assertNotIn('commands', policy.agent_profile(CFG.agent('codex'), None, 'review'))
+        row = ('agy', None, 'agy', ARGON, 'high', ())
+        self.assertEqual(policy.ReviewPolicy(reviewers=(row + ((), ()),)).version(),
+                         policy.ReviewPolicy(reviewers=(row,)).version())
+        self.assertNotEqual(policy.ReviewPolicy(reviewers=(row + ((), ('git diff',)),)).version(),
+                            policy.ReviewPolicy(reviewers=(row + ((('m', 'high'),),),)).version())
+
+    def test_changed_commands_void_an_approval(self):
+        # agy in the pool, and agy outside it as the PR's recorded reviewer: in both cases only
+        # its review commands change.
+        for pool in (('agy',), ('codex',)):
+            before, after = with_pool(*pool), with_pool(*pool, review_commands=['git diff'])
+            for cfg, stale in ((before, False), (after, True)):
+                with self.subTest(pool=pool, stale=stale):
+                    p = pr()
+                    p.meta = dict(p.meta, reviewer='agy')
+                    approval = dict(norm(raw_review()), reviewer='agy')
+                    approval['receipt'] = Dispatcher(before, FakeGH(), FakeWS(), FakeRunner(),
+                                                     log=lambda _: None)._receipt(p)
+                    self.assertEqual(approval['receipt']['reviewers'], ['agy'])
+                    p.reviews = [approval]
+                    gh = FakeGH()
+                    gh.labels[100] = set(p.labels)
+                    self.assertEqual(plan(Snapshot([p], [], []), cfg), [
+                        Action('apply_review', 100, 'approval already recorded')])
+                    Dispatcher(cfg, gh, FakeWS(), FakeRunner(),
+                               log=lambda _: None)._do_apply_review(p)
+                    events = [r['event'] for r in (markdown.read_marker(body, 'policy')
+                                                   for _, body in gh.comments) if r]
+                    if stale:
+                        self.assertEqual(gh.labels[100], {'agent:review'})
+                        self.assertEqual(events, ['stale'])
+                    else:
+                        self.assertEqual(gh.labels[100], {'agent:ready-to-merge'})
+                        self.assertEqual(events, ['promoted'])
+            if pool == ('codex',):
+                # Outside the pool only the recorded profile binds the commands.
+                self.assertEqual(before.review_policy.version(), after.review_policy.version())
 
 
 class OperatorProfileTests(unittest.TestCase):
@@ -170,6 +240,22 @@ class NoOutputTests(unittest.TestCase):
     def test_other_clis_are_unchanged(self):
         self.assertIsNone(agents.no_output_reason('claude', '', JETSKI))
         self.assertIsNone(agents.no_output_reason('agy', '{"status": "SUCCESS"}', ''))
+
+    def test_a_valid_answer_quoting_the_message_is_kept(self):
+        answer = dict(raw_review(), summary=f'Gestito correttamente {agents.NO_OUTPUT}.',
+                      checks_performed=[JETSKI])
+        for out in (json.dumps({'status': 'SUCCESS', 'structured_output': answer}),
+                    json.dumps({'status': 'SUCCESS', 'structured_output': answer}, indent=2)):
+            with self.subTest(indent='\n' in out):
+                self.assertIsNone(agents.no_output_reason('agy', out, ''))
+                cli = FakeCLI(gemini_4_argon_high=(0, out, ''))
+                with tempfile.TemporaryDirectory() as tmp:
+                    result = agents.AgentRunner(tmp, 10, run=cli).run(
+                        CFG.agent('agy'), 'review', 'p', 'review', tmp, 'pr-1')
+                self.assertEqual(result['summary'], answer['summary'])
+        # The CLI's own diagnostic still counts, on stderr or on a line of its own.
+        self.assertEqual(agents.no_output_reason('agy', '', f'warn\n{JETSKI}\n'), JETSKI)
+        self.assertEqual(agents.no_output_reason('agy', f'  {JETSKI}\n', ''), JETSKI)
 
     def test_the_escalation_comment_gives_the_reason(self):
         cli = FakeCLI(gemini_4_argon_high=(0, '', JETSKI))

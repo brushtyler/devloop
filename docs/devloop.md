@@ -654,17 +654,24 @@ each agy turn its minimal permissions, and treats a stop without output as a fai
   `python3 -m unittest`, `git status`, `git diff`, `git log` and `git show`; write turns get no
   `git add` nor `git commit`, because the dispatcher commits.
 - **Never.** devloop refuses at startup a prefix that is a bare interpreter, shell or `git`
-  (`python3`, `bash`, `sh`, …), one with wildcards, quotes or shell syntax (`*`, `;`, `&&`, `|`,
+  (`python3`, `bash`, `sh`, …), also when given by path (`/usr/bin/python3`, `/bin/sh`,
+  `venv/bin/python`), one with wildcards, quotes or shell syntax (`*`, `;`, `&&`, `|`,
   `$`, …), and `--dangerously-skip-permissions` or `--settings` in `write_args` or `review_args`.
   A `test_cmd` that cannot be a prefix, such as `make test && lint`, needs explicit lists.
   The two lists are accepted only for agy agents.
+- **Bound to approvals.** The commands are part of the agent's profile that markers and
+  receipts record (`commands`, agy only), and the `review_commands` of the pool's reviewers
+  enter the policy version: changing them voids the approvals given with the old ones, also for
+  a recorded reviewer no longer in the pool.
 - **Files.** Reads and edits stay inside the turn's working directory, which agy enforces
   without rules; `read_file(...)` rules are not used, since they did not restrict reads in the
   tests on agy 1.5.9.
 - **No output is an error.** An agy turn that exits with no output, or with
   `jetski: no output produced`, fails with `<agent> stopped without output: <message>`, which
   goes to the turn's log and to the `agent:needs-human` comment. It is never an empty result;
-  with exit 0 it never counts as an unavailable model either.
+  with exit 0 it never counts as an unavailable model either. The message counts as the CLI's
+  diagnostic on stderr, or on stdout only as a line of its own: a structured answer that quotes
+  it is still a valid answer.
 
 ```toml
 [agents.agy]
