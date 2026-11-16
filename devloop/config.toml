@@ -10,6 +10,12 @@ state_dir = ".ssdlc/devloop"
 # The same tests as `python3 -m unittest discover -s tests`, split across parallel worker
 # processes (each runs several modules in turn, like the serial discover does in one process).
 test_cmd = "python3 scripts/run-tests.py"
+# Local tests after each writing turn: implement, fix, sync with conflicts (issue #169).
+# "full" runs test_cmd, "changed" only the test modules pertinent to the branch's diff against
+# the base (none when, say, only documentation changed), "none" nothing. The CI stays the gate:
+# without "full" a review needs the CI passed, and a head without CI gets test_cmd locally
+# before its review.
+local_tests = "changed"
 # Language of the text that agents write for GitHub.
 language = "Italian"
 
