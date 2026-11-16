@@ -624,7 +624,8 @@ class Dispatcher:
 
         A model whose turn fails as unavailable (``ModelUnavailable``) leaves ``models``, so the
         action never tries it again, and the next one runs with the same prompt and worktree,
-        plus a note about the partial work. Every other failure ends the turn as before. A model
+        plus a note about the partial work. Every other failure ends the turn as before, listing
+        the models tried or left out if any (``ModelsUnavailable`` with ``last_failed``). A model
         that ``allowed`` refuses leaves ``models`` without running. When none is left, an agent
         without fallback models fails as before #121; one with them fails listing the models
         tried and why (``ModelsUnavailable``)."""
@@ -645,6 +646,14 @@ class Dispatcher:
                 self.log(f'  {candidate.key}: model {candidate.model} unavailable: {exc.reason}')
                 failed = exc
                 continue
+            except AgentError as exc:
+                if not models.tried:
+                    raise
+                # Any other failure ends the turn as before, but after models were tried or left
+                # out the escalation lists them all, this one included.
+                models.tried.append((candidate.model, str(exc)))
+                raise ModelsUnavailable(models.agent.key, models.tried, exc.log,
+                                        last_failed=True) from exc
             models.left.insert(0, candidate)  # available: later attempts of the action use it
             if candidate.fallback_for:
                 self.log(f'  {candidate.key} ran on fallback model {candidate.model} '

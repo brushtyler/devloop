@@ -63,12 +63,15 @@ class ModelUnavailable(AgentError):
 
 
 class ModelsUnavailable(AgentError):
-    """Every model of an agent's chain was unavailable, or left out, in one action. ``tried``:
+    """Every model of an agent's chain was unavailable, or left out, in one action; or, with
+    ``last_failed``, the last model tried failed otherwise after the others had been. ``tried``:
     ``(model, why)`` pairs, in order."""
 
-    def __init__(self, key, tried, log=None):
+    def __init__(self, key, tried, log=None, last_failed=False):
         listed = '\n'.join(f'- `{model}`: {why}' for model, why in tried)
-        super().__init__(f'no model of `{key}` was available; models tried:\n\n{listed}', log)
+        headline = (f'the last model tried for `{key}` failed' if last_failed
+                    else f'no model of `{key}` was available')
+        super().__init__(f'{headline}; models tried:\n\n{listed}', log)
         self.tried = list(tried)
 
 
@@ -143,6 +146,16 @@ def extract_output(kind, stdout, out_file):
     return output
 
 
+def has_result(kind, stdout, out_file):
+    """Whether a failed invocation still left a structured final message, valid against the
+    schema or not. An explicit error envelope or a missing or unreadable output is no result."""
+    try:
+        extract_output(kind, stdout, out_file)
+    except (AgentError, json.JSONDecodeError):
+        return False
+    return True
+
+
 class AgentRunner:
     """``on_turn(agent, prompt_path)``, if given, is called when a turn starts. ``stall``
     (``stall.StallWatch``), if given, checks each turn for stalls while it runs."""
@@ -207,6 +220,10 @@ class AgentRunner:
         text = f'{done.stdout}\n{done.stderr}'
         if done.returncode != 0:
             message = f'{agent.key} exited with {done.returncode}'
+            if has_result(agent.kind, done.stdout, out_file):
+                # A structured result, valid against the schema or not, takes precedence over
+                # any text match: the turn failed, but not for lack of a model (#121).
+                raise AgentError(message, log)
             reason = unavailable_reason(agent, done.returncode, text)
             if reason:
                 raise ModelUnavailable(message, log, reason)

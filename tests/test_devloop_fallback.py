@@ -163,6 +163,20 @@ class UnavailabilityTests(unittest.TestCase):
             raw_review(), summary='RESOURCE_EXHAUSTED quota 429 handled')})
         self.assertEqual(self.run_agy((0, valid, QUOTA))['verdict'], 'approve')
 
+    def test_a_result_wins_over_a_match_even_with_a_non_zero_exit(self):
+        valid = json.dumps({'status': 'SUCCESS', 'structured_output': raw_review()})
+        schema_error = json.dumps({'status': 'SUCCESS', 'structured_output': {'quota': 429}})
+        agent = dataclasses.replace(CFG.agent('agy'), unavailable_exit_codes=(75,))
+        for name, reply in {'valid result': (1, valid, QUOTA),
+                            'schema error': (1, schema_error, QUOTA),
+                            'listed exit code': (75, valid, QUOTA)}.items():
+            with self.subTest(name):
+                exc = self.assertFails(reply, False, agent)
+                self.assertTrue(str(exc).startswith('agy exited with'), str(exc))
+        # Without a result, the match counts as before.
+        no_output = json.dumps({'status': 'SUCCESS'})
+        self.assertFails((1, no_output, QUOTA), True)
+
 
 class FallbackTurnTests(unittest.TestCase):
     """The dispatcher reruns the turn on the next model only when the model is unavailable."""
@@ -246,6 +260,26 @@ class FallbackTurnTests(unittest.TestCase):
         self.assertIn(f'- `{ARGON}`: agy exited with 1 (`RESOURCE_EXHAUSTED`', body)
         self.assertIn(f'- `{HYDROGEN}`: agy exited with 1 (`429`', body)
         self.assertIn('Log locale:', body)
+
+    def test_another_error_on_the_fallback_lists_the_models_tried(self):
+        cases = {'cli error': ((1, '', 'segmentation fault'), 'agy exited with 1'),
+                 'invalid output': ((0, 'not JSON', ''), 'agy output is not JSON'),
+                 'timeout': ((subprocess.TimeoutExpired('agy', 1), '', ''), 'agy timed out')}
+        for name, (reply, why) in cases.items():
+            cli = FakeCLI(gemini_4_argon_high=(1, '', QUOTA), gemini_4_hydrogen_high=reply)
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                d = self.make(agents.AgentRunner(tmp, 10, run=cli))
+                p = self.agy_pr()
+                d.snapshot = lambda: Snapshot([p], [], [])
+                d.tick()
+                self.assertEqual(cli.models(), [ARGON, HYDROGEN])
+                self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+                body = self.gh.comments[-1][1]
+                self.assertIn('Il passo `review` è fallito: the last model tried for `agy` failed',
+                              body)
+                self.assertIn(f'- `{ARGON}`: agy exited with 1 (`RESOURCE_EXHAUSTED`', body)
+                self.assertIn(f'- `{HYDROGEN}`: {why}', body)
+                self.assertIn('Log locale:', body)
 
     def test_an_agent_without_fallbacks_fails_as_before(self):
         runner = FakeRunner(unavailable('claude'))

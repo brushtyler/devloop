@@ -529,12 +529,15 @@ fallback_models = [
   other than `SUCCESS`), and its stdout or stderr matches one of `unavailable_patterns`
   (regular expressions, case-insensitive; default `RESOURCE_EXHAUSTED`, `quota`, `429`,
   `model .* not available`), or the exit code is in `unavailable_exit_codes` (default none). A
-  valid result, output that is not JSON or does not match the schema, a timeout and a stall
-  never count, whatever the text, and follow the usual path to `agent:needs-human`.
+  structured result, valid or not against the schema, takes precedence even with a non-zero
+  exit; it, output that is not JSON after a zero exit, a timeout and a stall never count,
+  whatever the text, and follow the usual path to `agent:needs-human`.
 - **Once.** Each model is tried at most once per action: a rate limit the CLI reports as
   terminal counts as persistent, and a model found unavailable is not tried again by the later
   attempts of the same action (`implement_test_retries`). When the last model fails too, the
-  issue or PR goes to `agent:needs-human` with a comment listing the models tried and why.
+  issue or PR goes to `agent:needs-human` with a comment listing the models tried and why. Any
+  other failure after a fallback ends the action without trying further models, and its
+  comment lists the models tried too, the failed one included.
 - **Worktree.** The fallback is a new session with the same prompt and worktree. Partial changes
   of the previous attempt, and the merge in progress of a sync, stay as they are, without any
   rollback; the prompt tells the agent that the worktree may contain them.
