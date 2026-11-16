@@ -216,9 +216,11 @@ def _create(dirfd):
 
     Called only under the initialization lock, with neither name present. link(2)
     never replaces an existing path, so a conflict is a refusal, not a replacement.
+    The inode is private (0600): a container payload running with another UID cannot
+    open it (ssdlc_container_holder).
     """
     tmp = f'.{GATE_NAME}.{secrets.token_hex(8)}.tmp'
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o444, dir_fd=dirfd)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dirfd)
     try:
         try:
             record = dict(kind=KIND, schema_version=1, inode=os.fstat(fd).st_ino,
@@ -271,8 +273,12 @@ def _initialize(dirfd):
         _create(dirfd)
 
 
-def open_gate(ticket_root, expected_identity=None):
-    """Open and verify the canonical ticket's gate, creating it only on first initialization."""
+def open_gate(ticket_root, expected_identity=None, *, create=True):
+    """Open and verify the canonical ticket's gate, creating it only on first initialization.
+
+    With ``create=False`` nothing is initialized or written: on a read-only mount of
+    the ticket, as in a container, a missing gate is refused instead.
+    """
     _require_linux()
     root = Path(ticket_root)
     if not root.is_absolute():
@@ -284,7 +290,7 @@ def open_gate(ticket_root, expected_identity=None):
     fd = None
     try:
         filesystem = check_filesystem(dirfd)
-        if _lstat(dirfd, GATE_NAME) is None or _lstat(dirfd, ANCHOR_NAME) is None:
+        if create and (_lstat(dirfd, GATE_NAME) is None or _lstat(dirfd, ANCHOR_NAME) is None):
             _initialize(dirfd)
         linked = _lstat(dirfd, GATE_NAME)
         if linked is None:
