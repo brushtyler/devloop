@@ -3362,21 +3362,51 @@ class SSDLCOrchestrator:
             "Infrastructure prerequisites belong to ENVIRONMENT_PREREQUISITE, not speculative target code changes. "
             "impact_report is deterministic, advisory host evidence from the plan base: its possible_omissions are "
             "consumers and tests not covered by any task. Examine them, but they never block approval on their own, "
-            "and UNKNOWN entries are not evidence of a dependency.\n" + review_schema)
+            "and UNKNOWN entries are not evidence of a dependency. "
+            "impact_report.contracts, present when tasks declare contract_changes, verifies them statically at the "
+            "plan base. Each contracts.defects entry is a demonstrated incompatibility whose consumer lacks an owner, "
+            "scope or ordering: report it as an OPEN BLOCKING PLAN_DEFECT whose task_ids include the declaring task, "
+            "whose message or evidence cites the consumer path, and whose references include at least one of the "
+            "defect's requirement_refs, standard_refs or quality_check_refs; the requested change gives the consumer "
+            "an owning task in scope, ordered through depends_on. contracts.diagnoses (UNKNOWN dependencies, generic "
+            "references, uses whose incompatibility is not demonstrated, missing approved obligations) need a diagnosis in an ADVISORY finding but never block on "
+            "their own. New permissions or external resources are operator decisions: report them as "
+            "ENVIRONMENT_PREREQUISITE, never as planned tasks.\n" + review_schema)
         prompt += ("\nUse repair.history to preserve all earlier fixes. Avoid unrelated rewrites during repair. "
                    "Honor execution_contract: the host harness captures and verifies the executing controller. "
                    "Do not create controller-capture tasks or assume undeclared environment variables. "
                    "For crash safety, enumerate persistence boundaries from the approved design and specify "
                    "the fault injection and expected recovery for each; justify equivalence when grouping boundaries.")
+        prompt += ("\nWhen a task changes a Python contract that existing code uses (a top-level function, class or "
+                   "constant), declare it in that task's contract_changes: contract (the top-level name), producer "
+                   "(its file, which must be in the task's target_files), expected_change (COMPATIBLE, INCOMPATIBLE "
+                   "or REMOVED) and description. For INCOMPATIBLE or REMOVED changes, every existing consumer that "
+                   "must change belongs to the target_files of the same task or of a task ordered with it through "
+                   "depends_on; a needed prerequisite is a normal task with depends_on. Not every importer of the "
+                   "producer must change. contract_refs stays reserved for design artifact references. New "
+                   "permissions or external resources are operator decisions, not tasks.")
+        impact_reports = {}
+        def impact_report(plan):
+            key = digest(plan)
+            if key not in impact_reports:
+                from ssdlc_impact import build_report
+                impact = build_report(self.repo_root, plan)
+                impact_path = self.dir_design / 'task-planning' / ('impact-report-' + key + '.json')
+                if impact_path.exists() and json.loads(impact_path.read_text()) != impact:
+                    raise PlanError('Impact report changed on the same plan; explicit revision required')
+                atomic_json(impact_path, impact)
+                self.record_artifact(str(impact_path.relative_to(self.ssdlc_root)), impact_path)
+                impact_reports[key] = impact
+            return impact_reports[key]
+        def contract_defects(plan):
+            # Only declared contract changes can require a revision; plans without
+            # declarations keep the purely advisory report.
+            if not any(task.get('contract_changes') for task in plan['tasks']):
+                return []
+            from ssdlc_impact import contract_defects as defects
+            return defects(impact_report(plan))
         def review(plan, history):
-            from ssdlc_impact import build_report
-            # Advisory only: the report never changes the review verdict or plan state.
-            impact = build_report(self.repo_root, plan)
-            impact_path = self.dir_design / 'task-planning' / ('impact-report-' + digest(plan) + '.json')
-            if impact_path.exists() and json.loads(impact_path.read_text()) != impact:
-                raise PlanError('Impact report changed on the same plan; explicit revision required')
-            atomic_json(impact_path, impact)
-            self.record_artifact(str(impact_path.relative_to(self.ssdlc_root)), impact_path)
+            impact = impact_report(plan)
             t0 = time.time()
             out, cost, tin, tout, trace = EngineRunner.invoke_role(
                 rev_engine, rev_model,
@@ -3392,7 +3422,7 @@ class SSDLCOrchestrator:
                             {"context": context, "schema": schema, "prompt": prompt, "review_prompt": review_prompt,
                              "planner": [engine, model, effort], "reviewer": [rev_engine, rev_model, rev_effort]},
                             validate, generate, review, self.check_budget_circuit_breaker, review_repairs=review_repairs,
-                            structured_reviews=True)
+                            structured_reviews=True, contract_defects=contract_defects)
         try:
             if recover_review:
                 repair.recover_rejected_review()

@@ -348,6 +348,32 @@ def transitional_expectation_issues(plan: dict) -> list[dict]:
     return issues
 
 
+def contract_change_issues(plan: dict) -> list[dict]:
+    """A declared contract change belongs to the task that edits its producer.
+
+    Declarations are optional. They grant no coverage and no scope: the
+    producer must already be one of the declaring task's ``target_files``.
+    """
+    issues = []
+    for task in plan['tasks']:
+        seen = set()
+        for item in task.get('contract_changes', []):
+            where = {'task_id': task['task_id'], 'field': 'contract_changes', 'contract': item['contract'],
+                     'producer': item['producer']}
+            key = (item['contract'], item['producer'])
+            if key in seen:
+                issues.append({**where, 'code': 'DUPLICATE_CONTRACT_CHANGE',
+                               'message': 'A task declares the same contract change twice'})
+            seen.add(key)
+            if not item['contract'].strip() or any(ord(ch) < 32 for ch in item['contract']):
+                issues.append({**where, 'code': 'INVALID_CONTRACT_CHANGE',
+                               'message': 'A contract change needs a printable contract name'})
+            if item['producer'] not in task['target_files']:
+                issues.append({**where, 'code': 'CONTRACT_PRODUCER_OUTSIDE_SCOPE',
+                               'message': 'The contract producer must be in the declaring task target_files'})
+    return issues
+
+
 class TaskPlanValidator:
     def __init__(self, repo: Path, requirements: str, quality: dict, artifacts: Path | None = None):
         self.repo = repo.resolve()
@@ -479,7 +505,8 @@ class TaskPlanValidator:
                                    'ref': ref, 'message': str(exc),
                                    'available_refs': self.available_contract_refs()})
         issues.extend(transitional_expectation_issues(plan))
-        missing = sorted(self.requirements - covered)
+        issues.extend(contract_change_issues(plan))
+        missing =sorted(self.requirements - covered)
         if missing:
             issues.append({'code': 'UNCOVERED_REQUIREMENTS', 'field': 'tasks', 'missing_refs': missing,
                            'coverage_policy': self.requirement_catalogue['coverage_policy']})

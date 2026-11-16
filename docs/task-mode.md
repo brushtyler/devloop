@@ -79,8 +79,13 @@ The planner returns a structured plan (`schemas/plan.schema.json`), which an ind
 
 **Stops**
 - Three consecutive reviews that keep the same blocking IDs stop as `STAGNATION`. The session counts these passes without progress: a review whose open blocking IDs equal those of the previous review adds one, a review with a different set (or none) resets the count to 0. The limit is 2 passes, that is three identical sets in a row. The counter (`no_progress` in `session.json` and on each attempt) survives resume, and appears in the `TASK_PLAN_GATE` details (passed or failed, for example after exhausted repairs) and in the `STAGNATION` stop message. It is separate from the repair allowances, `REPAIR_STALLED`, feedback `max_rounds` and `gate_round_ceiling`.
-- A missing environment prerequisite stops as `ENVIRONMENT_PREREQUISITE`.
+- A missing environment prerequisite stops as `ENVIRONMENT_PREREQUISITE`. New permissions or external resources are operator decisions, not planned tasks.
 - Invalid reviewer output gets one correction on the same candidate, then stops as `REVIEW_PROTOCOL`.
+
+**Declared contract changes**
+- A task may declare in `contract_changes` the contracts it modifies: `contract`, `producer` (in its own `target_files`) and `expected_change` (`COMPATIBLE`, `INCOMPATIBLE`, `REMOVED`), with a `description`. Plans without declarations validate as before.
+- The impact report verifies them statically at the plan base, resolving each name in its scope. A consumer whose incompatibility is demonstrated (an unguarded use of a `REMOVED` name, with no fallback) and that no task covers, or that only a task unordered with the declaring one covers, is a `PLAN_DEFECT` bound to the declaring task's approved obligations: the review must report it as an OPEN BLOCKING finding, so the plan needs a revision. A use alone does not demonstrate a break: `INCOMPATIBLE` uses, guarded or fallback uses, `UNKNOWN` dependencies (including names whose binding is not provably the producer) and generic references are diagnoses and never block on their own.
+- A prerequisite is a normal task with `depends_on`. Details: [Declared contract changes](developer-feedback.md#declared-contract-changes).
 
 Evidence lives in `02-design/task-planning/`.
 
