@@ -548,7 +548,8 @@ def pr(number=100, issue=7, labels=('agent:review',), reviews=(), fixes=(), chec
 def ready(number, labels=(), labeler='brushtyler', priority='normal', ready_at=None):
     """A ready issue as the snapshot reads it: ``priority`` is the one its trusted labels give."""
     return {'number': number, 'title': f'issue {number}', 'labels': {'agent:ready', *labels},
-            'labeler': labeler, 'priority': priority, 'ready_at': ready_at}
+            'labeler': labeler, 'admitted': labeler in CFG.trusted_users, 'priority': priority,
+            'ready_at': ready_at}
 
 
 class PlanTests(unittest.TestCase):

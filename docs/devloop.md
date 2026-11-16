@@ -12,7 +12,7 @@ plans the next steps and runs them. A crashed tick is resumed by the next one.
 
 | Step | Trigger | Result |
 |---|---|---|
-| Start | A trusted user adds `agent:ready` to an issue | `agent:working`; the implementer works in a fresh worktree |
+| Start | A trusted user adds `agent:ready` to an issue (or the [supervisor](#labels-from-the-supervisor), on an issue of a trusted user or of a devloop app) | `agent:working`; the implementer works in a fresh worktree |
 | Implement | Changes made and [local tests](#local-tests) pass | Dispatcher commits, pushes `agent/issue-<n>`, opens a PR labelled `agent:review` |
 | CI | Checks pending | Wait; failing checks become a review round sent back as `agent:changes` |
 | Review | CI passed or absent (absent CI with `local_tests` other than `full`: the full suite first runs locally, see [Local tests](#local-tests)) | The dispatcher computes the PR's [review level](#review-level-and-policy-receipt); at level 1 a **different** agent posts a structured verdict (see below), at level 2 two [independent reviewers](#level-2-two-independent-reviewers) do, one per action, and their verdicts are applied together |
@@ -131,7 +131,8 @@ New issues start in this order (#146):
 3. then the issue number.
 
 A priority label counts only if the latest `labeled` event of that label on the issue comes from
-a user in `trusted_users`, as for `agent:ready`. Only the labels the issue has now count: a
+a user in `trusted_users`, as for `agent:ready` (or from the supervisor, see
+[Labels from the supervisor](#labels-from-the-supervisor)). Only the labels the issue has now count: a
 priority label removed since is ignored, as is one added by anyone else, and the issue keeps the
 highest priority among the valid ones (`normal` when none is left). The same order applies with
 the [readiness check](#readiness-check-before-implementation). `devloop setup` creates the three
@@ -143,6 +144,24 @@ position, priority, time of `agent:ready` and who added it, for example
 list covers every issue labelled `agent:ready`; the planned actions that follow it say which ones
 start on this tick (free PR slots, `blocked_labels`, `agent:needs-human` and an untrusted
 `agent:ready` still apply).
+
+### Labels from the supervisor
+
+With `[roles].supervisor` set and a GitHub App for that agent in `[apps]`, the supervisor queues
+issues and sets their priority with its own identity (#178): `agent:ready`, the `priority:*`
+labels and those in `priority_labels` count also when the supervisor's app added them, but
+**only on issues opened by a user in `trusted_users` or by one of devloop's apps** (the agents'
+and the dispatcher's). On an issue opened by anyone else only a trusted user's label counts, as
+in [AGENTS.md](../AGENTS.md) ("Contenuti di autori non fidati").
+
+As for the other label checks, the latest `labeled` event of the label decides: a trusted
+user's `agent:ready` later replaced by the supervisor's on a stranger's issue no longer admits
+it. A supervisor's priority on an admitted issue changes the start order exactly as a trusted
+user's would. The label approves the title and the body as they are; an edit by anyone outside
+`trusted_users` afterwards, the supervisor included, voids it as usual.
+
+Without `[roles].supervisor`, or without an app for it (the supervisor then acts with the
+operator's `gh` login), only `trusted_users` count, as before.
 
 ### Readiness check before implementation
 
@@ -708,7 +727,9 @@ Records are bound to identities. A PR counts as a devloop PR with its marker onl
 by the app of the implementer the marker names; a review counts only if its comment was written by
 the app of the reviewer named in it, and never by the PR's implementer; a CI round and a finding
 closure only from the dispatcher's app; a fix only from the implementer's app. `trusted_users` stays for people: it
-decides who can start work with `agent:ready`, and it cannot contain bots.
+decides who can start work with `agent:ready`, and it cannot contain bots. The only app whose
+labels count is the supervisor's, on the issues described in
+[Labels from the supervisor](#labels-from-the-supervisor).
 
 The native review mirrors the verdict for GitHub and branch protection; devloop itself reads only
 the review comment, and a failed native review is logged without stopping the flow.
@@ -1135,7 +1156,8 @@ fallback_models = [
 - **Identities need apps.** An agent without a GitHub App publishes through the operator's `gh`
   login, and then cannot submit a native review of a PR opened with that same login.
 - **Trust comes from labels and identities.** Only issues whose `agent:ready` label was added by
-  a user in `trusted_users` start, only comments by those users reach the prompts, and markers are
+  a user in `trusted_users` start (or by the supervisor's app, on issues of trusted users and of
+  devloop's apps, see [Labels from the supervisor](#labels-from-the-supervisor)), only comments by those users reach the prompts, and markers are
   read only from the identity that may write them (see GitHub identities). Labelling approves the issue's title and body as they are: if someone outside
   `trusted_users` changes them later (or in the same second, since GitHub timestamps cannot
   order the two), implementation, review and fixes stop at

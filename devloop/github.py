@@ -74,7 +74,7 @@ class GitHub:
     # Reads ---------------------------------------------------------------
     def issues_with_label(self, label):
         return self._json('issue', 'list', '-R', self.repo, '--state', 'open', '--label', label,
-                          '--limit', '200', '--json', 'number,title,labels')
+                          '--limit', '200', '--json', 'number,title,labels,author')
 
     def issue(self, number):
         return self._json('issue', 'view', str(number), '-R', self.repo,
