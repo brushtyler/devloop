@@ -20,6 +20,10 @@ Where a method went, when it was not obvious:
 - ``pr_reviews`` (the native reviews) is in ``CodeReview``, and ``check_runs`` in ``CI``.
 - ``merge_state`` is a ``CodeReview`` method: the adapter turns the mergeability of a PR, as
   ``open_prs`` reports it, into ``clean``, ``conflict`` or ``unknown``.
+- ``pr_state`` and ``merge_pr`` (#172) are in ``CodeReview``: the merge of a ready PR re-reads
+  it and merges it. ``pr_state`` keeps ``mergeable`` and ``mergeStateStatus`` as GitHub reports
+  them, because the ``strict`` merge mode requires exactly ``MERGEABLE`` and ``CLEAN``.
+  ``merge_pr`` runs on the dispatcher's ``merger``, the local login, not on an app.
 - ``GitHub.last_labeler`` is not in any port: the dispatcher no longer calls it.
 """
 
@@ -85,6 +89,13 @@ class CodeReview(Protocol):
 
     def pr_head(self, number):
         """The current head commit of PR ``number``, read fresh."""
+
+    def pr_state(self, number):
+        """PR ``number`` as a merge needs it, read fresh: ``{state, headRefOid, mergeable,
+        mergeStateStatus, labels}``."""
+
+    def merge_pr(self, number, head):
+        """Merge PR ``number`` with a merge commit, only if its head is still ``head``."""
 
     def pr_reviews(self, number):
         """The native reviews of PR ``number``, oldest first, as ``{id, login, state}``."""

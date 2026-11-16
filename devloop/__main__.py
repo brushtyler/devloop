@@ -13,7 +13,7 @@ from .agents import AgentRunner, isolated_env
 from .apps import DISPATCHER, Identities
 from .config import ConfigError, load_config
 from .dispatcher import Dispatcher, TickLog, ensure_labels, plan, queue_lines, run_forever
-from .github import GitHubError
+from .github import GitHub, GitHubError
 from .ledger import Ledger
 from .review import last_round
 from .stall import StallWatch
@@ -81,8 +81,10 @@ def build(args):
                              agent.key, prompt, agent.model if agent.fallback_for else None),
                          stall=stall)
     gh = identities.github(DISPATCHER)
+    # Merges (#172) use the local gh login devloop runs with: no app gets contents=write.
     dispatcher = Dispatcher(cfg, gh, ws, runner, log=tick_log, identities=identities,
-                            activity=current, ledger=Ledger(gh, state_dir=state))
+                            activity=current, ledger=Ledger(gh, state_dir=state),
+                            merger=GitHub(cfg.repo))
     return cfg, state, dispatcher
 
 

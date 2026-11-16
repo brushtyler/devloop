@@ -159,6 +159,12 @@ class GitHub:
         """The PR's current head commit, read fresh."""
         return self._json('api', f'repos/{self.repo}/pulls/{number}')['head']['sha']
 
+    def pr_state(self, number):
+        """The PR as a merge needs it, read fresh: ``{state, headRefOid, mergeable,
+        mergeStateStatus, labels}``."""
+        return self._json('pr', 'view', str(number), '-R', self.repo, '--json',
+                          'state,headRefOid,mergeable,mergeStateStatus,labels')
+
     def checks(self, sha):
         """``(state, failed_names, failed_run_ids)`` for commit ``sha``.
 
@@ -236,6 +242,12 @@ class GitHub:
         """A native PR review (APPROVE, REQUEST_CHANGES or COMMENT) on ``commit``."""
         self._gh('api', '-X', 'POST', f'repos/{self.repo}/pulls/{number}/reviews',
                  '-f', f'commit_id={commit}', '-f', f'event={event}', '-F', 'body=@-', stdin=body)
+
+    def merge_pr(self, number, head):
+        """Merge PR ``number`` with a merge commit, only if its head is still ``head``. The
+        branch is kept."""
+        self._gh('pr', 'merge', str(number), '-R', self.repo, '--merge',
+                 '--match-head-commit', head)
 
     def ensure_label(self, name, color, description):
         self._gh('label', 'create', name, '-R', self.repo, '--color', color,

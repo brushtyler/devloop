@@ -107,6 +107,14 @@ class FakeGH:
     def pr_head(self, number):
         return self.head
 
+    def pr_state(self, number):
+        return {'state': 'OPEN', 'headRefOid': self.head, 'mergeable': 'MERGEABLE',
+                'mergeStateStatus': 'CLEAN',
+                'labels': [{'name': n} for n in sorted(self.labels.get(number, ()))]}
+
+    def merge_pr(self, number, head):
+        self.merged = getattr(self, 'merged', []) + [(number, head)]
+
     def pr_reviews(self, number):
         return [dict(r) for r in self.native_reviews]
 

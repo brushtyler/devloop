@@ -10,7 +10,7 @@ an app an actor uses the ambient ``gh`` login, and its records must come from ``
 
 Issue  agent:ready ─► agent:working ─► PR opened
 PR     agent:review ─► (CI fail | request_changes) ─► agent:changes ─► agent:review ─► …
-                   └─► approve ─► agent:ready-to-merge   (a human merges)
+                   └─► approve ─► agent:ready-to-merge ─► merged (a human, or devloop, #172)
        any step can escalate to agent:needs-human.
 
 Readiness is bound to the approved commit: a PR is promoted only if its head is still the
@@ -61,6 +61,13 @@ PR and its issue, run one after the other in plan order; a global action (``GLOB
 runs alone. Each log line carries the number of its action (``TickLog``), a failed action does
 not stop the others, and a review action at level 2 runs together every reviewer its round
 still waits for.
+
+Merge (#172, ``[merge]``): with ``mode = "off"`` (the default) a person merges. With ``strict``
+the dispatcher merges a ready PR, with the local ``gh`` login and ``--match-head-commit``, once
+every merge directive holds again just before the merge: the conditions of the promotion, CI
+``pass``, ``MERGEABLE`` and ``CLEAN``, neither ``agent:needs-human`` nor ``agent:merge-hold``.
+``auto`` adds ``/devloop hold <reason>`` and ``/devloop release`` from the supervisor's identity
+or a trusted user. A level override or an operator-only path can only make the mode stricter.
 """
 
 import hashlib
@@ -71,7 +78,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .acceptance import (acceptance_criteria, acceptance_findings, format_criteria, format_map,
@@ -97,7 +104,14 @@ from .workspace import WorkspaceError
 PROMPT_DIR = Path(__file__).resolve().parent / 'prompts'
 REREVIEW_COMMAND = '/devloop rereview'
 RECHECK_COMMAND = '/devloop recheck'
-EXPENSIVE = ('review', 'fix', 'implement', 'sync', 'preflight')
+# Hold and release a merge in ``auto`` mode (#172): the first line of a comment, after the
+# attribution header, from the supervisor's identity or a trusted user.
+HOLD_COMMAND = '/devloop hold'
+RELEASE_COMMAND = '/devloop release'
+# The modes in which devloop merges (#172).
+MERGING = ('strict', 'auto')
+# Actions that take a slot of ``max_actions_per_tick``.
+EXPENSIVE = ('review', 'fix', 'implement', 'sync', 'preflight', 'merge')
 # Actions that write to the base branch or to the whole repository (the merge of #172, the pin
 # of #174): with ``max_parallel_actions`` above 1 each runs alone, after the actions planned
 # before it and before those planned after it (#176).
@@ -107,8 +121,9 @@ LABEL_STYLE = {
     'working': ('fbca04', 'devloop: implementazione in corso'),
     'review': ('1d76db', 'devloop: in attesa di review automatica'),
     'changes': ('d93f0b', 'devloop: modifiche richieste dalla review'),
-    'ready_to_merge': ('0e8a16', 'devloop: approvata, in attesa del merge umano'),
+    'ready_to_merge': ('0e8a16', 'devloop: approvata, in attesa del merge'),
     'needs_human': ('b60205', 'devloop: serve una decisione umana'),
+    'merge_hold': ('5319e7', 'devloop: merge trattenuto dal supervisore o dall\'operatore'),
 }
 LEVEL_LABEL_STYLE = ('5319e7', 'devloop: la PR richiede una review di livello 2')
 # Priority labels of ready issues (#146) and their rank: the lower, the earlier an issue starts.
@@ -187,6 +202,13 @@ class PullRequest:
     # kept (#134), as the snapshot found re-checking it: the titles of the findings a review
     # would add. Empty when it holds or there is no such approval.
     acceptance: list = field(default_factory=list)
+    # Merge (#172): GitHub's ``mergeable`` and ``mergeStateStatus`` as read, the hold or release
+    # command still to apply (``{event, by, reason}``), and the merge mode of a PR that may be
+    # merged now (None when it may not, or merging is off).
+    mergeable: str = None
+    merge_status: str = None
+    hold: dict = None
+    merge_mode: str = None
 
 
 @dataclass
@@ -323,6 +345,34 @@ def zero_labels_hold(pr, rp):
             and rp.zero_label in pr.labels and rp.label not in pr.labels)
 
 
+def merge_command(body):
+    """The hold or release command of a comment (#172): ``(event, reason)`` when the first line
+    after the attribution header is ``/devloop hold <reason>`` or ``/devloop release``,
+    ``(event, None)`` for a hold without a reason, None when the comment is no such command."""
+    lines = [line.strip() for line in (body or '').strip().splitlines()]
+    while lines and (not lines[0] or lines[0].startswith('>')):
+        lines.pop(0)
+    tokens = lines[0].split(None, 2) if lines else []
+    if len(tokens) < 2 or tokens[0] != '/devloop' or tokens[1] not in ('hold', 'release'):
+        return None
+    reason = tokens[2].strip() if len(tokens) > 2 else ''
+    if tokens[1] == 'release':
+        return 'release', reason
+    return 'hold', reason or None
+
+
+def merge_ready(pr, cfg):
+    """Whether a ready PR meets, as the snapshot shows it, the merge directives that do not
+    depend on its receipt (#172): CI ``pass``, ``MERGEABLE`` and ``CLEAN``, neither
+    ``agent:needs-human`` nor ``agent:merge-hold``, no open finding, an acceptance map that
+    holds."""
+    lb = cfg.labels
+    return (lb.ready_to_merge in pr.labels and not pr.labels & {lb.needs_human, lb.merge_hold}
+            and pr.checks == 'pass' and pr.mergeable == 'MERGEABLE'
+            and pr.merge_status == 'CLEAN' and not pr.acceptance
+            and not open_findings(pr.reviews, pr.closures))
+
+
 def plan(snapshot, cfg):
     """Pure planning: the actions one tick should take, in order."""
     lb = cfg.labels
@@ -346,6 +396,11 @@ def plan(snapshot, cfg):
         if pr.finding_problems:
             actions.append(Action('unattributable', pr.number,
                                   'findings whose owner cannot be reconstructed'))
+            continue
+        if pr.hold:
+            # A hold or release of the merge (#172) is applied first, so that no merge of this
+            # tick overtakes it; the next tick plans with it.
+            actions.append(Action('hold', pr.number, f'{pr.hold["event"]} by {pr.hold["by"]}'))
             continue
         # The latest round, and the reviewers it still waits for: its verdict counts only once
         # every reviewer its receipt requires has reviewed.
@@ -377,6 +432,9 @@ def plan(snapshot, cfg):
                 # CI re-running on the approved commit: not ready until it passes again. The
                 # recorded approval is replayed from agent:review, without a new review.
                 actions.append(Action('revoke', pr.number, 'CI pending on the approved commit'))
+            elif pr.merge_mode in MERGING and merge_ready(pr, cfg):
+                # The merge directives are checked again just before the merge (#172).
+                actions.append(Action('merge', pr.number, f'merge mode {pr.merge_mode}'))
             continue
         still_open = open_findings(pr.reviews, pr.closures)
         # Also from agent:changes: a CI round sends the PR there, and a re-run may pass on the
@@ -696,9 +754,12 @@ class Dispatcher:
     status``. ``ledger`` (``ledger.Ledger``) records evidence and telemetry of each step (#133)."""
 
     def __init__(self, cfg, gh: Backend, ws, runner, log=print, identities=None, activity=None,
-                 ledger=None):
+                 ledger=None, merger=None):
         self.cfg = cfg
         self.gh = gh
+        # Merges run with the local ``gh`` login devloop runs with, never with an app (#172):
+        # the dispatcher's app has no ``contents=write``.
+        self.merger = merger if merger is not None else gh
         self.ws = ws
         self.runner = runner
         # Shared by the threads of parallel actions (#176): one line at a time.
@@ -805,6 +866,124 @@ class Dispatcher:
                                     'author': login, 'reason': reason, 'head_sha': pr.head_sha}
         return list(pending.values())
 
+    def _may_hold(self, login):
+        """Whether ``login`` may hold or release a merge (#172): a trusted user, or the app of
+        the agent configured as ``roles.supervisor``."""
+        supervisor = self._app_login(self.cfg.supervisor) if self.cfg.supervisor else None
+        return login in self.cfg.trusted_users or bool(supervisor and login == supervisor)
+
+    def _hold_command(self, pr, comments):
+        """The hold or release command still to apply (#172), ``{event, by, reason, comment}``
+        or None: the latest valid one not spent yet. A dispatcher ``hold`` record spends the
+        command it applied, whose comment id it carries, and every command before it (GitHub's
+        comment ids grow with time): a command written after that one stays to apply even when
+        it precedes the record. Commands are accepted only when the merge mode of the PR, with
+        the override of its level and its operator-only paths, is ``auto``, and from
+        ``_may_hold``; any other, and a hold without a reason, is ignored and logged. devloop's
+        own records are never commands."""
+        spent, last = None, -1
+        for position, comment in enumerate(comments):
+            record = read_marker(comment.get('body', ''), 'hold')
+            if record is None or not self._wrote((comment.get('author') or {}).get('login'),
+                                                 DISPATCHER):
+                continue
+            applied = record.get('comment')
+            if isinstance(applied, int) and not isinstance(applied, bool):
+                spent = applied if spent is None else max(spent, applied)
+            else:
+                last = position  # a record without the id spends what precedes it
+        mode = None
+        found = None
+        for comment in comments[last + 1:]:
+            body = comment.get('body') or ''
+            parsed = None if carries_record(body) else merge_command(body)
+            if parsed is None:
+                continue
+            number = comment.get('id')
+            if spent is not None and (not isinstance(number, int) or number <= spent):
+                continue
+            event, reason = parsed
+            login = (comment.get('author') or {}).get('login')
+            if self.cfg.merge.mode != 'auto':
+                # Overrides only restrict: without "auto" in [merge] no PR is in "auto".
+                why = f'merge mode is "{self.cfg.merge.mode}", not "auto"'
+            elif not self._may_hold(login):
+                why = 'the author is neither the supervisor nor a trusted user'
+            elif reason is None:
+                why = f'malformed, expected `{HOLD_COMMAND} <reason>`'
+            else:
+                if mode is None:
+                    mode = self._merge_mode(pr) or 'unknown'
+                why = (None if mode == 'auto'
+                       else 'the merge mode of this PR is not computable now' if mode == 'unknown'
+                       else f'merge mode of this PR is "{mode}", not "auto"')
+            if why:
+                self.log(f'  PR #{pr.number}: ignored `/devloop {event}` by {login}: {why}')
+                continue
+            found = {'event': event, 'by': login, 'reason': reason, 'comment': number}
+        return found
+
+    def _read_thread(self, pr, comments):
+        """Fill ``pr`` with what its conversation records, from the identities allowed to write
+        it: reviews, fixes, syncs, finding closures and commands, policy records, and the hold
+        or release command still to apply (#172). The snapshot reads it once per tick; the merge
+        reads it again just before merging, so that it never relies on an older view."""
+        problems = []
+        entries = sorted(self._marker_entries(pr, comments, 'review', problems),
+                         key=lambda e: (e[1]['round'], e[0]))
+        pr.reviews = [record for _, record in entries]
+        pr.fixes = self._markers(pr, comments, 'fix')
+        pr.syncs = self._markers(pr, comments, 'sync')
+        pr.closures = [c for record in self._markers(pr, comments, 'finding')
+                       for c in record['closed']]
+        state = finding_state(pr.reviews, pr.closures)
+        pr.finding_problems = problems + state.problems
+        pr.commands = self._finding_commands(pr, comments, state)
+        policy = self._marker_entries(pr, comments, 'policy')
+        pr.policy = [record for _, record in policy]
+        if self.ledger is not None:
+            pr.ci_recorded = [
+                (r.get('head'), r.get('state'), r.get('round'), r.get('checks'))
+                for _, r in ledger_entries(comments, self._signed)
+                if r['type'] == 'event' and r.get('event') == 'ci_round']
+        last_review = max((position for position, _ in entries), default=-1)
+        if policy and policy[-1][0] > last_review:
+            record = policy[-1][1]
+            if (record['event'] == 'promoted'
+                    and record['receipt']['level'] == ZERO_LEVEL):
+                pr.zero_head = record['receipt']['head']
+        if entries:
+            last = max(position for position, _ in entries)
+            # A receipt found stale after the latest review voids its approval.
+            pr.stale_receipt = any(position > last and record['event'] == 'stale'
+                                   for position, record in policy)
+            # Only what trusted users wrote after the latest verdict can void it.
+            since = comments[last + 1:]
+            pr.operator_comments = operator_comments(since, self.cfg.trusted_users)
+            pr.rereview = any(requests_rereview(c.get('body'))
+                              for c in pr.operator_comments)
+            latest = entries[-1][1]['round']
+            before = max((position for position, record in entries
+                          if record['round'] < latest), default=-1)
+            pr.round_comments = operator_comments(comments[before + 1:],
+                                                  self.cfg.trusted_users)
+        # Last: whether a command is accepted depends on the merge mode of the PR, which its
+        # review and policy records determine (#172).
+        pr.hold = self._hold_command(pr, comments)
+
+    def _merge_mode(self, pr):
+        """The merge mode of ``pr`` now (#172): ``[merge]`` with the override of its review
+        level, ``off`` when its diff touches an operator-only path. None when it cannot be
+        computed."""
+        try:
+            receipt, paths = self._receipt_and_paths(pr)
+        except (GitHubError, WorkspaceError) as exc:
+            self.log(f'  merge mode of #{pr.number} not computable: {exc}')
+            return None
+        if receipt['head'] != pr.head_sha:
+            return None
+        return self.cfg.merge.mode_for(receipt['level'], paths)
+
     def _devloop_pr(self, raw):
         """A devloop PR is recognised by its branch, ``<branch_prefix><issue>``, so that it stays
         in the flow (and its branch is never overwritten) even if its marker is lost. ``meta`` is
@@ -828,7 +1007,8 @@ class Dispatcher:
                            head_ref=ref, head_sha=raw['headRefOid'],
                            title=raw['title'], body=raw.get('body', ''),
                            labels=label_names(raw['labels']), meta=meta or {},
-                           merge_state=self.gh.merge_state(raw))
+                           merge_state=self.gh.merge_state(raw),
+                           mergeable=raw.get('mergeable'), merge_status=raw.get('mergeStateStatus'))
 
     def snapshot(self):
         lb = self.cfg.labels
@@ -838,46 +1018,7 @@ class Dispatcher:
             if pr is None:
                 continue
             if pr.meta and pr.labels & {lb.review, lb.changes, lb.ready_to_merge}:
-                comments = self.gh.pr_comments(pr.number)
-                problems = []
-                entries = sorted(self._marker_entries(pr, comments, 'review', problems),
-                                 key=lambda e: (e[1]['round'], e[0]))
-                pr.reviews = [record for _, record in entries]
-                pr.fixes = self._markers(pr, comments, 'fix')
-                pr.syncs = self._markers(pr, comments, 'sync')
-                pr.closures = [c for record in self._markers(pr, comments, 'finding')
-                               for c in record['closed']]
-                state = finding_state(pr.reviews, pr.closures)
-                pr.finding_problems = problems + state.problems
-                pr.commands = self._finding_commands(pr, comments, state)
-                policy = self._marker_entries(pr, comments, 'policy')
-                pr.policy = [record for _, record in policy]
-                if self.ledger is not None:
-                    pr.ci_recorded = [
-                        (r.get('head'), r.get('state'), r.get('round'), r.get('checks'))
-                        for _, r in ledger_entries(comments, self._signed)
-                        if r['type'] == 'event' and r.get('event') == 'ci_round']
-                last_review = max((position for position, _ in entries), default=-1)
-                if policy and policy[-1][0] > last_review:
-                    record = policy[-1][1]
-                    if (record['event'] == 'promoted'
-                            and record['receipt']['level'] == ZERO_LEVEL):
-                        pr.zero_head = record['receipt']['head']
-                if entries:
-                    last = max(position for position, _ in entries)
-                    # A receipt found stale after the latest review voids its approval.
-                    pr.stale_receipt = any(position > last and record['event'] == 'stale'
-                                           for position, record in policy)
-                    # Only what trusted users wrote after the latest verdict can void it.
-                    since = comments[last + 1:]
-                    pr.operator_comments = operator_comments(since, self.cfg.trusted_users)
-                    pr.rereview = any(requests_rereview(c.get('body'))
-                                      for c in pr.operator_comments)
-                    latest = entries[-1][1]['round']
-                    before = max((position for position, record in entries
-                                  if record['round'] < latest), default=-1)
-                    pr.round_comments = operator_comments(comments[before + 1:],
-                                                          self.cfg.trusted_users)
+                self._read_thread(pr, self.gh.pr_comments(pr.number))
             # In agent:changes CI matters only to close an open CI finding (``plan``).
             ci_open = lb.changes in pr.labels and any(
                 f['owner'] == CI for f in open_findings(pr.reviews, pr.closures))
@@ -893,6 +1034,8 @@ class Dispatcher:
                 pr.zero_problem = self._zero_problem(pr)
             if pr.meta and pr.labels & {lb.review, lb.ready_to_merge} and pr.zero_head is None:
                 pr.acceptance = self._acceptance_problems(pr)
+            if self.cfg.merge.enabled() and pr.meta and merge_ready(pr, self.cfg):
+                pr.merge_mode = self._merge_mode(pr)
             prs.append(pr)
         ready = []
         pr_issues = {pr.issue for pr in prs}
@@ -1655,6 +1798,29 @@ class Dispatcher:
             return self._promote_zero(pr, current)
         if len(current['reviewers']) < current['level']:
             return self._escalate_level(pr, current)
+        bases = self._approvals_match(pr, records, current, paths)
+        if bases is None:
+            return
+        by = ', '.join(f'`{key}`' for key in current['reviewers'])
+        branch = self.cfg.base_branch
+        revalidated = (f'\n\nLe approvazioni date su una base precedente restano valide sulla '
+                       f'base corrente: i commit intermedi di `{branch}` non toccano file della '
+                       'PR.\n\n' + _describe_bases(bases, branch)) if bases else ''
+        self._policy_comment(
+            pr, 'Pronta per il merge',
+            f'Approvazione del commit `{records[0]["head_sha"][:12]}` da parte di {by} '
+            'confermata: la ricevuta di policy ricalcolata coincide con quella della review'
+            + (', a parte la base' if bases else '') + '.' + revalidated,
+            current, 'promoted', bases)
+        self.gh.edit_labels(pr.number, add=[lb.ready_to_merge], remove=[lb.review, lb.changes])
+
+    def _approvals_match(self, pr, records, current, paths, step='promozione'):
+        """The base checks the approvals ``records`` rely on (``[]`` when none was needed) when
+        every reviewer ``current`` requires approved with a receipt that matches it, an earlier
+        base admitted only if the base branch left the PR's files alone since (#160).
+        Otherwise None, after recording why (``stale``) and sending the PR back to review for
+        a new review of the same head. ``step``: the promotion, or the merge (#172)."""
+        lb = self.cfg.labels
         changed = [k for k in BINDING
                    if any(k in differences(receipt_of(r), current) for r in records)]
         # An approval given on an earlier base holds only if no commit of the base branch since
@@ -1673,24 +1839,15 @@ class Dispatcher:
             detail = (f'\n\nCommit di `{branch}` fra la base dell\'approvazione e quella '
                       'corrente:\n\n' + _describe_bases(bases, branch)) if bases else ''
             self._policy_comment(
-                pr, 'Approvazione non valida per la promozione',
-                f'La ricevuta di policy ricalcolata prima della promozione non coincide con '
+                pr, f'Approvazione non valida per {"il" if step == "merge" else "la"} {step}',
+                f'La ricevuta di policy ricalcolata prima {"del" if step == "merge" else "della"} '
+                f'{step} non coincide con '
                 f'quella dell\'approvazione ({what}). La PR resta in review: serve una nuova '
                 'review, anche dello stesso commit. Round e finding aperti restano invariati.'
                 + detail, current, 'stale', bases)
             self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.changes, lb.ready_to_merge])
-            return
-        by = ', '.join(f'`{key}`' for key in current['reviewers'])
-        revalidated = (f'\n\nLe approvazioni date su una base precedente restano valide sulla '
-                       f'base corrente: i commit intermedi di `{branch}` non toccano file della '
-                       'PR.\n\n' + _describe_bases(bases, branch)) if bases else ''
-        self._policy_comment(
-            pr, 'Pronta per il merge',
-            f'Approvazione del commit `{records[0]["head_sha"][:12]}` da parte di {by} '
-            'confermata: la ricevuta di policy ricalcolata coincide con quella della review'
-            + (', a parte la base' if bases else '') + '.' + revalidated,
-            current, 'promoted', bases)
-        self.gh.edit_labels(pr.number, add=[lb.ready_to_merge], remove=[lb.review, lb.changes])
+            return None
+        return bases
 
     def _promote_zero(self, pr, receipt):
         """Level 0 (#107): promote the head without a review, only if no finding is open, the
@@ -1867,6 +2024,125 @@ class Dispatcher:
         self.gh.comment(pr.number,
                         publishable(dispatcher_header() + f'\n## {title}\n\n' + reason + '.'))
         self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.ready_to_merge])
+
+    def _do_hold(self, pr):
+        """Apply a hold or release command (#172): add or remove ``agent:merge-hold``, then
+        record who asked and why in a dispatcher ``hold`` record, which spends the command.
+        Label first: if the record is lost, the next tick applies the same command again."""
+        lb, command = self.cfg.labels, pr.hold
+        reason = ' '.join(command['reason'].split())
+        if command['event'] == 'hold':
+            self.gh.edit_labels(pr.number, add=[lb.merge_hold])
+            title = 'Merge trattenuto'
+            text = (f'`{command["by"]}` ha trattenuto il merge: {reason}\n\ndevloop non mergia '
+                    f'la PR finché resta `{lb.merge_hold}`; `{RELEASE_COMMAND}` lo permette di '
+                    'nuovo.')
+        else:
+            self.gh.edit_labels(pr.number, remove=[lb.merge_hold])
+            title = 'Merge rilasciato'
+            text = (f'`{command["by"]}` ha rilasciato il merge' + (f': {reason}' if reason else '.')
+                    + f'\n\ndevloop può di nuovo mergiare la PR quando è `{lb.ready_to_merge}` e '
+                    'valgono le direttive di merge.')
+        self.gh.comment(pr.number, publishable(dispatcher_header() + f'\n## {title}\n\n{text}',
+                                               'hold', dict(command, head=pr.head_sha)))
+        self.log(f'  {command["event"]} by {command["by"]}')
+        pr.hold = None
+
+    def _do_merge(self, pr):
+        """Merge a ready PR (#172), with a merge commit on the approved head, with the local
+        ``gh`` login. Every merge directive is read again just before, with reviews, closures,
+        policy records and commands rebuilt from the comments read now: the PR still open,
+        ``agent:ready-to-merge`` without ``agent:needs-human`` nor ``agent:merge-hold``, no hold
+        or release command waiting, the head unchanged, ``MERGEABLE`` and ``CLEAN``, CI
+        ``pass``, no open finding, the merge mode of the recomputed receipt, and the conditions
+        of the promotion: the approvals of every required reviewer with a matching receipt, or
+        at level 0 the checks of a level-0 promotion. When one is missing devloop does not
+        merge: what the per-tick checks of a ready PR revoke is left to the next tick, a stale
+        receipt or an open finding is handled as at promotion."""
+        cfg, lb, rp = self.cfg, self.cfg.labels, self.cfg.review_policy
+        fresh = self.gh.pr_state(pr.number)
+        labels = label_names(fresh.get('labels') or [])
+        head = fresh.get('headRefOid') or ''
+
+        def skip(why):
+            self.log(f'  not merged: {why}')
+
+        if fresh.get('state') != 'OPEN':
+            return skip(f'the PR is {fresh.get("state")}')
+        if lb.ready_to_merge not in labels or labels & {lb.needs_human, lb.merge_hold}:
+            return skip('labels changed: ' + ', '.join(sorted(labels)))
+        if head != pr.head_sha:
+            return skip(f'head moved to {head[:12]}')
+        status = (fresh.get('mergeable'), fresh.get('mergeStateStatus'))
+        if status != ('MERGEABLE', 'CLEAN'):
+            return skip('GitHub reports {} / {}'.format(*status))
+        # Reviews, closures, policy records and commands as the conversation shows them now,
+        # with the same identity checks as the snapshot: never the snapshot's older view.
+        pr = replace(pr, labels=labels, reviews=[], fixes=[], syncs=[], closures=[],
+                     commands=[], finding_problems=[], policy=[], zero_head=None,
+                     zero_problem='', stale_receipt=False, operator_comments=[],
+                     rereview=False, round_comments=[], acceptance=[], hold=None)
+        self._read_thread(pr, self.gh.pr_comments(pr.number))
+        if pr.hold:
+            return skip('a hold or release command waits to be applied')
+        if pr.finding_problems:
+            return skip('findings whose owner cannot be reconstructed')
+        if pr.stale_receipt:
+            return skip('a policy record found the receipt of the approval stale')
+        ci, _ = self._read_ci(head)
+        if ci != 'pass':
+            return skip(f'CI is {ci}')
+        left = open_findings(pr.reviews, pr.closures)
+        if left:
+            return self._escalate(pr.number, _open_findings_reason(left),
+                                  remove=[lb.review, lb.changes, lb.ready_to_merge])
+        if pr.zero_head is None and self._acceptance_problems(pr):
+            return skip('the acceptance map does not hold')
+        current, paths = self._receipt_and_paths(pr)
+        if current['head'] != head:
+            return skip(f'the pushed head is {current["head"][:12]}')
+        mode = cfg.merge.mode_for(current['level'], paths)
+        if mode not in MERGING:
+            return skip(f'the merge mode of this PR is {mode}')
+        bases = []
+        if pr.zero_head is not None:
+            # Level 0: the same checks as its promotion, and its labels still in place.
+            problem = self._zero_problem(pr)
+            if not problem and not (pr.zero_head == head and rp.zero_label in labels
+                                    and rp.label not in labels):
+                problem = 'il head o le label di livello sono cambiati'
+            if problem:
+                pr.zero_problem = problem
+                return self._do_revoke(pr)
+        else:
+            latest = current_round(pr.reviews)
+            if not (latest and not pending_reviewers(latest)
+                    and round_verdict(latest) == 'approve' and latest[0]['head_sha'] == head):
+                return skip('the head is not the approved commit')
+            if len(current['reviewers']) < current['level']:
+                return self._escalate_level(pr, current)
+            bases = self._approvals_match(pr, latest, current, paths, step='merge')
+            if bases is None:
+                return None
+        self.merger.merge_pr(pr.number, head)
+        self.log(f'  merged {head[:12]} at level {current["level"]} in mode {mode}')
+        payload = {'head': head, 'level': current['level'], 'mode': mode, 'receipt': current}
+        if bases:
+            payload['bases'] = bases
+        try:
+            self.gh.comment(pr.number, publishable(
+                dispatcher_header() + '\n## Mergiata da devloop\n\n'
+                f'devloop ha mergiato il commit `{head[:12]}` con un merge commit, legato a quel '
+                f'head (`--match-head-commit`), in modalità `{mode}`, al livello '
+                f'{current["level"]}. Subito prima ha ricontrollato le direttive di merge: CI '
+                '`pass`, `MERGEABLE` e `CLEAN`, nessun finding aperto, nessuna label '
+                f'`{lb.needs_human}` o `{lb.merge_hold}`, e le condizioni della promozione con la '
+                'ricevuta di policy ricalcolata. Il branch resta.\n\n' + describe_receipt(current),
+                'merged', payload))
+        except GitHubError as exc:
+            # The PR is merged: escalating it would only label a closed PR.
+            self.log(f'  the merged record could not be written: {exc}')
+        return None
 
     def _do_stale(self, number):
         lb = self.cfg.labels

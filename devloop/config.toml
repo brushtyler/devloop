@@ -1,6 +1,6 @@
 # devloop: dispatcher that moves issues labelled `agent:ready` through
 # implementation, independent structured review and fixes, up to a PR that a
-# human merges. See docs/devloop.md.
+# human merges (or devloop, see [merge]). See docs/devloop.md.
 
 repo = "brushtyler/ssdlc"
 base_branch = "main"
@@ -99,7 +99,33 @@ allowlist = []
 # Check runs by exact name and GitHub App id, e.g. { name = "unittest", app_id = 15368 }.
 checks = []
 
+# Merge (issue #172). mode:
+# - "off" (default): a person merges every PR, as before;
+# - "strict": devloop merges a PR in agent:ready-to-merge, with a merge commit bound to the
+#   approved head (--match-head-commit) and the local `gh` login it runs with, only if, read
+#   again just before the merge: the conditions of the promotion still hold (every required
+#   approve, no open finding, head = approved commit, policy receipt recomputed and matching;
+#   at level 0 the checks of its promotion), CI is `pass`, GitHub reports MERGEABLE and CLEAN,
+#   and neither agent:needs-human nor agent:merge-hold is set. The branch is kept;
+# - "auto": as "strict", and the supervisor (roles.supervisor) or a trusted user can hold a
+#   merge with `/devloop hold <reason>` and allow it again with `/devloop release`. Needs
+#   roles.supervisor.
+# Each merge takes a slot of max_actions_per_tick and runs alone. Enabling it is the operator's
+# decision.
+[merge]
+mode = "off"
+# A PR touching one of these paths (directories ending in "/" or files from the root) is merged
+# by a person, whatever the mode.
+operator_only_paths = ["docs/adr/", "AGENTS.md", "CLAUDE.md"]
+# A mode per review level: the most restrictive of this and `mode` applies (off, then strict,
+# then auto).
+# [merge.levels]
+# "2" = "off"
+
 [roles]
+# The agent whose GitHub identity may hold and release merges in "auto" mode (issue #172),
+# besides trusted_users.
+# supervisor = "claude"
 implementer = "claude"
 # The reviewer pool, in order; none may be the implementer. Level 1 uses the PR's recorded
 # reviewer (the first of the pool when the PR was opened). Level 2 takes the first pair that
