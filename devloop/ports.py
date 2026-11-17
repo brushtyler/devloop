@@ -25,6 +25,9 @@ Where a method went, when it was not obvious:
   them, because the ``strict`` merge mode requires exactly ``MERGEABLE`` and ``CLEAN``.
   ``merge_pr`` runs on the dispatcher's ``merger``: the ``merger`` app when configured (#201),
   otherwise the local login.
+- ``close_issue`` (#228) is in ``Tracker`` and ``merged_prs`` in ``CodeReview``: after a merge
+  the dispatcher closes the PR's issue itself, and the planner never starts an issue that a
+  merged devloop PR already resolved.
 - ``GitHub.last_labeler`` is not in any port: the dispatcher no longer calls it.
 - ``GitHub.open_issues``, ``comments_since``, ``issue_state`` and ``issue_author`` are not in
   any port: only the ``watch`` command (``devloop/watch.py``) calls them, not the dispatcher.
@@ -73,6 +76,9 @@ class Tracker(Protocol):
     def comment(self, number, body):
         """Post a comment; returns its id, or None if unknown."""
 
+    def close_issue(self, number):
+        """Close issue ``number`` as completed."""
+
     def edit_comment(self, comment_id, body):
         """Replace the body of comment ``comment_id``."""
 
@@ -87,6 +93,10 @@ class CodeReview(Protocol):
     def open_prs(self):
         """The open pull requests, with ``author`` in REST form (``author_login``)."""
 
+    def merged_prs(self, branch):
+        """The merged pull requests from head branch ``branch``, as :meth:`open_prs` with
+        ``mergeCommit``."""
+
     def merge_state(self, pr):
         """``clean``, ``conflict`` or ``unknown`` for ``pr`` as :meth:`open_prs` returns it."""
 
@@ -95,7 +105,7 @@ class CodeReview(Protocol):
 
     def pr_state(self, number):
         """PR ``number`` as a merge needs it, read fresh: ``{state, headRefOid, mergeable,
-        mergeStateStatus, labels}``."""
+        mergeStateStatus, labels, mergeCommit}``."""
 
     def merge_pr(self, number, head):
         """Merge PR ``number`` with a merge commit, only if its head is still ``head``."""
