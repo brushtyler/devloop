@@ -348,7 +348,9 @@ each agy turn its minimal permissions, and treats a stop without output as a fai
   goes to the turn's log and to the `agent:needs-operator` comment. When agy's JSON lists
   `denied_actions`, the message ends with `; denied_actions: [...]` (#155), so the escalation
   says which action was denied. It is never an empty result; with exit 0 it never counts as an
-  unavailable model either, so it does not start the fallback. The message counts as the CLI's
+  unavailable model either, so it does not start the fallback by itself: only a permission
+  denied twice on the same model moves the turn to the next model of the chain, and escalates
+  when the chain has none left (see below). The message counts as the CLI's
   diagnostic on stderr, or on stdout only as a line of its own: a structured answer that quotes
   it is still a valid answer.
 - **An empty run moves to the next model.** A turn that exits 0 with an empty stdout and
@@ -437,14 +439,17 @@ fallback_models = [
   `structured_output` or an explicit error envelope leave room for a match. A result, a parse
   error, a timeout and a stall never count, whatever the text, and follow the usual path to
   `agent:needs-operator`. An agy [empty run](#agy-permissions) (exit 0, no result, no error) also
-  moves to the next model, without being remembered.
+  moves to the next model, without being remembered, and so does an agy permission
+  [denied twice](#agy-permissions) on the same model (#319), which remembers that model for
+  `denied_cooldown_hours`; on the last model of the chain either escalates.
 - **Once.** Each model is tried at most once per action, but for the single retry of an agy
   denied permission or of an empty run on the last model: a rate limit the CLI reports as
   terminal counts as persistent, and a model found unavailable is not tried again by the later
   attempts of the same action (`implement_test_retries`). When the last model fails too, the
-  issue or PR goes to `agent:needs-operator` with a comment listing the models tried and why. Any
-  other failure after a fallback ends the action without trying further models, and its
-  comment lists the models tried too, the failed one included.
+  issue or PR goes to `agent:needs-operator` with a comment listing the models tried and why. A
+  second agy denial moves to the next model as an unavailable model does (#319), and on the last
+  model escalates the same way. Any other failure after a fallback ends the action without
+  trying further models, and its comment lists the models tried too, the failed one included.
 - **Worktree.** The fallback is a new session with the same prompt and worktree. Partial changes
   of the previous attempt, and the merge in progress of a sync, stay as they are, without any
   rollback; the prompt tells the agent that the worktree may contain them.
