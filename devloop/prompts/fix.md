@@ -49,6 +49,8 @@ Current acceptance map of the pull request:
 
 $acceptance_map
 
+$docs
+
 ## Issue #$issue_number: $issue_title
 
 $issue_body

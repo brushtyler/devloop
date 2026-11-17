@@ -75,16 +75,18 @@ class PolicyConfigTests(unittest.TestCase):
                 config.parse_config(dict(DATA, review_policy=dict(table, **change)))
 
     def test_path_lists_come_from_the_running_installation(self):
-        # The list is read from the dispatcher's root, not from a PR branch.
+        # The list is read from the dispatcher's root, not from a PR branch. That root holds no
+        # documents here: [docs] map (#203, which needs them) has its own tests.
+        data = {k: v for k, v in DATA.items() if k != 'docs'}
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / 'schemas').mkdir()
             (Path(tmp) / 'schemas/recovery-grader-baseline.json').write_text(
                 json.dumps({'files': {'core.py': 'x'}}))
-            self.assertEqual(config.parse_config(DATA, root=tmp).review_policy.sensitive_files,
+            self.assertEqual(config.parse_config(data, root=tmp).review_policy.sensitive_files,
                              ('core.py',))
             (Path(tmp) / 'schemas/recovery-grader-baseline.json').write_text('{"files": []}')
             with self.assertRaises(config.ConfigError):
-                config.parse_config(DATA, root=tmp)
+                config.parse_config(data, root=tmp)
 
 
 class LevelTests(unittest.TestCase):

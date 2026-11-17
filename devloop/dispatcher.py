@@ -806,6 +806,60 @@ def _template(name, **values):
     return string.Template(text).safe_substitute({k: str(v) for k, v in values.items()})
 
 
+# The changed files shown for each mapped document in a prompt (#203); the rest are counted.
+DOCS_PATHS_SHOWN = 5
+
+
+def docs_map_section(entries):
+    """The documentation section of the first implement prompt (#203): its diff is still empty,
+    so it gets the whole ``[docs] map``. Empty without a map."""
+    if not entries:
+        return ''
+    lines = '\n'.join(f'- `{key}` → ' + ', '.join(f'`{d}`' for d in documents)
+                      for key, documents in entries)
+    return ('## Documentation map\n\n'
+            'devloop maps code paths to the documents that describe them (`[docs] map`; a path '
+            'ending in `/` covers every file under it). Your diff is still empty, so this is the '
+            'whole map. Before finishing, apply it to the files you changed: update every '
+            'document mapped to one of them whose described behaviour your change alters. A file '
+            'that no entry covers asks for no document.\n\n' + lines)
+
+
+def _docs_list(documents):
+    lines = []
+    for document, paths in documents.items():
+        shown = ', '.join(f'`{p}`' for p in paths[:DOCS_PATHS_SHOWN])
+        more = (f' and {len(paths) - DOCS_PATHS_SHOWN} more' if len(paths) > DOCS_PATHS_SHOWN
+                else '')
+        lines.append(f'- `{document}`, mapped from {shown}{more}')
+    return '\n'.join(lines)
+
+
+def docs_diff_section(documents):
+    """The documentation section of a later implement attempt and of a fix (#203): the
+    documents mapped to the files of the current diff (``DocsMap.documents``). Empty when no
+    file of the diff is mapped."""
+    if not documents:
+        return ''
+    return ('## Documents mapped to the diff\n\n'
+            'The files this branch changes map to these documents (`[docs] map`). Update each '
+            'one whose described behaviour your change alters; leave the others as they '
+            'are.\n\n' + _docs_list(documents))
+
+
+def docs_review_section(documents):
+    """The documentation section of a review prompt (#203): the documents mapped to the
+    files of the pull request's diff, and how to judge them. Empty when no file is mapped."""
+    if not documents:
+        return ''
+    return ('## Documents mapped to the diff\n\n'
+            'The files this pull request changes map to these documents (`[docs] map`):\n\n'
+            + _docs_list(documents)
+            + '\n\nA behaviour described in one of these documents that the change alters without '
+              'updating that document is a **blocking** finding. When a mapped document stays '
+              'correct without changes, say so in `checks_performed`.')
+
+
 def _format_findings(findings):
     lines = []
     for f in findings:
@@ -2129,8 +2183,17 @@ class Dispatcher:
             raise failed  # an agent without fallback models: as before #121
         raise ModelsUnavailable(models.agent.key, models.tried, getattr(failed, 'log', None))
 
+    def _mapped_docs(self, path):
+        """``{document: [paths]}`` of ``[docs] map`` for the diff of the worktree ``path``
+        (#203): the same diff as the local tests (``worktree_changes``, #169), read now."""
+        if not self.cfg.docs.entries:
+            return {}
+        return self.cfg.docs.documents(self.ws.worktree_changes(path))
+
     def _write_turn(self, agent, prompt, schema, path, label, where=None):
         """Run a writing agent, then the local tests (``_verify``); retry with the failures.
+        ``prompt`` is the text, or a function of the attempt (0 first) that renders it, so that
+        each attempt gets what its worktree holds then (#203).
         Returns the output, ``None`` on success or a reason to escalate, the agent configuration
         of the last turn (``_turn``), the ledger record of the passing test, to bind to the
         commit that follows (None without a ledger or without a passing test), and the mode and
@@ -2138,8 +2201,10 @@ class Dispatcher:
         turn, or an implementation without changes). A model found
         unavailable is not tried again in later attempts."""
         models = Models(agent)
+        failures = ''
         for attempt in range(1 + self.cfg.implement_test_retries):
-            result, used = self._turn(models, 'write', prompt, schema, path,
+            text = (prompt(attempt) if callable(prompt) else prompt) + failures
+            result, used = self._turn(models, 'write', text, schema, path,
                                       f'{label}-{attempt + 1}', where=where)
             if result['status'] == 'blocked':
                 return result, None, used, None, None
@@ -2148,8 +2213,8 @@ class Dispatcher:
             passed, tail, tested, local = self._verify(where, path, attempt + 1)
             if passed:
                 return result, None, used, tested, local
-            prompt += ('\n\n## Test failures after your previous attempt\n\nThe test command failed. '
-                       f'Fix the cause, then finish again.\n\n```text\n{tail}\n```\n')
+            failures += ('\n\n## Test failures after your previous attempt\n\nThe test command '
+                         f'failed. Fix the cause, then finish again.\n\n```text\n{tail}\n```\n')
         return (result, ('I test locali falliscono anche dopo i tentativi di correzione.', tail),
                 used, None, local)
 
@@ -2816,11 +2881,17 @@ class Dispatcher:
         # from and the request its prompt gets.
         key = self._issue_key('implement', self.ws.head(path), issue['request'])
         criteria = acceptance_criteria(issue.get('body'))
-        prompt = _template('implement', repo=cfg.repo, base_branch=cfg.base_branch,
-                           issue_number=number, issue_title=issue['title'],
-                           issue_body=issue.get('body') or '', issue_comments=comments,
-                           acceptance_criteria=format_criteria(criteria),
-                           test_cmd=cfg.test_cmd, language=cfg.language)
+
+        def prompt(attempt):
+            # #203: the first attempt has no diff yet and gets the whole map; a later one the
+            # documents mapped to the diff it left.
+            docs = (docs_map_section(cfg.docs.entries) if attempt == 0
+                    else docs_diff_section(self._mapped_docs(path)))
+            return _template('implement', repo=cfg.repo, base_branch=cfg.base_branch,
+                             issue_number=number, issue_title=issue['title'],
+                             issue_body=issue.get('body') or '', issue_comments=comments,
+                             acceptance_criteria=format_criteria(criteria),
+                             test_cmd=cfg.test_cmd, language=cfg.language, docs=docs)
         try:
             result, failure, used, tested, local = self._write_turn(
                 agent, prompt, 'implement', path, f'issue-{number}-implement',
@@ -2981,6 +3052,7 @@ class Dispatcher:
                            issue_body=issue.get('body') or '', pr_body=pr.body,
                            acceptance_criteria=format_criteria(criteria),
                            acceptance_map=format_map(acceptance_map),
+                           docs=docs_review_section(self._mapped_docs(path)),
                            diff_stat=self.ws.diff_stat(path),
                            previous=format_previous_rounds(earlier, pr.fixes, pr.closures),
                            operator_comments=format_operator_comments(comments),
@@ -3152,13 +3224,17 @@ class Dispatcher:
             self.log('  branch changed after the review; sending it back to review')
             self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.changes])
             return
-        prompt = _template('fix', repo=cfg.repo, pr_number=pr.number, issue_number=pr.issue,
-                           issue_title=issue['title'], issue_body=issue.get('body') or '',
-                           findings=_format_findings(findings), test_cmd=cfg.test_cmd,
-                           acceptance_criteria=format_criteria(
-                               acceptance_criteria(issue.get('body'))),
-                           acceptance_map=format_map(latest_map(pr.meta, pr.fixes)),
-                           language=cfg.language)
+
+        def prompt(attempt):
+            # The documents mapped to the diff each attempt starts from (#203).
+            return _template('fix', repo=cfg.repo, pr_number=pr.number, issue_number=pr.issue,
+                             issue_title=issue['title'], issue_body=issue.get('body') or '',
+                             findings=_format_findings(findings), test_cmd=cfg.test_cmd,
+                             acceptance_criteria=format_criteria(
+                                 acceptance_criteria(issue.get('body'))),
+                             acceptance_map=format_map(latest_map(pr.meta, pr.fixes)),
+                             docs=docs_diff_section(self._mapped_docs(path)),
+                             language=cfg.language)
         result, failure, used, tested, local = self._write_turn(
             agent, prompt, 'fix', path, f'pr-{pr.number}-fix-r{latest["round"]}',
             where=(pr.number, 'fix'))

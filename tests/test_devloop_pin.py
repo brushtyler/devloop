@@ -29,6 +29,8 @@ REPO = Path(__file__).resolve().parent.parent
 LAUNCHER = REPO / 'scripts' / 'devloop-pinned'
 LIST = 'schemas/recovery-grader-baseline.json'
 DATA = tomllib.loads(config.DEFAULT_CONFIG.read_text())
+# The documents of [docs] map (#203), in the order a pin lists them.
+DOCUMENTS = list(dict.fromkeys(d for _, docs in config.docs_entries(DATA) for d in docs))
 
 
 def load_launcher():
@@ -40,11 +42,13 @@ def load_launcher():
 
 
 def copy_package(dest):
-    """The devloop package and the list file of this checkout into ``dest``."""
+    """The devloop package, the list file and the documents of ``[docs] map`` (#203) of this
+    checkout into ``dest``."""
     shutil.copytree(REPO / 'devloop', dest / 'devloop',
                     ignore=shutil.ignore_patterns('__pycache__'))
-    (dest / LIST).parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy(REPO / LIST, dest / LIST)
+    for name in [LIST, *DOCUMENTS]:
+        (dest / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(REPO / name, dest / name)
 
 
 def git(cwd, *args):
@@ -70,7 +74,7 @@ class GitCase(unittest.TestCase):
         git(self.tmp, 'clone', '--quiet', str(origin), str(self.root))
         git(self.root, 'checkout', '--quiet', '-b', 'main')
         copy_package(self.root)
-        (self.root / 'README.md').write_text('not pinned\n')
+        (self.root / 'NOTES.md').write_text('not pinned\n')
         self.first = self.commit('devloop')
         git(self.root, 'push', '--quiet', 'origin', 'main')
         self.state = self.root / '.ssdlc' / 'devloop'
@@ -112,10 +116,13 @@ class PinTests(GitCase):
         self.assertEqual(self.pointed(), copy.resolve())
         self.assertTrue((self.state / 'current').is_symlink())
         self.assertEqual(os.readlink(self.state / 'current'), copy.name)
-        self.assertEqual(sorted(p.name for p in copy.iterdir()), ['devloop', 'pin.json', 'schemas'])
+        # The mapped documents (#203) come along, nothing else of the commit.
+        self.assertEqual(sorted(p.name for p in copy.iterdir()),
+                         ['README.md', 'devloop', 'docs', 'pin.json', 'schemas'])
         self.assertEqual(json.loads((copy / 'pin.json').read_text()),
-                         {'commit': self.first, 'files': [LIST]})
-        self.assertEqual((copy / LIST).read_bytes(), (REPO / LIST).read_bytes())
+                         {'commit': self.first, 'files': [LIST, *DOCUMENTS]})
+        for name in [LIST, *DOCUMENTS]:
+            self.assertEqual((copy / name).read_bytes(), (REPO / name).read_bytes())
         self.assertTrue((copy / 'devloop' / 'dispatcher.py').is_file())
         for path in [copy, *copy.rglob('*')]:
             self.assertFalse(path.stat().st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH),
@@ -147,6 +154,20 @@ class PinTests(GitCase):
                 local.write_text(f'[review_policy]\nsensitive_path_lists = ["{value}"]\n')
                 with self.assertRaisesRegex(pin.PinError, 'not a relative path'):
                     self.pin('main', local)
+        self.assertEqual(self.pointed(), old.resolve())
+
+    def test_a_mapped_document_missing_from_the_commit_fails(self):
+        # #203: every document of [docs] map must be a regular file of the pinned commit.
+        old = self.pin('main')
+        git(self.root, 'rm', '--quiet', 'docs/devloop.md')
+        self.commit('no devloop document')
+        git(self.root, 'push', '--quiet', 'origin', 'main')
+        with self.assertRaisesRegex(pin.PinError, 'docs.map: docs/devloop.md is not a file'):
+            self.pin('main')
+        local = self.tmp / 'config.local.toml'
+        local.write_text('[docs.map]\n"x.py" = ["/etc/passwd"]\n')
+        with self.assertRaisesRegex(pin.PinError, 'not a relative path'):
+            self.pin(self.first[:12], local)
         self.assertEqual(self.pointed(), old.resolve())
 
     def test_a_commit_only_local_is_refused(self):
@@ -222,8 +243,8 @@ class PinTests(GitCase):
         self.assertIn('(copy reused)', self.logs[-1])
         # A reused copy is checked again against the current overlay.
         local = self.tmp / 'config.local.toml'
-        local.write_text('[review_policy]\nsensitive_path_lists = ["README.md"]\n')
-        with self.assertRaisesRegex(pin.PinError, 'README.md is missing'):
+        local.write_text('[review_policy]\nsensitive_path_lists = ["NOTES.md"]\n')
+        with self.assertRaisesRegex(pin.PinError, 'NOTES.md is missing'):
             self.pin(new_sha, local)
         self.assertEqual(self.pointed(), old.resolve())
 

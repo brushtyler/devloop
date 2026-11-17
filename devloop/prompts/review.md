@@ -14,7 +14,8 @@ Read `AGENTS.md` and the README section "Developing SSDLC".
 1. The change does what issue #$issue_number asks, completely, and nothing unrelated.
 2. Correctness: logic errors, unhandled states, broken invariants, regressions in callers.
 3. Tests cover the new or changed behaviour and would fail without the change.
-4. User-facing docs match the new behaviour and limits.
+4. User-facing docs match the new behaviour and limits, starting from the documents mapped to the
+   diff below, when there are any.
 5. This project's principles: explicit operator authority, frozen limits, evidence and integrity.
    A change that weakens them without the issue asking for it is blocking.
 6. The acceptance coverage map below. Verify every entry against the code and the tests: a
@@ -64,6 +65,8 @@ $acceptance_criteria
 Latest coverage map of the pull request, from the implementer or its latest fix:
 
 $acceptance_map
+
+$docs
 
 ## Diff summary
 
