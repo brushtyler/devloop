@@ -218,6 +218,22 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(record['verdict'], 'request_changes')
         self.assertEqual(self.gh.labels[100], {'agent:changes'})
 
+    def test_review_prompt_describes_the_merge_modes(self):
+        runner = FakeRunner(raw_review())
+        d = self.make(runner)
+        p = pr()
+        p.meta = dict(META, acceptance_map=covered_map())
+        self.gh.labels[100] = set(p.labels)
+        d._do_review(p)
+        prompt = ' '.join(runner.calls[0][3].split())
+        self.assertNotIn('goes to a human for merge', prompt)
+        self.assertIn('Your verdict decides whether the PR becomes ready to merge.', prompt)
+        self.assertIn('An approval can lead to an automatic merge: with merge mode `off` a person '
+                      'merges the ready PR; with `strict` or `auto` devloop merges it itself, '
+                      'once every merge directive holds', prompt)
+        self.assertIn('A stricter mode for the review level, or a diff that touches '
+                      'operator-only paths, leaves the merge to a person.', prompt)
+
     def test_pr_without_map_gets_a_finding_and_the_fix_provides_it(self):
         runner = FakeRunner(raw_review())
         d = self.make(runner)
