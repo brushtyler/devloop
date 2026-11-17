@@ -109,12 +109,12 @@ from .acceptance import (acceptance_criteria, acceptance_findings, format_criter
                          latest_map, render_map)
 from .agents import (TAIL_LINES, AgentError, ModelsUnavailable, ModelUnavailable, NoOutput,
                      PermissionDenied, StartFailure, background_unfinished)
-from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, MERGER, PR_COMMENT, REVIEW
+from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, MERGER, PR_COMMENT, RERUN, REVIEW
 from .config import INSTALL_ROOT, ConfigError
-from .github import GitHubError, author_login
+from .github import GitHubError, author_login, job_id
 from .ledger import entries as ledger_entries
 from .ledger import open_turns
-from .localtests import module_command, select_modules
+from .localtests import failed_modules, module_command, select_modules
 from .markdown import (RESUME, carries_record, dispatcher_header, publishable, read_marker,
                        render_escalation, render_fix, render_native_review, render_preflight,
                        render_review, render_supervision)
@@ -251,6 +251,23 @@ class PullRequest:
     # Fixes asked with ``FIX_COMMAND`` and not run yet (#195), oldest first, as
     # ``{comment, by, request}``: one fix of the current head answers all of them.
     fix_requests: list = field(default_factory=list)
+    # Re-runs of failed CI jobs the dispatcher recorded (``rerun`` markers, #200), and whether
+    # the CI still shows the very failed checks a re-run of the head replaces: the re-run has
+    # not started yet, and the failure is not a new one.
+    reruns: list = field(default_factory=list)
+    rerun_waiting: bool = False
+
+
+def rerun_of(reruns, head):
+    """The re-run recorded for ``head`` among ``reruns`` (#200), or None: one per head."""
+    return next((r for r in reruns if r['head'] == head), None)
+
+
+def rerun_waiting(record, details):
+    """Whether the checks ``details`` of a head still fail with exactly the checks its re-run
+    ``record`` replaces (#200): a re-run job is a new check run, with a new link."""
+    failed = {c.get('link') for c in details if c.get('bucket') == 'fail'}
+    return bool(failed) and failed <= set(record['checks'])
 
 
 @dataclass
@@ -544,6 +561,8 @@ def plan(snapshot, cfg):
                 actions.append(Action('revoke', pr.number, 'the acceptance map does not hold'))
             elif pr.merge_state == 'conflict':
                 actions.append(Action('sync', pr.number, 'conflicts with the base branch'))
+            elif pr.checks == 'fail' and pr.rerun_waiting:
+                pass  # the failed jobs were re-run (#200): not merged, nor a round, yet
             elif pr.checks == 'fail':
                 actions.append(Action('ci_failed', pr.number, 'CI failed after approval')
                                if rounds_left else Action('round_limit', pr.number))
@@ -599,6 +618,8 @@ def plan(snapshot, cfg):
                 continue  # GitHub is still computing mergeability: next tick
             elif pr.checks == 'pending':
                 continue
+            elif pr.checks == 'fail' and pr.rerun_waiting:
+                continue  # the failed jobs were re-run (#200) and have not started yet
             elif replay and not unbound and not unmapped and pr.checks != 'fail':
                 actions.append(Action('apply_review', pr.number, 'approval already recorded'))
             elif partial and pr.checks != 'fail':
@@ -1055,7 +1076,7 @@ class Dispatcher:
             login = (comment.get('author') or {}).get('login')
             if kind in ('fix', 'sync'):
                 actor = implementer
-            elif kind in ('policy', 'finding'):
+            elif kind in ('policy', 'finding', 'rerun'):
                 actor = DISPATCHER
             elif record['source'] == 'ci':
                 actor = DISPATCHER
@@ -1558,7 +1579,8 @@ class Dispatcher:
         pr.reviews = [record for _, record in entries]
         pr.fixes = self._markers(pr, comments, 'fix')
         pr.syncs = self._markers(pr, comments, 'sync')
-        pr.closures = [c for record in self._markers(pr, comments, 'finding')
+        pr.reruns = self._markers(pr, comments, 'rerun')
+        pr.closures =[c for record in self._markers(pr, comments, 'finding')
                        for c in record['closed']]
         state = finding_state(pr.reviews, pr.closures)
         pr.finding_problems = problems + state.problems
@@ -1709,6 +1731,11 @@ class Dispatcher:
                         pr.check_details)
                 else:
                     pr.checks, pr.failed_checks, pr.failed_runs = self.gh.checks(pr.head_sha)
+                record = rerun_of(pr.reruns, pr.head_sha)
+                if pr.checks == 'fail' and record is not None:
+                    details = (pr.check_details if pr.check_details is not None
+                               else self.gh.check_details(pr.head_sha))
+                    pr.rerun_waiting = rerun_waiting(record, details)
             if (lb.ready_to_merge in pr.labels and pr.zero_head is not None
                     and zero_labels_hold(pr, self.cfg.review_policy)):
                 pr.zero_problem = self._zero_problem(pr)
@@ -3296,17 +3323,27 @@ class Dispatcher:
         return receipt, paths
 
     def _do_ci_failed(self, pr):
-        receipt, _ = self._current_receipt(pr)
+        receipt, paths = self._current_receipt(pr)
         if receipt is None:
             return
         if receipt['level'] > 1 and len(receipt['reviewers']) < receipt['level']:
             return self._escalate_level(pr, receipt)
+        if self._rerun_unrelated(pr, paths):
+            return
         log_tail = '\n'.join(self.gh.failed_log(run) for run in pr.failed_runs[:2])
         review = ci_failure_review(failed_checks=pr.failed_checks, log_tail=log_tail,
                                    previous_open=open_findings(pr.reviews, pr.closures),
                                    round_no=last_round(pr.reviews) + 1,
                                    max_rounds=self._last_round_allowed(pr.reviews),
                                    head_sha=pr.head_sha)
+        rerun = rerun_of(pr.reruns, pr.head_sha)
+        if rerun is not None:
+            review['note'] = (
+                'I job falliti di questo commit erano già stati rilanciati una volta, perché '
+                'nessun modulo fallito era pertinente alla PR (run '
+                + ', '.join(str(r) for r in rerun['runs']) + '; moduli: '
+                + (', '.join(rerun['modules']) or 'nessuno') + '). Anche il rilancio è fallito: '
+                'questo fallimento conta come round.')
         review['receipt'] = receipt
         if self.ledger is not None:
             details = self.gh.check_details(pr.head_sha)
@@ -3314,6 +3351,65 @@ class Dispatcher:
                             review['round'])
         self.gh.comment(pr.number, render_review(review, dispatcher_header()))
         self._apply_round(pr, [review], announce=True, reviews=pr.reviews + [review])
+
+    def _rerun_unrelated(self, pr, paths):
+        """Re-run once the failed jobs of the head's CI when its failure does not concern the
+        PR (#200); whether it did. Only at the first failure of a head (``rerun`` marker), with
+        ``ci_rerun_unrelated``, when every failed check is a GitHub Actions job whose own log
+        names the failed test modules (``failed_modules``) and none of them is pertinent to
+        ``paths``,
+        the PR's diff, as ``local_tests = "changed"`` would select them (``select_modules``).
+        A re-run that GitHub refuses, such as a 403 without ``actions: write``, is logged and
+        the failure is a round, as before."""
+        if not self.cfg.ci_rerun_unrelated or rerun_of(pr.reruns, pr.head_sha) is not None:
+            return False
+        details = self.gh.check_details(pr.head_sha)
+        failed = [c for c in details if c.get('bucket') == 'fail']
+        runs = sorted({c.get('run_id') for c in failed}, key=str)
+        if not failed or None in runs:
+            self.log('  CI rerun: ' + ('no failed check read again' if not failed else
+                                       'not every failed check is a GitHub Actions run')
+                     + '; CI round')
+            return False
+        # Each failed job on its own: a run whose suite fails only in modules not pertinent to
+        # the PR may hold another failed job, such as a benchmark, that names none.
+        modules = set()
+        for check in failed:
+            job = job_id(check.get('link'))
+            found = None if job is None else failed_modules(
+                self.gh.failed_log(check['run_id'], max_lines=None, job_id=job))
+            if found is None:
+                self.log(f'  CI rerun: the log of the failed job {check.get("name")} (run '
+                         f'{check["run_id"]}) does not tell which test modules failed; CI round')
+                return False
+            modules.update(found)
+        modules = sorted(modules)
+        pertinent = select_modules(paths, modules)
+        if pertinent:
+            self.log(f'  CI rerun: failed modules pertinent to the PR: {", ".join(pertinent)}; '
+                     'CI round')
+            return False
+        try:
+            rerunner = self._as(DISPATCHER, RERUN)
+            for run in runs:
+                rerunner.rerun_failed_jobs(run)
+        except GitHubError as exc:
+            self.log(f'  CI rerun refused, the failure is a round as before (the dispatcher\'s '
+                     f'app needs actions: write): {exc}')
+            return False
+        record = {'head': pr.head_sha, 'runs': runs, 'modules': modules,
+                  'checks': sorted(c['link'] for c in failed)}
+        self.gh.comment(pr.number, publishable(
+            dispatcher_header() + '\n## CI rilanciata\n\n'
+            f'La CI di `{pr.head_sha[:12]}` è fallita solo in moduli di test non pertinenti al '
+            f'diff della PR ({", ".join(f"`{m}`" for m in modules)}): il dispatcher ha '
+            'rilanciato una volta i job falliti (run '
+            + ', '.join(str(r) for r in runs) + '), senza aprire un round. Se anche il '
+            'rilancio fallisce, il fallimento conta come round.', 'rerun', record))
+        self._ledger_event(pr.number, 'ci_rerun', head=pr.head_sha, runs=runs, modules=modules)
+        self.log(f'  CI rerun of {", ".join(str(r) for r in runs)}: failed modules not '
+                 f'pertinent to the PR ({", ".join(modules)})')
+        return True
 
     def _last_round_allowed(self, reviews):
         """The number of the last round ``max_review_rounds`` allows, given the waived rounds
