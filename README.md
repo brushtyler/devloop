@@ -79,18 +79,13 @@ The steps of [ADR 0001](docs/adr/0001-prodotto-unico-fasi-su-tracker.md), in ord
 
 ## Developing SSDLC
 
+Read the [development guide](docs/development.md): the test suite (`scripts/run-tests.py`) and how to run a single module, the documentation tests, the CI, the rule that keeps documents in step with the code, and the pinned controller.
+
 ```bash
-python3 -m venv .tools/python
-.tools/python/bin/python3 -m pip install -r requirements.txt
-.tools/python/bin/python3 scripts/run-tests.py                   # what CI runs
-python3 -I ssdlc_replay_gate.py --output recovery-benchmark.json # isolated A5 recovery gate
+.tools/python/bin/python3 scripts/run-tests.py           # the whole suite, what CI runs
+python3 -m unittest discover -s tests -p 'test_name.py'  # a single module
 ```
 
-- `scripts/run-tests.py` runs exactly the tests of `python3 -m unittest discover -s tests`, split across parallel processes (`-j N` sets how many); CI checks that it ran as many tests as the discover finds.
-- Running a single module: `python3 -m unittest discover -s tests -p 'test_name.py'` (works for every module; `python3 -m unittest tests.test_name` needs `PYTHONPATH=tests` for modules that import helpers from `tests/`).
-- Docker smoke tests: `python3 tests/docker_smoke.py --image <image> --suite` and `python3 tests/docker_pid_smoke.py --image <image>`.
-- Docker test of the writer gate holder (opt-in, as root on the host): `SSDLC_DOCKER_TESTS=1 python3 -m unittest discover -s tests -p 'test_container_holder_docker.py' -v` ([Writer fencing](docs/writer-fencing.md#containers-the-pid-1-holder)).
-- `tests/test_doc_links.py` checks that relative links, anchors and repository paths cited in `README.md`, `AGENTS.md` and `docs/` resolve. External links and fenced code blocks are skipped; to skip an intentional example, put `<!-- doc-links: ignore -->` on the line before it.
 - When SSDLC develops itself, run a pinned controller checkout against a **separate** target checkout.
 - Agents contributing to this repository follow [AGENTS.md](AGENTS.md).
 - [devloop](docs/devloop.md) dispatches issues labelled `agent:ready` to an implementer agent and an independent reviewer agent, up to a PR that a human merges (devloop merges only when the operator enables a merge mode).
