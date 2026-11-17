@@ -1,6 +1,6 @@
-"""GitHub App identities: one app per agent and one for the dispatcher.
+"""GitHub App identities: one app per agent, one for the dispatcher and an optional one for merges.
 
-Each actor (``dispatcher`` or an agent key) may have a GitHub App. Its installation tokens are
+Each actor (``dispatcher``, ``merger`` or an agent key) may have a GitHub App. Its installation tokens are
 minted per action with only the permissions that action needs, so a reviewer never holds a
 token that can push. An actor without an app falls back to the ambient ``gh`` login, as before.
 
@@ -25,12 +25,15 @@ from .ports import Backend
 
 API = 'https://api.github.com'
 DISPATCHER = 'dispatcher'
+# The app that only merges (#201): never used for comments, labels or pushes, and not an agent.
+MERGER = 'merger'
 
 # Permissions of the token minted for each kind of action (metadata: read is always implied).
 IMPLEMENT = {'contents': 'write', 'pull_requests': 'write'}
 REVIEW = {'contents': 'read', 'pull_requests': 'write'}
 PR_COMMENT = {'pull_requests': 'write'}
 ISSUE_COMMENT = {'issues': 'write'}
+MERGE = {'contents': 'write', 'pull_requests': 'write'}  # only the merger's token (#201)
 
 _REFRESH_MARGIN = 300  # seconds of validity a cached token must still have
 
@@ -187,7 +190,12 @@ class Identities:
         return app.login if app else None
 
     def agent_logins(self):
-        return {app.login for actor, app in self.apps.items() if actor != DISPATCHER}
+        return {app.login for actor, app in self.apps.items() if actor not in (DISPATCHER, MERGER)}
+
+    def merger(self) -> Backend:
+        """The client merges run with (#201): the ``merger`` app, with a token limited to
+        ``MERGE`` and minted when the merge runs, or the ambient ``gh`` login without it."""
+        return self.github(MERGER, MERGE)
 
     def git_auth(self, actor, permissions):
         """Commit identity and push credentials for ``actor``, or None for the ambient ones."""

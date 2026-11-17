@@ -1,11 +1,17 @@
 """devloop: merge modes off, strict and auto, with hold and release by the supervisor (#172)."""
 
 import dataclasses
+import importlib.util
+import os
+import tempfile
 import tomllib
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
-from devloop import config, markdown, review
+import devloop.__main__ as devloop_main
+from devloop import apps, config, markdown, review
 from devloop.config import MergePolicy
 from devloop.dispatcher import Action, Dispatcher, Snapshot, ensure_labels, merge_command, plan
 from devloop.github import GitHub
@@ -508,6 +514,183 @@ class DirectiveTests(Case):
                 self.gh.say('stranger', blocking)
                 d._do_merge(p)
                 self.assertEqual(self.gh.merged, [(100, SHA1)])
+
+
+MERGER_LOGIN = 'brushtyler-devloop-merger[bot]'
+
+
+class StubApp:
+    """An app as ``Identities`` uses it: a login and tokens, each request recorded."""
+
+    def __init__(self, login, token):
+        self.login, self._token, self.asked = login, token, []
+
+    def token(self, permissions=None):
+        self.asked.append(permissions)
+        return self._token
+
+
+class SimulatedGh:
+    """``subprocess.run`` as ``gh`` sees it: the argv and the environment of every call."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, argv, **kw):
+        self.calls.append((argv, kw.get('env')))
+        return SimpleNamespace(returncode=0, stdout='{}', stderr='')
+
+
+class MergerIdentities(Identities):
+    """The test identities, plus the merger's app (#201)."""
+
+    def login(self, actor):
+        return MERGER_LOGIN if actor == apps.MERGER else super().login(actor)
+
+
+class MergerAppTests(unittest.TestCase):
+    """Merges with the ``merger`` app (#201), or with the ambient login without it."""
+
+    def merge_with(self, real_ids, identities):
+        gh = MergeGH()
+        d = Dispatcher(STRICT, gh, FakeWS(), FakeRunner(), log=lambda m: None,
+                       identities=identities(gh), merger=real_ids.merger())
+        self.assertEqual(d.tick(), [MERGE])
+        return gh
+
+    def test_with_the_merger_app_the_merge_runs_with_its_token(self):
+        merger, dispatcher = StubApp(MERGER_LOGIN, 'merger-tok'), StubApp('d[bot]', 'disp-tok')
+        run = SimulatedGh()
+        ids = apps.Identities('o/r', {'merger': merger, 'dispatcher': dispatcher}, run=run)
+        client = ids.merger()
+        self.assertEqual(merger.asked, [])  # the token is asked for when the merge runs
+        gh = self.merge_with(ids, MergerIdentities)
+        (argv, env), = run.calls
+        self.assertEqual(argv, ['gh', 'pr', 'merge', '100', '-R', 'o/r', '--merge',
+                                '--match-head-commit', SHA1])
+        self.assertEqual(env['GH_TOKEN'], 'merger-tok')
+        # Only the permissions a merge needs, and no other app is asked for a token.
+        self.assertEqual(merger.asked, [{'contents': 'write', 'pull_requests': 'write'}])
+        self.assertEqual(apps.MERGE, {'contents': 'write', 'pull_requests': 'write'})
+        self.assertEqual(dispatcher.asked, [])
+        # The fake GitHub of the dispatcher did not merge: the merger's client did.
+        self.assertEqual(gh.merged, [])
+        (record,) = records(gh, 'merged')
+        self.assertEqual(record['merged_by'], MERGER_LOGIN)
+        self.assertIsInstance(client, GitHub)
+
+    def test_without_the_merger_app_the_merge_uses_the_ambient_login(self):
+        dispatcher = StubApp('d[bot]', 'disp-tok')
+        run = SimulatedGh()
+        ids = apps.Identities('o/r', {'dispatcher': dispatcher}, run=run)
+        gh = self.merge_with(ids, Identities)
+        (argv, env), = run.calls
+        self.assertEqual(argv, ['gh', 'pr', 'merge', '100', '-R', 'o/r', '--merge',
+                                '--match-head-commit', SHA1])
+        self.assertIsNone(env)  # no GH_TOKEN: the local gh login, as before #201
+        self.assertEqual(dispatcher.asked, [])
+        # The record is the one of #172, without merged_by.
+        (record,) = records(gh, 'merged')
+        self.assertEqual(record, {'head': SHA1, 'level': 1, 'mode': 'strict',
+                                  'receipt': receipt()})
+
+    def test_build_hands_the_merger_client_to_the_dispatcher(self):
+        merger = StubApp(MERGER_LOGIN, 'merger-tok')
+        for configured in ({'merger': merger}, {}):
+            with self.subTest(merger=bool(configured)), tempfile.TemporaryDirectory() as tmp:
+                run = SimulatedGh()
+                ids = apps.Identities(CFG.repo, configured, run=run)
+                args = SimpleNamespace(config=None, local_config=None)
+                with mock.patch.object(devloop_main, 'load_config', return_value=CFG), \
+                        mock.patch.object(devloop_main, 'main_checkout', return_value=Path(tmp)), \
+                        mock.patch.object(devloop_main.Identities, 'from_config',
+                                          return_value=ids):
+                    _, _, dispatcher = devloop_main.build(args)
+                dispatcher.merger.merge_pr(7, SHA1)
+                (argv, env), = run.calls
+                self.assertEqual(argv[:4], ['gh', 'pr', 'merge', '7'])
+                if configured:
+                    self.assertEqual(env['GH_TOKEN'], 'merger-tok')
+                else:
+                    self.assertIsNone(env)
+
+    def test_the_merger_is_not_an_agent(self):
+        ids = apps.Identities('o/r', {'merger': StubApp(MERGER_LOGIN, 't'),
+                                      'claude': StubApp('c[bot]', 't')})
+        self.assertEqual(ids.agent_logins(), {'c[bot]'})
+        self.assertEqual(ids.login('merger'), MERGER_LOGIN)
+
+    def test_the_merger_is_configured_as_an_app_only(self):
+        cfg = config.load_config()
+        self.assertEqual(cfg.apps['merger'], config.AppConfig(5792929, 'brushtyler-devloop-merger'))
+        self.assertNotIn('merger', cfg.agents)
+        agents = dict(DATA['agents'], merger=DATA['agents']['codex'])
+        with self.assertRaisesRegex(config.ConfigError, 'reserved'):
+            config.parse_config(dict(DATA, agents=agents))
+        without = {k: v for k, v in DATA['apps'].items() if k != 'merger'}
+        self.assertNotIn('merger', config.parse_config(dict(DATA, apps=without)).apps)
+
+    def test_a_merged_record_with_a_bad_signature_is_not_a_record(self):
+        good = {'head': SHA1, 'level': 1, 'mode': 'strict', 'receipt': receipt()}
+        text = lambda payload: markdown.publishable('x', 'merged', payload)
+        self.assertEqual(markdown.read_marker(text(dict(good, merged_by=MERGER_LOGIN)), 'merged'),
+                         dict(good, merged_by=MERGER_LOGIN))
+        self.assertIsNone(markdown.read_marker(text(dict(good, merged_by=7)), 'merged'))
+
+
+class MergerDocsTests(unittest.TestCase):
+    def test_the_guide_documents_creating_and_configuring_the_merger_app(self):
+        text = (Path(__file__).resolve().parents[1] / 'docs' / 'devloop.md').read_text()
+        section = ' '.join(text.split('\n### The merger app\n', 1)[1].split('\n## ', 1)[0].split())
+        for phrase in ('`Contents: Read and write`', '`Pull requests: Read and write`',
+                       '`Metadata: Read-only`', 'Only select repositories', 'chmod 600',
+                       '<slug>.<date>.private-key.pem', '[apps.merger]', 'app_id = 5792929',
+                       'slug = "brushtyler-devloop-merger"', 'python3 -m devloop apps',
+                       '`scripts/agent-token.py` refuses it', '`merged_by`',
+                       'Without `[apps.merger]` the merges use the local `gh` login'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, section)
+
+
+class AgentTokenTests(unittest.TestCase):
+    """``scripts/agent-token.py`` never exposes devloop's own apps (#201)."""
+
+    @classmethod
+    def setUpClass(cls):
+        path = Path(__file__).resolve().parents[1] / 'scripts' / 'agent-token.py'
+        spec = importlib.util.spec_from_file_location('agent_token', path)
+        cls.script = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.script)
+
+    def test_the_merger_and_the_dispatcher_are_refused(self):
+        for actor in ('merger', 'MERGER', 'dispatcher'):
+            with self.subTest(actor=actor), mock.patch.object(self.script, 'load_config') as load, \
+                    mock.patch.object(self.script.subprocess, 'run') as run:
+                with self.assertRaisesRegex(SystemExit, 'reserved to devloop'):
+                    self.script.main([actor, '--', 'gh', 'pr', 'merge', '1'])
+                load.assert_not_called()
+                run.assert_not_called()
+
+    def test_the_agents_are_still_accepted(self):
+        self.assertEqual(self.script.parse(['codex', '--', 'gh', 'x']),
+                         ('codex', {'issues': 'write', 'pull_requests': 'write'}, ['gh', 'x']))
+
+    def test_only_the_actors_key_is_read(self):
+        # The merger's key lives with devloop: an agent's token needs only the agent's key.
+        with tempfile.TemporaryDirectory() as tmp:
+            key = Path(tmp) / 'brushtyler-devloop-codex-agent.2026-11-17.private-key.pem'
+            key.write_text('k')
+            key.chmod(0o600)
+            seen = {}
+
+            def fake_run(command, env):
+                seen.update(command=command, token=env['GH_TOKEN'])
+                return SimpleNamespace(returncode=0)
+            with mock.patch.dict(os.environ, {'DEVLOOP_APP_KEY_DIR': tmp}), \
+                    mock.patch.object(self.script.AppAuth, 'token', return_value='codex-tok'), \
+                    mock.patch.object(self.script.subprocess, 'run', fake_run):
+                self.assertEqual(self.script.main(['codex', '--', 'gh', 'x']), 0)
+            self.assertEqual(seen, {'command': ['gh', 'x'], 'token': 'codex-tok'})
 
 
 class LevelZeroTests(unittest.TestCase):

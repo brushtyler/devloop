@@ -12,7 +12,7 @@ from pathlib import Path
 
 from . import activity, follow, pin, watch
 from .agents import AgentRunner, isolated_env
-from .apps import DISPATCHER, Identities
+from .apps import DISPATCHER, MERGER, Identities
 from .config import ConfigError, load_config
 from .dispatcher import (Dispatcher, TickLog, ensure_labels, plan, pr_counts_line, queue_lines,
                          run_forever)
@@ -108,10 +108,11 @@ def build(args):
                              agent.key, prompt, agent.model if agent.fallback_for else None),
                          stall=stall)
     gh = identities.github(DISPATCHER)
-    # Merges (#172) use the local gh login devloop runs with: no app gets contents=write.
+    # Merges (#172) run with the merger's app (#201), the only one that gets contents=write,
+    # or without it with the local gh login devloop runs with.
     dispatcher = Dispatcher(cfg, gh, ws, runner, log=tick_log, identities=identities,
                             activity=current, ledger=Ledger(gh, state_dir=state),
-                            merger=GitHub(cfg.repo),
+                            merger=identities.merger(),
                             pinner=pin.AutoPin(root, state, args.local_config, log=tick_log))
     return cfg, state, dispatcher
 
@@ -235,7 +236,7 @@ def main(argv=None):
         return
     if args.command == 'apps':
         failed = False
-        for actor in [DISPATCHER, *cfg.agents]:
+        for actor in [DISPATCHER, MERGER, *cfg.agents]:
             app = dispatcher.identities.apps.get(actor)
             if app is None:
                 log(f'{actor}: no app, uses the ambient gh login')

@@ -90,7 +90,7 @@ from pathlib import Path
 from .acceptance import (acceptance_criteria, acceptance_findings, format_criteria, format_map,
                          latest_map, render_map)
 from .agents import AgentError, ModelsUnavailable, ModelUnavailable, PermissionDenied
-from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, PR_COMMENT, REVIEW
+from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, MERGER, PR_COMMENT, REVIEW
 from .config import INSTALL_ROOT, ConfigError
 from .github import GitHubError, author_login
 from .ledger import entries as ledger_entries
@@ -822,8 +822,9 @@ class Dispatcher:
         # The pin after a merge (#174, ``pin.AutoPin``), used only with ``[pin] auto = true``.
         self.pinner = pinner
         self.gh = gh
-        # Merges run with the local ``gh`` login devloop runs with, never with an app (#172):
-        # the dispatcher's app has no ``contents=write``.
+        # Merges run with the merger's app when there is one (#201, ``Identities.merger``),
+        # otherwise with the local ``gh`` login devloop runs with (#172): no other app, the
+        # dispatcher's included, gets ``contents=write``.
         self.merger = merger if merger is not None else gh
         self.ws = ws
         self.runner = runner
@@ -2246,6 +2247,10 @@ class Dispatcher:
             except OSError as exc:
                 self.log(f'  auto-pin NOT requested, pin by hand: {exc}')
         payload = {'head': head, 'level': current['level'], 'mode': mode, 'receipt': current}
+        merged_by = self._app_login(MERGER)
+        if merged_by:
+            # Signed by the merger's app (#201); a merge with the ambient login names nobody.
+            payload['merged_by'] = merged_by
         if bases:
             payload['bases'] = bases
         try:

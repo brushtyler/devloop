@@ -172,9 +172,11 @@ def _valid_ledger(r):
 
 
 def _valid_merged(m):
-    """A merge devloop made (#172): the merged head, its receipt, level and merge mode."""
+    """A merge devloop made (#172): the merged head, its receipt, level and merge mode, and in
+    ``merged_by`` the login of the merger's app when it merged (#201)."""
     return (isinstance(m.get('head'), str) and m.get('mode') in ('strict', 'auto')
-            and _is_int(m.get('level')) and valid_receipt(m.get('receipt')))
+            and _is_int(m.get('level')) and valid_receipt(m.get('receipt'))
+            and isinstance(m.get('merged_by', ''), str))
 
 
 def _valid_hold(h):
