@@ -136,7 +136,7 @@ runs all five files and the existing full suite unmodified; AC-14 is checked by
 legacy compatibility coverage. Run the global suite on a temporary copy of
 tracked sources when subprocesses could generate ignored files in the checkout.
 
-The unified acceptance suite is `test_unified_integration.py`: deterministic fake
+The unified acceptance suite is `tests/test_unified_integration.py`: deterministic fake
 Claude/Codex processes and sandbox commands exercise real CLI/pipeline entry points,
 bootstrap checkpoints, corrective gates, journal reconciliation and limit boundaries.
 No network or provider credentials are required. These offline checks do not claim

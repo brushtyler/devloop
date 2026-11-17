@@ -277,6 +277,7 @@ python3 -I ssdlc_replay_gate.py --output recovery-benchmark.json # isolated A5 r
 - Running a single module: `python3 -m unittest discover -s tests -p 'test_name.py'` (works for every module; `python3 -m unittest tests.test_name` needs `PYTHONPATH=tests` for modules that import helpers from `tests/`).
 - Docker smoke tests: `python3 tests/docker_smoke.py --image <image> --suite` and `python3 tests/docker_pid_smoke.py --image <image>`.
 - Docker test of the writer gate holder (opt-in, as root on the host): `SSDLC_DOCKER_TESTS=1 python3 -m unittest discover -s tests -p 'test_container_holder_docker.py' -v` ([Writer fencing](docs/writer-fencing.md#containers-the-pid-1-holder)).
+- `tests/test_doc_links.py` checks that relative links, anchors and repository paths cited in `README.md`, `AGENTS.md` and `docs/` resolve. External links and fenced code blocks are skipped; to skip an intentional example, put `<!-- doc-links: ignore -->` on the line before it.
 - When SSDLC develops itself, run a pinned controller checkout against a **separate** target checkout.
 - Agents contributing to this repository follow [AGENTS.md](AGENTS.md).
 - [devloop](docs/devloop.md) dispatches issues labelled `agent:ready` to an implementer agent and an independent reviewer agent, up to a PR that a human merges (devloop merges only when the operator enables a merge mode).
