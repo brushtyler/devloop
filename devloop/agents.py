@@ -11,7 +11,7 @@ from pathlib import Path
 from .markdown import header, parse_version
 from .schema import load_schema, schema_path, validate, SchemaError
 from .unavailability import reset_seconds
-from .workspace import git_config_env, run_in_group
+from .workspace import git_config_env, partial_text, run_in_group
 
 MODES = ('write', 'review')
 # The tools that start sub-agents, denied in every claude turn (issue #219): a headless turn
@@ -75,9 +75,57 @@ def isolated_env(gh_config_dir, base=None):
 
 
 class AgentError(RuntimeError):
+    """A failed turn. ``log``: the turn's local log; ``tail``: for a turn the dispatcher stopped
+    (a timeout, issue #215), the last lines of its output, cleaned by ``output_tail``, or ''."""
+
+    tail = ''
+
     def __init__(self, message, log=None):
         super().__init__(message)
         self.log = log
+
+
+TAIL_LINES = 10
+TAIL_WIDTH = 300
+_SECRET_NAME = re.compile(r'KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL', re.I)
+_PEM = re.compile(r'-----BEGIN [^-]+-----.*?(?:-----END [^-]+-----|\Z)', re.S)
+_CREDENTIAL = re.compile(r'(?<![A-Za-z0-9_])(?:sk-[A-Za-z0-9_-]{20,}'
+                         r'|(?:ghp_|ghs_|gho_|ghu_|ghr_|github_pat_)[A-Za-z0-9_]{20,}'
+                         r'|AKIA[A-Z0-9]{16}|Bearer\s+[A-Za-z0-9._~+/-]{20,}=*)(?![A-Za-z0-9_])')
+# An absolute path: a slash not preceded by a word, a dot, a tilde or another slash, followed
+# by one or more segments. Relative paths, ``~/…`` and URLs (``//`` after the scheme) do not
+# match.
+_ABSOLUTE = re.compile(r'(?<![\w.~/\\])(?:/[^\s/\'"`,;:()\[\]{}<>|\\]+)+/?')
+
+
+def _local_path(match):
+    name = match.group(0).rstrip('/').rsplit('/', 1)[-1]
+    return f'…/{name}' if name else '…'
+
+
+def output_tail(stdout, stderr, workdir=None, env=None, lines=TAIL_LINES, width=TAIL_WIDTH):
+    """The last ``lines`` non-blank lines of a turn's output (stdout, then stderr), for a
+    public comment (issue #215): each cut to ``width`` characters; private keys, credentials and
+    the values of secret-looking variables of ``env`` (default ``os.environ``) replaced with
+    ``[REDACTED]``; paths inside ``workdir`` made relative and any other absolute path reduced
+    to its last segment. '' when the turn wrote nothing."""
+    text = f'{stdout or ""}\n{stderr or ""}'
+    secrets = sorted({v for k, v in (os.environ if env is None else env).items()
+                      if _SECRET_NAME.search(k) and isinstance(v, str) and len(v) >= 8},
+                     key=lambda v: (-len(v), v))
+    text = _PEM.sub('[REDACTED]', text)
+    for secret in secrets:
+        text = text.replace(secret, '[REDACTED]')
+    text = _CREDENTIAL.sub('[REDACTED]', text)
+    if workdir is not None:
+        roots = {str(Path(workdir)), os.path.realpath(workdir)}
+        for root in sorted((r.rstrip('/') for r in roots if r.rstrip('/')), key=len,
+                           reverse=True):
+            text = re.sub(re.escape(root) + r'(?=[/\s\'"`:,;)\]}]|$)', '.', text,
+                          flags=re.M)
+    text = _ABSOLUTE.sub(_local_path, text)
+    kept = [line.rstrip() for line in text.splitlines() if line.strip()][-lines:]
+    return '\n'.join(line if len(line) <= width else line[:width - 1] + '…' for line in kept)
 
 
 class EnvelopeError(AgentError):
@@ -462,19 +510,38 @@ class AgentRunner:
             if self._stall is not None:
                 kwargs.update(watch=self._stall.turn(agent.key, workdir),
                               watch_interval=self._stall.interval)
+        def write_log(status, stdout, stderr):
+            log.write_text(f'$ {argv[0]} ({mode})\n{status}\n--- stdout\n{stdout}'
+                           f'\n--- stderr\n{stderr}', encoding='utf-8')
+
+        def stopped_log(status, stdout='', stderr=''):
+            # The comment of a failed turn cites the log: it exists even when the turn did not
+            # end on its own (issue #215). A log that cannot be written does not hide why the
+            # turn failed.
+            try:
+                write_log(status, partial_text(stdout), partial_text(stderr))
+            except OSError:
+                pass
+
         try:
             done = run(argv, input=stdin, cwd=workdir, capture_output=True, text=True,
                        timeout=self.timeout, **kwargs)
         except AgentError as exc:  # the stall check stopped the turn
+            stopped_log(f'stopped: {exc}', *(getattr(exc, 'partial_output', None) or ('', '')))
             exc.log = log
             raise
         except subprocess.TimeoutExpired as exc:
-            raise AgentError(f'{agent.key} timed out after {self.timeout}s', log) from exc
+            out, err = partial_text(exc.output), partial_text(exc.stderr)
+            message = f'{agent.key} timed out after {self.timeout}s'
+            stopped_log(message, out, err)
+            error = AgentError(message, log)
+            error.tail = output_tail(out, err, workdir, self._env)
+            raise error from exc
         except OSError as exc:
+            stopped_log(f'could not start: {exc}')
             raise AgentError(f'{agent.key} could not start: {exc}', log) from exc
         self.last_report = telemetry(agent.kind, done.stdout)
-        log.write_text(f'$ {argv[0]} ({mode})\nexit {done.returncode}\n--- stdout\n{done.stdout}'
-                       f'\n--- stderr\n{done.stderr}', encoding='utf-8')
+        write_log(f'exit {done.returncode}', done.stdout, done.stderr)
         text = f'{done.stdout}\n{done.stderr}'
         stopped = no_output_reason(agent.kind, done.stdout, done.stderr)
         denied = denied_actions(agent.kind, done.stdout)

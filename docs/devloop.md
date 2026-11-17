@@ -77,6 +77,17 @@ and set the label that should run next (`agent:ready` on the issue, `agent:revie
 **class**, recorded in its marker; with `[merge].mode = "auto"` the non-critical ones go to
 `agent:needs-supervisor` instead (see [Escalations to the supervisor](#escalations-to-the-supervisor)).
 
+The escalation of a failed agent turn names its local log, `<time>-<label>-<agent>.log` in
+`<state_dir>/logs`. The log exists for every turn, including one that timed out, was stopped as
+stalled or could not start: it holds what the agent wrote on stdout and stderr until then. A
+descendant that left the agent's process group and still holds its output open does not lose
+what was read before it. For a timeout the comment also quotes the last lines of that output, at
+most 10, each cut to 300 characters: private keys, tokens and the values of variables whose name
+looks secret (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`) become `[REDACTED]`, paths in
+the worktree become relative and any other absolute path keeps only its last segment
+(`…/name`). The full output stays in the local log. A CLI that writes its output only at the end,
+such as `claude --output-format json`, may leave nothing to quote.
+
 A round is one evaluation of a head: a CI failure, or the reviews of every reviewer the review
 level requires (one at level 1, two at level 2), whatever the number of reviewers. The round
 limit (`max_review_rounds`) is checked before every new round, whether a review or a CI failure,

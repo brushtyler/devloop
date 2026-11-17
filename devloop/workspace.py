@@ -21,22 +21,29 @@ class WorkspaceError(RuntimeError):
     pass
 
 
+def partial_text(data):
+    """Output that ``communicate()`` collected before a timeout: bytes even in text mode."""
+    if isinstance(data, bytes):
+        return data.decode('utf-8', 'replace').replace('\r\n', '\n')
+    return data or ''
+
+
 def _kill_group(proc):
-    """Kill the process group of ``proc`` and return what it wrote, ``('', '')`` if unknown."""
+    """Kill the process group of ``proc`` and return what it wrote."""
     try:
         os.killpg(proc.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
     try:
         return proc.communicate(timeout=5)
-    except subprocess.TimeoutExpired:
-        # A descendant that left the group (its own session) still holds the pipes: give up
-        # on the output rather than wait for it.
+    except subprocess.TimeoutExpired as exc:
+        # A descendant that left the group (its own session) still holds the pipes: stop
+        # waiting, but keep what was read so far (issue #215).
         for pipe in (proc.stdin, proc.stdout, proc.stderr):
             if pipe:
                 pipe.close()
         proc.wait()
-        return '', ''
+        return partial_text(exc.output), partial_text(exc.stderr)
 
 
 def run_in_group(argv, *, timeout=None, input=None, watch=None, watch_interval=30.0, **kwargs):
@@ -45,7 +52,8 @@ def run_in_group(argv, *, timeout=None, input=None, watch=None, watch_interval=3
     background commands an agent CLI started, do not outlive it.
 
     ``watch(pid)``, if given, is called every ``watch_interval`` seconds while the command runs;
-    an exception it raises kills the whole group and propagates."""
+    an exception it raises kills the whole group and propagates, with what the command wrote
+    until then in its ``partial_output`` attribute, ``(stdout, stderr)``."""
     kwargs.pop('capture_output', None)
     kwargs.pop('text', None)
     proc = subprocess.Popen(argv, stdin=subprocess.PIPE if input is not None else None,
@@ -68,8 +76,12 @@ def run_in_group(argv, *, timeout=None, input=None, watch=None, watch_interval=3
                 raise subprocess.TimeoutExpired(argv, timeout, output=out, stderr=err) from None
         try:
             watch(proc.pid)
-        except BaseException:
-            _kill_group(proc)
+        except BaseException as exc:
+            partial = _kill_group(proc)
+            try:
+                exc.partial_output = partial
+            except AttributeError:
+                pass
             raise
     return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
