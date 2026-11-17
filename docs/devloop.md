@@ -572,13 +572,16 @@ PR already in `agent:ready-to-merge` keeps its label until something sends it ba
   PR that is `BLOCKED`, `BEHIND` or `UNSTABLE` stays ready and waits. **No mode, and no agent,
   merges with CI not green, with blocking findings open or without the approvals required.**
 - **How.** `gh pr merge --merge --match-head-commit <approved head>`: a merge commit, only if
-  the head is still the approved one. It runs with the local `gh` login devloop runs with: no
-  GitHub App, the dispatcher's included, gets `contents=write`. The branch is kept. A merge that
-  GitHub refuses goes to `agent:needs-human` like any `gh` failure.
+  the head is still the approved one. It runs with the [merger app](#the-merger-app) when
+  `[apps.merger]` is configured, with a token minted at that moment and limited to
+  `contents=write` and `pull_requests=write`; without it, with the local `gh` login devloop runs
+  with. No other GitHub App, the dispatcher's included, gets `contents=write`. The branch is
+  kept. A merge that GitHub refuses goes to `agent:needs-human` like any `gh` failure.
 - **Slot.** A merge takes a slot of `max_actions_per_tick` and runs alone, after the actions
   planned before it and before those planned after it ([Parallel actions](#parallel-actions)).
 - **Record.** A dispatcher comment with a `merged` marker records the head, the receipt, the
-  level and the mode.
+  level and the mode, and in `merged_by` the login of the merger app when it merged (none with
+  the local login).
 
 ### Holding a merge
 
@@ -932,6 +935,7 @@ Each agent and the dispatcher can act on GitHub with its own GitHub App (#65), c
 | dispatcher | every read, labels, escalations, CI rounds, finding closures, readiness |
 | implementer | commits (author and committer are its bot), push, opens the PR, fix and blocked comments |
 | reviewer | the review comment and a native GitHub review (`APPROVE`, `REQUEST_CHANGES` or `COMMENT`) on the reviewed commit |
+| merger | only the merges of the `strict` and `auto` [merge modes](#merge-modes) (see [The merger app](#the-merger-app)) |
 
 Apps are per agent, not per role: GitHub keeps one review state per identity, and it already
 refuses an approval from the author of a PR. Least privilege per role comes from the tokens:
@@ -984,6 +988,52 @@ stops on its own instead of holding the turn for an hour. Values the operator se
 environment are kept. This prevents accidental use of the operator's credentials, not
 deliberate access: code running as the same system user can still read files. Real isolation
 needs a dedicated system user or a container.
+
+### The merger app
+
+The `strict` and `auto` [merge modes](#merge-modes) merge with an app of their own, `merger`
+(#201), so that devloop needs neither a `gh` login nor the operator's broader permissions. It is
+the only app with `contents=write`, and it does nothing else: comments, labels and pushes stay
+with the dispatcher's and the agents' apps, its comments and labels count for no role (the
+dispatcher accepts reviews only from configured agents, so a review naming `merger` as
+reviewer is ignored even when its app wrote it), and
+`scripts/agent-token.py` refuses it, as it refuses the dispatcher's app. Without `[apps.merger]`
+the merges use the local `gh` login, as before.
+
+Creating it (once, by the operator, in the account that owns the repository: *Settings →
+Developer settings → GitHub Apps → New GitHub App*):
+
+- **Name.** For example `brushtyler-devloop-merger`; its slug is the `slug` of the
+  configuration, and its bot login `<slug>[bot]`.
+- **Webhook.** Off: devloop reads GitHub, it receives no events.
+- **Permissions.** Repository permissions `Contents: Read and write` and
+  `Pull requests: Read and write`, plus `Metadata: Read-only`, which GitHub requires. Nothing
+  else: no `Workflows`, `Issues` or administration permission, and no organisation or account
+  permission.
+- **Where it can be installed.** *Only on this account*.
+- **Installation.** *Install App* → *Only select repositories* → this repository alone. devloop
+  mints tokens for this repository only, but an installation limited to it keeps the key from
+  reaching any other.
+- **Private key.** *Generate a private key*, then put the downloaded file in `key_dir` of the
+  user devloop runs as (or `$DEVLOOP_APP_KEY_DIR`) with its name as GitHub gives it,
+  `<slug>.<date>.private-key.pem`, and `chmod 600` it. A configured app whose key is missing
+  stops devloop at startup.
+- **Branch protection.** If a rule of the base branch restricts who can push or merge, add the
+  app to those allowed.
+
+Configuring it, in `config.toml` (app id and slug are not secret):
+
+```toml
+[apps.merger]
+app_id = 5792929
+slug = "brushtyler-devloop-merger"
+```
+
+`merger`, like `dispatcher`, cannot be the name of an agent. `python3 -m devloop apps` then
+lists `merger` with its installation and permissions; without the app it reports that merges use
+the ambient `gh` login. Each merge asks for a new token, limited to `contents=write` and
+`pull_requests=write`, when it runs; `--match-head-commit` binds it to the approved head as
+before, and the `merged` record carries in `merged_by` the app's login.
 
 ## Ports and adapters
 
@@ -1081,7 +1131,9 @@ comment text are cut short and control characters removed. What it reports:
 
 The [ledger](#evidence-and-telemetry) records (`## Registro devloop`) are not reported: they are
 too frequent. Trust follows [AGENTS.md](../AGENTS.md): an issue or PR counts if its author is in
-`trusted_users` or is one of devloop's apps (the `[apps]` logins). Anyone else's issue or PR
+`trusted_users` or is one of devloop's apps (the `[apps]` logins of the agents and the
+dispatcher; not the [merger app](#the-merger-app), which only merges: its comments and the
+`review` records naming it are ignored). Anyone else's issue or PR
 produces only `new issue #N by an untrusted author (ignored)` (or `new PR`), with no title nor
 content, and nothing after it. The exception is an issue whose latest `agent:ready` was added by
 a user in `trusted_users`, whether the label is still there or the dispatcher already replaced it
@@ -1247,7 +1299,8 @@ The installation in use since 2026-11-16 (#185):
 - state, pinned copies and the local config in `.ssdlc/devloop` of that clone;
 - the GitHub App keys in `~/.ghapps` of that user (each key mode `600`), the agent CLIs logged
   in with logins of that user, and no `gh` login: devloop acts with its apps. A
-  [merge mode](#merge-modes) other than `off` merges with the local `gh` login, so it needs one.
+  [merge mode](#merge-modes) other than `off` merges with the [merger app](#the-merger-app),
+  whose key is there too; without that app it would need a local `gh` login.
 
 ```bash
 sudo useradd --create-home devloop
@@ -1748,3 +1801,8 @@ fallback_memory_seconds = 3600  # when the error does not say when the model is 
   `--json` fields, all known to `gh` 2.46; an issue's state and close reason are read with REST,
   since `gh issue view --json stateReason` is newer than that (#211).
   For commit statuses the aggregate state counts, including contexts beyond the first page.
+  Of the check runs with the same name and app (a re-run of the workflows starts a new suite,
+  and the old run stays on the commit) only the most recent counts: the greatest `started_at`
+  and, on a tie, the greatest id, as GitHub does in a PR's rollup. A superseded run still
+  `in_progress` does not keep the CI pending, an old failure does not fail it, and the failed
+  run ids (the logs sent back to the implementer) come only from the latest runs (#221).

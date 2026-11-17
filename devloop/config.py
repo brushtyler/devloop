@@ -168,6 +168,11 @@ class AgentConfig:
                          for f in self.fallback_models]
 
 
+# Actors that are an app of devloop's and never an agent: the dispatcher, and the merger, the app
+# that only merges (#201).
+APP_ONLY_ACTORS = ('dispatcher', 'merger')
+
+
 @dataclass(frozen=True)
 class AppConfig:
     """A GitHub App: its id and slug. The private key is found by slug in ``app_key_dir``."""
@@ -569,6 +574,8 @@ def parse_config(data, root=INSTALL_ROOT):
     agents = {}
     for key, table in (data.get('agents') or {}).items():
         where = f'agents.{key}'
+        if key in APP_ONLY_ACTORS:
+            raise ConfigError(f'{where}: {key!r} is reserved to devloop\'s own app')
         kind = _require(table, 'kind', str, where)
         if kind not in AGENT_KINDS:
             raise ConfigError(f'{where}.kind: must be one of {AGENT_KINDS}')
@@ -619,8 +626,8 @@ def parse_config(data, root=INSTALL_ROOT):
     apps = {}
     for actor, table in apps_table.items():
         where = f'apps.{actor}'
-        if actor != 'dispatcher' and actor not in agents:
-            raise ConfigError(f'{where}: not the dispatcher nor a configured agent')
+        if actor not in APP_ONLY_ACTORS and actor not in agents:
+            raise ConfigError(f'{where}: not the dispatcher, the merger nor a configured agent')
         if not isinstance(table, dict):
             raise ConfigError(f'{where}: expected a table')
         apps[actor] = AppConfig(app_id=_require(table, 'app_id', int, where),

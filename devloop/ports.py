@@ -23,7 +23,8 @@ Where a method went, when it was not obvious:
 - ``pr_state`` and ``merge_pr`` (#172) are in ``CodeReview``: the merge of a ready PR re-reads
   it and merges it. ``pr_state`` keeps ``mergeable`` and ``mergeStateStatus`` as GitHub reports
   them, because the ``strict`` merge mode requires exactly ``MERGEABLE`` and ``CLEAN``.
-  ``merge_pr`` runs on the dispatcher's ``merger``, the local login, not on an app.
+  ``merge_pr`` runs on the dispatcher's ``merger``: the ``merger`` app when configured (#201),
+  otherwise the local login.
 - ``GitHub.last_labeler`` is not in any port: the dispatcher no longer calls it.
 - ``GitHub.open_issues``, ``comments_since``, ``issue_state`` and ``issue_author`` are not in
   any port: only the ``watch`` command (``devloop/watch.py``) calls them, not the dispatcher.

@@ -245,9 +245,12 @@ class GitHub:
 
     def check_details(self, sha):
         """Every check of commit ``sha`` as ``normalize_checks`` returns it: check runs and
-        commit statuses, each with its outcome and, for a GitHub Actions run, its run id."""
+        commit statuses, each with its outcome and, for a GitHub Actions run, its run id. Of the
+        check runs with the same name and app (a re-run in another suite) only the most recent
+        counts."""
         runs = self._json_lines('api', '--paginate', f'repos/{self.repo}/commits/{sha}/check-runs',
-                                '--jq', '.check_runs[] | {name, status, conclusion, details_url}')
+                                '--jq', '.check_runs[] | {id, name, app_id: .app.id, started_at, '
+                                        'status, conclusion, details_url}')
         combined = self._json('api', f'repos/{self.repo}/commits/{sha}/status?per_page=100')
         return normalize_checks(runs, combined or {})
 
@@ -342,11 +345,30 @@ def _status_bucket(state):
     return 'fail' if state in _FAILED_STATUSES else 'pending' if state == 'pending' else 'pass'
 
 
+def latest_check_runs(check_runs):
+    """Only the most recent of the check runs with the same name and app: the one with the
+    greatest ``started_at`` and, on a tie, the greatest ``id``. ``commits/<sha>/check-runs``
+    returns the latest run of each suite, so a re-run in a new suite leaves the superseded run
+    there too, possibly stuck ``in_progress``. The kept runs stay in their original order."""
+    latest = {}
+    for index, run in enumerate(check_runs):
+        key = (run.get('name'), run.get('app_id'))
+        rank = (run.get('started_at') or '', run.get('id') or 0)
+        if key not in latest or rank >= latest[key][0]:
+            latest[key] = (rank, index)
+    kept = sorted(index for _, index in latest.values())
+    return [check_runs[index] for index in kept]
+
+
 def normalize_checks(check_runs, combined_status):
     """Check runs and commit statuses as ``{name, bucket, link, conclusion, run_id}`` (bucket:
     pass, fail, pending; conclusion: the run's conclusion, its status while it runs, or the
     status's state). ``run_id`` is the GitHub Actions run of a check run, read from its link:
     None for other check runs and for commit statuses.
+
+    Of the check runs with the same name and app only the most recent counts
+    (:func:`latest_check_runs`), as in GitHub's own rollup of a PR. Commit statuses are already
+    one per context.
 
     ``combined_status`` is the response of ``commits/<sha>/status``. Its ``statuses`` list is
     paginated, so the aggregate ``state`` is authoritative: if it is worse than every listed
@@ -354,7 +376,7 @@ def normalize_checks(check_runs, combined_status):
     Without any status (``total_count`` 0) GitHub reports ``pending``, which means nothing here.
     """
     checks = []
-    for run in check_runs:
+    for run in latest_check_runs(check_runs):
         if run.get('status') != 'completed':
             bucket = 'pending'
         elif run.get('conclusion') in _FAILED_CONCLUSIONS:

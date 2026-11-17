@@ -103,7 +103,7 @@ from .acceptance import (acceptance_criteria, acceptance_findings, format_criter
                          latest_map, render_map)
 from .agents import (AgentError, ModelsUnavailable, ModelUnavailable, NoOutput,
                      PermissionDenied, background_unfinished)
-from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, PR_COMMENT, REVIEW
+from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, MERGER, PR_COMMENT, REVIEW
 from .config import INSTALL_ROOT, ConfigError
 from .github import GitHubError, author_login
 from .ledger import entries as ledger_entries
@@ -981,8 +981,9 @@ class Dispatcher:
         # The pin after a merge (#174, ``pin.AutoPin``), used only with ``[pin] auto = true``.
         self.pinner = pinner
         self.gh = gh
-        # Merges run with the local ``gh`` login devloop runs with, never with an app (#172):
-        # the dispatcher's app has no ``contents=write``.
+        # Merges run with the merger's app when there is one (#201, ``Identities.merger``),
+        # otherwise with the local ``gh`` login devloop runs with (#172): no other app, the
+        # dispatcher's included, gets ``contents=write``.
         self.merger = merger if merger is not None else gh
         self.ws = ws
         self.runner = runner
@@ -1016,7 +1017,8 @@ class Dispatcher:
     def _markers(self, pr, comments, kind):
         """Records of ``kind`` from the identities allowed to write them, at most one per
         comment: fixes from the PR's implementer, CI verdicts and policy records from the
-        dispatcher, reviews from the agent named in the record, never the implementer."""
+        dispatcher, reviews from the configured agent named in the record, never the
+        implementer nor the merger."""
         return [record for _, record in self._marker_entries(pr, comments, kind)]
 
     def _marker_entries(self, pr, comments, kind, problems=None):
@@ -1044,7 +1046,9 @@ class Dispatcher:
                     problems.append(f'la review del round {record["round"]} non registra il '
                                     'reviewer')
                 continue
-            elif record['reviewer'] in (implementer, CI):
+            elif record['reviewer'] in (implementer, CI) or record['reviewer'] not in self.cfg.agents:
+                # Only a configured agent reviews: never the implementer, nor one of devloop's
+                # own apps, such as the merger, whose app only merges (#201).
                 continue
             else:
                 actor = record['reviewer']
@@ -3011,6 +3015,10 @@ class Dispatcher:
             except OSError as exc:
                 self.log(f'  auto-pin NOT requested, pin by hand: {exc}')
         payload = {'head': head, 'level': current['level'], 'mode': mode, 'receipt': current}
+        merged_by = self._app_login(MERGER)
+        if merged_by:
+            # Signed by the merger's app (#201); a merge with the ambient login names nobody.
+            payload['merged_by'] = merged_by
         if bases:
             payload['bases'] = bases
         try:

@@ -53,7 +53,7 @@ import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .apps import DISPATCHER, AppAuth, Identities
+from .apps import DISPATCHER, MERGER, AppAuth, Identities
 from .dispatcher import label_names, ready_approval
 from .github import GitHubError, GitHubNotFound, author_login
 from .markdown import read_marker
@@ -111,21 +111,23 @@ def failure_class(exc):
 
 class Trust:
     """Who counts for the watcher: ``users`` (``trusted_users``) and ``writers``, the app login
-    of each actor that has one (agents and the dispatcher)."""
+    of each actor that has one (agents and the dispatcher). The ``merger`` app (#201) only
+    merges: it is never a writer, so its comments and records are not trusted."""
 
     def __init__(self, users, writers, ready_label):
         self.users = frozenset(users)
-        self.writers = dict(writers)
+        self.writers = {actor: login for actor, login in dict(writers).items() if actor != MERGER}
         self.apps = frozenset(self.writers.values())
         self.ready_label = ready_label
 
     @classmethod
     def from_config(cls, cfg):
         """The logins of the configured apps, the agents' and the dispatcher's, as the
-        dispatcher derives them (``Identities.login``). Only slugs are needed: no private key
-        is read."""
+        dispatcher derives them (``Identities.login``); not the ``merger``'s, which writes
+        nothing. Only slugs are needed: no private key is read."""
         identities = Identities(cfg.repo, {actor: AppAuth(app.app_id, app.slug, None, cfg.repo)
-                                           for actor, app in cfg.apps.items()})
+                                           for actor, app in cfg.apps.items()
+                                           if actor != MERGER})
         writers = {actor: identities.login(actor) for actor in identities.apps}
         return cls(cfg.trusted_users, writers, cfg.labels.ready)
 
@@ -133,7 +135,10 @@ class Trust:
         return bool(login) and (login in self.users or login in self.apps)
 
     def wrote(self, login, actor):
-        """Whether ``login`` may write records for ``actor``: its app, else a trusted user."""
+        """Whether ``login`` may write records for ``actor``: its app, else a trusted user.
+        Nobody writes records for the ``merger``."""
+        if actor == MERGER:
+            return False
         expected = self.writers.get(actor)
         return login == expected if expected else login in self.users
 
