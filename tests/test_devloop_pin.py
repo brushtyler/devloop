@@ -156,13 +156,13 @@ class PinTests(GitCase):
         # #210: the map is checked for shape only; its documents belong to the repository, and
         # the pinned copy holds neither those the commit lacks nor those it has.
         self.assertTrue(DOCUMENTS)
-        self.assertIn('docs/devloop.md', DOCUMENTS)
+        self.assertIn('docs/devloop/guide.md', DOCUMENTS)
         tree = git(self.root, 'ls-tree', '-r', '--name-only', self.first).splitlines()
         self.assertFalse(set(DOCUMENTS) & set(tree))
         copy = self.pin('main')
         self.assertEqual(self.pointed(), copy.resolve())
         self.assertFalse((copy / 'docs').exists())
-        second = self.push('a mapped document', 'docs/devloop.md', 'devloop\n')
+        second = self.push('a mapped document', 'docs/devloop/guide.md', 'devloop\n')
         copy = self.pin('main')
         self.assertEqual(copy, self.state / f'pinned-{second[:12]}')
         self.assertEqual(sorted(p.name for p in copy.iterdir()), ['devloop', 'pin.json', 'schemas'])
@@ -560,7 +560,7 @@ class LauncherTests(unittest.TestCase):
             self.assertEqual(env['DISABLE_AUTOUPDATER'], '0')
 
     def test_the_installation_recommends_cli_without_automatic_updates(self):
-        text = (REPO / 'docs' / 'devloop.md').read_text(encoding='utf-8')
+        text = (REPO / 'docs' / 'devloop' / 'guide.md').read_text(encoding='utf-8')
         start = text.index('#### Installation as a dedicated user')
         section = ' '.join(text[start:text.index('#### Pin\n', start)].split())
         self.assertIn('disable their automatic updates: for Claude Code, '
@@ -635,7 +635,7 @@ class RestartTests(unittest.TestCase):
 
 class DocsTests(unittest.TestCase):
     def test_the_installation_is_documented(self):
-        text = (REPO / 'docs' / 'devloop.md').read_text()
+        text = (REPO / 'docs' / 'devloop' / 'guide.md').read_text()
         for needle in ('python3 -m devloop pin', 'scripts/devloop-pinned', '--allow-root',
                        'config.local.toml', 'sudo -u devloop -H', 'Rollback', '[pin]'):
             with self.subTest(needle=needle):

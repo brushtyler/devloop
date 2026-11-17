@@ -662,7 +662,7 @@ class MergerAppTests(unittest.TestCase):
 
 class MergerDocsTests(unittest.TestCase):
     def test_the_guide_documents_creating_and_configuring_the_merger_app(self):
-        text = (Path(__file__).resolve().parents[1] / 'docs' / 'devloop.md').read_text()
+        text = (Path(__file__).resolve().parents[1] / 'docs' / 'devloop' / 'reference.md').read_text()
         section = ' '.join(text.split('\n### The merger app\n', 1)[1].split('\n## ', 1)[0].split())
         for phrase in ('`Contents: Read and write`', '`Pull requests: Read and write`',
                        '`Metadata: Read-only`', 'Only select repositories', 'chmod 600',

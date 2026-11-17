@@ -281,7 +281,7 @@ class IssueHistoryTests(unittest.TestCase):
 
 class DocumentationTests(unittest.TestCase):
     def test_the_rule_is_documented(self):
-        section = docs.plan_section('docs/devloop.md', 'Labels from the supervisor',
+        section = docs.plan_section('docs/devloop/guide.md', 'Labels from the supervisor',
                                     root=docs.ROOT)
         docs.assert_documented(self, section, [
             '[roles].supervisor', 'agent:ready', 'priority:*', 'priority_labels',
@@ -291,9 +291,10 @@ class DocumentationTests(unittest.TestCase):
             'changes the start order exactly as a trusted user\'s would',
             'without [roles].supervisor', 'only trusted_users count, as before'], issues=(178,))
         # The page is reachable from the README, and the start step links to the section.
-        self.assertIn('docs/devloop.md', docs.user_facing_docs().names)
-        page = 'devloop: agent dispatcher for this repository'
-        docs.assert_documented(self, docs.plan_section('docs/devloop.md', page, root=docs.ROOT),
+        self.assertIn('docs/devloop/guide.md', docs.user_facing_docs().names)
+        page = 'devloop: operator guide'
+        docs.assert_documented(self, docs.plan_section('docs/devloop/guide.md', page,
+                                                       root=docs.ROOT),
                                ['(#labels-from-the-supervisor)'])
 
 

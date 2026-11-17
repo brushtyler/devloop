@@ -441,7 +441,7 @@ class ConfigTests(unittest.TestCase):
 
 class DocumentationTests(unittest.TestCase):
     def test_the_devloop_document_describes_the_loop_and_the_unit(self):
-        text = (REPO / 'docs' / 'devloop.md').read_text(encoding='utf-8')
+        text = (REPO / 'docs' / 'devloop' / 'guide.md').read_text(encoding='utf-8')
         start = text.index('### Continuous loop')
         section = text[start:text.index('\n### ', start + 1)]
         for needle in ('--idle-timeout', '`STOP`', 'SIGTERM', 'alert_issue', 'devloop.service',
