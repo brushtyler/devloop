@@ -237,8 +237,10 @@ class TestVerticalSliceAndArgv(CoreCase):
         import orchestrator
         for command, extra in [('start', []), ('run', ['--detach'])]:
             received = self.repo / (command + '.json')
+            # Published by rename: received.exists() must imply complete content (#265).
             controller = self.controller('import json, sys, time\nfrom pathlib import Path\n'
-                f'Path({str(received)!r}).write_text(json.dumps(sys.argv[1:]))\ntime.sleep(30)\n')
+                f'tmp = Path({str(received) + ".tmp"!r})\ntmp.write_text(json.dumps(sys.argv[1:]))\n'
+                f'tmp.replace({str(received)!r})\ntime.sleep(30)\n')
             original = sup.validate_args
             def with_controller(a):
                 result = original(a)
@@ -655,7 +657,10 @@ class TestRealProcesses(CoreCase):
             results.append(json.loads(out))
         self.assertEqual(sum(x['handoff']['outcome'] == 'launched' and x['status'] == 'running' for x in results), 1)
         self.assertTrue(all(x['status'] in {'running', 'locked', 'already_running'} for x in results), results)
-        self.wait_for(received.exists)
+        # The controller creates the file (O_CREAT) before it writes the line:
+        # waiting only for the file to exist reads it empty when the test wins
+        # that window, as under load in devloop's local run (#265).
+        self.wait_for(lambda: received.exists() and received.read_text().endswith('\n'))
         self.assertEqual(received.read_text(), 'launch\n')
         self.assertEqual(sup.status(self.repo, 'T-1')['status'], 'running')
         cancelled = self.cancel_until_done()
