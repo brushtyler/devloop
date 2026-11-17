@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 from devloop import config, markdown
 from devloop.dispatcher import Dispatcher, plan
-from devloop.github import GitHub, GitHubError
+from devloop.github import GitHub, GitHubError, job_id
 from devloop.localtests import failed_modules
 from devloop.ports import summarize_checks
 
@@ -43,7 +43,8 @@ class CIGH(SnapshotGH):
         super().__init__(list(earlier))
         self.labels[100] = set(labels)
         self.details = [failed()]
-        self.logs = {RUN: suite_log('test_devloop_parallel')}
+        # The failed log of each job, as `gh run view --job <id> --log-failed` reads it.
+        self.logs = {(RUN, 1): suite_log('test_devloop_parallel')}
 
     def checks(self, sha):
         return summarize_checks(self.check_details(sha))
@@ -138,7 +139,7 @@ class RerunTests(unittest.TestCase):
     def test_pertinent_failure_is_a_round_at_once(self):
         # ssdlc_impact.py makes test_impact*.py pertinent, as with local_tests = "changed".
         gh = CIGH()
-        gh.logs[RUN] = suite_log('test_devloop_parallel', 'test_impact_more')
+        gh.logs[(RUN, 1)] = suite_log('test_devloop_parallel', 'test_impact_more')
         ws = FakeWS()
         ws.diff = [{'path': 'ssdlc_impact.py', 'links': []}]
         d = self.make(gh, ws)
@@ -161,9 +162,11 @@ class RerunTests(unittest.TestCase):
 
     def test_undeterminable_failure_is_a_round_at_once(self):
         cases = {
-            'no modules in the log': lambda gh: gh.logs.update({RUN: 'Error: lint failed'}),
+            'no modules in the log': lambda gh: gh.logs.update({(RUN, 1): 'Error: lint failed'}),
             'a worker problem': lambda gh: gh.logs.update(
-                {RUN: suite_log('test_devloop_parallel', problems=1)}),
+                {(RUN, 1): suite_log('test_devloop_parallel', problems=1)}),
+            'a check link without a job': lambda gh: gh.details.__setitem__(
+                0, failed(f'https://github.com/o/r/actions/runs/{RUN}')),
             'a commit status': lambda gh: gh.details.append(
                 {'name': 'ci/other', 'bucket': 'fail', 'link': None, 'conclusion': 'failure',
                  'run_id': None}),
@@ -179,6 +182,26 @@ class RerunTests(unittest.TestCase):
                 self.assertFalse(hasattr(gh, 'reruns'))
                 self.assertEqual(len(self.reviews()), 1)
                 self.assertEqual(gh.labels[100], {'agent:changes'})
+
+    def test_another_failed_job_of_the_same_run_without_modules_is_a_round_at_once(self):
+        # test.yml: the suite fails only in a module not pertinent to the PR, and in the same
+        # run the A5 benchmark fails without naming any module. The run's whole log would hold
+        # the suite's summary; the benchmark's own log does not.
+        bench = f'https://github.com/o/r/actions/runs/{RUN}/job/3'
+        gh = CIGH()
+        gh.details.append(failed(bench, RUN, 'Benchmark A5'))
+        gh.logs[(RUN, 3)] = PREFIX.replace('Unit Tests (Python 3.12)', 'Benchmark A5') + (
+            'A5 benchmark: precision 0.81 below 0.85')
+        gh.logs[RUN] = gh.logs[(RUN, 1)] + '\n' + gh.logs[(RUN, 3)]
+        d = self.make(gh)
+        self.assertEqual(self.step(d), ['ci_failed'])
+        self.assertFalse(hasattr(gh, 'reruns'))
+        self.assertEqual(self.reruns(), [])
+        [round_] = self.reviews()
+        self.assertEqual((round_['source'], round_['round'], round_['note']), ('ci', 1, ''))
+        self.assertEqual(gh.labels[100], {'agent:changes'})
+        self.assertTrue(any('failed job Benchmark A5 (run 42) does not tell' in line
+                            for line in self.lines))
 
     def test_a_403_on_the_rerun_is_a_round_as_before_with_a_log_line(self):
         gh = CIGH()
@@ -245,6 +268,20 @@ class AdapterTests(unittest.TestCase):
             returncode=0, stdout='\n'.join(f'line {i}' for i in range(200)), stderr=''))
         self.assertEqual(len(gh.failed_log(RUN).splitlines()), 80)
         self.assertEqual(len(gh.failed_log(RUN, max_lines=None).splitlines()), 200)
+
+    def test_the_failed_log_of_one_job(self):
+        gh = self.make(0)
+        gh.failed_log(RUN, max_lines=None, job_id=7)
+        self.assertEqual(self.calls, [['gh', 'run', 'view', '--job', '7', '-R', 'o/r',
+                                       '--log-failed']])
+        gh.failed_log(RUN)
+        self.assertEqual(self.calls[-1], ['gh', 'run', 'view', str(RUN), '-R', 'o/r',
+                                          '--log-failed'])
+
+    def test_the_job_of_a_check_link(self):
+        self.assertEqual(job_id(LINK), 1)
+        self.assertIsNone(job_id(f'https://github.com/o/r/actions/runs/{RUN}'))
+        self.assertIsNone(job_id(None))
 
 
 class ConfigTests(unittest.TestCase):

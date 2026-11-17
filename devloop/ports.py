@@ -127,8 +127,9 @@ class CI(Protocol):
         """Every check run of ``sha``, superseded ones included, as ``{id, name, app_id, status,
         conclusion}``."""
 
-    def failed_log(self, run_id, max_lines=80):
-        """The last ``max_lines`` of the failed steps of run ``run_id`` (all of them with None)."""
+    def failed_log(self, run_id, max_lines=80, job_id=None):
+        """The last ``max_lines`` of the failed steps of run ``run_id`` (all of them with None),
+        or only of its job ``job_id`` when given."""
 
     def rerun_failed_jobs(self, run_id):
         """Re-run the failed jobs of run ``run_id`` (#200); raises ``GitHubError`` if refused."""

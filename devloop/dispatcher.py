@@ -105,7 +105,7 @@ from .agents import (AgentError, ModelsUnavailable, ModelUnavailable, NoOutput,
                      PermissionDenied, background_unfinished)
 from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, MERGER, PR_COMMENT, RERUN, REVIEW
 from .config import INSTALL_ROOT, ConfigError
-from .github import GitHubError, author_login
+from .github import GitHubError, author_login, job_id
 from .ledger import entries as ledger_entries
 from .ledger import open_turns
 from .localtests import failed_modules, module_command, select_modules
@@ -3241,8 +3241,9 @@ class Dispatcher:
     def _rerun_unrelated(self, pr, paths):
         """Re-run once the failed jobs of the head's CI when its failure does not concern the
         PR (#200); whether it did. Only at the first failure of a head (``rerun`` marker), with
-        ``ci_rerun_unrelated``, when every failed check is a GitHub Actions run whose log names
-        the failed test modules (``failed_modules``) and none of them is pertinent to ``paths``,
+        ``ci_rerun_unrelated``, when every failed check is a GitHub Actions job whose own log
+        names the failed test modules (``failed_modules``) and none of them is pertinent to
+        ``paths``,
         the PR's diff, as ``local_tests = "changed"`` would select them (``select_modules``).
         A re-run that GitHub refuses, such as a 403 without ``actions: write``, is logged and
         the failure is a round, as before."""
@@ -3256,12 +3257,16 @@ class Dispatcher:
                                        'not every failed check is a GitHub Actions run')
                      + '; CI round')
             return False
+        # Each failed job on its own: a run whose suite fails only in modules not pertinent to
+        # the PR may hold another failed job, such as a benchmark, that names none.
         modules = set()
-        for run in runs:
-            found = failed_modules(self.gh.failed_log(run, max_lines=None))
+        for check in failed:
+            job = job_id(check.get('link'))
+            found = None if job is None else failed_modules(
+                self.gh.failed_log(check['run_id'], max_lines=None, job_id=job))
             if found is None:
-                self.log(f'  CI rerun: the log of run {run} does not tell which test modules '
-                         'failed; CI round')
+                self.log(f'  CI rerun: the log of the failed job {check.get("name")} (run '
+                         f'{check["run_id"]}) does not tell which test modules failed; CI round')
                 return False
             modules.update(found)
         modules = sorted(modules)

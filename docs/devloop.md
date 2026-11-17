@@ -1567,10 +1567,12 @@ and no approval depends on them.
 
 A CI failure normally becomes a round (`ci_failed`). A failure that does not depend on the PR,
 such as a flaky test already on `main`, would spend one for nothing. So at the **first** CI
-failure of a head the dispatcher first reads, in the log of each failed job
-(`gh run view --log-failed`, whole), the test modules that failed: `scripts/run-tests.py`
-prints `FAILED MODULE <name>` for each of them and a final `FAILED (modules=N, worker problems=M)`
-(#200).
+failure of a head the dispatcher first reads, in the log of each failed job on its own
+(`gh run view --job <id> --log-failed`, whole; the job is the one in the check's link), the test
+modules that failed: `scripts/run-tests.py` prints `FAILED MODULE <name>` for each of them and a
+final `FAILED (modules=N, worker problems=M)` (#200). Every failed job must say it: a run where
+the suite fails only in modules not pertinent to the PR and another job fails without naming any
+(such as a benchmark) is not determinable.
 
 - **None pertinent.** If no failed module is pertinent to the PR's diff, by the same
   correspondence between sources and tests as `local_tests = "changed"`
@@ -1579,9 +1581,9 @@ prints `FAILED MODULE <name>` for each of them and a final `FAILED (modules=N, w
   comment with a `rerun` marker records the head, the runs, the modules and the links of the
   failed checks; the ledger, when on, records a `ci_rerun` event.
 - **Pertinent, or not determinable.** A failed module pertinent to the diff, a failed check that
-  is not a GitHub Actions run (a commit status), a log without the `FAILED MODULE` lines or the
-  final summary, a count that does not match, a worker problem: the failure is a round at once,
-  as before.
+  is not a GitHub Actions job (a commit status), a failed job whose log lacks the
+  `FAILED MODULE` lines or the final summary, a count that does not match, a worker problem: the
+  failure is a round at once, as before, and nothing is re-run.
 - **While the re-run starts.** As long as GitHub still shows the very failed checks the re-run
   replaces (same links: a re-run job is a new check run), the dispatcher waits: no round, no
   review, no merge. A ready PR stays in `agent:ready-to-merge` meanwhile, and goes back to
