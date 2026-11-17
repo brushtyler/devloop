@@ -1002,6 +1002,12 @@ class FakeWS:
     def test_modules(self, path):
         return list(self.modules)
 
+    # Whether the branch lacks commits of ``origin/<base>`` before a fix (#250): no by default.
+    behind = False
+
+    def contains_base(self, path):
+        return not self.behind
+
     def start_merge(self, path, author=None):
         self.merge_authors.append(author)
         if self.conflicts is not None:

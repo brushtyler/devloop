@@ -41,7 +41,8 @@ a review or a promotion, the dispatcher reads each PR's merge state from GitHub 
 
 - **conflict** (`mergeable` CONFLICTING, or `DIRTY`): the PR is neither reviewed nor kept ready;
   the tick plans a `sync`. A verdict that asks for changes and is already recorded is applied
-  first, and a PR in `agent:changes` is fixed first: the sync happens when it is back in review;
+  first, and a PR in `agent:changes` goes to its fix, which finds the conflicts and runs the sync
+  before it (see [Fixes start from the latest `main`](#fixes-start-from-the-latest-main));
 - **unknown** (`UNKNOWN`, GitHub is still computing): nothing is planned for the PR until a later
   tick knows the state. A PR already in `agent:ready-to-merge` keeps its label meanwhile;
 - any other state (`CLEAN`, `BLOCKED`, `BEHIND`, `UNSTABLE`, …) is not a conflict.
@@ -64,6 +65,31 @@ except after an approval (see [Resync after approval](#resync-after-approval)). 
 sync that fails (the implementer is blocked, tests still fail, markers are left, the merge was
 concluded or aborted by the agent, or the agent run failed) goes to `agent:needs-human` with a
 comment that lists the files in conflict and their commits.
+
+#### Fixes start from the latest `main`
+
+CI runs on the PR's merge commit with `main` (`refs/pull/N/merge`), not on the branch: when
+`main` advanced without conflicts, CI can fail for code that exists only on `main`, which a fix
+on the branch would not see (#250). So before every fix (the answer to a review round or to a
+CI round, and a [`/devloop fix`](#fix-requested-by-the-operator-or-the-supervisor)) the
+dispatcher checks, in the fix worktree, whether the branch contains `origin/main`:
+
+- **it does**: the fix runs as before;
+- **it does not, and the merge has no conflicts**: the dispatcher commits the merge with the
+  implementer's identity, as for a sync, checks that it does not differ from `main` under
+  `protected_paths`, and starts the agent on top of it. The push carries the merge commit and the
+  fix, also when the agent changed nothing. The ledger records the `sync` event with the merged
+  base and the old and new heads, and the fix comment says that the merge was done;
+- **it does not, and the merge has conflicts**: the fix does not start. The usual sync runs
+  instead (the implementer resolves the conflicts, tests, push), but the PR keeps its label
+  (`agent:changes`, or `agent:review` for a `/devloop fix`), and the fix runs at the next tick on
+  the synced head. The `sync` marker records the head it synced (`from`), so that the fix
+  recognizes the synced head as its own; a sync that fails escalates as usual.
+
+The fix prompt tells the agent that the branch already contains the latest `origin/main`, so
+that it does not try to fetch, merge or rebase it. The merge of the base writes no review
+record, so, like a sync, it does not open nor consume a round: the review that follows the fix is
+the next round, as for any fix.
 
 #### Resync after approval
 
@@ -146,7 +172,8 @@ conflicts moved (see [Resync after approval](#resync-after-approval)). Round num
 
 A fix normally answers a review that asked for changes on the current head: a PR in
 `agent:changes` whose head moved after that review (for example after a sync with `main`) goes
-back to review instead. To ask for a correction that is already known, without waiting for a
+back to review instead, unless the head moved only by the syncs that the fix itself started (see
+[Fixes start from the latest `main`](#fixes-start-from-the-latest-main)). To ask for a correction that is already known, without waiting for a
 review and without spending a round, comment on the PR:
 
 ```text
@@ -1399,7 +1426,7 @@ readiness check, on the PR for review, fix, sync and CI. They publish no receipt
 | `request` | The issue goes from `agent:ready` to `agent:working` | SHA-256 of title and body, author and time of the trusted `labeled` event of `agent:ready`, ids of the trusted comments given to the implementer, time of the takeover. It is a snapshot **at the takeover**, not at the time of the label |
 | `turn` | Every invocation of an agent CLI, retries, fallback models and failures included: implement, fix, sync with an agent, review, readiness check | Kind, agent, GitHub identity (none: the operator's `gh` login), configured model and effort (for a fallback, the fallback model and the model it replaces), real model, start, end, duration, outcome (`success`, `failure`, `unavailable`), the error if any, telemetry, and the last command the turn ran or started when the CLI exposes it (`last_command`: only codex, from the `command_execution` items of `--json`; cleaned like the tail of a timeout, on one line, at most 200 characters; absent otherwise), also for a turn that timed out |
 | `verification` | Every test command the dispatcher runs after a writing turn (none when the [local tests](#local-tests) select nothing), and the full suite it runs before a review of a head without CI | Command, outcome, duration, the tree hash before and after the test, and the commit (none before a review) |
-| `event` | The CI of a head (`ci_round`): a failed CI round, the checks a review round saw whatever its verdict (`approve`, `request_changes` or `needs_human`), or the passing checks read again just before the PR is promoted to `agent:ready-to-merge` (also at level 0); a sync without an agent (`sync`) | For the CI, the head, the state (`fail`, `pass`, or `none` without checks), the review round (none at level 0) and each check with its outcome and the id of its GitHub Actions run (none for a commit status or a check outside Actions); the same checks read again for the same head and round are not recorded twice, a new run is. For a sync, the merged base commit and the old and new heads |
+| `event` | The CI of a head (`ci_round`): a failed CI round, the checks a review round saw whatever its verdict (`approve`, `request_changes` or `needs_human`), or the passing checks read again just before the PR is promoted to `agent:ready-to-merge` (also at level 0); a sync without an agent, or the merge of `main` before a fix (`sync`) | For the CI, the head, the state (`fail`, `pass`, or `none` without checks), the review round (none at level 0) and each check with its outcome and the id of its GitHub Actions run (none for a commit status or a check outside Actions); the same checks read again for the same head and round are not recorded twice, a new run is. For a sync, the merged base commit and the old and new heads |
 
 **Telemetry** is what the CLI attests, not authenticated:
 

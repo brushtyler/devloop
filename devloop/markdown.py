@@ -350,6 +350,13 @@ def render_fix(fix, head, round_no):
         parts.append(fix['summary'].strip())
     else:
         parts = [f'## Correzioni per il round {round_no}', '', fix['summary'].strip()]
+    merged = fix.get('base_merge')
+    if merged:
+        # The base merged into the branch before the fix (#250), pushed with it.
+        parts += ['', f'Prima della correzione il dispatcher ha fatto il merge di '
+                      f'`origin/{merged["branch"]}` (`{merged["base"][:12]}`) nel branch, senza '
+                      f'conflitti: merge commit `{merged["head"][:12]}`, pubblicato con la '
+                      'correzione. Il merge non consuma un round di review.']
     if fix['responses']:
         parts += ['', '| Finding | Azione | Nota |', '|---|---|---|']
         for r in fix['responses']:

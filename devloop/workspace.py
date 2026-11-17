@@ -366,6 +366,11 @@ class Workspace:
             commit = first
         return False
 
+    def contains_base(self, path):
+        """Whether the branch in ``path`` already contains ``origin/<base>`` as last fetched."""
+        return self._git('rev-list', '--count', f'HEAD..origin/{self.base_branch}',
+                         cwd=path).strip() == '0'
+
     def start_merge(self, path, author=None):
         """Merge ``origin/<base>`` into the branch in ``path`` without committing.
 
@@ -375,7 +380,7 @@ class Workspace:
         ``author`` (``{name, email}``) is the identity git requires even to start a merge, as
         in :meth:`commit_all`."""
         base = f'origin/{self.base_branch}'
-        if self._git('rev-list', '--count', f'HEAD..{base}', cwd=path).strip() == '0':
+        if self.contains_base(path):
             return None
         target = self._git('rev-parse', base, cwd=path).strip()
         # Exit status 1 means conflicts: the outcome is read from MERGE_HEAD and the index.
