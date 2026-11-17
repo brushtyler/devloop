@@ -10,7 +10,8 @@ Examples:
         gh api -X POST repos/brushtyler/ssdlc/pulls/71/reviews --input review.json
 
 Actors: claude, codex, agy. The dispatcher's app is reserved to devloop: devloop trusts some of
-the markers it reads only when the dispatcher wrote them.
+the markers it reads only when the dispatcher wrote them. So is the merger's app, the only one
+with contents=write, used only for devloop's merges.
 
 Without --perm the token gets issues=write and pull_requests=write: enough for comments,
 reviews and labels, not for pushing, merging or changing the repository. contents=write and
@@ -28,10 +29,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from devloop.apps import Identities  # noqa: E402
+from devloop.apps import AppAuth, find_key  # noqa: E402
 from devloop.config import load_config  # noqa: E402
 
 ACTORS = ('claude', 'codex', 'agy')
+RESERVED = ('dispatcher', 'merger')  # devloop's own apps, never exposed here
 DEFAULT = {'issues': 'write', 'pull_requests': 'write'}
 ALLOWED = {'issues': {'read', 'write'}, 'pull_requests': {'read', 'write'},
            'contents': {'read'}, 'metadata': {'read'}, 'checks': {'read'},
@@ -47,6 +49,8 @@ def parse(argv):
     if not head or not command:
         raise SystemExit(__doc__.strip())
     actor, options = head[0].lower(), head[1:]
+    if actor in RESERVED:
+        raise SystemExit(f'agent-token: the {actor} app is reserved to devloop')
     if actor not in ACTORS:
         raise SystemExit(f'agent-token: unknown actor {actor!r}; use one of {", ".join(ACTORS)}')
     permissions = {}
@@ -64,9 +68,13 @@ def parse(argv):
 
 def main(argv):
     actor, permissions, command = parse(argv)
-    app = Identities.from_config(load_config(REPO_ROOT / 'devloop/config.toml')).apps.get(actor)
-    if app is None:
+    cfg = load_config(REPO_ROOT / 'devloop/config.toml')
+    configured = cfg.apps.get(actor)
+    if configured is None:
         raise SystemExit(f'agent-token: no GitHub App configured for {actor!r} in devloop/config.toml')
+    # Only this actor's key is read: the reserved apps' keys need not be on this host.
+    key_dir = os.environ.get('DEVLOOP_APP_KEY_DIR') or cfg.app_key_dir
+    app = AppAuth(configured.app_id, configured.slug, find_key(key_dir, configured.slug), cfg.repo)
     env = {k: v for k, v in os.environ.items()
            if k not in ('GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN')}
     env['GH_TOKEN'] = app.token(permissions)
