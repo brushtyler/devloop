@@ -188,6 +188,14 @@ def _valid_merged(m):
             and isinstance(m.get('merged_by', ''), str))
 
 
+def _valid_closed(c):
+    """An issue the dispatcher closed after merging its PR (#228): the PR, the merged head, the
+    merge commit (None when it could not be read) and the merge mode."""
+    return (_is_int(c.get('pr')) and isinstance(c.get('head'), str)
+            and isinstance(c.get('merge_commit'), (str, type(None)))
+            and c.get('mode') in ('strict', 'auto'))
+
+
 def _valid_hold(h):
     """A hold or release command the dispatcher applied (#172), with its author and reason,
     and in ``comment`` the id of the comment that carried it (the commands it spends)."""
@@ -209,7 +217,7 @@ def _valid_supervision(s):
 _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy': _valid_policy,
           'finding': _valid_finding, 'sync': _valid_sync, 'preflight': _valid_preflight,
           'notice': _valid_notice, 'ledger': _valid_ledger, 'merged': _valid_merged,
-          'hold': _valid_hold, 'supervision': _valid_supervision}
+          'hold': _valid_hold, 'supervision': _valid_supervision, 'closed': _valid_closed}
 
 
 def read_marker(text, kind):

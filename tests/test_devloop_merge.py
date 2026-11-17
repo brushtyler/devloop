@@ -195,7 +195,7 @@ class AdapterTests(unittest.TestCase):
         argv = calls[1][0]
         self.assertEqual(argv[:6], ['gh', 'pr', 'view', '100', '-R', 'o/r'])
         self.assertEqual(argv[argv.index('--json') + 1],
-                         'state,headRefOid,mergeable,mergeStateStatus,labels')
+                         'state,headRefOid,mergeable,mergeStateStatus,labels,mergeCommit')
 
     def test_commands(self):
         self.assertEqual(merge_command('/devloop hold aspetto la #182'), ('hold', 'aspetto la #182'))
