@@ -1,6 +1,6 @@
 # ADR 0002: ruoli e responsabilità, e modalità di merge `off`, `strict` e `auto`
 
-- **Stato:** proposto. Come previsto dall'ADR 0001, diventa approvato solo con l'approvazione e il merge dell'operatore.
+- **Stato:** approvato dall'operatore con il merge di PR #189 (2026-11-17), e implementato: le modalità di merge con #172 (PR #188) e lo smistamento delle escalation con #182 (PR #198). La modalità `auto` è attiva dal 2026-11-17. Il resto del documento è il registro della decisione, scritto prima delle implementazioni: le frasi su "oggi" descrivono lo stato del 2026-11-16.
 - **Fase:** design (#175).
 - **Data:** 2026-11-16.
 

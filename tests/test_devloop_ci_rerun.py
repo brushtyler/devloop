@@ -104,7 +104,7 @@ class RerunTests(unittest.TestCase):
         [record] = self.reruns()
         self.assertEqual(record, {'head': SHA1, 'runs': [RUN],
                                   'modules': ['test_devloop_parallel.py'], 'checks': [LINK]})
-        self.assertIn('**Agent:** devloop dispatcher', self.gh.comments[-1][1])
+        self.assertIn('> **Bot:** devloop dispatcher', self.gh.comments[-1][1])
         self.assertIn('CI rilanciata', self.gh.comments[-1][1])
         # GitHub still shows the failed jobs the re-run replaces: devloop waits.
         self.assertEqual(self.step(d), [])

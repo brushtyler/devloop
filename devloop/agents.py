@@ -8,7 +8,7 @@ import threading
 import time
 from pathlib import Path
 
-from .markdown import header, parse_version
+from .markdown import agent_bot, devloop_version, header, parse_version
 from .schema import load_schema, schema_path, validate, SchemaError
 from .unavailability import reset_seconds
 from .workspace import git_config_env, partial_text, run_in_group
@@ -608,7 +608,11 @@ class AgentRunner:
         return version
 
     def header(self, agent):
-        return header(agent.display_name, self.version(agent), agent.model_label, agent.effort)
+        """The header of a text of ``agent`` that devloop publishes (#232): the identity it
+        publishes with and the version of devloop, then the agent, its model and reasoning
+        level, in one block."""
+        return header(agent.display_name, self.version(agent), agent.model_label, agent.effort,
+                      bot=agent_bot(agent.key), version=devloop_version())
 
     def run(self, agent, mode, prompt, schema_name, workdir, label):
         """Run one turn in ``workdir`` and return its schema-valid output."""

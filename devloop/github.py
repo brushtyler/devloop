@@ -13,6 +13,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 from urllib.parse import quote
 
 from .ports import summarize_checks
@@ -71,7 +72,9 @@ class GitHub:
     ``token``, when given, is a callable returning the token every call runs with; otherwise
     the ambient ``gh`` login is used. ``time_left``, when given, is a callable returning the
     seconds the calls may still take (None: no limit): each call gets at most that long, and
-    none starts once it is spent."""
+    none starts once it is spent. It belongs to the thread that sets it: the wait of ``devloop
+    run`` bounds its own reads, not those of the actions running meanwhile in other threads on
+    the same client (#227)."""
 
     timeout = 300  # seconds, for each call
 
@@ -79,7 +82,16 @@ class GitHub:
         self.repo = repo
         self._run = run
         self._token = token
+        self._local = threading.local()
         self.time_left = time_left
+
+    @property
+    def time_left(self):
+        return getattr(self._local, 'time_left', None)
+
+    @time_left.setter
+    def time_left(self, value):
+        self._local.time_left = value
 
     def _gh(self, *args, stdin=None, check=True):
         kwargs = {}

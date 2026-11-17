@@ -964,14 +964,66 @@ link.
 
 ## Attribution
 
-Every text devloop publishes starts with the header that [AGENTS.md](../AGENTS.md) requires. The
-values come from the configured agent: CLI version from its `--version`, model and reasoning level
-as passed on the command line. A known version is cached for the life of the process; a failed
-`--version` is retried at the next publication, and the header says `CLI non noto` only for texts
-published while it keeps failing. When a turn ran on a [fallback model](#fallback-models), the
-header names that model and its reasoning level, not the configured ones. Text the dispatcher
-writes on its own, such as escalations and CI rounds, names `devloop dispatcher` as the agent and
-no model.
+Every text devloop publishes starts with an attribution header. This section is the reference for
+its format: [AGENTS.md](../AGENTS.md) only tells the agents to add no header in devloop turns, and
+keeps the Agent, Model and Reasoning Level header for texts an agent publishes outside devloop
+with its own identity. The dispatcher composes the header in one place (`markdown.attribution`)
+as a single `> [!NOTE]` block (#232). It opens with `Bot`, the name of the identity that
+publishes, and `Version`, the version of devloop:
+
+- text the dispatcher writes on its own, such as markers, escalations, CI rounds, merges, ledger
+  records and closed findings, comes from a bot without AI: the block holds `Bot` and `Version`
+  only;
+- text of an AI agent (review, fix, implementation, readiness check, `Lavoro bloccato`) adds, in
+  the same block, the agent with its CLI version, the model and the reasoning level.
+
+```markdown
+> [!NOTE]
+> **Bot:** devloop dispatcher
+> **Version:** 0123456789ab
+```
+
+```markdown
+> [!NOTE]
+> **Bot:** devloop codex-agent
+> **Version:** 0123456789ab
+> **Agent:** Codex (CLI v0.5.1)
+> **Model:** GPT-5.5
+> **Reasoning Level:** High
+```
+
+`Bot` is `devloop dispatcher` for the dispatcher and `devloop <key>-agent` for the agent
+configured as `[agents.<key>]` (`devloop claude-agent`, `devloop codex-agent`, `devloop
+agy-agent`); the merger, if it ever publishes texts, will be `devloop merger`. `Version` is the first 12 characters of the commit in the `pin.json` of the
+[pinned copy](#run-from-a-pinned-installation) in use. Without a pinned copy, in development or
+in the tests, it is the commit of the checkout devloop runs from, if that directory is the top
+level of a git checkout, otherwise `non nota`. It is read once per process: a new pin starts a
+new process.
+
+The agent's values come from the configured agent: CLI version from its `--version`, model and
+reasoning level as passed on the command line. A known version is cached for the life of the
+process; a failed `--version` is retried at the next publication, and the header says `CLI non
+noto` only for texts published while it keeps failing. When a turn ran on a
+[fallback model](#fallback-models), the header names that model and its reasoning level, not the
+configured ones. The agents add no header of their own to the text they return (summary,
+findings, notes, PR body): the dispatcher would duplicate it.
+
+Texts published before #232 carry the agent header alone, without `Bot` and `Version`; the
+dispatcher's names `devloop dispatcher` as the agent and no model:
+
+```markdown
+> [!NOTE]
+> **Agent:** devloop dispatcher
+> **Model:** nessuno (testo generato dal dispatcher)
+> **Reasoning Level:** n/a
+```
+
+All forms stay valid: devloop
+recognizes its texts by the `> [!NOTE]` that opens every header, by the identity that wrote them
+and, for records, by a valid marker, never by the header alone. A text with the `Bot` header from
+an identity that may not write devloop records is no record. `operator_comments` leaves out texts
+with any of these headers, and the `/devloop` commands are read on the first line after any of
+them.
 
 ## Who does what
 
@@ -1319,6 +1371,10 @@ comment.
    ([Waking the supervising agent](#waking-the-supervising-agent)), for at most
    `--idle-timeout` seconds (default 900, 15 minutes); at the first news, or at the timeout, it
    runs the next tick.
+
+With `max_parallel_actions` above 1 the loop runs in [continuous mode](#continuous-mode): a tick
+starts its actions without waiting for them, and while some run the loop waits for one to end
+or, with a slot free, for news on GitHub; either way the next tick plans at once.
 
 The wait reads GitHub every 60 seconds (less when `--idle-timeout` is shorter), with the same
 identity as the ticks' reads, and keeps its state in `state_dir/run-watch-state.json`, apart from
@@ -1749,6 +1805,40 @@ This repository sets 3: implement, fix, sync and review of different issues and 
   Each run of `test_cmd` gets a temporary directory of its own (`TMPDIR`), removed afterwards,
   so parallel test runs do not share one.
 
+### Continuous mode
+
+With `max_parallel_actions` above 1, actions run in one of two modes (#227):
+
+- **`devloop tick`: one round with a barrier.** The tick plans, runs its actions as
+  [Parallel actions](#parallel-actions) describes, and ends when every one has ended. This is
+  the mode of manual use and of the tests, unchanged.
+- **`devloop run`: no barrier at the end of a tick.** A tick plans and starts in the free slots
+  the actions that fit, up to `max_parallel_actions` running at once, and returns without
+  waiting for them. As soon as one ends, the next tick reads GitHub again and plans the free
+  slots; while a slot is free, news on GitHub (a CI that passes, a new ready issue) starts a
+  tick too, within the usual `--idle-timeout`. A long action (a 45-minute implementation) no
+  longer holds the reviews and fixes that become ready meanwhile. An action that ends while a
+  tick reads GitHub starts the next tick at once, even when it was the last one running.
+
+In `devloop run` a plan leaves out the issues and PRs of the running actions: no second action
+starts on the same number, nor on a PR and its issue, until the first has ended; of two actions
+planned on the same number only the first starts, and the next tick, which sees its result,
+decides the other. An implementation or readiness check that is running keeps its slot of
+`max_open_prs`. A global action (a merge) starts only when nothing runs, alone: while one is
+planned and actions are running, no other action starts, so they end and the global action runs
+next; the actions planned with it start in the ticks after it. While a global action runs, no
+other action starts, even when news on GitHub start a tick and slots are free. The
+[pin after a merge](#pin-after-a-merge) runs only when no action runs, and while one is pending
+no action starts. The turns of running actions are not marked incomplete by the ticks that run
+meanwhile; they are checked once their action ends.
+
+The dispatcher lock stays one: the loop runs the actions in threads of its own process. A stop
+(`SIGTERM`, `SIGINT`, the `STOP` file) starts no other tick and waits for the running actions to
+end before the loop exits; so does the failed tick that stops the loop, before the alert
+([Continuous loop](#continuous-loop)). Each action logs its
+`outcome of <action> #<N>: …` line when it ends. With `max_parallel_actions = 1`, `devloop run`
+runs ticks with the barrier, one action at a time, as before.
+
 ### Local tests
 
 After every writing turn (implement, fix, sync with conflicts) the dispatcher runs tests in the
@@ -2054,7 +2144,8 @@ fallback_memory_seconds = 3600  # when the error does not say when the model is 
   next one.
 - **Single host.** One dispatcher runs at a time. With `max_parallel_actions = 1` (the
   default) a tick runs its actions one at a time; above 1, actions on different issues and PRs
-  run in threads of that one process ([Parallel actions](#parallel-actions)).
+  run in threads of that one process ([Parallel actions](#parallel-actions)), and in
+  `devloop run` without waiting for the end of the tick ([Continuous mode](#continuous-mode)).
 - **`devloop watch` compares states.** Each round compares what it reads with the latest
   successful round, so a change undone between two reads (a label added and removed, an issue
   opened and closed, a CI that fails and passes again on the same head, an `agent:ready` removed

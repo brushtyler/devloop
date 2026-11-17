@@ -17,6 +17,12 @@ loop at once, with an alert: a comment of the dispatcher on ``[run].alert_issue`
 or the local log when none is configured or the comment fails. A tick that succeeds resets the
 count. A new pin (``Repinned``, #174) is not a failure: it propagates, and the process starts
 again from the new copy, unless a stop was requested during that tick: then the loop ends.
+
+Continuous mode (#227, with ``workers``, ``dispatcher.Workers``): a tick starts its actions in
+the free slots and returns without waiting for them. While some still run, the loop waits for
+one to end; with a slot free, also for news on GitHub, at most ``idle_timeout`` seconds. Either
+way the next tick plans at once, so a long action no longer holds the others. A stop, or the
+``MAX_FAILURES``-th failed tick, waits for the running actions to end before the loop returns.
 """
 
 import signal
@@ -48,6 +54,11 @@ class Stopped(Exception):
     """A stop was requested during a wait."""
 
 
+class Woken(Stopped):
+    """Continuous mode (#227): an action ended during a wait, and the next tick plans its
+    slot."""
+
+
 def alert_body(classes):
     """The alert of a loop stopped after ``classes``, the failure classes of its last ticks
     (``watch.failure_class``): no message, path or token of the errors."""
@@ -67,12 +78,15 @@ class Loop:
     for news on GitHub for at most ``timeout`` seconds, sleeping with ``sleep`` and calling
     ``check`` (``Stopped`` on a stop) before each read, and returns 0 on news or
     ``watch.NOTHING_NEW`` at the timeout. ``alert(body)`` publishes the alert, None
-    without ``[run].alert_issue``. ``clock`` is monotonic."""
+    without ``[run].alert_issue``. ``clock`` is monotonic. ``workers``, in continuous mode
+    (#227), holds the actions the ticks started and that may still run."""
 
     def __init__(self, tick, watch, stop_file, *, log, alert=None, alert_issue=0,
-                 idle_timeout=IDLE_TIMEOUT, clock=time.monotonic, sleep=time.sleep):
+                 idle_timeout=IDLE_TIMEOUT, clock=time.monotonic, sleep=time.sleep,
+                 workers=None):
         self.tick = tick
         self.watch = watch
+        self.workers = workers
         self.stop_file = Path(stop_file)
         self.log = log
         self.alert = alert
@@ -101,11 +115,19 @@ class Loop:
         if self.stop_reason():
             raise Stopped()
 
-    def pause(self, seconds):
-        """Sleep ``seconds``, a little at a time; ``Stopped`` as soon as a stop is requested."""
+    def check_wake(self):
+        """``check_stop``, and ``Woken`` once an action of the continuous mode ended (#227)."""
+        self.check_stop()
+        if self.workers is not None and self.workers.ended():
+            raise Woken()
+
+    def pause(self, seconds, check=None):
+        """Sleep ``seconds``, a little at a time; ``Stopped`` as soon as a stop is requested
+        (``check``, by default ``check_stop``, raises it)."""
+        check = check or self.check_stop
         deadline = self._clock() + seconds
         while True:
-            self.check_stop()
+            check()
             left = deadline - self._clock()
             if left <= 0:
                 return
@@ -123,6 +145,8 @@ class Loop:
         finally:
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
+            if self.workers is not None:
+                self.workers.close()
 
     def _loop(self):
         failures = []
@@ -130,10 +154,12 @@ class Loop:
             reason = self.stop_reason()
             if reason:
                 self.log(f'stop requested ({reason}): no further tick')
+                self._drain()
                 return 0
             try:
                 actions = self.tick()
             except Repinned:
+                # A pin runs only when no action runs (continuous mode included).
                 reason = self.stop_reason()
                 if reason:  # the restart would forget a signal: no new copy, no further tick
                     self.log(f'stop requested ({reason}): no restart from the new pin, '
@@ -144,15 +170,67 @@ class Loop:
                 failures.append(failure_class(exc))
                 self.log(f'tick failed ({len(failures)} in a row): {type(exc).__name__}: {exc}')
                 if len(failures) >= MAX_FAILURES:
+                    self._drain()
                     return self._give_up(failures)
                 wait = BACKOFF_SECONDS[len(failures) - 1]
                 self.log(f'next tick in {wait} seconds')
                 self._wait(self.pause, wait)
                 continue
             failures = []
+            if self.workers is not None and self.workers.running():
+                self._wait(self._busy)
+                continue
             if actions:
                 continue
+            if self.workers is not None and self.workers.ended():
+                # The last action ended during the tick, after it read what runs: its result is
+                # not in that plan, and no wait would notice it.
+                self.log('an action ended during the tick: next tick')
+                continue
             self._wait(self._idle)
+
+    def _drain(self):
+        """Continuous mode (#227): wait for the running actions to end; none starts."""
+        if self.workers is None or not self.workers.running():
+            return
+        self.log(f'waiting for {self._running()} to end')
+        while self.workers.running():
+            self._sleep(POLL_SECONDS)
+
+    def _running(self):
+        return ', '.join(f'{action.kind} #{action.number}'
+                         for action, _ in self.workers.running()) or 'no action'
+
+    def _busy(self):
+        """Continuous mode (#227): wait while actions run. With every slot taken, until one
+        ends; with a slot free, also until news on GitHub arrive, at most ``idle_timeout``
+        seconds. A watcher that fails waits the rest of the time, or until an action ends."""
+        try:
+            if self.workers.full():
+                self.log(f'every slot is taken ({self._running()}): waiting for an action '
+                         'to end')
+                while True:
+                    self.check_wake()
+                    self._sleep(POLL_SECONDS)
+            self.log(f'running: {self._running()}; waiting for an action to end or for news '
+                     f'on GitHub, at most {self.idle_timeout} seconds')
+            start = self._clock()
+
+            def wait(seconds):
+                self.pause(seconds, self.check_wake)
+            try:
+                code = self.watch(self.idle_timeout, wait, self.check_wake)
+            except Stopped:
+                raise
+            except Exception as exc:  # the next tick runs when an action ends or at the timeout
+                self.log(f'waiting for news failed ({failure_class(exc)}): next tick when an '
+                         'action ends or at the timeout')
+                wait(self.idle_timeout - (self._clock() - start))
+                return
+        except Woken:
+            self.log('an action ended: next tick')
+            return
+        self.log('no news: next tick' if code == NOTHING_NEW else 'news on GitHub: next tick')
 
     def _wait(self, how, *args):
         if self.stop_reason():

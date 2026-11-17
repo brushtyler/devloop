@@ -10,20 +10,32 @@ by models (summaries, findings, notes, PR bodies, logs). Two rules keep the two 
 """
 
 import base64
+import functools
 import json
 import re
+import subprocess
+from pathlib import Path
 
 from .acceptance import render_map
+from .config import INSTALL_ROOT
 from .policy import EVENTS, valid_receipt
 from .supervision import COMMANDS, OUTCOMES, critical, describe
 
 UNKNOWN = 'non noto'
+UNKNOWN_VERSION = 'non nota'
 _EFFORT_LABELS = {'xhigh': 'Extra High', 'max': 'Max'}
 _MARKER = re.compile(r'<!-- devloop:(?P<kind>[a-z]+):v1 (?P<payload>[A-Za-z0-9+/=]+) -->')
 _VERSION = re.compile(r'\d+\.\d+(?:\.\d+)?')
 
-DISPATCHER = {'agent': 'devloop dispatcher', 'model': 'nessuno (testo generato dal dispatcher)',
-              'effort': 'n/a'}
+# Every text devloop publishes opens with the name of the identity it publishes with and the
+# version of devloop (#232): the texts of the AI agents add agent, model and reasoning level in
+# the same block, those of bots without AI (the dispatcher, one day the merger) nothing else.
+# Records published before #232 carry the agent header alone, the dispatcher's with ``devloop
+# dispatcher`` as the agent: every form is devloop text.
+DISPATCHER = 'devloop dispatcher'
+# The stamp ``devloop pin`` writes in the root of a pinned copy (``pin.STAMP``).
+PIN_STAMP = 'pin.json'
+_SHA = re.compile(r'[0-9a-f]{40}')
 
 
 def parse_version(text):
@@ -38,20 +50,78 @@ def effort_label(effort):
     return _EFFORT_LABELS.get(effort, effort.title())
 
 
-def header(agent_name, cli_version, model_label, effort):
-    """The header AGENTS.md requires on every text published to GitHub."""
-    agent = f'{agent_name} (CLI v{cli_version})' if cli_version else f'{agent_name} (CLI {UNKNOWN})'
-    return ('> [!NOTE]\n'
-            f'> **Agent:** {agent}\n'
-            f'> **Model:** {model_label or UNKNOWN}\n'
-            f'> **Reasoning Level:** {effort_label(effort)}\n')
+def attribution(bot=None, version=None, agent=None):
+    """The one ``> [!NOTE]`` block of a text published to GitHub (AGENTS.md, #232), composed
+    here only. ``bot``: the name of the identity devloop publishes with, followed by the
+    ``version`` of devloop; ``agent``: ``(name, cli_version, model_label, effort)`` of the AI
+    agent that wrote the text. A bot without AI has ``bot`` alone; a text of an agent that
+    devloop publishes has both, in one block; a text an agent publishes outside devloop has
+    ``agent`` alone."""
+    lines = ['> [!NOTE]']
+    if bot:
+        lines += [f'> **Bot:** {bot}', f'> **Version:** {version or UNKNOWN_VERSION}']
+    if agent:
+        name, cli_version, model_label, effort = agent
+        cli = f'CLI v{cli_version}' if cli_version else f'CLI {UNKNOWN}'
+        lines += [f'> **Agent:** {name} ({cli})', f'> **Model:** {model_label or UNKNOWN}',
+                  f'> **Reasoning Level:** {effort_label(effort)}']
+    return '\n'.join(lines) + '\n'
 
 
-def dispatcher_header():
-    return ('> [!NOTE]\n'
-            f'> **Agent:** {DISPATCHER["agent"]}\n'
-            f'> **Model:** {DISPATCHER["model"]}\n'
-            f'> **Reasoning Level:** {DISPATCHER["effort"]}\n')
+def header(agent_name, cli_version, model_label, effort, bot=None, version=None):
+    """The header of a text an AI agent wrote. devloop publishes it with ``bot``, the name of
+    the agent's identity (``agent_bot``), and ``version``, the version of devloop (#232);
+    without ``bot`` it is the header an agent writes outside devloop."""
+    return attribution(bot, version, (agent_name, cli_version, model_label, effort))
+
+
+def agent_bot(key):
+    """The name of the identity devloop publishes the texts of agent ``key`` with (#232):
+    ``devloop claude-agent``, ``devloop codex-agent``, ``devloop agy-agent``."""
+    return f'devloop {key}-agent'
+
+
+def _checkout_sha(root):
+    """The commit of the checkout whose top level is ``root``, or None: a directory inside
+    another repository (a pinned copy without its stamp) is not a checkout of devloop."""
+    try:
+        proc = subprocess.run(['git', 'rev-parse', '--show-toplevel', 'HEAD'], cwd=root,
+                              capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    lines = proc.stdout.splitlines() if proc.returncode == 0 else []
+    if len(lines) != 2 or not _SHA.fullmatch(lines[1].strip()):
+        return None
+    try:
+        same = Path(lines[0].strip()).resolve() == Path(root).resolve()
+    except OSError:
+        return None
+    return lines[1].strip() if same else None
+
+
+@functools.cache
+def devloop_version(root=INSTALL_ROOT):
+    """The version of devloop running from ``root``: the first 12 characters of the commit of
+    the pinned copy (its ``pin.json``), else of the checkout, else ``UNKNOWN_VERSION``.
+    Computed once per process: a new pin starts a new process."""
+    try:
+        commit = json.loads((Path(root) / PIN_STAMP).read_text(encoding='utf-8')).get('commit')
+    except (OSError, ValueError, AttributeError):
+        commit = None
+    if not (isinstance(commit, str) and _SHA.fullmatch(commit)):
+        commit = _checkout_sha(root)
+    return commit[:12] if commit else UNKNOWN_VERSION
+
+
+def bot_header(bot, version):
+    """The header of a text written by a bot without AI (#232): its name and the version of
+    devloop, instead of an agent, a model and a reasoning level."""
+    return attribution(bot, version)
+
+
+def dispatcher_header(root=INSTALL_ROOT):
+    """The header of every text the dispatcher writes on its own."""
+    return bot_header(DISPATCHER, devloop_version(root))
 
 
 def marker(kind, payload):
