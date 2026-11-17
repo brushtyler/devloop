@@ -16,7 +16,7 @@ first failure in a row, 5 after the second); the ``MAX_FAILURES``-th failure in 
 loop at once, with an alert: a comment of the dispatcher on ``[run].alert_issue``, one attempt,
 or the local log when none is configured or the comment fails. A tick that succeeds resets the
 count. A new pin (``Repinned``, #174) is not a failure: it propagates, and the process starts
-again from the new copy.
+again from the new copy, unless a stop was requested during that tick: then the loop ends.
 """
 
 import signal
@@ -63,9 +63,10 @@ def alert_body(classes):
 
 
 class Loop:
-    """``tick()`` runs one tick and returns its actions. ``watch(timeout, sleep)`` waits for
-    news on GitHub for at most ``timeout`` seconds, sleeping with ``sleep``, and returns 0 on
-    news or ``watch.NOTHING_NEW`` at the timeout. ``alert(body)`` publishes the alert, None
+    """``tick()`` runs one tick and returns its actions. ``watch(timeout, sleep, check)`` waits
+    for news on GitHub for at most ``timeout`` seconds, sleeping with ``sleep`` and calling
+    ``check`` (``Stopped`` on a stop) before each read, and returns 0 on news or
+    ``watch.NOTHING_NEW`` at the timeout. ``alert(body)`` publishes the alert, None
     without ``[run].alert_issue``. ``clock`` is monotonic."""
 
     def __init__(self, tick, watch, stop_file, *, log, alert=None, alert_issue=0,
@@ -94,12 +95,17 @@ class Loop:
             return f'the {self.stop_file.name} file'
         return None
 
+    def check_stop(self):
+        """``Stopped`` when a stop is requested: the watcher calls it before each read of
+        GitHub, so a stop during a read lets no other read start."""
+        if self.stop_reason():
+            raise Stopped()
+
     def pause(self, seconds):
         """Sleep ``seconds``, a little at a time; ``Stopped`` as soon as a stop is requested."""
         deadline = self._clock() + seconds
         while True:
-            if self.stop_reason():
-                raise Stopped()
+            self.check_stop()
             left = deadline - self._clock()
             if left <= 0:
                 return
@@ -128,6 +134,11 @@ class Loop:
             try:
                 actions = self.tick()
             except Repinned:
+                reason = self.stop_reason()
+                if reason:  # the restart would forget a signal: no new copy, no further tick
+                    self.log(f'stop requested ({reason}): no restart from the new pin, '
+                             'no further tick')
+                    return 0
                 raise
             except Exception as exc:  # a failed tick: counted, never lost
                 failures.append(failure_class(exc))
@@ -157,7 +168,7 @@ class Loop:
         self.log(f'no action: waiting for news on GitHub, at most {self.idle_timeout} seconds')
         start = self._clock()
         try:
-            code = self.watch(self.idle_timeout, self.pause)
+            code = self.watch(self.idle_timeout, self.pause, self.check_stop)
         except Stopped:
             raise
         except Exception as exc:  # the next tick runs at the timeout all the same

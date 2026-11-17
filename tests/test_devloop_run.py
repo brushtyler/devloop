@@ -59,7 +59,7 @@ class LoopCase(unittest.TestCase):
                 raise outcome
             return outcome() if callable(outcome) else outcome
 
-        def watch(timeout, sleep):
+        def watch(timeout, sleep, check):
             self.events.append(('watch', timeout))
             result = self.watch_results.pop(0) if self.watch_results else NOTHING_NEW
             if callable(result):
@@ -163,6 +163,23 @@ class StopTests(LoopCase):
         self.assertEqual(code, 0)
         self.assertEqual([e[0] for e in self.events], ['tick', 'watch'])
         self.assertEqual(sum(self.clock.slept), 10)
+
+    def test_a_stop_during_a_tick_that_repins_ends_the_loop_without_a_restart(self):
+        def tick_with_sigterm_then_pin():
+            os.kill(os.getpid(), signal.SIGTERM)
+            raise pin.Repinned(self.tmp / 'new')
+        code = self.loop([tick_with_sigterm_then_pin, ['review']]).run()
+        self.assertEqual(code, 0)
+        self.assertEqual(self.events, [('tick', 1)])
+        self.assertIn('stop requested (SIGTERM): no restart from the new pin, no further tick',
+                      self.logs)
+
+    def test_the_stop_file_during_a_tick_that_repins_ends_the_loop_too(self):
+        def tick_with_stop_then_pin():
+            self.stop.touch()
+            raise pin.Repinned(self.tmp / 'new')
+        code = self.loop([tick_with_stop_then_pin, ['review']]).run()
+        self.assertEqual((code, self.events), (0, [('tick', 1)]))
 
     def test_a_stop_cuts_the_backoff_short(self):
         def stop_during_backoff():
@@ -349,6 +366,55 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(seen[0], (gh, self.tmp / 'run-watch-state.json', 30, 30))
         self.assertTrue(callable(seen[1]))
         self.assertIsNone(gh.time_left)
+
+    def test_a_sigterm_during_an_auto_pin_ends_the_loop_without_a_restart(self):
+        def tick():
+            os.kill(os.getpid(), signal.SIGTERM)
+            raise pin.Repinned(self.tmp / 'pinned-new')
+        dispatcher = SimpleNamespace(tick=mock.Mock(side_effect=tick), identities=None,
+                                     gh=mock.Mock(time_left=None))
+        with mock.patch.object(cli, 'build', return_value=(config.load_config(), self.tmp,
+                                                           dispatcher)), \
+                mock.patch.object(cli, 'log'), mock.patch.object(pin, 'reexec') as reexec:
+            cli.main(['run'])
+        reexec.assert_not_called()
+        self.assertEqual(dispatcher.tick.call_count, 1)
+
+    def wait_with_stop_during_first_read(self, stop):
+        """A real watcher on a client whose first read requests a stop with ``stop``: the
+        GitHub reads that the wait starts, by name."""
+        reads = []
+
+        class Client:
+            time_left = None
+
+            def __getattr__(client, name):
+                def read(*args):
+                    if client.time_left is not None:
+                        client.time_left()  # as github.GitHub does before each gh call
+                    reads.append(name)
+                    if len(reads) == 1:
+                        stop()
+                    return []
+                return read
+        gh = Client()
+        dispatcher = SimpleNamespace(tick=mock.Mock(return_value=[]), gh=gh, identities=None)
+        with mock.patch.object(cli, 'log'):
+            code = cli.run_loop(config.load_config(), self.tmp, dispatcher, 900)
+        self.assertEqual(code, 0)
+        self.assertEqual(dispatcher.tick.call_count, 1)
+        self.assertIsNone(gh.time_left)  # restored after the stop too
+        self.assertFalse((self.tmp / runloop.WATCH_STATE_FILE).exists())  # no round completed
+        return reads
+
+    def test_a_sigterm_during_a_read_of_the_wait_starts_no_other_read(self):
+        reads = self.wait_with_stop_during_first_read(
+            lambda: os.kill(os.getpid(), signal.SIGTERM))
+        self.assertEqual(reads, ['open_prs'])
+
+    def test_the_stop_file_during_a_read_of_the_wait_starts_no_other_read(self):
+        reads = self.wait_with_stop_during_first_read((self.tmp / runloop.STOP_FILE).touch)
+        self.assertEqual(reads, ['open_prs'])
 
 
 class ConfigTests(unittest.TestCase):

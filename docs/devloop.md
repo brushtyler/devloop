@@ -1279,8 +1279,10 @@ refused.
 
 **Clean stop.** `SIGTERM` or `SIGINT` (Ctrl-C), or the file `state_dir/STOP`
 (`.ssdlc/devloop/STOP` of the main checkout), stop the loop: the tick in progress ends, no other
-starts, and a wait in progress ends at once (after the read of GitHub in progress, if any). The
-exit code is 0. Agent turns and tests
+starts, and a wait in progress ends at once (after the read of GitHub in progress, if any: no
+other read starts). A stop requested during a tick that ends with a new
+[pin after a merge](#pin-after-a-merge) ends the loop too, without the restart from the new copy;
+the next start runs the new copy. The exit code is 0. Agent turns and tests
 run in process groups of their own, so the signal reaches only devloop and the tick finishes its
 actions. devloop never removes `STOP`: while it exists `devloop run` says so in the log and exits
 with 0 at once, without a tick, so not even a restart by systemd starts the loop again. The
@@ -1306,7 +1308,7 @@ The log keeps the full message of each failed tick.
 runs, waits included: a manual `devloop tick` (or `cleanup`) exits with `another dispatcher is
 running (lock held)`, and a loop does not start while a manual tick runs. To run a tick by hand,
 stop the loop first. A [pin after a merge](#pin-after-a-merge) restarts the loop from the new
-copy with the same arguments and the lock still held.
+copy with the same arguments and the lock still held, unless a stop was requested meanwhile.
 
 **Activation is the operator's.** The loop runs unsupervised and spends the agents' quotas, so
 devloop installs no service. An example unit, `devloop.service`, for the

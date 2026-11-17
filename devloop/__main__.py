@@ -205,12 +205,16 @@ def run_loop(cfg, state, dispatcher, timeout):
     trust = watch.Trust.from_config(cfg)
     gh = dispatcher.identities.github(DISPATCHER) if dispatcher.identities else dispatcher.gh
 
-    def wait_for_news(seconds, sleep):
+    def wait_for_news(seconds, sleep, check):
         watcher = watch.Watcher(gh, trust, state / runloop.WATCH_STATE_FILE,
                                 interval=min(runloop.WATCH_INTERVAL, seconds), timeout=seconds,
                                 sleep=sleep, out=lambda line: log(f'news: {line}'), err=log)
+
+        def time_left():
+            check()  # after a stop no other gh call (nor token mint) starts: Stopped
+            return watcher.time_left()
         # No gh call outlasts the wait; the client may be the ticks' own, so it is restored.
-        before, gh.time_left = gh.time_left, watcher.time_left
+        before, gh.time_left = gh.time_left, time_left
         try:
             return watcher.run()
         finally:
