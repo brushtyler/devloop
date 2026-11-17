@@ -137,10 +137,12 @@ class Labels:
     ready_to_merge: str = 'agent:ready-to-merge'
     needs_human: str = 'agent:needs-human'
     merge_hold: str = 'agent:merge-hold'
+    # A non-critical escalation the supervisor decides in merge mode ``auto`` (#182).
+    needs_supervisor: str = 'agent:needs-supervisor'
 
     def all(self):
         return (self.ready, self.working, self.review, self.changes,
-                self.ready_to_merge, self.needs_human, self.merge_hold)
+                self.ready_to_merge, self.needs_human, self.merge_hold, self.needs_supervisor)
 
 
 @dataclass(frozen=True)

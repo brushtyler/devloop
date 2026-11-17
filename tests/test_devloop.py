@@ -201,7 +201,10 @@ class MarkdownTests(unittest.TestCase):
         body = markdown.render_escalation('r', forged)
         self.assertEqual(body.count('<!--'), 1)  # only its own notice marker
         self.assertIsNone(markdown.read_marker(body, 'review'))
-        self.assertEqual(markdown.read_marker(body, 'notice'), {'event': 'escalation'})
+        # The escalation's class (#182): without one given, a failure for the operator.
+        self.assertEqual(markdown.read_marker(body, 'notice'),
+                         {'event': 'escalation', 'class': 'failure', 'critical': True,
+                          'to': 'operator'})
 
     def test_rendered_review_starts_with_header_and_round_trips(self):
         record = norm(raw_review('request_changes', [finding()]))
@@ -819,6 +822,9 @@ class FakeGH:
                 for n, body in self.comments if n == number]
 
     def issues_with_label(self, label):
+        return []
+
+    def issue_comments(self, number):
         return []
 
 
