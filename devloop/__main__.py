@@ -360,7 +360,8 @@ def main(argv=None):
         for line in queue_lines(snap):
             log(line)
         for action in plan(snap, cfg):
-            log(f'next: {action.kind} #{action.number}')
+            log(f'next: {action.kind} #{action.number}'
+                + (f': {action.reason}' if action.reason else ''))
         return
     if args.command == 'tick' and args.dry_run:
         # It plans and writes nothing, as `status`: no dispatcher lock, so that the smoke test

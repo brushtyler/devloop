@@ -12,6 +12,8 @@ the attribution header:
 - ``/devloop retry``: run the failed step again, without counting a round; at most
   ``MAX_RETRIES`` times per step and input, then the escalation becomes critical;
 - ``/devloop accept-defaults``: accept the defaults the readiness check proposed;
+- ``/devloop decide <text>``: decide the gaps of the readiness check otherwise (#258): the text,
+  the rest of the comment, reaches the next check through the dispatcher's record;
 - ``/devloop escalate <reason>``: hand the escalation to the operator.
 """
 
@@ -53,10 +55,12 @@ MAX_RETRIES = 2
 # An issue with this label is in a design phase: its escalations stay critical.
 DESIGN_LABEL = 'phase:design'
 
-RETRY, ACCEPT_DEFAULTS, ESCALATE = 'retry', 'accept-defaults', 'escalate'
-COMMANDS = (RETRY, ACCEPT_DEFAULTS, ESCALATE)
+RETRY, ACCEPT_DEFAULTS, DECIDE, ESCALATE = 'retry', 'accept-defaults', 'decide', 'escalate'
+COMMANDS = (RETRY, ACCEPT_DEFAULTS, DECIDE, ESCALATE)
+# The commands that need a text: without one they are malformed.
+NEEDS_TEXT = (DECIDE, ESCALATE)
 # What a supervision record says happened to a command.
-OUTCOMES = ('applied', 'accepted', 'escalated', 'refused', 'limit')
+OUTCOMES = ('applied', 'accepted', 'decided', 'escalated', 'refused', 'limit')
 
 
 def critical(cls):
@@ -107,17 +111,21 @@ def preflight_class(outcome):
 
 
 def supervisor_command(body):
-    """The supervisor command of a comment: ``(command, reason)`` when the first line after the
-    attribution header is ``/devloop retry``, ``/devloop accept-defaults`` or ``/devloop
-    escalate <reason>``; ``(escalate, None)`` for an escalate without a reason; None when the
-    comment is no such command."""
-    lines = [line.strip() for line in (body or '').strip().splitlines()]
-    while lines and (not lines[0] or lines[0].startswith('>')):
+    """The supervisor command of a comment: ``(command, text)`` when the first line after the
+    attribution header is ``/devloop retry``, ``/devloop accept-defaults``, ``/devloop decide
+    <text>`` or ``/devloop escalate <reason>``; None when the comment is no such command. The
+    reason of an escalate is the rest of its line; the text of a decide is the rest of the
+    comment, from the rest of its first line on (#258). A decide or an escalate without a text
+    has None as text, and is malformed."""
+    lines = (body or '').strip().splitlines()
+    while lines and (not lines[0].strip() or lines[0].strip().startswith('>')):
         lines.pop(0)
-    tokens = lines[0].split(None, 2) if lines else []
+    tokens = lines[0].strip().split(None, 2) if lines else []
     if len(tokens) < 2 or tokens[0] != '/devloop' or tokens[1] not in COMMANDS:
         return None
     reason = tokens[2].strip() if len(tokens) > 2 else ''
-    if tokens[1] == ESCALATE:
-        return ESCALATE, reason or None
+    if tokens[1] == DECIDE:
+        reason = '\n'.join([reason, *lines[1:]]).strip()
+    if tokens[1] in NEEDS_TEXT:
+        return tokens[1], reason or None
     return tokens[1], reason

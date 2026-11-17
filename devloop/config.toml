@@ -37,7 +37,8 @@ trusted_users = ["brushtyler"]
 max_open_prs = 2            # devloop PRs in progress at once; new issues wait
 # PRs waiting for a person (issue #199): agent:needs-human, and agent:ready-to-merge when devloop
 # does not merge them ([merge] mode "off", a level override "off", operator_only_paths). They do
-# not take the slots of max_open_prs; once this many are open, no new issue starts.
+# not take the slots of max_open_prs; once this many are open, only priority:high issues start
+# (issue #274).
 max_parked_prs = 3
 max_review_rounds = 3       # review rounds (including CI failures) before escalating
 max_actions_per_tick = 3
@@ -203,8 +204,8 @@ auto = false
 # The agent whose GitHub identity may hold and release merges in "auto" mode (issue #172),
 # besides trusted_users. Its app's agent:ready and priority labels count too, but only on issues
 # opened by a trusted user or by a devloop app (issue #178). In "auto" it also decides the
-# non-critical escalations in agent:needs-supervisor with /devloop retry, accept-defaults and
-# escalate (issue #182). In any merge mode it may ask for a fix of a PR in agent:review or
+# non-critical escalations in agent:needs-supervisor with /devloop retry, accept-defaults,
+# decide (issue #258) and escalate (issue #182). In any merge mode it may ask for a fix of a PR in agent:review or
 # agent:changes with /devloop fix, as a trusted user may (issue #195).
 # supervisor = "claude"
 implementer = "claude"
