@@ -80,7 +80,7 @@ class ResyncTests(Quorum):
         self.approved_then_synced(SYNCED, conflicts=('x.py',))
         self.assertEqual(self.planned(), [Action('round_limit', 100)])
         self.d.tick()
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         self.assertEqual(len(self.records('review')), 1)
 
     def test_a_sync_whose_conflicts_an_agent_resolved_spends_a_round(self):
@@ -98,7 +98,7 @@ class ResyncTests(Quorum):
         # the limit at once: its fix would need a round that counts.
         self.approved_then_synced(raw_review('request_changes', [finding()]))
         self.d.tick()
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         self.assertIn('Raggiunto il limite di 1 round', self.gh.comments[-1][1])
 
     def test_the_fix_after_a_resync_is_reviewed_in_a_round_that_counts(self):
@@ -118,7 +118,7 @@ class ResyncTests(Quorum):
         self.assertNotIn('resync', last)
         reviews = self.records('review')
         self.assertEqual((waived_rounds(reviews), counted_rounds(reviews)), ({2}, 2))
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         self.assertIn('Raggiunto il limite di 2 round', self.gh.comments[-1][1])
 
     def test_a_rereview_or_a_ci_failure_after_the_sync_counts(self):

@@ -17,7 +17,7 @@ from devloop.workspace import Workspace
 from helpers.devloop_fakes import FakeGH
 from test_devloop import (CFG, IMPL, META, REV, SHA1, SHA2, FakeRunner, FakeWS, finding,
                           implemented, pr, raw_review)
-from test_devloop_preflight import PCFG, READY, NEEDS_HUMAN, IssueGH, checked, gap
+from test_devloop_preflight import PCFG, READY, NEEDS_OPERATOR, IssueGH, checked, gap
 
 NULLS = dict.fromkeys(agents.TELEMETRY_FIELDS)
 CLAUDE_ENVELOPE = {
@@ -370,10 +370,10 @@ class LedgerDispatcherTests(unittest.TestCase):
                 # is no longer in agent:working, the turn is on the issue.
                 'implementation with its PR open': (7, lambda d: d._do_implement(7),
                                                    implemented()),
-                # The review ends with needs_human: the PR is out of the scan of the labels.
-                'review escalated to needs_human': (
+                # The review ends with needs_operator: the PR is out of the scan of the labels.
+                'review escalated to needs_operator': (
                     100, lambda d: d._do_review(pr()),
-                    raw_review('needs_human', human='decisione di prodotto')),
+                    raw_review('needs_operator', human='decisione di prodotto')),
             }
             for name, (number, step, output) in cases.items():
                 with self.subTest(name):
@@ -384,7 +384,7 @@ class LedgerDispatcherTests(unittest.TestCase):
                     self.gh.fail_edits = True
                     step(d)
                     if number == 100:
-                        self.assertIn('agent:needs-human', self.gh.labels[100])
+                        self.assertIn('agent:needs-operator', self.gh.labels[100])
                     else:
                         self.assertEqual(self.gh.created[0]['head'], 'agent/issue-7')
                     self.assertEqual(self.gh.records(number, 'turn')[0]['state'], 'open')
@@ -495,8 +495,8 @@ class GreenCILedgerTests(unittest.TestCase):
     def test_passing_checks_are_recorded_whatever_the_verdict(self):
         for raw, labels in ((raw_review('request_changes', blocking=[finding()]),
                              {'agent:changes'}),
-                            (raw_review('needs_human', human='a product decision'),
-                             {'agent:needs-human'})):
+                            (raw_review('needs_operator', human='a product decision'),
+                             {'agent:needs-operator'})):
             with self.subTest(verdict=raw['verdict']):
                 d = self.make(raw)
                 d.tick()
@@ -548,7 +548,7 @@ class PreflightLedgerTests(unittest.TestCase):
         runner = FakeRunner(checked(False, [gap()]), checked(True))
         d = Dispatcher(PCFG, gh, FakeWS(), runner, log=lambda m: None, ledger=Ledger(gh))
         d.tick()
-        self.assertEqual(gh.labels[7], {READY, NEEDS_HUMAN})
+        self.assertEqual(gh.labels[7], {READY, NEEDS_OPERATOR})
         gh.say('/devloop recheck')
         d.tick()
         self.assertEqual(gh.labels[7], {READY})

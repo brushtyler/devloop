@@ -33,6 +33,9 @@ Where a method went, when it was not obvious:
   merged devloop PR already resolved.
 - ``issue_dependencies`` (#277) is in ``Tracker``: the native "blocked by" dependencies between
   issues, which the planner reads to hold back an issue while a trusted block is open.
+- ``repo_labels`` and ``rename_label`` (#248) are in ``Tracker`` next to ``ensure_label``:
+  ``ensure_labels`` renames ``agent:needs-operator`` from its old name, and ``devloop status``
+  reports when both names exist.
 - ``GitHub.last_labeler`` is not in any port: the dispatcher no longer calls it.
 - ``GitHub.open_issues``, ``comments_since``, ``issue_state`` and ``issue_author`` are not in
   any port: only the ``watch`` command (``devloop/watch.py``) calls them, not the dispatcher.
@@ -94,6 +97,13 @@ class Tracker(Protocol):
 
     def ensure_label(self, name, color, description):
         """Create or update label ``name``."""
+
+    def repo_labels(self):
+        """The names of the repository's labels."""
+
+    def rename_label(self, name, new_name, color, description):
+        """Rename label ``name`` to ``new_name``, with that color and description: the issues
+        and pull requests that have it keep it."""
 
 
 @runtime_checkable

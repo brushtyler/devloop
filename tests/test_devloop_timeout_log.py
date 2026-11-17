@@ -383,7 +383,7 @@ class EscalationTests(unittest.TestCase):
             self.assertEqual(d.tick(), [Action('implement', 7)])
             (log,) = Path(tmp).glob('*-issue-7-implement*.log')
             self.assertIn('step 1: /wt/issue-7/tests/test_1.py', log.read_text())
-        self.assertEqual(gh.labels[7], {'agent:needs-human'})
+        self.assertEqual(gh.labels[7], {'agent:needs-operator'})
         body = gh.comments[-1][1]
         self.assertIn('Il passo `implement` è fallito: claude timed out after 5s.', body)
         self.assertIn(f'Log locale: `{log.name}` in `{CFG.state_dir}/logs`.', body)

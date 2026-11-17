@@ -96,7 +96,7 @@ class IssueChangeTests(unittest.TestCase):
         d = Dispatcher(CFG, gh, FakeWS(), runner, log=lambda m: None)
         self.assertEqual(d.tick(), [Action('implement', 7)])
         self.assertEqual((runner.calls, gh.created), ([], []))
-        self.assertEqual(gh.labels[7], {'agent:needs-human'})
+        self.assertEqual(gh.labels[7], {'agent:needs-operator'})
         self.assertIn('modificato da `stranger`', gh.comments[-1][1])
 
     def test_an_issue_renamed_after_the_label_stops_before_the_implementer(self):
@@ -107,7 +107,7 @@ class IssueChangeTests(unittest.TestCase):
         d = Dispatcher(CFG, gh, FakeWS(), runner, log=lambda m: None)
         self.assertEqual(d.tick(), [Action('implement', 7)])
         self.assertEqual((runner.calls, gh.created), ([], []))
-        self.assertEqual(gh.labels[7], {'agent:needs-human'})
+        self.assertEqual(gh.labels[7], {'agent:needs-operator'})
 
 
 class CrashReconciliationTests(unittest.TestCase):
@@ -119,7 +119,7 @@ class CrashReconciliationTests(unittest.TestCase):
         d = self.make()
         self.gh.labels[7] = {'agent:working'}
         self.assertEqual(steps(d.tick()), [('stale', 7)])
-        self.assertEqual(self.gh.labels[7], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[7], {'agent:needs-operator'})
         self.assertIn('Implementazione interrotta', self.gh.comments[-1][1])
         self.assertEqual(d.tick(), [])
 

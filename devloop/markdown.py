@@ -19,6 +19,7 @@ from pathlib import Path
 from .acceptance import render_map
 from .config import INSTALL_ROOT
 from .policy import EVENTS, valid_receipt
+from .review import LEGACY_VERDICT, current_verdict
 from .supervision import COMMANDS, OUTCOMES, critical, describe
 
 UNKNOWN = 'non noto'
@@ -152,7 +153,9 @@ def _list_of_dicts(value):
 
 
 def _valid_review(r):
-    return (r.get('verdict') in _VERDICT_TEXT and _is_int(r.get('round'), 1)
+    # A record published before #248 carries ``LEGACY_VERDICT``: ``read_marker`` renames it.
+    return ((r.get('verdict') in _VERDICT_TEXT or r.get('verdict') == LEGACY_VERDICT)
+            and _is_int(r.get('round'), 1)
             and isinstance(r.get('head_sha'), str) and isinstance(r.get('summary'), str)
             and r.get('source') in ('agent', 'ci')
             and all(_list_of_dicts(r.get(k)) for k in ('blocking_findings',
@@ -211,21 +214,29 @@ def _valid_gap(g):
 
 def _valid_preflight(p):
     """A readiness check (#114): ``ready`` never with ``blocked``, which records that the check
-    added ``agent:needs-human`` after ``labeled`` earlier ``labeled`` events of that label."""
+    added ``agent:needs-operator`` after ``labeled`` earlier ``labeled`` events of that label
+    (#248: of the label under both its names)."""
     return (all(isinstance(p.get(k), str) for k in ('hash', 'agent', 'split'))
             and all(isinstance(p.get(k), bool) for k in ('ready', 'blocked'))
             and not (p['ready'] and p['blocked']) and _is_int(p.get('labeled'))
             and isinstance(p.get('gaps'), list) and all(_valid_gap(g) for g in p['gaps']))
 
 
-NOTICES = ('escalation', 'blocked')
+NOTICES = ('escalation', 'blocked', 'operator_merge')
 
 
 def _valid_notice(n):
-    """A text devloop publishes without a record of its own (#114): an escalation to a human,
-    or an agent that stopped. Its marker tells it apart from the operator's own text when both
-    are written with the same login. Since #182 it carries the escalation's ``class``; a notice
-    without one, or with one that is not known, is critical (``supervision.critical``)."""
+    """A text devloop publishes without a record of its own (#114): an escalation to the
+    operator, or an agent that stopped. Its marker tells it apart from the operator's own text
+    when both are written with the same login. Since #182 it carries the escalation's
+    ``class``; a notice without one, or with one that is not known, is critical
+    (``supervision.critical``). Since #248 also a ready PR whose merge is the operator's
+    (``operator_merge``): its head, how many ``labeled`` events of ``agent:needs-operator``
+    (under both its names) came before the dispatcher added it, and the promotion it belongs
+    to, as the count of promotions recorded on the PR."""
+    if n.get('event') == 'operator_merge':
+        return (isinstance(n.get('head'), str) and _is_int(n.get('labeled'))
+                and _is_int(n.get('promotion')))
     return n.get('event') in NOTICES
 
 
@@ -326,7 +337,12 @@ def read_marker(text, kind):
         data = json.loads(base64.b64decode(match.group('payload'), validate=True))
     except (ValueError, json.JSONDecodeError):
         return None
-    return data if isinstance(data, dict) and _VALID[kind](data) else None
+    if not (isinstance(data, dict) and _VALID[kind](data)):
+        return None
+    if kind == 'review':
+        # A verdict published before #248 is read under its current name.
+        data['verdict'] = current_verdict(data['verdict'])
+    return data
 
 
 def carries_record(text):
@@ -337,7 +353,7 @@ def carries_record(text):
 _VERDICT_TEXT = {
     'approve': 'Approvata',
     'request_changes': 'Modifiche richieste',
-    'needs_human': 'Serve una decisione umana',
+    'needs_operator': 'Serve una decisione dell\'operatore',
 }
 _STATUS_TEXT = {'resolved': 'risolto', 'unresolved': 'non risolto', 'withdrawn': 'ritirato'}
 _ACTION_TEXT = {'fixed': 'corretto', 'disputed': 'contestato', 'not_applicable': 'non applicabile'}
@@ -394,7 +410,7 @@ def render_review(review, head):
                       f'`{review["resync"]["from"][:12]}`; {why}: questo round non conta per il '
                       'limite dei round.']
     parts +=['', review['summary'].strip()]
-    if review['verdict'] == 'needs_human' and review['human_reason']:
+    if review['verdict'] == 'needs_operator' and review['human_reason']:
         parts += ['', '### Decisione richiesta', '', review['human_reason'].strip()]
     if review['blocking_findings']:
         parts += ['', '### Bloccanti', '', _findings(review['blocking_findings'])]
@@ -413,7 +429,7 @@ def render_review(review, head):
 
 
 _REVIEW_EVENT = {'approve': 'APPROVE', 'request_changes': 'REQUEST_CHANGES',
-                 'needs_human': 'COMMENT'}
+                 'needs_operator': 'COMMENT'}
 
 
 def render_native_review(review, head):
@@ -474,7 +490,7 @@ PREFLIGHT_RESUME = (
     'Per proseguire, un utente fidato risponde nella issue: decide i punti aperti o accetta i '
     'default proposti in un commento, oppure modifica titolo o corpo. Il controllo si ripete al '
     'tick successivo; per ripeterlo senza modifiche basta un commento con `/devloop recheck` '
-    'come prima riga. Se l\'esito è positivo devloop rimuove `agent:needs-human` che aveva messo '
+    'come prima riga. Se l\'esito è positivo devloop rimuove `agent:needs-operator` che aveva messo '
     'e l\'issue torna in coda.')
 
 
@@ -507,7 +523,7 @@ def render_preflight(record, head, note=''):
     return publishable(head + '\n' + '\n'.join(parts), 'preflight', record)
 
 
-RESUME = ('Per riprendere: correggere la causa, **rimuovere `agent:needs-human`** e impostare la '
+RESUME = ('Per riprendere: correggere la causa, **rimuovere `agent:needs-operator`** e impostare la '
           'label del passo da eseguire (`agent:ready` sulla issue, `agent:review` o '
           '`agent:changes` sulla PR).')
 
@@ -521,14 +537,14 @@ SUPERVISOR_RESUME = (
     'l\'issue in coda;\n'
     '- `/devloop decide <decisioni>`: decide le lacune del controllo di prontezza anche '
     'diversamente dai default (il testo è il resto del commento) e rimette l\'issue in coda;\n'
-    '- `/devloop escalate <motivo>`: passa l\'escalation all\'operatore (`agent:needs-human`).')
+    '- `/devloop escalate <motivo>`: passa l\'escalation all\'operatore (`agent:needs-operator`).')
 
 
 def render_escalation(reason, detail='', cls='failure', supervised=None):
     """An escalation (#182: of class ``cls``). ``supervised``, for a non-critical one the
     supervisor decides, holds the step, the key of its input and what a retry resumes; without
     it the escalation goes to the operator."""
-    title = 'Escalation al supervisore' if supervised else 'Serve un intervento umano'
+    title = 'Escalation al supervisore' if supervised else 'Serve un intervento dell\'operatore'
     body = (dispatcher_header() + f'\n## {title}\n\n' + reason.strip() + '\n\n'
             + f'**Classe:** `{cls}` ({describe(cls)}), '
             + ('critica' if critical(cls) else 'non critica') + '.\n\n'
@@ -552,6 +568,21 @@ def render_cycle(record):
         'finché il ciclo resta. Il supervisore o l\'operatore rimuove una delle dipendenze; '
         'devloop ricalcola da solo quali issue possono partire, senza altri interventi.\n',
         'cycle', record)
+
+
+def render_operator_merge(head, labeled, promotion, reasons, label):
+    """The dispatcher's comment on a ready PR that devloop does not merge (#248): the merge is
+    the operator's, for ``reasons`` (Markdown lines), and ``label`` stays only while the head
+    ``head`` is ready. ``labeled``: how many ``labeled`` events of ``label`` came before;
+    ``promotion``: how many promotions the PR's policy records count."""
+    body = (dispatcher_header() + '\n## Il merge spetta all\'operatore\n\n'
+            f'Il commit `{head[:12]}` è pronto per il merge, ma devloop non lo mergia:\n\n'
+            + reasons.strip() + '\n\n'
+            f'devloop ha aggiunto `{label}` e continua a seguire la PR: la sincronizza se va in '
+            'conflitto con la base, ricontrolla la CI e, con un nuovo commit, revoca la prontezza '
+            f'e la rimanda in review, togliendo `{label}`.\n')
+    return publishable(body, 'notice', {'event': 'operator_merge', 'head': head,
+                                        'labeled': labeled, 'promotion': promotion})
 
 
 def render_supervision(record, text):
