@@ -161,7 +161,7 @@ from pathlib import Path
 from .acceptance import (acceptance_criteria, acceptance_findings, format_criteria, format_map,
                          latest_map, render_map)
 from .agents import (TAIL_LINES, AgentError, ModelsUnavailable, ModelUnavailable, NoOutput,
-                     PermissionDenied, StartFailure, background_unfinished)
+                     PermissionDenied, StartFailure, background_unfinished, denied_retry_note)
 from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, MERGER, PR_COMMENT, RERUN, REVIEW
 from .config import INSTALL_ROOT, LEGACY_NEEDS_OPERATOR, ConfigError
 from .context import (DOCS_PATHS_SHOWN, LABEL_STYLE, PROMPT_DIR, REREVIEW_COMMAND,
@@ -1564,7 +1564,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
     def _permission_denied(self, candidate, exc, retry):
         """Log an agy turn stopped on a denied permission (``PermissionDenied``, #180) with the
         permission and its target. Returns None when ``retry``, the turn being run once more;
-        otherwise the error to escalate, which names the permission denied again."""
+        otherwise the error to escalate, which names the permission denied again, the model and
+        what was denied: the command, or ``comando non riportato da agy`` (#319)."""
         target = exc.target or 'target non riportato da agy'
         if retry:
             self.log(f'  {candidate.key}: model {candidate.model} denied the '
@@ -1573,7 +1574,22 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
         self.log(f'  {candidate.key}: model {candidate.model} denied the '
                  f'"{exc.permission}" permission again ({target})')
         return PermissionDenied(f'{exc}; permission `{exc.permission}` denied again after one '
-                                'retry', exc.log, exc.permission, exc.target)
+                                f'retry; model `{candidate.model}`; {exc.denied()}', exc.log,
+                                exc.permission, exc.target, exc.command)
+
+    def _remember_denied(self, agent, candidate, exc):
+        """Record ``candidate``, denied a permission twice, as unreliable for the headless turns
+        of ``agent`` for ``denied_cooldown_hours`` (#319), in the memory of unavailable models.
+        Returns the text the log line adds; an agent without fallback models records nothing."""
+        if self.memory is None or not agent.fallback_models:
+            return ''
+        until = self.memory.now() + agent.denied_cooldown_hours * 3600
+        reason = f'permission `{exc.permission}` denied twice ({exc.denied()})'
+        try:
+            entry = self.memory.record(candidate.key, candidate.model, reason, until)
+        except OSError as error:
+            return f'; not remembered: {error}'
+        return f'; skipped until {entry["until"]}'
 
     # Memory of unavailable models (#151) -----------------------------------
     def _remembered(self, models, candidate):
@@ -1622,8 +1638,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
 
         An agy turn stopped on a permission headless mode cannot ask (``PermissionDenied``) is a
         failure of the tool (#180): the same model runs the same turn once more, in the same
-        directory, with ``-retry`` in its label. A second denial on the same model fails as any
-        other error, naming the permission.
+        directory, with ``-retry`` in its label, and a prompt that says what was denied and which
+        commands it may run (#319). After a second denial on the same model the next model of
+        the chain runs, as after an unavailable one, and the denied model is remembered for
+        ``denied_cooldown_hours`` (#319); on the last model it fails as any other error, naming
+        the permission, the model and what was denied.
 
         An agy turn that ended with no result and no error (``NoOutput``, #222) leaves
         ``models`` as an unavailable model does, without being remembered: the next model runs.
@@ -1640,7 +1659,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
         the turn fails listing each one with its reason and time (``ModelsUnavailable``). A
         model that answers is forgotten."""
         failed = None
-        retried = set()  # the models already denied a permission in this call
+        retried = {}  # the models already denied a permission in this call: their denial
         emptied = set()  # the last models of the chain already rerun after no output (#222)
         while models.left:
             candidate = models.left.pop(0)
@@ -1660,6 +1679,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
                 self.log(f'  {candidate.key}: model {candidate.model} skipped: not independent')
                 continue
             text = prompt + FALLBACK_NOTE[mode] if failed else prompt
+            if candidate.model in retried:  # what was denied, and what is allowed (#319)
+                text += denied_retry_note(candidate, mode, retried[candidate.model])
             suffix = f'-{candidate.model}' if candidate.fallback_for else ''
             # Its own log: the first attempt's stays as it was.
             suffix += '-retry' * ((candidate.model in retried) + (candidate.model in emptied))
@@ -1701,8 +1722,17 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
                 error = self._permission_denied(candidate, exc,
                                                 retry=candidate.model not in retried)
                 if error is None:
-                    retried.add(candidate.model)
+                    retried[candidate.model] = exc
                     models.left.insert(0, candidate)
+                    continue
+                if models.left:
+                    # Denied twice: the model ignores the commands it may run. The next model
+                    # runs, as after an unavailable one, and this one is remembered (#319).
+                    models.tried.append((candidate.model, str(error)))
+                    self.log(f'  {candidate.key}: model {candidate.model} denied twice; trying '
+                             f'{models.left[0].model}'
+                             + self._remember_denied(models.agent, candidate, exc))
+                    failed = error
                     continue
                 if not models.tried:
                     raise error from exc

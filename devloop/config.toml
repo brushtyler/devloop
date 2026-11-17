@@ -347,6 +347,10 @@ fallback_models = [
 # reset the error announces ("Resets in 152h4m35s"), else for fallback_memory_seconds (default
 # 3600). `devloop fallback reset agy` forgets it. Without fallback_models nothing is remembered.
 # fallback_memory_seconds = 3600
+# A model that a turn's denied permission stops twice (the retry included) is left for the next
+# model of the chain, and remembered the same way for denied_cooldown_hours (default 6, issue
+# #319). On the last model the turn escalates (tool_failure) naming the model and the command.
+# denied_cooldown_hours = 6
 # Headless agy cannot ask for a permission (issue #122): each turn gets, with --settings, only
 # `command(<prefix>)` rules for these command prefixes. Default for both lists: test_cmd,
 # "python3 -m unittest", "git status", "git diff", "git log", "git show". A bare interpreter,

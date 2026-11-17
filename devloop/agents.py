@@ -226,10 +226,23 @@ class PermissionDenied(AgentError):
     denied one, as agy names it; ``target`` the last action agy's JSON lists as denied, as
     compact JSON, or None when agy does not report it."""
 
-    def __init__(self, message, log=None, permission='', target=None):
+    def __init__(self, message, log=None, permission='', target=None, command=None):
         super().__init__(message, log)
         self.permission = permission
         self.target = target
+        # The command line of that action, cleaned by ``public_text``, or None when agy's JSON
+        # does not report it (#319).
+        self.command = command
+
+    def denied(self):
+        """What was denied, for the retry prompt, the log and the escalation (#319): the
+        command when agy reports it, else ``comando non riportato da agy`` with the action it
+        does report; for another permission, its target."""
+        if self.command:
+            return f'command `{self.command}`'
+        if self.permission == 'command':
+            return f'comando non riportato da agy (action: {self.target or "non riportata"})'
+        return f'target {self.target or "non riportato da agy"}'
 
 
 class NoOutput(AgentError):
@@ -402,6 +415,23 @@ def agy_prompt_block(agent, mode):
             'this session cannot ask for, and ends the turn with no result.\n')
 
 
+def denied_retry_note(agent, mode, denial):
+    """What the retry of a turn stopped on a denied permission (``denial``, a
+    ``PermissionDenied``) is told before it runs (#319): what was denied, and the command
+    prefixes it may run, from the same list as its ``--settings``."""
+    commands = agy_commands(agent, mode) if agent.kind == 'agy' else ()
+    if commands:
+        allowed = ('Use only shell commands that start with one of these prefixes:\n\n'
+                   + ''.join(f'- `{c}`\n' for c in commands))
+    else:
+        allowed = 'Run no shell command in this turn.\n'
+    return ('\n\n## Denied in the previous attempt\n\nThe previous attempt at this turn, on this '
+            f'model, ended with no result: headless mode denied the `{denial.permission}` '
+            f'permission ({denial.denied()}). Do not run it again. ' + allowed +
+            '\nRead and search files only with your own file tools, inside the working '
+            'directory.\n')
+
+
 def turn_prompt(agent, mode, prompt):
     """The prompt one turn of ``agent`` runs with: for agy, followed by its command block."""
     return prompt + agy_prompt_block(agent, mode)
@@ -459,6 +489,46 @@ def denied_target(kind, stdout):
     if not isinstance(denied, list) or not denied:
         return None
     return json.dumps(denied[-1], ensure_ascii=False, separators=(',', ':'))[:500]
+
+
+# The keys of a denied action, or of its arguments, that may hold its command line (#319): agy
+# 1.5 reports none of them (``{"action":"command","display_name":"Bash"}``), later versions may.
+_COMMAND_KEYS = ('command', 'command_line', 'commandLine', 'CommandLine', 'cmd')
+
+
+def _command_of(action):
+    if not isinstance(action, dict):
+        return None
+    for key in _COMMAND_KEYS:
+        value = action.get(key)
+        if isinstance(value, list) and value and all(isinstance(v, str) for v in value):
+            value = ' '.join(value)
+        if isinstance(value, str) and value.strip():
+            return value
+    for key in ('args', 'arguments', 'input'):
+        found = _command_of(action.get(key))
+        if found:
+            return found
+    return None
+
+
+def denied_command(kind, stdout, workdir=None, env=None, width=COMMAND_WIDTH):
+    """The command line of the last action agy's JSON envelope lists in ``denied_actions``,
+    cleaned by ``public_text``, on one line and cut to ``width``, or None when agy does not
+    report it (#319)."""
+    if kind != 'agy':
+        return None
+    try:
+        envelope = json.loads(stdout or '')
+    except json.JSONDecodeError:
+        return None
+    denied = envelope.get('denied_actions') if isinstance(envelope, dict) else None
+    if not isinstance(denied, list) or not denied:
+        return None
+    command = _command_of(denied[-1])
+    if command is None:
+        return None
+    return _cut(' '.join(public_text(command, workdir, env).split()), width) or None
 
 
 def no_output_reason(kind, stdout, stderr):
@@ -699,7 +769,9 @@ class AgentRunner:
             permission = denied_permission(stopped)
             if permission:
                 raise PermissionDenied(message, log, permission,
-                                       denied_target(agent.kind, done.stdout))
+                                       denied_target(agent.kind, done.stdout),
+                                       denied_command(agent.kind, done.stdout, workdir,
+                                                      self._env))
             # No diagnostic of a denial, only agy's note of an empty run (#222).
             empty = stopped == 'no output' and empty_run(agent.kind, done.stdout, done.stderr)
             if empty:

@@ -369,13 +369,36 @@ each agy turn its minimal permissions, and treats a stop without output as a fai
   not the change's (#180): the same model runs the same turn once more, in the same directory
   and tick, with `-retry` in its log name. devloop's log reports the permission and the last
   action agy's JSON lists in `denied_actions`, or `target non riportato da agy` when there is
-  none. A second denial on the same model escalates as before, and the comment ends with
-  ``permission `<name>` denied again after one retry``. Any other failure (an unavailable
+  none. The retry's prompt (#319) adds, before the `## Shell commands` block, a
+  `## Denied in the previous attempt` block: what was denied (the command line of the last
+  denied action, when agy's JSON reports it, cleaned as the [failure comment](protocol.md#failed-agent-turns)
+  cleans commands; for a `command` permission without it, `comando non riportato da agy` with
+  the action agy reports; for another permission, its target), not to run it again, and the
+  command prefixes the turn may run, from the same list as `--settings`. agy 1.5 reports no
+  command line (`{"action":"command","display_name":"Bash"}`).
+- **A model denied twice leaves the turn to the next one.** A second denial on the same model,
+  when the [fallback chain](#fallback-models) has another model after it, moves the turn to that
+  model, as for an unavailable model (#319): the tick log says
+  `agy: model <model> denied twice; trying <next model>`, and the denied model is remembered in
+  the [memory of unavailable models](#memory-of-unavailable-models) for
+  `denied_cooldown_hours` of the agent (default 6, at least 1), with the reason
+  ``permission `<name>` denied twice (<what>)``. On the last model, or on an agent without
+  fallback models, the second denial escalates as before (`tool_failure`), and the comment
+  says ``permission `<name>` denied again after one retry; model `<model>`; <what>``, `<what>`
+  being the command or `comando non riportato da agy` as in the retry: whoever decides knows
+  whether to run the review again or replace the reviewer. That last model is not remembered.
+  Any other failure (an unavailable
   model, a non-zero exit, a stop that names no permission, invalid output, a timeout) is not
   retried: it escalates or starts the fallback as before, except an empty run (see above). After a fallback, the next model gets
   its own single retry. The [readiness check](guide.md#readiness-check-before-implementation), which
-  has no fallback, gets the same single retry, in the same checkout, with its own log and turn
-  record (`issue-<n>-preflight-retry`).
+  has no fallback, gets the same single retry, with the same retry prompt, in the same checkout,
+  with its own log and turn record (`issue-<n>-preflight-retry`); its second denial escalates
+  naming the model and what was denied.
+
+```toml
+[agents.agy]
+denied_cooldown_hours = 6  # how long a model denied twice is skipped
+```
 
 ```toml
 [agents.agy]
@@ -453,7 +476,9 @@ sometimes days later. So that each turn does not try it again first, devloop rem
   (`152h4m35s`, `4m`, `30s`), the model is skipped until the time the error was detected plus
   that duration. Any other format counts as no indication: the model is skipped for
   `fallback_memory_seconds` of the agent (default 3600, at least 1). An agy empty run (#222)
-  is never recorded: it may be transient.
+  is never recorded: it may be transient. An agy model denied a permission twice in one turn,
+  when the turn moves on to the next model (#319, [agy permissions](#agy-permissions)), is
+  recorded for `denied_cooldown_hours` (default 6).
 - **During.** A turn of that agent skips a remembered model without running it and starts from
   the first model of the chain that is not remembered, configured model or fallback alike. The
   tick log says so (`<agent>: model <model> skipped: unavailable until <time> (<reason>)`), the
