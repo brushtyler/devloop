@@ -234,7 +234,7 @@ follow the code. It is the documentation phase of devloop, the `07-docs` of an S
 [docs.map]
 "devloop/" = ["docs/devloop/guide.md"]
 "orchestrator.py" = ["docs/getting-started.md", "docs/architecture.md"]
-"schemas/" = ["docs/configuration.md"]
+"schemas/quality-contract.schema.json" = ["docs/configuration.md"]
 ```
 
 A key is a directory prefix ending in `/` (it covers every file under it) or a file, matched
