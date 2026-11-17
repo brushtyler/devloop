@@ -1,5 +1,5 @@
 """devloop command line: python3 -m devloop
-{setup,status,apps,tick,run,cleanup,follow,watch,pin,fallback}."""
+{setup,status,apps,tick,run,cleanup,follow,watch,pin,report,fallback}."""
 
 import argparse
 import fcntl
@@ -11,7 +11,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import activity, follow, pin, runloop, unavailability, watch
+from . import activity, follow, pin, report, runloop, unavailability, watch
 from .agents import AgentRunner, isolated_env
 from .apps import DISPATCHER, MERGER, Identities
 from .config import ConfigError, Reloader, load_config
@@ -202,6 +202,41 @@ def idle_timeout(parser, args):
     return value
 
 
+def run_report(parser, args):
+    """``devloop report [--day YYYY-MM-DD] [--publish]`` (#256): print the summary of a day
+    (default: today, UTC) from devloop's records, or publish it on ``[report] issue`` as the
+    dispatcher. Reads GitHub with the identity of the ticks' reads, as ``devloop watch``."""
+    day = None
+    if args.day is not None:
+        try:
+            day = report.parse_day(args.day)
+        except ValueError:
+            parser.error(f'report: --day must be a day in the form YYYY-MM-DD, not {args.day!r}')
+    try:
+        cfg = load_config(args.config, args.local_config)
+    except ConfigError as exc:
+        sys.exit(f'devloop: invalid config: {exc}')
+    if args.publish and not cfg.report.issue:
+        sys.exit('devloop: report --publish: no [report] issue is configured. Set the number of '
+                 'the dedicated issue as "issue" in [report] of the local overlay.')
+    try:
+        gh = Identities.from_config(cfg).github(DISPATCHER)
+    except OSError as exc:
+        sys.exit(f'devloop: invalid config: GitHub App key: {exc}. Set $DEVLOOP_APP_KEY_DIR or '
+                 'remove the app from [apps] to use the ambient gh login.')
+    trust = watch.Trust.from_config(cfg)
+    try:
+        if args.publish:
+            state = main_checkout() / cfg.state_dir
+            report.build(cfg, gh, trust, state, log=log).publish(day)
+            return
+        day = day or report.utc_today()
+        summary = report.Records(gh, trust, day, day, cfg.agents).summary(day)
+        print(report.render_text(summary), end='', flush=True)
+    except (GitHubError, report.ReportError) as exc:
+        sys.exit(f'devloop: report: {exc}')
+
+
 def run_loop(cfg, state, dispatcher, timeout, reloader=None):
     """``devloop run`` (#177): ``runloop.Loop`` with the dispatcher's ticks, a watcher with the
     identity of the ticks' reads (as ``devloop watch``) on a state file of its own, and the
@@ -209,12 +244,17 @@ def run_loop(cfg, state, dispatcher, timeout, reloader=None):
     loop runs in continuous mode (#227): the dispatcher's ticks start their actions in
     ``Workers`` and do not wait for them. Before each tick ``reloader`` (``config.Reloader``,
     #278), when given, gives the dispatcher the limits of the configuration files as they are
-    now; the actions already running go on. Returns the exit code."""
+    now; the actions already running go on. With ``[report] issue`` (#256) the daily summary is
+    published at the end of a tick, at most every ``[report] interval`` minutes; a failure is
+    logged and does not fail the tick. Returns the exit code."""
     trust = watch.Trust.from_config(cfg)
     workers = None
     if cfg.max_parallel_actions > 1:
         workers = dispatcher.workers = Workers(cfg.max_parallel_actions)
     gh = dispatcher.identities.github(DISPATCHER) if dispatcher.identities else dispatcher.gh
+    publisher = report.build(cfg, gh, trust, state, log=log)
+    daily = (report.AutoReport(publisher, state, cfg.report.interval, log=log)
+             if publisher is not None else None)
 
     def wait_for_news(seconds, sleep, check):
         watcher = watch.Watcher(gh, trust, state / runloop.WATCH_STATE_FILE,
@@ -238,7 +278,10 @@ def run_loop(cfg, state, dispatcher, timeout, reloader=None):
     def tick():
         if reloader is not None:
             dispatcher.cfg = reloader.refresh()
-        return dispatcher.tick()
+        actions = dispatcher.tick()
+        if daily is not None:
+            daily.after_tick()
+        return actions
 
     return runloop.Loop(tick, wait_for_news, state / runloop.STOP_FILE, log=log,
                         alert=alert, alert_issue=issue, idle_timeout=timeout,
@@ -292,7 +335,14 @@ def main(argv=None):
     pin_cmd.add_argument('--no-smoke', action='store_true',
                          help='skip the smoke test of a new copy (tick --dry-run and a round of '
                               'watch from the copy); for exceptional cases, logged')
-    fallback_cmd = sub.add_parser('fallback', help='the memory of the models found unavailable')
+    report_cmd = sub.add_parser('report', help='print the summary of a day from devloop\'s '
+                                               'records, or publish it on [report] issue')
+    report_cmd.add_argument('--day', metavar='YYYY-MM-DD',
+                            help='the UTC day to summarize (default: today)')
+    report_cmd.add_argument('--publish', action='store_true',
+                            help='publish as the dispatcher on [report] issue: today in the body, '
+                                 'a past day in its archive comment')
+    fallback_cmd = sub.add_parser('fallback',help='the memory of the models found unavailable')
     fallback_sub = fallback_cmd.add_subparsers(dest='fallback_command', required=True)
     reset_cmd = fallback_sub.add_parser('reset', help='forget the models an agent remembers '
                                                       'unavailable: its next turn starts from '
@@ -309,6 +359,8 @@ def main(argv=None):
         return run_pin(args)
     if args.command == 'fallback':
         return run_fallback(args)
+    if args.command == 'report':
+        return run_report(parser, args)
     if args.command == 'watch':
         sys.exit(run_watch(parser, args))
     if args.command == 'follow':
