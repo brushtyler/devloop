@@ -18,9 +18,9 @@ from types import SimpleNamespace
 from unittest import mock
 
 import devloop.__main__ as cli
-from devloop import config, markdown, pin
+from devloop import config, markdown, pin, runloop
 from devloop.config import ConfigError, MergePolicy, PinPolicy
-from devloop.dispatcher import Dispatcher, run_forever
+from devloop.dispatcher import Dispatcher
 from test_devloop import (CFG, REV_NAME, SHA1, FakeRunner, FakeWS, norm, raw_review, receipt)
 from test_devloop_merge import Identities, MergeGH, header, records
 from test_devloop_zero import changes
@@ -328,11 +328,14 @@ class AutoPinTests(GitCase):
             d.tick()
         self.assertEqual((snapshots, self.pointed()), ([], old.resolve()))
         self.assertEqual(pin.pending(self.state)['pr'], 100)  # tried again at the next tick
-        # `run` logs it and goes on with the next tick.
+        # `run` counts it as a failed tick and goes on with the next one, after the backoff.
         d.tick = mock.Mock(side_effect=[pin.PinError('auto-pin failed'), KeyboardInterrupt])
-        with self.assertRaises(KeyboardInterrupt):
-            run_forever(d, 1, sleep=lambda s: None)
-        self.assertIn('tick failed: auto-pin failed', self.logs)
+        loop = runloop.Loop(d.tick, None, self.tmp / 'STOP', log=self.logs.append,
+                            clock=lambda: 0, sleep=lambda s: None)
+        with mock.patch.object(runloop, 'BACKOFF_SECONDS', (0, 0, 0)), \
+                self.assertRaises(KeyboardInterrupt):
+            loop.run()
+        self.assertIn('tick failed (1 in a row): PinError: auto-pin failed', self.logs)
 
 
 class FakePinner:

@@ -80,6 +80,13 @@ class MergePolicy:
 
 
 @dataclass(frozen=True)
+class RunPolicy:
+    """``[run]`` (#177): the issue that gets the alert of ``devloop run`` after three consecutive
+    failed ticks, or 0 when none is configured (the alert goes to the local log only)."""
+    alert_issue: int = 0
+
+
+@dataclass(frozen=True)
 class PinPolicy:
     """``[pin]`` (#174): whether a merge by devloop that touches ``paths`` (``devloop/`` and the
     files of ``review_policy.sensitive_path_lists``) pins ``origin/<base_branch>`` at the next
@@ -245,6 +252,7 @@ class Config:
     # mode (#172), or '' when none is configured.
     supervisor: str = ''
     pin: PinPolicy = field(default_factory=PinPolicy)
+    run: RunPolicy = field(default_factory=RunPolicy)
     # Code paths and their documents, listed in the implement, fix and review prompts (#203).
     docs: DocsMap = field(default_factory=DocsMap)
 
@@ -499,6 +507,20 @@ def parse_pin(table, lists):
     return PinPolicy(auto=auto, paths=('devloop/', *lists))
 
 
+def parse_run(table):
+    """``[run]`` (#177): ``alert_issue``, optional, the number of an issue (at least 1)."""
+    if not isinstance(table, dict):
+        raise ConfigError('run: expected a table')
+    unknown = set(table) - {'alert_issue'}
+    if unknown:
+        raise ConfigError(f'run: unknown keys {sorted(unknown)}')
+    alert = table.get('alert_issue', 0)
+    if 'alert_issue' in table and (not isinstance(alert, int) or isinstance(alert, bool)
+                                   or alert < 1):
+        raise ConfigError('run.alert_issue: expected the number of an issue')
+    return RunPolicy(alert_issue=alert)
+
+
 def _docs_path(value, where, document):
     """``value`` as a path of ``[docs] map``: a non-empty path relative to the root, without
     surrounding spaces, ``.``, ``..`` or empty segments, backslashes or pattern characters. A key
@@ -674,6 +696,7 @@ def parse_config(data, root=INSTALL_ROOT):
         local_tests=local_tests, ci_rerun_unrelated=ci_rerun,
         merge=parse_merge(data.get('merge', {}), supervisor), supervisor=supervisor,
         pin=parse_pin(data.get('pin', {}), sensitive_lists(data)),
+        run=parse_run(data.get('run', {})),
         docs=parse_docs(data),
         review_policy=parse_review_policy(
             data.get('review_policy', {}), root,
@@ -716,6 +739,7 @@ OVERLAY_KEYS = {
     'agents': {'*': _AGENT_KEYS},
     'apps': {'key_dir': None, '*': dict.fromkeys(('app_id', 'slug'))},
     'pin': {'auto': None},
+    'run': {'alert_issue': None},
     'docs': {'map': {'*': None}},
 }
 
