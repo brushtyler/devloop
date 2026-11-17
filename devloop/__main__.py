@@ -14,7 +14,8 @@ from . import activity, follow, pin, watch
 from .agents import AgentRunner, isolated_env
 from .apps import DISPATCHER, Identities
 from .config import ConfigError, load_config
-from .dispatcher import Dispatcher, TickLog, ensure_labels, plan, queue_lines, run_forever
+from .dispatcher import (Dispatcher, TickLog, ensure_labels, plan, pr_counts_line, queue_lines,
+                         run_forever)
 from .github import GitHub, GitHubError
 from .ledger import Ledger
 from .review import last_round
@@ -260,6 +261,7 @@ def main(argv=None):
             conflict = ' CONFLICT with ' + cfg.base_branch if pr.merge_state == 'conflict' else ''
             log(f'PR #{pr.number} (issue #{pr.issue}) [{labels}] rounds={last_round(pr.reviews)} '
                 f'ci={pr.checks} merge={pr.merge_state}{conflict}')
+        log(pr_counts_line(snap, cfg))
         for line in queue_lines(snap):
             log(line)
         for action in plan(snap, cfg):

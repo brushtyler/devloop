@@ -573,10 +573,11 @@ class PlanTests(unittest.TestCase):
             ready(5), ready(3, labeler='stranger'), ready(9, ['prerequisito'], priority='high'),
             ready(2, ['bloccata']), ready(4, ['agent:needs-human'])])
         self.assertEqual(self.kinds(snap), [('implement', 9), ('implement', 5)])
-        snap.prs = [pr(number=100, labels=['agent:ready-to-merge'], reviews=[norm(raw_review())])]
+        snap.prs = [pr(number=100, labels=['agent:review'], reviews=[norm(raw_review())],
+                       checks='pending')]
         self.assertEqual(self.kinds(snap), [('implement', 9)])
-        snap.prs.append(pr(number=101, issue=8, labels=['agent:needs-human']))
-        self.assertEqual(self.kinds(snap), [])
+        snap.prs.append(pr(number=101, issue=8, labels=['agent:changes'], checks='pending'))
+        self.assertEqual(self.kinds(snap), [('fix', 101)])
 
     def test_review_waits_for_ci_and_routes_failures(self):
         self.assertEqual(self.kinds(Snapshot([pr(checks='pending')], [], [])), [])
