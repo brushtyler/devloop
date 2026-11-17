@@ -142,6 +142,10 @@ issue, with the state of each blocking issue and who added each block, read with
 query, more only when the events of an open block are older than the latest 100)
 ([Dependencies between issues](devloop/guide.md#dependencies-between-issues)).
 
+`CI` also has `commit_date` and `required_checks` (#263): the commit date of a head and the
+checks the base branch requires, for the wait for the
+[CI of a new head](devloop/reference.md#ci-of-a-new-head).
+
 The ports hold only the methods the dispatcher calls, with their current names and signatures,
 and return normalized data. `GitHub` (`devloop/github.py`) implements all three, and `Identities`
 (`devloop/apps.py`) hands one out for each actor: they are the concrete adapters. The

@@ -87,6 +87,17 @@ class RunPolicy:
 
 
 @dataclass(frozen=True)
+class CIPolicy:
+    """``[ci]`` (#263): a head without CI, with ``local_tests`` other than ``full``, is not
+    reviewed for ``grace_minutes`` after its push (the dispatcher's push, else the commit date):
+    the CI may not have registered yet. After that it gets the full suite locally, as before,
+    unless the base branch requires checks: then it waits for them up to
+    ``required_timeout_minutes`` from the push, and is escalated after."""
+    grace_minutes: int = 5
+    required_timeout_minutes: int = 30
+
+
+@dataclass(frozen=True)
 class PinPolicy:
     """``[pin]`` (#174): whether a merge by devloop that touches ``paths`` (``devloop/`` and the
     files of ``review_policy.sensitive_path_lists``) pins ``origin/<base_branch>`` at the next
@@ -263,6 +274,8 @@ class Config:
     supervisor: str = ''
     pin: PinPolicy = field(default_factory=PinPolicy)
     run: RunPolicy = field(default_factory=RunPolicy)
+    # The wait for the CI of a new head (#263).
+    ci: CIPolicy = field(default_factory=CIPolicy)
     # Code paths and their documents, listed in the implement, fix and review prompts (#203).
     docs: DocsMap = field(default_factory=DocsMap)
 
@@ -531,6 +544,24 @@ def parse_run(table):
     return RunPolicy(alert_issue=alert)
 
 
+def parse_ci(table):
+    """``[ci]`` (#263): ``grace_minutes`` (0 or more) and ``required_timeout_minutes`` (at least
+    1), whole minutes."""
+    if not isinstance(table, dict):
+        raise ConfigError('ci: expected a table')
+    unknown = set(table) - {'grace_minutes', 'required_timeout_minutes'}
+    if unknown:
+        raise ConfigError(f'ci: unknown keys {sorted(unknown)}')
+    values = {}
+    for key, low in (('grace_minutes', 0), ('required_timeout_minutes', 1)):
+        if key in table:
+            value = table[key]
+            if not isinstance(value, int) or isinstance(value, bool) or value < low:
+                raise ConfigError(f'ci.{key}: expected a whole number of minutes, at least {low}')
+            values[key] = value
+    return CIPolicy(**values)
+
+
 def _docs_path(value, where, document):
     """``value`` as a path of ``[docs] map``: a non-empty path relative to the root, without
     surrounding spaces, ``.``, ``..`` or empty segments, backslashes or pattern characters. A key
@@ -707,6 +738,7 @@ def parse_config(data, root=INSTALL_ROOT):
         merge=parse_merge(data.get('merge', {}), supervisor), supervisor=supervisor,
         pin=parse_pin(data.get('pin', {}), sensitive_lists(data)),
         run=parse_run(data.get('run', {})),
+        ci=parse_ci(data.get('ci', {})),
         docs=parse_docs(data),
         review_policy=parse_review_policy(
             data.get('review_policy', {}), root,
@@ -750,6 +782,7 @@ OVERLAY_KEYS = {
     'apps': {'key_dir': None, '*': dict.fromkeys(('app_id', 'slug'))},
     'pin': {'auto': None},
     'run': {'alert_issue': None},
+    'ci': dict.fromkeys(('grace_minutes', 'required_timeout_minutes')),
     'docs': {'map': {'*': None}},
 }
 

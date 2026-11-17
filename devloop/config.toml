@@ -150,6 +150,16 @@ auto = false
 [run]
 # alert_issue = 123
 
+# The CI of a new head (issue #263). With local_tests other than "full", a PR in agent:review
+# whose head has no CI yet is not reviewed for grace_minutes after its push (the dispatcher's own
+# push, else the commit date): GitHub may not have registered the CI yet. After that the full
+# suite runs locally before the review, as before, unless the rulesets or the branch protection
+# of base_branch require checks: then the review waits for them, and after
+# required_timeout_minutes from the push the PR goes to agent:needs-operator (class ci_missing).
+[ci]
+grace_minutes = 5
+required_timeout_minutes = 30
+
 # Documentation map (issue #203): code paths and the documents that describe them. A key is a
 # directory prefix ending in "/" or a file, relative to the root, with no pattern characters;
 # each value lists one or more documents of the repository (a pin does not extract them, #210).
