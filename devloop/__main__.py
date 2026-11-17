@@ -14,7 +14,8 @@ from . import activity, follow, pin, runloop, unavailability, watch
 from .agents import AgentRunner, isolated_env
 from .apps import DISPATCHER, MERGER, Identities
 from .config import ConfigError, load_config
-from .dispatcher import Dispatcher, TickLog, ensure_labels, plan, pr_counts_line, queue_lines
+from .dispatcher import (Dispatcher, TickLog, Workers, ensure_labels, plan, pr_counts_line,
+                         queue_lines)
 from .github import GitHub, GitHubError
 from .ledger import Ledger
 from .review import last_round
@@ -201,8 +202,13 @@ def idle_timeout(parser, args):
 def run_loop(cfg, state, dispatcher, timeout):
     """``devloop run`` (#177): ``runloop.Loop`` with the dispatcher's ticks, a watcher with the
     identity of the ticks' reads (as ``devloop watch``) on a state file of its own, and the
-    alert on ``[run].alert_issue`` as the dispatcher. Returns the exit code."""
+    alert on ``[run].alert_issue`` as the dispatcher. With ``max_parallel_actions`` above 1 the
+    loop runs in continuous mode (#227): the dispatcher's ticks start their actions in
+    ``Workers`` and do not wait for them. Returns the exit code."""
     trust = watch.Trust.from_config(cfg)
+    workers = None
+    if cfg.max_parallel_actions > 1:
+        workers = dispatcher.workers = Workers(cfg.max_parallel_actions)
     gh = dispatcher.identities.github(DISPATCHER) if dispatcher.identities else dispatcher.gh
 
     def wait_for_news(seconds, sleep, check):
@@ -214,6 +220,7 @@ def run_loop(cfg, state, dispatcher, timeout):
             check()  # after a stop no other gh call (nor token mint) starts: Stopped
             return watcher.time_left()
         # No gh call outlasts the wait; the client may be the ticks' own, so it is restored.
+        # The limit belongs to this thread: actions running meanwhile are not bounded by it.
         before, gh.time_left = gh.time_left, time_left
         try:
             return watcher.run()
@@ -223,7 +230,8 @@ def run_loop(cfg, state, dispatcher, timeout):
     issue = cfg.run.alert_issue
     alert = (lambda body: dispatcher.gh.comment(issue, body)) if issue else None
     return runloop.Loop(dispatcher.tick, wait_for_news, state / runloop.STOP_FILE, log=log,
-                        alert=alert, alert_issue=issue, idle_timeout=timeout).run()
+                        alert=alert, alert_issue=issue, idle_timeout=timeout,
+                        workers=workers).run()
 
 
 def main(argv=None):
