@@ -16,7 +16,7 @@ from test_devloop_supervision import Case as SupervisionCase
 
 MERGE_COMMIT = 'c' * 40
 READY = 'agent:ready'
-HUMAN, SUPER = 'agent:needs-human', 'agent:needs-supervisor'
+HUMAN, SUPER = 'agent:needs-operator', 'agent:needs-supervisor'
 
 
 class ClosingGH(MergeGH):

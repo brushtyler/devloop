@@ -108,6 +108,10 @@ def _identity_env(author):
 # git commands that update state shared by every worktree of the repository (remote-tracking
 # refs, the list of worktrees): parallel actions (#176) run them one at a time.
 _SHARED_GIT = ('fetch', 'worktree')
+# git commands that only read the repository: the only ones a read-only workspace runs (#260),
+# ``merge-tree`` included because the objects it writes go out of the repository.
+_READ_GIT = ('rev-parse', 'rev-list', 'diff', 'diff-tree', 'cat-file', 'merge-base', 'log',
+             'ls-files', 'status', 'merge-tree')
 
 
 class Workspace:
@@ -124,6 +128,20 @@ class Workspace:
         self._test_env = test_env
         self.private_tmp = private_tmp
         self._shared = threading.RLock()
+        self._read_only = None
+
+    def read_only(self, objects):
+        """From now on write nothing to the repository (#260), for ``tick --dry-run``, which
+        runs without the dispatcher's lock while a dispatcher may run. ``fetch`` is skipped, so
+        the remote branches are those last fetched; the objects git writes (``merge-tree``) go to
+        ``objects``, a directory of the caller, with those of the repository as alternates;
+        optional locks are off (``status`` and ``diff`` do not refresh the index); any other
+        command that writes raises WorkspaceError."""
+        common = Path(self._git('rev-parse', '--git-common-dir').strip())
+        self._read_only = {'GIT_OBJECT_DIRECTORY': str(objects),
+                           'GIT_ALTERNATE_OBJECT_DIRECTORIES':
+                               str((self.repo_root / common).resolve() / 'objects'),
+                           'GIT_OPTIONAL_LOCKS': '0'}
 
     def _git(self, *args, cwd=None, check=True, stdin=None, env=None, unset=()):
         return self._git_run(*args, cwd=cwd, check=check, stdin=stdin, env=env,
@@ -131,6 +149,12 @@ class Workspace:
 
     def _git_run(self, *args, cwd=None, check=True, stdin=None, env=None, unset=()):
         """The completed git command, stdout and stderr included."""
+        if self._read_only is not None:
+            if args[0] == 'fetch':
+                return subprocess.CompletedProcess(['git', *args], 0, '', '')
+            if args[0] not in _READ_GIT:
+                raise WorkspaceError(f'git {args[0]}: not run, the workspace is read-only')
+            env = dict(env or {}, **self._read_only)
         kwargs = {}
         if env or unset:
             inherited = {k: v for k, v in os.environ.items() if k not in unset}

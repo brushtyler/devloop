@@ -59,6 +59,14 @@ class MapConfigTests(unittest.TestCase):
                          ['docs/architecture.md', 'docs/devloop/guide.md'])
         self.assertEqual(CFG.docs.documents(['scripts/devloop-pinned']),
                          {'docs/devloop/guide.md': ['scripts/devloop-pinned']})
+        # #242: the README is an index (ADR 0003, I6); the engine maps to the getting-started guide.
+        for path in ('orchestrator.py', 'ssdlc_tasks.py', 'ssdlc_controller.py'):
+            self.assertEqual(CFG.docs.documents([path]),
+                             {'docs/getting-started.md': [path], 'docs/architecture.md': [path]})
+        self.assertEqual(CFG.docs.documents(['setup-ssdlc.sh']),
+                         {'docs/getting-started.md': ['setup-ssdlc.sh'],
+                          'docs/configuration.md': ['setup-ssdlc.sh']})
+        self.assertNotIn('README.md', {d for _, docs in CFG.docs.entries for d in docs})
         self.assertNotIn('docs/devloop.md', {d for _, docs in CFG.docs.entries for d in docs})
         for _, documents in CFG.docs.entries:
             for document in documents:
@@ -189,7 +197,8 @@ class PromptTests(unittest.TestCase):
         self.assertIn('- `devloop/` → `docs/devloop/guide.md`', prompt)
         self.assertIn('- `devloop/dispatcher.py` → `docs/devloop/reference.md`, '
                       '`docs/devloop/protocol.md`', prompt)
-        self.assertIn('- `orchestrator.py` → `README.md`, `docs/architecture.md`', prompt)
+        self.assertIn('- `orchestrator.py` → `docs/getting-started.md`, `docs/architecture.md`',
+                      prompt)
         self.assertLess(prompt.index('## Documentation map'), prompt.index('## Issue #7'))
 
     def test_a_later_implement_attempt_gets_the_documents_of_its_diff(self):
@@ -244,7 +253,7 @@ class PromptTests(unittest.TestCase):
         line = f'  docs.map: {guide} is not a file of the worktree; omitted from the prompt'
         prompt = self.review(files, absent=(guide,))
         self.assertNotIn(guide, prompt)
-        self.assertIn('- `README.md`, mapped from `orchestrator.py`', prompt)
+        self.assertIn('- `docs/getting-started.md`, mapped from `orchestrator.py`', prompt)
         self.assertIn(BLOCKING, prompt)
         self.assertIn(line, self.logs)
         # Every mapped document missing: no section at all.
@@ -266,7 +275,7 @@ class PromptTests(unittest.TestCase):
         self.assertNotIn(guide, first)
         self.assertNotIn('`devloop/` →', first)  # a key left with no document
         self.assertNotIn('`devloop/ports.py` →', first)
-        self.assertIn('- `orchestrator.py` → `README.md`\n', first)
+        self.assertIn('- `orchestrator.py` → `docs/getting-started.md`\n', first)
         self.assertNotIn(guide, second)
         self.assertNotIn('## Documents mapped to the diff', second)
         for document in ('docs/architecture.md', guide):

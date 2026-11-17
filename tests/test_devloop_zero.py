@@ -87,7 +87,8 @@ class ZeroConfigTests(unittest.TestCase):
 
     def test_setup_creates_the_zero_label_only_when_enabled(self):
         created = []
-        gh = SimpleNamespace(ensure_label=lambda name, *style: created.append(name))
+        gh = SimpleNamespace(ensure_label=lambda name, *style: created.append(name),
+                             repo_labels=lambda: [])
         ensure_labels(gh, CFG.labels, POLICY)
         self.assertNotIn('reviews:0', created)
         ensure_labels(gh, CFG.labels, ZPOLICY)
@@ -318,7 +319,7 @@ class ZeroDispatcherTests(unittest.TestCase):
 
     def assert_refused(self, why):
         self.assertEqual(self.runner.calls, [])
-        self.assertEqual(self.gh.labels[100], {'reviews:0', 'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'reviews:0', 'agent:needs-operator'})
         record = records(self.gh, 'policy')[-1]
         self.assertEqual((record['event'], record['receipt']['level']), ('level', 0))
         self.assertIn(why, published(self.gh)[-1])
@@ -350,7 +351,7 @@ class ZeroDispatcherTests(unittest.TestCase):
                 self.assertIn(f'`{path}`', policy.describe(recorded['receipt']))
                 # Level 1: one reviewer approved; level 2: no pair in the pool, a human.
                 self.assertEqual(len(self.runner.calls), 1 if level == 1 else 0)
-                self.assertIn('agent:ready-to-merge' if level == 1 else 'agent:needs-human',
+                self.assertIn('agent:ready-to-merge' if level == 1 else 'agent:needs-operator',
                               self.gh.labels[100])
                 self.assertNotIn(0, [r['receipt']['level'] for r in records(self.gh, 'policy')])
 
@@ -460,6 +461,7 @@ class ZeroReadinessTests(unittest.TestCase):
     def ready_pr(self, labels=('agent:ready-to-merge', 'reviews:0'), zero_head=SHA1, **kw):
         p = pr(labels=labels, **kw)
         p.zero_head = zero_head
+        p.operator_merges = [p.head_sha]  # the operator merge (#248) was already told
         return p
 
     def test_readiness_holds_only_for_its_head_and_labels(self):
@@ -488,6 +490,8 @@ class ZeroReadinessTests(unittest.TestCase):
         self.assertEqual(d.tick(), [Action('review', 100)])
         self.assertEqual(gh.labels[100], {'reviews:0', 'agent:ready-to-merge'})
         self.assertEqual(d.snapshot().prs[0].zero_head, SHA1)
+        # [merge] is off: the merge is the operator's (#248), and the label the dispatcher's.
+        self.assertEqual(d.tick(), [Action('operator_merge', 100, 'merge mode off')])
         self.assertEqual(d.tick(), [])
         # The operator removes the label: readiness goes, and the PR gets a level-1 review.
         gh.labels[100].discard('reviews:0')
@@ -511,8 +515,11 @@ class ZeroReadinessTests(unittest.TestCase):
         runner = FakeRunner(raw_review())
         d = Dispatcher(ZCFG, gh, ws, runner, log=lambda m: None)
         self.assertEqual(d.tick(), [Action('review', 100)])
+        # With [merge] off the merge is the operator's (#248): the dispatcher's own label.
+        self.assertEqual(d.tick(), [Action('operator_merge', 100, 'merge mode off')])
         self.assertEqual(d.tick(), [])
-        self.assertEqual(gh.labels[100], {'reviews:0', 'agent:ready-to-merge'})
+        self.assertEqual(gh.labels[100],
+                         {'reviews:0', 'agent:ready-to-merge', 'agent:needs-operator'})
         return Dispatcher(cfg, gh, ws, runner, log=lambda m: None), gh, runner
 
     def assert_revoked(self, d, gh, why):
@@ -551,7 +558,7 @@ class ZeroReadinessTests(unittest.TestCase):
                 if conclusion:
                     # Still level 0, the check is no success: a human decides.
                     self.assertEqual(d.tick(), [Action('review', 100)])
-                    self.assertEqual(gh.labels[100], {'reviews:0', 'agent:needs-human'})
+                    self.assertEqual(gh.labels[100], {'reviews:0', 'agent:needs-operator'})
                     self.assertEqual(runner.calls, [])
 
     def test_a_later_request_for_changes_revokes(self):
@@ -561,7 +568,7 @@ class ZeroReadinessTests(unittest.TestCase):
         gh.native_reviews.append({'login': 'brushtyler', 'state': 'CHANGES_REQUESTED'})
         self.assert_revoked(d, gh, '`REQUEST_CHANGES`')
         self.assertEqual(d.tick(), [Action('review', 100)])
-        self.assertEqual(gh.labels[100], {'reviews:0', 'agent:needs-human'})
+        self.assertEqual(gh.labels[100], {'reviews:0', 'agent:needs-operator'})
         self.assertEqual(runner.calls, [])
 
 

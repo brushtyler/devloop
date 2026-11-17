@@ -41,7 +41,7 @@ Each PR records its implementer and the first reviewer of the pool when it is op
 changing the roles does not affect the level-1 reviewer of open PRs. If the recorded reviewer is
 no longer configured, the first of the pool takes over, but never the agent that implemented the
 PR: without an independent reviewer, or if the PR's implementer is no longer configured, the PR
-goes to `agent:needs-human`. The level-2 pair always comes from the current pool.
+goes to `agent:needs-operator`. The level-2 pair always comes from the current pool.
 
 Agents run headless: `claude -p`, `codex exec`, `agy -p`, with the schema in
 [`devloop/schemas/`](../../devloop/schemas/). Implementers edit only their worktree; the
@@ -53,7 +53,7 @@ at the same commit, `pr-<n>-review`, which shares the repository's refs (so
 `git diff origin/main...HEAD` works) and is removed after the review. The tests the reviewer runs
 can therefore write files and temporary directories. After the review the dispatcher checks
 that the PR worktree is still at the reviewed commit with no change and no new file, not even
-an ignored one; otherwise the verdict is discarded and the PR goes to `agent:needs-human`.
+an ignored one; otherwise the verdict is discarded and the PR goes to `agent:needs-operator`.
 
 | Reviewer | Sandbox |
 |---|---|
@@ -145,12 +145,12 @@ The pertinent modules, among the `tests/test_*.py` files of the worktree, are:
 When no module is pertinent, for example when only documentation changed, and with `"none"`,
 no test runs locally and the PR goes on to the CI. `implement_test_retries` applies to the tests
 that ran: a failure goes back to the implementer with the output, and after the last attempt the
-issue or PR goes to `agent:needs-human`, as with `"full"`.
+issue or PR goes to `agent:needs-operator`, as with `"full"`.
 
 **The CI stays the gate.** A defect the local modules miss becomes a CI round. When the full suite
 did not run locally (`"changed"` or `"none"`), a review needs the CI passed: if the head has no
 CI at all, the first reviewer's action of the round runs `test_cmd` locally, in a disposable copy
-of the PR worktree, before the review, and a failure sends the PR to `agent:needs-human` without a
+of the PR worktree, before the review, and a failure sends the PR to `agent:needs-operator` without a
 review. With `"full"` the gate is unchanged: CI passed or absent.
 
 The mode and the modules run (`local_tests`: `{mode, modules}`, only `{mode}` with `"full"`) go to the tick log and, as
@@ -194,7 +194,7 @@ as before. `ci_rerun_unrelated = false` turns the re-run off; the default is `tr
 the `rerun` kind counts only when the dispatcher's identity wrote it.
 
 Only a `ci_failed` is re-run this way: a CI failure on a PR that has no round left goes to
-`agent:needs-human` (`round_limit`), as before.
+`agent:needs-operator` (`round_limit`), as before.
 
 ### Documentation map
 
@@ -204,7 +204,7 @@ follow the code. It is the documentation phase of devloop, the `07-docs` of an S
 ```toml
 [docs.map]
 "devloop/" = ["docs/devloop/guide.md"]
-"orchestrator.py" = ["README.md", "docs/architecture.md"]
+"orchestrator.py" = ["docs/getting-started.md", "docs/architecture.md"]
 "schemas/" = ["docs/configuration.md"]
 ```
 
@@ -274,7 +274,7 @@ each agy turn its minimal permissions, and treats a stop without output as a fai
   agents' prompts do not get it.
 - **No output is an error.** An agy turn that exits with no output, or with
   `jetski: no output produced`, fails with `<agent> stopped without output: <message>`, which
-  goes to the turn's log and to the `agent:needs-human` comment. When agy's JSON lists
+  goes to the turn's log and to the `agent:needs-operator` comment. When agy's JSON lists
   `denied_actions`, the message ends with `; denied_actions: [...]` (#155), so the escalation
   says which action was denied. It is never an empty result; with exit 0 it never counts as an
   unavailable model either, so it does not start the fallback. The message counts as the CLI's
@@ -342,13 +342,13 @@ fallback_models = [
   precedence even with a non-zero exit: only a missing or empty output, an envelope without
   `structured_output` or an explicit error envelope leave room for a match. A result, a parse
   error, a timeout and a stall never count, whatever the text, and follow the usual path to
-  `agent:needs-human`. An agy [empty run](#agy-permissions) (exit 0, no result, no error) also
+  `agent:needs-operator`. An agy [empty run](#agy-permissions) (exit 0, no result, no error) also
   moves to the next model, without being remembered.
 - **Once.** Each model is tried at most once per action, but for the single retry of an agy
   denied permission or of an empty run on the last model: a rate limit the CLI reports as
   terminal counts as persistent, and a model found unavailable is not tried again by the later
   attempts of the same action (`implement_test_retries`). When the last model fails too, the
-  issue or PR goes to `agent:needs-human` with a comment listing the models tried and why. Any
+  issue or PR goes to `agent:needs-operator` with a comment listing the models tried and why. Any
   other failure after a fallback ends the action without trying further models, and its
   comment lists the models tried too, the failed one included.
 - **Worktree.** The fallback is a new session with the same prompt and worktree. Partial changes
@@ -448,7 +448,7 @@ listed file that does not exist yet is no error, and a PR that adds it gets leve
 **Level 1** works as before: one reviewer, the PR's recorded reviewer or else the first of the
 pool, never the PR's implementer. **Level 2** needs two independent reviewers (#111, below).
 When the pool has not enough of them, the PR is neither reviewed nor promoted: it goes to
-`agent:needs-human` with a dispatcher comment that gives the level, its reason (the label and
+`agent:needs-operator` with a dispatcher comment that gives the level, its reason (the label and
 who added it, or the sensitive paths) and why the pool falls short. Since the level does not go
 down, putting the PR back into `agent:review` escalates it again until the configuration
 changes: until then a person reviews the PR and decides on the merge.
@@ -468,7 +468,7 @@ receipt (`reviewers`).
 Since #111 the PR marker, every fix, every sync whose conflicts an agent resolved (`sync`
 marker) and every review record the identity and tuple actually used (`profile`). At level 2,
 when a PR or one of its fixes was recorded before, or a sync marker lacks the profile,
-independence cannot be verified and the PR goes to `agent:needs-human`. At level 1 older markers
+independence cannot be verified and the PR goes to `agent:needs-operator`. At level 1 older markers
 stay valid as before.
 
 A round at level 2 works as follows:
@@ -484,14 +484,14 @@ A round at level 2 works as follows:
   the same prompt, so each still sees only the earlier rounds. Each verdict is recorded as
   before, one per reviewer, and a round whose reviewers both answer is applied in the same tick.
   If a reviewer fails, the other verdict stays recorded and the round waits only for the
-  missing reviewer; the failure goes to `agent:needs-human` as any failure does, and once a
+  missing reviewer; the failure goes to `agent:needs-operator` as any failure does, and once a
   human sends the PR back to `agent:review` the next action runs only that reviewer.
-- **Aggregation.** The verdicts are applied once both are in: `needs_human` from either sends
-  the PR to `agent:needs-human`; otherwise a `request_changes` from either starts a single fix
+- **Aggregation.** The verdicts are applied once both are in: `needs_operator` from either sends
+  the PR to `agent:needs-operator`; otherwise a `request_changes` from either starts a single fix
   that receives every open finding of both; two approvals go to promotion.
 - **Quorum.** The PR is promoted only if every reviewer of the receipt recomputed just before
   approved the same head with that same receipt, and no blocking finding is open. A missing
-  reviewer, one that timed out (the step goes to `agent:needs-human`) or one that asked for a
+  reviewer, one that timed out (the step goes to `agent:needs-operator`) or one that asked for a
   human is not an approval, and the quorum never goes down. A second review of the same reviewer
   in the same round is ignored, so two approvals of one reviewer are not enough.
 - **Another owner's findings.** An approval stays an approval even if another reviewer's
@@ -593,15 +593,15 @@ At level 0 the dispatcher runs no reviewer. Before promoting it re-reads the hea
   `app_id` of the GitHub App that produces it; commit statuses do not count. For each, the most
   recent run on the current head decides, and only `success` is a success. While one is still
   running the PR waits; a check that is missing (also a filtered workflow), `skipped`,
-  `neutral`, `cancelled` or failed sends the PR to `agent:needs-human`. The test command is
+  `neutral`, `cancelled` or failed sends the PR to `agent:needs-operator`. The test command is
   `test_cmd` of the running dispatcher and the workflows are under `.github/`, which a PR cannot
   change at level 0; still, do not list in the allowlist files that the CI runs as its own
   harness (for example `scripts/run-tests.py`).
 - **No open finding.** A blocking finding still open from an earlier round sends the PR to
-  `agent:needs-human`; the operator can close it with a `/devloop finding` command.
+  `agent:needs-operator`; the operator can close it with a `/devloop finding` command.
 - **No standing request for changes.** A native `REQUEST_CHANGES` review from a user in
   `trusted_users` blocks, also after new commits, until it is dismissed or the same user
-  approves; a comment does not withdraw it. It sends the PR to `agent:needs-human`.
+  approves; a comment does not withdraw it. It sends the PR to `agent:needs-operator`.
 
 The promotion is a dispatcher comment with a `policy` marker that records the receipt (level 0,
 the label, who added it and when, the allowlist outcome) and the state of each expected check.
@@ -658,7 +658,7 @@ permissions.
 
 The apps have no `Workflows` permission, and devloop never pushes changes under
 `protected_paths` (default `.github/`): a workflow or a local action pushed to a branch of this
-repository would run in CI before any review. Such a change goes to `agent:needs-human` and is
+repository would run in CI before any review. Such a change goes to `agent:needs-operator` and is
 applied by a person.
 
 Agent CLIs and the test command run without GitHub credentials in reach: `GH_TOKEN` and

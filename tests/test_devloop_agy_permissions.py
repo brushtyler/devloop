@@ -273,7 +273,7 @@ class NoOutputTests(unittest.TestCase):
         # Not an unavailable model: no fallback, one retry on the same model (#180).
         self.assertEqual(cli.models(), [ARGON, ARGON])
         self.assertNotIn(HYDROGEN, gh.comments[-1][1])
-        self.assertEqual(gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(gh.labels[100], {'agent:needs-operator'})
         self.assertIn(f'agy stopped without output: {JETSKI}', gh.comments[-1][1])
 
 
@@ -327,7 +327,7 @@ class DeniedActionsTests(unittest.TestCase):
             d.snapshot = lambda: Snapshot([p], [], [])
             self.assertEqual(d.tick(), [Action('review', 100)])
         self.assertEqual(cli.models(), [ARGON, ARGON])  # one retry (#180), no fallback
-        self.assertEqual(gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(gh.labels[100], {'agent:needs-operator'})
         self.assertIn(f'denied_actions: {DENIED}', gh.comments[-1][1])
 
 
@@ -413,7 +413,7 @@ class PermissionRetryTests(unittest.TestCase):
         cli = FakeCLI(gemini_4_argon_high=(0, READ_ENVELOPE, READ_JETSKI))
         log = self.tick(cli)
         self.assertEqual(cli.models(), [ARGON, ARGON])  # once more, then no fallback
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         body = self.gh.comments[-1][1]
         self.assertIn(f'Il passo `review` è fallito: agy stopped without output: {READ_JETSKI}',
                       body)
@@ -427,7 +427,7 @@ class PermissionRetryTests(unittest.TestCase):
                           gemini_4_hydrogen_high=[(0, '', READ_JETSKI), (0, '', READ_JETSKI)])
         self.tick(cli)
         self.assertEqual(cli.models(), [ARGON, HYDROGEN, HYDROGEN])
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         body = self.gh.comments[-1][1]
         self.assertIn('the last model tried for `agy` failed', body)
         self.assertIn(f'- `{HYDROGEN}`: agy stopped without output: {READ_JETSKI}; permission '
@@ -450,7 +450,7 @@ class PermissionRetryTests(unittest.TestCase):
                 cli = FakeCLI(gemini_4_argon_high=reply)
                 log = self.tick(cli)
                 self.assertEqual(cli.models(), [ARGON])
-                self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+                self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
                 body = self.gh.comments[-1][1]
                 self.assertIn(f'Il passo `review` è fallito: {message}', body)
                 self.assertNotIn('after one retry', body)
@@ -489,7 +489,7 @@ class PreflightPermissionRetryTests(unittest.TestCase):
         self.assertIn(f'agy: model {CFG.agent("agy").model} denied the "read_file" permission '
                       f'({READ_TARGET}); retrying once', log)
         self.assertIn('issue-7-preflight', self.ws.removed)
-        self.assertNotIn('agent:needs-human', self.gh.labels[7])
+        self.assertNotIn('agent:needs-operator', self.gh.labels[7])
         record = markdown.read_marker(self.gh.thread[-1]['body'], 'preflight')
         self.assertTrue(record['ready'])
 
@@ -497,7 +497,7 @@ class PreflightPermissionRetryTests(unittest.TestCase):
         log = self.tick(self.denied(), self.denied())
         self.assertEqual(len(self.runner.calls), 2)
         self.assertEqual(self.labels, ['issue-7-preflight', 'issue-7-preflight-retry'])
-        self.assertIn('agent:needs-human', self.gh.labels[7])
+        self.assertIn('agent:needs-operator', self.gh.labels[7])
         body = self.gh.thread[-1]['body']
         self.assertIn(f'agy stopped without output: {READ_JETSKI}', body)
         self.assertIn('permission `read_file` denied again after one retry', body)
@@ -511,7 +511,7 @@ class PreflightPermissionRetryTests(unittest.TestCase):
             with self.subTest(error=str(error)):
                 log = self.tick(error)
                 self.assertEqual(len(self.runner.calls), 1)
-                self.assertIn('agent:needs-human', self.gh.labels[7])
+                self.assertIn('agent:needs-operator', self.gh.labels[7])
                 self.assertNotIn('after one retry', self.gh.thread[-1]['body'])
                 self.assertNotIn('retrying once', log)
 

@@ -15,7 +15,7 @@ from test_devloop import CFG, IMPL, REV, FakeRunner, FakeWS, implemented, pr
 
 # The checker is any agent other than the implementer; the distributed config leaves it off.
 PCFG = dataclasses.replace(CFG, preflight=REV)
-NEEDS_HUMAN, READY = 'agent:needs-human', 'agent:ready'
+NEEDS_OPERATOR, READY = 'agent:needs-operator', 'agent:ready'
 
 
 def gap(kind='operator_decision', default=''):
@@ -36,9 +36,9 @@ class IssueGH(FakeGH):
         super().__init__()
         self.labels[7] = set(labels)
         self.thread = []
-        # Logins of the `labeled` events of agent:needs-human. Not `label_events`: that name is a
+        # Logins of the `labeled` events of agent:needs-operator. Not `label_events`: that name is a
         # method of the Tracker port, and an attribute would hide it.
-        self.needs_human_labelers = []
+        self.needs_operator_labelers = []
 
     def say(self, body, who='brushtyler'):
         self.thread.append({'author': {'login': who}, 'body': body})
@@ -49,8 +49,8 @@ class IssueGH(FakeGH):
             self.say(body)
 
     def edit_labels(self, number, add=(), remove=()):
-        if NEEDS_HUMAN in add and NEEDS_HUMAN not in self.labels.get(number, set()):
-            self.needs_human_labelers.append('brushtyler')
+        if NEEDS_OPERATOR in add and NEEDS_OPERATOR not in self.labels.get(number, set()):
+            self.needs_operator_labelers.append('brushtyler')
         super().edit_labels(number, add=add, remove=remove)
 
     def issue(self, number):
@@ -61,7 +61,7 @@ class IssueGH(FakeGH):
         return [dict(c) for c in self.thread] if number == 7 else []
 
     def labelers(self, number, label):
-        return list(self.needs_human_labelers) if label == NEEDS_HUMAN else super().labelers(number, label)
+        return list(self.needs_operator_labelers) if label == NEEDS_OPERATOR else super().labelers(number, label)
 
     def labeled_events(self, number):
         return [{'label': READY, 'by': 'brushtyler', 'at': '2026-11-13T10:00:00Z'}]
@@ -90,7 +90,7 @@ class PreflightTests(unittest.TestCase):
         """Issue #7 after a failed check: blocked by the check."""
         self.runner.outputs.append(checked(False, gaps or [gap()]))
         d.tick()
-        self.assertEqual(self.gh.labels[7], {READY, NEEDS_HUMAN})
+        self.assertEqual(self.gh.labels[7], {READY, NEEDS_OPERATOR})
 
     # Not ready ---------------------------------------------------------------------
 
@@ -102,7 +102,7 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(str(self.runner.workdirs[0]), '/wt/issue-7-preflight')
         self.assertIn('issue-7-preflight', self.ws.removed)
         self.assertIn('Do the thing.', self.runner.calls[0][3])
-        self.assertEqual(self.gh.labels[7], {READY, NEEDS_HUMAN})
+        self.assertEqual(self.gh.labels[7], {READY, NEEDS_OPERATOR})
         body = self.gh.thread[-1]['body']
         for text in ('issue non pronta', 'Quale formato usare?', '*Default proposto:* JSON',
                      '`devloop/x.py:3`', 'Dividere in due.', '/devloop recheck'):
@@ -120,17 +120,17 @@ class PreflightTests(unittest.TestCase):
             with self.subTest(output=output):
                 d = self.make(output)
                 d.tick()
-                self.assertEqual(self.gh.labels[7], {READY, NEEDS_HUMAN})
+                self.assertEqual(self.gh.labels[7], {READY, NEEDS_OPERATOR})
                 self.assertFalse(self.records()[-1]['ready'])
 
     def test_a_cached_failure_blocks_again_without_a_new_check(self):
         d = self.make()
         self.blocked(d)
-        # The operator removes agent:needs-human without changing the issue.
-        self.gh.labels[7].discard(NEEDS_HUMAN)
+        # The operator removes agent:needs-operator without changing the issue.
+        self.gh.labels[7].discard(NEEDS_OPERATOR)
         self.assertEqual(self.planned(d), [('preflight_block', 7)])
         d.tick()
-        self.assertEqual(self.gh.labels[7], {READY, NEEDS_HUMAN})
+        self.assertEqual(self.gh.labels[7], {READY, NEEDS_OPERATOR})
         self.assertEqual(len(self.runner.calls), 1)
         self.assertIn('riusato', self.gh.thread[-1]['body'])
         # The new block is the check's own again: a positive recheck removes it.
@@ -221,7 +221,7 @@ class PreflightTests(unittest.TestCase):
         d.tick()
         # The request is consumed: a still failing outcome is not checked again.
         self.assertEqual(self.planned(d), [])
-        self.assertEqual(self.gh.labels[7], {READY, NEEDS_HUMAN})
+        self.assertEqual(self.gh.labels[7], {READY, NEEDS_OPERATOR})
         self.gh.say('/devloop recheck')
         self.runner.outputs.append(checked(True))
         d.tick()
@@ -249,7 +249,7 @@ class PreflightTests(unittest.TestCase):
 
     def test_the_check_loses_the_block_when_someone_else_owns_it(self):
         cases = {
-            'relabelled by someone else': lambda gh: gh.needs_human_labelers.append('brushtyler'),
+            'relabelled by someone else': lambda gh: gh.needs_operator_labelers.append('brushtyler'),
             'another escalation': lambda gh: gh.say(markdown.render_escalation('Altro motivo.')),
         }
         for name, change in cases.items():
@@ -263,7 +263,7 @@ class PreflightTests(unittest.TestCase):
                 self.assertEqual(self.planned(d), [])
                 self.runner.outputs.append(checked(True))
                 d._do_preflight(7)
-                self.assertEqual(self.gh.labels[7], {READY, NEEDS_HUMAN})
+                self.assertEqual(self.gh.labels[7], {READY, NEEDS_OPERATOR})
                 self.assertIn('resta', self.gh.thread[-1]['body'])
 
     def test_an_untrusted_comment_with_the_header_keeps_the_block_the_checks(self):
@@ -281,16 +281,16 @@ class PreflightTests(unittest.TestCase):
                       self.gh.thread[-1]['body'])
 
     def test_a_label_already_present_is_never_the_checks(self):
-        d = self.make(checked(False, [gap()]), checked(True), labels=(READY, NEEDS_HUMAN))
-        self.gh.needs_human_labelers.append('brushtyler')
+        d = self.make(checked(False, [gap()]), checked(True), labels=(READY, NEEDS_OPERATOR))
+        self.gh.needs_operator_labelers.append('brushtyler')
         d._do_preflight(7)
         record = self.records()[-1]
         self.assertFalse(record['blocked'])
-        self.assertEqual(self.gh.needs_human_labelers, ['brushtyler'])
+        self.assertEqual(self.gh.needs_operator_labelers, ['brushtyler'])
         self.gh.say('/devloop recheck')
         self.assertEqual(self.planned(d), [])
         d._do_preflight(7)
-        self.assertEqual(self.gh.labels[7], {READY, NEEDS_HUMAN})
+        self.assertEqual(self.gh.labels[7], {READY, NEEDS_OPERATOR})
 
     # Capacity and failures -----------------------------------------------------------
 
@@ -311,10 +311,10 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual([(a.kind, a.number) for a in plan(Snapshot([], issues, []), cfg)],
                          [('preflight', 1)])
 
-    def test_a_timeout_goes_to_needs_human_without_the_implementer(self):
+    def test_a_timeout_goes_to_needs_operator_without_the_implementer(self):
         d = self.make(agents.AgentError(f'{REV} timed out after 3600s'))
         self.assertEqual([a.kind for a in d.tick()], ['preflight'])
-        self.assertIn(NEEDS_HUMAN, self.gh.labels[7])
+        self.assertIn(NEEDS_OPERATOR, self.gh.labels[7])
         self.assertIn('timed out', self.gh.thread[-1]['body'])
         self.assertEqual(len(self.runner.calls), 1)
         self.assertEqual(self.gh.created, [])

@@ -181,6 +181,15 @@ class Sim(Dispatcher):
                 self.pinner.request(n, 'head')
         self._turn_of('merge', target, done)
 
+    def _do_operator_merge(self, target):
+        """The merge is the operator's (#248): the world records the notice, and the PR is
+        parked from then on."""
+        with self.world.lock:
+            p = self.world.prs[target.number]
+            p.operator_merges = [p.head_sha]
+            p.labels = p.labels | {'agent:needs-operator'}
+            p.operator_owned = True
+
     mergeable = ()
 
 
@@ -248,7 +257,8 @@ class NoBarrierTests(ContinuousLoopCase):
         self.assertLess(review[0], 8 * MINUTE)
         self.assertLess(review[1], implement[1])
         self.assertTrue(overlap(implement, review))
-        self.assertEqual(self.world.prs[223].labels, {READY})
+        # [merge] is off: the merge is the operator's (#248).
+        self.assertEqual(self.world.prs[223].labels, {READY, 'agent:needs-operator'})
         self.assertIn('news on GitHub: next tick', self.logs)
         self.assertIn('an action ended: next tick', self.logs)
         self.assertIn('outcome of review #223: done', d.logs)

@@ -171,7 +171,8 @@ class MergeConfigTests(unittest.TestCase):
 
     def test_setup_creates_the_hold_label(self):
         created = []
-        ensure_labels(SimpleNamespace(ensure_label=lambda name, *style: created.append(name)),
+        ensure_labels(SimpleNamespace(ensure_label=lambda name, *style: created.append(name),
+                                      repo_labels=lambda: []),
                       CFG.labels, CFG.review_policy)
         self.assertIn(HOLD, created)
         self.assertIn(HOLD, CFG.labels.all())
@@ -213,10 +214,18 @@ class OffTests(Case):
         d = self.make(CFG)
         snap = d.snapshot()
         self.assertIsNone(snap.prs[0].merge_mode)
-        self.assertEqual(plan(snap, CFG), [])
+        # The merge is the operator's (#248): the dispatcher says so, once per head.
+        operator_merge = Action('operator_merge', 100, 'merge mode off')
+        self.assertEqual(plan(snap, CFG), [operator_merge])
+        self.assertEqual(d.tick(), [operator_merge])
+        self.assertEqual(self.gh.merged, [])
+        self.assertEqual(self.gh.labels[100], {READY, 'agent:needs-operator'})
+        (notice,) = records(self.gh, 'notice')
+        self.assertEqual(notice, {'event': 'operator_merge', 'head': SHA1, 'labeled': 0,
+                                  'promotion': 0})
+        self.assertIn('`[merge] mode = "off"`', self.gh.comments[-1][1])
         self.assertEqual(d.tick(), [])
-        self.assertEqual((self.gh.merged, self.gh.comments), ([], []))
-        self.assertEqual(self.gh.labels[100], {READY})
+        self.assertEqual(len(self.gh.comments), 1)
 
     def test_commands_are_ignored_and_logged_outside_auto(self):
         for cfg in (CFG, STRICT):
@@ -228,7 +237,8 @@ class OffTests(Case):
                 self.assertEqual(records(self.gh, 'hold'), [])
                 self.assertTrue(any('ignored `/devloop hold`' in line and 'not "auto"' in line
                                     for line in self.logs))
-                self.assertEqual(actions, [] if cfg is CFG else [MERGE])
+                self.assertEqual([a.kind for a in actions],
+                                 ['operator_merge'] if cfg is CFG else ['merge'])
 
 
 class StrictTests(Case):
@@ -272,8 +282,16 @@ class StrictTests(Case):
                 ws.diff = changes(*diff)
                 d = self.make(cfg, ws=ws)
                 self.assertEqual(d.snapshot().prs[0].merge_mode, 'off')
-                self.assertEqual(d.tick(), [])
+                self.assertEqual([a.kind for a in d.tick()], ['operator_merge'])
                 self.assert_not_merged()
+                self.assertIn('agent:needs-operator', self.gh.labels[100])
+                body = self.gh.comments[-1][1]
+                if cfg is overridden:
+                    self.assertIn('`[merge.levels]` imposta `off` per il livello di review 1', body)
+                else:
+                    self.assertIn('`[merge] operator_only_paths`', body)
+                    for path in diff:
+                        self.assertEqual(f'`{path}`' in body, path != 'x.py')
 
 
 class AutoTests(Case):
@@ -378,7 +396,8 @@ class AutoTests(Case):
                 self.assertTrue(any('ignored `/devloop hold`' in line
                                     and f'merge mode of this PR is "{mode}"' in line
                                     for line in self.logs))
-                self.assertEqual([a.kind for a in actions], ['merge'] if merges else [])
+                self.assertEqual([a.kind for a in actions],
+                                 ['merge'] if merges else ['operator_merge'])
 
 
 class DirectiveTests(Case):
@@ -403,7 +422,7 @@ class DirectiveTests(Case):
             'unstable': lambda gh, ws: setattr(gh, 'status', 'UNSTABLE'),
             'behind': lambda gh, ws: setattr(gh, 'status', 'BEHIND'),
             'conflicting': lambda gh, ws: setattr(gh, 'mergeable', 'CONFLICTING'),
-            'needs-human': lambda gh, ws: gh.labels[100].add('agent:needs-human'),
+            'needs-operator': lambda gh, ws: gh.labels[100].add('agent:needs-operator'),
             'merge-hold': lambda gh, ws: gh.labels[100].add(HOLD),
             'not ready': lambda gh, ws: gh.labels[100].discard(READY),
             'closed': lambda gh, ws: setattr(gh, 'state', 'CLOSED'),
@@ -424,7 +443,7 @@ class DirectiveTests(Case):
             'blocked': lambda gh: setattr(gh, 'status', 'BLOCKED'),
             'behind': lambda gh: setattr(gh, 'status', 'BEHIND'),
             'unknown': lambda gh: setattr(gh, 'mergeable', 'UNKNOWN'),
-            'needs-human': lambda gh: gh.labels[100].add('agent:needs-human'),
+            'needs-operator': lambda gh: gh.labels[100].add('agent:needs-operator'),
             'merge-hold': lambda gh: gh.labels[100].add(HOLD),
         }
         for cfg in self.MODES:
@@ -472,7 +491,7 @@ class DirectiveTests(Case):
                 self.assertEqual(plan(Snapshot([p], [], []), cfg), [])
                 d._do_merge(p)
                 self.assert_not_merged()
-                self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+                self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
                 self.assertIn('1/ci/R1-1', self.gh.comments[-1][1])
 
     def test_reviews_written_after_the_snapshot_count(self):
@@ -493,7 +512,7 @@ class DirectiveTests(Case):
                     self.gh.say(login, body)
                     d._do_merge(p)
                     self.assert_not_merged()
-                    self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+                    self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
             with self.subTest(mode=cfg.merge.mode, change='new round not approved yet'):
                 # A second round that has not approved the head: the approval no longer stands.
                 d, p = self.ready(cfg)
@@ -747,8 +766,11 @@ class LevelZeroTests(unittest.TestCase):
     def test_a_level_zero_override(self):
         cfg = dataclasses.replace(ZCFG, merge=MergePolicy(mode='strict', levels=((0, 'off'),)))
         d, gh = self.promoted(cfg)
-        self.assertEqual(d.tick(), [])
+        # The merge is the operator's (#248): the level is why.
+        self.assertEqual([a.kind for a in d.tick()], ['operator_merge'])
         self.assertEqual(gh.merged, [])
+        self.assertIn('agent:needs-operator', gh.labels[100])
+        self.assertIn('livello di review 0', gh.comments[-1][1])
 
 
 if __name__ == '__main__':

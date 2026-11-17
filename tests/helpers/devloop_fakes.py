@@ -62,11 +62,20 @@ class FakeGH:
     def issue_comments(self, number):
         return self.pr_comments(number)
 
-    # Logins of the `labeled` events of a label on a PR, oldest first.
+    # Native dependencies (#277): none by default.
+    def issue_dependencies(self, number):
+        return {'author': 'brushtyler', 'blocked_by': [], 'added': []}
+
+    # Logins of the `labeled` events of a label on a PR, oldest first: for the level-2 label
+    # those a test sets, for any other those of ``edit_labels`` (``label_log``), each written
+    # by ``labeler``, the login the dispatcher acts with.
     level_labelers = ()
+    labeler = 'brushtyler'
 
     def labelers(self, number, label):
-        return list(self.level_labelers) if label == 'reviews:2' else []
+        if label == 'reviews:2':
+            return list(self.level_labelers)
+        return list(getattr(self, 'label_log', {}).get((number, label), ()))
 
     # Level 0 (#107): events of the level-0 label, check runs of a head, native PR reviews.
     zero_events = ()
@@ -83,6 +92,11 @@ class FakeGH:
     def edit_labels(self, number, add=(), remove=()):
         current = self.labels.setdefault(number, set())
         current.difference_update(remove)
+        # GitHub records a `labeled` event only for a label the issue or PR did not have.
+        log = self.__dict__.setdefault('label_log', {})
+        for label in add:
+            if label not in current:
+                log.setdefault((number, label), []).append(self.labeler)
         current.update(add)
 
     def comment(self, number, body):
@@ -96,6 +110,22 @@ class FakeGH:
 
     def ensure_label(self, name, color, description):
         self.label_styles[name] = (color, description)
+
+    # The repository's labels before setup (#248): ``repo_labels`` answers with these and the
+    # labels ``ensure_label`` created; ``rename_label`` renames them in ``renamed_labels``.
+    existing_labels = ()
+
+    def repo_labels(self):
+        return list(dict.fromkeys([*self.existing_labels, *self.label_styles]))
+
+    def rename_label(self, name, new_name, color, description):
+        self.renamed_labels = getattr(self, 'renamed_labels', []) + [(name, new_name)]
+        self.existing_labels = [new_name if n == name else n for n in self.existing_labels]
+        self.label_styles[new_name] = (color, description)
+        for labels in self.labels.values():
+            if name in labels:
+                labels.discard(name)
+                labels.add(new_name)
 
     # CodeReview ----------------------------------------------------------
     # Snapshot reads: ``open`` holds the raw open PRs, as `gh pr list` returns them.

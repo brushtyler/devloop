@@ -33,8 +33,9 @@ CLIENTS = ('dispatcher.py', 'ledger.py')
 
 EXPECTED = {
     ports.Tracker: ['issues_with_label', 'issue', 'issue_history', 'issue_comments',
-                    'pr_comments', 'labelers', 'label_events', 'labeled_events', 'edit_labels',
-                    'comment', 'close_issue', 'edit_comment', 'ensure_label'],
+                    'pr_comments', 'issue_dependencies', 'labelers', 'label_events', 'labeled_events', 'edit_labels',
+                    'comment', 'close_issue', 'edit_comment', 'ensure_label', 'repo_labels',
+                    'rename_label'],
     ports.CodeReview: ['open_prs', 'merged_prs', 'merge_state', 'pr_head', 'pr_state', 'merge_pr',
                        'pr_reviews', 'create_pr', 'submit_review'],
     ports.CI: ['checks', 'check_details', 'check_runs', 'failed_log', 'rerun_failed_jobs'],

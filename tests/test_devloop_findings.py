@@ -143,7 +143,7 @@ class TwoReviewerTests(Flow, unittest.TestCase):
         self.assertIn(f'1/{OTHER}/R1-1', self.runner.calls[0][3])  # the reviewer sees the key
         (recorded,) = self.published('review')
         self.assertEqual((recorded['reviewer'], recorded['verdict']), (REV, 'approve'))
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         self.assertEqual(self.published('policy'), [])  # no promotion
         escalation = self.gh.comments[-1][1]
         self.assertIn(f'1/{OTHER}/R1-1', escalation)
@@ -343,7 +343,7 @@ class MigrationTests(Flow, unittest.TestCase):
         self.assertEqual(len(snap.prs[0].reviews), 2)
         self.assertEqual([a.kind for a in plan(snap, CFG)], ['apply_review'])
         self.d.tick()
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         self.assertEqual(self.published('policy'), [])  # no promotion
         self.assertIn(f'1/{OTHER}/R1-1', self.gh.comments[-1][1])
         # Its own findings still open, attributed to its reviewer; so do partly keyed records.
@@ -366,7 +366,7 @@ class MigrationTests(Flow, unittest.TestCase):
                 self.make(comments)
                 self.assertEqual([a.kind for a in self.planned()], ['unattributable'])
                 self.d.tick()
-                self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+                self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
                 self.assertIn(detail, self.gh.comments[-1][1])
                 self.assertEqual(self.runner.calls, [])
 
