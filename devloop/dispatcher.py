@@ -1377,6 +1377,15 @@ class Dispatcher:
         if cls not in (TOOL_FAILURE, SYNC_FAILED):
             return trace('refused', 'rifiutato: vale solo per le escalation `tool_failure` e '
                          '`sync_failed`. Il comando è speso; l\'escalation resta al supervisore.')
+        # An issue a merged devloop PR already resolved is never checked nor implemented again
+        # (#228), whatever escalation it waits in: the retry becomes a merged_issue escalation.
+        merged = [] if is_pr else self._merged_prs(number)
+        if merged:
+            trace('refused', 'rifiutato: l\'issue è già risolta da una PR devloop mergiata ('
+                  + ', '.join(f'#{m["number"]}' for m in merged) + '), quindi ripeterne il '
+                  'passo duplicherebbe il lavoro. Il comando è speso; l\'issue passa a '
+                  'un\'escalation `merged_issue`.')
+            return self._do_merged_issue(number, merged)
         key, step = escalation.get('key'), escalation.get('step')
         if (not isinstance(key, dict) or step not in RETRY_STEPS or key.get('step') != step
                 or is_pr == (step in ISSUE_STEPS) or (step == 'preflight'
@@ -3108,14 +3117,16 @@ class Dispatcher:
         except GitHubError as exc:
             self.log(f'  issue #{number} NOT closed, close it by hand: {exc}')
 
-    def _do_merged_issue(self, number):
+    def _do_merged_issue(self, number, merged=None):
         """Escalate a ready issue that a merged devloop PR already resolved (#228), instead of
         checking or implementing it again: class ``merged_issue``, non-critical. In ``auto``
         the supervisor decides it and the issue keeps ``agent:ready`` meanwhile (no retry is
         admitted: closing the issue, or ``/devloop escalate``, settles it); otherwise it goes
-        to the operator, without ``agent:ready``."""
+        to the operator, without ``agent:ready`` nor ``agent:needs-supervisor``. ``merged``:
+        the merged PRs already read (``_do_supervise``, a retry refused for them)."""
         lb = self.cfg.labels
-        merged = self._merged_prs(number)
+        if merged is None:
+            merged = self._merged_prs(number)
         if not merged:
             self.log('  no merged devloop PR found any more; next tick')
             return
@@ -3126,7 +3137,10 @@ class Dispatcher:
                   'per non duplicare il lavoro. Se è risolta va chiusa; se serve altro lavoro, '
                   'va aperta una nuova issue.')
         supervised, why = self._supervised(number, MERGED_ISSUE, 'implement')
-        self._escalate(number, reason, remove=[lb.ready], cls=MERGED_ISSUE,
+        # From a refused retry the issue is in agent:needs-supervisor: it leaves it only for
+        # the operator.
+        remove = [lb.ready] if supervised else [lb.ready, lb.needs_supervisor]
+        self._escalate(number, reason, remove=remove, cls=MERGED_ISSUE,
                        supervised=supervised, why=why)
 
     def _do_stale(self, number):

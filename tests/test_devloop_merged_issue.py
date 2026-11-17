@@ -8,10 +8,11 @@ from types import SimpleNamespace
 from devloop import markdown
 from devloop.dispatcher import Action, Dispatcher, Snapshot, plan
 from devloop.github import GitHub, GitHubError
-from test_devloop import CFG, REV, SHA1, FakeRunner, FakeWS
+from test_devloop import CFG, REV, SHA1, FakeRunner, FakeWS, implemented
 from test_devloop_merge import AUTO, STRICT, Identities, MergeGH
 from test_devloop_supervision import AUTO as SUP_AUTO
-from test_devloop_supervision import SUPERVISOR_LOGIN, Case as SupervisionCase
+from test_devloop_supervision import PREFLIGHT_AUTO, SUPERVISOR_LOGIN, crash
+from test_devloop_supervision import Case as SupervisionCase
 
 MERGE_COMMIT = 'c' * 40
 READY = 'agent:ready'
@@ -227,6 +228,48 @@ class SupervisorTests(SupervisionCase):
         self.assertEqual(self.gh.labels[7], {READY, SUPER})
         self.assertEqual(self.runner.calls, [])
         self.assertEqual(self.tick(d), [])
+
+    def test_a_retry_of_an_earlier_tool_failure_is_refused_once_a_pr_merged(self):
+        # A tool failure escalated before the PR merged (e.g. a duplicate readiness check
+        # started after the merge): request and base are unchanged, but the step never runs.
+        for name, cfg in (('preflight', PREFLIGHT_AUTO), ('implement', SUP_AUTO)):
+            with self.subTest(step=name):
+                d = self.make(cfg, crash(), implemented(), has_pr=False)
+                self.assertEqual(self.tick(d), [(name, 7)])
+                (failure,) = self.escalations(7)
+                self.assertEqual((failure['class'], failure['step']), ('tool_failure', name))
+                self.gh.merged_raw = (merged_pr(),)
+                self.gh.command(7, '/devloop retry', SUPERVISOR_LOGIN)
+                self.assertEqual(self.tick(d), [('supervise', 7)])
+                decision = self.decisions(7)[-1]
+                self.assertEqual((decision['command'], decision['outcome']), ('retry', 'refused'))
+                self.assertIn('#99', [c['body'] for c in self.gh.threads[7]
+                                      if markdown.read_marker(c['body'], 'supervision')][-1])
+                self.assertEqual(len(self.runner.calls), 1)
+                self.assertEqual(self.gh.created, [])
+                escalation = self.escalations(7)[-1]
+                self.assertEqual((escalation['class'], escalation['to']),
+                                 ('merged_issue', 'supervisor'))
+                self.assertIn(SUPER, self.gh.labels[7])
+                self.assertNotIn(HUMAN, self.gh.labels[7])
+                # Another retry is refused for the new class, and nothing runs.
+                self.gh.command(7, '/devloop retry', SUPERVISOR_LOGIN)
+                self.assertEqual(self.tick(d), [('supervise', 7)])
+                self.assertEqual(self.decisions(7)[-1]['outcome'], 'refused')
+                self.assertEqual(len(self.runner.calls), 1)
+
+    def test_a_refused_retry_goes_to_the_operator_when_the_supervisor_cannot_decide(self):
+        d = self.make(SUP_AUTO, crash(), has_pr=False)
+        self.assertEqual(self.tick(d), [('implement', 7)])
+        self.gh.merged_raw = (merged_pr(),)
+        self.gh.author = 'stranger'
+        self.gh.command(7, '/devloop retry', SUPERVISOR_LOGIN)
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        self.assertEqual(self.decisions(7)[-1]['outcome'], 'refused')
+        escalation = self.escalations(7)[-1]
+        self.assertEqual((escalation['class'], escalation['to']), ('merged_issue', 'operator'))
+        self.assertEqual(self.gh.labels[7], {HUMAN})
+        self.assertEqual(len(self.runner.calls), 1)
 
 
 if __name__ == '__main__':

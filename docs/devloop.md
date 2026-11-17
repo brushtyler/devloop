@@ -599,6 +599,10 @@ never checked nor implemented again. It becomes a `merged_issue` escalation, non
 `"auto"` it goes to `agent:needs-supervisor` and keeps `agent:ready`, otherwise to
 `agent:needs-human` without `agent:ready`. `/devloop retry` is refused for it: closing the issue,
 or `/devloop escalate <reason>`, settles it. More work on the same subject needs a new issue.
+The same check runs before a `/devloop retry` of an issue already escalated for another class
+(a `tool_failure` of its readiness check or implementation, for example): with a merged devloop
+PR the retry is refused, the step is not run, and the issue gets a `merged_issue` escalation
+routed as above.
 
 ### Holding a merge
 
