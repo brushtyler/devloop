@@ -233,7 +233,7 @@ class Config:
     preflight: str = ''
     max_open_prs: int = 2
     # Open devloop PRs waiting for a person (``dispatcher.parked``, #199): they do not take the
-    # slots of max_open_prs, and once this many are open no new issue starts.
+    # slots of max_open_prs, and once this many are open only priority:high issues start (#274).
     max_parked_prs: int = 3
     max_review_rounds: int = 3
     max_actions_per_tick: int = 3
