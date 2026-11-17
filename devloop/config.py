@@ -80,6 +80,25 @@ class MergePolicy:
 
 
 @dataclass(frozen=True)
+class PinPolicy:
+    """``[pin]`` (#174): whether a merge by devloop that touches ``paths`` (``devloop/`` and the
+    files of ``review_policy.sensitive_path_lists``) pins ``origin/<base_branch>`` at the next
+    tick."""
+    auto: bool = False
+    paths: tuple = ('devloop/',) + DEFAULT_SENSITIVE_LISTS
+
+    def touches(self, changed):
+        """Whether a path of ``changed`` is, or is under, an entry of ``paths``."""
+        for path in changed:
+            path = path.strip('/')
+            for entry in self.paths:
+                entry = entry.strip().strip('/')
+                if entry and (path == entry or path.startswith(entry + '/')):
+                    return True
+        return False
+
+
+@dataclass(frozen=True)
 class FallbackModel:
     """A model an agent falls back to when the ones before it are unavailable (issue #121)."""
     model: str
@@ -186,6 +205,7 @@ class Config:
     # The agent whose identity, besides trusted_users, may hold and release a merge in ``auto``
     # mode (#172), or '' when none is configured.
     supervisor: str = ''
+    pin: PinPolicy = field(default_factory=PinPolicy)
 
     def agent(self, key):
         return self.agents[key]
@@ -414,6 +434,20 @@ def parse_merge(table, supervisor):
     return MergePolicy(mode=mode, levels=tuple(sorted(levels)), operator_only_paths=paths)
 
 
+def parse_pin(table, lists):
+    """``[pin]`` (#174): ``auto`` (default false). ``lists`` are the names of
+    ``review_policy.sensitive_path_lists``, watched with ``devloop/``."""
+    if not isinstance(table, dict):
+        raise ConfigError('pin: expected a table')
+    unknown = set(table) - {'auto'}
+    if unknown:
+        raise ConfigError(f'pin: unknown keys {sorted(unknown)}')
+    auto = table.get('auto', False)
+    if not isinstance(auto, bool):
+        raise ConfigError('pin.auto: expected true or false')
+    return PinPolicy(auto=auto, paths=('devloop/', *lists))
+
+
 def _reviewer_pool(roles, agents, implementer):
     """``roles.reviewers``, or ``roles.reviewer`` as a pool of one: known agents, no repeats,
     never the implementer."""
@@ -532,6 +566,7 @@ def parse_config(data, root=INSTALL_ROOT):
         apps=apps, app_key_dir=key_dir, agent_stall_action=stall_action,
         local_tests=local_tests,
         merge=parse_merge(data.get('merge', {}), supervisor), supervisor=supervisor,
+        pin=parse_pin(data.get('pin', {}), sensitive_lists(data)),
         review_policy=parse_review_policy(
             data.get('review_policy', {}), root,
             [(k, apps[k].slug if k in apps else None, agents[k].kind, agents[k].model,
@@ -541,7 +576,88 @@ def parse_config(data, root=INSTALL_ROOT):
         **ints)
 
 
-def load_config(path=None):
-    path = Path(path) if path else DEFAULT_CONFIG
-    with open(path, 'rb') as fh:
-        return parse_config(tomllib.load(fh))
+def sensitive_lists(data):
+    """The names in ``review_policy.sensitive_path_lists`` of the raw configuration ``data``."""
+    table = data.get('review_policy', {})
+    if not isinstance(table, dict):
+        raise ConfigError('review_policy: expected a table')
+    return _str_list(table, 'sensitive_path_lists', 'review_policy', DEFAULT_SENSITIVE_LISTS)
+
+
+# The keys a local overlay may set (#174), the same as config.toml: ``None`` is a value, a dict
+# a table, ``'*'`` any name (an agent, an app, a level).
+_AGENT_KEYS = dict.fromkeys(('kind', 'display_name', 'model', 'model_label', 'effort',
+                             'version_cmd', 'write_args', 'review_args', 'commit_trailer',
+                             'fallback_models', 'unavailable_patterns', 'unavailable_exit_codes',
+                             'write_commands', 'review_commands'))
+OVERLAY_KEYS = {
+    **dict.fromkeys(('repo', 'base_branch', 'branch_prefix', 'state_dir', 'test_cmd',
+                     'local_tests', 'language', 'trusted_users', 'preflight', 'max_open_prs',
+                     'max_review_rounds', 'max_actions_per_tick', 'max_parallel_actions',
+                     'implement_test_retries', 'agent_timeout_seconds', 'test_timeout_seconds',
+                     'agent_command_timeout_seconds', 'agent_stall_seconds',
+                     'agent_stall_action', 'blocked_labels', 'priority_labels',
+                     'protected_paths')),
+    'review_policy': {**dict.fromkeys(('default_level', 'label', 'sensitive_paths',
+                                       'sensitive_path_lists')),
+                      'zero': dict.fromkeys(('label', 'allowlist', 'checks'))},
+    'merge': {'mode': None, 'operator_only_paths': None, 'levels': {'*': None}},
+    'roles': dict.fromkeys(('implementer', 'reviewer', 'reviewers', 'supervisor')),
+    'agents': {'*': _AGENT_KEYS},
+    'apps': {'key_dir': None, '*': dict.fromkeys(('app_id', 'slug'))},
+    'pin': {'auto': None},
+}
+
+
+def _check_overlay(table, schema, where):
+    for key, value in table.items():
+        at = f'{where}.{key}' if where else key
+        if key in schema:
+            expected = schema[key]
+        elif '*' in schema:
+            expected = schema['*']
+        else:
+            raise ConfigError(f'local config: unknown key {at!r}')
+        if isinstance(expected, dict):
+            if not isinstance(value, dict):
+                raise ConfigError(f'local config: {at} must be a table')
+            _check_overlay(value, expected, at)
+
+
+def apply_overlay(data, overlay):
+    """``data`` with the keys of ``overlay`` (the local config, #174) set over it: tables merge
+    key by key, any other value (a list too) replaces the one below. A key that config.toml
+    cannot have is refused."""
+    _check_overlay(overlay, OVERLAY_KEYS, '')
+
+    def merge(base, top):
+        out = dict(base)
+        for key, value in top.items():
+            below = out.get(key)
+            out[key] = (merge(below, value) if isinstance(value, dict) and isinstance(below, dict)
+                        else value)
+        return out
+    return merge(data, overlay)
+
+
+def read_toml(path, what='config'):
+    try:
+        with open(path, 'rb') as fh:
+            return tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ConfigError(f'{what} {path}: {exc}') from exc
+
+
+def load_data(path=None, local=None):
+    """The raw configuration: ``path`` (default: config.toml of this installation) with the
+    local overlay ``local`` (#174) applied, when given."""
+    data = read_toml(Path(path) if path else DEFAULT_CONFIG)
+    if local:
+        data = apply_overlay(data, read_toml(Path(local), 'local config'))
+    return data
+
+
+def load_config(path=None, local=None):
+    """The configuration of ``path`` (default: config.toml of this installation) with the local
+    overlay ``local`` (#174) applied, when given."""
+    return parse_config(load_data(path, local))

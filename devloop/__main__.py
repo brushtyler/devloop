@@ -1,14 +1,16 @@
-"""devloop command line: python3 -m devloop {setup,status,apps,tick,run,cleanup,follow,watch}."""
+"""devloop command line: python3 -m devloop
+{setup,status,apps,tick,run,cleanup,follow,watch,pin}."""
 
 import argparse
 import fcntl
+import os
 import subprocess
 import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import activity, follow, watch
+from . import activity, follow, pin, watch
 from .agents import AgentRunner, isolated_env
 from .apps import DISPATCHER, Identities
 from .config import ConfigError, load_config
@@ -19,6 +21,9 @@ from .review import last_round
 from .stall import StallWatch
 from .workspace import Workspace
 
+# The descriptor of the dispatcher lock, passed on by a restart from a new pinned copy (#174).
+LOCK_FD = 'DEVLOOP_LOCK_FD'
+
 
 def main_checkout():
     """The main checkout of the repository containing the current directory."""
@@ -27,15 +32,33 @@ def main_checkout():
     return Path(common).parent
 
 
+def _inherited_lock(lock_path):
+    """The lock a process that restarted itself from a new pinned copy passed on open (#174),
+    or None. Only a descriptor of this very lock file counts."""
+    value = os.environ.pop(LOCK_FD, None)
+    if not value or not value.isdigit():
+        return None
+    fd = int(value)
+    try:
+        if not os.path.samestat(os.fstat(fd), os.stat(lock_path)):
+            return None
+    except OSError:
+        return None
+    os.set_inheritable(fd, False)
+    return open(fd, 'w')
+
+
 @contextmanager
 def single_instance(lock_path):
+    """Hold ``lock_path`` while the block runs; the open file is yielded, so that a restart from
+    a new pinned copy can pass it on."""
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, 'w') as fh:
+    with _inherited_lock(lock_path) or open(lock_path, 'w') as fh:
         try:
             fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             sys.exit('devloop: another dispatcher is running (lock held)')
-        yield
+        yield fh
 
 
 def log(message):
@@ -49,13 +72,16 @@ def agent_environment(cfg, gh_config):
     that never ends does not hold the turn for an hour (issue #96). An operator's own values are
     kept."""
     env = isolated_env(gh_config)
+    # The pinned copy on PYTHONPATH (#174) is devloop's own: the tests of a worktree import the
+    # worktree's code.
+    env.pop('PYTHONPATH', None)
     env.setdefault('BASH_DEFAULT_TIMEOUT_MS', str(cfg.agent_command_timeout_seconds * 1000))
     env.setdefault('BASH_MAX_TIMEOUT_MS', str(cfg.test_timeout_seconds * 1000))
     return env
 
 
 def build(args):
-    cfg = load_config(args.config)
+    cfg = load_config(args.config, args.local_config)
     root = main_checkout()
     state = root / cfg.state_dir
     try:
@@ -84,8 +110,25 @@ def build(args):
     # Merges (#172) use the local gh login devloop runs with: no app gets contents=write.
     dispatcher = Dispatcher(cfg, gh, ws, runner, log=tick_log, identities=identities,
                             activity=current, ledger=Ledger(gh, state_dir=state),
-                            merger=GitHub(cfg.repo))
+                            merger=GitHub(cfg.repo),
+                            pinner=pin.AutoPin(root, state, args.local_config, log=tick_log))
     return cfg, state, dispatcher
+
+
+def run_pin(args):
+    """``devloop pin <ref>`` (#174). The overlay is ``--local-config``, or
+    ``<state_dir>/config.local.toml`` when it exists."""
+    try:
+        cfg = load_config(args.config, args.local_config)
+    except ConfigError as exc:
+        sys.exit(f'devloop: invalid config: {exc}')
+    root = main_checkout()
+    state = root / cfg.state_dir
+    local = args.local_config or state / pin.LOCAL_CONFIG
+    try:
+        pin.pin(root, state, args.ref, local, log=log)
+    except (pin.PinError, ConfigError, OSError) as exc:
+        sys.exit(f'devloop: pin failed, the pinned copy is unchanged: {exc}')
 
 
 def run_watch(parser, args, github=GitHub):
@@ -104,7 +147,7 @@ def run_watch(parser, args, github=GitHub):
         except ValueError as exc:
             parser.error(f'watch: {exc}')
     try:
-        cfg = load_config(args.config)
+        cfg = load_config(args.config, args.local_config)
     except ConfigError as exc:
         sys.exit(f'devloop: invalid config: {exc}')
     state = Path(args.state) if args.state else main_checkout() / cfg.state_dir / watch.STATE_FILE
@@ -121,6 +164,9 @@ def run_watch(parser, args, github=GitHub):
 def main(argv=None):
     parser = argparse.ArgumentParser(prog='devloop', description=__doc__)
     parser.add_argument('--config', help='TOML config (default: devloop/config.toml)')
+    parser.add_argument('--local-config', metavar='PATH',
+                        help='local overlay: only the keys it sets replace those of the config '
+                             '(scripts/devloop-pinned passes <state_dir>/config.local.toml)')
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('setup', help='create or update the agent:* labels')
     sub.add_parser('status', help='show the running action, devloop PRs, ready issues and the '
@@ -149,8 +195,16 @@ def main(argv=None):
                                 'news (default: wait forever)')
     watch_cmd.add_argument('--state', help='state file (default: <state_dir>/watch-state.json in '
                                            'the main checkout)')
+    pin_cmd = sub.add_parser('pin', help='pin a commit of origin: verified read-only copy in '
+                                         '<state_dir>/pinned-<sha12>, pointed at by '
+                                         '<state_dir>/current')
+    pin_cmd.add_argument('ref', help='a branch or tag of origin, or a commit reachable from '
+                                     'them or of a copy already pinned (rollback)')
+    argv = sys.argv[1:] if argv is None else list(argv)
     args = parser.parse_args(argv)
 
+    if args.command == 'pin':
+        return run_pin(args)
     if args.command == 'watch':
         sys.exit(run_watch(parser, args))
     if args.command == 'follow':
@@ -158,7 +212,7 @@ def main(argv=None):
         if not follow.NAME.fullmatch(args.target):
             sys.exit(f'devloop: follow needs issue-<N> or pr-<N>, not {args.target!r}')
         try:
-            cfg = load_config(args.config)
+            cfg = load_config(args.config, args.local_config)
         except ConfigError as exc:
             sys.exit(f'devloop: invalid config: {exc}')
         root = main_checkout() / cfg.state_dir / 'worktrees'
@@ -211,15 +265,24 @@ def main(argv=None):
         for action in plan(snap, cfg):
             log(f'next: {action.kind} #{action.number}')
         return
-    with single_instance(state / 'dispatcher.lock'):
-        if args.command == 'tick':
-            dispatcher.tick(dry_run=args.dry_run)
-        elif args.command == 'run':
-            run_forever(dispatcher, args.interval)
-        elif args.command == 'cleanup':
+    with single_instance(state / 'dispatcher.lock') as lock:
+        if args.command == 'cleanup':
             for name in dispatcher.ws.names():
                 dispatcher.ws.remove(name)
                 log(f'removed worktree {name}')
+            return
+        try:
+            if args.command == 'tick':
+                dispatcher.tick(dry_run=args.dry_run)
+            elif args.command == 'run':
+                run_forever(dispatcher, args.interval)
+        except pin.PinError as exc:
+            sys.exit(f'devloop: {exc}')
+        except pin.Repinned as exc:
+            # Configuration, policy and dispatcher load again from the new copy, with the same
+            # arguments and the lock still held (#174).
+            log(f'restarting from {exc.copy}')
+            pin.reexec(exc.copy, argv, lock.fileno(), LOCK_FD)
 
 
 if __name__ == '__main__':
