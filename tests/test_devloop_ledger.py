@@ -549,6 +549,33 @@ class GreenCILedgerTests(unittest.TestCase):
                 d._record_ci(again, SHA1, again.checks, again.check_details, 1)
                 self.assertEqual(len(self.ci_events()), 1)
 
+    def test_the_suite_summary_seen_with_ci_pending_is_recorded_by_the_promotion(self):
+        # The suite job is over and its summary is in the prompt, another job keeps the CI
+        # pending: the review approves without a ci_round; once the CI passes, the promotion
+        # records the round with the summary of the suite read from the job log (#300).
+        bench = {'name': 'Benchmark', 'bucket': 'pending', 'conclusion': 'in_progress',
+                 'link': 'https://github.com/o/r/actions/runs/43/job/9', 'run_id': 43,
+                 'duration_s': None}
+        runner = FakeRunner(raw_review())
+        self.gh = SnapLedgerGH()
+        self.gh.labels[100] = {'agent:review'}
+        self.gh.job_logs = {8: SUITE_LOG}
+        self.gh.details = [dict(GREEN[0]), dict(bench)]
+        d = Dispatcher(CFG, self.gh, FakeWS(), runner, log=lambda m: None,
+                       ledger=Ledger(self.gh))
+        d.tick()
+        self.assertIn(f'  - `{SUITE_SUMMARY["ran"]}`', runner.calls[0][3])
+        self.assertEqual(self.ci_events(), [])
+        self.assertEqual(self.gh.labels[100], {'agent:review'})
+        self.gh.details = [dict(GREEN[0]),
+                           dict(bench, bucket='pass', conclusion='success', duration_s=30)]
+        d.tick()
+        self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
+        (event,) = self.ci_events()
+        self.assertEqual((event['state'], event['round']), ('pass', 1))
+        self.assertEqual([c['duration_s'] for c in event['checks']], [372, 30])
+        self.assertEqual(event['tests'], [{'name': 'Unit Tests', **SUITE_SUMMARY}])
+
     def test_pending_checks_are_not_recorded_and_do_not_promote(self):
         d = self.make()
         self.gh.details = [dict(GREEN[0], bucket='pending', conclusion='in_progress')]

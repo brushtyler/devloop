@@ -1456,8 +1456,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
         commit status) and, for a GitHub Actions run, its id (a commit status has none).
         ``jobs``, the summary the prompts got (``_ci_jobs``), adds ``tests``: for each job, the
         final lines of ``scripts/run-tests.py`` read from its log, or ``log: unavailable``
-        when the log could not be read. The same checks read again for the same head and round
-        are not recorded twice."""
+        when the log could not be read. Without ``jobs`` (a promotion after a review that saw
+        the CI pending, a level-0 promotion) they are read now from ``details``, so that the
+        event has them whatever path records it. The same checks read again for the same head
+        and round are not recorded twice."""
         if self.ledger is None or details is None:
             return
         checks = [{'name': c['name'], 'outcome': c.get('conclusion') or c['bucket'],
@@ -1468,6 +1470,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
             return
         # A level-0 promotion has no review round.
         extra = {'round': round_no} if round_no is not None else {}
+        if jobs is None:
+            jobs = self._ci_jobs(details)
         tests = [dict({'name': j['name']}, **(j['tests'] if j.get('tests') else {'log': j['log']}))
                  for j in jobs or () if j.get('tests') or j.get('log')]
         if tests:
