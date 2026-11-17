@@ -25,20 +25,11 @@ ROOT = Path(__file__).resolve().parents[1]
 CODE_DIRS = ('devloop/', 'scripts/', 'schemas/', 'docs/', 'tests/')
 IGNORE = '<!-- doc-links: ignore -->'
 
-# Temporary allow-list, to resolve in the documentation audit (#205). Each entry is
-# (page, target exactly as written). The list must only shrink: adding an entry needs a
-# review, and an entry that no longer fails makes the test fail until it is removed.
-# The current entries are illustrative names written mid-paragraph, where an ignore
-# comment would split the paragraph: #205 decides whether to reword them.
-ALLOWED = frozenset({
-    ('docs/developer-feedback.md', 'conftest.py'),         # file-name pattern of a test file
-    ('docs/developer-feedback.md', 'docs/CODEOWNERS'),     # one of the CODEOWNERS locations
-    ('docs/devloop.md', 'docs/guide.md'),                  # example of an unlisted Markdown file
-    ('docs/devloop.md', 'docs/AGENTS.md'),                 # example of an excluded AGENTS.md
-    ('docs/devloop.md', 'X.py'),                           # placeholder of a changed module
-    ('docs/devloop.md', 'tests/test_X*.py'),               # placeholder pattern
-    ('docs/devloop.md', 'tests/test_<name>*.py'),          # placeholder pattern
-})
+# Allow-list of known broken references, each (page, target exactly as written). The
+# documentation audit (#205, issue #238) emptied it: reword an illustrative name, or put
+# `<!-- doc-links: ignore -->` on the line before it. Adding an entry needs a review, and
+# an entry that no longer fails makes the test fail until it is removed.
+ALLOWED = frozenset()
 
 _FENCE = re.compile(r'^\s*(`{3,}|~{3,})')
 _HEADING = re.compile(r'^ {0,3}#{1,6}(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$')

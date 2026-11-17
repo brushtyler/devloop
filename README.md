@@ -189,6 +189,7 @@ The full reference covers routing tables, reasoning effort, budgets, container l
 | `python3 orchestrator.py start` / `status` / `cancel` / `resume` / `monitor` | Detached supervision ([docs](docs/supervision.md)) |
 | `python3 orchestrator.py bounce-preview …` | Read-only targeted-bounce preview ([docs](docs/bounce-preview.md)) |
 | `python3 orchestrator.py continuation-*` | Explicit recovery transitions for stopped runs ([docs](#recovery-and-continuation)) |
+| `python3 orchestrator.py usage-profile-*` | Add engine usage rules to the limits profile of a stopped generation ([docs](docs/bounded-recovery.md#live-calls-without-a-reported-cost-issue-43)) |
 | `python3 orchestrator.py feedback-*` | Developer-feedback diagnosis and delegation ([docs](docs/developer-feedback.md)) |
 
 ---
@@ -247,7 +248,7 @@ All new runs use the task scheduler, including Tier S. See [unified execution an
 | [Developer feedback](docs/developer-feedback.md) | Scope diagnosis, reviewed feedback roles, delegated amendments, GitHub projections (#39) |
 | [Native gate convergence](docs/native-gate-convergence.md) | Candidate checks collected before the reviews that need them |
 | [Bounce preview](docs/bounce-preview.md) | Read-only preview of a targeted bounce from a gate |
-| [Writer fencing](docs/writer-fencing.md) | Writer gate protocol and in-container PID 1 holder for automatic fencing (#45); not yet used by real runs |
+| [Writer fencing](docs/writer-fencing.md) | Writer gate protocol and in-container PID 1 holder for automatic fencing (#45); every new run records `writer_fencing: v1`, and the role containers of admitted runs start under the holder |
 
 ### Plans
 
@@ -272,10 +273,11 @@ Open work is tracked in the [GitHub issues](https://github.com/brushtyler/ssdlc/
 ```bash
 python3 -m venv .tools/python
 .tools/python/bin/python3 -m pip install -r requirements.txt
-.tools/python/bin/python3 -m unittest discover -s tests          # what CI runs
+.tools/python/bin/python3 scripts/run-tests.py                   # what CI runs
 python3 -I ssdlc_replay_gate.py --output recovery-benchmark.json # isolated A5 recovery gate
 ```
 
+- `scripts/run-tests.py` runs exactly the tests of `python3 -m unittest discover -s tests`, split across parallel processes (`-j N` sets how many); CI checks that it ran as many tests as the discover finds.
 - Running a single module: `python3 -m unittest discover -s tests -p 'test_name.py'` (works for every module; `python3 -m unittest tests.test_name` needs `PYTHONPATH=tests` for modules that import helpers from `tests/`).
 - Docker smoke tests: `python3 tests/docker_smoke.py --image <image> --suite` and `python3 tests/docker_pid_smoke.py --image <image>`.
 - Docker test of the writer gate holder (opt-in, as root on the host): `SSDLC_DOCKER_TESTS=1 python3 -m unittest discover -s tests -p 'test_container_holder_docker.py' -v` ([Writer fencing](docs/writer-fencing.md#containers-the-pid-1-holder)).

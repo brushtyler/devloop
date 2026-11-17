@@ -1,12 +1,8 @@
 # Task mode
 
-Task mode breaks development into a reviewed DAG of tasks. Each task has a strict file manifest, owned requirements and automated checks. It is the default for every new run, including Tier S:
+Task mode breaks development into a reviewed DAG of tasks. Each task has a strict file manifest, owned requirements and automated checks. It is the default for every new run, including Tier S, and there is nothing to enable: the obsolete `SSDLC_ENABLE_TASK_BREAKDOWN` variable is ignored, with a warning in the log.
 
-```bash
-# Task mode is the default for every new run, including Tier S.
-```
-
-Before you enable it, review any project-specific standards already installed. Global review, QA and AppSec still run after development. Recovery after a stop is covered by the [recovery documents](../README.md#recovery-and-continuation).
+Before the first run, review any project-specific standards already installed. Global review, QA and AppSec still run after development. Recovery after a stop is covered by the [recovery documents](../README.md#recovery-and-continuation).
 
 ## Requirements catalogue
 
@@ -364,7 +360,7 @@ separate); **23** refuses a legacy/non-executable startup, with a new-run comman
 **24** refuses bootstrap eligibility/profile validation; **25** refuses unverified
 final-candidate approval on a sealed task run; **2** is invalid CLI usage.
 Pipeline execution errors fail nonzero; they do not imply successful signoff.
-Preview's separate **0/10/20** outcomes are described above.
+Preview's separate **0/10/20** outcomes are described in [Bounce preview](bounce-preview.md).
 
 Metrics are per-process counters, not billing units: `corrective_transactions_created`,
 `corrective_transactions_executed`, `corrective_transactions_refused` (by reason),
