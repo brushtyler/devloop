@@ -26,7 +26,14 @@ the requirements. The local engine and its tests need them.
 `scripts/run-tests.py` runs exactly the tests of `python3 -m unittest discover -s tests`, split
 across parallel worker processes. `-j N` sets how many (default: the number of CPUs). The modules
 are split slowest first, using the durations of the previous run, kept in
-`.ssdlc/test-durations.json` (ignored by git). The summary at the end gives the total, the slowest
+`.ssdlc/test-durations.json` (ignored by git). A module that took more than 60 seconds in the
+previous local run or, when that file has no entry for it, in the versioned `tests/durations.json`
+(module and seconds from a full run; a fresh checkout such as CI has only this one) is split by test
+class across the processes; a module in neither file stays whole; a module with
+`setUpModule`/`tearDownModule` or a custom suite stays whole, and output and failures are still
+reported per module. Before starting, it runs `git update-index -q --refresh` once if the root is a
+git repository, so the tests' `git status` calls do not rehash every file of a fresh checkout; a
+failure there is only reported. The summary at the end gives the total, the slowest
 modules and the output of every failed module, each under a `FAILED MODULE` line; the exit code is
 non-zero when a test failed or a worker did not finish. On 4 CPUs the suite takes about 8 minutes;
 serially, about 25.

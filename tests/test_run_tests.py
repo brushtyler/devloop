@@ -1,5 +1,7 @@
 """scripts/run-tests.py must run exactly the tests of `python3 -m unittest discover -s tests`."""
 
+import json
+import os
 import re
 import shutil
 import subprocess
@@ -23,7 +25,7 @@ def ran(output):
     return int(found[-1]) if found else None
 
 
-class RunTestsEquivalenceTests(unittest.TestCase):
+class ProjectMixin:
     def project(self, files):
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp)
@@ -40,6 +42,8 @@ class RunTestsEquivalenceTests(unittest.TestCase):
                                   capture_output=True, text=True, timeout=120)
         return serial, parallel
 
+
+class RunTestsEquivalenceTests(ProjectMixin, unittest.TestCase):
     def test_same_tests_and_outcome_as_discover(self):
         # Codex review of #75: a load_tests hook that forwards the pattern, and modules with the
         # same name in two packages, were run differently from the full discover.
@@ -226,6 +230,249 @@ class RunTestsEquivalenceTests(unittest.TestCase):
         self.assertNotEqual(serial.returncode, 0)
         self.assertNotEqual(parallel.returncode, 0)
         self.assertIn('does_not_exist_anywhere', parallel.stdout)
+
+
+# A helper the test modules below import (tests/ is on sys.path in the discover): each call
+# appends `<what> <pid>` to log.txt at the project root.
+RECORDER = '''
+    import os
+    LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'log.txt')
+    def record(what):
+        with open(LOG, 'a') as fh:
+            fh.write(f'{what} {os.getpid()}\\n')
+'''
+
+
+def two_classes(name, fail=False):
+    """A module with classes A (with setUpClass, two tests) and B (one test, failing if ``fail``)."""
+    outcome = "self.fail('split failure')" if fail else 'pass'
+    return textwrap.dedent(f'''
+        import unittest
+        from recorder import record
+        class A(unittest.TestCase):
+            @classmethod
+            def setUpClass(cls):
+                record('{name}.A.setUpClass')
+            def test_one(self):
+                record('{name}.A')
+            def test_two(self):
+                record('{name}.A')
+        class B(unittest.TestCase):
+            def test_one(self):
+                record('{name}.B')
+                {outcome}
+    ''')
+
+
+class RunTestsDistributionTests(ProjectMixin, unittest.TestCase):
+    """Issue #272: slow modules are split by class across the workers, and the git index is
+    refreshed once before they start."""
+
+    def run_tests(self, root, jobs=2, env=None):
+        return subprocess.run([sys.executable, 'scripts/run-tests.py', '-j', str(jobs)], cwd=root,
+                              capture_output=True, text=True, timeout=120, env=env)
+
+    def both(self, root, jobs=2):
+        """The serial discover, then the runner; log.txt keeps only what the runner recorded."""
+        serial = subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests'],
+                                cwd=root, capture_output=True, text=True, timeout=120)
+        (root / 'log.txt').unlink(missing_ok=True)
+        return serial, self.run_tests(root, jobs)
+
+    def history(self, root, durations):
+        (root / '.ssdlc').mkdir(exist_ok=True)
+        (root / '.ssdlc' / 'test-durations.json').write_text(json.dumps(durations))
+
+    def log(self, root):
+        """``{what: [pid, ...]}`` from log.txt."""
+        entries = {}
+        path = root / 'log.txt'
+        for line in path.read_text().splitlines() if path.exists() else []:
+            what, pid = line.rsplit(' ', 1)
+            entries.setdefault(what, []).append(pid)
+        return entries
+
+    def test_a_slow_module_runs_its_classes_in_different_workers(self):
+        root = self.project({'tests/recorder.py': RECORDER, 'tests/test_slow.py': two_classes('slow')})
+        self.history(root, {'test_slow': 100})
+        serial, parallel = self.both(root)
+        self.assertEqual(parallel.returncode, 0, parallel.stdout)
+        self.assertEqual(ran(parallel.stdout), ran(serial.stderr))
+        self.assertEqual(ran(parallel.stdout), 3)
+        self.assertIn('(1 modules, 1 split by class, 2 jobs)', parallel.stdout)
+        # The output stays per module: one progress line for the whole module.
+        self.assertEqual(len(re.findall(r'^ok   test_slow \(3 tests', parallel.stdout, re.M)), 1)
+        log = self.log(root)
+        self.assertEqual(len(set(log['slow.A'])), 1, log)   # a class is never split
+        self.assertEqual(len(log['slow.A.setUpClass']), 1, log)
+        self.assertNotEqual(log['slow.A'][0], log['slow.B'][0], log)
+        durations = json.loads((root / '.ssdlc' / 'test-durations.json').read_text())
+        self.assertIsInstance(durations['test_slow'], (int, float))
+        self.assertLess(durations['test_slow'], 100)
+
+    def test_a_module_with_a_short_history_stays_whole(self):
+        root = self.project({'tests/recorder.py': RECORDER, 'tests/test_fast.py': two_classes('fast')})
+        self.history(root, {'test_fast': 10})
+        parallel = self.run_tests(root)
+        self.assertEqual(parallel.returncode, 0, parallel.stdout)
+        self.assertIn('(1 modules, 0 split by class, 1 jobs)', parallel.stdout)
+        log = self.log(root)
+        self.assertEqual(log['fast.A'][0], log['fast.B'][0], log)
+
+    def versioned(self, root, durations):
+        (root / 'tests' / 'durations.json').write_text(json.dumps(durations))
+
+    def test_without_any_history_no_module_is_split(self):
+        # CI measure on #285: splitting every divisible module of a fresh checkout by estimate
+        # made the suite about 40% slower, since each class repeats the module's imports.
+        root = self.project({'tests/recorder.py': RECORDER, 'tests/test_new.py': two_classes('new')})
+        serial, parallel = self.both(root)
+        self.assertEqual(parallel.returncode, 0, parallel.stdout)
+        self.assertEqual(ran(parallel.stdout), ran(serial.stderr))
+        self.assertIn('(1 modules, 0 split by class, 1 jobs)', parallel.stdout)
+        log = self.log(root)
+        self.assertEqual(log['new.A'][0], log['new.B'][0], log)
+
+    def test_without_local_history_the_versioned_durations_decide(self):
+        # load_tests may select classes defined elsewhere: the discovered instances are split.
+        root = self.project({
+            'tests/recorder.py': RECORDER,
+            'tests/cases_elsewhere.py': two_classes('elsewhere'),
+            'tests/test_loader.py': '''
+                import cases_elsewhere
+                def load_tests(loader, tests, pattern):
+                    return loader.loadTestsFromModule(cases_elsewhere)
+            ''',
+            'tests/test_short.py': two_classes('short'),
+            'tests/test_absent.py': two_classes('absent'),
+        })
+        # The label of a module is the module of its first test: cases_elsewhere for test_loader.
+        self.versioned(root, {'cases_elsewhere': 100, 'test_short': 10})
+        serial, parallel = self.both(root, jobs=4)
+        self.assertEqual(parallel.returncode, 0, parallel.stdout)
+        self.assertEqual(ran(parallel.stdout), ran(serial.stderr))
+        self.assertIn('(3 modules, 1 split by class, 4 jobs)', parallel.stdout)
+        log = self.log(root)
+        self.assertEqual(len(log['elsewhere.A.setUpClass']), 1, log)
+        self.assertNotEqual(log['elsewhere.A'][0], log['elsewhere.B'][0], log)
+        for name in ('short', 'absent'):
+            self.assertEqual(log[f'{name}.A'][0], log[f'{name}.B'][0], log)
+        # The versioned file is only read; the measured durations go to the local history.
+        self.assertEqual(json.loads((root / 'tests' / 'durations.json').read_text()),
+                         {'cases_elsewhere': 100, 'test_short': 10})
+        local = json.loads((root / '.ssdlc' / 'test-durations.json').read_text())
+        self.assertEqual(set(local), {'cases_elsewhere', 'test_short', 'test_absent'})
+
+    def test_the_local_history_wins_over_the_versioned_durations(self):
+        root = self.project({'tests/recorder.py': RECORDER, 'tests/test_slow.py': two_classes('slow'),
+                             'tests/test_other.py': two_classes('other')})
+        self.versioned(root, {'test_slow': 100, 'test_other': 100})
+        # The local history has test_slow only: test_other falls back to the versioned file.
+        self.history(root, {'test_slow': 10})
+        parallel = self.run_tests(root, jobs=4)
+        self.assertEqual(parallel.returncode, 0, parallel.stdout)
+        self.assertIn('(2 modules, 1 split by class, 3 jobs)', parallel.stdout)
+        log = self.log(root)
+        self.assertEqual(log['slow.A'][0], log['slow.B'][0], log)
+        self.assertNotEqual(log['other.A'][0], log['other.B'][0], log)
+
+    def test_module_fixtures_and_custom_suites_are_not_split(self):
+        root = self.project({
+            'tests/recorder.py': RECORDER,
+            'tests/test_fixture.py': two_classes('fixture') + textwrap.dedent('''
+                def setUpModule():
+                    record('fixture.setUpModule')
+            '''),
+            'tests/cases_custom.py': two_classes('custom'),
+            'tests/test_custom.py': '''
+                import unittest, cases_custom
+                class Custom(unittest.TestSuite):
+                    pass
+                def load_tests(loader, tests, pattern):
+                    return Custom(loader.loadTestsFromModule(cases_custom))
+            ''',
+        })
+        # The label of a module is the module of its first test: cases_custom for test_custom.
+        self.history(root, {'test_fixture': 100, 'cases_custom': 100})
+        serial, parallel = self.both(root, jobs=4)
+        self.assertEqual(parallel.returncode, 0, parallel.stdout)
+        self.assertEqual(ran(parallel.stdout), ran(serial.stderr))
+        self.assertIn('(2 modules, 0 split by class, 2 jobs)', parallel.stdout)
+        log = self.log(root)
+        self.assertEqual(len(log['fixture.setUpModule']), 1, log)
+        for name in ('fixture', 'custom'):
+            self.assertEqual(log[f'{name}.A'][0], log[f'{name}.B'][0], log)
+
+    def test_a_failure_in_a_split_module_is_reported_once_for_the_module(self):
+        root = self.project({'tests/recorder.py': RECORDER,
+                             'tests/test_slow.py': two_classes('slow', fail=True)})
+        self.history(root, {'test_slow': 100})
+        serial, parallel = self.both(root)
+        self.assertNotEqual(serial.returncode, 0)
+        self.assertEqual(parallel.returncode, 1, parallel.stdout)
+        self.assertEqual(ran(parallel.stdout), ran(serial.stderr))
+        self.assertIn('1 split by class', parallel.stdout)
+        self.assertEqual(parallel.stdout.count('FAILED MODULE test_slow'), 1, parallel.stdout)
+        self.assertIn('split failure', parallel.stdout)
+        self.assertIn('FAILED (modules=1, worker problems=0)', parallel.stdout)
+        self.assertEqual(len(re.findall(r'^FAIL test_slow \(3 tests', parallel.stdout, re.M)), 1)
+        # A failed module still records its total time.
+        durations = json.loads((root / '.ssdlc' / 'test-durations.json').read_text())
+        self.assertLess(durations['test_slow'], 100)
+
+    def fake_git(self, root, code):
+        """A `git` on PATH that logs its arguments to log.txt and exits with ``code``."""
+        bin_dir = root / 'fakebin'
+        bin_dir.mkdir()
+        git = bin_dir / 'git'
+        git.write_text(f'#!/bin/sh\necho "git $*" >> "{root / "log.txt"}"\n'
+                       f'echo "fatal: simulated" >&2\nexit {code}\n')
+        git.chmod(0o755)
+        return dict(os.environ, PATH=f'{bin_dir}{os.pathsep}{os.environ.get("PATH", "")}')
+
+    def test_the_index_is_refreshed_once_before_the_workers_and_a_failure_is_not_fatal(self):
+        root = self.project({'tests/recorder.py': RECORDER, 'tests/test_slow.py': two_classes('slow')})
+        (root / '.git').mkdir()  # the root is a repository: the fake git does the rest
+        parallel = self.run_tests(root, jobs=2, env=self.fake_git(root, 1))
+        self.assertEqual(parallel.returncode, 0, parallel.stdout)
+        self.assertIn('git update-index --refresh exited with 1, continuing: fatal: simulated',
+                      parallel.stdout)
+        lines = (root / 'log.txt').read_text().splitlines()
+        calls = [line for line in lines if line.startswith('git ')]
+        self.assertEqual(calls, ['git update-index -q --refresh'])
+        self.assertEqual(lines[0], calls[0])  # before any test ran
+
+    def test_a_root_that_is_not_a_repository_is_not_refreshed(self):
+        root = self.project({'tests/recorder.py': RECORDER, 'tests/test_slow.py': two_classes('slow')})
+        parallel = self.run_tests(root, jobs=2, env=self.fake_git(root, 0))
+        self.assertEqual(parallel.returncode, 0, parallel.stdout)
+        self.assertNotIn('git', ' '.join(self.log(root)))
+        self.assertNotIn('update-index', parallel.stdout)
+
+    @unittest.skipUnless(shutil.which('git'), 'git is not installed')
+    def test_a_stale_index_is_refreshed(self):
+        root = self.project({'tests/test_plain.py': '''
+            import unittest
+            class T(unittest.TestCase):
+                def test_ok(self):
+                    pass
+        '''})
+        git = ['git', '-c', 'user.name=t', '-c', 'user.email=t@example.invalid',
+               '-c', 'commit.gpgsign=false']
+        for cmd in (['init', '-q'], ['add', '-A'], ['commit', '-q', '-m', 'init']):
+            subprocess.run(git + cmd, cwd=root, check=True, capture_output=True)
+        # New stat data, same content: `git diff-files` does not refresh, so it lists the file
+        # until the index is refreshed.
+        path = root / 'tests' / 'test_plain.py'
+        os.utime(path, (path.stat().st_atime, path.stat().st_mtime + 100))
+        stale = subprocess.run(['git', 'diff-files', '--name-only'], cwd=root, capture_output=True,
+                               text=True, check=True).stdout
+        self.assertIn('tests/test_plain.py', stale)
+        parallel = self.run_tests(root)
+        self.assertEqual(parallel.returncode, 0, parallel.stdout)
+        fresh = subprocess.run(['git', 'diff-files', '--name-only'], cwd=root, capture_output=True,
+                               text=True, check=True).stdout
+        self.assertEqual(fresh, '')
 
 
 if __name__ == '__main__':
