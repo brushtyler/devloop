@@ -16,6 +16,7 @@ from unittest import mock
 
 import devloop.__main__ as cli
 from devloop import config, runloop
+from devloop.config import INSTALL_ROOT
 from devloop.dispatcher import Action, Dispatcher, Snapshot, Workers, admit, plan
 from devloop.github import GitHub, GitHubError
 from devloop.watch import NOTHING_NEW
@@ -107,11 +108,13 @@ class World:
 class Sim(Dispatcher):
     """A dispatcher on a ``World``, whose actions are simulated agent turns of ``durations``
     seconds (by ``(kind, number)``, else by kind). Each action records its span on the clock and checks that no other
-    action on the same numbers, and no global action, runs with it."""
+    action on the same numbers, and no other merge, runs with it."""
 
-    def __init__(self, cfg, world, clock, durations, stop_after=None, stop_file=None):
+    def __init__(self, cfg, world, clock, durations, stop_after=None, stop_file=None,
+                 pinner=None):
         self.logs = []
-        super().__init__(cfg, FakeGH(), FakeWS(), FakeRunner(), log=self.logs.append)
+        super().__init__(cfg, FakeGH(), FakeWS(), FakeRunner(), log=self.logs.append,
+                         pinner=pinner)
         self.world, self.clock, self.durations = world, clock, durations
         self.spans = {}  # (kind, number): (start, end)
         self.violations = []
@@ -138,7 +141,7 @@ class Sim(Dispatcher):
         numbers = {number, getattr(target, 'issue', number)}
         with self._lock:
             for other, held in self._active:
-                if held & numbers or 'merge' in (kind, other):
+                if held & numbers or kind == other == 'merge':
                     self.violations.append(((kind, number), other))
             entry = (kind, frozenset(numbers))
             self._active.append(entry)
@@ -172,7 +175,11 @@ class Sim(Dispatcher):
         self._turn_of('review', target, done)
 
     def _do_merge(self, target):
-        self._turn_of('merge', target, lambda n: self.world.prs.pop(n))
+        def done(n):
+            self.world.prs.pop(n)
+            if self.pinner is not None:
+                self.pinner.request(n, 'head')
+        self._turn_of('merge', target, done)
 
     mergeable = ()
 
@@ -263,9 +270,9 @@ class NoBarrierTests(ContinuousLoopCase):
 
 
 class ExclusionTests(ContinuousLoopCase):
-    def test_actions_on_the_same_number_never_overlap_and_a_merge_runs_alone(self):
+    def test_a_ready_pr_is_merged_while_a_long_implementation_runs(self):
         # #100 is fixed, reviewed and merged; #101 reviewed; #9 implemented for 46 minutes;
-        # #10 becomes ready while the merge of #100 waits for the implementation to end.
+        # #10 becomes ready after 20. The merge of #100 does not wait for #9 (#264).
         self.world.prs[100] = pr(100, issue=7, labels=['agent:changes'])
         self.world.prs[101] = pr(101, issue=8, labels=['agent:review'])
         self.world.issues[9] = 0
@@ -283,34 +290,80 @@ class ExclusionTests(ContinuousLoopCase):
         # The same number, one action after the other.
         self.assertLessEqual(spans[('fix', 100)][1], spans[('review', 100)][0])
         self.assertLessEqual(spans[('review', 100)][1], spans[('merge', 100)][0])
-        # The merge overlaps no other action: it waited for #9, and #10 waited for it.
-        merge = spans[('merge', 100)]
-        for key, span in spans.items():
-            if key != ('merge', 100):
-                self.assertFalse(overlap(merge, span), key)
-        self.assertGreaterEqual(merge[0], spans[('implement', 9)][1])
-        self.assertGreaterEqual(spans[('implement', 10)][0], merge[1])
-        # Different numbers ran together.
-        self.assertTrue(overlap(spans[('fix', 100)], spans[('implement', 9)]))
-        self.assertTrue(overlap(spans[('review', 101)], spans[('implement', 9)]))
+        # The merge starts as soon as the review of #100 ends, while #9 still runs.
+        merge, implement = spans[('merge', 100)], spans[('implement', 9)]
+        self.assertLess(merge[0] - spans[('review', 100)][1], 2 * MINUTE)
+        self.assertTrue(overlap(merge, implement))
+        self.assertLess(merge[1], implement[1])
+        self.assertNotIn(100, self.world.prs)
+        # Different numbers ran together, and #10 did not wait for #9.
+        self.assertTrue(overlap(spans[('fix', 100)], implement))
+        self.assertTrue(overlap(spans[('review', 101)], implement))
+        self.assertLess(spans[('implement', 10)][0], implement[1])
 
-    def test_news_during_a_merge_start_nothing_until_it_ends(self):
-        # The merge of #100 lasts 30 minutes; #10 becomes ready after 5, and that news plans a
-        # tick while the merge runs, with two slots free.
-        p = pr(100, issue=7, labels=[READY], reviews=[norm(raw_review())])
-        p.mergeable, p.merge_status, p.merge_mode = 'MERGEABLE', 'CLEAN', 'strict'
-        self.world.prs[100] = p
+    def test_two_merges_never_overlap_and_hold_back_no_other_action(self):
+        # #100 and #101 are both ready; each merge lasts 30 minutes. #10 becomes ready after 5,
+        # and that news starts its implementation while the first merge runs.
+        for n, issue in ((100, 7), (101, 8)):
+            p = pr(n, issue=issue, labels=[READY], reviews=[norm(raw_review())])
+            p.mergeable, p.merge_status, p.merge_mode = 'MERGEABLE', 'CLEAN', 'strict'
+            self.world.prs[n] = p
         self.world.issues[10] = 5 * MINUTE
         cfg = dataclasses.replace(STRICT, max_parallel_actions=3, max_open_prs=5)
         d = Sim(cfg, self.world, self.clock, {'implement': 10 * MINUTE, 'merge': 30 * MINUTE},
-                stop_after=('implement', 10), stop_file=self.stop)
-        self.run_loop(d)
-        merge, implement = d.spans[('merge', 100)], d.spans[('implement', 10)]
-        self.assertEqual(merge[0], 0)
+                stop_after=('merge', 101), stop_file=self.stop)
+        self.run_loop(d)  # no violation: no merge ran with another one
+        first, second = d.spans[('merge', 100)], d.spans[('merge', 101)]
+        implement = d.spans[('implement', 10)]
+        self.assertEqual(first[0], 0)
+        self.assertFalse(overlap(first, second))
+        self.assertGreaterEqual(second[0], first[1])
         self.assertIn('news on GitHub: next tick', self.logs)
         self.assertTrue(any(line.endswith('running: merge #100') for line in d.logs), d.logs)
-        self.assertFalse(overlap(merge, implement))
-        self.assertGreaterEqual(implement[0], merge[1])
+        self.assertTrue(overlap(first, implement))
+        self.assertLess(implement[0], 6 * MINUTE)
+        self.assertEqual(self.world.prs, {})
+
+    def test_the_auto_pin_after_a_merge_waits_for_the_running_actions_and_starts_nothing(self):
+        # The merge of #100 (1 minute) requests a pin while #9 is implemented for 30 minutes;
+        # #10 becomes ready after 5. The pin runs once #9 has ended, and #10 starts after it.
+        p = pr(100, issue=7, labels=[READY], reviews=[norm(raw_review())])
+        p.mergeable, p.merge_status, p.merge_mode = 'MERGEABLE', 'CLEAN', 'strict'
+        self.world.prs[100] = p
+        self.world.issues[9] = 0
+        self.world.issues[10] = 5 * MINUTE
+        pins, requests = [], []
+
+        class Pinner:
+            def pending(_):
+                return requests[-1] if requests else None
+
+            def request(_, number, head):
+                requests.append({'pr': number, 'head': head})
+
+            def pin(_, ref):
+                pins.append((self.clock(), ref, d.workers.running()))
+                requests.clear()
+                return INSTALL_ROOT
+
+        cfg = dataclasses.replace(STRICT, max_parallel_actions=3, max_open_prs=5,
+                                  pin=dataclasses.replace(STRICT.pin, auto=True))
+        d = Sim(cfg, self.world, self.clock, {'implement': 30 * MINUTE, 'merge': MINUTE},
+                stop_after=('implement', 10), stop_file=self.stop, pinner=Pinner())
+        self.run_loop(d)
+        merge, first = d.spans[('merge', 100)], d.spans[('implement', 9)]
+        second = d.spans[('implement', 10)]
+        # The merge ran alongside #9 ...
+        self.assertTrue(overlap(merge, first))
+        # ... the pin waited for #9, with nothing running, ...
+        self.assertEqual(len(pins), 1)
+        moment, ref, running = pins[0]
+        self.assertEqual((ref, running), ('origin/main', []))
+        self.assertGreaterEqual(moment, first[1])
+        # ... and #10, ready meanwhile, started only after the pin.
+        self.assertGreaterEqual(second[0], moment)
+        self.assertTrue(any(line.startswith('auto-pin pending: no action starts')
+                            for line in d.logs), d.logs)
 
 
 class StopAndFailureTests(ContinuousLoopCase):
@@ -432,16 +485,37 @@ class AdmitTests(unittest.TestCase):
         self.assertEqual(admit(actions, {}, [], 0), [])
 
     def test_a_global_action_starts_alone_and_only_when_nothing_runs(self):
-        actions = [Action('fix', 100), Action('merge', 101), Action('fix', 102)]
-        self.assertEqual(admit(actions, {}, [], 3), [Action('merge', 101)])
+        actions = [Action('fix', 100), Action('pin', 0), Action('fix', 102)]
+        self.assertEqual(admit(actions, {}, [], 3), [Action('pin', 0)])
         running = [(Action('implement', 9), frozenset({9}))]
+        self.assertEqual(admit(actions, {}, running, 2), [])
+        running = [(Action('merge', 101), frozenset({101, 8}))]
         self.assertEqual(admit(actions, {}, running, 2), [])
 
     def test_nothing_starts_while_a_global_action_runs(self):
-        running = [(Action('merge', 100), frozenset({100, 7}))]
-        actions = [Action('fix', 101), Action('implement', 9)]
-        self.assertEqual(admit(actions, {101: 8}, running, 2), [])
-        self.assertEqual(admit([Action('pin', 0)], {}, running, 2), [])
+        running = [(Action('pin', 0), frozenset({0}))]
+        actions = [Action('fix', 101), Action('merge', 102), Action('implement', 9)]
+        self.assertEqual(admit(actions, {101: 8, 102: 10}, running, 2), [])
+
+    def test_a_ready_pr_holds_back_no_other_action(self):
+        # #264: a merge is not global. With a long implementation running, it starts with the
+        # review, readiness check and fix planned with it.
+        running = [(Action('implement', 9), frozenset({9}))]
+        actions = [Action('merge', 100), Action('review', 101), Action('preflight', 11),
+                   Action('fix', 102)]
+        issue_of = {100: 7, 101: 8, 102: 10}
+        self.assertEqual(admit(actions, issue_of, running, 4), actions)
+        # A merge that waits for another one holds back nothing either.
+        running.append((Action('merge', 103), frozenset({103, 12})))
+        self.assertEqual(admit(actions, issue_of, running, 3), actions[1:])
+
+    def test_one_merge_at_a_time(self):
+        actions = [Action('merge', 100), Action('merge', 101), Action('fix', 102)]
+        self.assertEqual(admit(actions, {}, [], 3), [Action('merge', 100), Action('fix', 102)])
+        running = [(Action('merge', 99), frozenset({99}))]
+        self.assertEqual(admit(actions, {}, running, 3), [Action('fix', 102)])
+        # The merge left waiting still holds its number: a later action on it does not start.
+        self.assertEqual(admit([Action('merge', 100), Action('hold', 100)], {}, running, 3), [])
 
 
 class PlanAroundRunningTests(unittest.TestCase):
@@ -581,6 +655,15 @@ class DocumentationTests(unittest.TestCase):
         for needle in ('`devloop run`', '`devloop tick`', 'max_parallel_actions', 'barrier',
                        'global action', 'same number', 'STOP'):
             self.assertIn(needle, section)
+
+    def test_the_devloop_document_describes_the_merge_lane(self):
+        text = (REPO / 'docs' / 'devloop.md').read_text(encoding='utf-8')
+        start = text.index('#### The merge lane')
+        section = text[start:text.index('\n### ', start)]
+        for needle in ('one merge\nat a time', 'holds back no\nother action', 'pin after a merge',
+                       'stays global', 'no action is exclusive with a merge', '`devloop tick`'):
+            self.assertIn(needle, section)
+        self.assertIn('[merge lane](#the-merge-lane)', text)
 
 
 if __name__ == '__main__':

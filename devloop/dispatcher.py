@@ -72,7 +72,7 @@ trusted user's label counts. The issue text stays trusted only while no one outs
 Parallel actions (#176, ``max_parallel_actions`` above 1): the actions of a tick on different
 issues and PRs run at once, up to that many (``schedule``). Actions on the same number, or on a
 PR and its issue, run one after the other in plan order; a global action (``GLOBAL_ACTIONS``)
-runs alone. Each log line carries the number of its action (``TickLog``), a failed action does
+or a merge runs alone. Each log line carries the number of its action (``TickLog``), a failed action does
 not stop the others, and a review action at level 2 runs together every reviewer its round
 still waits for.
 
@@ -81,7 +81,8 @@ barrier at the end of a tick. A tick plans and starts actions in the free slots,
 for them; the loop runs the next tick as soon as one ends, or as news on GitHub arrive while a
 slot is free. The issues and PRs of the running actions are left out of the plan (``plan``'s
 ``busy``), so no two actions on the same number overlap, and a global action starts only when
-nothing runs, alone (``admit``). ``devloop tick`` keeps the barrier.
+nothing runs, alone (``admit``). A merge runs in a lane of its own (#264, ``MERGE_LANE``): one
+at a time, alongside the actions on other numbers. ``devloop tick`` keeps the barrier.
 
 Merge (#172, ``[merge]``): with ``mode = "off"`` (the default) a person merges. With ``strict``
 the dispatcher merges a ready PR, with the local ``gh`` login and ``--match-head-commit``, once
@@ -168,10 +169,16 @@ RESYNC_AFTER_APPROVAL = 'resync_after_approval'
 BASE_CHANGED = 'base_changed'
 # Actions that take a slot of ``max_actions_per_tick``.
 EXPENSIVE = ('review', 'fix', 'implement', 'sync', 'preflight', 'merge', 'supervise')
-# Actions that write to the base branch or to the whole repository (the merge of #172, the pin
-# of #174): with ``max_parallel_actions`` above 1 each runs alone, after the actions planned
-# before it and before those planned after it (#176).
-GLOBAL_ACTIONS = frozenset({'merge', 'pin'})
+# Actions that write to the whole repository or to devloop itself (the pin of #174): with
+# ``max_parallel_actions`` above 1 each runs alone, after the actions planned before it and
+# before those planned after it (#176), and in continuous mode only when nothing runs (#227).
+GLOBAL_ACTIONS = frozenset({'pin'})
+# Actions that write to the base branch (the merge of #172). In continuous mode they run in a
+# lane of their own (#264): one at a time, alongside the actions on other numbers, since those
+# work in their own worktrees and already handle a base that moves (#160, #235, #250, #252),
+# as they must for a merge made by a person. In a tick's ``schedule`` each is still a phase of
+# its own, as a global action.
+MERGE_LANE = frozenset({'merge'})
 LABEL_STYLE = {
     'ready': ('0e8a16', 'devloop: pronta per essere implementata da un agent'),
     'working': ('fbca04', 'devloop: implementazione in corso'),
@@ -328,11 +335,12 @@ def schedule(actions, issue_of):
 
     Actions on the same number share a lane, in plan order, and so do an action on a PR and one
     on its issue (``issue_of``: PR number to issue number). A global action
-    (``GLOBAL_ACTIONS``) is a phase of its own: it starts after every action planned before it
-    has ended, and those planned after it start once it has ended."""
+    (``GLOBAL_ACTIONS``) or a merge (``MERGE_LANE``) is a phase of its own: it starts after
+    every action planned before it has ended, and those planned after it start once it has
+    ended."""
     phases, batch = [], []
     for position, action in enumerate(actions):
-        if action.kind in GLOBAL_ACTIONS:
+        if action.kind in GLOBAL_ACTIONS or action.kind in MERGE_LANE:
             if batch:
                 phases.append(_lanes(batch, issue_of))
             phases.append([[(position, action)]])
@@ -376,14 +384,17 @@ def admit(actions, issue_of, running, slots):
 
     A global action (``GLOBAL_ACTIONS``) starts only when nothing runs, alone and before the
     others; while one is planned and something runs, nothing starts, so that the running actions
-    end and it runs next. While a global action runs, nothing starts either. Of several actions
-    on the same number, or on a PR and its issue, only the first starts: the next plan, which
-    sees its result, decides the others."""
+    end and it runs next. While a global action runs, nothing starts either. A merge
+    (``MERGE_LANE``, #264) is not global: it starts alongside the actions on other numbers and
+    holds back none of them, but only one merge runs at a time; a merge planned while another
+    runs waits for a later plan. Of several actions on the same number, or on a PR and its
+    issue, only the first starts: the next plan, which sees its result, decides the others."""
     if any(action.kind in GLOBAL_ACTIONS for action, _ in running):
         return []
     first = next((a for a in actions if a.kind in GLOBAL_ACTIONS), None)
     if first is not None:
         return [] if running else [first]
+    merging = any(action.kind in MERGE_LANE for action, _ in running)
     chosen, taken = [], set()
     for action in actions:
         if len(chosen) >= slots:
@@ -392,6 +403,10 @@ def admit(actions, issue_of, running, slots):
         if numbers & taken:
             continue
         taken |= numbers
+        if action.kind in MERGE_LANE:
+            if merging:
+                continue
+            merging = True
         chosen.append(action)
     return chosen
 
