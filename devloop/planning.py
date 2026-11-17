@@ -591,8 +591,10 @@ def _plan_preflight(snapshot, cfg, pr_issues, free, urgent=''):
     why ``max_parked_prs`` is reached (#274), only ``priority:high`` issues start, and their
     actions carry it. A failed check that is still
     valid blocks the issue again if its ``agent:needs-operator`` was removed. An issue the check
-    blocked is checked again, whatever ``free``, when its text changed or a trusted user asked
-    for it; any other ``agent:needs-operator`` (or its name before #248) is left alone. An issue in
+    blocked is checked again, whatever ``free``, when its text changed, a trusted user asked
+    for it or someone who may admit it added ``agent:ready`` again (#270); when the base branch
+    advanced past a failure that depends on it (#270), only within ``free``, as any check. Any
+    other ``agent:needs-operator`` (or its name before #248) is left alone. An issue in
     ``agent:needs-supervisor`` waits for the supervisor (#182)."""
     lb = cfg.labels
     excluded = set(cfg.blocked_labels) | {lb.working, lb.needs_supervisor}
@@ -608,6 +610,11 @@ def _plan_preflight(snapshot, cfg, pr_issues, free, urgent=''):
         state, reason = preflight_state(view)
         if operator_blocked(issue['labels'], lb):
             if view['owned'] and state == 'run':
+                if reason == BASE_ADVANCED:
+                    # Nobody asked for this check: it takes a slot, as a first check does.
+                    if taken >= free or (urgent and issue.get('priority') != 'high'):
+                        continue
+                    taken += 1
                 actions.append(Action('preflight', issue['number'], reason))
         elif state == 'not_ready':
             actions.append(Action('preflight_block', issue['number'],
@@ -620,10 +627,24 @@ def _plan_preflight(snapshot, cfg, pr_issues, free, urgent=''):
     return actions
 
 
+BASE_ADVANCED = 'the base branch advanced since the failed readiness check, whose gaps depend on it'
+
+
+def repository_bound(record):
+    """Whether a readiness check's failure holds only for the commit of the base branch it ran
+    on (#270): it failed with at least one gap ``repository_dependent`` and recorded that commit
+    (``base``). A record written before #270 has neither, and holds for its text alone."""
+    return (record is not None and not record['ready'] and isinstance(record.get('base'), str)
+            and any(g.get('repository_dependent') is True for g in record['gaps']))
+
+
 def preflight_state(view):
     """``(state, reason)`` of an issue's readiness check: ``run`` when a check is needed,
     otherwise ``ready`` or ``not_ready``, the outcome of the latest check, which holds while the
-    issue text keeps its hash."""
+    issue text keeps its hash. A failed check holds also only while no one who may admit the
+    issue added ``agent:ready`` again after it (``relabeled``, the login, #270) and, when it is
+    ``repository_bound``, while the base branch stays at the commit it ran on (``base``, the
+    current one, None when unknown: the outcome holds)."""
     record = view['record']
     if view['recheck']:
         return 'run', f'{RECHECK_COMMAND} by a trusted user'
@@ -631,6 +652,10 @@ def preflight_state(view):
         return 'run', 'no readiness check yet'
     if record['hash'] != view['hash']:
         return 'run', 'the issue text changed since the readiness check'
+    if not record['ready'] and view.get('relabeled'):
+        return 'run', f'agent:ready added again by {view["relabeled"]} after the failed check'
+    if repository_bound(record) and view.get('base') and view['base'] != record['base']:
+        return 'run', BASE_ADVANCED
     return ('ready' if record['ready'] else 'not_ready'), ''
 
 

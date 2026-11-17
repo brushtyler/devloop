@@ -300,9 +300,11 @@ class GitHub:
 
     def pr_comments(self, number):
         """Conversation comments, read with REST so that an app's login is ``<slug>[bot]``
-        (`gh pr view` reports it as a bare ``<slug>``, indistinguishable from a user)."""
+        (`gh pr view` reports it as a bare ``<slug>``, indistinguishable from a user), with the
+        time each was written (``created_at``, ISO 8601, UTC)."""
         return self._json_lines('api', '--paginate', f'repos/{self.repo}/issues/{number}/comments',
-                                '--jq', '.[] | {id, author: {login: .user.login}, body}')
+                                '--jq', '.[] | {id, author: {login: .user.login}, body, '
+                                        'created_at}')
 
     def issue_comments(self, number):
         """An issue's comments, oldest first, read with REST as :meth:`pr_comments`."""

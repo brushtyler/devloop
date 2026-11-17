@@ -167,6 +167,16 @@ carry one. Any other trusted comment counts, even one that starts with the heade
 GitHub Apps devloop and the operator share a login, and the header alone would hide a
 requirement the check never saw.
 
+Since #270 the marker also records `base`, the commit of the base branch the check ran on, and
+each gap its `repository_dependent` flag. A failed outcome with at least one such gap holds only
+while the base branch stays at `base`; one whose gaps all concern the text holds for the hash
+alone. A failed outcome also stops holding when the latest `labeled` event of `agent:ready`
+comes after the check's comment (by GitHub's `created_at`, a later second) and one of the
+issue's admitters wrote it. Records written before #270 lack both fields and are read as
+before: their failure holds for the hash, the dependency is never inferred from the
+descriptions, and the label added again repeats them too. A failure reused to block the issue
+again keeps the `base` of its record.
+
 The dispatcher removes only a block that belongs to the check. The check owns
 `agent:needs-operator` only if it added the label when the label was absent: its record keeps the
 number of earlier `labeled` events of the label, and the dispatcher must have written the only

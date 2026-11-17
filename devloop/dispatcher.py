@@ -56,7 +56,9 @@ another owner's finding is open.
 Readiness check (#114, with ``preflight`` configured): before ``implement`` a read-only agent,
 other than the implementer, checks on a checkout of the base branch that the issue can be
 implemented in one run. Its outcome is a ``preflight`` record on the issue, bound to the hash of
-the title, the body and the trusted comments, and reused while that hash holds. An issue that is
+the title, the body and the trusted comments, and reused while that hash holds. A failed check
+holds also only until someone who may admit the issue adds agent:ready again, and, when a gap
+depends on the base branch, only for the commit it ran on (#270). An issue that is
 not ready goes to agent:needs-operator; the check removes that label only if it added it itself.
 
 Start order (#146): ready issues start by priority (``priority:high``, ``normal``, ``low``; a
@@ -135,6 +137,7 @@ suite runs locally, as before, unless the base branch requires checks: the revie
 them, and after ``required_timeout_minutes`` the PR is escalated (``ci_missing``).
 """
 
+import functools
 import hashlib
 import itertools
 import json
@@ -812,6 +815,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
         # those without an open block (#114), that may start or are blocked by the check.
         candidates = [i for i in ready if 'merged' in i and not i['merged']]
         views = self._dependency_view([i['number'] for i in candidates]) if candidates else {}
+        # The base branch, fetched at most once per snapshot, for the failed checks that depend
+        # on it (#270).
+        base_head = functools.cache(lambda: self.ws.base_head())
         for issue in candidates:
             issue.update(views[issue['number']])
             if issue['cycle']:
@@ -819,7 +825,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
                 self.log(f'  issue #{issue["number"]}: dependency cycle '
                          + ', '.join(issue['cycle']) + ': it does not start')
             if self.cfg.preflight and not issue['blocked_by']:
-                issue['preflight'] = self._preflight_view(issue['number'], issue['labels'])
+                issue['preflight'] = self._preflight_view(issue['number'], issue['labels'],
+                                                          base_head)
         working = [raw['number'] for raw in self.gh.issues_with_label(lb.working)]
         return Snapshot(prs=prs, ready_issues=ready, working_issues=working,
                         supervised=self._supervised_items(prs))

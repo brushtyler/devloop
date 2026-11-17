@@ -259,7 +259,9 @@ follows [`devloop/schemas/preflight.json`](../../devloop/schemas/preflight.json)
 
 - `ready`, a boolean;
 - `gaps`, each with a `kind` (`operator_decision`, `default_available` or `tool_unavailable`),
-  a `description`, the `code_refs` that show it and a `proposed_default` (`""` if none);
+  a `description`, the `code_refs` that show it, a `proposed_default` (`""` if none) and
+  `repository_dependent` (#270), `true` when the gap closes by itself once `main` gains some
+  content (a prerequisite not merged yet, a file that does not exist yet), whatever its `kind`;
 - `split`, how to divide an issue too large for one run, `""` if not needed.
 
 An issue is ready only if the agent says so **and** lists no gap and no split: a
@@ -283,6 +285,25 @@ edited the issue) or when a trusted user wrote a comment whose **first line** is
 latest record on the issue. The command is ignored, and logged, when anyone outside
 `trusted_users` writes it. If the new check passes, the dispatcher removes `agent:needs-operator`
 and the issue goes back in the queue.
+
+A failed check is also repeated, without a change to the text and without `/devloop recheck`
+(#270):
+
+- **when `main` advances**, if at least one gap is `repository_dependent`: such an outcome holds
+  only for the commit of `main` it ran on, recorded with it. The first tick that finds `main` at
+  another commit checks the issue again, within the free PR slots of the tick like any check
+  nobody asked for; if the prerequisite has arrived, the check passes. A failure whose gaps all
+  concern the text holds as before, whatever `main` does;
+- **when `agent:ready` is added again** after the failed check, by someone who may admit the
+  issue: a trusted user or, where its labels count, the supervisor's app
+  ([Labels from the supervisor](#labels-from-the-supervisor)). The supervisor only asks for the gaps to be
+  evaluated again; it decides a default with `/devloop decide`. The latest `labeled` event of
+  `agent:ready` must come after the check's comment (a label in the same second does not count);
+  a label from anyone else is ignored, as it does not admit the issue at all.
+
+Checks recorded before #270 carry neither the commit nor `repository_dependent`: they keep
+holding for their text alone, devloop does not infer the dependency from their descriptions, and
+`agent:ready` added again repeats them too. The next check records both.
 
 Rechecks run only for blocks the check owns: when the check owns `agent:needs-operator` is
 described in [Readiness check records](protocol.md#readiness-check-records).
