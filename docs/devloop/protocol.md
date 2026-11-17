@@ -31,7 +31,7 @@ alone until GitHub recomputes. As for any push, the merge must not differ from `
 
 A sync writes no review record, so it does not consume a review round, and it runs even when no
 round is left. The PR goes back to `agent:review`, also from `agent:ready-to-merge`, and the next
-round reviews the new head after CI as usual; that round counts against `max_review_rounds`,
+round reviews the new head as usual, also while its CI runs; that round counts against `max_review_rounds`,
 except after an approval (see [Resync after approval](#resync-after-approval)). A
 sync that fails (the implementer is blocked, tests still fail, markers are left, the merge was
 concluded or aborted by the agent, or the agent run failed) goes to `agent:needs-operator` with a
@@ -148,6 +148,25 @@ conflicts moved, nor the new review of an approved head whose approval the base 
 (`round/reviewer/ID`), so the round shown as the limit (`round 4 of at most 4`, `round 4/4`) is
 `max_review_rounds` plus the rounds that did not count.
 
+### Approval and CI
+
+A review round starts while the CI of its head is pending (#271), or while a head just pushed has
+no CI yet within the [window of a new head](reference.md#ci-of-a-new-head): the review record
+then carries `ci: pending`, and no full suite runs locally in place of the CI. The CI of the
+same head decides what the approval is worth:
+
+- **CI passed.** The recorded approval is applied without a new review, as a replay: no new
+  round, and the PR goes to `agent:ready-to-merge` if the other conditions of the promotion hold.
+- **CI failed.** The approval does not count for the merge: the PR is never promoted and never
+  merged on it. The failure becomes a CI round after the review's, counted against
+  `max_review_rounds` as any CI round, and the PR goes to `agent:changes` with every finding
+  still open (or its failed jobs are re-run once, see
+  [CI failures not pertinent to the PR](reference.md#ci-failures-not-pertinent-to-the-pr)).
+- **No CI after the window.** With `local_tests` other than `full` the full suite runs locally
+  before the promotion; if it fails, the PR goes to `agent:needs-operator`.
+
+A CI already failed before the review is a CI round, as before: no review runs on that head.
+
 ## PR marker
 
 A devloop PR is recognised by its branch, `agent/issue-<n>`, opened by a trusted user. Its body
@@ -202,7 +221,8 @@ configuration of the pool or of a required reviewer (apps, models, efforts, `rev
 changed, or the level rose, the PR stays in
 `agent:review`, a dispatcher comment says what changed, and the next tick runs a new review,
 even of the same head. That review is a
-round like any other and waits for CI. Approvals recorded before receipts existed have none:
+round like any other: it may start while the CI runs, and its approval waits for the CI of the
+same head (see [Approval and CI](#approval-and-ci)). Approvals recorded before receipts existed have none:
 they are not promoted and need a new review; their rounds and open findings stay as they are. A
 PR already in `agent:ready-to-merge` keeps its label until something sends it back to review.
 
@@ -491,7 +511,7 @@ readiness check, on the PR for review, fix, sync and CI. They publish no receipt
 |---|---|---|
 | `request` | The issue goes from `agent:ready` to `agent:working` | SHA-256 of title and body, author and time of the trusted `labeled` event of `agent:ready`, ids of the trusted comments given to the implementer, time of the takeover. It is a snapshot **at the takeover**, not at the time of the label |
 | `turn` | Every invocation of an agent CLI, retries, fallback models and failures included: implement, fix, sync with an agent, review, readiness check | Kind, agent, GitHub identity (none: the operator's `gh` login), configured model and effort (for a fallback, the fallback model and the model it replaces), real model, start, end, duration, outcome (`success`, `failure`, `unavailable`), the error if any, telemetry, and the last command the turn ran or started when the CLI exposes it (`last_command`: only codex, from the `command_execution` items of `--json`; cleaned like the tail of a timeout, on one line, at most 200 characters; absent otherwise), also for a turn that timed out |
-| `verification` | Every test command the dispatcher runs after a writing turn (none when the [local tests](reference.md#local-tests) select nothing), and the full suite it runs before a review of a head without CI | Command, outcome, duration, the tree hash before and after the test, and the commit (none before a review) |
+| `verification` | Every test command the dispatcher runs after a writing turn (none when the [local tests](reference.md#local-tests) select nothing), and the full suite it runs before a review of a head without CI, or before the promotion of an approval given while no CI was known | Command, outcome, duration, the tree hash before and after the test, and the commit (none before a review) |
 | `event` | The CI of a head (`ci_round`): a failed CI round, the checks a review round saw whatever its verdict (`approve`, `request_changes` or `needs_operator`), or the passing checks read again just before the PR is promoted to `agent:ready-to-merge` (also at level 0); a sync without an agent, or the merge of `main` before a fix (`sync`) | For the CI, the head, the state (`fail`, `pass`, or `none` without checks), the review round (none at level 0) and each check with its outcome and the id of its GitHub Actions run (none for a commit status or a check outside Actions); the same checks read again for the same head and round are not recorded twice, a new run is. For a sync, the merged base commit and the old and new heads |
 
 **Telemetry** is what the CLI attests, not authenticated:

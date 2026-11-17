@@ -113,8 +113,9 @@ class PullRequest:
     # not started yet, and the failure is not a new one.
     reruns: list = field(default_factory=list)
     rerun_waiting: bool = False
-    # In agent:review, a head without CI that the review waits for (#263): why, as the log says
-    # it ('' when it does not wait), and the checks the base branch requires that are still
+    # In agent:review, a head without CI that waits for it (#263), as if its CI were pending: the
+    # review starts, the approval waits (#271). Why, as the log says it ('' when it does not
+    # wait), and the checks the base branch requires that are still
     # missing after ``required_timeout_minutes`` (empty unless the PR is to escalate).
     ci_wait: str = ''
     ci_missing: list = field(default_factory=list)
@@ -500,17 +501,23 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
                 actions.append(Action('sync', pr.number, 'conflicts with the base branch'))
             elif pr.merge_state == 'unknown':
                 continue  # GitHub is still computing mergeability: next tick
-            elif pr.checks == 'pending':
-                continue
             elif pr.ci_missing:
                 # The checks the base branch requires never appeared on the head (#263).
                 actions.append(Action('ci_missing', pr.number, 'required checks missing: '
                                       + ', '.join(pr.ci_missing)))
-            elif pr.ci_wait:
-                continue  # a head without CI yet (#263): as if its CI were pending
             elif pr.checks == 'fail' and pr.rerun_waiting:
                 continue  # the failed jobs were re-run (#200) and have not started yet
+            elif ((pr.checks == 'pending' or pr.ci_wait) and cfg.review_policy.zero_enabled()
+                  and cfg.review_policy.zero_label in pr.labels):
+                # Level 0 (#107) has no review to start early and needs every expected check:
+                # it waits for the CI, as before #271.
+                continue
             elif replay and not unbound and not unmapped and pr.checks != 'fail':
+                if pr.checks == 'pending' or pr.ci_wait:
+                    # The review started with the CI running (#271), or on a head without CI
+                    # yet (#263): the approval waits for the CI of this same head. Passed, it
+                    # is applied without a new review; failed, it goes to ci_failed below.
+                    continue
                 actions.append(Action('apply_review', pr.number, 'approval already recorded'))
             elif partial and pr.checks != 'fail':
                 actions.append(Action('review', pr.number, 'the round waits for '
@@ -528,6 +535,8 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
                           else 'the approval has no matching policy receipt' if unbound
                           else 'the acceptance map does not hold' if unmapped
                           else 'every finding of the request for changes is closed' if settled
+                          else 'CI pending: the merge waits for it'
+                          if pr.checks == 'pending' or pr.ci_wait
                           else '')
                 actions.append(Action('review', pr.number, reason))
     # A ready issue that a merged devloop PR already resolved is never checked nor implemented

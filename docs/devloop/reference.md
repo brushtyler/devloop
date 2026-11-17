@@ -153,11 +153,15 @@ no test runs locally and the PR goes on to the CI. `implement_test_retries` appl
 that ran: a failure goes back to the implementer with the output, and after the last attempt the
 issue or PR goes to `agent:needs-operator`, as with `"full"`.
 
-**The CI stays the gate.** A defect the local modules miss becomes a CI round. When the full suite
-did not run locally (`"changed"` or `"none"`), a review needs the CI passed: if the head has no
-CI at all, the first reviewer's action of the round runs `test_cmd` locally, in a disposable copy
-of the PR worktree, before the review, and a failure sends the PR to `agent:needs-operator` without a
-review. With `"full"` the gate is unchanged: CI passed or absent.
+**The CI stays the gate.** A defect the local modules miss becomes a CI round. The review may
+start while the CI runs, but an approval leads to `agent:ready-to-merge` only once the CI of the
+same head passes (#271). When the full suite did not run locally (`"changed"` or `"none"`) and
+the head has no CI at all past the [window of a new head](#ci-of-a-new-head), the first
+reviewer's action of the round runs `test_cmd` locally, in a disposable copy of the PR worktree,
+before the review, and a failure sends the PR to `agent:needs-operator` without a review. An
+approval given within that window, while no CI was known, gets the same full suite before its
+promotion if the window ends without CI: a failure sends the PR to `agent:needs-operator`
+without promoting it. With `"full"` an absent CI is enough, as before; a pending CI is not.
 
 The mode and the modules run (`local_tests`: `{mode, modules}`, only `{mode}` with `"full"`) go to the tick log and, as
 information only, to the markers of implement and fix: they are not part of the policy receipt
@@ -168,27 +172,32 @@ and no approval depends on them.
 In continuous mode a review can be planned a few seconds after a push, before GitHub registers
 the CI of the new head: with `local_tests` other than `"full"` the dispatcher would then run the
 whole suite locally ([Local tests](#local-tests)) while the CI is about to start (#263). So a PR
-in `agent:review` whose head has no CI at all waits, as if its CI were pending: the review is not
-planned and nothing runs locally.
+in `agent:review` whose head has no CI at all is treated as if its CI were pending (#271): the
+review starts, its prompt says the CI is `pending`, and no full suite runs locally. An approval
+waits for the CI of that head, as with a CI pending: it is applied, without a new review, once
+the CI passes.
 
 - **Grace window.** The wait lasts `[ci] grace_minutes` (default 5) from the push of the head:
   the push the running dispatcher made (implement, fix, sync), else the commit date of the head
   as GitHub reports it, read once. A date in the future, or one that cannot be read, counts from
   the first time the dispatcher looks at the head, so the wait stays bounded.
 - **No CI after the window.** The [full suite runs locally](#local-tests) before the review, as
-  before.
+  before; for an approval already given within the window, before its promotion.
 - **Required checks.** When the rulesets or the classic branch protection of `base_branch`
-  require checks, the review waits for them instead, up to `[ci] required_timeout_minutes`
-  (default 30) from the push. After that the PR goes to `agent:needs-operator` with an escalation
+  require checks, the merge waits for them instead, up to `[ci] required_timeout_minutes`
+  (default 30) from the push, and no full suite runs locally: the review still starts within
+  that time. After that the PR goes to `agent:needs-operator` with an escalation
   of class `ci_missing`: it is not among the [classes](guide.md#escalations-to-the-supervisor),
   so it is critical and always goes to the operator. The timeout prevails over a longer grace
   window: with `grace_minutes = 60` and `required_timeout_minutes = 30` the PR is escalated 30
   minutes after the push. If the required checks cannot be read, the
   dispatcher writes a line to the tick log and counts them as none.
 
-The tick log says why a review waits, for example `PR #257: waiting for CI on 9ef3336dfbe6:
-pushed 12 s ago, within [ci] grace_minutes = 5`. With `local_tests = "full"` nothing waits: the
-gate stays the one of [Local tests](#local-tests). `grace_minutes` is a whole number of at least
+The tick log says why the head waits for its CI, for example `PR #257: waiting for CI on
+9ef3336dfbe6: pushed 12 s ago, within [ci] grace_minutes = 5`, and an approval not promoted yet
+says `not promoted: no CI on 9ef3336dfbe6 yet, and the approval did not see it` (or `not
+promoted: CI is pending`). With `local_tests = "full"` there is no window: a head without CI is
+reviewed and promoted as before, the gate of [Local tests](#local-tests). `grace_minutes` is a whole number of at least
 0 (0 turns the window off) and `required_timeout_minutes` one of at least 1; another value, or an
 unknown key of `[ci]`, stops devloop at startup.
 

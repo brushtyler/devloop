@@ -731,8 +731,9 @@ class PlanTests(unittest.TestCase):
         snap.prs.append(pr(number=101, issue=8, labels=['agent:changes'], checks='pending'))
         self.assertEqual(self.kinds(snap), [('fix', 101)])
 
-    def test_review_waits_for_ci_and_routes_failures(self):
-        self.assertEqual(self.kinds(Snapshot([pr(checks='pending')], [], [])), [])
+    def test_review_starts_with_ci_pending_and_routes_failures(self):
+        # The review does not wait for the CI (#271); a CI already failed goes to ci_failed.
+        self.assertEqual(self.kinds(Snapshot([pr(checks='pending')], [], [])), [('review', 100)])
         self.assertEqual(self.kinds(Snapshot([pr(checks='fail')], [], [])), [('ci_failed', 100)])
         self.assertEqual(self.kinds(Snapshot([pr(checks='none')], [], [])), [('review', 100)])
         self.assertEqual(self.kinds(Snapshot([pr(labels=['agent:changes'])], [], [])), [('fix', 100)])
@@ -1475,13 +1476,15 @@ class DispatcherTests(unittest.TestCase):
         self.assertIn('Kept both sides.', body)
         self.assertIsNone(markdown.read_marker(body, 'review'))
         self.assertEqual(self.ws.removed, ['pr-100'])
-        # GitHub reports the new head mergeable: it is reviewed as round 1, after CI.
+        # GitHub reports the new head mergeable: it is reviewed as round 1, also while its CI
+        # runs (#271): the merge waits for that CI, the review does not.
         self.gh.open = [self.raw_pr('MERGEABLE', 'CLEAN', head=SHA2)]
         snap = d.snapshot()
         self.assertEqual((snap.prs[0].reviews, snap.prs[0].merge_state), ([], 'clean'))
         self.assertEqual(plan(snap, CFG), [Action('review', 100)])
         self.gh.ci = 'pending'
-        self.assertEqual(plan(d.snapshot(), CFG), [])
+        self.assertEqual(plan(d.snapshot(), CFG),
+                         [Action('review', 100, 'CI pending: the merge waits for it')])
 
     def test_unknown_merge_state_is_deferred_without_errors(self):
         runner = FakeRunner()
@@ -1679,7 +1682,8 @@ class RereviewTests(unittest.TestCase):
         d = self.make(self.needs_operator_then(('brushtyler', '/devloop rereview'), rounds=3))
         self.assertEqual(self.planned(d), [('round_limit', 100)])
         self.gh.ci = 'pending'
-        self.assertEqual(self.planned(d), [])  # waits for CI like any new round
+        # A new round starts with the CI running too (#271), and so counts against the limit.
+        self.assertEqual(self.planned(d), [('round_limit', 100)])
 
 
 # GitHub App identities -----------------------------------------------------------

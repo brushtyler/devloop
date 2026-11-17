@@ -11,7 +11,10 @@ The working directory is a disposable git worktree at the PR head, removed after
 tests may write temporary files, but your edits never reach the PR. Inspect the change with
 `git diff origin/$base_branch...HEAD` and read whatever surrounding code you need.
 CI status for this commit: **$ci**. CI runs the full suite (`$test_cmd`), so do not rerun all of
-it; run single test modules only when you need to confirm a specific behaviour.
+it; run single test modules only when you need to confirm a specific behaviour. With `pending`
+the outcome of the tests is not known yet: judge the code, and do not assume it passes. An
+approval makes the PR ready only once the CI of this same commit passes; if it fails, the PR
+goes back to the implementer, with the failure.
 Read `AGENTS.md` and the README section "Developing SSDLC".
 
 ## What to check
