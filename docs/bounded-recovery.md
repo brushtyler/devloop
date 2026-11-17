@@ -1,9 +1,9 @@
 # Bounded recovery and design (I2)
 
-I2 implements A4.4–A4.7, A6b, the new A3 stop inventory and an initial A5 CI
-replay gate from `PLAN_AUTONOMY_WORKSTREAMS.md`. This is direct bootstrap work
-with semantic engines, real Git and credential-free Docker verification. It is
-not an unattended delivery demonstration or the final autonomous profile.
+This page describes frozen recovery limits, the timeout, transport and lock
+contracts, design convergence, the recovery stop inventory and the A5 replay
+gate. The [History](#history) at the end of this page records how it was built,
+increment by increment.
 
 ## Activation and limits
 
@@ -178,14 +178,9 @@ refused; it never resets consumed history. An authorized extension needs a
 separate explicit transition, rather than editing policy/journal files.
 
 Existing tickets cannot acquire a fresh profile over historical accounting.
-I1 imported generations remain verification-only until a separately reviewed
-cumulative-limit reconciliation/authorization is supported through
-[issue #27](https://github.com/brushtyler/ssdlc/issues/27), which completes I2.
-PR #26 is its independently reviewable first increment for new runs. In particular this
-increment neither resumes issue #22 nor treats its existing ledger/unknown
-legacy caps as zero. This conservative compatibility refusal is deliberate;
-the original source, counters and limits remain preserved. Do not copy this
-controller over a frozen run or manually rewrite its state.
+A stopped I1 generation is admitted through the separate
+[historical admission](#historical-i1-admission). Do not copy this controller
+over a frozen run or manually rewrite its state.
 
 ## Timeout, transport and lock contracts
 
@@ -285,10 +280,9 @@ provenance. Raw transcripts, authorizations and run journals stay private.
 
 [Issue #27 admission](historical-reconciliation.md) provides a separate exact-hash
 transition from a stopped I1 generation into cumulative native I2 enforcement.
-It never installs a fresh profile over historical consumption. Other new-run I2
-hardening remains in issue #29.
+It never installs a fresh profile over historical consumption.
 
-## Protected baseline and issue #29 validation
+## Protected baseline
 
 `schemas/recovery-grader-baseline.json` (`i2-fixtures-v5`) pins the grader,
 expectations, replay fixtures, imported test helpers and existing CI gate by
@@ -299,6 +293,45 @@ those files, the baseline control file, or any path under `tests/replay/`;
 capture also blocks them if validation is bypassed. Direct, explicitly reviewed
 baseline changes must update the pins alongside the code. Hashes are host-owned
 integrity references, not authentication against a host user who replaces both.
+
+Issue #32 isolates the A5 CI job from general unittest discovery. The pinned
+`ssdlc_replay_gate.py` requires Python isolated mode and stages only the pinned
+test modules/fixtures in a disposable import directory. The original `tests/`
+is never added to its import path. New discovery modules cannot monkeypatch this
+process; `PYTHONPATH` and user site are ignored. The unit gate also invokes the
+isolated entrypoint, but CI independently runs it in a separate job. Production
+modules remain the candidate under test; this is import isolation from discovery,
+not a sandbox against arbitrary malicious production code or host dependencies.
+The v3 baseline preserves all twelve corpus cases and expected outcomes. Target
+aliases are normalized before grader protection checks; parent traversal remains
+forbidden. Controller snapshots ignore global/system Git configuration and
+injected Git config, and override global excludes/fsmonitor, retaining only
+repository-owned ignore rules.
+
+## History
+
+### Increment I2
+
+I2 implements A4.4–A4.7, A6b, the new A3 stop inventory and an initial A5 CI
+replay gate from `PLAN_AUTONOMY_WORKSTREAMS.md`. This is direct bootstrap work
+with semantic engines, real Git and credential-free Docker verification. It is
+not an unattended delivery demonstration or the final autonomous profile.
+
+### First increment for new runs (PR #26)
+
+Existing tickets cannot acquire a fresh profile over historical accounting.
+I1 imported generations remain verification-only until a separately reviewed
+cumulative-limit reconciliation/authorization is supported through
+[issue #27](https://github.com/brushtyler/ssdlc/issues/27), which completes I2.
+PR #26 is its independently reviewable first increment for new runs. In particular this
+increment neither resumes issue #22 nor treats its existing ledger/unknown
+legacy caps as zero. This conservative compatibility refusal is deliberate;
+the original source, counters and limits remain preserved. Do not copy this
+controller over a frozen run or manually rewrite its state.
+
+Other new-run I2 hardening remains in issue #29.
+
+### Protected baseline and issue #29 validation
 
 The v2 baseline adds oscillating findings, diagnosis-as-evidence and empty ADR
 after diagnosis. `escaped_seeded_defects` is derived from the seeded repair's
@@ -320,21 +353,7 @@ output; passing task checks still grants no global readiness by itself.
 Deterministic evidence compilation remains an authorized service operation after
 historical admission, so a limit/stop report does not require another model call.
 
-
-Issue #32 isolates the A5 CI job from general unittest discovery. The pinned
-`ssdlc_replay_gate.py` requires Python isolated mode and stages only the pinned
-test modules/fixtures in a disposable import directory. The original `tests/`
-is never added to its import path. New discovery modules cannot monkeypatch this
-process; `PYTHONPATH` and user site are ignored. The unit gate also invokes the
-isolated entrypoint, but CI independently runs it in a separate job. Production
-modules remain the candidate under test; this is import isolation from discovery,
-not a sandbox against arbitrary malicious production code or host dependencies.
-The v3 baseline preserves all twelve corpus cases and expected outcomes. Target
-aliases are normalized before grader protection checks; parent traversal remains
-forbidden. Controller snapshots ignore global/system Git configuration and
-injected Git config, and override global excludes/fsmonitor, retaining only
-repository-owned ignore rules.
-
+### Issue #22 fixture-boundary revision (v4)
 
 The issue #22 v4 fixture-boundary revision extracts `RepositoryTests`, `finding`
 and `review` unchanged into pinned `tests/replay/repository_fixtures.py`. Replay

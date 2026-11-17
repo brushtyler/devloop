@@ -53,6 +53,8 @@ The steps of [ADR 0001](docs/adr/0001-prodotto-unico-fasi-su-tracker.md), in ord
 
 ### Recovery and continuation
 
+Start from the [recovery index](docs/recovery.md): from the stop, to the transition, to the document.
+
 | Document | When to use it |
 | --- | --- |
 | [Candidate capture](docs/candidate-capture.md) | How developer output is captured and verified in disposable workspaces (I0) |

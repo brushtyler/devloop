@@ -78,7 +78,7 @@ Before new planning or the first task, the host captures and registers `00-recon
 - A missing or altered contract blocks execution.
 - The fingerprint ignores global and system Git configuration, so it does not depend on `HOME`.
 
-Keep the executing installation pinned to a reviewed version. When SSDLC develops itself, run that pinned controller against a separate target checkout. A run continues on its pinned controller; changing controller requires an explicit migration (see the [recovery documents](../README.md#recovery-and-continuation)).
+Keep the executing installation pinned to a reviewed version. When SSDLC develops itself, run that pinned controller against a separate target checkout. A run continues on its pinned controller; changing controller requires an explicit migration (see the [recovery index](recovery.md)).
 
 ## Integrity model and its limits
 

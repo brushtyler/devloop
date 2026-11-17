@@ -1,9 +1,8 @@
 # Native stopped-run continuation (I1)
 
-This implements the first compatibility rule in `PLAN_AUTONOMY_WORKSTREAMS.md`:
-`pre-checkpoint-import-v1`. It is direct bootstrap work with offline semantic
-engines and a credential-free Docker smoke, not autonomous delivery. Validation
-and scope are recorded in `docs/evidence/i1-offline-validation.json`.
+The `pre-checkpoint-import-v1` compatibility rule (I1) imports a stopped
+pre-checkpoint task run for fresh verification. The [History](#history) at the
+end of this page records how it was built.
 
 I1 accepts a stopped task run with a valid version 1.0 journal, no completed
 checkpoint, one previously charged root-task attempt and all other tasks pending
@@ -165,6 +164,15 @@ verification is a dedicated foreground command; it does not resume the old
 supervisor process or silently redirect its evidence. Use the command output and
 new `runtime-generations/<id>/state.json` / `03-dev/tasks/task-journal.jsonl` for
 this verification. Cumulative I2 admission is described in [historical reconciliation](historical-reconciliation.md); it starts a new pinned execution generation, never redirects the old supervisor.
+
+## History
+
+### Increment I1
+
+This implements the first compatibility rule in `PLAN_AUTONOMY_WORKSTREAMS.md`:
+`pre-checkpoint-import-v1`. It is direct bootstrap work with offline semantic
+engines and a credential-free Docker smoke, not autonomous delivery. Validation
+and scope are recorded in `docs/evidence/i1-offline-validation.json`.
 
 Issue #22's real run has only been inventoried read-only while implementing I1.
 Its preserved T01 source must still be reconciled with the latest merged base,

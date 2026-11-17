@@ -49,7 +49,7 @@ flowchart TD
 
 All new runs use the task scheduler, including Tier S. See [unified execution and bootstrap](task-mode.md#unified-execution-and-greenfield-bootstrap), [corrective bounce](bounce-preview.md) and [native gate convergence](native-gate-convergence.md).
 
-Runs can also be **supervised** in the background, **resumed** from a phase, and **recovered** through explicit, hash-bound transitions under frozen cumulative limits. See the [recovery documents](../README.md#recovery-and-continuation).
+Runs can also be **supervised** in the background, **resumed** from a phase, and **recovered** through explicit, hash-bound transitions under frozen cumulative limits. See the [recovery index](recovery.md).
 
 Details: [Pipeline and architecture](architecture.md) · [Task mode](task-mode.md).
 
@@ -171,7 +171,7 @@ The full reference covers routing tables, reasoning effort, budgets, container l
 | `./ssdlc approve T` / `reject T --reason "…"` | Human sign-off |
 | `python3 orchestrator.py start` / `status` / `cancel` / `resume` / `monitor` | Detached supervision ([docs](supervision.md)) |
 | `python3 orchestrator.py bounce-preview …` | Read-only targeted-bounce preview ([docs](bounce-preview.md)) |
-| `python3 orchestrator.py continuation-*` | Explicit recovery transitions for stopped runs ([docs](../README.md#recovery-and-continuation)) |
+| `python3 orchestrator.py continuation-*` | Explicit recovery transitions for stopped runs ([docs](recovery.md)) |
 | `python3 orchestrator.py usage-profile-*` | Add engine usage rules to the limits profile of a stopped generation ([docs](bounded-recovery.md#live-calls-without-a-reported-cost-issue-43)) |
 | `python3 orchestrator.py feedback-*` | Developer-feedback diagnosis and delegation ([docs](developer-feedback.md)) |
 

@@ -207,9 +207,9 @@ required_timeout_minutes = 30
 "ssdlc_feedback_return.py" = ["docs/developer-feedback.md"]
 "ssdlc_feedback_roles.py" = ["docs/developer-feedback.md"]
 "ssdlc_feedback_workflow.py" = ["docs/developer-feedback.md"]
-"ssdlc_scope_amendments.py" = ["docs/scope-amendments.md"]
-"ssdlc_continuations.py" = ["docs/continuations.md", "docs/historical-reconciliation.md"]
-"ssdlc_historical.py" = ["docs/continuations.md", "docs/historical-reconciliation.md"]
+"ssdlc_scope_amendments.py" = ["docs/scope-amendments.md", "docs/recovery.md"]
+"ssdlc_continuations.py" = ["docs/continuations.md", "docs/historical-reconciliation.md", "docs/recovery.md"]
+"ssdlc_historical.py" = ["docs/continuations.md", "docs/historical-reconciliation.md", "docs/recovery.md"]
 "schemas/" = ["docs/configuration.md"]
 "ssdlc_catalogues.py" = ["docs/configuration.md"]
 

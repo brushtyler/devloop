@@ -70,6 +70,15 @@ class MapConfigTests(unittest.TestCase):
                          {'docs/getting-started.md': ['setup-ssdlc.sh'],
                           'docs/configuration.md': ['setup-ssdlc.sh']})
         self.assertNotIn('README.md', {d for _, docs in CFG.docs.entries for d in docs})
+        # #245: the recovery transitions also map to the recovery index (ADR 0003, I8).
+        self.assertEqual(CFG.docs.documents(['ssdlc_scope_amendments.py']),
+                         {'docs/scope-amendments.md': ['ssdlc_scope_amendments.py'],
+                          'docs/recovery.md': ['ssdlc_scope_amendments.py']})
+        for path in ('ssdlc_continuations.py', 'ssdlc_historical.py'):
+            self.assertEqual(CFG.docs.documents([path]),
+                             {'docs/continuations.md': [path],
+                              'docs/historical-reconciliation.md': [path],
+                              'docs/recovery.md': [path]})
         self.assertNotIn('docs/devloop.md', {d for _, docs in CFG.docs.entries for d in docs})
         for _, documents in CFG.docs.entries:
             for document in documents:
