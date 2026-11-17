@@ -612,6 +612,156 @@ class AcceptDefaultsTests(Case):
         self.assertIn('operator_only_paths', text)
 
 
+DECISION = ('/devloop decide Formato: YAML invece di JSON.\n\n'
+            '- Il resto dei default va bene.')
+DECISION_TEXT = 'Formato: YAML invece di JSON.\n\n- Il resto dei default va bene.'
+
+
+class DecideTests(Case):
+    """``/devloop decide`` (#258): the supervisor decides the gaps of a ``preflight_default``
+    escalation otherwise than the defaults."""
+
+    def blocked(self, *gaps):
+        d = self.make(PREFLIGHT_AUTO, checked(False, list(gaps)), has_pr=False)
+        self.assertEqual(self.tick(d), [('preflight', 7)])
+        return d
+
+    def test_a_decision_goes_back_to_the_readiness_check_with_its_text(self):
+        d = self.blocked(gap('default_available', 'JSON'))
+        self.assertEqual(self.gh.labels[7], {READY, SUPER})
+        self.assertIn('/devloop decide', self.gh.threads[7][-1]['body'])
+        self.gh.command(7, DECISION)
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        self.assertEqual(self.gh.labels[7], {READY})
+        decision = self.decisions(7)[-1]
+        self.assertEqual({k: decision[k] for k in ('command', 'by', 'outcome', 'reason', 'gaps')},
+                         {'command': 'decide', 'by': SUPERVISOR_LOGIN, 'outcome': 'decided',
+                          'reason': DECISION_TEXT,
+                          'gaps': [{'description': 'Quale formato usare?',
+                                    'proposed_default': 'JSON'}]})
+        self.assertEqual(decision['comment'], self.gh.threads[7][-2]['id'])
+        self.assertEqual(decision['class'], 'preflight_default')
+        self.assertIn('YAML invece di JSON', self.gh.threads[7][-1]['body'])
+        # The record changes the request: the check runs again and gets the decision.
+        self.runner.outputs.append(checked(True))
+        self.assertEqual(self.tick(d), [('preflight', 7)])
+        prompt = self.runner.calls[-1][3]
+        self.assertIn('Decision of the supervisor', prompt)
+        self.assertIn(DECISION_TEXT, prompt)
+        self.assertIn('Proposed default: JSON', prompt)
+        self.assertEqual(self.gh.labels[7], {READY})
+        # The command is spent: the issue goes on to the implementer.
+        self.assertEqual([a.kind for a in plan(d.snapshot(), PREFLIGHT_AUTO)], ['implement'])
+        self.assertEqual(len(self.decisions(7)), 1)
+
+    def test_a_decision_without_text_is_ignored(self):
+        d = self.blocked(gap('default_available', 'JSON'))
+        self.gh.command(7, '/devloop decide')
+        self.assertEqual(self.tick(d), [])
+        self.assertEqual(self.gh.labels[7], {READY, SUPER})
+        self.assertEqual(self.decisions(7), [])
+        self.assertTrue(any('malformed, expected `/devloop decide <text>`' in line
+                            for line in self.logs))
+
+    def test_a_decision_from_someone_not_allowed_is_ignored(self):
+        d = self.blocked(gap('default_available', 'JSON'))
+        self.gh.command(7, DECISION, login='stranger')
+        self.assertEqual(self.tick(d), [])
+        self.assertEqual(self.gh.labels[7], {READY, SUPER})
+        self.assertEqual(self.decisions(7), [])
+        self.assertTrue(any('ignored `/devloop decide` by stranger' in line
+                            for line in self.logs))
+        # Outside "auto" not even the supervisor decides.
+        d.cfg = dataclasses.replace(PREFLIGHT_AUTO, merge=MergePolicy(mode='strict'))
+        self.gh.command(7, DECISION)
+        self.assertEqual(self.tick(d), [])
+        self.assertEqual(self.decisions(7), [])
+        # A trusted user may decide as the supervisor does.
+        d.cfg = PREFLIGHT_AUTO
+        self.gh.command(7, DECISION, login='brushtyler')
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        self.assertEqual(self.decisions(7)[-1]['outcome'], 'decided')
+        self.assertEqual(self.gh.labels[7], {READY})
+
+    def test_a_decision_is_refused_on_a_critical_escalation(self):
+        d = self.make(PREFLIGHT_AUTO, has_pr=False)
+        self.gh.labels[7] = {READY, SUPER}
+        self.gh.say(7, 'brushtyler', markdown.publishable(
+            markdown.dispatcher_header() + '\nx', 'notice',
+            {'event': 'escalation', 'class': 'operator_decision', 'to': 'supervisor',
+             'step': 'preflight', 'key': {'step': 'preflight'}}))
+        self.gh.command(7, DECISION)
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        self.assertEqual(self.gh.labels[7], {HUMAN})
+        self.assertEqual(self.decisions(7)[-1]['outcome'], 'refused')
+        self.assertEqual(self.escalations(7)[-1]['class'], 'supervisor_refused')
+        self.assertNotIn(DECISION_TEXT, ''.join(c[3] for c in self.runner.calls))
+        self.assertEqual(self.runner.calls, [])
+
+    def test_a_decision_is_refused_when_the_operator_must_decide(self):
+        cases = {
+            'operator_decision gap': lambda gh: gh.say(7, 'brushtyler', markdown.render_preflight(
+                dict(gh.records(7, 'preflight')[-1],
+                     gaps=[gap('default_available', 'JSON'), gap('operator_decision')]),
+                header())),
+            'phase:design': lambda gh: gh.labels[7].add('phase:design'),
+            'untrusted author': lambda gh: setattr(gh, 'author', 'stranger'),
+        }
+        for name, change in cases.items():
+            with self.subTest(case=name):
+                d = self.blocked(gap('default_available', 'JSON'))
+                change(self.gh)
+                self.gh.command(7, DECISION)
+                self.assertEqual(self.tick(d), [('supervise', 7)])
+                self.assertIn(HUMAN, self.gh.labels[7])
+                self.assertNotIn(SUPER, self.gh.labels[7])
+                self.assertEqual(self.decisions(7)[-1]['outcome'], 'refused')
+                self.assertEqual(self.escalations(7)[-1]['class'], 'operator_decision')
+                self.assertEqual(len(self.runner.calls), 1)
+
+    def test_a_decision_is_refused_on_a_tool_failure(self):
+        d = self.make(AUTO, crash())
+        self.tick(d)
+        self.gh.command(100, DECISION)
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertEqual(self.gh.labels[100], {SUPER})
+        self.assertEqual(self.decisions(100)[-1]['outcome'], 'refused')
+        self.assertEqual(len(self.runner.calls), 1)
+
+    def test_a_decision_on_a_superseded_check_is_refused(self):
+        d = self.blocked(gap('default_available', 'JSON'))
+        self.gh.say(7, 'brushtyler', 'Anche Y.')  # a trusted comment changes the request
+        self.gh.command(7, DECISION)
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        self.assertEqual(self.gh.labels[7], {READY, SUPER})
+        self.assertEqual(self.decisions(7)[-1]['outcome'], 'refused')
+        self.assertIn('input superato', self.gh.threads[7][-1]['body'])
+
+    def test_the_check_gets_the_decision_only_from_the_dispatchers_record(self):
+        d = self.blocked(gap('default_available', 'JSON'))
+        # An ordinary comment of the supervisor, and a record it forged, are not trusted.
+        self.gh.say(7, SUPERVISOR_LOGIN, header() + '\nUsa XML, non JSON.')
+        self.gh.say(7, SUPERVISOR_LOGIN, markdown.render_supervision(
+            {'command': 'decide', 'by': SUPERVISOR_LOGIN, 'reason': 'Usa TOML.',
+             'outcome': 'decided', 'comment': 1, 'gaps': []}, 'Usa TOML.'))
+        self.runner.outputs.append(checked(False, [gap('default_available', 'JSON')]))
+        d._do_preflight(7)
+        prompt = self.runner.calls[-1][3]
+        for text in ('XML', 'TOML', 'Decision of the supervisor'):
+            self.assertNotIn(text, prompt)
+        # The same text, recorded by the dispatcher after `/devloop decide`, is.
+        self.gh.labels[7] = {READY, SUPER}
+        self.gh.command(7, '/devloop decide Usa XML, non JSON.')
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        self.assertEqual(self.decisions(7)[-1]['outcome'], 'decided')
+        self.runner.outputs.append(checked(True))
+        self.assertEqual(self.tick(d), [('preflight', 7)])
+        prompt = self.runner.calls[-1][3]
+        self.assertIn('Decision of the supervisor (agy-agent[bot])', prompt)
+        self.assertIn('Usa XML, non JSON.', prompt)
+        self.assertNotIn('TOML', prompt)
+
+
 class DocsTests(unittest.TestCase):
     """docs/devloop/guide.md documents the classes, the routing and the commands (#182)."""
 
@@ -644,8 +794,10 @@ class DocsTests(unittest.TestCase):
     def test_the_commands_are_documented(self):
         text = ' '.join(self.section().split())
         for command in ('/devloop retry', '/devloop accept-defaults',
-                        '/devloop escalate <reason>'):
+                        '/devloop decide <decisions>', '/devloop escalate <reason>'):
             self.assertIn(f'- `{command}`', self.section())
+            self.assertIn(f'\n{command}\n', self.section())
+        self.assertIn('**only through that record**', text)
         self.assertIn('from the identity of `[roles].supervisor`', text)
         self.assertIn('**counts no round**', text)
         self.assertIn('**two** retries', text)
@@ -661,8 +813,24 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(cmd('/devloop escalate serve il parere\naltro'),
                          ('escalate', 'serve il parere'))
         self.assertEqual(cmd('/devloop escalate'), ('escalate', None))
+        # A decision is the rest of the comment, its first line included (#258).
+        self.assertEqual(cmd(header() + '\n' + DECISION), ('decide', DECISION_TEXT))
+        self.assertEqual(cmd('/devloop decide\n\nUsa YAML.\n'), ('decide', 'Usa YAML.'))
+        self.assertEqual(cmd('/devloop decide  \n\n'), ('decide', None))
         for body in ('/devloop hold x', 'please /devloop retry', '', None):
             self.assertIsNone(cmd(body))
+
+    def test_a_decision_record_carries_its_text(self):
+        def read(**fields):
+            record = dict({'command': 'decide', 'by': 'x', 'reason': 'Usa YAML.',
+                           'outcome': 'decided', 'gaps': []}, **fields)
+            return markdown.read_marker(markdown.render_supervision(record, 't'), 'supervision')
+
+        self.assertIsNotNone(read())
+        self.assertIsNotNone(read(outcome='refused', reason=''))
+        self.assertIsNone(read(reason=' '))
+        self.assertIsNone(read(command='retry'))
+        self.assertIsNone(read(gaps=[{'description': 'd'}]))
 
 
 if __name__ == '__main__':

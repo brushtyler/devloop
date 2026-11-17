@@ -286,13 +286,17 @@ def _valid_hold(h):
 
 def _valid_supervision(s):
     """A supervisor command the dispatcher handled (#182): the command, its author, the outcome
-    and in ``comment`` the id of the comment that carried it (the commands it spends)."""
-    defaults = s.get('defaults', [])
+    and in ``comment`` the id of the comment that carried it (the commands it spends). A
+    ``decide`` (#258) that was applied carries its text in ``reason`` and the gaps it answers."""
+    lists = [s.get('defaults', []), s.get('gaps', [])]
     return (s.get('command') in COMMANDS and s.get('outcome') in OUTCOMES
             and isinstance(s.get('by'), str) and isinstance(s.get('reason', ''), str)
-            and isinstance(defaults, list)
+            and (s['outcome'] != 'decided'
+                 or (s['command'] == 'decide' and bool(s.get('reason', '').strip())))
+            and all(isinstance(items, list) for items in lists)
             and all(isinstance(d, dict) and isinstance(d.get('description'), str)
-                    and isinstance(d.get('proposed_default'), str) for d in defaults))
+                    and isinstance(d.get('proposed_default'), str)
+                    for items in lists for d in items))
 
 
 def _valid_rerun(r):
@@ -523,6 +527,8 @@ SUPERVISOR_RESUME = (
     'passo e input, poi l\'escalation passa all\'operatore);\n'
     '- `/devloop accept-defaults`: accetta i default proposti dal controllo di prontezza e rimette '
     'l\'issue in coda;\n'
+    '- `/devloop decide <decisioni>`: decide le lacune del controllo di prontezza anche '
+    'diversamente dai default (il testo è il resto del commento) e rimette l\'issue in coda;\n'
     '- `/devloop escalate <motivo>`: passa l\'escalation all\'operatore (`agent:needs-operator`).')
 
 

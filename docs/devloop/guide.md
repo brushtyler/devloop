@@ -141,6 +141,15 @@ and fewer parked PRs than `max_parked_prs`, since many open PRs make conflicts m
 progress (max_open_prs), <n>/<max_parked_prs> parked (max_parked_prs)`. Issues with a
 `blocked_labels` label are skipped.
 
+**Exception for high-priority issues** (#274): once `max_parked_prs` is reached, a ready issue
+with priority `high` (`priority:high`, or a label in `priority_labels` such as `prerequisito`,
+see [Start order](#start-order-of-ready-issues)) still starts, because it may be the fix the
+parked PRs wait for. It still needs a free slot of `max_open_prs`. Issues with priority `normal`
+or `low` wait, as do supervisor retries of an issue step. The tick log and the `next:` lines of
+`devloop status` give the reason: `implement #<n>: priority high: starts although
+<n>/<max_parked_prs> PRs are parked (max_parked_prs)` (with the readiness check, the same reason
+follows the one of the `preflight` action).
+
 ### Start order of ready issues
 
 New issues start in this order (#146):
@@ -391,6 +400,7 @@ any, is one of:
 ```text
 /devloop retry
 /devloop accept-defaults
+/devloop decide <decisions>
 /devloop escalate <reason>
 ```
 
@@ -434,12 +444,24 @@ command before it, and among the commands that wait the latest wins.
   0001 reserves to the operator (rollout, budget and rounds, credentials and permissions, trust
   rules, the replay gate baseline, the merge mode, the continuous loop and automatic pinning, ADR
   approval), or a change to `operator_only_paths`, is always `operator_decision`.
+- `/devloop decide <decisions>` decides the gaps of a `preflight_default` escalation otherwise
+  than `accept-defaults` does: the supervisor may accept some defaults and replace others. The
+  decisions are the rest of the comment, from the text after the command on its first line to
+  the end; a command without them is ignored. It admits the same escalations as
+  `accept-defaults`, under the same conditions, and is refused in the same cases. The dispatcher
+  records the decisions with the gaps they answer and removes `agent:needs-supervisor`; the
+  issue goes back in the queue and the readiness check runs again with the decisions as a
+  trusted comment, as it does with accepted defaults (they count in the hash of the request and
+  reach the prompts of the check and of the implementer). The decisions reach the prompts **only
+  through that record**: the supervisor's own comment, as any comment of an author outside
+  `trusted_users`, never does. Gaps reserved to the operator (`operator_decision`) are not the
+  supervisor's: the operator decides them with a comment of their own on GitHub.
 - `/devloop escalate <reason>` hands the escalation to the operator: `agent:needs-operator`, with
   the reason (`supervisor_escalated`). It needs a reason.
 
 An escalation whose class is critical or unknown, or that was not routed to the supervisor,
 accepts no command: the command is refused and the item goes to `agent:needs-operator`. A command
-the class does not admit (`accept-defaults` on a tool failure, `retry` on defaults) is refused
+the class does not admit (`accept-defaults` or `decide` on a tool failure, `retry` on defaults) is refused
 and the escalation stays with the supervisor.
 
 **Trace.** Every command applied leaves a dispatcher record, described in

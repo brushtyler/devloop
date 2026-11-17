@@ -8,7 +8,7 @@ from unittest import mock
 
 from devloop import config
 from devloop.config import ConfigError, MergePolicy
-from devloop.dispatcher import Snapshot, parked, plan, pr_counts
+from devloop.dispatcher import Snapshot, issue_priority, parked, plan, pr_counts
 from test_devloop import CFG, FakeWS, norm, pr, raw_review, ready
 from test_devloop_merge import AUTO, STRICT, Case
 from test_devloop_zero import changes
@@ -80,6 +80,58 @@ class PlanTests(unittest.TestCase):
         self.assertEqual([(a.kind, a.number) for a in plan(snapshot(prs[:1], issue), checked)],
                          [('preflight', 10)])
 
+    def test_a_high_priority_issue_starts_with_max_parked_prs_reached(self):
+        # #274: three PRs parked (3/3) waiting for the fix of the same test, and the fix is a
+        # ready priority:high issue: it starts, a normal or low one waits as before.
+        prs = [pr(number=n, issue=n, labels=[NEEDS_OPERATOR]) for n in (1, 2, 3)]
+        snap = snapshot(prs, ready(10), ready(11, priority='high'), ready(12, priority='low'))
+        self.assertEqual(pr_counts(snap, OFF), (0, 3))
+        actions = [a for a in plan(snap, OFF) if a.kind == 'implement']
+        self.assertEqual([a.number for a in actions], [11])
+        self.assertEqual(actions[0].reason,
+                         'priority high: starts although 3/3 PRs are parked (max_parked_prs)')
+        self.assertEqual(started(snapshot(prs, ready(10), ready(12, priority='low')), OFF), [])
+        # A priority_labels label (prerequisito) counts as high, as it does for the order.
+        labels, events = {'agent:ready', 'prerequisito'}, [{'label': 'prerequisito',
+                                                            'by': 'brushtyler', 'at': 't'}]
+        priority = issue_priority(labels, events, OFF.trusted_users, ('prerequisito',))
+        self.assertEqual(started(snapshot(prs, ready(10), ready(13, ['prerequisito'],
+                                                                priority=priority)), OFF), [13])
+        # Below the limit nothing changes: every issue starts, without the reason.
+        actions = plan(snapshot(prs[:2], ready(10), ready(11, priority='high')), OFF)
+        self.assertEqual([(a.kind, a.number, a.reason) for a in actions],
+                         [('implement', 11, ''), ('implement', 10, '')])
+        # The same with the readiness check: only the high issue is checked, with the reason.
+        checked = dataclasses.replace(OFF, preflight='codex')
+        view = {'record': None, 'hash': 'h', 'recheck': False, 'owned': False}
+        issues = [dict(ready(10), preflight=view), dict(ready(11, priority='high'), preflight=view)]
+        self.assertEqual([(a.kind, a.number, a.reason) for a in plan(snapshot(prs, *issues),
+                                                                     checked)],
+                         [('preflight', 11, 'no readiness check yet; priority high: starts '
+                                            'although 3/3 PRs are parked (max_parked_prs)')])
+        passed = dict(view, record={'hash': 'h', 'ready': True})
+        issues = [dict(ready(10), preflight=passed),
+                  dict(ready(11, priority='high'), preflight=passed)]
+        self.assertEqual([(a.kind, a.number) for a in plan(snapshot(prs, *issues), checked)],
+                         [('implement', 11)])
+
+    def test_a_high_priority_issue_still_respects_max_open_prs(self):
+        # Parked limit reached and every slot of max_open_prs taken: the high issue waits too.
+        parked_prs = [pr(number=n, issue=n, labels=[NEEDS_OPERATOR]) for n in (1, 2, 3)]
+        busy = parked_prs + [in_review(4), in_review(5), in_review(6)]
+        high = [ready(10, priority='high'), ready(11, priority='high')]
+        self.assertEqual(pr_counts(snapshot(busy), OFF), (3, 3))
+        self.assertEqual(started(snapshot(busy, *high), OFF), [])
+        # One slot free: one high issue starts, not both.
+        self.assertEqual(started(snapshot(busy[:-1], *high), OFF), [10])
+        # A slot reserved by an action still running (continuous mode) counts as taken.
+        self.assertEqual([a.number for a in plan(snapshot(busy[:-1], *high), OFF, reserved=1)
+                          if a.kind == 'implement'], [])
+        # The same with the readiness check.
+        checked = dataclasses.replace(OFF, preflight='codex')
+        view = {'record': None, 'hash': 'h', 'recheck': False, 'owned': False}
+        self.assertEqual(plan(snapshot(busy, dict(high[0], preflight=view)), checked), [])
+
     def test_a_ready_pr_devloop_merges_itself_is_not_parked(self):
         for cfg in (dataclasses.replace(OFF, merge=STRICT.merge),
                     dataclasses.replace(OFF, merge=AUTO.merge, supervisor=AUTO.supervisor)):
@@ -138,6 +190,25 @@ class SnapshotTests(Case):
                 mock.patch.object(cli, 'log', lines.append):
             cli.main(['status'])
         self.assertIn(line, lines)
+
+    def test_tick_log_and_status_say_why_a_high_issue_starts_over_the_parked_limit(self):
+        import devloop.__main__ as cli
+        cfg = dataclasses.replace(CFG, max_parked_prs=1)
+        reason = 'priority high: starts although 1/1 PRs are parked (max_parked_prs)'
+        snap = snapshot([pr(number=1, issue=1, labels=[NEEDS_OPERATOR])],
+                        ready(10), ready(11, priority='high'))
+        d = self.make(cfg)
+        with mock.patch.object(d, 'snapshot', return_value=snap):
+            d.tick(dry_run=True)
+        self.assertIn(f'[dry-run] implement #11: {reason}', self.logs)
+        self.assertNotIn('[dry-run] implement #10', self.logs)
+        lines = []
+        with mock.patch.object(cli, 'build', return_value=(cfg, Path('/state'), d)), \
+                mock.patch.object(cli, 'log', lines.append), \
+                mock.patch.object(d, 'snapshot', return_value=snap):
+            cli.main(['status'])
+        self.assertEqual([line for line in lines if line.startswith('next: ')],
+                         [f'next: implement #11: {reason}'])
 
 
 class ConfigTests(unittest.TestCase):
