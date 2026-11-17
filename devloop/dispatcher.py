@@ -81,6 +81,11 @@ agent:needs-supervisor, unless something makes it critical (``_supervised``), an
 supervisor's identity or a trusted user decides it with ``/devloop retry``, ``/devloop
 accept-defaults`` or ``/devloop escalate <reason>`` (``_do_supervise``). Critical and unknown
 classes always go to agent:needs-human.
+
+Requested fixes (#195): ``/devloop fix`` from a trusted user or the supervisor's identity, on a
+PR in agent:review or agent:changes, runs a fix of the current head with the rest of the comment
+as a requirement, without a review and without a round (``_do_requested_fix``). One such fix per
+head: a later command on the same head counts only after a new commit (``_fix_requests``).
 """
 
 import hashlib
@@ -127,6 +132,9 @@ RECHECK_COMMAND = '/devloop recheck'
 # attribution header, from the supervisor's identity or a trusted user.
 HOLD_COMMAND = '/devloop hold'
 RELEASE_COMMAND = '/devloop release'
+# A fix asked by a trusted user or the supervisor (#195): the first line of a comment, after the
+# attribution header; the rest of the comment is the request.
+FIX_COMMAND = '/devloop fix'
 # The modes in which devloop merges (#172).
 MERGING = ('strict', 'auto')
 # Actions that take a slot of ``max_actions_per_tick``.
@@ -232,6 +240,9 @@ class PullRequest:
     merge_status: str = None
     hold: dict = None
     merge_mode: str = None
+    # Fixes asked with ``FIX_COMMAND`` and not run yet (#195), oldest first, as
+    # ``{comment, by, request}``: one fix of the current head answers all of them.
+    fix_requests: list = field(default_factory=list)
 
 
 @dataclass
@@ -400,6 +411,25 @@ def merge_command(body):
     return 'hold', reason or None
 
 
+def fix_command(body):
+    """The request of a fix command (#195): when the first line after the attribution header is
+    ``/devloop fix``, the rest of that line and the lines below it, stripped (``''`` when there
+    is none); None when the comment is no such command."""
+    lines = (body or '').strip().splitlines()
+    while lines and (not lines[0].strip() or lines[0].strip().startswith('>')):
+        lines.pop(0)
+    tokens = lines[0].split(None, 2) if lines else []
+    if tokens[:2] != FIX_COMMAND.split():
+        return None
+    rest = tokens[2] if len(tokens) > 2 else ''
+    return '\n'.join([rest, *lines[1:]]).strip()
+
+
+def requested_fixes(fixes):
+    """The fixes that ``FIX_COMMAND`` asked for (#195), among the fix records ``fixes``."""
+    return [f for f in fixes if f.get('requests')]
+
+
 def merge_ready(pr, cfg):
     """Whether a ready PR meets, as the snapshot shows it, the merge directives that do not
     depend on its receipt (#172): CI ``pass``, ``MERGEABLE`` and ``CLEAN``, neither
@@ -524,6 +554,12 @@ def plan(snapshot, cfg):
             # Closures are recorded first; the next tick plans with them.
             actions.append(Action('findings', pr.number, 'CI passed on the head' if ci_green
                                   else 'operator command'))
+            continue
+        if pr.fix_requests:
+            # A fix of the current head asked by a trusted user or the supervisor (#195): no
+            # review first, and no round, since it writes no review record.
+            by = ', '.join(dict.fromkeys(r['by'] for r in pr.fix_requests))
+            actions.append(Action('fix', pr.number, f'{FIX_COMMAND} by {by}'))
             continue
         # A request for changes whose findings were all closed by CI or the operator: nothing
         # is left to fix, and the head needs a new review.
@@ -869,10 +905,33 @@ def _format_findings(findings):
     return '\n'.join(lines) or '(none)'
 
 
+def format_fix_requests(requests):
+    """The section of a fix prompt with the requests of ``FIX_COMMAND`` (#195), ``{comment, by,
+    request}``; empty without any."""
+    if not requests:
+        return ''
+    rendered = '\n\n'.join(f'### Request by {r["by"]}\n\n{r["request"]}' for r in requests)
+    return ('## Requests from the operator\n\n'
+            f'A trusted user or the supervisor asked for this fix with `{FIX_COMMAND}`, without '
+            'waiting for a review. Treat each request below as a requirement of this fix, as you '
+            'would a blocking finding: implement it, or return `status: "blocked"` if it needs a '
+            'product decision or contradicts the issue. List no response for it in `responses`, '
+            'which is for the open findings only. Your `summary` must say how you handled each '
+            'request.\n\n' + rendered)
+
+
+def _format_requested(fix):
+    return (f'Fix asked with `{FIX_COMMAND}` on {str(fix.get("from") or "?")[:12]}:\n'
+            + '\n'.join(f'- by {r.get("by")}: {r.get("request", "")}' for r in fix['requests']))
+
+
 def format_previous_rounds(reviews, fixes, closures=()):
+    rounds = {review['round'] for review in reviews}
+    # Fixes asked with FIX_COMMAND before any review of their round (#195).
+    parts = [_format_requested(fix) for fix in requested_fixes(fixes)
+             if fix['round'] not in rounds]
     if not reviews:
-        return 'This is the first round.'
-    parts = []
+        return '\n\n'.join(parts) or 'This is the first round.'
     for position, review in enumerate(reviews):
         owner = owner_of(review)
         parts.append(f'### Round {review["round"]}: {review["verdict"]} on {review["head_sha"][:12]}'
@@ -883,7 +942,9 @@ def format_previous_rounds(reviews, fixes, closures=()):
         if reviews[position + 1:position + 2] and reviews[position + 1]['round'] == review['round']:
             continue  # the fix answers the whole round: after its last review
         for fix in fixes:
-            if fix['round'] == review['round']:
+            if fix['round'] == review['round'] and fix.get('requests'):
+                parts.append(_format_requested(fix))
+            if fix['round'] == review['round'] and (fix['responses'] or not fix.get('requests')):
                 parts.append('Implementer responses:\n' + '\n'.join(
                     f'- {r["finding_id"]}: {r["action"]}: {r["note"]}' for r in fix['responses']))
     if closures:
@@ -1017,8 +1078,8 @@ class Dispatcher:
         return list(pending.values())
 
     def _may_hold(self, login):
-        """Whether ``login`` may hold or release a merge (#172): a trusted user, or the app of
-        the agent configured as ``roles.supervisor``."""
+        """Whether ``login`` may hold or release a merge (#172), or ask for a fix (#195): a
+        trusted user, or the app of the agent configured as ``roles.supervisor``."""
         supervisor = self._app_login(self.cfg.supervisor) if self.cfg.supervisor else None
         return login in self.cfg.trusted_users or bool(supervisor and login == supervisor)
 
@@ -1478,9 +1539,53 @@ class Dispatcher:
                           if record['round'] < latest), default=-1)
             pr.round_comments = operator_comments(comments[before + 1:],
                                                   self.cfg.trusted_users)
+        if pr.labels & {self.cfg.labels.review, self.cfg.labels.changes}:
+            pr.fix_requests = self._fix_requests(pr, comments)
         # Last: whether a command is accepted depends on the merge mode of the PR, which its
         # review and policy records determine (#172).
         pr.hold = self._hold_command(pr, comments)
+
+    def _fix_requests(self, pr, comments):
+        """The fixes asked with ``FIX_COMMAND`` and not run yet (#195), ``{comment, by,
+        request}``, oldest first. A fix record that answers commands spends them, whose comment
+        ids it carries, and every command before them (GitHub's comment ids grow with time), as
+        a hold record does (``_hold_command``); one without the ids spends what precedes it. A
+        command counts from a trusted user or the supervisor's identity (``_may_hold``), with a
+        request; a command on a head where a requested fix already ran is ignored until a new
+        commit, so that commands cannot loop on the same head. Every ignored command is logged.
+        devloop's own records are never commands."""
+        spent, last, ran = None, -1, set()
+        for position, record in self._marker_entries(pr, comments, 'fix'):
+            if not record.get('requests'):
+                continue
+            ran.add(record.get('from'))
+            ids = [r.get('comment') for r in record['requests']]
+            if all(isinstance(i, int) and not isinstance(i, bool) for i in ids):
+                spent = max([*ids, *([spent] if spent is not None else [])])
+            else:
+                last = position
+        found = []
+        for comment in comments[last + 1:]:
+            body = comment.get('body') or ''
+            request = None if carries_record(body) else fix_command(body)
+            if request is None:
+                continue
+            ident = comment.get('id')
+            if spent is not None and (not isinstance(ident, int) or ident <= spent):
+                continue
+            login = (comment.get('author') or {}).get('login')
+            why = ('the author is neither the supervisor nor a trusted user'
+                   if not self._may_hold(login)
+                   else f'malformed, expected `{FIX_COMMAND}` followed by the request'
+                   if not request
+                   else f'a fix asked with `{FIX_COMMAND}` already ran on head '
+                        f'{pr.head_sha[:12]}: a new command counts after a new commit'
+                   if pr.head_sha in ran else None)
+            if why:
+                self.log(f'  PR #{pr.number}: ignored `{FIX_COMMAND}` by {login}: {why}')
+                continue
+            found.append({'comment': ident, 'by': login, 'request': request})
+        return found
 
     def _merge_mode(self, pr):
         """The merge mode of ``pr`` now (#172): ``[merge]`` with the override of its review
@@ -3223,6 +3328,8 @@ class Dispatcher:
 
     def _do_fix(self, pr):
         cfg, lb = self.cfg, self.cfg.labels
+        if pr.fix_requests:
+            return self._do_requested_fix(pr)
         if not pr.reviews:
             return self._escalate(pr.number, 'Modifiche richieste ma nessuna review devloop da '
                                              'correggere.', remove=[lb.changes],
@@ -3256,31 +3363,86 @@ class Dispatcher:
                                  acceptance_criteria(issue.get('body'))),
                              acceptance_map=format_map(latest_map(pr.meta, pr.fixes)),
                              docs=docs_diff_section(self._mapped_docs(path)),
-                             language=cfg.language)
+                             requests='', language=cfg.language)
         result, failure, used, tested, local = self._write_turn(
             agent, prompt, 'fix', path, f'pr-{pr.number}-fix-r{latest["round"]}',
             where=(pr.number, 'fix'))
+        self._publish_fix(pr, agent, name, path, (result, failure, used, tested, local),
+                          since=latest['head_sha'], round_no=latest['round'],
+                          remove=[lb.changes])
+
+    def _publish_fix(self, pr, agent, name, path, turn, since, round_no, remove, extra=None):
+        """Publish the outcome of a fix ``turn`` (``_write_turn``'s result) in worktree
+        ``path``: escalate a blocked agent or failing tests (removing ``remove``), otherwise
+        commit and push the changes made since commit ``since``, record the fix of round
+        ``round_no`` (with ``extra`` fields in its marker) and send the PR back to review."""
+        lb = self.cfg.labels
+        result, failure, used, tested, local = turn
         if result['status'] == 'blocked':
-            return self._blocked(pr.number, used, result['blocked_reason'], remove=[lb.changes],
+            return self._blocked(pr.number, used, result['blocked_reason'], remove=remove,
                                  on_pr=True)
         if failure:
-            return self._escalate(pr.number, failure[0], failure[1], remove=[lb.changes],
+            return self._escalate(pr.number, failure[0], failure[1], remove=remove,
                                   cls='tests_failed')
         if self.ws.has_changes(path):
             auth = self._git_auth(agent.key, IMPLEMENT)
             commit = self.ws.commit_all(
                 path, self._commit_message(agent, result['commit_message'], pr.issue), author=auth)
             self._bind_tested(tested, path, commit)
-            protected = self._protected_changes(path, since=latest['head_sha'])
+            protected = self._protected_changes(path, since=since)
             if protected:
-                return self._escalate_protected(pr.number, protected, remove=[lb.changes])
+                return self._escalate_protected(pr.number, protected, remove=remove)
             self.ws.push(path, pr.head_ref, auth=auth)
         fix = dict(result, head_sha=self.ws.head(path),
-                   profile=self._profile(agent.key, 'write', used), local_tests=local)
+                   profile=self._profile(agent.key, 'write', used), local_tests=local,
+                   **(extra or {}))
         self._as(agent.key, PR_COMMENT).comment(
-            pr.number, render_fix(fix, self.runner.header(used), latest['round']))
+            pr.number, render_fix(fix, self.runner.header(used), round_no))
         self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.changes])
         self.ws.remove(name)
+
+    def _do_requested_fix(self, pr):
+        """A fix of the current head asked with ``FIX_COMMAND`` by a trusted user or the
+        supervisor (#195), on a PR in ``agent:review`` or ``agent:changes``: the implementer gets
+        the requests as requirements, and in ``agent:changes`` the findings still open too. It
+        follows the rules of every fix (local tests, protected paths, push, back to
+        ``agent:review``) and writes no review record, so it spends no round. Its record carries
+        the comments that asked for it and the head it ran on: they are spent, and a new command
+        counts on that head only after a new commit (``_fix_requests``). The record belongs to
+        the latest round, which it answers, so the next tick reviews the head again; before any
+        review it belongs to round 0."""
+        cfg, lb = self.cfg, self.cfg.labels
+        remove = [lb.review, lb.changes]
+        if pr.meta['implementer'] not in cfg.agents:
+            return self._escalate(
+                pr.number, f'L\'implementer della PR (`{pr.meta["implementer"]}`) non è più '
+                           f'configurato: serve una decisione su chi esegue `{FIX_COMMAND}`.',
+                remove=remove, cls='configuration')
+        agent = cfg.agent(pr.meta['implementer'])
+        requests = pr.fix_requests
+        findings = (open_findings(pr.reviews, pr.closures) if lb.changes in pr.labels else [])
+        round_no = last_round(pr.reviews)
+        issue, _ = self._issue_context(pr.issue)
+        name = f'pr-{pr.number}'
+        path = self.ws.existing_branch(name, pr.head_ref)
+        if self.ws.head(path) != pr.head_sha:
+            self.log('  head moved since the snapshot; retrying next tick')
+            return
+
+        def prompt(attempt):
+            return _template('fix', repo=cfg.repo, pr_number=pr.number, issue_number=pr.issue,
+                             issue_title=issue['title'], issue_body=issue.get('body') or '',
+                             findings=_format_findings(findings), test_cmd=cfg.test_cmd,
+                             requests=format_fix_requests(requests),
+                             acceptance_criteria=format_criteria(
+                                 acceptance_criteria(issue.get('body'))),
+                             acceptance_map=format_map(latest_map(pr.meta, pr.fixes)),
+                             docs=docs_diff_section(self._mapped_docs(path)),
+                             language=cfg.language)
+        turn = self._write_turn(agent, prompt, 'fix', path, f'pr-{pr.number}-fix-request',
+                                where=(pr.number, 'fix'))
+        self._publish_fix(pr, agent, name, path, turn, since=pr.head_sha, round_no=round_no,
+                          remove=remove, extra={'requests': requests, 'from': pr.head_sha})
 
     def _do_sync(self, pr):
         """Merge the base branch into a conflicting PR. The implementer resolves the conflicts

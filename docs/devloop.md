@@ -16,7 +16,7 @@ plans the next steps and runs them. A crashed tick is resumed by the next one.
 | Implement | Changes made and [local tests](#local-tests) pass | Dispatcher commits, pushes `agent/issue-<n>`, opens a PR labelled `agent:review` |
 | CI | Checks pending | Wait; failing checks become a review round sent back as `agent:changes` |
 | Review | CI passed or absent (absent CI with `local_tests` other than `full`: the full suite first runs locally, see [Local tests](#local-tests)) | The dispatcher computes the PR's [review level](#review-level-and-policy-receipt); at level 1 a **different** agent posts a structured verdict (see below), at level 2 two [independent reviewers](#level-2-two-independent-reviewers) do, one per action, and their verdicts are applied together |
-| Fix | `agent:changes` | The implementer fixes or disputes every open finding of the round, then back to `agent:review` |
+| Fix | `agent:changes`, or a [`/devloop fix`](#fix-requested-by-the-operator-or-the-supervisor) command on a PR in `agent:review` or `agent:changes` | The implementer fixes or disputes every open finding of the round, and applies the requests of the command, then back to `agent:review` |
 | Sync | A PR in `agent:review` or `agent:ready-to-merge` conflicts with `main` | The implementer resolves the conflicts of a merge of `origin/main`; the dispatcher pushes the merge commit, back to `agent:review` (see below) |
 | Approve | Verdict `approve` from every reviewer the level requires | `agent:ready-to-merge`, only if no [finding](#findings-and-who-closes-them) is still open, the PR head is still the reviewed commit, CI passed and the policy receipt recomputed just before promotion matches the one of every approval (an earlier base is admitted only if `main` left the PR's files alone since, see [When `main` advances](#when-main-advances-during-a-round)) |
 | Level 0 | A trusted user's `reviews:0`, the whole diff in the operator's allowlist, every expected check `success` | `agent:ready-to-merge` without a review (see [Level 0](#level-0-no-review)); off by default |
@@ -87,6 +87,42 @@ count either (see [When `main` advances](#when-main-advances-during-a-round)): t
 replaces it counts once. Round numbers stay progressive, because they also name the findings
 (`round/reviewer/ID`), so the round shown as the limit (`round 4 of at most 4`, `round 4/4`) is
 `max_review_rounds` plus the rounds that did not count.
+
+### Fix requested by the operator or the supervisor
+
+A fix normally answers a review that asked for changes on the current head: a PR in
+`agent:changes` whose head moved after that review (for example after a sync with `main`) goes
+back to review instead. To ask for a correction that is already known, without waiting for a
+review and without spending a round, comment on the PR:
+
+```text
+/devloop fix
+Add the fakes that came with the merge to the conformance test.
+```
+
+- `/devloop fix` must be the **first line** of the comment (after the attribution header, for
+  the supervisor). The rest of that line and the lines below it are the request; a command
+  without a request is ignored.
+- It counts from a user in `trusted_users` and, only when `[roles].supervisor` is configured,
+  from the supervisor's GitHub App, in any merge mode. A command from anyone else is ignored and
+  logged, and so is text devloop publishes with a record.
+- It applies to a PR in `agent:review` or `agent:changes`. On a PR in `agent:needs-human`,
+  `agent:needs-supervisor` or `agent:ready-to-merge` nothing runs.
+- The next tick runs a fix of the **current head** with the request as a requirement, before any
+  review. In `agent:changes` the fix also answers every finding still open. Every rule of a
+  fix holds: [local tests](#local-tests), `protected_paths`, push with the implementer's
+  identity, back to `agent:review`. The fix writes no review record, so it does not count
+  against `max_review_rounds`; the review that follows is a new round as usual.
+- **One fix per head.** Every command written before the fix runs is answered by that one fix.
+  A command on a head where a requested fix already ran (for example one that changed nothing)
+  is ignored and logged until a new commit reaches the PR, so that commands cannot loop.
+- The fix record (`fix` marker) cites the comments that asked for it (their ids, authors and
+  requests) and the head it ran on, and belongs to the latest round (round 0 before any
+  review). The next review sees the request among the comments of the trusted users, as for
+  any comment, and in the previous rounds of its prompt.
+- A fix that stops at `agent:needs-human` (the agent is blocked, tests still fail) records
+  nothing, so the command is still to apply when the PR is resumed in `agent:review` or
+  `agent:changes`. To drop it, delete the comment or remove its first line.
 
 ### Resuming after a `needs_human` verdict without code changes
 
@@ -841,7 +877,7 @@ is *proposed* until the operator approves and merges it.
 |---|---|---|---|
 | **Operator** | `brushtyler` | Takes the reserved decisions of ADR 0001; resolves escalations (`agent:needs-human`); approves ADRs; assigns roles; can always merge, block or resume any work | — |
 | **Coordinator** (optional, not assigned today) | — | Backlog plan and priorities, draft ADRs, checks the supervisor's work. A revocable delegation of the operator | The reserved decisions |
-| **Supervisor** | Claude Code (`claude-agent`) | Watches devloop; analyses runs; opens issues for problems and improvements; queues issues of trusted authors (`agent:ready`, priority) within the approved priorities; in `auto` mode holds or sequences merges and decides non-critical escalations; escalates to the operator | Implement, review, change configuration, policy, budget or credentials; merge: the dispatcher does |
+| **Supervisor** | Claude Code (`claude-agent`) | Watches devloop; analyses runs; opens issues for problems and improvements; queues issues of trusted authors (`agent:ready`, priority) within the approved priorities; asks for a fix of a PR in review (`/devloop fix`, any mode); in `auto` mode holds or sequences merges and decides non-critical escalations; escalates to the operator | Implement, review, change configuration, policy, budget or credentials; merge: the dispatcher does |
 | **Dispatcher** | devloop (`dispatcher`) | Runs the steps: preflight, implement, review, fix, sync, CI rounds, promotion, merge (`strict` or `auto` mode), pin (if on), continuous loop (if on); writes the markers; escalates | The reserved decisions; merge with merging off |
 | **Preflight** | Codex (`codex-agent`) | Checks an issue's readiness, read-only | Write to GitHub: the dispatcher does |
 | **Implementer** | Claude (`claude-agent`) | Implements and fixes in the worktree | Publish, push, merge |

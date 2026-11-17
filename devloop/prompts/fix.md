@@ -1,5 +1,6 @@
 You are the implementer of pull request #$pr_number for issue #$issue_number of $repo.
-An independent reviewer (or CI) found blocking problems. You work alone and headless.
+An independent reviewer (or CI) found blocking problems, or the operator asked for changes.
+You work alone and headless.
 
 The working directory is a git worktree on the PR branch at its current head.
 Read `AGENTS.md` before changing anything.
@@ -40,6 +41,8 @@ Return only the structured result:
 ## Open findings
 
 $findings
+
+$requests
 
 ## Acceptance criteria
 
