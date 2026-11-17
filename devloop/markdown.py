@@ -94,8 +94,15 @@ def _valid_review(r):
 
 
 def _valid_fix(f):
-    return (_is_int(f.get('round'), 1) and isinstance(f.get('head_sha'), str)
-            and _list_of_dicts(f.get('responses')))
+    """A fix of a round. One asked with ``/devloop fix`` (#195) carries ``requests``, the
+    comments that asked for it, and ``from``, the head it ran on; before any review it belongs
+    to round 0."""
+    requests = f.get('requests', [])
+    requested = bool(requests)
+    return (_is_int(f.get('round'), 0 if requested else 1) and isinstance(f.get('head_sha'), str)
+            and _list_of_dicts(f.get('responses')) and _list_of_dicts(requests)
+            and all(isinstance(r.get('by'), str) for r in requests)
+            and (not requested or isinstance(f.get('from'), str)))
 
 
 def _valid_sync(s):
@@ -305,13 +312,27 @@ def render_native_review(review, head):
 
 
 def render_fix(fix, head, round_no):
-    parts = [f'## Correzioni per il round {round_no}', '', fix['summary'].strip()]
+    requests = fix.get('requests') or []
+    if requests:
+        # A fix asked with /devloop fix (#195): it cites the comments that asked for it.
+        parts = [f'## Correzioni richieste con `/devloop fix` su `{fix["from"][:12]}`', '']
+        for r in requests:
+            cited = f'commento {r["comment"]}' if r.get('comment') is not None else 'commento'
+            parts += [f'Richiesta di `{r["by"]}` ({cited}):', '',
+                      '\n'.join('> ' + line for line in r['request'].splitlines()), '']
+        parts.append(fix['summary'].strip())
+    else:
+        parts = [f'## Correzioni per il round {round_no}', '', fix['summary'].strip()]
     if fix['responses']:
         parts += ['', '| Finding | Azione | Nota |', '|---|---|---|']
         for r in fix['responses']:
             note = r['note'].replace('|', '\\|').replace('\n', ' ')
             parts.append(f'| {r["finding_id"]} | {_ACTION_TEXT[r["action"]]} | {note} |')
     payload = {'round': round_no, 'head_sha': fix['head_sha'], 'responses': fix['responses']}
+    if requests:
+        payload['requests'] = [{'comment': r.get('comment'), 'by': r['by'],
+                                'request': r['request']} for r in requests]
+        payload['from'] = fix['from']
     if 'acceptance_map' in fix:
         # The latest map of the PR from now on (#134).
         parts += ['', render_map(fix['acceptance_map'])]
