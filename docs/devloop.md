@@ -13,3 +13,8 @@ split into three pages:
 
 Ports and adapters are in [Pipeline and architecture](architecture.md#ports-and-adapters); roles
 and merge modes in [ADR 0002](adr/0002-ruoli-e-responsabilita.md).
+
+The split moved the content of the former single page without rewriting it. CI and the level-2
+reviews verified it on the merge of #262, commit `3c34f1cde8065bfeabee0d8c76294eafd6032a8e`. The
+ledger of the split and the test that checked it were removed afterwards (#273): they stay in the
+repository history at that commit.
