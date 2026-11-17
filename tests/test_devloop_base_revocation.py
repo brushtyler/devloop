@@ -74,7 +74,7 @@ class BaseRevocationTests(Quorum):
         self.assertIsNone(self.d.snapshot().prs[0].resync)
         self.assertEqual(self.planned(), [Action('round_limit', 100)])
         self.d.tick()
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         self.assertEqual(len(self.records('review')), 1)
 
     def test_a_new_commit_after_the_revocation_spends_a_round(self):
@@ -118,7 +118,7 @@ class BaseRevocationTests(Quorum):
     def test_a_request_for_changes_in_the_free_round_keeps_the_limit(self):
         self.approved_then_revoked(raw_review('request_changes', [finding()]))
         self.d.tick()
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         self.assertIn('Raggiunto il limite di 1 round', self.gh.comments[-1][1])
 
 

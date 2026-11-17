@@ -292,7 +292,8 @@ class AutoPinTests(GitCase):
         snapshots = []
         d = Dispatcher(cfg, None, FakeWS(), FakeRunner(), log=self.logs.append,
                        pinner=pin.AutoPin(self.root, self.state, log=self.logs.append))
-        d.snapshot = lambda: snapshots.append(1) or (_ for _ in ()).throw(AssertionError('plan'))
+        d.labels_checked = True  # no GitHub here: the label rename of #248 is not under test
+        d.snapshot =lambda: snapshots.append(1) or (_ for _ in ()).throw(AssertionError('plan'))
         return d, snapshots
 
     def test_a_requested_pin_runs_before_planning_and_restarts(self):

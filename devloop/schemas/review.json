@@ -4,7 +4,7 @@
   "required": ["verdict", "summary", "blocking_findings", "non_blocking_findings",
                "previous_findings", "human_reason", "checks_performed"],
   "properties": {
-    "verdict": {"type": "string", "enum": ["approve", "request_changes", "needs_human"]},
+    "verdict": {"type": "string", "enum": ["approve", "request_changes", "needs_operator"]},
     "summary": {"type": "string"},
     "blocking_findings": {
       "type": "array",

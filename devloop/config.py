@@ -198,6 +198,11 @@ class AppConfig:
     slug: str
 
 
+# The name ``agent:needs-operator`` had before #248. ``devloop setup`` renames the label on
+# GitHub; until then, and while a repository still has it, it blocks exactly as the new one.
+LEGACY_NEEDS_OPERATOR = 'agent:needs-human'
+
+
 @dataclass(frozen=True)
 class Labels:
     ready: str = 'agent:ready'
@@ -205,14 +210,19 @@ class Labels:
     review: str = 'agent:review'
     changes: str = 'agent:changes'
     ready_to_merge: str = 'agent:ready-to-merge'
-    needs_human: str = 'agent:needs-human'
+    needs_operator: str = 'agent:needs-operator'
     merge_hold: str = 'agent:merge-hold'
     # A non-critical escalation the supervisor decides in merge mode ``auto`` (#182).
     needs_supervisor: str = 'agent:needs-supervisor'
 
     def all(self):
         return (self.ready, self.working, self.review, self.changes,
-                self.ready_to_merge, self.needs_human, self.merge_hold, self.needs_supervisor)
+                self.ready_to_merge, self.needs_operator, self.merge_hold, self.needs_supervisor)
+
+    def operator(self):
+        """The labels that hand an issue or a PR to the operator (#248): ``needs_operator`` and
+        its name before #248, which blocks and authorizes exactly as it does."""
+        return frozenset({self.needs_operator, LEGACY_NEEDS_OPERATOR})
 
 
 @dataclass(frozen=True)

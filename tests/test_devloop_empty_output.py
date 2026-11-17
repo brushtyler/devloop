@@ -108,7 +108,7 @@ class EmptyRunTests(unittest.TestCase):
         cli = FakeCLI(gemini_4_argon_high=EMPTY, gemini_4_hydrogen_high=EMPTY)
         log = self.tick(cli)
         self.assertEqual(cli.models(), [ARGON, HYDROGEN, HYDROGEN])
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         body = self.gh.comments[-1][1]
         self.assertEqual(markdown.read_marker(body, 'notice')['class'], 'tool_failure')
         self.assertIn('Il passo `review` è fallito: the last model tried for `agy` failed', body)
@@ -123,7 +123,7 @@ class EmptyRunTests(unittest.TestCase):
         cli = FakeCLI(gemini_4_argon_high=EMPTY)
         self.tick(cli, cfg)
         self.assertEqual(cli.models(), [ARGON, ARGON])
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         body = self.gh.comments[-1][1]
         self.assertEqual(markdown.read_marker(body, 'notice')['class'], 'tool_failure')
         self.assertIn(f'Il passo `review` è fallito: agy returned no output: {WARNING}; no output '

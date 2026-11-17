@@ -47,7 +47,7 @@ Read `AGENTS.md` and the README section "Developing SSDLC".
 
 - `approve`: no blocking finding and every previous finding resolved or withdrawn.
 - `request_changes`: at least one blocking finding, or a previous finding still unresolved.
-- `needs_human`: the issue is ambiguous, the change needs a product or authority decision, or the
+- `needs_operator`: the issue is ambiguous, the change needs a product or authority decision, or the
   disagreement with the implementer cannot be settled technically. Explain it in `human_reason`.
 
 Write every human-readable field in $language. Use `line: 0` and an empty `file` when a finding

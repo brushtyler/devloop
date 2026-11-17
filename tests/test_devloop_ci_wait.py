@@ -135,7 +135,7 @@ class CIWaitTests(unittest.TestCase):
         self.now += 1
         self.assertEqual(self.step(d), ['ci_missing'])
         self.assertEqual((self.runner.calls, self.ws.commands), ([], []))
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         body = self.gh.comments[-1][1]
         self.assertIn('30 minuti dopo il push', body)
         self.assertIn('`Unit Tests (Python 3.12)`', body)
@@ -153,7 +153,7 @@ class CIWaitTests(unittest.TestCase):
         self.now += 2 * 60  # 31 minutes after the push, still within the grace
         self.assertEqual(self.step(d), ['ci_missing'])
         self.assertEqual((self.runner.calls, self.ws.commands), ([], []))
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         self.assertEqual(self.notices()[-1]['class'], 'ci_missing')
         # Without required checks the same head still waits for the whole grace.
         d = self.make(committed=NOW - 31 * 60, cfg=cfg)

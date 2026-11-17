@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import orchestrator
+import ssdlc_controller
 import ssdlc_corrective as corrective
 from ssdlc_tasks import TaskError, TaskJournal, atomic_json, digest, file_hash, git, ticket_lock
 import test_gate_reports as gate_fixtures
@@ -19,8 +20,33 @@ class Crash(BaseException):
     pass
 
 
+_CONTROLLER_ROOT = Path(orchestrator.__file__).resolve().parent
+_live_controller_snapshot = ssdlc_controller.controller_snapshot
+_controller_cache = {}
+
+
+def cached_controller_snapshot(root):
+    """Snapshot the executing controller checkout once per test process.
+
+    These tests never modify the controller checkout, yet the engine guards it
+    about a hundred times per test, each time with three git subprocesses and a
+    hash of every controller file. The guards still run and still compare the
+    snapshot; only the repeated identical observation is reused. Any other
+    root is observed live.
+    """
+    if Path(root).resolve() != _CONTROLLER_ROOT:
+        return _live_controller_snapshot(root)
+    if 'snapshot' not in _controller_cache:
+        _controller_cache['snapshot'] = _live_controller_snapshot(root)
+    return copy.deepcopy(_controller_cache['snapshot'])
+
+
 class ExecutorFixture(gate_fixtures.GateFixture):
     def setUp(self):
+        for target in ('ssdlc_controller.controller_snapshot', 'orchestrator.controller_snapshot'):
+            snapshot = patch(target, side_effect=cached_controller_snapshot)
+            snapshot.start()
+            self.addCleanup(snapshot.stop)
         super().setUp()
         self.orch._ensure_controller_contract()
         self.directory = self.orch.dir_dev / 'tasks'
