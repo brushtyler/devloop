@@ -8,12 +8,13 @@ from types import SimpleNamespace
 from unittest import mock
 
 import doc_contracts as docs
+import test_devloop_supervision as supervision
 from devloop import markdown
 from devloop.dispatcher import Dispatcher, dependency_cycles, plan, queue_lines, start_order
 from devloop.github import GitHub
 from helpers.devloop_fakes import FakeIdentities
-from test_devloop import CFG, FakeRunner, FakeWS
-from test_devloop_preflight import PCFG
+from test_devloop import CFG, FakeRunner, FakeWS, implemented
+from test_devloop_preflight import PCFG, checked
 from test_devloop_priority import QueueGH, added, at
 
 READY, HIGH = 'agent:ready', 'priority:high'
@@ -283,6 +284,116 @@ class AdapterTests(unittest.TestCase):
         query = next(a for a in argv if a.startswith('query='))
         self.assertIn('blockedBy', query)
         self.assertIn('BLOCKED_BY_ADDED_EVENT', query)
+        self.assertFalse(any(a.startswith('before=') for a in argv))
+
+    def test_the_events_are_read_back_until_every_open_block_has_its_addition(self):
+        # #5, a trusted block still open, was added before 150 other additions: its event is
+        # not among the latest 100, and is read on the previous page.
+        def event(number, by, day):
+            return {'__typename': 'BlockedByAddedEvent', 'createdAt': at(day),
+                    'actor': {'__typename': 'User', 'login': by},
+                    'blockingIssue': {'number': number, 'repository': {'nameWithOwner': 'o/r'}}}
+
+        old = [event(5, 'brushtyler', 1)] + [event(100 + i, 'brushtyler', 2) for i in range(49)]
+        recent = [event(200 + i, 'brushtyler', 3) for i in range(100)]
+        blocked_by = [{'number': 5, 'state': 'OPEN', 'repository': {'nameWithOwner': 'o/r'}},
+                      {'number': 9, 'state': 'CLOSED', 'repository': {'nameWithOwner': 'o/r'}}]
+        pages = {None: (recent, {'hasPreviousPage': True, 'startCursor': 'C2'}),
+                 'C2': (old, {'hasPreviousPage': False, 'startCursor': 'C1'})}
+        calls = []
+
+        def fake_run(argv, **kw):
+            before = next((a[len('before='):] for a in argv if a.startswith('before=')), None)
+            calls.append(before)
+            nodes, info = pages[before]
+            payload = {'data': {'repository': {'issue': {
+                'author': {'__typename': 'User', 'login': 'brushtyler'},
+                'blockedBy': {'nodes': blocked_by},
+                'timelineItems': {'pageInfo': info, 'nodes': nodes}}}}}
+            return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr='')
+
+        gh = GitHub('o/r', run=fake_run)
+        read = gh.issue_dependencies(7)
+        self.assertEqual(calls, [None, 'C2'])
+        self.assertEqual(len(read['added']), 150)
+        self.assertEqual(read['added'][0], {'repo': 'o/r', 'number': 5, 'by': 'brushtyler',
+                                            'at': at(1)})
+        self.assertEqual([e['number'] for e in read['added'][-2:]], [298, 299])
+        # Through the dispatcher, the open block counts: #7 does not start.
+        d = Dispatcher(dataclasses.replace(CFG, repo='o/r'), gh, FakeWS(), FakeRunner(),
+                       log=lambda m: None)
+        self.assertEqual(d._dependency_view([7])[7]['blocked_by'], ['#5'])
+        # Once every open block has its event, no earlier page is read.
+        calls.clear()
+        blocked_by[0]['number'] = 250
+        gh.issue_dependencies(7)
+        self.assertEqual(calls, [None])
+        # Nor when no block is open.
+        calls.clear()
+        blocked_by[0]['state'] = 'CLOSED'
+        blocked_by[0]['number'] = 1
+        gh.issue_dependencies(7)
+        self.assertEqual(calls, [None])
+
+
+class RetryTests(supervision.Case):
+    """A supervisor's ``/devloop retry`` of an issue's step waits while the issue is blocked
+    (#277), with no slot taken and no attempt spent, and runs once the block closes."""
+
+    def blocked(self, state='OPEN'):
+        """Issue #7 is blocked by #1, added by a trusted user, in ``state``."""
+        pair = block(1, state)
+        self.gh.issue_dependencies = lambda n: (
+            {'author': 'brushtyler', 'blocked_by': [dict(pair[0])], 'added': [dict(pair[1])]}
+            if n == 7 else {'author': 'brushtyler', 'blocked_by': [], 'added': []})
+
+    def test_a_retry_of_a_blocked_issue_waits_for_the_block_to_close(self):
+        cases = {'preflight': (supervision.PREFLIGHT_AUTO, checked(True)),
+                 'implement': (supervision.AUTO, implemented())}
+        for step, (cfg, output) in cases.items():
+            with self.subTest(step=step):
+                d = self.make(cfg, supervision.crash(), output, has_pr=False)
+                self.assertEqual(self.tick(d), [(step, 7)])
+                self.assertEqual(self.gh.labels[7] & {supervision.SUPER, supervision.HUMAN},
+                                 {supervision.SUPER})
+                # A trusted block is added after the failure, then the supervisor retries.
+                self.blocked()
+                self.gh.command(7, '/devloop retry')
+                snap = d.snapshot()
+                self.assertEqual(snap.supervised[0]['blocked_by'], ['#1'])
+                self.assertEqual(plan(snap, cfg), [])
+                self.assertEqual(self.tick(d), [])
+                self.assertIn('  issue #7: the retry waits, blocked by #1', self.logs)
+                # Nothing ran, nothing was spent.
+                self.assertEqual(len(self.runner.calls), 1)
+                self.assertEqual(self.decisions(7), [])
+                self.assertIn(supervision.SUPER, self.gh.labels[7])
+                # Run directly, as a plan made before the block would, it waits too.
+                d._do_supervise(7)
+                self.assertIn('  the retry waits, blocked by #1', self.logs)
+                self.assertEqual(len(self.runner.calls), 1)
+                self.assertEqual(self.decisions(7), [])
+                self.assertEqual(self.gh.created, [])
+                # The block closes: the same command runs, with nobody repeating it.
+                self.blocked('CLOSED')
+                self.assertEqual(self.tick(d), [('supervise', 7)])
+                self.assertEqual(len(self.runner.calls), 2)
+                decision = self.decisions(7)[-1]
+                self.assertEqual((decision['outcome'], decision['attempt']), ('applied', 1))
+                if step == 'implement':
+                    self.assertEqual(len(self.gh.created), 1)
+
+    def test_a_blocked_retry_takes_no_slot(self):
+        d = self.make(supervision.AUTO, supervision.crash(), has_pr=False)
+        self.tick(d)
+        self.blocked()
+        self.gh.command(7, '/devloop retry')
+        snap = d.snapshot()
+        snap.ready_issues.append({'number': 8, 'title': 'Issue 8', 'labels': {READY},
+                                  'labeler': 'brushtyler', 'admitted': True, 'merged': [],
+                                  'blocked_by': []})
+        one = dataclasses.replace(supervision.AUTO, max_open_prs=1)
+        self.assertEqual([(a.kind, a.number) for a in plan(snap, one)], [('implement', 8)])
 
 
 class DocumentationTests(unittest.TestCase):

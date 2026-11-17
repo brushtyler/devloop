@@ -192,7 +192,9 @@ written in the text and the issues that wait for it queued by hand once it is me
   [readiness check](#readiness-check-before-implementation) nor implemented, and takes no slot
   of `max_open_prs`. When the last block closes it becomes eligible by itself, in the usual
   [start order](#start-order-of-ready-issues), without anyone queuing it again. A closed block
-  blocks nothing.
+  blocks nothing. The same holds for a supervisor's `/devloop retry` of the readiness check or of
+  the implementation of a blocked issue: the command waits, takes no slot and spends no attempt,
+  and runs once the last block closes (the tick log says `the retry waits, blocked by #<n>`).
 - **Only trusted blocks count.** A block counts only if the latest timeline event that added it
   to the blocked issue comes from a user in `trusted_users`, or from the supervisor's app on an
   issue it may queue ([Labels from the supervisor](#labels-from-the-supervisor)): the same rule
@@ -209,8 +211,11 @@ written in the text and the issues that wait for it queued by hand once it is me
   supervisor. No label is added: once a block of the cycle is removed, the issues start as
   usual.
 
-The dependencies are read once per tick, for each ready issue that may start, with one GraphQL
+The dependencies are read once per tick, for each ready issue that may start, usually with one GraphQL
 query (`Tracker.issue_dependencies`, see [Ports and adapters](../architecture.md#ports-and-adapters)).
+The timeline events that tell who added each block are read 100 at a time, backwards, until
+every open block has its latest addition: a long history of blocks added and removed does not
+make a trusted block look as if it came from an unknown author.
 
 ### Labels from the supervisor
 
@@ -425,7 +430,8 @@ command before it, and among the commands that wait the latest wins.
   fix, `agent:review` for a [requested fix](#fix-requested-by-the-operator-or-the-supervisor)
   that started there, `agent:changes` for a sync that a fix in `agent:changes` started because
   its branch conflicted with `main`) and the next tick runs it; an issue's readiness check or implementation runs at once, and
-  takes a free PR slot as it would. A failed attempt writes no review record, so a retry
+  takes a free PR slot as it would; while the issue is blocked by an open issue it waits,
+  unspent ([Dependencies between issues](#dependencies-between-issues)). A failed attempt writes no review record, so a retry
   **counts no round**. After the initial failure the supervisor may authorise **two** retries
   for the same key; the third command is not run and the item goes to `agent:needs-human`
   (`retry_limit`). The automatic retries inside one run (a permission denied to agy,

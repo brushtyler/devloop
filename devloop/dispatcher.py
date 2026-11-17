@@ -65,7 +65,8 @@ number. A priority label counts only if a trusted user added it.
 
 Dependencies (#277): a ready issue with a native "blocked by" dependency on an open issue is
 neither checked nor implemented, and takes no slot; it becomes eligible by itself once the last
-block closes. A block counts only if the login that added it (the latest timeline event) may
+block closes. A supervisor's ``/devloop retry`` of a blocked issue's step waits the same way,
+unspent. A block counts only if the login that added it (the latest timeline event) may
 admit the issue (``_admitters``); any other is ignored and logged. With the same priority, an
 issue that blocks other ready issues starts first. The issues of the queue on a dependency cycle
 do not start, and the dispatcher reports the cycle once on each of them (``cycle`` record),
@@ -325,7 +326,8 @@ class Snapshot:
     ready_issues: list
     working_issues: list  # issue numbers
     # Issues and PRs in agent:needs-supervisor with a supervisor command to apply (#182):
-    # dicts ``{number, command, by, step, pr}`` (``_supervisor_view``).
+    # dicts ``{number, command, by, step, pr}`` (``_supervisor_view``); a retry of an issue's
+    # step has ``blocked_by`` too, its open blocks (#277), and waits while it is not empty.
     supervised: list = field(default_factory=list)
 
 
@@ -687,9 +689,10 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0):
     free = 0 if parked_full else slots
     for item in snapshot.supervised:
         # A supervisor command (#182). A retry of an issue's step runs that step, and takes a
-        # free PR slot as the step itself would; without one it waits for a later tick.
+        # free PR slot as the step itself would; without one it waits for a later tick. While
+        # the issue is blocked by an open issue (#277) it waits too, and takes no slot.
         if item['command'] == RETRY and not item['pr'] and item['step'] in ISSUE_STEPS:
-            if free <= 0:
+            if item.get('blocked_by') or free <= 0:
                 continue
             free -= 1
         actions.append(Action('supervise', item['number'], f'{item["command"]} by {item["by"]}'))
@@ -1611,10 +1614,11 @@ class Dispatcher:
         - ``retry``: only for ``tool_failure`` and ``sync_failed``, and only while the input of
           the step is the one that failed (the key of the escalation). A PR goes back to the
           label of its step, and the next tick runs it; an issue's step runs now. Retries
-          write no review record, so they count no round. After ``MAX_RETRIES`` retries for
-          the same key (counted per reviewer, ``retries_done``) the next one is not run and the
-          item goes to ``agent:needs-human``, as it does when what made the escalation
-          non-critical (``_supervised``) no longer holds.
+          write no review record, so they count no round. A retry of an issue blocked by an
+          open issue (#277) waits, unspent, until the last block closes. After
+          ``MAX_RETRIES`` retries for the same key (counted per reviewer, ``retries_done``) the
+          next one is not run and the item goes to ``agent:needs-human``, as it does when what
+          made the escalation non-critical (``_supervised``) no longer holds.
 
         An escalation whose class is critical or unknown, or that was not routed to the
         supervisor, accepts no command: the item goes to ``agent:needs-human``."""
@@ -1728,6 +1732,13 @@ class Dispatcher:
                                      'rifiutato.', 'supervisor_refused', human_remove)
         if current != key:
             return superseded()
+        # An issue blocked by an open issue (#277), read again now, does not run its step: the
+        # command waits, with no record and no attempt spent, until the last block closes.
+        if not is_pr:
+            blocked_by = self._dependency_view([number])[number]['blocked_by']
+            if blocked_by:
+                self.log('  the retry waits, blocked by ' + ', '.join(blocked_by))
+                return
         # Counted per reviewer: a review whose reviewers failed together, then one by one, keeps
         # the retries each one already had.
         done = retries_done(key, [r.get('key') for _, r in
@@ -2145,6 +2156,16 @@ class Dispatcher:
             view = self._supervisor_view(number, read(number))
             if view is not None:
                 found.append(dict(view, number=number, pr=is_pr))
+        # A retry of an issue's step waits while the issue is blocked (#277), as a ready issue
+        # does: ``blocked_by`` holds its open blocks.
+        retries = [item for item in found if item['command'] == RETRY and not item['pr']
+                   and item.get('step') in ISSUE_STEPS]
+        views = self._dependency_view([item['number'] for item in retries]) if retries else {}
+        for item in retries:
+            item['blocked_by'] = views[item['number']]['blocked_by']
+            if item['blocked_by']:
+                self.log(f'  issue #{item["number"]}: the retry waits, blocked by '
+                         + ', '.join(item['blocked_by']))
         return found
 
     # Dependencies (#277) -------------------------------------------------------

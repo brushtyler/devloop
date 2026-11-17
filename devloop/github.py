@@ -27,13 +27,16 @@ _ISSUE_HISTORY = (
     'timelineItems(itemTypes:[LABELED_EVENT,RENAMED_TITLE_EVENT],last:100){nodes{__typename '
     '... on LabeledEvent{createdAt actor{__typename login} label{name}} '
     '... on RenamedTitleEvent{createdAt actor{__typename login}}}}}}}')
-# Native dependencies of an issue (#277): the issues that block it, with their state, and who
-# added each "blocked by" (the timeline events), in one query.
+# Native dependencies of an issue (#277): the issues that block it, with their state (GitHub
+# allows at most 50 per issue), and who added each "blocked by" (the timeline events, read
+# backwards one page at a time, from ``$before``).
 _ISSUE_DEPENDENCIES = (
-    'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){'
+    'query($owner:String!,$name:String!,$number:Int!,$before:String){'
+    'repository(owner:$owner,name:$name){'
     'issue(number:$number){author{__typename login} '
     'blockedBy(first:50){nodes{number state repository{nameWithOwner}}} '
-    'timelineItems(itemTypes:[BLOCKED_BY_ADDED_EVENT],last:100){nodes{__typename '
+    'timelineItems(itemTypes:[BLOCKED_BY_ADDED_EVENT],last:100,before:$before){'
+    'pageInfo{hasPreviousPage startCursor} nodes{__typename '
     '... on BlockedByAddedEvent{createdAt actor{__typename login} '
     'blockingIssue{number repository{nameWithOwner}}}}}}}}')
 _FAILED_CONCLUSIONS = {'failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure',
@@ -199,31 +202,51 @@ class GitHub:
         }
 
     def issue_dependencies(self, number):
-        """The native "blocked by" dependencies of issue ``number`` (#277), read in one query:
-        ``{author, blocked_by, added}``. ``blocked_by`` lists the issues that block it now as
-        ``{repo, number, state}`` (``state`` OPEN or CLOSED, ``repo`` as ``owner/name``);
-        ``added`` the events that added a blocker, oldest first, as ``{repo, number, by, at}``.
-        Logins are in REST form (``graphql_login``)."""
+        """The native "blocked by" dependencies of issue ``number`` (#277): ``{author,
+        blocked_by, added}``. ``blocked_by`` lists the issues that block it now as ``{repo,
+        number, state}`` (``state`` OPEN or CLOSED, ``repo`` as ``owner/name``); ``added`` the
+        events that added a blocker, oldest first, as ``{repo, number, by, at}``. Logins are in
+        REST form (``graphql_login``).
+
+        The events are read backwards, 100 at a time, until every open blocker has its latest
+        addition or the timeline is over: an open block missing from ``added`` has no event at
+        all, it is never one cut off by a truncated read. ``author`` and ``blocked_by`` are those
+        of the first read."""
         owner, name = self.repo.split('/', 1)
-        data = self._json('api', 'graphql', '-f', f'query={_ISSUE_DEPENDENCIES}',
-                          '-f', f'owner={owner}', '-f', f'name={name}',
-                          '-F', f'number={int(number)}')
-        issue = data['data']['repository']['issue']
 
         def where(node):
             return (node.get('repository') or {}).get('nameWithOwner'), node.get('number')
 
+        issue, pages, before = None, [], None
+        while True:
+            cursor = ['-f', f'before={before}'] if before else []
+            data = self._json('api', 'graphql', '-f', f'query={_ISSUE_DEPENDENCIES}',
+                              '-f', f'owner={owner}', '-f', f'name={name}',
+                              '-F', f'number={int(number)}', *cursor)
+            read = data['data']['repository']['issue']
+            issue = issue or read
+            timeline = read['timelineItems']
+            pages.append([n for n in timeline['nodes']
+                          if n.get('__typename') == 'BlockedByAddedEvent'
+                          and n.get('blockingIssue')])
+            found = {where(n['blockingIssue']) for page in pages for n in page}
+            missing = {where(n) for n in issue['blockedBy']['nodes']
+                       if n.get('state') == 'OPEN'} - found
+            info = timeline.get('pageInfo') or {}
+            before = info.get('startCursor')
+            if not missing or not info.get('hasPreviousPage') or not before:
+                break
         blocked_by = []
         for node in issue['blockedBy']['nodes']:
             repo, blocker = where(node)
             blocked_by.append({'repo': repo, 'number': blocker, 'state': node.get('state')})
         added = []
-        for node in issue['timelineItems']['nodes']:
-            if node.get('__typename') != 'BlockedByAddedEvent' or not node.get('blockingIssue'):
-                continue
-            repo, blocker = where(node['blockingIssue'])
-            added.append({'repo': repo, 'number': blocker, 'by': graphql_login(node.get('actor')),
-                          'at': node.get('createdAt')})
+        for page in reversed(pages):  # the oldest page was read last
+            for node in page:
+                repo, blocker = where(node['blockingIssue'])
+                added.append({'repo': repo, 'number': blocker,
+                              'by': graphql_login(node.get('actor')),
+                              'at': node.get('createdAt')})
         return {'author': graphql_login(issue['author']), 'blocked_by': blocked_by,
                 'added': added}
 
