@@ -143,6 +143,26 @@ class CIWaitTests(unittest.TestCase):
         self.assertEqual(self.notices(), [{'event': 'escalation', 'class': 'ci_missing',
                                            'critical': True, 'to': 'operator'}])
 
+    def test_the_required_timeout_prevails_over_a_longer_grace(self):
+        cfg = dataclasses.replace(CFG, ci=config.CIPolicy(grace_minutes=60,
+                                                          required_timeout_minutes=30))
+        d = self.make(committed=NOW - 29 * 60, cfg=cfg)
+        self.gh.required = ['Unit Tests (Python 3.12)']
+        self.assertEqual(self.step(d), [])
+        self.assertIn('within [ci] grace_minutes = 60', self.waits()[-1])
+        self.now += 2 * 60  # 31 minutes after the push, still within the grace
+        self.assertEqual(self.step(d), ['ci_missing'])
+        self.assertEqual((self.runner.calls, self.ws.commands), ([], []))
+        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.notices()[-1]['class'], 'ci_missing')
+        # Without required checks the same head still waits for the whole grace.
+        d = self.make(committed=NOW - 31 * 60, cfg=cfg)
+        self.assertEqual(self.step(d), [])
+        self.assertIn('pushed 1860 s ago, within [ci] grace_minutes = 60', self.waits()[-1])
+        self.now += 29 * 60  # 60 minutes after the push: the full suite, as before
+        self.assertEqual(self.step(d), ['review'])
+        self.assertEqual(self.ws.commands, [SUITE])
+
     def test_required_checks_that_appear_are_reviewed_without_local_suite(self):
         d = self.make(committed=NOW - 6 * 60)
         self.gh.required = ['Unit Tests (Python 3.12)']

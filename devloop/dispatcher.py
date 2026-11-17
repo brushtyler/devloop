@@ -2106,8 +2106,9 @@ class Dispatcher:
         other than ``full`` (#263). Within ``[ci] grace_minutes`` of the head's push the review
         waits, as if its CI were pending (``why`` says it, and the log too). After that, when
         the base branch requires checks, it waits for them up to ``required_timeout_minutes``,
-        and then ``missing`` lists them: the PR is escalated. Otherwise ``('', [])``: the full
-        suite runs locally before the review, as before.
+        and then ``missing`` lists them: the PR is escalated, even within a grace window longer
+        than that timeout. Otherwise ``('', [])``: the full suite runs locally before the
+        review, as before.
 
         The push counts from when this dispatcher pushed the head, else from the head's commit
         date, read once; a date in the future, or one that cannot be read, counts from now, so
@@ -2124,11 +2125,19 @@ class Dispatcher:
             since = now if committed is None else min(committed, now)
             self._ci_since[sha] = since
         age = now - since
-        if age < ci.grace_minutes * 60:
+        grace = age < ci.grace_minutes * 60
+        timed_out = age >= ci.required_timeout_minutes * 60
+
+        def in_grace():
             why = (f'waiting for CI on {sha[:12]}: pushed {int(age)} s ago, within '
                    f'[ci] grace_minutes = {ci.grace_minutes}')
             self.log(f'  PR #{pr.number}: {why}')
             return why, []
+
+        # A grace longer than the timeout of the required checks does not delay their
+        # escalation: past the timeout the required checks are read even within the grace.
+        if grace and not timed_out:
+            return in_grace()
         base = self.cfg.base_branch
         try:
             required = self.gh.required_checks(base)
@@ -2137,8 +2146,8 @@ class Dispatcher:
                      f'{exc}')
             required = []
         if not required:
-            return '', []
-        if age < ci.required_timeout_minutes * 60:
+            return in_grace() if grace else ('', [])
+        if not timed_out:
             why = (f'waiting for CI on {sha[:12]}: {base} requires {", ".join(required)}, not '
                    f'reported {int(age)} s after the push ([ci] required_timeout_minutes = '
                    f'{ci.required_timeout_minutes})')

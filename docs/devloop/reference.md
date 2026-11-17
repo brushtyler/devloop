@@ -174,7 +174,9 @@ planned and nothing runs locally.
   require checks, the review waits for them instead, up to `[ci] required_timeout_minutes`
   (default 30) from the push. After that the PR goes to `agent:needs-human` with an escalation
   of class `ci_missing`: it is not among the [classes](guide.md#escalations-to-the-supervisor),
-  so it is critical and always goes to the operator. If the required checks cannot be read, the
+  so it is critical and always goes to the operator. The timeout prevails over a longer grace
+  window: with `grace_minutes = 60` and `required_timeout_minutes = 30` the PR is escalated 30
+  minutes after the push. If the required checks cannot be read, the
   dispatcher writes a line to the tick log and counts them as none.
 
 The tick log says why a review waits, for example `PR #257: waiting for CI on 9ef3336dfbe6:
