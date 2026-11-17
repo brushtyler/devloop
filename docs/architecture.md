@@ -1,5 +1,133 @@
 # Pipeline and architecture
 
+SSDLC is one product, in one repository, with two components that today work side by side and
+will converge ([ADR 0001](adr/0001-prodotto-unico-fasi-su-tracker.md)). The first sections of
+this page describe the product: its components, how the local engine and the devloop dispatcher
+relate, the ports through which devloop reaches GitHub, the boundary that keeps devloop
+independent of the engine, and the `core` package planned for the code they will share. The
+sections from [Phases](#phases) on describe the local engine: phases, risk tiers, isolation, run
+layout, controller contract and integrity model.
+
+## Components
+
+| Component | Code | What it does |
+| --- | --- | --- |
+| **Local engine** | `orchestrator.py`, `ssdlc_*.py`, `setup-ssdlc.sh`, `schemas/`, `standards/` | Runs a ticket for a target project on one host, through the [phases](#phases) below, with state, journal and evidence under `<project>/.ssdlc/`. `setup-ssdlc.sh` bootstraps the toolkit and initializes projects; `schemas/` holds the JSON schemas of the engine's records (plans, manifests, gate findings, recovery and reconciliation records); `standards/` holds the templates of a project's standards registry. |
+| **devloop** | `devloop/`, `scripts/devloop-pinned` | Dispatches the issues and PRs of this repository to an implementer agent and an independent reviewer, through fix rounds, up to a merge by a human or, when the operator enables a merge mode, by devloop. Its state lives on GitHub, in labels and in markers in comments. |
+
+Both components share the test suite in `tests/` (run by `scripts/run-tests.py` and by the CI,
+see the [development guide](development.md)) and the documentation in `docs/`, with the
+decisions in `docs/adr/`.
+
+devloop's modules, by part:
+
+| Part | Modules |
+| --- | --- |
+| Dispatcher | `devloop/dispatcher.py` (reads the GitHub state, plans the next steps of a tick, runs them), `devloop/runloop.py` (the continuous loop), `devloop/supervision.py` (escalation classes and supervisor commands), `devloop/localtests.py` (the tests run after a writing turn), `devloop/watch.py`, `devloop/activity.py`, `devloop/stall.py`, `devloop/follow.py` |
+| GitHub | `devloop/ports.py`, `devloop/github.py`, `devloop/apps.py`: see [Ports and adapters](#ports-and-adapters) |
+| Agents | `devloop/agents.py` (headless invocation of the agent CLIs), `devloop/schema.py` with `devloop/schemas/` (structured output), `devloop/prompts/`, `devloop/workspace.py` (Git worktrees), `devloop/unavailability.py` (models found unavailable) |
+| Records and rules | `devloop/markdown.py` (attribution header and markers), `devloop/ledger.py` (evidence and telemetry), `devloop/policy.py` (review level and policy receipt), `devloop/review.py` (review records and findings), `devloop/acceptance.py` (acceptance criteria) |
+| Installation | `devloop/config.py` with `devloop/config.toml`, `devloop/pin.py` and `scripts/devloop-pinned` (the [pinned installation](devloop/guide.md#run-from-a-pinned-installation)) |
+
+The operator's view of devloop is in the [guide](devloop/guide.md), its configuration in the
+[reference](devloop/reference.md) and its records in the [protocol](devloop/protocol.md).
+
+## Engine and dispatcher
+
+Today the two components do not call each other:
+
+- **No run-time link.** devloop does not run the engine's pipeline, and the engine does not run
+  devloop. devloop imports only the standard library and itself (see
+  [The devloop boundary](#the-devloop-boundary)); the engine does not import `devloop`.
+- **Each has its own pinned installation.** The engine's controller is bound to each run by the
+  [controller contract](#controller-contract), and when SSDLC develops itself a pinned
+  controller runs against a separate target checkout. devloop runs from a read-only copy of one
+  commit, made by `devloop pin` and started by `scripts/devloop-pinned`, never from the checkout
+  it changes.
+- **Separate state.** The engine keeps the state of a run on the host: `state.json`, the
+  journals and the execution generations under `.ssdlc/<ticket>/` (see
+  [Run layout](#run-layout)). devloop keeps its state on GitHub, so a tick can stop at any
+  point and the next one resumes.
+- **devloop develops this repository, engine included.** The engine's code is what devloop's
+  agents change, test and review: `test_cmd` runs the whole suite, engine tests included; with
+  `local_tests = "changed"` a change to `ssdlc_<name>.py` selects `test_<name>*.py`
+  ([Local tests](devloop/reference.md#local-tests)); the engine modules that decide fencing,
+  transitions and authorizations are sensitive paths that need two reviewers
+  ([Review level and policy receipt](devloop/reference.md#review-level-and-policy-receipt)); the
+  [documentation map](devloop/reference.md#documentation-map) binds engine modules to their
+  documents.
+- **The engine has no dispatcher of its own.** Specification, design, plan and evidence are
+  files on the host of the run; `08-supervisor` opens a draft PR and waits for human sign-off.
+
+Issue #59 had planned the engine as the executor of one unit of work inside devloop; that was
+never built. ADR 0001 replaced it with convergence, in steps: the tracker ports (step 1, done), budget
+and durable state (step 2), the phases as issue and PR types next to the local engine (step 3),
+containment and fencing of the executors (step 4), a filesystem backend (step 5), and the
+convergence of the local engine only after demonstrated parity and an explicit migration
+authorized by the operator (step 6). Until then the engine's guarantees are not removed or
+replaced (ADR 0001, constraint 1).
+
+## Ports and adapters
+
+The dispatcher reaches GitHub through three ports, declared in `devloop/ports.py` as step 1 of
+[ADR 0001](adr/0001-prodotto-unico-fasi-su-tracker.md):
+
+| Port | Methods |
+|---|---|
+| `Tracker` | issues and their history, comments of issues and PRs, labels: `issues_with_label`, `issue`, `issue_history`, `issue_comments`, `pr_comments`, `labelers`, `label_events`, `labeled_events`, `edit_labels`, `comment`, `close_issue`, `edit_comment`, `ensure_label`, `repo_labels`, `rename_label` |
+| `CodeReview` | PRs and reviews: `open_prs`, `merged_prs`, `merge_state` (`clean`, `conflict` or `unknown`), `pr_head`, `pr_state`, `merge_pr`, `pr_reviews`, `create_pr`, `submit_review` |
+| `CI` | checks of a commit: `checks` (summarized by `summarize_checks`), `check_details`, `check_runs`, `failed_log`, `rerun_failed_jobs` (#200) |
+
+`Tracker` also has `issue_dependencies` (#277): the native "blocked by" dependencies of an
+issue, with the state of each blocking issue and who added each block, read with GraphQL (one
+query, more only when the events of an open block are older than the latest 100)
+([Dependencies between issues](devloop/guide.md#dependencies-between-issues)).
+
+`CI` also has `commit_date` and `required_checks` (#263): the commit date of a head and the
+checks the base branch requires, for the wait for the
+[CI of a new head](devloop/reference.md#ci-of-a-new-head).
+
+The ports hold only the methods the dispatcher calls, with their current names and signatures,
+and return normalized data. `GitHub` (`devloop/github.py`) implements all three, and `Identities`
+(`devloop/apps.py`) hands one out for each actor: they are the concrete adapters. The
+dispatcher, its ledger and `setup` depend on the ports only. There is no other backend yet; the
+module docstring records where a method that could fit more than one port went.
+
+In the tests, `FakeGH` (`tests/helpers/devloop_fakes.py`) implements the ports in memory. It
+proves neither persistence nor atomicity. `tests/test_devloop_ports.py` checks that the adapter
+and every fake expose each port method with the same signature.
+
+## The devloop boundary
+
+`tests/test_devloop_boundary.py` reads every `.py` file under `devloop/` and fails if any of
+them imports a module other than the standard library (`sys.stdlib_module_names`) or `devloop`
+itself. Relative imports inside the package are allowed.
+
+- **What it keeps.** devloop depends on no `ssdlc_*` module, on `orchestrator.py` and on no
+  third-party package. Its pinned copy needs no engine code, and a change to an engine module
+  does not change the code that dispatches, reviews and merges. The engine is the candidate under
+  test of the replay gate; the boundary keeps it out of the code that develops it.
+- **What it does not check.** It reads `import` statements only: it does not see code loaded
+  with `importlib` or `__import__`, subprocesses, or files read as data. The commands devloop
+  runs in a worktree, such as `test_cmd`, run the repository's code, engine included, outside
+  the boundary.
+- **Who may change it.** The boundary comes from #59. The operator revoked it in a limited way
+  on 2026-11-16 (ADR 0001, constraint 6 and decision 1): the only allowed widening is the `core`
+  package below. Any other change to the allowlist is a new operator decision.
+
+## Future `core` package
+
+ADR 0001 lets devloop reuse code of the engine **only** through a declared `core` package,
+added to the allowlist of `tests/test_devloop_boundary.py`. The package does not exist yet; it
+is expected with the phases on the tracker (step 3). Its conditions:
+
+- **Pure validators only**, such as the requirements catalogue and plan validation. No stateful
+  loop: not `DesignSession`, not `orchestrator.py`.
+- **Prompts and schemas reused as data**, copied into the pinned installation.
+- **Never a direct import of `ssdlc_*` modules.**
+
+Until `core` exists, the allowlist is the standard library and `devloop`.
+
 ## Phases
 
 | Phase | Role | Focus and artifacts |
@@ -125,33 +253,3 @@ SSDLC does not implement authenticated provenance today. If a deployment needs i
 3. **Digital signature over checkpoints.** A signing service or hardware token signs the head; anyone with the public key can verify. It adds identity to option 1, but it is only as strong as the custody of the private key.
 
 For options 2 and 3, the key must stay outside every developer and test sandbox. It must never be placed in the project, the ticket directory, `.ssdlc/.runtime` (mounted read-write in role containers), environment variables passed to containers, or the toolkit directory. Even then, a signature shows that the signer approved a head; it does not prove that the events are true. Signed checkpoints must still be combined with the controls above. Adopting one of these options is a product decision and is not part of the current task engine.
-
-## Ports and adapters
-
-The dispatcher reaches GitHub through three ports, declared in `devloop/ports.py` as step 1 of
-[ADR 0001](adr/0001-prodotto-unico-fasi-su-tracker.md):
-
-| Port | Methods |
-|---|---|
-| `Tracker` | issues and their history, comments of issues and PRs, labels: `issues_with_label`, `issue`, `issue_history`, `issue_comments`, `pr_comments`, `labelers`, `label_events`, `labeled_events`, `edit_labels`, `comment`, `close_issue`, `edit_comment`, `ensure_label`, `repo_labels`, `rename_label` |
-| `CodeReview` | PRs and reviews: `open_prs`, `merged_prs`, `merge_state` (`clean`, `conflict` or `unknown`), `pr_head`, `pr_state`, `merge_pr`, `pr_reviews`, `create_pr`, `submit_review` |
-| `CI` | checks of a commit: `checks` (summarized by `summarize_checks`), `check_details`, `check_runs`, `failed_log`, `rerun_failed_jobs` (#200) |
-
-`Tracker` also has `issue_dependencies` (#277): the native "blocked by" dependencies of an
-issue, with the state of each blocking issue and who added each block, read with GraphQL (one
-query, more only when the events of an open block are older than the latest 100)
-([Dependencies between issues](devloop/guide.md#dependencies-between-issues)).
-
-`CI` also has `commit_date` and `required_checks` (#263): the commit date of a head and the
-checks the base branch requires, for the wait for the
-[CI of a new head](devloop/reference.md#ci-of-a-new-head).
-
-The ports hold only the methods the dispatcher calls, with their current names and signatures,
-and return normalized data. `GitHub` (`devloop/github.py`) implements all three, and `Identities`
-(`devloop/apps.py`) hands one out for each actor: they are the concrete adapters. The
-dispatcher, its ledger and `setup` depend on the ports only. There is no other backend yet; the
-module docstring records where a method that could fit more than one port went.
-
-In the tests, `FakeGH` (`tests/helpers/devloop_fakes.py`) implements the ports in memory. It
-proves neither persistence nor atomicity. `tests/test_devloop_ports.py` checks that the adapter
-and every fake expose each port method with the same signature.

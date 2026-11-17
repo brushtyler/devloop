@@ -45,7 +45,7 @@ The steps of [ADR 0001](docs/adr/0001-prodotto-unico-fasi-su-tracker.md), in ord
 | --- | --- |
 | [Getting started](docs/getting-started.md) | Requirements, installation, first project, basic configuration, everyday commands, where things are stored |
 | [Configuration](docs/configuration.md) | Authentication, inheritance, model routing, reasoning effort, budgets, containers, remote sync, maintenance |
-| [Architecture](docs/architecture.md) | Phases, tiers, isolation, run layout, controller contract, integrity model, ports and adapters |
+| [Architecture](docs/architecture.md) | Components, engine and dispatcher, ports and adapters, the devloop boundary and the future `core` package; phases, tiers, isolation, run layout, controller contract, integrity model |
 | [Task mode](docs/task-mode.md) | PO validation, design sessions, task planning, scheduler, repair, gate reports |
 | [Supervision](docs/supervision.md) | Detached runs, resume, cancel, recovery matrix |
 | [Cost telemetry](docs/cost-telemetry.md) | Charges, API-equivalent estimates and tokens per provider; Evidence Pack breakdown |

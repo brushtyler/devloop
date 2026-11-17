@@ -404,6 +404,26 @@ class RepositoryDocLinksTests(unittest.TestCase):
         architecture = (ROOT / 'docs' / 'architecture.md').read_text(encoding='utf-8')
         self.assertIn('\n## Ports and adapters\n', architecture)
 
+    def test_the_architecture_describes_the_product_before_the_engine(self):
+        # #244 (ADR 0003, I7): components, engine and dispatcher, ports and adapters, the
+        # devloop boundary and the future `core` package, then the local engine.
+        architecture = (ROOT / 'docs' / 'architecture.md').read_text(encoding='utf-8')
+        headings = [line for line in architecture.splitlines() if line.startswith('## ')]
+        product = ['## Components', '## Engine and dispatcher', '## Ports and adapters',
+                   '## The devloop boundary', '## Future `core` package']
+        self.assertEqual(headings[:len(product)], product)
+        self.assertEqual(headings[len(product)], '## Phases')
+        self.assertIn('\n### Task journal: guarantees and threat model\n', architecture)
+        sections = {heading: architecture.split(f'\n{heading}\n', 1)[1].split('\n## ', 1)[0]
+                    for heading in product}
+        for code in ('`orchestrator.py`', '`ssdlc_*.py`', '`devloop/`'):
+            self.assertIn(code, sections['## Components'])
+        self.assertIn('`tests/test_devloop_boundary.py`', sections['## The devloop boundary'])
+        self.assertIn('adr/0001-prodotto-unico-fasi-su-tracker.md', architecture)
+        for phrase in ('`tests/test_devloop_boundary.py`', 'Pure validators only',
+                       '`ssdlc_*`'):
+            self.assertIn(phrase, sections['## Future `core` package'])
+
 
 if __name__ == '__main__':
     unittest.main()
