@@ -88,9 +88,9 @@ def build(args):
     return cfg, state, dispatcher
 
 
-def run_watch(parser, args, github=GitHub):
-    """``devloop watch`` (#173). It reads GitHub with the ambient ``gh`` login: no app key is
-    needed."""
+def run_watch(parser, args):
+    """``devloop watch`` (#173). It reads GitHub with the identity of the ticks' reads (#197):
+    the dispatcher's app when ``[apps]`` has one, else the ambient ``gh`` login."""
     if args.interval < 1:
         parser.error('watch: --interval must be at least 1 second')
     if args.timeout is not None and args.timeout < 1:
@@ -108,7 +108,11 @@ def run_watch(parser, args, github=GitHub):
     except ConfigError as exc:
         sys.exit(f'devloop: invalid config: {exc}')
     state = Path(args.state) if args.state else main_checkout() / cfg.state_dir / watch.STATE_FILE
-    gh = github(cfg.repo)
+    try:
+        gh = Identities.from_config(cfg).github(DISPATCHER)
+    except OSError as exc:
+        sys.exit(f'devloop: invalid config: GitHub App key: {exc}. Set $DEVLOOP_APP_KEY_DIR or '
+                 'remove the app from [apps] to use the ambient gh login.')
     watcher = watch.Watcher(gh, watch.Trust.from_config(cfg), state,
                             interval=args.interval, timeout=args.timeout, exec_argv=exec_argv)
     gh.time_left = watcher.time_left  # no gh call outlasts --timeout

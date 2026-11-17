@@ -1,6 +1,7 @@
 """devloop watch: wakes the supervising agent when GitHub changes (#173)."""
 
 import json
+import os
 import shlex
 import shutil
 import subprocess
@@ -14,6 +15,7 @@ from unittest import mock
 
 from devloop import watch
 from devloop.__main__ import main
+from devloop.apps import DISPATCHER, Identities
 from devloop.config import load_config
 from devloop.github import GitHub, GitHubError, GitHubNotFound
 from devloop.markdown import marker
@@ -322,7 +324,7 @@ class ChangesTest(unittest.TestCase):
         del gh.prs[10]
         gh.states[10] = GitHubError('gh pr view 10: HTTP 502')
         self.assertEqual(self.news(), [])
-        self.assertEqual(self.h.err[-1], 'devloop watch: round failed (GitHubError)')
+        self.assertEqual(self.h.err[-1], 'devloop watch: round failed (server error)')
         self.assertIn('10', json.loads(self.h.path.read_text())['prs'])
         gh.states[10] = {'state': 'MERGED'}
         self.assertEqual(self.news(), ['PR #10 merged: PR 10'])
@@ -683,7 +685,46 @@ class ErrorsTest(unittest.TestCase):
         code, _ = h.run(steps=[recover])
         self.assertEqual(code, 0)
         self.assertEqual(h.lines(), ['PR #10 labels +agent:changes -agent:review'])
-        self.assertEqual(h.err, ['devloop watch: round failed (GitHubError)'])
+        self.assertEqual(h.err, ['devloop watch: round failed (server error)'])
+
+    def test_an_authentication_error_is_reported_as_such(self):
+        # A real adapter whose gh has no login (#197): only the class reaches stderr.
+        for stderr in ('To get started with GitHub CLI, please run:  gh auth login\n'
+                       'Alternatively, populate the GH_TOKEN environment variable.',
+                       'HTTP 401: Bad credentials (https://api.github.com/graphql) '
+                       'token=ghs_secret /home/operator/secret-path'):
+            with self.subTest(stderr=stderr):
+                gh = GitHub('o/r', run=lambda args, **kw: SimpleNamespace(
+                    returncode=1, stdout='', stderr=stderr))
+                h = Harness(self, gh=gh)
+                self.assertIsNone(h.watcher(Clock()).round())
+                self.assertEqual(h.err, ['devloop watch: round failed (authentication)'])
+                self.assertFalse(h.path.exists())
+
+    def test_failure_classes(self):
+        cases = (
+            (GitHubError('POST /app/installations/1/access_tokens: HTTP 401: {}'),
+             'authentication'),
+            (GitHubError('openssl could not sign the app JWT: bad key'), 'authentication'),
+            (GitHubError('gh api: API rate limit exceeded for installation (HTTP 403)'),
+             'rate limit'),
+            (GitHubError('gh api: HTTP 429'), 'rate limit'),
+            (GitHubError('gh pr list: Resource not accessible by integration (HTTP 403)'),
+             'permission'),
+            (GitHubNotFound('gh pr view 9: Could not resolve to a PullRequest'), 'not found'),
+            (GitHubError('gh api: Not Found (HTTP 404)'), 'not found'),
+            (GitHubError('gh api: Server Error (HTTP 502)'), 'server error'),
+            (GitHubError('gh pr list: error connecting to api.github.com'), 'network'),
+            (GitHubError('gh pr list: timed out after 300s'), 'network'),
+            (GitHubError('GET /repos/o/r/installation: <urlopen error [Errno -3]>'), 'network'),
+            (GitHubError('gh could not start: [Errno 2] No such file'), 'gh unavailable'),
+            (GitHubError('gh pr list: something else'), 'GitHubError'),
+            (OSError('disk full'), 'OSError'),
+            (ValueError('bad json'), 'ValueError'),
+        )
+        for exc, expected in cases:
+            with self.subTest(exc=exc):
+                self.assertEqual(watch.failure_class(exc), expected)
 
     def test_repeated_errors_give_one_watch_error_line(self):
         h = Harness(self)
@@ -827,7 +868,9 @@ class CommandLineTest(unittest.TestCase):
                         bounded=self.gh.time_left == self.time_left)
             return 3
 
+        ambient = Identities('o/r', {})
         with mock.patch.object(watch.Watcher, 'run', fake_run), \
+                mock.patch.object(Identities, 'from_config', return_value=ambient), \
                 self.assertRaises(SystemExit) as raised:
             main(['watch', '--timeout', '30', '--interval', '5', '--state',
                   str(tmp / 's.json')])
@@ -836,6 +879,75 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual((seen['timeout'], seen['interval'], seen['exec_argv']), (30, 5, None))
         self.assertIn('brushtyler', seen['trust'].users)
         self.assertTrue(seen['bounded'])  # each gh call gets at most the time left
+
+    def _watch_round(self, identities):
+        """Run ``devloop watch`` with ``identities`` and one real round of reads; the ``gh``
+        calls it made, as ``(argv, kwargs)``."""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        results = []
+
+        def one_round(self):
+            results.append(self.round())
+            return 3
+
+        # No gh login at all: an empty gh config and no token in the environment.
+        (tmp / 'gh').mkdir()
+        environ = {k: v for k, v in os.environ.items() if k not in ('GH_TOKEN', 'GITHUB_TOKEN')}
+        environ['GH_CONFIG_DIR'] = str(tmp / 'gh')
+        with mock.patch.dict(os.environ, environ, clear=True), mock.patch('sys.stdout'), \
+                mock.patch.object(watch.Watcher, 'run', one_round), \
+                mock.patch.object(Identities, 'from_config', return_value=identities) as built, \
+                self.assertRaises(SystemExit) as raised:
+            main(['watch', '--state', str(tmp / 's.json')])
+        self.assertEqual(raised.exception.code, 3)
+        self.assertEqual(built.call_args.args[0].repo, load_config().repo)
+        self.assertIsNotNone(results[0])  # the round succeeded
+        return results
+
+    @staticmethod
+    def _recording_run(calls):
+        def run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return SimpleNamespace(returncode=0, stdout='' if argv[1] == 'api' else '[]',
+                                   stderr='')
+        return run
+
+    def test_watch_reads_with_the_dispatcher_app_token(self):
+        calls, asked = [], []
+
+        def token(permissions=None):
+            asked.append(permissions)
+            return 'ghs_dispatcher'
+
+        app = SimpleNamespace(token=token, login=DISPATCH)
+        agent = SimpleNamespace(token=lambda permissions=None: 'ghs_agent', login=CLAUDE)
+        ids = Identities('o/r', {DISPATCHER: app, 'claude': agent},
+                         run=self._recording_run(calls))
+        self._watch_round(ids)
+        self.assertTrue(calls)
+        for argv, kwargs in calls:
+            self.assertEqual(argv[0], 'gh')
+            self.assertEqual(kwargs['env']['GH_TOKEN'], 'ghs_dispatcher')
+            self.assertNotIn('GITHUB_TOKEN', kwargs['env'])
+        self.assertEqual(set(asked), {None})  # the dispatcher's token, as the ticks read
+
+    def test_watch_without_a_dispatcher_app_uses_the_ambient_login(self):
+        calls = []
+        agent = SimpleNamespace(token=lambda permissions=None: 'ghs_agent', login=CLAUDE)
+        ids = Identities('o/r', {'claude': agent}, run=self._recording_run(calls))
+        self._watch_round(ids)
+        self.assertTrue(calls)
+        for argv, kwargs in calls:
+            self.assertEqual(argv[0], 'gh')
+            self.assertNotIn('env', kwargs)  # gh's own login, from the environment
+
+    def test_a_missing_dispatcher_key_is_a_config_error(self):
+        with mock.patch.object(Identities, 'from_config',
+                               side_effect=FileNotFoundError('no private key for dl-dispatcher')), \
+                self.assertRaises(SystemExit) as raised:
+            main(['watch'])
+        self.assertIn('invalid config: GitHub App key', str(raised.exception.code))
 
     def test_trust_comes_from_the_configuration_without_app_keys(self):
         cfg = load_config()
@@ -856,7 +968,8 @@ class DocsTest(unittest.TestCase):
         for phrase in ('--until-change', '--exec', '--timeout', 'Claude Code',
                        'python3 -m devloop watch --until-change',
                        'python3 -m devloop watch --exec', 'watch-state.json', 'watch error',
-                       'untrusted author (ignored)'):
+                       'untrusted author (ignored)', "the dispatcher's app",
+                       'local `gh` login', 'round failed (<class>)', '`authentication`'):
             self.assertIn(phrase, section)
 
 
