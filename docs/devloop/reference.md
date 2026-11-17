@@ -553,7 +553,9 @@ is admitted only if the same check passes from its base to the current one. The 
 records stay as they are, and the promotion's `policy` record carries `bases` with the checks
 it relied on. If `main` interfered, the PR conflicts with the current base, or non-interference
 is not proven, the approval is not promoted (a `stale` record lists the checks): a conflict is
-synced first, as usual, and a new round follows, which counts.
+synced first, as usual, and a new round follows. That round does not count when it reviews the
+same head again (#252), or a head only a clean sync moved (#235); otherwise it counts (see
+[Resync after approval](protocol.md#resync-after-approval)).
 
 ### Level 0: no review
 

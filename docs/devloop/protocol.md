@@ -85,6 +85,24 @@ after a new approval is free in the same way. The limit stays the same for the i
 changes: a request for changes in that round needs a fix, whose review is a round that counts,
 so with no round left it goes to `agent:needs-human` at once.
 
+The same holds when the head did not move at all (#252). Before promoting or merging, the
+dispatcher recomputes the receipt; when `main` advanced touching a file of the PR (or the
+check could not be verified, or the head no longer merges into it cleanly), it revokes the
+approval with an "Approvazione non valida" comment, a `stale` event of the `devloop:policy:v1`
+marker that lists the base checks (`bases`), and the PR goes back to review. The new review of
+that **same head** does not count against `max_review_rounds` when:
+
+- the latest round is complete and approved that head, the same for every reviewer;
+- the latest policy record after it is a `stale` event on that head written by the dispatcher's
+  identity (a marker anyone else writes is ignored), with at least one base check that is not
+  `disjoint`. A revocation for anything else (level, reviewers, policy version, a missing
+  approval) opens a round that counts;
+- the review is not a `/devloop rereview`, and CI did not fail on the head.
+
+The review records `resync` with the reason `base_changed`, the approved round and its head
+(`from`), and its comment says it does not count; the revocation comment says so too. A new
+commit of the implementer in the meantime changes the head, and its review counts as before.
+
 ## Failed agent turns
 
 The escalation of a failed agent turn names its local log, `<time>-<label>-<agent>.log` in
@@ -125,7 +143,8 @@ already recorded is not a new round, and neither is a sync with `main` nor the s
 a round already open. A round that `main` advancing interrupted before it was complete does not
 count either (see [When `main` advances](reference.md#when-main-advances-during-a-round)): the round that
 replaces it counts once. Nor does the review of an approved head that only a sync without
-conflicts moved (see [Resync after approval](#resync-after-approval)). Round numbers stay progressive, because they also name the findings
+conflicts moved, nor the new review of an approved head whose approval the base revoked (see
+[Resync after approval](#resync-after-approval)). Round numbers stay progressive, because they also name the findings
 (`round/reviewer/ID`), so the round shown as the limit (`round 4 of at most 4`, `round 4/4`) is
 `max_review_rounds` plus the rounds that did not count.
 
