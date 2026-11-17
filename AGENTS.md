@@ -20,6 +20,8 @@ Esempio:
 > **Model:** Claude Opus 5.5
 > **Reasoning Level:** High
 
+**Nei turni di devloop gli agent non aggiungono nessuna intestazione** nei loro testi (summary, finding, note, corpo della PR): la compone il dispatcher. Il formato è descritto in [docs/devloop/protocol.md](docs/devloop/protocol.md#attribution).
+
 ### Come ricavare i valori
 
 Usare i valori **effettivi della sessione corrente** al momento della pubblicazione, non quelli di default o di una sessione precedente:

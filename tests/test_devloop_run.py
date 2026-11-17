@@ -204,7 +204,7 @@ class BackoffTests(LoopCase):
         waits = [line for line in self.logs if line.startswith('next tick in')]
         self.assertEqual(waits, ['next tick in 60 seconds', 'next tick in 300 seconds'])
         (body,) = self.alerts
-        self.assertTrue(body.startswith('> [!NOTE]\n> **Agent:**'))
+        self.assertTrue(body.startswith('> [!NOTE]\n> **Bot:** devloop dispatcher\n'))
         self.assertIn('`server error`, `network`, `RuntimeError`', body)
         self.assertNotIn('/home/devloop', body)
         self.assertNotIn('bad gateway', body)
