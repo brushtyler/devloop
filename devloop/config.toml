@@ -193,6 +193,7 @@ required_timeout_minutes = 30
 "devloop/dispatch_supervision.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
 "devloop/dispatch_preflight.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
 "devloop/dispatch_merge.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
+"devloop/dispatch_actions.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
 "devloop/ports.py" = ["docs/architecture.md"]
 "devloop/github.py" = ["docs/architecture.md"]
 "scripts/devloop-pinned" = ["docs/devloop/guide.md"]
