@@ -571,6 +571,23 @@ class PlanAroundRunningTests(unittest.TestCase):
         self.assertEqual(self.kinds(admit(actions, issue_of, [], 4)),
                          [('merge', 100), ('review', 103)])
 
+    def test_merges_after_the_spent_limit_start_none(self):
+        # #264: with a limit of 1 spent by a review, the first merge is dropped and does not
+        # take the lane, so the second one does not start in its place past the limit.
+        def ready_pr(number, issue):
+            p = pr(number, issue=issue, labels=[READY], reviews=[norm(raw_review())])
+            p.mergeable, p.merge_status, p.merge_mode = 'MERGEABLE', 'CLEAN', 'strict'
+            return p
+        snap = Snapshot(prs=[pr(99, issue=6, labels=['agent:review']), ready_pr(100, 7),
+                             ready_pr(101, 8)],
+                        ready_issues=[], working_issues=[])
+        cfg = dataclasses.replace(STRICT, max_parallel_actions=4, max_open_prs=5,
+                                  max_actions_per_tick=1)
+        issue_of = {p.number: p.issue for p in snap.prs}
+        actions = plan(snap, cfg, merging=False)
+        self.assertEqual(self.kinds(actions), [('review', 99)])
+        self.assertEqual(self.kinds(admit(actions, issue_of, [], 3)), [('review', 99)])
+
     def test_reserved_slots_count_against_max_open_prs(self):
         cfg = dataclasses.replace(PCFG, max_open_prs=4, max_actions_per_tick=10)
         self.assertEqual(self.kinds(plan(self.snap(), cfg, busy={9}, reserved=1)),

@@ -1867,6 +1867,8 @@ at a time**. A merge planned while another one runs waits for a later tick, and 
 PR and its issue: no other action on them starts meanwhile. A merge takes a slot of
 `max_parallel_actions` like any action. Of `max_actions_per_tick`, a tick spends a slot only on
 the merge that can start: the merges waiting for the lane leave the slots to the other actions.
+A merge that finds the limit already spent does not take the lane: it waits for a later tick,
+and so do the merges after it, so none of them starts past the limit.
 
 Why a merge may run alongside the other actions:
 

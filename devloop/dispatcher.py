@@ -633,7 +633,9 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
     ``merging`` tells whether a merge runs (continuous mode only, None in a tick): merges run one
     at a time (``MERGE_LANE``, #264), so only the first merge of the plan, and none while one
     runs, takes a slot of ``max_actions_per_tick``. The others stay in the plan, where ``admit``
-    holds them back with their numbers, and take no slot from the actions that can start now."""
+    holds them back with their numbers, and take no slot from the actions that can start now.
+    A merge that finds the limit already spent is dropped and does not take the lane: so is
+    every merge after it, which would otherwise start in its place past the limit."""
     lb = cfg.labels
     actions = []
     issue_of = {pr.number: pr.issue for pr in snapshot.prs}
@@ -808,16 +810,17 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
     for action in actions:
         if busy and numbers_of(action.number, issue_of) & busy:
             continue  # still running (#227): the plan after it ends decides
-        if merging is not None and action.kind in MERGE_LANE:
-            if merging:
-                # The merge lane is taken (#264): ``admit`` holds it back, with its numbers.
-                capped.append(action)
-                continue
-            merging = True
+        lane = merging is not None and action.kind in MERGE_LANE
+        if lane and merging:
+            # The merge lane is taken (#264): ``admit`` holds it back, with its numbers.
+            capped.append(action)
+            continue
         if action.kind in EXPENSIVE:
             if spent >= cfg.max_actions_per_tick:
                 continue
             spent += 1
+        if lane:
+            merging = True  # only a merge the plan keeps takes the lane
         capped.append(action)
     return capped
 
