@@ -28,7 +28,11 @@ trusted_users = ["brushtyler"]
 # slot of max_actions_per_tick. Disabled here: enabling it is the operator's decision.
 # preflight = "codex"
 
-max_open_prs = 2            # devloop PRs open at once; new issues wait
+max_open_prs = 2            # devloop PRs in progress at once; new issues wait
+# PRs waiting for a person (issue #199): agent:needs-human, and agent:ready-to-merge when devloop
+# does not merge them ([merge] mode "off", a level override "off", operator_only_paths). They do
+# not take the slots of max_open_prs; once this many are open, no new issue starts.
+max_parked_prs = 3
 max_review_rounds = 3       # review rounds (including CI failures) before escalating
 max_actions_per_tick = 3
 # Actions of one tick on different issues and PRs run at once, up to this many (issue #176): two

@@ -137,8 +137,10 @@ class StartOrderTests(unittest.TestCase):
                          ['next: implement #3', 'next: implement #2', 'next: implement #1'])
         d = self.make(issues)
         self.assertEqual([a.number for a in d.tick(dry_run=True)], [3, 2, 1])
-        self.assertEqual(self.logs[:3], [f'[dry-run] {line}' for line in expected])
-        self.assertEqual(self.logs[3:], ['[dry-run] implement #3', '[dry-run] implement #2',
+        self.assertEqual(self.logs[0], '[dry-run] open PRs: 0/10 in progress (max_open_prs), '
+                                       '0/3 parked (max_parked_prs)')
+        self.assertEqual(self.logs[1:4], [f'[dry-run] {line}' for line in expected])
+        self.assertEqual(self.logs[4:],['[dry-run] implement #3', '[dry-run] implement #2',
                                          '[dry-run] implement #1'])
         self.assertEqual((self.gh.comments, self.gh.labels), ([], {}))
 
