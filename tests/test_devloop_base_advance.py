@@ -149,12 +149,14 @@ class BaseAdvanceTests(Quorum):
                 if label == 'agent:review':
                     self.assertEqual(record['event'], 'stale')
                     self.assertIn('commit di base', self.gh.comments[-1][1])
-                    # A new round follows, and it counts: the round was complete.
+                    # A new round follows on the same head; it does not count (#252).
                     self.assertEqual(self.planned(), [Action(
-                        'review', 100, 'the approval has no matching policy receipt')])
+                        'review', 100, 'the approval was revoked because the base touched the '
+                        'PR')])
                     self.d.tick()
                     reviews = self.d.snapshot().prs[0].reviews
-                    self.assertEqual((reviews[-1]['round'], counted_rounds(reviews)), (2, 2))
+                    self.assertEqual((reviews[-1]['round'], counted_rounds(reviews)), (2, 1))
+                    self.assertEqual(reviews[-1]['resync']['reason'], 'base_changed')
 
     def test_a_base_that_conflicts_during_the_last_review_blocks_the_promotion(self):
         # Disjoint paths, but the head conflicts with the base the promotion recomputes.
