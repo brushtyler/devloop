@@ -11,7 +11,7 @@ from .localtests import MODES as LOCAL_TESTS_MODES
 from .policy import MAX_LEVEL, MIN_LEVEL, ZERO_LEVEL, ReviewPolicy
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / 'config.toml'
-# The root of the running dispatcher's installation (a pinned checkout, see docs/devloop.md):
+# The root of the running dispatcher's installation (a pinned checkout, see docs/devloop/guide.md):
 # relative ``sensitive_path_lists`` are read from here, never from a PR branch.
 INSTALL_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SENSITIVE_LISTS = ('schemas/recovery-grader-baseline.json',)
