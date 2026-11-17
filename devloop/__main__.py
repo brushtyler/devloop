@@ -16,10 +16,10 @@ from .agents import AgentRunner, isolated_env
 from .apps import DISPATCHER, MERGER, Identities
 from .config import ConfigError, Reloader, load_config
 from .dispatcher import (Dispatcher, TickLog, Workers, both_labels_warning, ensure_labels,
-                         label_transition, plan, pr_counts_line, queue_lines)
+                         label_transition, plan, pr_counts_line, pr_status_line,
+                         queue_lines)
 from .github import GitHub, GitHubError
 from .ledger import Ledger
-from .review import last_round
 from .stall import StallWatch
 from .workspace import Workspace
 
@@ -421,10 +421,7 @@ def main(argv=None):
             log(f'labels: {both_labels_warning(cfg.labels)}')
         snap = dispatcher.snapshot()
         for pr in snap.prs:
-            labels = ', '.join(sorted(l for l in pr.labels if l.startswith('agent:')))
-            conflict = ' CONFLICT with ' + cfg.base_branch if pr.merge_state == 'conflict' else ''
-            log(f'PR #{pr.number} (issue #{pr.issue}) [{labels}] rounds={last_round(pr.reviews)} '
-                f'ci={pr.checks} merge={pr.merge_state}{conflict}')
+            log(pr_status_line(pr, cfg, dispatcher.status_reviews(pr)))
         log(pr_counts_line(snap, cfg))
         for line in queue_lines(snap):
             log(line)

@@ -25,12 +25,12 @@ from .github import GitHubError, job_id
 from .localtests import failed_modules, select_modules
 from .markdown import (dispatcher_header, publishable, render_fix, render_native_review,
                        render_review)
-from .planning import (BASE_CHANGED, FIX_COMMAND, counted_rounds, pending_reviewers,
-                       preflight_state, waived_rounds)
+from .planning import (BASE_CHANGED, FIX_COMMAND, RESYNC_AFTER_APPROVAL, counted_rounds,
+                       pending_reviewers, preflight_state, waived_rounds)
 from .policy import ZERO_LEVEL, distinct, independent, profile_of
 from .ports import summarize_checks
 from .review import (ci_failure_review, current_round, last_round, normalize_review,
-                     open_findings, owner_of)
+                     open_findings, owner_of, round_verdict)
 from .supervision import SYNC_FAILED, TOOL_FAILURE
 from .workspace import WorkspaceError
 
@@ -697,6 +697,40 @@ class ActionsMixin:
                           remove=remove, extra={'requests': requests, 'from': pr.head_sha},
                           merged=merged)
 
+    def _sync_rounds_note(self, pr, conflicts, fix):
+        """What the comment of a sync of ``pr`` says of the next review (#289): with
+        ``conflicts`` an agent resolved, the content of the PR changed and the review counts
+        against ``max_review_rounds``, with the rounds left; without, the review of an approved
+        head does not count (#235), and any other review counts as it would have anyway.
+        ``fix``: a fix waits for the sync, and its review is the next one."""
+        limit = self.cfg.max_review_rounds
+        latest = current_round(pr.reviews)
+        approved = (bool(latest) and latest[0]['source'] == 'agent'
+                    and not pending_reviewers(latest) and round_verdict(latest) == 'approve'
+                    and all(r['head_sha'] == pr.head_sha for r in latest))
+        resynced = bool(pr.resync) and pr.resync.get('reason') == RESYNC_AFTER_APPROVAL
+        if not conflicts and not fix and not pr.rereview and (approved or resynced):
+            return ('La review del nuovo head **non conterà** come round: differisce da quello '
+                    'approvato solo per il merge senza conflitti della base (conta invece se la '
+                    'CI fallisce o se viene chiesta una nuova review con `/devloop rereview`).')
+        which = 'dopo la correzione' if fix else 'successiva'
+        if fix:
+            why = 'come ogni review dopo una correzione'
+        elif conflicts:
+            why = 'perché l\'agent ha risolto dei conflitti e il contenuto della PR è cambiato'
+        else:
+            why = 'come avrebbe contato senza la sincronizzazione'
+        number = counted_rounds(pr.reviews) + 1
+        if number > limit:
+            where = (f'contati già {number - 1} round di {limit} (`max_review_rounds`); nessun '
+                     f'round rimasto: la review {which} richiederà una decisione dell\'operatore')
+        elif number == limit:
+            where = f'round {number} di {limit} (`max_review_rounds`), l\'ultimo rimasto'
+        else:
+            where = (f'round {number} di {limit} (`max_review_rounds`); dopo questo ne '
+                     f'resteranno {limit - number}')
+        return f'La review {which} **conterà** come round, {why}: {where}.'
+
     def _do_sync(self, pr, fix_remove=None):
         """Merge the base branch into a conflicting PR. The implementer resolves the conflicts
         in the PR worktree, the dispatcher concludes the merge, pushes it and sends the PR back
@@ -790,7 +824,8 @@ class ActionsMixin:
                 'La correzione in attesa parte dal nuovo head al prossimo tick')
         text = (f'\n## Sincronizzazione con `{cfg.base_branch}`\n\n'
                 f'Merge di `{base}` (`{target[:12]}`) nel branch, nuovo head `{head[:12]}`. '
-                f'{then}; la sincronizzazione non consuma un round di review.\n\n')
+                f'{then}; la sincronizzazione non consuma un round di review. '
+                f'{self._sync_rounds_note(pr, bool(files), fix_remove is not None)}\n\n')
         if files:
             text += f'File in conflitto risolti:\n\n{listed}\n\n{result["summary"].strip()}'
             # Who resolved the conflicts wrote code on the PR: the marker keeps its profile,

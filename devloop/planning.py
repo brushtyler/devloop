@@ -760,6 +760,51 @@ def counted_rounds(reviews):
     return len({r['round'] for r in reviews} - waived_rounds(reviews))
 
 
+def round_reasons(reviews, fixes=(), syncs=()):
+    """Every round of ``reviews``, oldest first, as ``(round, reason, counts)`` with the reason
+    in Italian (#289) and whether it counts against ``max_review_rounds`` (``counted_rounds``).
+    A counted round is a CI failure, the review of a head an agent's conflict resolution
+    produced (``syncs``, the ``sync`` markers), the review after a fix (``fixes``) of the round
+    before, the first review, or a new review of the same or of another head. A waived round
+    (``waived_rounds``) is a review after a resync or a revocation for the base, or a round the
+    base interrupted and a later one replaced."""
+    waived = waived_rounds(reviews)
+    synced = {s.get('head_sha') for s in syncs} - {None}
+    fixed = {f.get('round') for f in fixes}
+    reasons, previous = [], None
+    for number in sorted({r['round'] for r in reviews}):
+        first = _round_records(reviews, number)[0]
+        if number in waived:
+            resync = first.get('resync')
+            reason = resync.get('reason') if isinstance(resync, dict) else None
+            if reason == RESYNC_AFTER_APPROVAL:
+                why = 'review di un head approvato, spostato solo da una sync senza conflitti'
+            elif reason == BASE_CHANGED:
+                why = 'nuova review di un head approvato, dopo la revoca per la base'
+            else:
+                why = 'round interrotto dall\'avanzare della base e sostituito dal successivo'
+                reasons.append((number, why, False))
+                continue  # the round replacing it follows what came before it
+            reasons.append((number, why, False))
+        else:
+            if first['source'] != 'agent':
+                why = 'CI fallita'
+            elif first.get('head_sha') in synced:
+                why = 'review dopo una sync con conflitti risolti dall\'agent'
+            elif (previous['round'] if previous else 0) in fixed:
+                # A fix answers the round before (round 0: a requested fix before any review).
+                why = 'review dopo una correzione'
+            elif previous is None:
+                why = 'prima review'
+            elif previous.get('head_sha') == first.get('head_sha'):
+                why = 'nuova review dello stesso head'
+            else:
+                why = 'review di un nuovo head'
+            reasons.append((number, why, True))
+        previous = first
+    return reasons
+
+
 def _parents(path):
     return {path[:i] for i, c in enumerate(path) if c == '/'}
 
