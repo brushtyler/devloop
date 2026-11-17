@@ -378,7 +378,31 @@ class RepositoryDocLinksTests(unittest.TestCase):
         names = [page.relative_to(ROOT).as_posix() for page in documentation(ROOT)]
         self.assertEqual(names[:2], ['README.md', 'AGENTS.md'])
         self.assertIn('docs/devloop.md', names)
+        for page in ('guide', 'reference', 'protocol'):
+            self.assertIn(f'docs/devloop/{page}.md', names)
         self.assertIn('docs/adr/0002-ruoli-e-responsabilita.md', names)
+
+    def test_the_devloop_document_is_an_index_of_its_three_pages(self):
+        # #241 (ADR 0003, I4): docs/devloop.md is an index, the content lives in docs/devloop/.
+        index = (ROOT / 'docs' / 'devloop.md').read_text(encoding='utf-8')
+        self.assertLess(len(index.splitlines()), 30)
+        for page in ('guide', 'reference', 'protocol'):
+            self.assertIn(f'](devloop/{page}.md)', index)
+        headings = {page: [line for line in (ROOT / 'docs' / 'devloop' / f'{page}.md')
+                           .read_text(encoding='utf-8').splitlines() if line.startswith('## ')]
+                    for page in ('guide', 'reference', 'protocol')}
+        for page, expected in (
+                ('guide', ('## The loop', '## Merge modes', '## Who does what', '## Usage',
+                           '## Limits')),
+                ('reference', ('## Configuration', '## Review level and policy receipt',
+                               '## GitHub identities')),
+                ('protocol', ('## Conflicts with `main`', '## Rounds', '## Receipts',
+                              '## Structured review', '## Attribution',
+                              '## Evidence and telemetry'))):
+            for heading in expected:
+                self.assertIn(heading, headings[page], page)
+        architecture = (ROOT / 'docs' / 'architecture.md').read_text(encoding='utf-8')
+        self.assertIn('\n## Ports and adapters\n', architecture)
 
 
 if __name__ == '__main__':

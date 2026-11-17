@@ -125,3 +125,24 @@ SSDLC does not implement authenticated provenance today. If a deployment needs i
 3. **Digital signature over checkpoints.** A signing service or hardware token signs the head; anyone with the public key can verify. It adds identity to option 1, but it is only as strong as the custody of the private key.
 
 For options 2 and 3, the key must stay outside every developer and test sandbox. It must never be placed in the project, the ticket directory, `.ssdlc/.runtime` (mounted read-write in role containers), environment variables passed to containers, or the toolkit directory. Even then, a signature shows that the signer approved a head; it does not prove that the events are true. Signed checkpoints must still be combined with the controls above. Adopting one of these options is a product decision and is not part of the current task engine.
+
+## Ports and adapters
+
+The dispatcher reaches GitHub through three ports, declared in `devloop/ports.py` as step 1 of
+[ADR 0001](adr/0001-prodotto-unico-fasi-su-tracker.md):
+
+| Port | Methods |
+|---|---|
+| `Tracker` | issues and their history, comments of issues and PRs, labels: `issues_with_label`, `issue`, `issue_history`, `issue_comments`, `pr_comments`, `labelers`, `label_events`, `labeled_events`, `edit_labels`, `comment`, `close_issue`, `edit_comment`, `ensure_label`, `repo_labels`, `rename_label` |
+| `CodeReview` | PRs and reviews: `open_prs`, `merged_prs`, `merge_state` (`clean`, `conflict` or `unknown`), `pr_head`, `pr_state`, `merge_pr`, `pr_reviews`, `create_pr`, `submit_review` |
+| `CI` | checks of a commit: `checks` (summarized by `summarize_checks`), `check_details`, `check_runs`, `failed_log`, `rerun_failed_jobs` (#200) |
+
+The ports hold only the methods the dispatcher calls, with their current names and signatures,
+and return normalized data. `GitHub` (`devloop/github.py`) implements all three, and `Identities`
+(`devloop/apps.py`) hands one out for each actor: they are the concrete adapters. The
+dispatcher, its ledger and `setup` depend on the ports only. There is no other backend yet; the
+module docstring records where a method that could fit more than one port went.
+
+In the tests, `FakeGH` (`tests/helpers/devloop_fakes.py`) implements the ports in memory. It
+proves neither persistence nor atomicity. `tests/test_devloop_ports.py` checks that the adapter
+and every fake expose each port method with the same signature.

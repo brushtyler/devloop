@@ -157,7 +157,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_documented(self):
         root = Path(__file__).resolve().parent.parent
-        self.assertIn('max_parked_prs', (root / 'docs' / 'devloop.md').read_text())
+        self.assertIn('max_parked_prs', (root / 'docs' / 'devloop' / 'guide.md').read_text())
         self.assertIn('max_parked_prs', (root / 'devloop' / 'config.toml').read_text())
 
 

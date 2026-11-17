@@ -585,7 +585,7 @@ class CommandTests(unittest.TestCase):
 
 class DocumentationTests(unittest.TestCase):
     def test_the_devloop_document_describes_both_modes(self):
-        text = (REPO / 'docs' / 'devloop.md').read_text(encoding='utf-8')
+        text = (REPO / 'docs' / 'devloop' / 'guide.md').read_text(encoding='utf-8')
         start = text.index('### Continuous mode')
         section = text[start:text.index('\n### ', start + 1)]
         for needle in ('`devloop run`', '`devloop tick`', 'max_parallel_actions', 'barrier',

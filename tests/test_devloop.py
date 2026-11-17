@@ -323,7 +323,7 @@ class AgentCommandTests(unittest.TestCase):
                     for tool in ('Agent', 'Task', 'Workflow'):
                         self.assertIn(tool, denied(argv))
         # The documentation names the same tools.
-        docs = (Path(__file__).resolve().parent.parent / 'docs' / 'devloop.md').read_text()
+        docs = (Path(__file__).resolve().parent.parent / 'docs' / 'devloop' / 'reference.md').read_text()
         self.assertIn('### No background work in a turn', docs)
         self.assertIn('`--disallowedTools ' + ' '.join(agents.CLAUDE_DENIED_TOOLS) + '`',
                       ' '.join(docs.split()))

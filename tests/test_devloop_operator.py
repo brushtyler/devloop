@@ -35,7 +35,7 @@ TEXT = ('.py', '.md', '.toml', '.json', '.sh', '.txt', '.yml', '.yaml', '.cfg', 
 
 
 def transition_section(lines):
-    """The line numbers of the section of docs/devloop.md on the rename (#248)."""
+    """The line numbers of the section of docs/devloop/guide.md on the rename (#248)."""
     start = next(i for i, line in enumerate(lines)
                  if line.startswith('### From `agent:needs-') and OLD_NAMES.search(line))
     end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith('#')), len(lines))
@@ -50,8 +50,11 @@ def allowed(relative, lines, number):
         return line.startswith('LEGACY_NEEDS_OPERATOR = ')
     if relative == 'devloop/review.py':
         return line.startswith('LEGACY_VERDICT = ')
-    if relative == 'docs/devloop.md':
+    if relative == 'docs/devloop/guide.md':
         return number in transition_section(lines)
+    if relative == 'tests/fixtures/devloop_split.json':
+        # The ledger of the split names that section of the guide.
+        return '"Usage > From `agent:needs-' in line
     return False
 
 
