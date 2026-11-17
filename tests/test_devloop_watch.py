@@ -118,6 +118,52 @@ class FakeGitHub:
         self.comments.append({'id': cid, 'number': number, 'login': login, 'body': body})
 
 
+class Gh246:
+    """A ``gh`` runner that knows only the ``--json`` fields of `gh` 2.46.0, the version on the
+    operator's host (#211): any other field fails as that `gh` fails. ``issues``, ``prs`` and
+    ``states`` are what `issue list`, `pr list` and REST ``issues/<n>`` answer."""
+
+    ISSUE_FIELDS = frozenset((
+        'assignees,author,body,closed,closedAt,comments,createdAt,id,labels,milestone,number,'
+        'projectCards,projectItems,reactionGroups,state,title,updatedAt,url').split(','))
+    PR_FIELDS = frozenset((
+        'additions,assignees,author,autoMergeRequest,baseRefName,body,changedFiles,closed,'
+        'closedAt,comments,commits,createdAt,deletions,files,headRefName,headRefOid,'
+        'headRepository,headRepositoryOwner,id,isCrossRepository,isDraft,labels,latestReviews,'
+        'maintainerCanModify,mergeCommit,mergeStateStatus,mergeable,mergedAt,mergedBy,milestone,'
+        'number,potentialMergeCommit,projectCards,projectItems,reactionGroups,reviewDecision,'
+        'reviewRequests,reviews,state,statusCheckRollup,title,updatedAt,url').split(','))
+
+    def __init__(self):
+        self.issues, self.prs, self.states = [], [], {}
+        self.calls, self.rejected = [], []
+
+    def run(self, args, **kwargs):
+        self.calls.append(args)
+        if '--json' in args:
+            known = self.ISSUE_FIELDS if args[1] == 'issue' else self.PR_FIELDS
+            unknown = [f for f in args[args.index('--json') + 1].split(',') if f not in known]
+            if unknown:
+                self.rejected.append(args)
+                return SimpleNamespace(returncode=1, stdout='',
+                                       stderr=f'Unknown JSON field: "{unknown[0]}"\n'
+                                              'Available fields:\n  ...')
+        if args[1:3] == ['issue', 'list']:
+            out = json.dumps(self.issues)
+        elif args[1:3] == ['pr', 'list']:
+            out = json.dumps(self.prs)
+        elif args[1:3] in (['issue', 'view'], ['pr', 'view']):
+            out = '{}'
+        elif args[1] == 'api' and '/issues/comments' in ' '.join(args):
+            out = ''
+        elif args[1] == 'api':
+            number = int(args[2].rsplit('/', 1)[1])
+            out = json.dumps(self.states[number])
+        else:
+            raise AssertionError(f'unexpected gh call: {args}')
+        return SimpleNamespace(returncode=0, stdout=out, stderr='')
+
+
 class Clock:
     """A monotonic clock that moves only when the watcher sleeps. Each sleep runs the next of
     ``steps`` (a change to GitHub); with none left it raises ``Stop`` when ``stop`` is set."""
@@ -704,6 +750,24 @@ class ErrorsTest(unittest.TestCase):
                 self.assertEqual(h.err, ['devloop watch: round failed (authentication)'])
                 self.assertFalse(h.path.exists())
 
+    def test_an_issue_closed_between_two_rounds_on_gh_2_46(self):
+        # #211: the real adapter on a gh that has no `stateReason` in `issue view --json`.
+        fake = Gh246()
+        fake.issues = [{'number': 5, 'title': 'Crash', 'labels': [],
+                        'author': {'login': OPERATOR, 'is_bot': False}}]
+        h = Harness(self, gh=GitHub('o/r', run=fake.run))
+        self.assertEqual(h.run(timeout=1)[0], 3)
+        self.assertEqual(h.lines(), ['watch baseline: 0 open PRs, 1 open issues'])
+        h.out.clear()
+        fake.issues = []
+        fake.states[5] = {'state': 'closed', 'state_reason': 'not_planned'}
+        self.assertEqual(h.run(timeout=1)[0], 0)
+        self.assertEqual(h.lines(), ['issue #5 closed (not_planned): Crash'])
+        self.assertEqual(h.err, [])
+        self.assertEqual(fake.rejected, [])
+        self.assertIn(['gh', 'api', 'repos/o/r/issues/5', '--jq', '{state, state_reason}'],
+                      fake.calls)
+
     def test_failure_classes(self):
         cases = (
             (GitHubError('POST /app/installations/1/access_tokens: HTTP 401: {}'),
@@ -721,6 +785,7 @@ class ErrorsTest(unittest.TestCase):
             (GitHubError('gh pr list: timed out after 300s'), 'network'),
             (GitHubError('GET /repos/o/r/installation: <urlopen error [Errno -3]>'), 'network'),
             (GitHubError('gh could not start: [Errno 2] No such file'), 'gh unavailable'),
+            (GitHubError('gh issue view 203: Unknown JSON field: "stateReason"'), 'cli_version'),
             (GitHubError('gh pr list: something else'), 'GitHubError'),
             (OSError('disk full'), 'OSError'),
             (ValueError('bad json'), 'ValueError'),
@@ -1112,7 +1177,7 @@ class GitHubReadsTest(unittest.TestCase):
         def run(args, **kwargs):
             calls.append(args)
             out = ('{"id": 7, "login": "x[bot]", "body": "b", "number": 3}\n'
-                   if args[1] == 'api' else '{"state": "CLOSED", "stateReason": "NOT_PLANNED"}')
+                   if args[1] == 'api' else '[]')
             return SimpleNamespace(returncode=0, stdout=out, stderr='')
 
         gh = GitHub('o/r', run=run)
@@ -1120,13 +1185,55 @@ class GitHubReadsTest(unittest.TestCase):
                          [{'id': 7, 'login': 'x[bot]', 'body': 'b', 'number': 3}])
         self.assertIn('repos/o/r/issues/comments?since=2026-11-16T10:00:00Z&per_page=100',
                       calls[-1])
-        self.assertEqual(gh.issue_state(3)['stateReason'], 'NOT_PLANNED')
-        self.assertEqual(calls[-1][1:4], ['issue', 'view', '3'])
         gh.open_issues()
         self.assertEqual(calls[-1][1:3], ['issue', 'list'])
         self.assertIn('number,title,author,labels', calls[-1])
         gh.issue_author(3)
         self.assertEqual(calls[-1][1:3], ['api', 'repos/o/r/issues/3'])
+
+    def test_issue_state_reads_rest_with_the_porcelain_contract(self):
+        # #211: `gh issue view --json stateReason` fails on gh 2.46; REST has state_reason.
+        calls = []
+        answers = {
+            '{"state":"closed","state_reason":"not_planned"}':
+                {'state': 'CLOSED', 'stateReason': 'NOT_PLANNED'},
+            '{"state":"closed","state_reason":"completed"}':
+                {'state': 'CLOSED', 'stateReason': 'COMPLETED'},
+            '{"state":"open","state_reason":null}': {'state': 'OPEN', 'stateReason': None},
+            '{"state":"open","state_reason":"reopened"}':
+                {'state': 'OPEN', 'stateReason': 'REOPENED'},
+        }
+        for out, expected in answers.items():
+            with self.subTest(out=out):
+                gh = GitHub('o/r', run=lambda args, **kw: calls.append(args) or SimpleNamespace(
+                    returncode=0, stdout=out + '\n', stderr=''))
+                self.assertEqual(gh.issue_state('3'), expected)
+                self.assertEqual(calls[-1], ['gh', 'api', 'repos/o/r/issues/3',
+                                             '--jq', '{state, state_reason}'])
+                self.assertNotIn('--json', calls[-1])
+
+    def test_issue_state_not_found_is_explicit(self):
+        gh = GitHub('o/r', run=lambda args, **kw: SimpleNamespace(
+            returncode=1, stdout='', stderr='gh: Not Found (HTTP 404)'))
+        with self.assertRaises(GitHubNotFound):
+            gh.issue_state(3)
+
+    def test_porcelain_reads_ask_only_for_fields_gh_2_46_knows(self):
+        fake = Gh246()
+        fake.states[3] = {'state': 'open', 'state_reason': None}
+        gh = GitHub('o/r', run=fake.run)
+        gh.issues_with_label('agent:ready')
+        gh.issue(3)
+        gh.open_issues()
+        gh.open_prs()
+        gh.pr_state(4)
+        gh.issue_state(3)
+        self.assertEqual(fake.rejected, [])
+        self.assertEqual(len([c for c in fake.calls if '--json' in c]), 5)
+        # The read #211 replaced is refused, and its error has a class of its own.
+        with self.assertRaises(GitHubError) as raised:
+            gh._json('issue', 'view', '3', '-R', 'o/r', '--json', 'state,stateReason')
+        self.assertEqual(watch.failure_class(raised.exception), 'cli_version')
 
     def test_time_left_bounds_each_call(self):
         timeouts = []

@@ -1097,7 +1097,8 @@ after the interval and the state of the latest successful round is kept. Each fa
 writes `devloop watch: round failed (<class>)` on stderr, with the class of the error and never
 `gh`'s output, tokens or paths: `authentication` (no `gh` login, bad credentials, an app token
 that could not be minted), `permission`, `not found`, `rate limit`, `server error`, `network`,
-`gh unavailable`, or the name of the error's type when none applies. After three consecutive
+`gh unavailable`, `cli_version` (the installed `gh` does not know a `--json` field: `Unknown
+JSON field`), or the name of the error's type when none applies. After three consecutive
 failed rounds it emits one line, `watch error: 3 consecutive rounds could not read GitHub, the
 last valid state is kept`, without `gh`'s output; it counts as news (`--until-change` exits with
 0, `--exec` delivers it). A successful round resets the count. This includes the read of an issue
@@ -1631,4 +1632,7 @@ fallback_models = [
   killed, an `--exec` command that fails) loses those lines rather than repeating them.
 - **`gh` compatibility.** Checks, labels, comments and PR creation go through the REST API
   (`gh api`), so devloop does not depend on newer porcelain flags such as `gh pr checks --json`.
+  The porcelain reads (`gh issue list/view`, `gh pr list/view`) ask only for long-standing
+  `--json` fields, all known to `gh` 2.46; an issue's state and close reason are read with REST,
+  since `gh issue view --json stateReason` is newer than that (#211).
   For commit statuses the aggregate state counts, including contexts beyond the first page.

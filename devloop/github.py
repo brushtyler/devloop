@@ -2,7 +2,8 @@
 
 Checks, labels, comments and pull request creation use the REST API through `gh api`, which
 behaves the same across `gh` versions. Porcelain commands are used only for reads whose `--json`
-output is long-standing (`issue list/view`, `pr list/view`).
+fields are long-standing (`issue list/view`, `pr list/view`); a field newer `gh` added (such as
+an issue's ``stateReason``) is read with REST instead.
 
 ``GitHub`` is the concrete adapter of the ports of ``devloop.ports`` (``Tracker``,
 ``CodeReview`` and ``CI``); the dispatcher depends on the ports, not on this class.
@@ -130,9 +131,14 @@ class GitHub:
                           str(limit), '--json', 'number,title,author,labels')
 
     def issue_state(self, number):
-        """``{state, stateReason}`` of issue ``number``, read fresh."""
-        return self._json('issue', 'view', str(number), '-R', self.repo,
-                          '--json', 'state,stateReason')
+        """``{state, stateReason}`` of issue ``number``, read fresh: ``state`` OPEN or CLOSED,
+        ``stateReason`` (COMPLETED, NOT_PLANNED, ...) or None, both in upper case as `gh issue
+        view` reports them. Read with REST: older `gh` (2.46 among them) has no ``stateReason``
+        field in `gh issue view --json` (#211)."""
+        raw = self._json('api', f'repos/{self.repo}/issues/{int(number)}',
+                         '--jq', '{state, state_reason}') or {}
+        return {'state': (raw.get('state') or '').upper() or None,
+                'stateReason': (raw.get('state_reason') or '').upper() or None}
 
     def issue_author(self, number):
         """``{login, pull_request}`` of issue or PR ``number``, whatever its state: its author's

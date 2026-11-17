@@ -89,13 +89,16 @@ FAILURE_CLASSES = (
                            r'connection (?:refused|reset)|dial tcp|tls handshake|'
                            r'urlopen error', re.I)),
     ('gh unavailable', re.compile(r'gh could not start', re.I)),
+    # A `--json` field the installed `gh` does not know (#211).
+    ('cli_version', re.compile(r'Unknown JSON field', re.I)),
 )
 
 
 def failure_class(exc):
     """What kind of failure ``exc`` is, for the ``round failed`` line: ``rate limit``,
-    ``authentication``, ``permission``, ``not found``, ``server error``, ``network`` or
-    ``gh unavailable`` for a GitHub error it recognises, else the name of its type."""
+    ``authentication``, ``permission``, ``not found``, ``server error``, ``network``,
+    ``gh unavailable`` or ``cli_version`` for a GitHub error it recognises, else the name of its
+    type."""
     if isinstance(exc, GitHubNotFound):
         return 'not found'
     if isinstance(exc, GitHubError):
