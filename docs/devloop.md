@@ -1231,12 +1231,14 @@ sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned run --inte
    on `origin`, is refused. The commit of a copy already pinned (also abbreviated) is used
    without a fetch: that is the rollback;
 2. reads `devloop/config.toml` of that commit with the local overlay applied, and takes the files
-   of `review_policy.sensitive_path_lists`: each must be a relative path inside the root and a
+   of `review_policy.sensitive_path_lists` and the documents of the
+   [documentation map](#documentation-map): each must be a relative path inside the root and a
    regular file of the commit;
 3. extracts `devloop/` and those files into `.ssdlc/devloop/pinned-<sha12>`, with a `pin.json`
    naming the commit, and makes the copy read-only;
 4. checks the copy: in a Python with only the copy on its module path, the package imports, and
-   its configuration, with the overlay, loads and reads `sensitive_path_lists` from the copy;
+   its configuration, with the overlay, loads and reads `sensitive_path_lists` and the mapped
+   documents from the copy;
 5. points `.ssdlc/devloop/current` at the copy, with an atomic rename of a symlink.
 
 A failure at any step leaves `current` as it was, and leaves no new copy behind. A copy that
@@ -1336,7 +1338,8 @@ open PRs in progress and those waiting for a person ([Open PR limits](#open-pr-l
 `[merge]` (`mode`, `levels`, `operator_only_paths`) and `roles.supervisor` set the
 [merge modes](#merge-modes); an unknown mode, level or key stops devloop at startup.
 `[pin]` (`auto`, default `false`) sets the [pin after a merge](#pin-after-a-merge); a value that is
-not a boolean, or an unknown key, stops devloop at startup. Operator overrides go into the
+not a boolean, or an unknown key, stops devloop at startup. `[docs] map` sets the
+[documentation map](#documentation-map). Operator overrides go into the
 [local overlay](#local-config-as-an-overlay), not into this file.
 `[review_policy]` sets the
 [review level](#review-level-and-policy-receipt): `default_level` (1 or 2, default 1), the level
@@ -1440,6 +1443,44 @@ review. With `"full"` the gate is unchanged: CI passed or absent.
 The mode and the modules run (`local_tests`: `{mode, modules}`, only `{mode}` with `"full"`) go to the tick log and, as
 information only, to the markers of implement and fix: they are not part of the policy receipt
 and no approval depends on them.
+
+### Documentation map
+
+`[docs] map` (#203) maps code paths to the documents that describe them, so that the documents
+follow the code. It is the documentation phase of devloop, the `07-docs` of an SSDLC run:
+
+```toml
+[docs.map]
+"devloop/" = ["docs/devloop.md"]
+"orchestrator.py" = ["README.md", "docs/architecture.md"]
+"schemas/" = ["docs/configuration.md"]
+```
+
+A key is a directory prefix ending in `/` (it covers every file under it) or a file, matched
+exactly; both are relative to the root. A value is a non-empty list of documents. devloop stops at
+startup on an absolute path, an empty key, list or document, a `.`, `..` or empty segment, a
+backslash or a pattern character (`*`, `?`, `[`, `]`: `ssdlc_feedback*.py` is written as one key
+per file), a directory given as a document, and a document that is not a regular file of the
+running installation. A [pin](#pin) checks that each document is a file of the commit and
+extracts it into the copy. The [local overlay](#local-config-as-an-overlay) may add or replace
+keys. A pinned copy from before #203 does not extract the documents, so its pin of a commit with
+the map fails and leaves `current` as it was (an auto-pin too): pin that commit once with
+`python3 -m devloop pin origin/main` from a main checkout that already holds it; later pins work
+from the pinned copy.
+
+The prompts list the documents mapped to the files of the diff, the same diff the
+[local tests](#local-tests) use: from the merge base with `origin/main` to the current content of
+the worktree, read again for each prompt.
+
+| Prompt | Documents |
+|---|---|
+| First implement attempt | The whole map, since the diff is still empty: the implementer applies it to its own diff before finishing |
+| Later implement attempts (after failed local tests), fix | The documents mapped to the current diff, each with the files it comes from; the implementer updates those whose described behaviour changes |
+| Review | The documents mapped to the PR's diff. A documented behaviour that the change alters without updating its mapped document is a **blocking** finding; a mapped document that stays correct without changes is noted in `checks_performed` |
+
+A file that no key covers asks for nothing, and a diff without mapped files adds no section to
+the fix and review prompts. The map adds no turn and changes no budget or round. It grows with
+later issues.
 
 ### agy permissions
 

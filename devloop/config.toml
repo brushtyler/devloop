@@ -135,6 +135,38 @@ operator_only_paths = ["docs/adr/", "AGENTS.md", "CLAUDE.md"]
 [pin]
 auto = false
 
+# Documentation map (issue #203): code paths and the documents that describe them. A key is a
+# directory prefix ending in "/" or a file, relative to the root, with no pattern characters;
+# each value lists one or more documents, each a file of this commit (a pin extracts them too).
+# The implement, fix and review prompts list the documents mapped to the files of the diff
+# (the first implement prompt, with an empty diff, gets the whole map): an implementer updates
+# those whose described behaviour changes, and a reviewer reports a documented behaviour changed
+# without its document as a blocking finding. A file no key covers asks for nothing.
+[docs.map]
+"devloop/" = ["docs/devloop.md"]
+"orchestrator.py" = ["README.md", "docs/architecture.md"]
+"ssdlc_tasks.py" = ["README.md", "docs/architecture.md"]
+"ssdlc_controller.py" = ["README.md", "docs/architecture.md"]
+"ssdlc_writer_gate.py" = ["docs/writer-fencing.md"]
+"ssdlc_role_fencing.py" = ["docs/writer-fencing.md"]
+"ssdlc_container_holder.py" = ["docs/writer-fencing.md"]
+"ssdlc_telemetry.py" = ["docs/cost-telemetry.md", "docs/bounded-recovery.md"]
+"ssdlc_recovery.py" = ["docs/cost-telemetry.md", "docs/bounded-recovery.md"]
+"ssdlc_feedback.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_admission.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_analysis.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_bindings.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_delegation.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_delivery.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_return.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_roles.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_workflow.py" = ["docs/developer-feedback.md"]
+"ssdlc_scope_amendments.py" = ["docs/scope-amendments.md"]
+"ssdlc_continuations.py" = ["docs/continuations.md", "docs/historical-reconciliation.md"]
+"ssdlc_historical.py" = ["docs/continuations.md", "docs/historical-reconciliation.md"]
+"schemas/" = ["docs/configuration.md"]
+"ssdlc_catalogues.py" = ["docs/configuration.md"]
+
 [roles]
 # The agent whose GitHub identity may hold and release merges in "auto" mode (issue #172),
 # besides trusted_users. Its app's agent:ready and priority labels count too, but only on issues

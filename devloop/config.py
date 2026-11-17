@@ -99,6 +99,28 @@ class PinPolicy:
 
 
 @dataclass(frozen=True)
+class DocsMap:
+    """``[docs] map`` (#203): code paths and the documents that describe them. A key is a
+    directory prefix ending in ``/`` or a file, relative to the root; ``entries`` holds
+    ``(key, documents)`` pairs in configuration order."""
+    entries: tuple = ()
+
+    def documents(self, paths):
+        """``{document: [paths]}`` of the documents mapped to ``paths`` (the files of a diff),
+        sorted by document, each with the sorted paths of ``paths`` it comes from. A path that
+        no key covers maps to nothing."""
+        found = {}
+        for path in sorted(set(paths)):
+            for key, documents in self.entries:
+                if path == key or key.endswith('/') and path.startswith(key):
+                    for document in documents:
+                        found.setdefault(document, [])
+                        if path not in found[document]:
+                            found[document].append(path)
+        return dict(sorted(found.items()))
+
+
+@dataclass(frozen=True)
 class FallbackModel:
     """A model an agent falls back to when the ones before it are unavailable (issue #121)."""
     model: str
@@ -209,6 +231,8 @@ class Config:
     # mode (#172), or '' when none is configured.
     supervisor: str = ''
     pin: PinPolicy = field(default_factory=PinPolicy)
+    # Code paths and their documents, listed in the implement, fix and review prompts (#203).
+    docs: DocsMap = field(default_factory=DocsMap)
 
     def agent(self, key):
         return self.agents[key]
@@ -451,6 +475,62 @@ def parse_pin(table, lists):
     return PinPolicy(auto=auto, paths=('devloop/', *lists))
 
 
+def _docs_path(value, where, document):
+    """``value`` as a path of ``[docs] map``: a non-empty path relative to the root, without
+    surrounding spaces, ``.``, ``..`` or empty segments, backslashes or pattern characters. A key
+    may end in ``/`` (a directory prefix); a ``document`` is a file and may not."""
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f'{where}: empty entry')
+    parts = (value[:-1] if value.endswith('/') else value).split('/')
+    if (value != value.strip() or value.startswith('/')
+            or any(p in ('', '.', '..') for p in parts) or any(c in value for c in '*?[]\\')):
+        raise ConfigError(f'{where}: {value!r} is not a relative path inside the root')
+    if document and value.endswith('/'):
+        raise ConfigError(f'{where}: {value!r} is a directory, not a document')
+    return value
+
+
+def docs_entries(data):
+    """The ``(key, documents)`` pairs of ``[docs] map`` in the raw configuration ``data``,
+    checked for syntax only (#203): every key a directory prefix (``devloop/``) or a file, every
+    value a non-empty list of document files, all relative to the root."""
+    table = data.get('docs', {})
+    if not isinstance(table, dict):
+        raise ConfigError('docs: expected a table')
+    unknown = set(table) - {'map'}
+    if unknown:
+        raise ConfigError(f'docs: unknown keys {sorted(unknown)}')
+    mapping = table.get('map', {})
+    if not isinstance(mapping, dict):
+        raise ConfigError('docs.map: expected a table of "<path>" = ["<document>", ...]')
+    entries = []
+    for key, value in mapping.items():
+        where = f'docs.map.{key!r}' if key else 'docs.map'
+        _docs_path(key, where, document=False)
+        if not isinstance(value, list) or not value:
+            raise ConfigError(f'{where}: expected a non-empty list of documents')
+        documents = []
+        for document in value:
+            _docs_path(document, where, document=True)
+            if document not in documents:
+                documents.append(document)
+        entries.append((key, tuple(documents)))
+    return tuple(entries)
+
+
+def parse_docs(data, root):
+    """``[docs] map`` (#203): its entries (``docs_entries``), each document a regular file of
+    the installation at ``root`` (the pinned copy holds them, see ``pin.required_files``)."""
+    entries = docs_entries(data)
+    for key, documents in entries:
+        for document in documents:
+            path = Path(root) / document
+            if path.is_symlink() or not path.is_file():
+                raise ConfigError(f'docs.map.{key!r}: {document} is not a file of the '
+                                  'installation')
+    return DocsMap(entries=entries)
+
+
 def _reviewer_pool(roles, agents, implementer):
     """``roles.reviewers``, or ``roles.reviewer`` as a pool of one: known agents, no repeats,
     never the implementer."""
@@ -570,6 +650,7 @@ def parse_config(data, root=INSTALL_ROOT):
         local_tests=local_tests,
         merge=parse_merge(data.get('merge', {}), supervisor), supervisor=supervisor,
         pin=parse_pin(data.get('pin', {}), sensitive_lists(data)),
+        docs=parse_docs(data, root),
         review_policy=parse_review_policy(
             data.get('review_policy', {}), root,
             [(k, apps[k].slug if k in apps else None, agents[k].kind, agents[k].model,
@@ -610,6 +691,7 @@ OVERLAY_KEYS = {
     'agents': {'*': _AGENT_KEYS},
     'apps': {'key_dir': None, '*': dict.fromkeys(('app_id', 'slug'))},
     'pin': {'auto': None},
+    'docs': {'map': {'*': None}},
 }
 
 
