@@ -212,6 +212,15 @@ class GitHub:
                                    'isCrossRepository,mergeable,mergeStateStatus')
         return [dict(raw, author={'login': author_login(raw.get('author'))}) for raw in prs]
 
+    def merged_prs(self, branch):
+        """The merged PRs whose head branch is ``branch``, newest first, with the fields of
+        :meth:`open_prs` (the mergeability ones aside) and ``mergeCommit`` (#228)."""
+        prs = self._json('pr', 'list', '-R', self.repo, '--state', 'merged', '--head', branch,
+                         '--limit', '20', '--json', 'number,title,body,labels,headRefName,'
+                                                    'headRefOid,author,isCrossRepository,'
+                                                    'mergeCommit')
+        return [dict(raw, author={'login': author_login(raw.get('author'))}) for raw in prs]
+
     def merge_state(self, pr):
         """``clean``, ``conflict`` or ``unknown`` for ``pr`` as :meth:`open_prs` returns it."""
         return merge_state(pr.get('mergeable'), pr.get('mergeStateStatus'))
@@ -232,9 +241,9 @@ class GitHub:
 
     def pr_state(self, number):
         """The PR as a merge needs it, read fresh: ``{state, headRefOid, mergeable,
-        mergeStateStatus, labels}``."""
+        mergeStateStatus, labels, mergeCommit}`` (``mergeCommit``: ``{oid}`` once merged)."""
         return self._json('pr', 'view', str(number), '-R', self.repo, '--json',
-                          'state,headRefOid,mergeable,mergeStateStatus,labels')
+                          'state,headRefOid,mergeable,mergeStateStatus,labels,mergeCommit')
 
     def checks(self, sha):
         """``(state, failed_names, failed_run_ids)`` for commit ``sha``.
@@ -309,6 +318,11 @@ class GitHub:
         except json.JSONDecodeError:
             return None
         return created.get('id') if isinstance(created, dict) else None
+
+    def close_issue(self, number):
+        """Close issue ``number`` as completed (#228)."""
+        self._gh('api', '-X', 'PATCH', f'repos/{self.repo}/issues/{int(number)}',
+                 '-f', 'state=closed', '-f', 'state_reason=completed')
 
     def edit_comment(self, comment_id, body):
         """Replace the body of comment ``comment_id`` of an issue or a PR."""

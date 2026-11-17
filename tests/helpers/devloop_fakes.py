@@ -88,6 +88,9 @@ class FakeGH:
     def comment(self, number, body):
         self.comments.append((number, body))
 
+    def close_issue(self, number):
+        self.closed = getattr(self, 'closed', []) + [number]
+
     def edit_comment(self, comment_id, body):
         self.comment_edits.append((comment_id, body))
 
@@ -100,6 +103,12 @@ class FakeGH:
 
     def open_prs(self):
         return [dict(raw) for raw in self.open]
+
+    # The raw merged PRs, as `gh pr list --state merged` returns them (none by default).
+    merged_raw = ()
+
+    def merged_prs(self, branch):
+        return [dict(raw) for raw in self.merged_raw if raw.get('headRefName') == branch]
 
     def merge_state(self, pr):
         return merge_state(pr.get('mergeable'), pr.get('mergeStateStatus'))

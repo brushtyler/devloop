@@ -181,17 +181,19 @@ class Ledger:
         entry.started = self._monotonic()
         return entry
 
-    def close_turn(self, entry, outcome, report=None, error=None):
+    def close_turn(self, entry, outcome, report=None, error=None, last_command=None):
         """Close a turn: ``outcome`` is ``success``, ``failure`` or ``unavailable``; ``report``
         the CLI's ``(fields, models)`` (``agents.telemetry``), None when the CLI did not
-        complete."""
+        complete; ``last_command`` the last command its output exposes, already cleaned
+        (``agents.public_command``), None when it exposes none (#215)."""
         fields, models = report or (dict.fromkeys(TELEMETRY_FIELDS), None)
         duration = (int((self._monotonic() - entry.started) * 1000)
                     if entry.started is not None else None)
+        changes = {'last_command': last_command} if last_command else {}
         self._edit(entry, state='closed', ended_at=self._now(), duration_ms=duration,
                    outcome=outcome, error=(str(error)[:300] if error else None),
                    telemetry={k: fields.get(k) for k in TELEMETRY_FIELDS},
-                   model_real=list(models) if models else None)
+                   model_real=list(models) if models else None, **changes)
         # Only a closed turn leaves the trace: a failed edit above keeps it for the next tick.
         self._count(entry.number, -1)
 
@@ -287,6 +289,10 @@ def _render_turn(r):
              ('Inizio', r.get('started_at')), ('Fine', r.get('ended_at')),
              ('Durata (ms)', r.get('duration_ms')), ('Esito', r.get('outcome'))]
     parts.append(_rows(rows))
+    if r.get('last_command'):
+        command = ' '.join(str(r['last_command']).split())
+        fence = '`' * (max((len(run) for run in re.findall('`+', command)), default=0) + 1)
+        parts.append(f'- **Ultimo comando (esposto dalla CLI):** {fence} {command} {fence}')
     if r.get('error'):
         parts.append(f'- **Errore:** {" ".join(str(r["error"]).split())}')
     parts += ['', '**Telemetria** (dichiarata dalla CLI, non autenticata):', '',

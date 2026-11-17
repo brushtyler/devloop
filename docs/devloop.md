@@ -79,6 +79,24 @@ and set the label that should run next (`agent:ready` on the issue, `agent:revie
 **class**, recorded in its marker; with `[merge].mode = "auto"` the non-critical ones go to
 `agent:needs-supervisor` instead (see [Escalations to the supervisor](#escalations-to-the-supervisor)).
 
+The escalation of a failed agent turn names its local log, `<time>-<label>-<agent>.log` in
+`<state_dir>/logs`. The log exists for every turn, including one that timed out, was stopped as
+stalled or could not start: it holds what the agent wrote on stdout and stderr until then. A
+descendant that left the agent's process group and still holds its output open does not lose
+what was read before it. For a timeout the comment also quotes the last lines of that output, at
+most 10, each cut to 300 characters. Terminal escape sequences (colours, titles), raw or written
+as `\u001b` in JSON events, are removed first. Private keys, tokens, the value assigned to a name
+that looks secret (`DB_PASSWORD=…`, `"token": "…"`, whatever its length; a quoted value up to
+its closing quote, spaces and escaped quotes included, also inside the JSON events of a CLI) and
+the values of the agent's variables whose name looks secret (`KEY`, `TOKEN`, `SECRET`,
+`PASSWORD`, `CREDENTIAL`) become `[REDACTED]`: such a value of 8 characters or more wherever it
+appears, a shorter one, however short, as a whole word, even when that blanks a common word
+(`1` in `ran 1 test`). Paths in the worktree become relative and any other absolute path
+keeps only its last segment (`…/name`). The full output stays in the local log. A CLI that writes
+its output only at the end, such as `claude --output-format json`, may leave nothing to quote. The
+turn's [ledger record](#evidence-and-telemetry) keeps its duration and, when the CLI exposes it,
+the last command it ran or started.
+
 A round is one evaluation of a head: a CI failure, or the reviews of every reviewer the review
 level requires (one at level 1, two at level 2), whatever the number of reviewers. The round
 limit (`max_review_rounds`) is checked before every new round, whether a review or a CI failure,
@@ -585,6 +603,27 @@ PR already in `agent:ready-to-merge` keeps its label until something sends it ba
   level and the mode, and in `merged_by` the login of the merger app when it merged (none with
   the local login).
 
+### Closing the issue
+
+With a merge made by the merger app, GitHub does not apply the PR's "Closes #N" (#228). After
+every merge in `"strict"` or `"auto"` the dispatcher therefore closes the issue named by the
+PR's marker itself, with its own identity (the merger app gets no new permission): a dispatcher
+comment with a `closed` marker records the PR, the merged head, the merge commit and the mode,
+then the issue is closed as completed and loses `agent:ready`. An issue that is already closed,
+because GitHub closed it or a person merged, is left alone. A failure to close is written to the
+dispatcher log and leaves the merge as it is.
+
+**Safety net in the planner.** An open issue in `agent:ready` with a merged devloop PR (a PR from
+its branch, `<branch_prefix><issue>`, by a trusted user or a devloop app, merged by anyone) is
+never checked nor implemented again. It becomes a `merged_issue` escalation, non-critical: in
+`"auto"` it goes to `agent:needs-supervisor` and keeps `agent:ready`, otherwise to
+`agent:needs-human` without `agent:ready`. `/devloop retry` is refused for it: closing the issue,
+or `/devloop escalate <reason>`, settles it. More work on the same subject needs a new issue.
+The same check runs before a `/devloop retry` of an issue already escalated for another class
+(a `tool_failure` of its readiness check or implementation, for example): with a merged devloop
+PR the retry is refused, the step is not run, and the issue gets a `merged_issue` escalation
+routed as above.
+
 ### Holding a merge
 
 Only in `"auto"`. A PR comment whose first line, after the attribution header if any, is
@@ -642,6 +681,7 @@ check, and the `policy` marker of a level that cannot be reviewed or promoted. A
 | `tool_failure` | The agent or its model produced no result: a crash, a timeout, a stall with `agent_stall_action = "abort"`, no model available, a denied permission, a block for [background work still running](#no-background-work-in-a-turn) | No |
 | `preflight_default` | A failed [readiness check](#readiness-check-before-implementation) whose gaps are all `default_available`, with no split | No |
 | `sync_failed` | A [sync](#conflicts-with-main) that failed, with no file in conflict under a sensitive path (`sensitive_paths`) or `operator_only_paths` | No |
+| `merged_issue` | An open issue in `agent:ready` that a merged devloop PR already resolved ([Closing the issue](#closing-the-issue)) | No |
 | `round_limit` | The limit of review rounds | Yes |
 | `operator_decision` | A readiness check with an `operator_decision` or `tool_unavailable` gap, or a split | Yes |
 | `untrusted` | The issue text changed after `agent:ready` by someone outside `trusted_users` | Yes |
@@ -1044,8 +1084,8 @@ The dispatcher reaches GitHub through three ports, declared in `devloop/ports.py
 
 | Port | Methods |
 |---|---|
-| `Tracker` | issues and their history, comments of issues and PRs, labels: `issues_with_label`, `issue`, `issue_history`, `issue_comments`, `pr_comments`, `labelers`, `label_events`, `labeled_events`, `edit_labels`, `comment`, `edit_comment`, `ensure_label` |
-| `CodeReview` | PRs and reviews: `open_prs`, `merge_state` (`clean`, `conflict` or `unknown`), `pr_head`, `pr_state`, `merge_pr`, `pr_reviews`, `create_pr`, `submit_review` |
+| `Tracker` | issues and their history, comments of issues and PRs, labels: `issues_with_label`, `issue`, `issue_history`, `issue_comments`, `pr_comments`, `labelers`, `label_events`, `labeled_events`, `edit_labels`, `comment`, `close_issue`, `edit_comment`, `ensure_label` |
+| `CodeReview` | PRs and reviews: `open_prs`, `merged_prs`, `merge_state` (`clean`, `conflict` or `unknown`), `pr_head`, `pr_state`, `merge_pr`, `pr_reviews`, `create_pr`, `submit_review` |
 | `CI` | checks of a commit: `checks` (summarized by `summarize_checks`), `check_details`, `check_runs`, `failed_log`, `rerun_failed_jobs` (#200) |
 
 The ports hold only the methods the dispatcher calls, with their current names and signatures,
@@ -1218,7 +1258,7 @@ readiness check, on the PR for review, fix, sync and CI. They publish no receipt
 | Record | When | Content |
 |---|---|---|
 | `request` | The issue goes from `agent:ready` to `agent:working` | SHA-256 of title and body, author and time of the trusted `labeled` event of `agent:ready`, ids of the trusted comments given to the implementer, time of the takeover. It is a snapshot **at the takeover**, not at the time of the label |
-| `turn` | Every invocation of an agent CLI, retries, fallback models and failures included: implement, fix, sync with an agent, review, readiness check | Kind, agent, GitHub identity (none: the operator's `gh` login), configured model and effort (for a fallback, the fallback model and the model it replaces), real model, start, end, duration, outcome (`success`, `failure`, `unavailable`), the error if any, telemetry |
+| `turn` | Every invocation of an agent CLI, retries, fallback models and failures included: implement, fix, sync with an agent, review, readiness check | Kind, agent, GitHub identity (none: the operator's `gh` login), configured model and effort (for a fallback, the fallback model and the model it replaces), real model, start, end, duration, outcome (`success`, `failure`, `unavailable`), the error if any, telemetry, and the last command the turn ran or started when the CLI exposes it (`last_command`: only codex, from the `command_execution` items of `--json`; cleaned like the tail of a timeout, on one line, at most 200 characters; absent otherwise), also for a turn that timed out |
 | `verification` | Every test command the dispatcher runs after a writing turn (none when the [local tests](#local-tests) select nothing), and the full suite it runs before a review of a head without CI | Command, outcome, duration, the tree hash before and after the test, and the commit (none before a review) |
 | `event` | The CI of a head (`ci_round`): a failed CI round, the checks a review round saw whatever its verdict (`approve`, `request_changes` or `needs_human`), or the passing checks read again just before the PR is promoted to `agent:ready-to-merge` (also at level 0); a sync without an agent (`sync`) | For the CI, the head, the state (`fail`, `pass`, or `none` without checks), the review round (none at level 0) and each check with its outcome and the id of its GitHub Actions run (none for a commit status or a check outside Actions); the same checks read again for the same head and round are not recorded twice, a new run is. For a sync, the merged base commit and the old and new heads |
 

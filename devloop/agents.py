@@ -11,7 +11,7 @@ from pathlib import Path
 from .markdown import header, parse_version
 from .schema import load_schema, schema_path, validate, SchemaError
 from .unavailability import reset_seconds
-from .workspace import git_config_env, run_in_group
+from .workspace import git_config_env, partial_text, run_in_group
 
 MODES = ('write', 'review')
 # The tools that start sub-agents, denied in every claude turn (issue #219): a headless turn
@@ -75,9 +75,133 @@ def isolated_env(gh_config_dir, base=None):
 
 
 class AgentError(RuntimeError):
+    """A failed turn. ``log``: the turn's local log; ``tail``: for a turn the dispatcher stopped
+    (a timeout, issue #215), the last lines of its output, cleaned by ``output_tail``, or ''."""
+
+    tail = ''
+
     def __init__(self, message, log=None):
         super().__init__(message)
         self.log = log
+
+
+TAIL_LINES = 10
+TAIL_WIDTH = 300
+COMMAND_WIDTH = 200
+_SECRET_NAME = re.compile(r'KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL', re.I)
+# Values of secret-looking variables shorter than this are replaced only as whole words, however
+# short: a value such as ``pw1`` would otherwise be blanked inside longer words too. A known
+# secret is never published, even at the cost of blanking a common word (``1`` of ``ran 1 test``).
+_SECRET_WORD = 8
+_PEM = re.compile(r'-----BEGIN [^-]+-----.*?(?:-----END [^-]+-----|\Z)', re.S)
+_CREDENTIAL = re.compile(r'(?<![A-Za-z0-9_])(?:sk-[A-Za-z0-9_-]{20,}'
+                         r'|(?:ghp_|ghs_|gho_|ghu_|ghr_|github_pat_)[A-Za-z0-9_]{20,}'
+                         r'|AKIA[A-Z0-9]{16}|Bearer\s+[A-Za-z0-9._~+/-]{20,}=*)(?![A-Za-z0-9_])')
+# The value assigned to a secret-looking name, whatever its length: ``DB_PASSWORD=x``,
+# ``api-key: x``, ``"token": "x"``, also inside the JSON events of a CLI (``\"x\"``). The word
+# must be a whole part of the name: ``KeyError: 'x'`` and ``input_tokens: 3`` stay. A quoted
+# value is replaced up to its closing quote, spaces, separators and escaped quotes included, or
+# to the end of the line when the quote is not closed: ``"open \"se\" same"`` in shell or JSON,
+# ``'a b'``, and ``\"a \\\"b\\\" c\"`` inside a JSON string.
+_ASSIGNED = re.compile(
+    r'(?<![A-Za-z0-9])((?:[A-Za-z0-9]+[_.-])*(?:key|token|secret|password|passwd|credentials?)'
+    r'(?:[_.-][A-Za-z0-9]+)*(?![A-Za-z0-9])\\?["\']?\s*[=:]\s*)'
+    r'(?:(\\")(?:\\\\(?:\\.|[^\\"\n])|\\[^"\\\n]|[^"\\\n])*(\\"|$)'  # inside a JSON string
+    r'|(")(?:\\.|[^"\\\n])*("|$)'
+    r"|(')[^'\n]*('|$)"
+    r'|[^\s"\'`\\,;&|]+)', re.I | re.M)
+
+
+def _redact_assigned(match):
+    quotes = [q for q in match.groups()[1:] if q is not None]
+    opening, closing = quotes if quotes else ('', '')
+    return f'{match.group(1)}{opening}[REDACTED]{closing}'
+
+
+# A terminal escape sequence (colours, cursor, titles), raw or as the JSON events of a CLI
+# write it (``\u001b``): it would hide what follows it, an absolute path for example.
+_ESC = r'(?:\x1b|\\u001[bB]|\\x1[bB]|\\033)'
+_ANSI = re.compile(_ESC + r'(?:\[[0-?]*[ -/]*[@-~]'  # CSI: colours, cursor
+                   r'|\][^\x07\x1b\n]*?(?:\x07|\\u0007|' + _ESC + r'\\{1,2})'  # OSC: titles, links
+                   r'|[@-Z^_])')  # other two-character sequences
+# An absolute path: a slash not preceded by a word, a dot, a tilde or another slash (save the
+# ``\n``, ``\t`` and ``\r`` of a JSON string), followed by one or more segments. Relative
+# paths, ``~/…`` and URLs (``//`` after the scheme) do not match.
+_ABSOLUTE = re.compile(r'(?:(?<=\\[nrt])|(?<![\w.~/\\]))(?:/[^\s/\'"`,;:()\[\]{}<>|\\]+)+/?')
+
+
+def _local_path(match):
+    name = match.group(0).rstrip('/').rsplit('/', 1)[-1]
+    return f'…/{name}' if name else '…'
+
+
+def public_text(text, workdir=None, env=None):
+    """``text`` written by an agent, cleaned for a public comment (issue #215): terminal escape
+    sequences removed; private keys, credentials, values assigned to secret-looking names and
+    the values of secret-looking variables of ``env`` (default ``os.environ``) replaced with
+    ``[REDACTED]``; paths inside ``workdir`` made relative and any other absolute path reduced
+    to its last segment."""
+    text = _ANSI.sub('', text)
+    values = {v for k, v in (os.environ if env is None else env).items()
+              if _SECRET_NAME.search(k) and isinstance(v, str) and v.strip()}
+    text = _PEM.sub('[REDACTED]', text)
+    for secret in sorted(values, key=lambda v: (-len(v), v)):
+        if len(secret) >= _SECRET_WORD:
+            text = text.replace(secret, '[REDACTED]')
+        else:
+            text = re.sub(r'(?<![A-Za-z0-9_])' + re.escape(secret) + r'(?![A-Za-z0-9_])',
+                          '[REDACTED]', text)
+    text = _CREDENTIAL.sub('[REDACTED]', text)
+    text = _ASSIGNED.sub(_redact_assigned, text)
+    if workdir is not None:
+        roots = {str(Path(workdir)), os.path.realpath(workdir)}
+        for root in sorted((r.rstrip('/') for r in roots if r.rstrip('/')), key=len,
+                           reverse=True):
+            text = re.sub(re.escape(root) + r'(?=[/\s\'"`:,;)\]}\\]|$)', '.', text,
+                          flags=re.M)
+    return _ABSOLUTE.sub(_local_path, text)
+
+
+def _cut(line, width):
+    return line if len(line) <= width else line[:width - 1] + '…'
+
+
+def output_tail(stdout, stderr, workdir=None, env=None, lines=TAIL_LINES, width=TAIL_WIDTH):
+    """The last ``lines`` non-blank lines of a turn's output (stdout, then stderr), cleaned by
+    ``public_text`` for a public comment (issue #215), each cut to ``width`` characters. ''
+    when the turn wrote nothing."""
+    text = public_text(f'{stdout or ""}\n{stderr or ""}', workdir, env)
+    kept = [line.rstrip() for line in text.splitlines() if line.strip()][-lines:]
+    return '\n'.join(_cut(line, width) for line in kept)
+
+
+def last_command(kind, stdout):
+    """The last command the turn's output says the agent ran or started, as written, or None
+    when the CLI does not expose it (issue #215). Only codex does, with ``--json``: its
+    ``command_execution`` items. claude and agy write their JSON only at the end, without the
+    commands."""
+    if kind != 'codex':
+        return None
+    found = None
+    for line in (stdout or '').splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        item = event.get('item') if isinstance(event, dict) else None
+        if (isinstance(item, dict) and item.get('type') == 'command_execution'
+                and isinstance(item.get('command'), str) and item['command'].strip()):
+            found = item['command']
+    return found
+
+
+def public_command(kind, stdout, workdir=None, env=None, width=COMMAND_WIDTH):
+    """``last_command`` cleaned by ``public_text`` for the turn's ledger marker, on one line
+    and cut to ``width`` characters; None when the CLI does not expose it."""
+    command = last_command(kind, stdout)
+    if command is None:
+        return None
+    return _cut(' '.join(public_text(command, workdir, env).split()), width) or None
 
 
 class EnvelopeError(AgentError):
@@ -417,8 +541,10 @@ class AgentRunner:
     ``last_report`` is the ``telemetry`` of the latest turn, ``(fields, models)``, set whether
     the turn succeeded or failed; None when the CLI did not complete (timeout, stall, failed
     start), so that nothing is attested. It belongs to the calling thread: parallel actions
-    (#176) each read the report of their own turn. ``clock`` dates the failures that announce
-    when the model is back (#151)."""
+    (#176) each read the report of their own turn. ``last_command``, in the same way, is the
+    last command the latest turn's output exposes (``public_command``), whether the turn ended
+    or was stopped, or None. ``clock`` dates the failures that announce when the model is back
+    (#151)."""
 
     def __init__(self, log_dir, timeout, run=subprocess.run, env=None, on_turn=None, stall=None,
                  clock=time.time):
@@ -439,6 +565,14 @@ class AgentRunner:
     @last_report.setter
     def last_report(self, report):
         self._local.report = report
+
+    @property
+    def last_command(self):
+        return getattr(self._local, 'command', None)
+
+    @last_command.setter
+    def last_command(self, command):
+        self._local.command = command
 
     def _resets_at(self, text):
         """The epoch the error in ``text`` announces the model back at, or None (#151)."""
@@ -464,6 +598,7 @@ class AgentRunner:
     def run(self, agent, mode, prompt, schema_name, workdir, label):
         """Run one turn in ``workdir`` and return its schema-valid output."""
         self.last_report = None
+        self.last_command = None
         self.log_dir.mkdir(parents=True, exist_ok=True)
         stem = self.log_dir / f'{time.strftime("%Y%m%dT%H%M%S")}-{label}-{agent.key}'
         out_file = stem.with_suffix('.last.json')
@@ -483,19 +618,43 @@ class AgentRunner:
             if self._stall is not None:
                 kwargs.update(watch=self._stall.turn(agent.key, workdir),
                               watch_interval=self._stall.interval)
+        def write_log(status, stdout, stderr):
+            log.write_text(f'$ {argv[0]} ({mode})\n{status}\n--- stdout\n{stdout}'
+                           f'\n--- stderr\n{stderr}', encoding='utf-8')
+
+        def stopped_log(status, stdout='', stderr=''):
+            # The comment of a failed turn cites the log: it exists even when the turn did not
+            # end on its own (issue #215). A log that cannot be written does not hide why the
+            # turn failed.
+            try:
+                write_log(status, partial_text(stdout), partial_text(stderr))
+            except OSError:
+                pass
+
         try:
             done = run(argv, input=stdin, cwd=workdir, capture_output=True, text=True,
                        timeout=self.timeout, **kwargs)
         except AgentError as exc:  # the stall check stopped the turn
+            out, err = (partial_text(p) for p in (getattr(exc, 'partial_output', None)
+                                                  or ('', '')))
+            stopped_log(f'stopped: {exc}', out, err)
+            self.last_command = public_command(agent.kind, out, workdir, self._env)
             exc.log = log
             raise
         except subprocess.TimeoutExpired as exc:
-            raise AgentError(f'{agent.key} timed out after {self.timeout}s', log) from exc
+            out, err = partial_text(exc.output), partial_text(exc.stderr)
+            message = f'{agent.key} timed out after {self.timeout}s'
+            stopped_log(message, out, err)
+            self.last_command = public_command(agent.kind, out, workdir, self._env)
+            error = AgentError(message, log)
+            error.tail = output_tail(out, err, workdir, self._env)
+            raise error from exc
         except OSError as exc:
+            stopped_log(f'could not start: {exc}')
             raise AgentError(f'{agent.key} could not start: {exc}', log) from exc
         self.last_report = telemetry(agent.kind, done.stdout)
-        log.write_text(f'$ {argv[0]} ({mode})\nexit {done.returncode}\n--- stdout\n{done.stdout}'
-                       f'\n--- stderr\n{done.stderr}', encoding='utf-8')
+        self.last_command = public_command(agent.kind, done.stdout, workdir, self._env)
+        write_log(f'exit {done.returncode}', done.stdout, done.stderr)
         text = f'{done.stdout}\n{done.stderr}'
         stopped = no_output_reason(agent.kind, done.stdout, done.stderr)
         denied = denied_actions(agent.kind, done.stdout)
