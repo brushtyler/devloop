@@ -186,6 +186,14 @@ class FakeGH:
         log = self.logs.get(key, f'log of {key}')
         return log if max_lines is None else '\n'.join(log.splitlines()[-max_lines:])
 
+    # The whole logs of single jobs by job id (#300): a job not listed has a log without any
+    # summary of scripts/run-tests.py; None, a log that cannot be read.
+    job_logs = {}
+
+    def job_log(self, job_id):
+        self.job_log_reads = getattr(self, 'job_log_reads', []) + [job_id]
+        return self.job_logs.get(job_id, f'log of job {job_id}')
+
     # What a re-run of failed jobs raises (#200), e.g. a GitHubError for a 403; None: it runs.
     rerun_error = None
 

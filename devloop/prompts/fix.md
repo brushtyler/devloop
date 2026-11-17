@@ -50,6 +50,12 @@ $findings
 
 $requests
 
+$ci_summary
+
+When a finding or a request asks for a measure of the suite (its duration, the number of tests),
+take it from the CI summary above: it is the CI of the head the reviewer saw, read by the
+dispatcher.
+
 ## Acceptance criteria
 
 $acceptance_criteria

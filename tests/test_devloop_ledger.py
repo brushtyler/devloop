@@ -35,9 +35,23 @@ def ledger_records(comments, kind=None):
 
 GREEN = normalize_checks(
     [{'name': 'Unit Tests', 'status': 'completed', 'conclusion': 'success',
+      'started_at': '2026-11-17T10:00:00Z', 'completed_at': '2026-11-17T10:06:12Z',
       'details_url': 'https://github.com/o/r/actions/runs/43/job/8'}],
     {'state': 'success', 'total_count': 1,
      'statuses': [{'context': 'ext', 'state': 'success', 'target_url': 'https://ci.example'}]})
+# The end of a job log of scripts/run-tests.py as `gh run view --job <id> --log` prints it (#300).
+SUITE_LOG = (
+    'Unit Tests\tRun unit test suite\t2026-11-17T10:05:58.1Z ok   test_devloop 40s\n'
+    'Unit Tests\tRun unit test suite\t2026-11-17T10:06:00.1Z \n'
+    'Unit Tests\tRun unit test suite\t2026-11-17T10:06:00.2Z Slowest: test_a 120s, test_b 80s\n'
+    'Unit Tests\tRun unit test suite\t2026-11-17T10:06:00.3Z ' + '-' * 70 + '\n'
+    'Unit Tests\tRun unit test suite\t2026-11-17T10:06:00.4Z Ran 4321 tests in 350.125s '
+    '(210 modules, 12 split by class, 4 jobs)\n'
+    'Unit Tests\tRun unit test suite\t2026-11-17T10:06:00.5Z \n'
+    'Unit Tests\tRun unit test suite\t2026-11-17T10:06:00.6Z OK\n'
+    'Unit Tests\tRun unit test suite\t2026-11-17T10:06:00.7Z Discovered 4321 tests, ran 4321\n')
+SUITE_SUMMARY = {'ran': 'Ran 4321 tests in 350.125s (210 modules, 12 split by class, 4 jobs)',
+                 'slowest': 'Slowest: test_a 120s, test_b 80s'}
 
 
 class LedgerGH(FakeGH):
@@ -97,6 +111,7 @@ class LedgerGH(FakeGH):
             return [dict(c) for c in GREEN]
         return normalize_checks(
             [{'name': 'Unit Tests', 'status': 'completed', 'conclusion': 'failure',
+              'started_at': '2026-11-17T10:00:00Z', 'completed_at': '2026-11-17T10:02:05Z',
               'details_url': 'https://github.com/o/r/actions/runs/42/job/7'}],
             {'state': 'failure', 'total_count': 1,
              'statuses': [{'context': 'ext', 'state': 'error', 'target_url': 'https://ci.example'}]})
@@ -356,10 +371,29 @@ class LedgerDispatcherTests(unittest.TestCase):
         self.assertEqual(self.gh.records(100, 'turn'), [])
         (event,) = self.gh.records(100, 'event')
         self.assertEqual((event['event'], event['head'], event['round']), ('ci_round', SHA1, 1))
-        # An Actions run has its id; an external commit status has none.
+        # An Actions run has its id and its duration (#300); an external commit status has
+        # neither.
         self.assertEqual(event['checks'], [
-            {'name': 'Unit Tests', 'outcome': 'failure', 'run_id': 42},
-            {'name': 'ext', 'outcome': 'error', 'run_id': None}])
+            {'name': 'Unit Tests', 'outcome': 'failure', 'run_id': 42, 'duration_s': 125},
+            {'name': 'ext', 'outcome': 'error', 'run_id': None, 'duration_s': None}])
+        # The job log holds no summary of scripts/run-tests.py: nothing about the tests.
+        self.assertNotIn('tests', event)
+
+    def test_a_ci_round_records_the_summary_of_the_suite_read_from_the_job_log(self):
+        d = self.make(number=100)
+        self.gh.ci = 'fail'
+        self.gh.job_logs = {7: SUITE_LOG}
+        d._do_ci_failed(pr(checks='fail'))
+        (event,) = self.gh.records(100, 'event')
+        self.assertEqual(event['tests'], [{'name': 'Unit Tests', **SUITE_SUMMARY}])
+        # A log that cannot be read is recorded as such, and the round is recorded anyway.
+        d = self.make(number=100)
+        self.gh.ci = 'fail'
+        self.gh.job_logs = {7: None}
+        d._do_ci_failed(pr(checks='fail'))
+        (event,) = self.gh.records(100, 'event')
+        self.assertEqual(event['tests'], [{'name': 'Unit Tests', 'log': 'unavailable'}])
+        self.assertEqual(event['checks'][0]['duration_s'], 125)
 
     def test_a_turn_left_open_is_flagged_whatever_labels_follow(self):
         # The trace is in state_dir: a dispatcher started again, with labels that no longer
@@ -478,8 +512,8 @@ class GreenCILedgerTests(unittest.TestCase):
         (event,) = self.ci_events()
         self.assertEqual((event['head'], event['state'], event['round']), (SHA1, 'pass', 1))
         self.assertEqual(event['checks'], [
-            {'name': 'Unit Tests', 'outcome': 'success', 'run_id': 43},
-            {'name': 'ext', 'outcome': 'success', 'run_id': None}])
+            {'name': 'Unit Tests', 'outcome': 'success', 'run_id': 43, 'duration_s': 372},
+            {'name': 'ext', 'outcome': 'success', 'run_id': None, 'duration_s': None}])
         # The recorded approval replayed: the same checks read again are not recorded twice.
         self.gh.labels[100] = {'agent:review'}
         self.assertEqual([a.kind for a in d.tick()], ['apply_review'])
@@ -505,8 +539,10 @@ class GreenCILedgerTests(unittest.TestCase):
                 self.assertEqual((event['head'], event['state'], event['round']),
                                  (SHA1, 'pass', 1))
                 self.assertEqual(event['checks'], [
-                    {'name': 'Unit Tests', 'outcome': 'success', 'run_id': 43},
-                    {'name': 'ext', 'outcome': 'success', 'run_id': None}])
+                    {'name': 'Unit Tests', 'outcome': 'success', 'run_id': 43,
+                     'duration_s': 372},
+                    {'name': 'ext', 'outcome': 'success', 'run_id': None,
+                     'duration_s': None}])
                 # The same checks read again for the same head and round record nothing new.
                 self.gh.labels[100] = {'agent:review'}
                 again = d.snapshot().prs[0]

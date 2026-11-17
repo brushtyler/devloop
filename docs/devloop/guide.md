@@ -38,6 +38,12 @@ the same fix answers the reviewer's findings and the CI failure together. A CI t
 failed before the review sends the PR to the fix without a review, as before. A PR with the [level 0](reference.md#level-0-no-review) label, when level 0
 is enabled, has no review to start early: it still waits for its CI.
 
+The review and fix prompts carry a summary of the CI of the head, read by the dispatcher: each
+job with its outcome and duration and, for a job that runs `scripts/run-tests.py`, its final
+`Ran N tests in S (…)` and `Slowest` lines (#300). The agents, without network, can use those
+measures instead of asking the supervisor for them; a job log that cannot be read only leaves
+its summary out (see [Summary of the CI in the prompts](reference.md#summary-of-the-ci-in-the-prompts)).
+
 A head just pushed, without CI yet, is reviewed as if its CI were pending: with `local_tests`
 other than `full` no full suite runs locally in place of the CI for `[ci] grace_minutes`, and as
 long as `main` requires checks up to `[ci] required_timeout_minutes` (see
