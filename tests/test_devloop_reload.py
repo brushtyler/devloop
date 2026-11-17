@@ -115,6 +115,16 @@ class ReloaderTests(FilesCase):
             self.assertIn(key, restart[0])
         self.assertNotIn('max_open_prs', restart[0])
 
+    def test_a_change_before_the_reloader_exists_is_read_at_the_first_tick(self):
+        # main loads the configuration and only then creates the reloader: an overlay changed
+        # in between is not taken as the one already applied.
+        cfg = config.load_config(self.base, self.local)
+        self.overlay('max_open_prs = 2\n')
+        reloader = Reloader(cfg, self.base, self.local, log=self.logs.append)
+        for _ in range(3):
+            self.assertEqual(reloader.refresh().max_open_prs, 2)
+        self.assertEqual(self.logs, ['config: max_open_prs 1 -> 2 from this tick'])
+
 
 class RunLoopTests(FilesCase):
     """``cli.run_loop`` with the reloader ``main`` gives it."""

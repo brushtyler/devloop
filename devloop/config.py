@@ -861,13 +861,15 @@ class Reloader:
     one of them changed (its hash: an mtime may not change for a quick rewrite), returns the
     configuration of the tick: ``cfg`` with the ``LIVE_KEYS`` of the files. A change of any other
     key is logged and waits for a restart; a configuration that does not load is logged and the
-    previous one stays. Either way the files are loaded again only after their next change."""
+    previous one stays. Either way the files are loaded again only after their next change.
+    The first ``refresh()`` loads them in any case: they may have changed between the load of
+    ``cfg`` and the creation of the reloader, and a fingerprint taken here would hide that."""
 
     def __init__(self, cfg, path=None, local=None, *, log):
         self.cfg = cfg
         self.log = log
         self.paths = (Path(path) if path else DEFAULT_CONFIG,) + ((Path(local),) if local else ())
-        self._seen = {p: self._read(p) for p in self.paths}
+        self._seen = None  # no content compared with ``cfg`` yet
 
     @staticmethod
     def _read(path):

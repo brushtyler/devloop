@@ -1193,7 +1193,8 @@ replace it.
 #### Changes while the loop runs
 
 A running `devloop run` reads `devloop/config.toml` of its copy and the overlay again before
-each tick (#278), and loads them when their content changed (the hash of each file). Only three
+each tick (#278), and loads them at the first tick and then when their content changed (the hash
+of each file), so a change made while the loop was starting is not missed. Only three
 keys take effect without a restart:
 
 - `max_open_prs`, `max_parked_prs` and `max_review_rounds`: the new values apply from the next
