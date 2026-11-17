@@ -39,8 +39,8 @@ A run that stopped and cannot simply be resumed needs an explicit transition: ch
 | `LIMIT_REACHED` | A frozen limit or deadline is exhausted | Only an explicit, reviewed extension continues the run |
 | `OUTCOME_UNCERTAIN` | An invocation has no confirmed outcome | Reconcile; no automatic redispatch |
 | `BUDGET_CAP_GATE` | Measured spend reached `SSDLC_BUDGET_CAP_USD`, or a call on a measured route reported no charge | Raise the cap explicitly, or stop |
-| `ESTIMATE_CAP_GATE` | API-equivalent estimates reached `SSDLC_ESTIMATE_CAP_USD` | Raise the cap explicitly, or stop |
-| `LIMIT_REACHED` … `refused before launch` | The route of the call is unknown, or its adapter cannot report the measure a cap in force needs (for example Claude or Codex routed to OpenRouter) | Use a route the caps can bound, or disable the cap explicitly (`0`) ([Cost telemetry](cost-telemetry.md#separate-caps-and-route-admission)) |
+| `ESTIMATE_CAP_GATE` | API-equivalent estimates reached `SSDLC_ESTIMATE_CAP_USD`, or a Claude CLI call reported no estimate | Raise the cap explicitly, or stop |
+| `LIMIT_REACHED` … `refused before launch` | The route of the call is unknown, its adapter cannot report the measure a cap in force needs (for example Claude or Codex routed to OpenRouter), or a `codex`/`agy` subscription route has no `unmetered_quota` declaration | Use a route the caps can bound, declare the subscription explicitly (`SSDLC_UNMETERED_QUOTA` or the profile's `live_unknown_usage`), or disable the cap explicitly (`0`) ([Cost telemetry](cost-telemetry.md#separate-caps-and-route-admission)) |
 
 ## GitHub synchronization
 

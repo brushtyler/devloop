@@ -1289,7 +1289,8 @@ class PromptTransportTests(unittest.TestCase):
     def test_large_prompts_use_stdin_and_codex_traces_do_not_enter_phase_result(self):
         prompt = 'x' * 200000
         for engine in ('codex', 'claude'):
-            with self.subTest(engine=engine), patch.object(EngineRunner, '_should_spawn_role_container', return_value=False), patch('orchestrator.subprocess.run') as run:
+            # Without a frozen profile codex needs its explicit unmetered_quota declaration (#165).
+            with self.subTest(engine=engine), patch.dict(os.environ, SSDLC_UNMETERED_QUOTA='codex'), patch.object(EngineRunner, '_should_spawn_role_container', return_value=False), patch('orchestrator.subprocess.run') as run:
                 output = 'phase result' if engine == 'codex' else json.dumps({'result': 'phase result'})
                 run.return_value = subprocess.CompletedProcess([], 0, output, 'tool transcript')
                 result = getattr(EngineRunner, 'run_' + engine)(prompt, Path.cwd())

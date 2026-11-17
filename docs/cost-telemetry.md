@@ -103,8 +103,9 @@ and an estimate never consumes the spend cap.
 | `SSDLC_BUDGET_CAP_USD` | S $3, M $6, L $20 | Measured spend: charges reported in USD by a measured route. Gate `BUDGET_CAP_GATE` |
 | `SSDLC_ESTIMATE_CAP_USD` | S $3, M $6, L $20 | API-equivalent estimates (Claude CLI). Gate `ESTIMATE_CAP_GATE` |
 | `SSDLC_DEV_BUDGET_USD` | S $1, M $2.5, L $8 | Each Claude developer call, as `--max-budget-usd` |
+| `SSDLC_UNMETERED_QUOTA` | none | Not a cap: the subscription CLIs (`codex`, `agy`) declared outside the dollar caps without a frozen profile (see [Measures required per route](#measures-required-per-route)) |
 
-The three are independent and all stay active with their tier defaults; only an
+The three caps are independent and all stay active with their tier defaults; only an
 explicit `0` disables one of the two ticket caps. The limits on attempts, calls,
 rounds and elapsed time are unchanged, so a monetary estimate is never the only
 bound of a loop. No token limit is introduced: token telemetry is kept and
@@ -120,19 +121,25 @@ How the ledger feeds the caps (each invocation once):
   reinterpreted as an estimate;
 - a completed call on a measured route that reported no charge in USD makes the
   spend unknown: with the spend cap in force the run stops with
-  `BUDGET_CAP_GATE` instead of counting it as zero.
+  `BUDGET_CAP_GATE` instead of counting it as zero;
+- a completed Claude CLI call that reported no estimate (no `total_cost_usd`)
+  makes the estimates unknown: with the estimate cap in force the run stops with
+  `ESTIMATE_CAP_GATE` instead of counting it as zero. An incomplete call reports
+  nothing by definition and stays an unclassified figure.
 
 ### Measures required per route
 
 Before the call is reserved or launched, the effective route of the call is
 derived from its own configuration and admitted only if the caps in force can
-bound it:
+bound it. An OpenRouter call without `OPENROUTER_API_KEY` and without a frozen
+profile falls back to a local CLI (`call_cli_fallback`): the route of that CLI is
+the one admitted, before the supervisor intent.
 
 | Route | When | Measure required |
 | --- | --- | --- |
 | `openrouter_api` | OpenRouter HTTP adapter; Claude or Codex with `use_openrouter` and `OPENROUTER_API_KEY` | spend. Only the HTTP adapter reports it: Claude or Codex on this route are refused while the spend cap is in force, because an estimate is not a charge |
 | `claude_cli` | Claude CLI with no base URL of its own | estimate (`total_cost_usd`) |
-| `codex_cli`, `agy_cli` | the CLI subscription | a `live_unknown_usage` declaration of the frozen profile for the engine (`unmetered_quota` or `reserve_per_invocation`, [#43](https://github.com/brushtyler/ssdlc/issues/43)) |
+| `codex_cli`, `agy_cli` | the CLI subscription | an explicit `unmetered_quota` declaration for the engine: the `live_unknown_usage` of the frozen profile (`unmetered_quota` or `reserve_per_invocation`, [#43](https://github.com/brushtyler/ssdlc/issues/43)) or, without a profile, `SSDLC_UNMETERED_QUOTA`. Without one it is refused while either cap is in force |
 | `unknown` | OpenRouter requested for Claude but the role container would not receive its base URL, or the Claude CLI would receive another base URL | none can be determined: refused while either cap is in force |
 
 A refusal is `LIMIT_REACHED` with "refused before launch": no reservation, no
@@ -143,10 +150,16 @@ route of the same engine. The capacity check of
 [#128](https://github.com/brushtyler/ssdlc/issues/128) and the atomic check at
 reservation follow unchanged.
 
-Without a frozen profile there is nothing to declare: `codex` and `agy` on their
-subscription route are admitted as before and stay outside the dollar caps,
-bounded by attempts, calls and time. Declared exclusions and transitions of
-existing profiles, and caps in credits, are part B2
+A feedback consultation is admitted on its route the same way, before its intent
+and its reservation. If a prepaid feedback call is refused later, at the
+dispatch, its reservation is closed as `not_dispatched`, never left uncertain.
+
+Without a frozen profile the operator declares the subscription routes that stay
+outside the dollar caps with `SSDLC_UNMETERED_QUOTA`, a comma-separated list of
+`codex` and `agy` (for example `SSDLC_UNMETERED_QUOTA=codex,agy`); any other name
+refuses the call. A declared route is bounded by attempts, calls and time. The
+declaration never covers the OpenRouter route of the same engine. Transitions of
+existing profiles and caps in credits are part B2
 ([#214](https://github.com/brushtyler/ssdlc/issues/214)). A frozen profile keeps
 its own separate `metered_usd` and `cli_estimate_usd` caps and the frozen combined
 authority of its corrective transactions.

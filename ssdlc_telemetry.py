@@ -422,13 +422,16 @@ def render(report):
 
 OPENROUTER_ANTHROPIC_URL = 'https://openrouter.ai/api'
 # The measure each effective route needs. A CLI subscription route is excluded from the
-# dollar caps only by an explicit declaration of the frozen profile (``live_unknown_usage``).
+# dollar caps only by an explicit declaration: the ``live_unknown_usage`` of the frozen
+# profile or, without one, ``SSDLC_UNMETERED_QUOTA``.
 ROUTE_MEASURES = {'openrouter_api': 'spend', 'claude_cli': 'estimate', 'codex_cli': 'declaration',
                   'agy_cli': 'declaration'}
 # The measures each adapter really reports. The Claude CLI estimate is never a charge, even
 # when the CLI is routed to OpenRouter.
 ADAPTER_MEASURES = {'openrouter': ('spend',), 'claude': ('estimate',), 'codex': (), 'agy': ()}
 ESTIMATE_CAP_DEFAULTS = {'S': 3., 'M': 6., 'L': 20.}
+# Engines whose subscription CLI route an operator may declare as an unmetered quota.
+UNMETERED_ENGINES = ('codex', 'agy')
 
 
 class AdmissionRefused(ValueError):
@@ -446,13 +449,26 @@ def estimate_cap(env, tier):
     return cap if cap > 0 else None
 
 
+def unmetered_declarations(env):
+    """The operator's explicit ``unmetered_quota`` declarations for a run without a frozen
+    profile: ``SSDLC_UNMETERED_QUOTA``, a comma-separated list of ``codex`` and ``agy``.
+    Unset or empty: no declaration. Any other engine is refused (``ValueError``)."""
+    engines = [name.strip().lower() for name in (env.get('SSDLC_UNMETERED_QUOTA') or '').split(',')
+               if name.strip()]
+    unknown = sorted(set(engines) - set(UNMETERED_ENGINES))
+    if unknown:
+        raise ValueError('SSDLC_UNMETERED_QUOTA names engines without a subscription route: ' + ', '.join(unknown))
+    return {name: {'model': 'unmetered_quota', 'reason': 'SSDLC_UNMETERED_QUOTA'} for name in engines}
+
+
 def admit(provider, route, *, spend_cap, estimate_cap_active, declarations=None):
     """The measure that bounds an imminent call on its effective ``route`` (``None``: unknown).
 
     A route that cannot be determined, or a measured route whose adapter reports no charge,
     is refused when a cap it would escape is in force: an estimate never stands for a charge.
-    A CLI subscription route is bounded by the profile declaration for its engine, if any;
-    without a frozen profile it keeps the coverage it had (see docs/cost-telemetry.md)."""
+    A CLI subscription route reports no dollar measure: it leaves the dollar caps only with
+    an explicit declaration for its engine (``declarations``), and is refused without one
+    while either cap is in force (see docs/cost-telemetry.md)."""
     if route is None:
         if spend_cap or estimate_cap_active:
             raise AdmissionRefused('The route of the call cannot be determined, so the configured cost caps '
@@ -469,7 +485,13 @@ def admit(provider, route, *, spend_cap, estimate_cap_active, declarations=None)
     if required is None:
         raise AdmissionRefused('Unregistered route ' + str(route) + '; dispatch refused before launch')
     rule = (declarations or {}).get(provider)
-    return {'route': route, 'measure': rule['model'] if rule else None}
+    if rule:
+        return {'route': route, 'measure': rule['model']}
+    if spend_cap or estimate_cap_active:
+        raise AdmissionRefused(f'Route {route} reports no dollar measure and no unmetered_quota declaration '
+                               f'applies to {provider}, so the configured cost caps cannot be applied; '
+                               'dispatch refused before launch')
+    return {'route': route, 'measure': None}
 
 
 def ledger_measures(ledger):
@@ -479,9 +501,10 @@ def ledger_measures(ledger):
     ``unclassified_usd``: ``cost_usd`` of legacy rows, of rows without telemetry and of calls
     with neither a charge nor an estimate (incomplete ones included), which keeps counting against the spend cap as it always did (it is not
     reinterpreted as an estimate); ``unmeasured_spend``: completed calls on a measured route
-    that reported no charge in USD."""
+    that reported no charge in USD; ``unmeasured_estimate``: completed calls on a route that
+    needs an estimate (the Claude CLI) that reported none."""
     spend_usd = estimate_usd = unclassified_usd = 0
-    unmeasured, seen = [], set()
+    unmeasured, unestimated, seen = [], [], set()
     for row in ledger or ():
         if not isinstance(row, dict):
             continue
@@ -502,8 +525,12 @@ def ledger_measures(ledger):
             # Neither measure is known (an incomplete call, or a result recorded with every
             # measure unknown): its figure stays an unclassified one, never dropped.
             unclassified_usd += _amount(row.get('cost_usd')) or 0
-        if (t['outcome'] == 'completed' and ROUTE_MEASURES.get(t['route']['value']) == 'spend'
-                and not charged):
+        # A Claude CLI call records no route of its own: its route needs an estimate.
+        route = t['route']['value']
+        required = ROUTE_MEASURES.get(route) if route else ('estimate' if t['provider'] == 'claude' else None)
+        if t['outcome'] == 'completed' and required == 'spend' and not charged:
             unmeasured.append(t['invocation_id'])
+        if t['outcome'] == 'completed' and required == 'estimate' and not estimated:
+            unestimated.append(t['invocation_id'])
     return {'spend_usd': spend_usd, 'estimate_usd': estimate_usd, 'unclassified_usd': unclassified_usd,
-            'unmeasured_spend': unmeasured}
+            'unmeasured_spend': unmeasured, 'unmeasured_estimate': unestimated}

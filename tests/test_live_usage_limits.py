@@ -250,15 +250,18 @@ class LiveUnknownUsageTests(unittest.TestCase):
         self.assertEqual((codex['unmetered_quota'], codex['reported_tokens']),
                          (1, {'input_tokens': 131000, 'output_tokens': 4200}))
         # Failure and non-JSON output: errors and raw text are kept, absent tokens stay unreported.
+        # Without a frozen profile the subscription route needs the operator's declaration (#165).
         failed = '\n'.join(json.dumps(e) for e in (
             {'type': 'turn.failed', 'error': {'message': 'usage limit reached'}},)) + '\n'
         with patch.object(EngineRunner, '_should_spawn_role_container', return_value=False), \
+                patch.dict('os.environ', SSDLC_UNMETERED_QUOTA='codex'), \
                 patch.object(EngineRunner, '_run_role_command',
                              return_value=subprocess.CompletedProcess([], 1, failed, 'stderr')):
             result = EngineRunner.run_codex('prompt', self.root)
         self.assertEqual(tuple(result), ('usage limit reached\nstderr', 1))
         self.assertEqual(observed_tokens('codex', 'run_codex', result), {'input_tokens': None, 'output_tokens': None})
         with patch.object(EngineRunner, '_should_spawn_role_container', return_value=False), \
+                patch.dict('os.environ', SSDLC_UNMETERED_QUOTA='codex'), \
                 patch.object(EngineRunner, '_run_role_command',
                              return_value=subprocess.CompletedProcess([], 0, 'plain text\n', '')):
             result = EngineRunner.run_codex('prompt', self.root)

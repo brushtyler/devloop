@@ -101,9 +101,12 @@ at reservation stays at the dispatch boundary.
 Before that reservation, the dispatch admits the effective **route** of the call
 ([issue #165](https://github.com/brushtyler/ssdlc/issues/165)): a route that
 cannot be determined, or a measured route (OpenRouter) whose adapter cannot
-report the charge, is refused with `LIMIT_REACHED` before launch. A
-`live_unknown_usage` declaration covers the engine's subscription CLI route, not
-its OpenRouter route. See
+report the charge, is refused with `LIMIT_REACHED` before launch, as is a
+subscription CLI route (`codex`, `agy`) without an explicit `unmetered_quota`
+declaration. A `live_unknown_usage` declaration covers the engine's subscription
+CLI route, not its OpenRouter route. A feedback consultation is admitted on its
+route before its intent and its reservation; a later refusal of a prepaid call
+closes the reservation as `not_dispatched`. See
 [Cost telemetry](cost-telemetry.md#measures-required-per-route).
 
 Token counts reported by the adapter are stored on the row as `reported_tokens`,

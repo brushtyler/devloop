@@ -160,6 +160,9 @@ class AdapterTests(unittest.TestCase):
         self.runner = EngineRunner
         self.container = patch.object(EngineRunner, '_should_spawn_role_container', return_value=False)
         self.container.start(); self.addCleanup(self.container.stop)
+        # No frozen profile: the subscription CLIs need the operator's declaration (#165).
+        declared = patch.dict(os.environ, SSDLC_UNMETERED_QUOTA='codex,agy')
+        declared.start(); self.addCleanup(declared.stop)
 
     def run_with(self, fn, completed, *args, **kwargs):
         calls = []

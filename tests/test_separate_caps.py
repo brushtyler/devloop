@@ -16,7 +16,7 @@ from test_recovery_limits import policy
 
 ROOT = Path(__file__).resolve().parents[1]
 CAP_VARIABLES = ('SSDLC_BUDGET_CAP_USD', 'SSDLC_ESTIMATE_CAP_USD', 'SSDLC_DEV_BUDGET_USD', 'SSDLC_MAX_DEV_RETRIES',
-                 'SSDLC_SUPERVISED_RUN_ID', 'OPENROUTER_API_KEY', 'ANTHROPIC_BASE_URL')
+                 'SSDLC_SUPERVISED_RUN_ID', 'OPENROUTER_API_KEY', 'ANTHROPIC_BASE_URL', 'SSDLC_UNMETERED_QUOTA')
 CLAUDE = {'type': 'result', 'result': 'claude answer', 'num_turns': 1, 'total_cost_usd': 0.5,
           'usage': {'input_tokens': 1, 'cache_creation_input_tokens': 0, 'cache_read_input_tokens': 0,
                     'output_tokens': 1}}
@@ -88,7 +88,8 @@ class BreakerTests(BreakerCase):
         orch.check_budget_circuit_breaker()
         orch.record_gate.assert_not_called()
         self.assertEqual(t.ledger_measures(ledger), {'spend_usd': 0.4, 'estimate_usd': 9.0,
-                                                     'unclassified_usd': 0, 'unmeasured_spend': []})
+                                                     'unclassified_usd': 0, 'unmeasured_spend': [],
+                                                     'unmeasured_estimate': []})
         # The measured route keeps applying the cap.
         orch = self.orch(ledger + [openrouter_charge(0.6)])
         self.assertIn('Measured spend ($1.00)', self.halted(orch, 'BUDGET_CAP_GATE'))
@@ -104,6 +105,34 @@ class BreakerTests(BreakerCase):
         # Only an explicit zero disables the spend cap.
         self.env(SSDLC_BUDGET_CAP_USD='0')
         self.orch([routed, openrouter_charge(None)]).check_budget_circuit_breaker()
+
+    def test_claude_call_without_an_estimate_stops_the_estimate_cap(self):
+        # The real adapter, with a simulated process that reports no total_cost_usd.
+        self.env()
+        outputs = iter(['{"result":"ok"}', '{"result":"ok"}', ''])
+        def fake(cmd, **_):
+            return subprocess.CompletedProcess([], 1 if fake.failed else 0, next(outputs), '')
+        fake.failed = False
+        with patch.object(EngineRunner, '_should_spawn_role_container', return_value=False), \
+             patch.object(EngineRunner, '_run_role_command', side_effect=fake):
+            silent = EngineRunner.run_claude('prompt', Path(self.tmp.name))
+            silent_again = EngineRunner.run_claude('prompt', Path(self.tmp.name))
+            fake.failed = True
+            failed = EngineRunner.run_claude('prompt', Path(self.tmp.name))
+        self.assertEqual(silent[0], 'ok')
+        row = entry('claude', silent.telemetry, silent[2])
+        self.assertEqual(t.ledger_measures([row])['unmeasured_estimate'], [silent.telemetry['invocation_id']])
+        # Both default caps in force: the missing estimate is never read as zero.
+        message = self.halted(self.orch([subscription_estimate(1), row]), 'ESTIMATE_CAP_GATE')
+        self.assertIn('estimates are unknown', message)
+        self.halted(self.orch([entry('claude', silent_again.telemetry)]), 'ESTIMATE_CAP_GATE')
+        # An incomplete call reports nothing by definition: it stays an unclassified figure.
+        incomplete = entry('claude', failed.telemetry, 0.2)
+        self.assertEqual(t.ledger_measures([incomplete])['unmeasured_estimate'], [])
+        self.orch([incomplete]).check_budget_circuit_breaker()
+        # Only an explicit zero disables the estimate cap, and with it this stop.
+        self.env(SSDLC_ESTIMATE_CAP_USD='0')
+        self.orch([row]).check_budget_circuit_breaker()
 
     def test_legacy_figures_keep_counting_as_spend_and_are_not_reinterpreted(self):
         self.env(SSDLC_BUDGET_CAP_USD='2', SSDLC_ESTIMATE_CAP_USD='1')
@@ -193,7 +222,14 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(t.admit('claude', 'claude_cli', **caps)['measure'], 'estimate')
         declared = policy()['live_unknown_usage']
         self.assertEqual(t.admit('codex', 'codex_cli', declarations=declared, **caps)['measure'], 'unmetered_quota')
-        self.assertIsNone(t.admit('agy', 'agy_cli', **caps)['measure'])
+        # A subscription route leaves the dollar caps only with an explicit declaration.
+        for provider, route in (('agy', 'agy_cli'), ('codex', 'codex_cli')):
+            for spend, estimate in ((True, False), (False, True), (True, True)):
+                with self.subTest(provider=provider, spend=spend, estimate=estimate), \
+                        self.assertRaisesRegex(t.AdmissionRefused, 'no unmetered_quota declaration'):
+                    t.admit(provider, route, spend_cap=spend, estimate_cap_active=estimate,
+                            declarations={'claude': {'model': 'unmetered_quota'}})
+        self.assertIsNone(t.admit('agy', 'agy_cli', spend_cap=False, estimate_cap_active=False)['measure'])
         # An estimate never stands for the charge a measured route needs.
         for provider in ('claude', 'codex'):
             with self.assertRaises(t.AdmissionRefused):
@@ -223,11 +259,75 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
 
     def test_measured_route_without_its_measure_is_refused_and_known_routes_proceed(self):
+        os.environ['SSDLC_UNMETERED_QUOTA'] = 'codex'
         self.refused(EngineRunner.run_claude, 'prompt', self.root, use_openrouter=True)
+        # The codex declaration covers its subscription route, never its OpenRouter route.
         self.refused(EngineRunner.run_codex, 'prompt', self.root, use_openrouter=True)
         EngineRunner.run_claude('prompt', self.root)
         EngineRunner.run_codex('prompt', self.root)
         self.assertEqual(len(self.calls), 2)
+
+    def test_cli_subscription_route_needs_an_explicit_declaration(self):
+        # Without a frozen profile and with the default caps in force, nothing is implicit.
+        self.refused(EngineRunner.run_codex, 'prompt', self.root)
+        self.refused(EngineRunner.run_agy, 'prompt', self.root)
+        self.refused(EngineRunner.invoke_role, 'codex', 'm', 's', 'u', self.root, 'P', 'T', '03-dev')
+        # Either cap in force is enough to require the declaration.
+        os.environ['SSDLC_BUDGET_CAP_USD'] = '0'
+        self.refused(EngineRunner.run_agy, 'prompt', self.root)
+        os.environ.pop('SSDLC_BUDGET_CAP_USD')
+        # A malformed declaration is refused, never read as a declaration.
+        os.environ['SSDLC_UNMETERED_QUOTA'] = 'codex,claude'
+        self.refused(EngineRunner.run_codex, 'prompt', self.root)
+        # The declaration applies to the engines it names only.
+        os.environ['SSDLC_UNMETERED_QUOTA'] = 'codex'
+        self.refused(EngineRunner.run_agy, 'prompt', self.root)
+        EngineRunner.run_codex('prompt', self.root)
+        os.environ['SSDLC_UNMETERED_QUOTA'] = ' Codex , agy '
+        EngineRunner.run_agy('prompt', self.root)
+        self.assertEqual([cmd[0] for cmd in self.calls], ['codex', 'agy'])
+        self.assertEqual(t.unmetered_declarations({'SSDLC_UNMETERED_QUOTA': 'agy'}),
+                         {'agy': {'model': 'unmetered_quota', 'reason': 'SSDLC_UNMETERED_QUOTA'}})
+        self.assertEqual(t.unmetered_declarations({}), {})
+        # With both caps explicitly disabled there is nothing to bound.
+        os.environ.pop('SSDLC_UNMETERED_QUOTA')
+        os.environ.update(SSDLC_BUDGET_CAP_USD='0', SSDLC_ESTIMATE_CAP_USD='0')
+        EngineRunner.run_codex('prompt', self.root)
+        self.assertEqual(len(self.calls), 3)
+
+    def test_openrouter_fallback_is_admitted_on_its_effective_cli_route(self):
+        # A supervised run without a frozen profile and without an OpenRouter key: the
+        # call falls back to a local CLI, whose route decides before the intent.
+        os.environ.pop('OPENROUTER_API_KEY')
+        os.environ['SSDLC_SUPERVISED_RUN_ID'] = 'run'
+        events = []
+        def event(kind, **fields):
+            events.append((kind, fields.get('engine')))
+            return True
+        installed = {'claude', 'codex'}
+        which = lambda name: '/usr/bin/' + name if name in installed else None
+        call = (EngineRunner.call_openrouter, 'claude-sonnet', 's', 'u', 'P', 'T', '03-dev')
+        with patch.object(orchestrator, '_supervision_event', side_effect=event), \
+             patch.object(orchestrator.shutil, 'which', side_effect=which):
+            os.environ['ANTHROPIC_BASE_URL'] = 'https://gateway.example/api'
+            self.refused(*call)
+            self.refused(EngineRunner.invoke_role, 'openrouter', 'claude-sonnet', 's', 'u', self.root, 'P', 'T',
+                         '03-dev')
+            self.assertEqual(events, [])
+            os.environ.pop('ANTHROPIC_BASE_URL')
+            call[0](*call[1:])
+            self.assertEqual([cmd[0] for cmd in self.calls], ['claude'])
+            # The intent keeps the requested engine, published only after the admission.
+            self.assertEqual(events[0], ('dispatch_started', 'openrouter'))
+            # The codex fallback needs its declaration like a direct codex call.
+            self.calls.clear(); events.clear()
+            installed.discard('claude')
+            self.refused(*call)
+            self.assertEqual(events, [])
+            os.environ['SSDLC_UNMETERED_QUOTA'] = 'codex'
+            call[0](*call[1:])
+            self.assertEqual([cmd[0] for cmd in self.calls], ['codex'])
+            self.assertEqual(events[0], ('dispatch_started', 'openrouter'))
 
     def test_frozen_profile_refuses_before_reserve(self):
         store = LimitsStore(self.root, lambda: 100)
@@ -247,6 +347,56 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
         self.assertEqual([(r['engine'], r['usage_model'], r['status']) for r in rows().values()],
                          [('codex', 'unmetered_quota', 'returned')])
+
+
+class FeedbackAdmissionTests(unittest.TestCase):
+    """A feedback consultation is admitted on its route before its intent and reservation."""
+
+    def setUp(self):
+        import test_feedback_roles as fixtures
+        self.addCleanup(environment(ANTHROPIC_BASE_URL='https://gateway.example/api').stop)
+        self.case = fixtures.FundedFeedbackRoleTests()
+        self.case.initialize()
+        self.addCleanup(self.case.doCleanups)
+        self.case.metadata = dict(self.case.metadata, engine='claude')
+        self.calls = []
+        command = patch.object(EngineRunner, '_run_role_command',
+                               side_effect=lambda cmd, **_: self.calls.append(cmd))
+        command.start(); self.addCleanup(command.stop)
+        container = patch.object(EngineRunner, '_should_spawn_role_container', return_value=True)
+        container.start(); self.addCleanup(container.stop)
+
+    def state(self):
+        return (self.case.fixture.store.inspect()['role_calls'],
+                self.case.limits._load(repair=False)[1]['invocations'])
+
+    def run_role(self, runner):
+        return self.case.roles.run(self.case.row['request_id'], 'planner', self.case.metadata, runner)
+
+    def test_unknown_route_is_refused_before_intent_and_reservation(self):
+        from ssdlc_feedback_workflow import ReadOnlyRoleRunner
+        before = self.state()
+        with self.assertRaisesRegex(RecoveryStop, 'refused before launch') as caught:
+            self.run_role(ReadOnlyRoleRunner(None, self.case.limits, 'prompt', 'low'))
+        self.assertEqual(caught.exception.category, 'LIMIT_REACHED')
+        self.assertEqual(self.state(), before)
+        self.assertEqual(self.state()[0], [])
+        self.assertEqual(self.calls, [])
+
+    def test_late_refusal_of_a_prepaid_call_is_not_dispatched_not_uncertain(self):
+        from ssdlc_recovery import NotDispatched
+        # A runner that skips the early admission: the dispatch still refuses, and the
+        # reservation is closed as not dispatched instead of staying uncertain.
+        def runner(metadata, invocation):
+            row = self.case.limits._load(repair=False)[1]['invocations'][invocation]
+            with orchestrator._prepaid_feedback(self.case.limits, invocation, row['role'], metadata['engine']):
+                return EngineRunner.run_claude('prompt', self.case.limits.root, use_openrouter=False)
+        with self.assertRaisesRegex(NotDispatched, 'refused before launch') as caught:
+            self.run_role(runner)
+        self.assertEqual(caught.exception.category, 'LIMIT_REACHED')
+        self.assertEqual(self.calls, [])
+        rows = list(self.state()[1].values())
+        self.assertEqual([(row['role'], row['status']) for row in rows], [('feedback-planner', 'not_dispatched')])
 
 
 class ReplayBaselineTests(unittest.TestCase):

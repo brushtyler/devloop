@@ -186,6 +186,11 @@ class ReadOnlyRoleRunner:
     def __init__(self, source, limits, prompt, effort):
         self.source, self.limits, self.prompt, self.effort = source, limits, prompt, effort
 
+    def admit(self, metadata):
+        """Route admission of the imminent call, before its intent and reservation (#165)."""
+        from orchestrator import admit_feedback_route
+        admit_feedback_route(metadata['engine'], self.limits)
+
     def __call__(self, metadata, invocation):
         from orchestrator import EngineRunner, _prepaid_feedback, _dispatch_context
         from ssdlc_candidates import checkout, inventory, git_metadata
