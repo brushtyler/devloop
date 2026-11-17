@@ -26,7 +26,7 @@
 
 | Ruolo | Attore oggi | Fa | Non fa |
 |---|---|---|---|
-| **Operatore** | `brushtyler` | Prende le decisioni riservate; risolve le escalation (`agent:needs-human`); approva gli ADR; assegna i ruoli; può sempre mergiare, bloccare o riprendere un'attività | — |
+| **Operatore** | `brushtyler` | Prende le decisioni riservate; risolve le escalation (`agent:needs-operator`); approva gli ADR; assegna i ruoli; può sempre mergiare, bloccare o riprendere un'attività | — |
 | **Coordinatore** (facoltativo, oggi non assegnato) | — | Piano e priorità del backlog, bozze di ADR, verifica del lavoro del supervisore. Delega dell'operatore, revocabile | Le decisioni riservate |
 | **Supervisore** | Claude Code (`claude-agent`) | Sorveglia devloop (watch); analizza le RUN; apre issue per problemi e miglioramenti; mette in coda (`agent:ready`, priorità) le issue di autori fidati, secondo le priorità approvate; in modalità `auto` trattiene o mette in sequenza i merge e decide le escalation non critiche; fa escalation all'operatore | Implementare, fare review, cambiare configurazione, policy, budget o credenziali; mergiare: lo fa il dispatcher |
 | **Dispatcher** | devloop (`dispatcher`) | Esegue le fasi: preflight, implement, review, fix, sync, round sulla CI, promozione, merge (modalità `strict` o `auto`), pin (se attivo), ciclo continuo (se attivo); scrive i marker; fa escalation | Le decisioni riservate; mergiare con il merge disattivato |
@@ -58,7 +58,7 @@ Si configurano con `[merge].mode`, con un override facoltativo per livello in `[
 - Ricevuta di policy coincidente.
 - CI superata.
 - PR mergeable senza conflitti.
-- Nessuna label `agent:needs-human` o `agent:merge-hold`.
+- Nessuna label `agent:needs-operator` o `agent:merge-hold`.
 
 **Nessuna modalità, e nessun agent, mergia con CI non verde, con finding bloccanti aperti o senza le approvazioni richieste.**
 

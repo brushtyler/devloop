@@ -14,8 +14,8 @@ from . import activity, follow, pin, runloop, unavailability, watch
 from .agents import AgentRunner, isolated_env
 from .apps import DISPATCHER, MERGER, Identities
 from .config import ConfigError, load_config
-from .dispatcher import (Dispatcher, TickLog, Workers, ensure_labels, plan, pr_counts_line,
-                         queue_lines)
+from .dispatcher import (Dispatcher, TickLog, Workers, both_labels_warning, ensure_labels,
+                         label_transition, plan, pr_counts_line, queue_lines)
 from .github import GitHub, GitHubError
 from .ledger import Ledger
 from .review import last_round
@@ -317,7 +317,9 @@ def main(argv=None):
         sys.exit(f'devloop: invalid config: {exc}')
 
     if args.command == 'setup':
-        ensure_labels(dispatcher.gh, cfg.labels, cfg.review_policy)
+        note = ensure_labels(dispatcher.gh, cfg.labels, cfg.review_policy)
+        if note:
+            log(f'labels: {note}')
         rp = cfg.review_policy
         log('labels ready: ' + ', '.join((*cfg.labels.all(), rp.label,
                                           *((rp.zero_label,) if rp.zero_enabled() else ()))))
@@ -346,6 +348,8 @@ def main(argv=None):
             log(line)
         for line in unavailability.describe(state):
             log(line)
+        if label_transition(dispatcher.gh, cfg.labels) == 'both':
+            log(f'labels: {both_labels_warning(cfg.labels)}')
         snap = dispatcher.snapshot()
         for pr in snap.prs:
             labels = ', '.join(sorted(l for l in pr.labels if l.startswith('agent:')))

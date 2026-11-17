@@ -222,9 +222,9 @@ class ParallelTickTests(unittest.TestCase):
                                         ('sync', 100)})
         self.assertTrue(overlap(d.spans[('fix', 100)], d.spans[('fix', 101)]))
         # The unexpected exception escalates its PR like a failure; the other one as before.
-        self.assertIn('agent:needs-human', gh.labels[100])
+        self.assertIn('agent:needs-operator', gh.labels[100])
         self.assertEqual(gh.labels[101], {'agent:review'})
-        self.assertIn('agent:needs-human', gh.labels[102])
+        self.assertIn('agent:needs-operator', gh.labels[102])
         bodies = {n: body for n, body in gh.comments}
         self.assertIn('errore inatteso del dispatcher (KeyError', bodies[100])
         self.assertIn('Il passo `sync` è fallito: agent died.', bodies[102])
@@ -303,7 +303,8 @@ class ParallelReviewersTests(Quorum):
         # Each judged the head on its own: the same prompt, without the other's verdict.
         self.assertEqual(self.runner.calls[0][3], self.runner.calls[1][3])
         self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
-        self.assertEqual(self.planned(), [])
+        # Only the operator merge is left to tell, with [merge] off (#248).
+        self.assertEqual([a.kind for a in self.planned()], ['operator_merge'])
 
     def test_a_failed_reviewer_keeps_the_other_verdict_and_the_round_waits_for_it(self):
         self.make_parallel({SECOND: [AgentError(f'{SECOND} crashed')]})
@@ -311,7 +312,7 @@ class ParallelReviewersTests(Quorum):
         (kept,) = self.records('review')
         self.assertEqual((kept['reviewer'], kept['round'], kept['verdict']), (FIRST, 1, 'approve'))
         # The failure escalates as before.
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         self.assertIn(f'Il passo `review` è fallito: {SECOND} crashed.', self.gh.comments[-1][1])
         # Once a human resumes it, the round runs only the missing reviewer.
         self.gh.labels[100] = {'agent:review'}
@@ -352,7 +353,7 @@ class ParallelReviewersTests(Quorum):
         self.assertEqual([span[1] for span in self.turns(SECOND)], ['other-model'])
         (kept,) = self.records('review')
         self.assertEqual(kept['reviewer'], FIRST)
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         self.assertIn(f'- `{first.model}`: not independent', self.gh.comments[-1][1])
 
     def test_with_the_default_of_one_a_review_action_runs_one_reviewer(self):

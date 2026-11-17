@@ -24,13 +24,22 @@ import re
 from .acceptance import acceptance_findings
 from .schema import load_schema, validate
 
-VERDICTS = ('approve', 'request_changes', 'needs_human')
+VERDICTS = ('approve', 'request_changes', 'needs_operator')
+# The name of ``needs_operator`` before #248: records published with it are still read, as
+# ``needs_operator`` (``current_verdict``).
+LEGACY_VERDICT = 'needs_human'
 CI = 'ci'
 OPERATOR = 'operator'
 CLOSING = ('resolved', 'withdrawn')
 KEY = re.compile(r'[1-9][0-9]*/[A-Za-z0-9_.-]+/R[1-9][0-9]*-[1-9][0-9]*')
 FINDING_COMMAND = '/devloop finding'
 _COMMAND = re.compile(r'/devloop finding\s+(\S+)\s+(\S+)\s+(\S.*)')
+
+
+def current_verdict(verdict):
+    """``verdict`` under its current name: ``LEGACY_VERDICT``, from a record published before
+    #248, is ``needs_operator``."""
+    return 'needs_operator' if verdict == LEGACY_VERDICT else verdict
 
 
 def finding_key(round_no, owner, finding_id):
@@ -177,10 +186,10 @@ def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, 
         verdict = 'request_changes'
         notes.append('Verdetto corretto da approve a request_changes: restano finding bloccanti aperti.')
     elif verdict == 'request_changes' and not (blocking or unresolved):
-        verdict = 'needs_human'
+        verdict = 'needs_operator'
         human_reason = human_reason or 'Il reviewer ha chiesto modifiche senza indicare finding bloccanti.'
         notes.append('Verdetto incoerente: request_changes senza finding bloccanti.')
-    elif verdict == 'needs_human' and not human_reason.strip():
+    elif verdict == 'needs_operator' and not human_reason.strip():
         human_reason = 'Il reviewer non ha indicato la decisione richiesta.'
     if foreign:
         notes.append('Restano aperti i finding di altri proprietari che il reviewer considera '
@@ -215,10 +224,10 @@ def current_round(reviews):
 
 
 def round_verdict(records):
-    """The verdict of a complete round: ``needs_human`` if any reviewer asked for a human,
-    else ``request_changes`` if any asked for changes, else ``approve``."""
-    verdicts = {r['verdict'] for r in records}
-    for verdict in ('needs_human', 'request_changes'):
+    """The verdict of a complete round: ``needs_operator`` if any reviewer asked for the
+    operator, else ``request_changes`` if any asked for changes, else ``approve``."""
+    verdicts = {current_verdict(r['verdict']) for r in records}
+    for verdict in ('needs_operator', 'request_changes'):
         if verdict in verdicts:
             return verdict
     return 'approve'

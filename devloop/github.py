@@ -363,6 +363,17 @@ class GitHub:
         self._gh('label', 'create', name, '-R', self.repo, '--color', color,
                  '--description', description, '--force')
 
+    def repo_labels(self):
+        """The names of the repository's labels."""
+        labels = self._json('label', 'list', '-R', self.repo, '--limit', '1000', '--json', 'name')
+        return [label['name'] for label in labels or []]
+
+    def rename_label(self, name, new_name, color, description):
+        """Rename label ``name`` to ``new_name`` (#248): an edit, not a new label, so that the
+        issues and pull requests that have it keep it."""
+        self._gh('label', 'edit', name, '-R', self.repo, '--name', new_name, '--color', color,
+                 '--description', description)
+
 
 def merge_state(mergeable, merge_state_status):
     """``conflict``, ``unknown`` or ``clean`` from a PR's ``mergeable`` and ``mergeStateStatus``.

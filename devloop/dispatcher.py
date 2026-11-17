@@ -11,7 +11,7 @@ an app an actor uses the ambient ``gh`` login, and its records must come from ``
 Issue  agent:ready ─► agent:working ─► PR opened
 PR     agent:review ─► (CI fail | request_changes) ─► agent:changes ─► agent:review ─► …
                    └─► approve ─► agent:ready-to-merge ─► merged (a human, or devloop, #172)
-       any step can escalate to agent:needs-human.
+       any step can escalate to agent:needs-operator.
 
 Readiness is bound to the approved commit: a PR is promoted only if its head is still the
 reviewed commit and CI passed. A ready PR whose head moves, or whose CI is running again, goes
@@ -26,7 +26,7 @@ running dispatcher's review policy for the head, with the reviewers the level re
 level 1, at level 2 the first pair of the pool that is independent (#111). A round is one
 evaluation of a head: a CI failure, or one review by each required reviewer, run one per action
 and applied together once all are in, so that a single fix receives every open finding. A PR
-whose pool has not enough independent reviewers goes to agent:needs-human. A round is promoted
+whose pool has not enough independent reviewers goes to agent:needs-operator. A round is promoted
 only if every required reviewer approved the head with the receipt recomputed just before,
 otherwise a new review is needed.
 
@@ -57,7 +57,7 @@ Readiness check (#114, with ``preflight`` configured): before ``implement`` a re
 other than the implementer, checks on a checkout of the base branch that the issue can be
 implemented in one run. Its outcome is a ``preflight`` record on the issue, bound to the hash of
 the title, the body and the trusted comments, and reused while that hash holds. An issue that is
-not ready goes to agent:needs-human; the check removes that label only if it added it itself.
+not ready goes to agent:needs-operator; the check removes that label only if it added it itself.
 
 Start order (#146): ready issues start by priority (``priority:high``, ``normal``, ``low``; a
 ``priority_labels`` label counts as high), then by the oldest current ``agent:ready``, then by
@@ -86,9 +86,19 @@ nothing runs, alone (``admit``). ``devloop tick`` keeps the barrier.
 Merge (#172, ``[merge]``): with ``mode = "off"`` (the default) a person merges. With ``strict``
 the dispatcher merges a ready PR, with the local ``gh`` login and ``--match-head-commit``, once
 every merge directive holds again just before the merge: the conditions of the promotion, CI
-``pass``, ``MERGEABLE`` and ``CLEAN``, neither ``agent:needs-human`` nor ``agent:merge-hold``.
+``pass``, ``MERGEABLE`` and ``CLEAN``, neither ``agent:needs-operator`` nor ``agent:merge-hold``.
 ``auto`` adds ``/devloop hold <reason>`` and ``/devloop release`` from the supervisor's identity
 or a trusted user. A level override or an operator-only path can only make the mode stricter.
+
+Operator merge (#248): a ready PR that devloop does not merge (mode ``off``, a level ``off``, an
+operator-only path) gets ``agent:needs-operator`` and an ``operator_merge`` notice, one comment
+per head, edited when the head is promoted again, that says why (``_do_operator_merge``). That
+label, and only while the notice of the current promotion is the latest of the dispatcher's
+and the dispatcher added it after the notice, does not stop devloop
+(``_operator_merge_owned``): the PR is synced, its CI checked, and when its readiness decays the
+dispatcher removes the label with ``agent:ready-to-merge``. Any other ``agent:needs-operator``,
+or the name it had before #248 (``config.LEGACY_NEEDS_OPERATOR``), hands the PR or the issue
+to the operator as before.
 
 Merged issues (#228): after a merge the dispatcher closes the PR's issue itself, with a
 ``closed`` record, and removes ``agent:ready``: the keywords "Closes #N" have no effect when the
@@ -101,7 +111,7 @@ non-critical one (``tool_failure``, ``preflight_default``, ``sync_failed``) goes
 agent:needs-supervisor, unless something makes it critical (``_supervised``), and the
 supervisor's identity or a trusted user decides it with ``/devloop retry``, ``/devloop
 accept-defaults``, ``/devloop decide <text>`` or ``/devloop escalate <reason>``
-(``_do_supervise``). Critical and unknown classes always go to agent:needs-human.
+(``_do_supervise``). Critical and unknown classes always go to agent:needs-operator.
 
 Requested fixes (#195): ``/devloop fix`` from a trusted user or the supervisor's identity, on a
 PR in agent:review or agent:changes, runs a fix of the current head with the rest of the comment
@@ -125,14 +135,14 @@ from .acceptance import (acceptance_criteria, acceptance_findings, format_criter
 from .agents import (TAIL_LINES, AgentError, ModelsUnavailable, ModelUnavailable, NoOutput,
                      PermissionDenied, StartFailure, background_unfinished)
 from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, MERGER, PR_COMMENT, RERUN, REVIEW
-from .config import INSTALL_ROOT, ConfigError
+from .config import INSTALL_ROOT, LEGACY_NEEDS_OPERATOR, ConfigError
 from .github import GitHubError, author_login, job_id
 from .ledger import entries as ledger_entries
 from .ledger import open_turns
 from .localtests import failed_modules, module_command, select_modules
 from .markdown import (RESUME, carries_record, dispatcher_header, publishable, read_marker,
-                       render_escalation, render_fix, render_native_review, render_preflight,
-                       render_review, render_supervision)
+                       render_escalation, render_fix, render_native_review, render_operator_merge,
+                       render_preflight, render_review, render_supervision)
 from .pin import PinError, Repinned
 from .policy import describe as describe_receipt
 from .policy import (BINDING, MAX_LISTED_PATHS, ZERO_LEVEL, agent_profile, changes_requested,
@@ -178,7 +188,7 @@ LABEL_STYLE = {
     'review': ('1d76db', 'devloop: in attesa di review automatica'),
     'changes': ('d93f0b', 'devloop: modifiche richieste dalla review'),
     'ready_to_merge': ('0e8a16', 'devloop: approvata, in attesa del merge'),
-    'needs_human': ('b60205', 'devloop: serve una decisione umana'),
+    'needs_operator': ('b60205', 'devloop: serve una decisione dell\'operatore'),
     'merge_hold': ('5319e7', 'devloop: merge trattenuto dal supervisore o dall\'operatore'),
     'needs_supervisor': ('d876e3', 'devloop: escalation non critica, decide il supervisore'),
 }
@@ -284,6 +294,38 @@ class PullRequest:
     # not started yet, and the failure is not a new one.
     reruns: list = field(default_factory=list)
     rerun_waiting: bool = False
+    # Operator merge (#248): the heads whose ``operator_merge`` notice belongs to the current
+    # promotion, the comment id of the notice of the current head (one per head, edited when
+    # the head is promoted again), how many promotions the policy records count, and whether
+    # ``agent:needs-operator`` is the dispatcher's own for that notice
+    # (``Dispatcher._operator_merge_owned``): then it does not stop devloop, and goes when the
+    # readiness decays.
+    operator_merges: list = field(default_factory=list)
+    operator_notice: int = None
+    promotions: int = 0
+    operator_owned: bool = False
+
+
+def operator_blocked(labels, lb):
+    """Whether ``labels`` hand an issue or a PR to the operator: ``agent:needs-operator`` or
+    its name before #248 (``Labels.operator``)."""
+    return bool(set(labels) & lb.operator())
+
+
+def operator_held(pr, lb):
+    """Whether devloop leaves ``pr`` to the operator: an operator label that is not the
+    dispatcher's own label of an operator merge (#248)."""
+    return operator_blocked(pr.labels, lb) and not pr.operator_owned
+
+
+def operator_merge_due(pr, cfg):
+    """Whether a ready PR whose merge is the operator's (#248) still lacks its
+    ``operator_merge`` notice for the current head: ``[merge]`` off, or the PR's own mode off
+    (a level ``off``, an operator-only path). A PR whose mode is not known is left as it is."""
+    if cfg.labels.ready_to_merge not in pr.labels or pr.head_sha in pr.operator_merges:
+        return False
+    return (not cfg.merge.enabled()
+            or pr.merge_mode is not None and pr.merge_mode not in MERGING)
 
 
 def rerun_of(reruns, head):
@@ -570,23 +612,23 @@ def requested_fixes(fixes):
 def merge_ready(pr, cfg):
     """Whether a ready PR meets, as the snapshot shows it, the merge directives that do not
     depend on its receipt (#172): CI ``pass``, ``MERGEABLE`` and ``CLEAN``, neither
-    ``agent:needs-human`` nor ``agent:merge-hold``, no open finding, an acceptance map that
-    holds."""
+    ``agent:needs-operator`` (under either name) nor ``agent:merge-hold``, no open finding, an
+    acceptance map that holds."""
     lb = cfg.labels
     return (lb.ready_to_merge in pr.labels
-            and not pr.labels & {lb.needs_human, lb.merge_hold, lb.needs_supervisor}
+            and not pr.labels & (lb.operator() | {lb.merge_hold, lb.needs_supervisor})
             and pr.checks == 'pass' and pr.mergeable == 'MERGEABLE'
             and pr.merge_status == 'CLEAN' and not pr.acceptance
             and not open_findings(pr.reviews, pr.closures))
 
 
 def parked(pr, cfg):
-    """Whether ``pr`` waits for a person (#199): ``agent:needs-human``, or
+    """Whether ``pr`` waits for a person (#199): ``agent:needs-operator``, or
     ``agent:ready-to-merge`` when devloop does not merge it, because ``[merge]`` is off or the
     PR's mode is (level override, operator-only path). A ready PR whose mode is not known counts
     as one devloop works on."""
     lb = cfg.labels
-    if lb.needs_human in pr.labels:
+    if operator_blocked(pr.labels, lb):
         return True
     if lb.ready_to_merge not in pr.labels:
         return False
@@ -646,7 +688,8 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0):
         else:
             actions.append(Action('settle', number, 'agent:working but its PR is open'))
     for pr in snapshot.prs:
-        if pr.labels & {lb.needs_human, lb.needs_supervisor}:
+        # The dispatcher's own label of an operator merge (#248) does not stop devloop.
+        if lb.needs_supervisor in pr.labels or operator_held(pr, lb):
             continue
         if not pr.meta:
             actions.append(Action('lost_meta', pr.number, 'PR body no longer ends with its marker'))
@@ -699,6 +742,10 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0):
             elif pr.merge_mode in MERGING and merge_ready(pr, cfg):
                 # The merge directives are checked again just before the merge (#172).
                 actions.append(Action('merge', pr.number, f'merge mode {pr.merge_mode}'))
+            elif operator_merge_due(pr, cfg):
+                # The merge is the operator's (#248): tell, once per head, and why.
+                actions.append(Action('operator_merge', pr.number,
+                                      f'merge mode {pr.merge_mode or cfg.merge.mode}'))
             continue
         still_open = open_findings(pr.reviews, pr.closures)
         # Also from agent:changes: a CI round sends the PR there, and a re-run may pass on the
@@ -776,7 +823,7 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0):
     for issue in snapshot.ready_issues:
         if issue.get('merged'):
             resolved.add(issue['number'])
-            if not issue['labels'] & {lb.needs_human, lb.needs_supervisor}:
+            if not issue['labels'] & (lb.operator() | {lb.needs_supervisor}):
                 actions.append(Action('merged_issue', issue['number'], 'resolved by merged PR '
                                       + ', '.join(f'#{n}' for n in issue['merged'])))
     # With max_parked_prs reached only priority:high issues start, still within the slots of
@@ -789,7 +836,7 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0):
     if cfg.preflight:
         actions += _plan_preflight(snapshot, cfg, pr_issues | resolved, free, urgent)
     elif free > 0:
-        blocked = set(cfg.blocked_labels) | {lb.working, lb.needs_human, lb.needs_supervisor}
+        blocked = set(cfg.blocked_labels) | lb.operator() | {lb.working, lb.needs_supervisor}
         candidates = [i for i in snapshot.ready_issues
                       if not (i['labels'] & blocked) and i['number'] not in pr_issues
                       and i['number'] not in resolved and i['admitted']
@@ -815,9 +862,9 @@ def _plan_preflight(snapshot, cfg, pr_issues, free, urgent=''):
     check is checked first (implemented on a later tick if ready). With ``urgent``, the reason
     why ``max_parked_prs`` is reached (#274), only ``priority:high`` issues start, and their
     actions carry it. A failed check that is still
-    valid blocks the issue again if its ``agent:needs-human`` was removed. An issue the check
+    valid blocks the issue again if its ``agent:needs-operator`` was removed. An issue the check
     blocked is checked again, whatever ``free``, when its text changed or a trusted user asked
-    for it; any other ``agent:needs-human`` is left alone. An issue in
+    for it; any other ``agent:needs-operator`` (or its name before #248) is left alone. An issue in
     ``agent:needs-supervisor`` waits for the supervisor (#182)."""
     lb = cfg.labels
     excluded = set(cfg.blocked_labels) | {lb.working, lb.needs_supervisor}
@@ -831,7 +878,7 @@ def _plan_preflight(snapshot, cfg, pr_issues, free, urgent=''):
         if view is None:
             continue  # not read by the snapshot: nothing is known about its check
         state, reason = preflight_state(view)
-        if lb.needs_human in issue['labels']:
+        if operator_blocked(issue['labels'], lb):
             if view['owned'] and state == 'run':
                 actions.append(Action('preflight', issue['number'], reason))
         elif state == 'not_ready':
@@ -1238,6 +1285,9 @@ class Dispatcher:
         # Continuous mode (#227): set by ``devloop run`` with parallel actions, a tick starts
         # its actions in these ``Workers`` and does not wait for them.
         self.workers = None
+        # Whether a tick of this process already checked the rename of agent:needs-operator
+        # (#248, ``_transition_labels``).
+        self.labels_checked = False
 
     # Identities ------------------------------------------------------------
     def _as(self, actor, permissions) -> Backend:
@@ -1534,7 +1584,8 @@ class Dispatcher:
         class ``cls``."""
         lb = self.cfg.labels
         self.gh.comment(number, render_escalation(reason, cls=cls))
-        self.gh.edit_labels(number, add=[lb.needs_human], remove=[lb.needs_supervisor, *remove])
+        self.gh.edit_labels(number, add=[lb.needs_operator],
+                            remove=[lb.needs_supervisor, *remove])
 
     def _do_supervise(self, target):
         """Apply the supervisor command waiting on an issue or PR in ``agent:needs-supervisor``
@@ -1543,7 +1594,7 @@ class Dispatcher:
         labels are lost spends the command, so that a retry is never run twice for one
         command.
 
-        - ``escalate``: the item goes to ``agent:needs-human`` with the reason.
+        - ``escalate``: the item goes to ``agent:needs-operator`` with the reason.
         - ``accept-defaults``: only for a ``preflight_default`` escalation (``_accept_defaults``).
         - ``decide``: only for a ``preflight_default`` escalation, with the supervisor's text
           (``_decide``, #258).
@@ -1552,11 +1603,11 @@ class Dispatcher:
           label of its step, and the next tick runs it; an issue's step runs now. Retries
           write no review record, so they count no round. After ``MAX_RETRIES`` retries for
           the same key (counted per reviewer, ``retries_done``) the next one is not run and the
-          item goes to ``agent:needs-human``, as it does when what made the escalation
+          item goes to ``agent:needs-operator``, as it does when what made the escalation
           non-critical (``_supervised``) no longer holds.
 
         An escalation whose class is critical or unknown, or that was not routed to the
-        supervisor, accepts no command: the item goes to ``agent:needs-human``."""
+        supervisor, accepts no command: the item goes to ``agent:needs-operator``."""
         lb = self.cfg.labels
         is_pr = isinstance(target, PullRequest)
         number = target.number if is_pr else target
@@ -1567,7 +1618,7 @@ class Dispatcher:
         else:
             labels = label_names(self.gh.issue(number).get('labels') or [])
             comments = self.gh.issue_comments(number)
-        if lb.needs_supervisor not in labels or lb.needs_human in labels:
+        if lb.needs_supervisor not in labels or operator_blocked(labels, lb):
             self.log('  not in agent:needs-supervisor any more; nothing to do')
             return
         command = self._supervisor_view(number, comments)
@@ -1700,7 +1751,7 @@ class Dispatcher:
         still approved, and the check is the one of the current text. The dispatcher's record
         lists the defaults and counts as a trusted comment, so the issue is checked again with
         them and, if ready, implemented. Anything else is refused: a gap the operator must
-        decide sends the issue to ``agent:needs-human``, a superseded check leaves it to the
+        decide sends the issue to ``agent:needs-operator``, a superseded check leaves it to the
         supervisor."""
         lb = self.cfg.labels
         record = self._decidable_check(number, labels, comments, trace,
@@ -1746,7 +1797,7 @@ class Dispatcher:
         gaps (``accept-defaults`` or ``decide``), else None after the refusal is traced: every
         gap ``default_available`` and no split, no ``phase:design`` label, an issue opened by a
         trusted user or a devloop app whose text is still approved, and a check of the current
-        text. A gap the operator must decide sends the issue to ``agent:needs-human`` with
+        text. A gap the operator must decide sends the issue to ``agent:needs-operator`` with
         ``refusal``; a superseded check leaves it to the supervisor. ``what``: what the command
         decides and its verb (``'i default si riferiscono'``), for the refusal of a superseded
         check."""
@@ -1870,6 +1921,22 @@ class Dispatcher:
                           if record['round'] < latest), default=-1)
             pr.round_comments = operator_comments(comments[before + 1:],
                                                   self.cfg.trusted_users)
+        # Operator merge (#248): one notice per head, bound to the promotion it was written or
+        # last edited for, and whether agent:needs-operator is the dispatcher's own.
+        promotions = [position for position, record in policy if record['event'] == 'promoted']
+        pr.promotions = len(promotions)
+        notices = self._dispatcher_records(comments, 'notice')
+        merges = [(position, record) for position, record in notices
+                  if record['event'] == 'operator_merge']
+        current = [(position, record) for position, record in merges
+                   if record['promotion'] == pr.promotions]
+        pr.operator_merges = [record['head'] for _, record in current]
+        of_head = next((position for position, record in reversed(merges)
+                        if record['head'] == pr.head_sha), None)
+        pr.operator_notice = comments[of_head].get('id') if of_head is not None else None
+        pr.operator_owned = self._operator_merge_owned(
+            pr, current[-1] if current else None, notices, policy,
+            promotions[-1] if promotions else -1)
         if pr.labels & {self.cfg.labels.review, self.cfg.labels.changes}:
             pr.fix_requests = self._fix_requests(pr, comments)
         # Last: whether a command is accepted depends on the merge mode of the PR, which its
@@ -1917,6 +1984,46 @@ class Dispatcher:
                 continue
             found.append({'comment': ident, 'by': login, 'request': request})
         return found
+
+    def _operator_labelers(self, number):
+        """Logins of every ``labeled`` event of ``agent:needs-operator`` on issue or PR
+        ``number``, oldest first, under both its names (#248): the events written before the
+        rename keep the old name, and come before those of the new one."""
+        lb = self.cfg.labels
+        return (self.gh.labelers(number, LEGACY_NEEDS_OPERATOR)
+                + self.gh.labelers(number, lb.needs_operator))
+
+    def _operator_merge_owned(self, pr, current, notices, policy, promoted):
+        """Whether ``agent:needs-operator`` on the ready ``pr`` is the dispatcher's own label of
+        an operator merge (#248). ``current``: ``(position, record)`` of the latest
+        ``operator_merge`` notice of the current promotion, which names the head made ready
+        (the PR's head may have moved since); it counts from its own position or from the
+        latest promotion (``promoted``, a position), whichever is later, since a head promoted
+        again edits its notice instead of writing a new one. From there no other notice of the
+        dispatcher (``notices``) and no escalation recorded in a policy record (``policy``) may
+        follow, the label has no ``labeled`` event but those the notice counted and one more,
+        and the dispatcher wrote that one. The label under its name before #248 is never the
+        dispatcher's. Anything else, or anything uncertain, leaves the PR to the operator."""
+        lb = self.cfg.labels
+        if (lb.needs_operator not in pr.labels or LEGACY_NEEDS_OPERATOR in pr.labels
+                or lb.ready_to_merge not in pr.labels or current is None):
+            return False
+        record = current[1]
+        position = max(current[0], promoted)
+        if any(later > position for later, _ in notices):
+            return False
+        # The escalations of the review level and of level 0 are policy records (#182).
+        if any(later > position and entry.get('class') for later, entry in policy):
+            return False
+        labelers = self._operator_labelers(pr.number)
+        return (len(labelers) == record['labeled'] + 1
+                and self._wrote(labelers[-1], DISPATCHER))
+
+    def _released(self, pr):
+        """The dispatcher's own label of an operator merge on ``pr`` (#248), which goes with
+        ``agent:ready-to-merge`` when the readiness decays without an escalation; none
+        otherwise."""
+        return [self.cfg.labels.needs_operator] if pr.operator_owned else []
 
     def _resync(self, pr):
         """``PullRequest.resync`` (#235): when the latest round is a complete agent round that
@@ -2031,7 +2138,7 @@ class Dispatcher:
             # Also for a ready PR that may not be merged now: its mode tells whether it waits
             # for a person, outside max_open_prs (#199). ``plan`` merges only with merge_ready.
             if (self.cfg.merge.enabled() and pr.meta and lb.ready_to_merge in pr.labels
-                    and lb.needs_human not in pr.labels):
+                    and not operator_held(pr, lb)):
                 pr.merge_mode = self._merge_mode(pr)
             prs.append(pr)
         ready = []
@@ -2062,14 +2169,14 @@ class Dispatcher:
                         supervised=self._supervised_items(prs))
 
     def _supervised_items(self, prs):
-        """The issues and PRs in ``agent:needs-supervisor``, not in ``agent:needs-human``, with
-        a supervisor command to apply (#182)."""
+        """The issues and PRs in ``agent:needs-supervisor``, not in ``agent:needs-operator``,
+        with a supervisor command to apply (#182)."""
         lb = self.cfg.labels
         items = [(pr.number, True, self.gh.pr_comments) for pr in prs
-                 if lb.needs_supervisor in pr.labels and lb.needs_human not in pr.labels]
+                 if lb.needs_supervisor in pr.labels and not operator_blocked(pr.labels, lb)]
         items += [(raw['number'], False, self.gh.issue_comments)
                   for raw in self.gh.issues_with_label(lb.needs_supervisor)
-                  if lb.needs_human not in label_names(raw['labels'])]
+                  if not operator_blocked(label_names(raw['labels']), lb)]
         found = []
         for number, is_pr, read in items:
             view = self._supervisor_view(number, read(number))
@@ -2128,12 +2235,14 @@ class Dispatcher:
         return asked
 
     def _owns_block(self, number, comments, records):
-        """Whether the issue's ``agent:needs-human`` belongs to the readiness check: the latest
-        check added it when the label was absent (its record says how many ``labeled`` events
-        of the label came before), the dispatcher wrote the only ``labeled`` event since, and
-        no other text devloop may have published (another escalation, ``_published``) came
-        after that check: an identity that writes no devloop record cannot void the block's
-        attribution. Anything else, or anything uncertain, leaves the block to a human."""
+        """Whether the issue's ``agent:needs-operator`` belongs to the readiness check: the
+        latest check added it when the label was absent (its record says how many ``labeled``
+        events of the label came before), the dispatcher wrote the only ``labeled`` event
+        since, and no other text devloop may have published (another escalation,
+        ``_published``) came after that check: an identity that writes no devloop record cannot
+        void the block's attribution. The label counts under both its names (#248), the events
+        of the old one included (``_operator_labelers``). Anything else, or anything uncertain,
+        leaves the block to the operator."""
         if not records:
             return False
         position, record = records[-1]
@@ -2142,9 +2251,14 @@ class Dispatcher:
         if not record['blocked'] or any(self._published(c) and not self._ledger_record(c)
                                         for c in comments[position + 1:]):
             return False
-        labelers = self.gh.labelers(number, self.cfg.labels.needs_human)
+        labelers = self._operator_labelers(number)
         return (len(labelers) == record['labeled'] + 1
                 and self._wrote(labelers[-1], DISPATCHER))
+
+    def _owned_block(self, labels):
+        """Whether ``labels`` carry the operator label under one name only (#248): with both,
+        which one the readiness check added cannot be told, and the block is the operator's."""
+        return len(set(labels) & self.cfg.labels.operator()) == 1
 
     def _preflight_view(self, number, labels):
         """What planning needs about an issue's readiness check, read now from GitHub:
@@ -2155,31 +2269,33 @@ class Dispatcher:
         return {'hash': self._request_hash(history, comments),
                 'record': records[-1][1] if records else None,
                 'recheck': self._recheck_requested(number, comments),
-                'owned': (self.cfg.labels.needs_human in labels
+                'owned': (self._owned_block(labels)
                           and self._owns_block(number, comments, records))}
 
     def _publish_preflight(self, number, outcome, digest, agent_key, note='', base=None):
-        """Record a check's outcome on the issue and apply it to ``agent:needs-human``: add the
-        label when the check fails and the label is absent, remove it when the check passes and
-        the label belongs to the readiness check. A label someone else set stays. ``base``: the
-        commit the check ran on, None for an outcome reused (the latest base then)."""
+        """Record a check's outcome on the issue and apply it to ``agent:needs-operator``: add
+        the label when the check fails and the label is absent, remove it when the check passes
+        and the label belongs to the readiness check, under whichever name it has (#248). A
+        label someone else set stays. ``base``: the commit the check ran on, None for an
+        outcome reused (the latest base then)."""
         lb = self.cfg.labels
         agent = self.cfg.agent(agent_key)
         labels = label_names(self.gh.issue(number).get('labels') or [])
         comments = self.gh.issue_comments(number)
         records = self._preflight_records(comments)
-        present = lb.needs_human in labels
-        owned = present and self._owns_block(number, comments, records)
+        present = operator_blocked(labels, lb)
+        owned = self._owned_block(labels) and self._owns_block(number, comments, records)
+        shown = ', '.join(f'`{name}`' for name in sorted(labels & lb.operator()))
         record = dict(outcome, hash=digest, agent=agent_key, blocked=False, labeled=0)
         author = self._as(agent_key, ISSUE_COMMENT)
         head = self.runner.header(agent)
         if outcome['ready']:
             if owned:
                 # Label first: if the comment is lost, the next tick checks the issue again.
-                self.gh.edit_labels(number, remove=[lb.needs_human])
+                self.gh.edit_labels(number, remove=sorted(labels & lb.operator()))
                 note = note or 'Il blocco messo dal controllo di prontezza è stato rimosso.'
             elif present:
-                note = ('`agent:needs-human` resta: non risulta messo dal controllo di prontezza, '
+                note = (f'{shown} resta: non risulta messo dal controllo di prontezza, '
                         'quindi lo rimuove una persona.')
             author.comment(number, render_preflight(record, head, note))
             self.log('  ready' + (', block removed' if owned else ''))
@@ -2206,15 +2322,14 @@ class Dispatcher:
         if owned:
             record.update(blocked=True, labeled=records[-1][1]['labeled'])
         elif present:
-            note = note or ('`agent:needs-human` era già presente e non è attribuito al controllo '
+            note = note or (f'{shown} era già presente e non è attribuito al controllo '
                             'di prontezza: un nuovo esito positivo non lo rimuove.')
         else:
-            record.update(blocked=True,
-                          labeled=len(self.gh.labelers(number, lb.needs_human)))
+            record.update(blocked=True, labeled=len(self._operator_labelers(number)))
         # Comment first: if the label is lost, the next tick blocks the issue again.
         author.comment(number, render_preflight(record, head, note))
         if record['blocked'] and not owned:
-            self.gh.edit_labels(number, add=[lb.needs_human])
+            self.gh.edit_labels(number, add=[lb.needs_operator])
         self.log(f'  not ready: {len(record["gaps"])} gap(s)')
 
     def _do_preflight(self, number):
@@ -2268,7 +2383,7 @@ class Dispatcher:
 
     def _do_preflight_block(self, number):
         """Block again an issue whose latest check, still valid for its text, failed, after its
-        ``agent:needs-human`` was removed: the outcome is reused, not recomputed."""
+        ``agent:needs-operator`` was removed: the outcome is reused, not recomputed."""
         view = self._preflight_view(number, ())
         if preflight_state(view)[0] != 'not_ready':
             self.log('  the readiness check changed since the snapshot; next tick')
@@ -2284,6 +2399,7 @@ class Dispatcher:
         if self.workers is not None and not dry_run:
             return self._tick_continuous()
         self._auto_pin(dry_run)
+        self._transition_labels(dry_run)
         snap = self.snapshot()
         self._flag_incomplete(snap, dry_run)
         actions = plan(snap, self.cfg)
@@ -2320,6 +2436,7 @@ class Dispatcher:
             self.log(f'auto-pin pending: no action starts until the {len(running)} running '
                      'ones end')
             return []
+        self._transition_labels(False)
         snap = self.snapshot()
         prs = {pr.number: pr for pr in snap.prs}
         issue_of = {number: pr.issue for number, pr in prs.items()}
@@ -2347,6 +2464,34 @@ class Dispatcher:
         outcomes = {}
         self._run_lane([(0, action)], prs, outcomes)
         self.log(f'outcome of {action.kind} #{action.number}: ' + outcomes.get(0, 'not run'))
+
+    def _transition_labels(self, dry_run):
+        """At the first tick of the process (#248), as ``devloop setup`` does: rename
+        ``agent:needs-operator`` from its old name when only that exists, so that the label the
+        dispatcher adds exists and the issues and PRs that had the old one keep it; with both
+        names, touch neither and say so. A dry run only logs what it would do. A failed read
+        or rename is logged and tried again at the next tick: until then the old label blocks
+        as the new one."""
+        if self.labels_checked:
+            return
+        lb = self.cfg.labels
+        try:
+            if dry_run:
+                transition = label_transition(self.gh, lb)
+                if transition == 'rename':
+                    self.log(f'[dry-run] labels: would rename {LEGACY_NEEDS_OPERATOR} to '
+                             f'{lb.needs_operator}')
+                elif transition == 'both':
+                    self.log(f'[dry-run] labels: {both_labels_warning(lb)}')
+                return
+            note = transition_labels(self.gh, lb)[1]
+        except GitHubError as exc:
+            self.log(f'labels: the rename of {LEGACY_NEEDS_OPERATOR} could not be checked, '
+                     f'next tick: {exc}')
+            return
+        if note:
+            self.log(f'labels: {note}')
+        self.labels_checked = True
 
     def _auto_pin(self, dry_run):
         """With ``[pin] auto = true`` and a pin requested by a merge (#174), pin
@@ -2429,7 +2574,7 @@ class Dispatcher:
                   why=''):
         """Escalate issue or PR ``number`` with an escalation of class ``cls`` (#182). With
         ``supervised`` (``_supervised``) it goes to ``agent:needs-supervisor`` and an issue
-        keeps ``agent:ready``; otherwise to ``agent:needs-human``, with ``why`` a non-critical
+        keeps ``agent:ready``; otherwise to ``agent:needs-operator``, with ``why`` a non-critical
         class in ``auto`` stays with the operator."""
         lb = self.cfg.labels
         if supervised:
@@ -2441,7 +2586,7 @@ class Dispatcher:
             reason = (reason.rstrip() + f'\n\nIn modalità di merge `auto` questa escalation '
                       f'andrebbe al supervisore, ma resta all\'operatore: {why}.')
         self.gh.comment(number, render_escalation(reason, detail, cls))
-        self.gh.edit_labels(number, add=[lb.needs_human], remove=remove)
+        self.gh.edit_labels(number, add=[lb.needs_operator], remove=remove)
 
     def _log_hint(self, exc):
         log = getattr(exc, 'log', None)
@@ -2608,9 +2753,10 @@ class Dispatcher:
 
         It looks first where the ledger's trace (``Ledger.pending``) says a turn was opened and
         not closed, whatever labels the issue or PR has now: an issue whose PR is open or that
-        was escalated, a PR in ``agent:needs-human``. Then, in case that trace was lost, open
-        devloop PRs not in ``agent:needs-human``, issues in ``agent:working`` and issues
-        waiting for a readiness check. A number leaves the trace once checked."""
+        was escalated, a PR in ``agent:needs-operator``. Then, in case that trace was lost, open
+        devloop PRs that devloop still works on (``operator_held``), issues in
+        ``agent:working`` and issues waiting for a readiness check. A number leaves the trace
+        once checked."""
         if self.ledger is None:
             return
         lb = self.cfg.labels
@@ -2620,7 +2766,7 @@ class Dispatcher:
             self.log(f'  trace of the open turns not readable: {exc}')
             traced = []
         numbers = list(traced)
-        numbers += [pr.number for pr in snap.prs if lb.needs_human not in pr.labels]
+        numbers += [pr.number for pr in snap.prs if not operator_held(pr, lb)]
         numbers += list(snap.working_issues)
         numbers += [i['number'] for i in snap.ready_issues if 'preflight' in i]
         for number in dict.fromkeys(numbers):
@@ -2884,7 +3030,7 @@ class Dispatcher:
                                            + reason.strip() + '\n\n' + RESUME,
                                            'notice', {'event': 'blocked', 'class': 'blocked',
                                                       'critical': True, 'to': 'operator'}))
-        self.gh.edit_labels(number, add=[self.cfg.labels.needs_human], remove=remove)
+        self.gh.edit_labels(number, add=[self.cfg.labels.needs_operator], remove=remove)
 
     def _protected_changes(self, path, since=None):
         """Changed files under ``protected_paths``, which devloop never pushes."""
@@ -3061,18 +3207,18 @@ class Dispatcher:
             + describe_receipt(receipt), 'policy', payload))
 
     def _escalate_level(self, pr, receipt):
-        """Not enough independent reviewers for the level: no review, no promotion, a human
-        decides."""
+        """Not enough independent reviewers for the level: no review, no promotion, the
+        operator decides."""
         lb, level = self.cfg.labels, receipt['level']
         needed = 'un reviewer indipendente' if level == 1 else f'{level} reviewer indipendenti'
         self._policy_comment(
-            pr, f'Review di livello {level}: serve un intervento umano',
+            pr, f'Review di livello {level}: serve un intervento dell\'operatore',
             f'La policy di review del dispatcher richiede per questa PR il livello {level}, '
             f'quindi {needed}, ma {self._select(pr, level)[1]}. devloop non revisiona né '
             'promuove la PR: la review e la decisione sul merge spettano a una persona. Il '
             'livello resta acquisito anche se la label viene rimossa o il diff cambia.',
             receipt, 'level', cls='review_level')
-        self.gh.edit_labels(pr.number, add=[lb.needs_human],
+        self.gh.edit_labels(pr.number, add=[lb.needs_operator],
                             remove=[lb.review, lb.changes, lb.ready_to_merge])
 
     def _promote(self, pr, records):
@@ -3140,7 +3286,8 @@ class Dispatcher:
                 f'quella dell\'approvazione ({what}). La PR resta in review: serve una nuova '
                 'review, anche dello stesso commit. ' + rounds
                 + detail, current, 'stale', bases)
-            self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.changes, lb.ready_to_merge])
+            self.gh.edit_labels(pr.number, add=[lb.review],
+                                remove=[lb.changes, lb.ready_to_merge, *self._released(pr)])
             return None
         return bases
 
@@ -3242,18 +3389,18 @@ class Dispatcher:
         return [f['title'] for f in found]
 
     def _refuse_zero(self, pr, receipt, why, states=()):
-        """Level 0 holds but the head cannot be promoted: a human decides."""
+        """Level 0 holds but the head cannot be promoted: the operator decides."""
         lb = self.cfg.labels
         self.gh.comment(pr.number, publishable(
-            dispatcher_header() + '\n## Livello 0: serve un intervento umano\n\n'
+            dispatcher_header() + '\n## Livello 0: serve un intervento dell\'operatore\n\n'
             f'La policy di review assegna a questa PR il livello 0, ma {why.strip()}.\n\n'
             'devloop non promuove la PR. Per riprendere: risolvere la causa, togliere '
-            f'`{lb.needs_human}` e rimettere `{lb.review}` (il livello 0 viene ricontrollato), '
+            f'`{lb.needs_operator}` e rimettere `{lb.review}` (il livello 0 viene ricontrollato), '
             f'oppure togliere anche la label `{self.cfg.review_policy.zero_label}` per una review '
             'di livello 1.\n\n' + describe_receipt(receipt),
             'policy', {'event': 'level', 'receipt': receipt, 'checks': list(states),
                        'class': 'level_zero'}))
-        self.gh.edit_labels(pr.number, add=[lb.needs_human],
+        self.gh.edit_labels(pr.number, add=[lb.needs_operator],
                             remove=[lb.review, lb.changes, lb.ready_to_merge])
 
     def _apply_round(self, pr, records, announce, reviews):
@@ -3271,21 +3418,23 @@ class Dispatcher:
                                cls='open_findings')
             elif self._approval_current(pr, records[0]):
                 self._promote(pr, records)
-        elif verdict == 'needs_human':
+        elif verdict == 'needs_operator':
             if announce:
                 # The reviewer's record asks for the decision; this one classifies it (#182).
                 self.gh.comment(pr.number, render_escalation(
                     'Un reviewer chiede una decisione dell\'operatore: il motivo è nella sua '
                     'review.', cls='reviewer_decision'))
-            self.gh.edit_labels(pr.number, add=[lb.needs_human], remove=transient)
+            self.gh.edit_labels(pr.number, add=[lb.needs_operator], remove=transient)
         elif counted_rounds(reviews) >= self.cfg.max_review_rounds:
             if announce:
                 self.gh.comment(pr.number, render_escalation(
                     f'Raggiunto il limite di {self.cfg.max_review_rounds} round di review con '
                     'finding bloccanti ancora aperti.', cls='round_limit'))
-            self.gh.edit_labels(pr.number, add=[lb.needs_human], remove=transient)
+            self.gh.edit_labels(pr.number, add=[lb.needs_operator], remove=transient)
         else:
-            self.gh.edit_labels(pr.number, add=[lb.changes], remove=[lb.review, lb.ready_to_merge])
+            # A CI failure on a ready PR (#248): the dispatcher's own operator label goes too.
+            self.gh.edit_labels(pr.number, add=[lb.changes],
+                                remove=[lb.review, lb.ready_to_merge, *self._released(pr)])
 
     # Actions -------------------------------------------------------------
     def _do_revoke(self, pr):
@@ -3323,9 +3472,12 @@ class Dispatcher:
         else:
             title = 'Approvazione revocata'
             reason = 'Non risulta una review devloop approvata. La PR torna in review'
+        released = self._released(pr)
+        if released:
+            reason += f', e `{lb.needs_operator}`, che il dispatcher aveva messo per il merge, è tolta'
         self.gh.comment(pr.number,
                         publishable(dispatcher_header() + f'\n## {title}\n\n' + reason + '.'))
-        self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.ready_to_merge])
+        self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.ready_to_merge, *released])
 
     def _do_hold(self, pr):
         """Apply a hold or release command (#172): add or remove ``agent:merge-hold``, then
@@ -3354,7 +3506,7 @@ class Dispatcher:
         """Merge a ready PR (#172), with a merge commit on the approved head, with the local
         ``gh`` login. Every merge directive is read again just before, with reviews, closures,
         policy records and commands rebuilt from the comments read now: the PR still open,
-        ``agent:ready-to-merge`` without ``agent:needs-human`` nor ``agent:merge-hold``, no hold
+        ``agent:ready-to-merge`` without ``agent:needs-operator`` nor ``agent:merge-hold``, no hold
         or release command waiting, the head unchanged, ``MERGEABLE`` and ``CLEAN``, CI
         ``pass``, no open finding, the merge mode of the recomputed receipt, and the conditions
         of the promotion: the approvals of every required reviewer with a matching receipt, or
@@ -3371,8 +3523,8 @@ class Dispatcher:
 
         if fresh.get('state') != 'OPEN':
             return skip(f'the PR is {fresh.get("state")}')
-        if lb.ready_to_merge not in labels or labels & {lb.needs_human, lb.merge_hold,
-                                                        lb.needs_supervisor}:
+        if lb.ready_to_merge not in labels or labels & (lb.operator() | {lb.merge_hold,
+                                                                         lb.needs_supervisor}):
             return skip('labels changed: ' + ', '.join(sorted(labels)))
         if head != pr.head_sha:
             return skip(f'head moved to {head[:12]}')
@@ -3451,7 +3603,7 @@ class Dispatcher:
                 f'head (`--match-head-commit`), in modalità `{mode}`, al livello '
                 f'{current["level"]}. Subito prima ha ricontrollato le direttive di merge: CI '
                 '`pass`, `MERGEABLE` e `CLEAN`, nessun finding aperto, nessuna label '
-                f'`{lb.needs_human}` o `{lb.merge_hold}`, e le condizioni della promozione con la '
+                f'`{lb.needs_operator}` o `{lb.merge_hold}`, e le condizioni della promozione con la '
                 'ricevuta di policy ricalcolata. Il branch resta.\n\n' + describe_receipt(current),
                 'merged', payload))
         except GitHubError as exc:
@@ -3459,6 +3611,64 @@ class Dispatcher:
             self.log(f'  the merged record could not be written: {exc}')
         self._close_merged_issue(pr, head, mode)
         return None
+
+    def _do_operator_merge(self, pr):
+        """Tell that the merge of a ready PR is the operator's (#248), with one comment per
+        head: an ``operator_merge`` notice that says why, then ``agent:needs-operator``. A head
+        promoted again, after its readiness decayed (its CI ran again, for example), edits the
+        notice it already has, with the current promotion and count of ``labeled`` events,
+        instead of writing a second one. The PR is read again first: a head, a state or labels
+        changed since the snapshot leave it to the next tick, and so does a merge mode that now
+        lets devloop merge it. Notice first: a label that cannot be added fails the step, which
+        escalates the PR."""
+        lb = self.cfg.labels
+        fresh = self.gh.pr_state(pr.number)
+        labels = label_names(fresh.get('labels') or [])
+        if fresh.get('state') != 'OPEN' or (fresh.get('headRefOid') or '') != pr.head_sha:
+            self.log('  head or state changed since the snapshot; next tick')
+            return
+        if lb.ready_to_merge not in labels or operator_blocked(labels, lb):
+            self.log('  labels changed: ' + ', '.join(sorted(labels)))
+            return
+        reasons = self._operator_merge_reasons(pr)
+        if not reasons:
+            return
+        labeled = len(self._operator_labelers(pr.number))
+        body = render_operator_merge(pr.head_sha, labeled, pr.promotions, reasons,
+                                     lb.needs_operator)
+        if pr.operator_notice is None:
+            self.gh.comment(pr.number, body)
+        else:
+            self.gh.edit_comment(pr.operator_notice, body)
+            self.log(f'  promoted again: updated the notice of {pr.head_sha[:12]}')
+        self.gh.edit_labels(pr.number, add=[lb.needs_operator])
+        self.log(f'  the merge of {pr.head_sha[:12]} is the operator\'s')
+
+    def _operator_merge_reasons(self, pr):
+        """Why devloop does not merge the ready ``pr`` (#248), as Markdown lines: ``[merge]``
+        off, a level ``off`` in ``[merge.levels]``, the operator-only paths its diff touches.
+        ``''`` (logged) when the head moved or devloop may merge it."""
+        merge = self.cfg.merge
+        if not merge.enabled():
+            return '- `[merge] mode = "off"`: devloop non mergia le PR.'
+        receipt, paths = self._current_receipt(pr)
+        if receipt is None:
+            return ''
+        lines = []
+        reserved = sorted(p for p in paths if merge.operator_only(p))
+        if reserved:
+            shown = ', '.join(f'`{p}`' for p in reserved[:MAX_LISTED_PATHS])
+            more = (f' e altri {len(reserved) - MAX_LISTED_PATHS}'
+                    if len(reserved) > MAX_LISTED_PATHS else '')
+            lines.append('- la PR tocca percorsi riservati all\'operatore '
+                         f'(`[merge] operator_only_paths`): {shown}{more}.')
+        level = receipt['level']
+        if any(lvl == level and mode == 'off' for lvl, mode in merge.levels):
+            lines.append(f'- `[merge.levels]` imposta `off` per il livello di review {level} di '
+                         'questa PR.')
+        if not lines:
+            self.log(f'  merge mode {merge.mode_for(level, paths)}: devloop may merge this PR')
+        return '\n'.join(lines)
 
     def _close_merged_issue(self, pr, head, mode):
         """Close the issue of ``pr``, the one its marker names, after devloop merged it (#228),
@@ -3585,7 +3795,7 @@ class Dispatcher:
         lb = self.cfg.labels
         self._escalate(pr.number, f'Raggiunto il limite di {self.cfg.max_review_rounds} round di '
                                   'review: un nuovo round (review o CI fallita) non parte senza una '
-                                  'decisione umana.',
+                                  'decisione dell\'operatore.',
                        remove=[lb.review, lb.changes, lb.ready_to_merge], cls='round_limit')
 
     def _do_implement(self, number):
@@ -4297,7 +4507,9 @@ class Dispatcher:
             self.gh.comment(pr.number, publishable(dispatcher_header() + text
                                                    + 'Il merge locale non aveva conflitti.'))
         if fix_remove is None:
-            self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.ready_to_merge, lb.changes])
+            # A ready PR whose merge is the operator's (#248) loses the dispatcher's label too.
+            self.gh.edit_labels(pr.number, add=[lb.review],
+                                remove=[lb.ready_to_merge, lb.changes, *self._released(pr)])
         self.ws.remove(name)
         self.log(f'  merged {base} into {pr.head_ref}: {head[:12]}')
 
@@ -4403,8 +4615,49 @@ def _format_conflicts(conflicts):
     return '\n'.join(lines) or '(none)'
 
 
+def label_transition(gh: Tracker, labels):
+    """Where the repository stands in the rename of ``agent:needs-operator`` from its name
+    before #248 (``LEGACY_NEEDS_OPERATOR``): ``rename`` when only the old label exists,
+    ``both`` when both do, None when the old one is gone."""
+    names = set(gh.repo_labels())
+    if LEGACY_NEEDS_OPERATOR not in names:
+        return None
+    return 'both' if labels.needs_operator in names else 'rename'
+
+
+def both_labels_warning(labels):
+    """What ``setup`` and ``status`` report when both names of the operator label exist."""
+    return (f'both {LEGACY_NEEDS_OPERATOR} and {labels.needs_operator} exist: setup renames '
+            f'nothing and touches neither, and both block as {labels.needs_operator}. Move the '
+            f'issues and PRs of {LEGACY_NEEDS_OPERATOR} to {labels.needs_operator}, then delete '
+            f'{LEGACY_NEEDS_OPERATOR}')
+
+
+def transition_labels(gh: Tracker, labels):
+    """The transition of #248, for ``devloop setup`` and the first tick of a process:
+    ``agent:needs-operator`` is renamed from its old name when only that exists, so that the
+    issues and PRs that have it keep it; with both names, neither label is touched
+    (``both_labels_warning``). Returns ``(label_transition, note for the log)``, the note ''
+    when there is nothing to say."""
+    transition = label_transition(gh, labels)
+    note = ''
+    if transition == 'rename':
+        color, description = LABEL_STYLE['needs_operator']
+        gh.rename_label(LEGACY_NEEDS_OPERATOR, labels.needs_operator, color, description)
+        note = (f'renamed {LEGACY_NEEDS_OPERATOR} to {labels.needs_operator}: the issues and PRs '
+                'that had it keep it')
+    elif transition == 'both':
+        note = both_labels_warning(labels)
+    return transition, note
+
+
 def ensure_labels(gh: Tracker, labels, review_policy=None):
+    """Create or update devloop's labels, and return what the transition of #248 did, for the
+    log ('' when nothing): see ``transition_labels``."""
+    transition, note = transition_labels(gh, labels)
     for attr, (color, description) in LABEL_STYLE.items():
+        if attr == 'needs_operator' and transition == 'both':
+            continue
         gh.ensure_label(getattr(labels, attr), color, description)
     if review_policy is not None:
         gh.ensure_label(review_policy.label, *LEVEL_LABEL_STYLE)
@@ -4412,3 +4665,4 @@ def ensure_labels(gh: Tracker, labels, review_policy=None):
             gh.ensure_label(review_policy.zero_label, *ZERO_LABEL_STYLE)
     for name, (color, description) in PRIORITY_LABEL_STYLE.items():
         gh.ensure_label(name, color, description)
+    return note

@@ -123,7 +123,7 @@ class BaseAdvanceTests(Quorum):
         self.first_review_then_base_moves(
             [PR_FILE], raw_review(), raw_review('request_changes', [finding()]), cfg=cfg)
         self.d.tick(), self.d.tick()
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         self.assertIn('Raggiunto il limite di 1 round', self.gh.comments[-1][1])
 
     def test_a_base_that_advances_during_the_last_review_is_checked_at_promotion(self):
