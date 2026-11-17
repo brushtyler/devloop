@@ -174,6 +174,12 @@ class Workspace:
                   f'origin/{self.base_branch}')
         return path
 
+    def base_head(self):
+        """The commit of the latest remote base branch: the base an issue's step starts from,
+        part of the key of the supervisor's retries (#182)."""
+        self._git('fetch', 'origin', self.base_branch)
+        return self._git('rev-parse', f'origin/{self.base_branch}').strip()
+
     def review_copy(self, path, reviewer=None):
         """``(name, path)`` of a disposable worktree for a reviewer, detached at the HEAD of
         ``path`` and sharing its refs, so that ``origin/<base>`` resolves. What the reviewer and

@@ -15,6 +15,7 @@ import re
 
 from .acceptance import render_map
 from .policy import EVENTS, valid_receipt
+from .supervision import COMMANDS, OUTCOMES, critical, describe
 
 UNKNOWN = 'non noto'
 _EFFORT_LABELS = {'xhigh': 'Extra High', 'max': 'Max'}
@@ -146,7 +147,8 @@ NOTICES = ('escalation', 'blocked')
 def _valid_notice(n):
     """A text devloop publishes without a record of its own (#114): an escalation to a human,
     or an agent that stopped. Its marker tells it apart from the operator's own text when both
-    are written with the same login."""
+    are written with the same login. Since #182 it carries the escalation's ``class``; a notice
+    without one, or with one that is not known, is critical (``supervision.critical``)."""
     return n.get('event') in NOTICES
 
 
@@ -184,10 +186,21 @@ def _valid_hold(h):
             and all(isinstance(h.get(k), str) for k in ('by', 'reason')))
 
 
+def _valid_supervision(s):
+    """A supervisor command the dispatcher handled (#182): the command, its author, the outcome
+    and in ``comment`` the id of the comment that carried it (the commands it spends)."""
+    defaults = s.get('defaults', [])
+    return (s.get('command') in COMMANDS and s.get('outcome') in OUTCOMES
+            and isinstance(s.get('by'), str) and isinstance(s.get('reason', ''), str)
+            and isinstance(defaults, list)
+            and all(isinstance(d, dict) and isinstance(d.get('description'), str)
+                    and isinstance(d.get('proposed_default'), str) for d in defaults))
+
+
 _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy': _valid_policy,
           'finding': _valid_finding, 'sync': _valid_sync, 'preflight': _valid_preflight,
           'notice': _valid_notice, 'ledger': _valid_ledger, 'merged': _valid_merged,
-          'hold': _valid_hold}
+          'hold': _valid_hold, 'supervision': _valid_supervision}
 
 
 def read_marker(text, kind):
@@ -355,9 +368,36 @@ RESUME = ('Per riprendere: correggere la causa, **rimuovere `agent:needs-human`*
           '`agent:changes` sulla PR).')
 
 
-def render_escalation(reason, detail=''):
-    body = (dispatcher_header() + '\n## Serve un intervento umano\n\n' + reason.strip() + '\n\n'
-            + RESUME + '\n')
+SUPERVISOR_RESUME = (
+    'Escalation non critica: decide il supervisore (modalità di merge `auto`). Comandi, come prima '
+    'riga di un commento, dall\'identità di `[roles].supervisor` o da un utente fidato:\n\n'
+    '- `/devloop retry`: ripete il passo fallito, senza contare un round (al massimo 2 volte per '
+    'passo e input, poi l\'escalation passa all\'operatore);\n'
+    '- `/devloop accept-defaults`: accetta i default proposti dal controllo di prontezza e rimette '
+    'l\'issue in coda;\n'
+    '- `/devloop escalate <motivo>`: passa l\'escalation all\'operatore (`agent:needs-human`).')
+
+
+def render_escalation(reason, detail='', cls='failure', supervised=None):
+    """An escalation (#182: of class ``cls``). ``supervised``, for a non-critical one the
+    supervisor decides, holds the step, the key of its input and what a retry resumes; without
+    it the escalation goes to the operator."""
+    title = 'Escalation al supervisore' if supervised else 'Serve un intervento umano'
+    body = (dispatcher_header() + f'\n## {title}\n\n' + reason.strip() + '\n\n'
+            + f'**Classe:** `{cls}` ({describe(cls)}), '
+            + ('critica' if critical(cls) else 'non critica') + '.\n\n'
+            + (SUPERVISOR_RESUME if supervised else RESUME) + '\n')
     if detail:
         body += '\n```text\n' + detail.strip()[-6000:].replace('```', "'''") + '\n```\n'
-    return publishable(body, 'notice', {'event': 'escalation'})
+    payload = {'event': 'escalation', 'class': cls, 'critical': critical(cls),
+               'to': 'supervisor' if supervised else 'operator'}
+    if supervised:
+        payload.update(supervised)
+    return publishable(body, 'notice', payload)
+
+
+def render_supervision(record, text):
+    """The dispatcher's trace of a supervisor command (#182): what was asked, by whom, and the
+    outcome, in a ``supervision`` marker."""
+    return publishable(dispatcher_header() + f'\n## Decisione del supervisore\n\n{text.strip()}',
+                       'supervision', record)

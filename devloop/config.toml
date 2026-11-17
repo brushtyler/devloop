@@ -138,7 +138,9 @@ auto = false
 [roles]
 # The agent whose GitHub identity may hold and release merges in "auto" mode (issue #172),
 # besides trusted_users. Its app's agent:ready and priority labels count too, but only on issues
-# opened by a trusted user or by a devloop app (issue #178).
+# opened by a trusted user or by a devloop app (issue #178). In "auto" it also decides the
+# non-critical escalations in agent:needs-supervisor with /devloop retry, accept-defaults and
+# escalate (issue #182).
 # supervisor = "claude"
 implementer = "claude"
 # The reviewer pool, in order; none may be the implementer. Level 1 uses the PR's recorded

@@ -74,6 +74,13 @@ every merge directive holds again just before the merge: the conditions of the p
 ``pass``, ``MERGEABLE`` and ``CLEAN``, neither ``agent:needs-human`` nor ``agent:merge-hold``.
 ``auto`` adds ``/devloop hold <reason>`` and ``/devloop release`` from the supervisor's identity
 or a trusted user. A level override or an operator-only path can only make the mode stricter.
+
+Escalation classes (#182, ``supervision``): every escalation records its class. In ``auto`` a
+non-critical one (``tool_failure``, ``preflight_default``, ``sync_failed``) goes to
+agent:needs-supervisor, unless something makes it critical (``_supervised``), and the
+supervisor's identity or a trusted user decides it with ``/devloop retry``, ``/devloop
+accept-defaults`` or ``/devloop escalate <reason>`` (``_do_supervise``). Critical and unknown
+classes always go to agent:needs-human.
 """
 
 import hashlib
@@ -97,7 +104,8 @@ from .ledger import entries as ledger_entries
 from .ledger import open_turns
 from .localtests import module_command, select_modules
 from .markdown import (RESUME, carries_record, dispatcher_header, publishable, read_marker,
-                       render_escalation, render_fix, render_native_review, render_preflight, render_review)
+                       render_escalation, render_fix, render_native_review, render_preflight,
+                       render_review, render_supervision)
 from .pin import PinError, Repinned
 from .policy import describe as describe_receipt
 from .policy import (BINDING, MAX_LISTED_PATHS, ZERO_LEVEL, agent_profile, changes_requested,
@@ -107,6 +115,9 @@ from .ports import Backend, Tracker, summarize_checks
 from .review import (CI, FINDING_COMMAND, OPERATOR, ci_failure_review, current_round,
                      finding_commands, finding_key, finding_state, last_round, normalize_review,
                      open_findings, owner_of, round_verdict)
+from .supervision import (ACCEPT_DEFAULTS, DESIGN_LABEL, ESCALATE, ISSUE_STEPS, MAX_RETRIES,
+                          PREFLIGHT_DEFAULT, RETRY, RETRY_STEPS, SYNC_FAILED, TOOL_FAILURE,
+                          critical, preflight_class, retries_done, supervisor_command)
 from .workspace import WorkspaceError
 
 PROMPT_DIR = Path(__file__).resolve().parent / 'prompts'
@@ -119,7 +130,7 @@ RELEASE_COMMAND = '/devloop release'
 # The modes in which devloop merges (#172).
 MERGING = ('strict', 'auto')
 # Actions that take a slot of ``max_actions_per_tick``.
-EXPENSIVE = ('review', 'fix', 'implement', 'sync', 'preflight', 'merge')
+EXPENSIVE = ('review', 'fix', 'implement', 'sync', 'preflight', 'merge', 'supervise')
 # Actions that write to the base branch or to the whole repository (the merge of #172, the pin
 # of #174): with ``max_parallel_actions`` above 1 each runs alone, after the actions planned
 # before it and before those planned after it (#176).
@@ -132,7 +143,10 @@ LABEL_STYLE = {
     'ready_to_merge': ('0e8a16', 'devloop: approvata, in attesa del merge'),
     'needs_human': ('b60205', 'devloop: serve una decisione umana'),
     'merge_hold': ('5319e7', 'devloop: merge trattenuto dal supervisore o dall\'operatore'),
+    'needs_supervisor': ('d876e3', 'devloop: escalation non critica, decide il supervisore'),
 }
+# The label a PR resumes from when the supervisor retries a step that failed on it (#182).
+RESUME_STEP = {'review': 'review', 'fix': 'changes', 'sync': 'review'}
 LEVEL_LABEL_STYLE = ('5319e7', 'devloop: la PR richiede una review di livello 2')
 # Priority labels of ready issues (#146) and their rank: the lower, the earlier an issue starts.
 PRIORITY_LABELS = {'priority:high': 'high', 'priority:normal': 'normal', 'priority:low': 'low'}
@@ -230,6 +244,9 @@ class Snapshot:
     # (``_preflight_view``)
     ready_issues: list
     working_issues: list  # issue numbers
+    # Issues and PRs in agent:needs-supervisor with a supervisor command to apply (#182):
+    # dicts ``{number, command, by, step, pr}`` (``_supervisor_view``).
+    supervised: list = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -389,7 +406,8 @@ def merge_ready(pr, cfg):
     ``agent:needs-human`` nor ``agent:merge-hold``, no open finding, an acceptance map that
     holds."""
     lb = cfg.labels
-    return (lb.ready_to_merge in pr.labels and not pr.labels & {lb.needs_human, lb.merge_hold}
+    return (lb.ready_to_merge in pr.labels
+            and not pr.labels & {lb.needs_human, lb.merge_hold, lb.needs_supervisor}
             and pr.checks == 'pass' and pr.mergeable == 'MERGEABLE'
             and pr.merge_status == 'CLEAN' and not pr.acceptance
             and not open_findings(pr.reviews, pr.closures))
@@ -428,13 +446,25 @@ def plan(snapshot, cfg):
     lb = cfg.labels
     actions = []
     pr_issues = {pr.issue for pr in snapshot.prs}
+    # Only the PRs devloop works on take the slots of max_open_prs; those waiting for a person
+    # have their own limit, and once it is reached no new issue starts (#199).
+    working, held = pr_counts(snapshot, cfg)
+    free = 0 if held >= cfg.max_parked_prs else cfg.max_open_prs - working
+    for item in snapshot.supervised:
+        # A supervisor command (#182). A retry of an issue's step runs that step, and takes a
+        # free PR slot as the step itself would; without one it waits for a later tick.
+        if item['command'] == RETRY and not item['pr'] and item['step'] in ISSUE_STEPS:
+            if free <= 0:
+                continue
+            free -= 1
+        actions.append(Action('supervise', item['number'], f'{item["command"]} by {item["by"]}'))
     for number in snapshot.working_issues:
         if number not in pr_issues:
             actions.append(Action('stale', number, 'agent:working without an open devloop PR'))
         else:
             actions.append(Action('settle', number, 'agent:working but its PR is open'))
     for pr in snapshot.prs:
-        if lb.needs_human in pr.labels:
+        if pr.labels & {lb.needs_human, lb.needs_supervisor}:
             continue
         if not pr.meta:
             actions.append(Action('lost_meta', pr.number, 'PR body no longer ends with its marker'))
@@ -541,14 +571,10 @@ def plan(snapshot, cfg):
                           else 'every finding of the request for changes is closed' if settled
                           else '')
                 actions.append(Action('review', pr.number, reason))
-    # Only the PRs devloop works on take the slots of max_open_prs; those waiting for a person
-    # have their own limit, and once it is reached no new issue starts (#199).
-    working, held = pr_counts(snapshot, cfg)
-    free = 0 if held >= cfg.max_parked_prs else cfg.max_open_prs - working
     if cfg.preflight:
         actions += _plan_preflight(snapshot, cfg, pr_issues, free)
     elif free > 0:
-        blocked = set(cfg.blocked_labels) | {lb.working, lb.needs_human}
+        blocked = set(cfg.blocked_labels) | {lb.working, lb.needs_human, lb.needs_supervisor}
         candidates = [i for i in snapshot.ready_issues
                       if not (i['labels'] & blocked) and i['number'] not in pr_issues
                       and i['admitted']]
@@ -570,9 +596,10 @@ def _plan_preflight(snapshot, cfg, pr_issues, free):
     check is checked first (implemented on a later tick if ready). A failed check that is still
     valid blocks the issue again if its ``agent:needs-human`` was removed. An issue the check
     blocked is checked again, whatever ``free``, when its text changed or a trusted user asked
-    for it; any other ``agent:needs-human`` is left alone."""
+    for it; any other ``agent:needs-human`` is left alone. An issue in
+    ``agent:needs-supervisor`` waits for the supervisor (#182)."""
     lb = cfg.labels
-    excluded = set(cfg.blocked_labels) | {lb.working}
+    excluded = set(cfg.blocked_labels) | {lb.working, lb.needs_supervisor}
     issues = [i for i in snapshot.ready_issues
               if not (i['labels'] & excluded) and i['number'] not in pr_issues
               and i['admitted']]
@@ -621,13 +648,17 @@ def control_command(body):
     return bool(lines) and lines[0].split()[:1] == ['/devloop']
 
 
-def preflight_hash(title, body, comments, trusted_users, automatic):
+def preflight_hash(title, body, comments, trusted_users, automatic, accepted=None):
     """The hash that binds a readiness check to the issue text: title, body and the comments of
     trusted users, without devloop's own records (``automatic(comment)``) and without
-    ``/devloop`` commands. Any other trusted comment counts, header or not."""
+    ``/devloop`` commands (a supervisor command after the attribution header too, #182). Any
+    other trusted comment counts, header or not, and so does a dispatcher record of defaults
+    the supervisor accepted (``accepted(comment)``, #182), as a trusted comment would."""
+    accepted = accepted or (lambda comment: False)
     kept = [[(c.get('author') or {}).get('login'), c.get('body') or ''] for c in comments
-            if (c.get('author') or {}).get('login') in trusted_users
-            and not automatic(c) and not control_command(c.get('body'))]
+            if accepted(c) or ((c.get('author') or {}).get('login') in trusted_users
+                               and not automatic(c) and not control_command(c.get('body'))
+                               and supervisor_command(c.get('body')) is None)]
     data = json.dumps([title or '', body or '', kept], ensure_ascii=False, separators=(',', ':'))
     return hashlib.sha256(data.encode('utf-8')).hexdigest()
 
@@ -952,6 +983,352 @@ class Dispatcher:
         return untrusted_change(history, self.cfg.labels.ready, self.cfg.trusted_users,
                                 self._admitters(history['author']))
 
+    # Supervision (#182) --------------------------------------------------------
+    def _accepted(self, comment):
+        """Whether ``comment`` is the dispatcher's record of defaults the supervisor accepted:
+        it counts as a trusted comment of the issue."""
+        record = read_marker(comment.get('body', ''), 'supervision')
+        return (record is not None and record['command'] == ACCEPT_DEFAULTS
+                and record['outcome'] == 'accepted'
+                and self._signed((comment.get('author') or {}).get('login')))
+
+    def _request_hash(self, history, comments):
+        """The hash of an issue's request (``preflight_hash``): what binds a readiness check,
+        and the key of an issue step's retries."""
+        return preflight_hash(history['title'], history['body'], comments,
+                              self.cfg.trusted_users, self._automatic, self._accepted)
+
+    def _devloop_author(self, login):
+        """Whether an issue opened by ``login`` may have its escalations decided by the
+        supervisor: a trusted user or one of devloop's apps."""
+        apps = {self._app_login(actor) for actor in (*self.cfg.agents, DISPATCHER)} - {None}
+        return bool(login) and (login in self.cfg.trusted_users or login in apps)
+
+    def _dispatcher_records(self, comments, kind, event=None):
+        """``(position, record)`` of the records of ``kind`` the dispatcher signed."""
+        found = []
+        for position, comment in enumerate(comments):
+            record = read_marker(comment.get('body', ''), kind)
+            if (record is not None and (event is None or record.get('event') == event)
+                    and self._signed((comment.get('author') or {}).get('login'))):
+                found.append((position, record))
+        return found
+
+    def _supervised(self, number, cls, step, pr=None, reviewer=None, key=None):
+        """``(route, why)`` of an escalation of class ``cls`` raised by ``step`` on issue or PR
+        ``number`` (``pr``: the PR, None for an issue). ``route`` is None when it goes to the
+        operator; otherwise the payload of an escalation the supervisor decides: the step, the
+        key of its input and, for a PR, the label a retry resumes from. ``why`` says why a
+        non-critical class in ``auto`` still goes to the operator, '' otherwise. ``key``: for an
+        issue, the key of the input the step ran on (``_issue_key``), bound before it ran; an
+        issue step without one goes to the operator.
+
+        Only in merge mode ``auto`` with a supervisor, and only when nothing makes the
+        escalation critical: a PR whose own merge mode is not ``auto`` (the override of its
+        level, an ``operator_only_paths`` path), a PR the supervisor implemented, an issue
+        opened by someone else than a trusted user or a devloop app, an issue text no longer
+        approved by ``agent:ready``, the ``phase:design`` label, or anything that cannot be
+        verified."""
+        cfg, lb = self.cfg, self.cfg.labels
+        if critical(cls) or cfg.merge.mode != 'auto' or not cfg.supervisor:
+            return None, ''
+        if step not in RETRY_STEPS:
+            return None, f'il passo `{step}` non è fra quelli che il supervisore può ripetere'
+        try:
+            labels = set()
+            if pr is not None:
+                if not pr.meta.get('implementer'):
+                    return None, ('il corpo della PR non termina più con il suo marker: chi l\'ha '
+                                  'implementata e la sua modalità di merge non sono verificabili')
+                labels |= pr.labels
+                if pr.meta.get('implementer') == cfg.supervisor:
+                    return None, 'il supervisore ha implementato questa PR'
+                mode = self._merge_mode(pr)
+                if mode != 'auto':
+                    return None, (f'la modalità di merge di questa PR è `{mode or "non calcolabile"}`'
+                                  ', non `auto` (override del livello o `operator_only_paths`)')
+            issue = pr.issue if pr is not None else number
+            history = self.gh.issue_history(issue)
+            if not self._devloop_author(history['author']):
+                return None, (f'l\'issue #{issue} è stata aperta da `{history["author"]}`, che non '
+                              'è un utente fidato né un\'app di devloop')
+            untrusted = self._untrusted_change(history)
+            if untrusted:
+                return None, untrusted
+            labels |= label_names(self.gh.issue(issue).get('labels') or [])
+            if DESIGN_LABEL in labels:
+                return None, f'la label `{DESIGN_LABEL}` è presente'
+            if pr is not None:
+                key = {'step': step, 'head': pr.head_sha}
+                if reviewer:
+                    key['reviewer'] = reviewer
+                return {'step': step, 'key': key,
+                        'resume': getattr(lb, RESUME_STEP.get(step, 'review'))}, ''
+            if key is None and cls == PREFLIGHT_DEFAULT:
+                # A failed check reused, not run again: no retry uses its key, and
+                # accept-defaults checks the hash of the check's own record.
+                key = self._issue_key(step, self.ws.base_head(),
+                                      self._request_hash(history, self.gh.issue_comments(number)))
+            if not isinstance(key, dict) or key.get('step') != step:
+                return None, 'l\'input del passo non è stato registrato prima dell\'esecuzione'
+            return {'step': step, 'key': key}, ''
+        except (GitHubError, WorkspaceError) as exc:
+            return None, f'non è stato possibile verificare che l\'escalation non sia critica ({exc})'
+
+    @staticmethod
+    def _issue_key(step, base, request):
+        """The key of the input of an issue's ``step``: the commit of the base its checkout
+        started from and the hash of the request its prompt got, both taken before the step
+        runs, so that a base or a text that changes during the turn is not mistaken for the
+        input that failed."""
+        return {'step': step, 'base': base, 'request': request}
+
+    def _current_key(self, number, key, pr):
+        """The key ``key`` would have now, for the same step (and reviewer) on issue or PR
+        ``number``: a retry of a superseded input is refused."""
+        if pr is not None:
+            current = {'step': key.get('step'), 'head': self.gh.pr_head(number)}
+            if 'reviewer' in key:
+                current['reviewer'] = key['reviewer']
+            return current
+        history = self.gh.issue_history(number)
+        return {'step': key.get('step'), 'base': self.ws.base_head(),
+                'request': self._request_hash(history, self.gh.issue_comments(number))}
+
+    def _supervisor_view(self, number, comments):
+        """The supervisor command still to apply on issue or PR ``number``, from its
+        ``comments``: ``{command, reason, by, comment, step}`` or None. Only a command written
+        after the latest escalation of the dispatcher counts. A dispatcher ``supervision``
+        record spends the command it handled, whose comment id it carries, and every command
+        before it; among those still waiting the latest wins. A command counts only in merge
+        mode ``auto`` and from the supervisor's identity or a trusted user (``_may_hold``); any
+        other, and an escalate without a reason, is ignored and logged. devloop's own records
+        are never commands."""
+        escalations = self._dispatcher_records(comments, 'notice', 'escalation')
+        if not escalations:
+            return None
+        start, latest = escalations[-1]
+        spent = None
+        for position, record in self._dispatcher_records(comments, 'supervision'):
+            applied = record.get('comment')
+            if isinstance(applied, int) and not isinstance(applied, bool):
+                spent = applied if spent is None else max(spent, applied)
+            else:
+                start = max(start, position)  # a record without the id spends what precedes it
+        found = None
+        for comment in comments[start + 1:]:
+            body = comment.get('body') or ''
+            parsed = None if carries_record(body) else supervisor_command(body)
+            if parsed is None:
+                continue
+            ident = comment.get('id')
+            if spent is not None and (not isinstance(ident, int) or ident <= spent):
+                continue
+            command, reason = parsed
+            login = (comment.get('author') or {}).get('login')
+            why = (f'merge mode is "{self.cfg.merge.mode}", not "auto"'
+                   if self.cfg.merge.mode != 'auto'
+                   else 'the author is neither the supervisor nor a trusted user'
+                   if not self._may_hold(login)
+                   else f'malformed, expected `/devloop {ESCALATE} <reason>`' if reason is None
+                   else None)
+            if why:
+                self.log(f'  #{number}: ignored `/devloop {command}` by {login}: {why}')
+                continue
+            found = {'command': command, 'reason': reason, 'by': login, 'comment': ident,
+                     'step': latest.get('step')}
+        return found
+
+    def _to_operator(self, number, reason, cls, remove=()):
+        """Hand an item in ``agent:needs-supervisor`` to the operator: a critical escalation of
+        class ``cls``."""
+        lb = self.cfg.labels
+        self.gh.comment(number, render_escalation(reason, cls=cls))
+        self.gh.edit_labels(number, add=[lb.needs_human], remove=[lb.needs_supervisor, *remove])
+
+    def _do_supervise(self, target):
+        """Apply the supervisor command waiting on an issue or PR in ``agent:needs-supervisor``
+        (#182), read again now. Each command leaves a dispatcher ``supervision`` record with the
+        command, its author and the outcome, written before the labels change: a record whose
+        labels are lost spends the command, so that a retry is never run twice for one
+        command.
+
+        - ``escalate``: the item goes to ``agent:needs-human`` with the reason.
+        - ``accept-defaults``: only for a ``preflight_default`` escalation (``_accept_defaults``).
+        - ``retry``: only for ``tool_failure`` and ``sync_failed``, and only while the input of
+          the step is the one that failed (the key of the escalation). A PR goes back to the
+          label of its step, and the next tick runs it; an issue's step runs now. Retries
+          write no review record, so they count no round. After ``MAX_RETRIES`` retries for
+          the same key (counted per reviewer, ``retries_done``) the next one is not run and the
+          item goes to ``agent:needs-human``, as it does when what made the escalation
+          non-critical (``_supervised``) no longer holds.
+
+        An escalation whose class is critical or unknown, or that was not routed to the
+        supervisor, accepts no command: the item goes to ``agent:needs-human``."""
+        lb = self.cfg.labels
+        is_pr = isinstance(target, PullRequest)
+        number = target.number if is_pr else target
+        if is_pr:
+            fresh = self.gh.pr_state(number)
+            labels = label_names(fresh.get('labels') or [])
+            comments = self.gh.pr_comments(number)
+        else:
+            labels = label_names(self.gh.issue(number).get('labels') or [])
+            comments = self.gh.issue_comments(number)
+        if lb.needs_supervisor not in labels or lb.needs_human in labels:
+            self.log('  not in agent:needs-supervisor any more; nothing to do')
+            return
+        command = self._supervisor_view(number, comments)
+        if command is None:
+            self.log('  no supervisor command to apply')
+            return
+        escalation = self._dispatcher_records(comments, 'notice', 'escalation')[-1][1]
+        cls = escalation.get('class')
+        name, by = command['command'], command['by']
+        # A tool failure of an issue loses agent:ready on its way to the operator, as any failed
+        # step does; the readiness check keeps it.
+        keep_ready = is_pr or cls == PREFLIGHT_DEFAULT
+        human_remove = [] if keep_ready else [lb.ready]
+
+        def trace(outcome, text, **extra):
+            record = dict(command=name, by=by, reason=command['reason'] or '',
+                          comment=command['comment'], outcome=outcome, **extra)
+            record['class'] = cls if isinstance(cls, str) else None
+            self.gh.comment(number, render_supervision(
+                record, f'`/devloop {name}` di `{by}`: {text.strip()}'))
+            self.log(f'  {name} by {by}: {outcome}')
+
+        if critical(cls) or escalation.get('to') != 'supervisor':
+            trace('refused', 'rifiutato. L\'escalation è critica (classe '
+                  f'`{cls}`) o non è affidata al supervisore: decide l\'operatore.')
+            return self._to_operator(number, f'Il supervisore non può decidere questa escalation '
+                                     f'(classe `{cls}`): `/devloop {name}` di `{by}` è stato '
+                                     'rifiutato.', 'supervisor_refused', human_remove)
+        if name == ESCALATE:
+            reason = ' '.join(command['reason'].split())
+            trace('escalated', f'l\'escalation passa all\'operatore: {reason}')
+            return self._to_operator(number, f'Il supervisore `{by}` passa all\'operatore '
+                                     f'l\'escalation di classe `{cls}`: {reason}',
+                                     'supervisor_escalated', human_remove)
+        if name == ACCEPT_DEFAULTS:
+            if is_pr or cls != PREFLIGHT_DEFAULT:
+                return trace('refused', 'rifiutato: vale solo per un\'escalation `preflight_default` '
+                             'del controllo di prontezza. Il comando è speso; l\'escalation '
+                             'resta al supervisore.')
+            return self._accept_defaults(number, labels, comments, trace)
+        if cls not in (TOOL_FAILURE, SYNC_FAILED):
+            return trace('refused', 'rifiutato: vale solo per le escalation `tool_failure` e '
+                         '`sync_failed`. Il comando è speso; l\'escalation resta al supervisore.')
+        key, step = escalation.get('key'), escalation.get('step')
+        if (not isinstance(key, dict) or step not in RETRY_STEPS or key.get('step') != step
+                or is_pr == (step in ISSUE_STEPS) or (step == 'preflight'
+                                                      and not self.cfg.preflight)):
+            trace('refused', 'rifiutato: l\'escalation non registra un passo ripetibile.')
+            return self._to_operator(number, 'L\'escalation non registra un passo che il '
+                                     f'supervisore possa ripetere: `/devloop {name}` di `{by}` è '
+                                     'stato rifiutato.', 'supervisor_refused', human_remove)
+        current = self._current_key(number, key, target if is_pr else None)
+
+        def superseded():
+            return trace('refused', 'rifiutato: l\'input del passo è cambiato dopo '
+                         'l\'escalation (' + ', '.join(f'`{k}`' for k in sorted(current)
+                                                        if current[k] != key.get(k))
+                         + '), quindi il comando si riferisce a un input superato. Il comando è '
+                         'speso; l\'escalation resta al supervisore.')
+
+        # What made the escalation non-critical is checked again, on data read now: a
+        # phase:design label, an untrusted text or author, the PR's own merge mode or its
+        # implementer may have changed while it waited. A PR is checked on its labels and head
+        # read now and on its thread rebuilt from the comments read now, as the merge does: the
+        # snapshot does not read the thread of a PR in agent:needs-supervisor, and without its
+        # review and policy records the level recorded earlier would be lost. A PR whose head
+        # moved is refused first: its merge mode would be the one of another diff.
+        if is_pr:
+            if current != key:
+                return superseded()
+            target = replace(target, labels=labels,
+                             head_sha=fresh.get('headRefOid') or target.head_sha, reviews=[],
+                             fixes=[], syncs=[], closures=[], commands=[], finding_problems=[],
+                             policy=[], zero_head=None, zero_problem='', stale_receipt=False,
+                             operator_comments=[], rereview=False, round_comments=[],
+                             acceptance=[], hold=None)
+            if target.meta:
+                self._read_thread(target, comments)
+        route, why = self._supervised(number, cls, step, target if is_pr else None,
+                                      key.get('reviewer'), key=key)
+        if route is None:
+            why = why or 'la modalità di merge non è più `auto` con un supervisore'
+            trace('refused', f'rifiutato: l\'escalation è diventata critica ({why}).')
+            return self._to_operator(number, 'Il supervisore non può più decidere questa '
+                                     f'escalation: {why}. `/devloop {name}` di `{by}` è stato '
+                                     'rifiutato.', 'supervisor_refused', human_remove)
+        if current != key:
+            return superseded()
+        # Counted per reviewer: a review whose reviewers failed together, then one by one, keeps
+        # the retries each one already had.
+        done = retries_done(key, [r.get('key') for _, r in
+                                  self._dispatcher_records(comments, 'supervision')
+                                  if r['command'] == RETRY and r['outcome'] == 'applied'])
+        if done >= MAX_RETRIES:
+            trace('limit', f'non eseguito: il passo `{step}` è già stato ripetuto {done} volte '
+                  'per lo stesso input.', key=key)
+            return self._to_operator(number, f'Il passo `{step}` è fallito di nuovo dopo {done} '
+                                     f'tentativi autorizzati dal supervisore (al massimo '
+                                     f'{MAX_RETRIES}): `/devloop {name}` di `{by}` non è stato '
+                                     'eseguito.', 'retry_limit', human_remove)
+        trace('applied', f'il passo `{step}` viene ripetuto (tentativo {done + 1} di '
+              f'{MAX_RETRIES}), senza contare un round di review.', key=key, attempt=done + 1)
+        if is_pr:
+            resume = escalation.get('resume')
+            self.gh.edit_labels(number, add=[resume if resume in (lb.review, lb.changes)
+                                             else lb.review], remove=[lb.needs_supervisor])
+            return
+        self.gh.edit_labels(number, remove=[lb.needs_supervisor])
+        try:
+            getattr(self, f'_do_{step}')(number)
+        except (AgentError, GitHubError, WorkspaceError, UntrustedChange) as exc:
+            self.log(f'  failed: {exc}')
+            self._escalate_failure(Action(step, number, 'retry'), None, exc)
+
+    def _accept_defaults(self, number, labels, comments, trace):
+        """Accept the defaults of the latest readiness check of issue ``number`` (#182): only
+        when every gap is ``default_available``, no split is needed, the issue has no
+        ``phase:design`` label, was opened by a trusted user or a devloop app, its text is
+        still approved, and the check is the one of the current text. The dispatcher's record
+        lists the defaults and counts as a trusted comment, so the issue is checked again with
+        them and, if ready, implemented. Anything else is refused: a gap the operator must
+        decide sends the issue to ``agent:needs-human``, a superseded check leaves it to the
+        supervisor."""
+        lb = self.cfg.labels
+        history = self.gh.issue_history(number)
+        records = self._preflight_records(comments)
+        record = records[-1][1] if records else None
+        problem = ('nessun controllo di prontezza fallito da accettare'
+                   if record is None or record['ready']
+                   else 'non tutte le lacune sono `default_available`, o serve una suddivisione: '
+                        'decide l\'operatore' if preflight_class(record) != PREFLIGHT_DEFAULT
+                   else f'l\'issue ha la label `{DESIGN_LABEL}`' if DESIGN_LABEL in labels
+                   else 'l\'issue non è stata aperta da un utente fidato né da un\'app di devloop'
+                   if not self._devloop_author(history['author'])
+                   else self._untrusted_change(history))
+        if problem:
+            trace('refused', f'rifiutato: {problem}.')
+            return self._to_operator(number, 'I default del controllo di prontezza non possono '
+                                     f'essere accettati dal supervisore: {problem}.',
+                                     'operator_decision')
+        if record['hash'] != self._request_hash(history, comments):
+            return trace('refused', 'rifiutato: il testo dell\'issue è cambiato dopo il controllo '
+                         'di prontezza, quindi i default si riferiscono a un input superato. Il '
+                         'comando è speso; l\'escalation resta al supervisore.')
+        defaults = [{'description': g['description'], 'proposed_default': g['proposed_default']}
+                    for g in record['gaps']]
+        listed = '\n'.join(f'- {d["description"].strip()}\n  *Default accettato:* '
+                           f'{d["proposed_default"].strip()}' for d in defaults)
+        trace('accepted', 'default del controllo di prontezza accettati. Questo record conta come '
+              'un commento fidato: l\'issue torna in coda e il controllo si ripete con questi '
+              f'default.\n\n{listed}', defaults=defaults, hash=record['hash'])
+        self.gh.edit_labels(number, remove=[lb.needs_supervisor])
+
     def _hold_command(self, pr, comments):
         """The hold or release command still to apply (#172), ``{event, by, reason, comment}``
         or None: the latest valid one not spent yet. A dispatcher ``hold`` record spends the
@@ -1122,7 +1499,7 @@ class Dispatcher:
             prs.append(pr)
         ready = []
         pr_issues = {pr.issue for pr in prs}
-        skip = set(self.cfg.blocked_labels) | {lb.working}
+        skip = set(self.cfg.blocked_labels) | {lb.working, lb.needs_supervisor}
         for raw in self.gh.issues_with_label(lb.ready):
             labels = label_names(raw['labels'])
             events = self.gh.labeled_events(raw['number'])
@@ -1142,7 +1519,24 @@ class Dispatcher:
                 issue['preflight'] = self._preflight_view(issue['number'], issue['labels'])
             ready.append(issue)
         working = [raw['number'] for raw in self.gh.issues_with_label(lb.working)]
-        return Snapshot(prs=prs, ready_issues=ready, working_issues=working)
+        return Snapshot(prs=prs, ready_issues=ready, working_issues=working,
+                        supervised=self._supervised_items(prs))
+
+    def _supervised_items(self, prs):
+        """The issues and PRs in ``agent:needs-supervisor``, not in ``agent:needs-human``, with
+        a supervisor command to apply (#182)."""
+        lb = self.cfg.labels
+        items = [(pr.number, True, self.gh.pr_comments) for pr in prs
+                 if lb.needs_supervisor in pr.labels and lb.needs_human not in pr.labels]
+        items += [(raw['number'], False, self.gh.issue_comments)
+                  for raw in self.gh.issues_with_label(lb.needs_supervisor)
+                  if lb.needs_human not in label_names(raw['labels'])]
+        found = []
+        for number, is_pr, read in items:
+            view = self._supervisor_view(number, read(number))
+            if view is not None:
+                found.append(dict(view, number=number, pr=is_pr))
+        return found
 
     # Readiness check (#114) ---------------------------------------------------
     def _preflight_records(self, comments):
@@ -1219,17 +1613,17 @@ class Dispatcher:
         history = self.gh.issue_history(number)
         comments = self.gh.issue_comments(number)
         records = self._preflight_records(comments)
-        return {'hash': preflight_hash(history['title'], history['body'], comments,
-                                       self.cfg.trusted_users, self._automatic),
+        return {'hash': self._request_hash(history, comments),
                 'record': records[-1][1] if records else None,
                 'recheck': self._recheck_requested(number, comments),
                 'owned': (self.cfg.labels.needs_human in labels
                           and self._owns_block(number, comments, records))}
 
-    def _publish_preflight(self, number, outcome, digest, agent_key, note=''):
+    def _publish_preflight(self, number, outcome, digest, agent_key, note='', base=None):
         """Record a check's outcome on the issue and apply it to ``agent:needs-human``: add the
         label when the check fails and the label is absent, remove it when the check passes and
-        the label belongs to the readiness check. A label someone else set stays."""
+        the label belongs to the readiness check. A label someone else set stays. ``base``: the
+        commit the check ran on, None for an outcome reused (the latest base then)."""
         lb = self.cfg.labels
         agent = self.cfg.agent(agent_key)
         labels = label_names(self.gh.issue(number).get('labels') or [])
@@ -1251,6 +1645,24 @@ class Dispatcher:
             author.comment(number, render_preflight(record, head, note))
             self.log('  ready' + (', block removed' if owned else ''))
             return
+        # The class of the escalation (#182): in "auto" gaps that are all defaults go to the
+        # supervisor, with a dispatcher escalation that carries the key of the check's input.
+        record['class'] = cls = preflight_class(outcome)
+        supervised, why = (None, '') if present else self._supervised(
+            number, cls, 'preflight',
+            key=self._issue_key('preflight', base, digest) if base else None)
+        if supervised:
+            author.comment(number, render_preflight(record, head, note))
+            self.gh.comment(number, render_escalation(
+                'Il controllo di prontezza ha trovato solo lacune con un default proposto '
+                '(`default_available`): il supervisore può accettarli con '
+                f'`/devloop {ACCEPT_DEFAULTS}`.', cls=cls, supervised=supervised))
+            self.gh.edit_labels(number, add=[lb.needs_supervisor])
+            self.log(f'  not ready: {len(record["gaps"])} gap(s), to the supervisor')
+            return
+        if why:
+            note = note or (f'In modalità di merge `auto` queste lacune andrebbero al supervisore, '
+                            f'ma l\'escalation resta all\'operatore: {why}.')
         if owned:
             record.update(blocked=True, labeled=records[-1][1]['labeled'])
         elif present:
@@ -1275,16 +1687,22 @@ class Dispatcher:
         if reason:
             raise UntrustedChange(f'issue #{number}: {reason}')
         comments = self.gh.issue_comments(number)
-        digest = preflight_hash(history['title'], history['body'], comments, cfg.trusted_users,
-                                self._automatic)
+        digest = self._request_hash(history, comments)
         prompt = _template('preflight', repo=cfg.repo, base_branch=cfg.base_branch,
                            issue_number=number, issue_title=history['title'],
                            issue_body=history['body'],
-                           issue_comments=_render_issue_comments(comments, cfg.trusted_users),
+                           issue_comments=_render_issue_comments(
+                               comments, cfg.trusted_users,
+                               [read_marker(c['body'], 'supervision')
+                                for c in comments if self._accepted(c)]),
                            language=cfg.language)
         name = f'issue-{number}-preflight'
         path = self.ws.base_copy(name)
         try:
+            # The input the check runs on (#182), bound before it runs: the commit of its
+            # checkout and the hash of the request its prompt gets.
+            base = self.ws.head(path)
+            key = self._issue_key('preflight', base, digest)
             # A denied permission is retried once, in the same checkout (#180), as in ``_turn``.
             for label in (name, f'{name}-retry'):
                 entry = self._open_turn((number, 'preflight'), agent, 'review', label)
@@ -1295,16 +1713,18 @@ class Dispatcher:
                     error = self._permission_denied(agent, exc, retry=label == name)
                     if error is None:
                         continue
+                    error.key = key
                     raise error from exc
                 except AgentError as exc:
                     self._close_turn(entry, 'unavailable' if isinstance(exc, ModelUnavailable)
                                      else 'failure', exc)
+                    exc.key = key
                     raise
                 self._close_turn(entry, 'success')
                 break
         finally:
             self.ws.remove(name)
-        self._publish_preflight(number, normalize_preflight(raw), digest, agent.key)
+        self._publish_preflight(number, normalize_preflight(raw), digest, agent.key, base=base)
 
     def _do_preflight_block(self, number):
         """Block again an issue whose latest check, still valid for its text, failed, after its
@@ -1418,23 +1838,46 @@ class Dispatcher:
                 outcomes[position] = f'failed: {first}' if failed else 'done'
 
     # Helpers -------------------------------------------------------------
-    def _escalate(self, number, reason, detail='', remove=()):
-        self.gh.comment(number, render_escalation(reason, detail))
-        self.gh.edit_labels(number, add=[self.cfg.labels.needs_human], remove=remove)
+    def _escalate(self, number, reason, detail='', remove=(), cls='failure', supervised=None,
+                  why=''):
+        """Escalate issue or PR ``number`` with an escalation of class ``cls`` (#182). With
+        ``supervised`` (``_supervised``) it goes to ``agent:needs-supervisor`` and an issue
+        keeps ``agent:ready``; otherwise to ``agent:needs-human``, with ``why`` a non-critical
+        class in ``auto`` stays with the operator."""
+        lb = self.cfg.labels
+        if supervised:
+            self.gh.comment(number, render_escalation(reason, detail, cls, supervised))
+            self.gh.edit_labels(number, add=[lb.needs_supervisor],
+                                remove=[label for label in remove if label != lb.ready])
+            return
+        if why:
+            reason = (reason.rstrip() + f'\n\nIn modalità di merge `auto` questa escalation '
+                      f'andrebbe al supervisore, ma resta all\'operatore: {why}.')
+        self.gh.comment(number, render_escalation(reason, detail, cls))
+        self.gh.edit_labels(number, add=[lb.needs_human], remove=remove)
 
     def _log_hint(self, exc):
         log = getattr(exc, 'log', None)
         return f' Log locale: `{Path(log).name}` in `{self.cfg.state_dir}/logs`.' if log else ''
 
     def _escalate_failure(self, action, pr, exc):
+        """Escalate a failed action. Its class (#182): ``tool_failure`` when the agent or its
+        model produced no result (``AgentError``: a crash, a timeout, a stall, an unavailable
+        model, a denied permission), ``untrusted`` for an issue text no longer trusted,
+        ``failure`` for anything else (``gh``, git, the dispatcher itself)."""
         lb = self.cfg.labels
         reason = f'Il passo `{action.kind}` è fallito: {_failure_text(exc)}{self._log_hint(exc)}'
+        cls = (TOOL_FAILURE if isinstance(exc, AgentError)
+               else 'untrusted' if isinstance(exc, UntrustedChange) else 'failure')
+        number = pr.number if pr is not None else action.number
+        remove = ([lb.review, lb.changes, lb.ready_to_merge] if pr is not None
+                  else [lb.working, lb.ready])
         try:
-            if pr is not None:
-                self._escalate(pr.number, reason,
-                               remove=[lb.review, lb.changes, lb.ready_to_merge])
-            else:
-                self._escalate(action.number, reason, remove=[lb.working, lb.ready])
+            supervised, why = self._supervised(number, cls, action.kind, pr,
+                                               getattr(exc, 'reviewer', None),
+                                               key=getattr(exc, 'key', None))
+            self._escalate(number, reason, remove=remove, cls=cls, supervised=supervised,
+                           why=why)
         except GitHubError as gh_exc:
             self.log(f'  could not escalate: {gh_exc}')
 
@@ -1446,9 +1889,18 @@ class Dispatcher:
         reason = self._untrusted_change(history)
         if reason:
             raise UntrustedChange(f'issue #{number}: {reason}')
+        # Defaults the supervisor accepted count as trusted comments (#182): read with REST, as
+        # every other record of the dispatcher, so that its app's login is the one it signs with.
+        listed = self.gh.issue_comments(number)
+        accepted = [c for c in listed if self._accepted(c)]
+        # ``request``: the hash of the request as read here (#182), part of the key of an
+        # implement turn's retries.
         issue = dict(self.gh.issue(number), title=history['title'], body=history['body'],
-                     labeled=history['labeled'], admitters=self._admitters(history['author']))
-        return issue, _render_issue_comments(issue.get('comments') or [], self.cfg.trusted_users)
+                     labeled=history['labeled'], admitters=self._admitters(history['author']),
+                     accepted=accepted, request=self._request_hash(history, listed))
+        return issue, _render_issue_comments(issue.get('comments') or [], self.cfg.trusted_users,
+                                             [read_marker(c['body'], 'supervision')
+                                              for c in accepted])
 
     # Ledger (#133) -----------------------------------------------------------
     def _signed(self, login):
@@ -1711,7 +2163,8 @@ class Dispatcher:
         author = self._as(agent.key, PR_COMMENT if on_pr else ISSUE_COMMENT)
         author.comment(number, publishable(self.runner.header(agent) + '\n## Lavoro bloccato\n\n'
                                            + reason.strip() + '\n\n' + RESUME,
-                                           'notice', {'event': 'blocked'}))
+                                           'notice', {'event': 'blocked', 'class': 'blocked',
+                                                      'critical': True, 'to': 'operator'}))
         self.gh.edit_labels(number, add=[self.cfg.labels.needs_human], remove=remove)
 
     def _protected_changes(self, path, since=None):
@@ -1725,7 +2178,7 @@ class Dispatcher:
                                'non pubblica: un workflow o una action locale su un branch di questo '
                                'repository verrebbe eseguito dalla CI prima di qualsiasi review. Il '
                                'commit resta nel worktree locale; la modifica va applicata a mano.'
-                               '\n\n' + listed, remove=remove)
+                               '\n\n' + listed, remove=remove, cls='protected_paths')
 
     def _approval_current(self, pr, review):
         """Re-read head and CI just before promoting: approval holds only for the reviewed commit
@@ -1876,11 +2329,14 @@ class Dispatcher:
                     '(kind, model, effort, review_args), e nessuno può avere l\'identità o il '
                     'modello (kind, model, effort) dell\'implementer o di chi ha corretto la PR')
 
-    def _policy_comment(self, pr, title, text, receipt, event, bases=()):
-        """A dispatcher ``policy`` record; ``bases``: the base checks it relied on (#160)."""
+    def _policy_comment(self, pr, title, text, receipt, event, bases=(), cls=None):
+        """A dispatcher ``policy`` record; ``bases``: the base checks it relied on (#160);
+        ``cls``: the class of the escalation it records, if any (#182)."""
         payload = {'event': event, 'receipt': receipt}
         if bases:
             payload['bases'] = list(bases)
+        if cls:
+            payload['class'] = cls
         self.gh.comment(pr.number, publishable(
             dispatcher_header() + f'\n## {title}\n\n{text.strip()}\n\n'
             + describe_receipt(receipt), 'policy', payload))
@@ -1896,7 +2352,7 @@ class Dispatcher:
             f'quindi {needed}, ma {self._select(pr, level)[1]}. devloop non revisiona né '
             'promuove la PR: la review e la decisione sul merge spettano a una persona. Il '
             'livello resta acquisito anche se la label viene rimossa o il diff cambia.',
-            receipt, 'level')
+            receipt, 'level', cls='review_level')
         self.gh.edit_labels(pr.number, add=[lb.needs_human],
                             remove=[lb.review, lb.changes, lb.ready_to_merge])
 
@@ -2068,7 +2524,8 @@ class Dispatcher:
             f'`{lb.needs_human}` e rimettere `{lb.review}` (il livello 0 viene ricontrollato), '
             f'oppure togliere anche la label `{self.cfg.review_policy.zero_label}` per una review '
             'di livello 1.\n\n' + describe_receipt(receipt),
-            'policy', {'event': 'level', 'receipt': receipt, 'checks': list(states)}))
+            'policy', {'event': 'level', 'receipt': receipt, 'checks': list(states),
+                       'class': 'level_zero'}))
         self.gh.edit_labels(pr.number, add=[lb.needs_human],
                             remove=[lb.review, lb.changes, lb.ready_to_merge])
 
@@ -2083,16 +2540,22 @@ class Dispatcher:
             left = open_findings(reviews, pr.closures)
             if left:
                 # Owners outside the round (CI, an earlier reviewer): no agent closes them.
-                self._escalate(pr.number, _open_findings_reason(left), remove=transient)
+                self._escalate(pr.number, _open_findings_reason(left), remove=transient,
+                               cls='open_findings')
             elif self._approval_current(pr, records[0]):
                 self._promote(pr, records)
         elif verdict == 'needs_human':
+            if announce:
+                # The reviewer's record asks for the decision; this one classifies it (#182).
+                self.gh.comment(pr.number, render_escalation(
+                    'Un reviewer chiede una decisione dell\'operatore: il motivo è nella sua '
+                    'review.', cls='reviewer_decision'))
             self.gh.edit_labels(pr.number, add=[lb.needs_human], remove=transient)
         elif counted_rounds(reviews) >= self.cfg.max_review_rounds:
             if announce:
                 self.gh.comment(pr.number, render_escalation(
                     f'Raggiunto il limite di {self.cfg.max_review_rounds} round di review con '
-                    'finding bloccanti ancora aperti.'))
+                    'finding bloccanti ancora aperti.', cls='round_limit'))
             self.gh.edit_labels(pr.number, add=[lb.needs_human], remove=transient)
         else:
             self.gh.edit_labels(pr.number, add=[lb.changes], remove=[lb.review, lb.ready_to_merge])
@@ -2181,7 +2644,8 @@ class Dispatcher:
 
         if fresh.get('state') != 'OPEN':
             return skip(f'the PR is {fresh.get("state")}')
-        if lb.ready_to_merge not in labels or labels & {lb.needs_human, lb.merge_hold}:
+        if lb.ready_to_merge not in labels or labels & {lb.needs_human, lb.merge_hold,
+                                                        lb.needs_supervisor}:
             return skip('labels changed: ' + ', '.join(sorted(labels)))
         if head != pr.head_sha:
             return skip(f'head moved to {head[:12]}')
@@ -2207,7 +2671,8 @@ class Dispatcher:
         left = open_findings(pr.reviews, pr.closures)
         if left:
             return self._escalate(pr.number, _open_findings_reason(left),
-                                  remove=[lb.review, lb.changes, lb.ready_to_merge])
+                                  remove=[lb.review, lb.changes, lb.ready_to_merge],
+                                  cls='open_findings')
         if pr.zero_head is None and self._acceptance_problems(pr):
             return skip('the acceptance map does not hold')
         current, paths = self._receipt_and_paths(pr)
@@ -2266,7 +2731,8 @@ class Dispatcher:
     def _do_stale(self, number):
         lb = self.cfg.labels
         self._escalate(number, 'Implementazione interrotta: la issue era in lavorazione ma non '
-                               'esiste una PR devloop aperta.', remove=[lb.working])
+                               'esiste una PR devloop aperta.', remove=[lb.working],
+                       cls='interrupted')
 
     def _do_settle(self, number):
         self.gh.edit_labels(number, remove=[self.cfg.labels.working])
@@ -2309,7 +2775,7 @@ class Dispatcher:
                                   'chiuderli e non prosegue: la review e la decisione sul merge '
                                   'spettano a una persona.\n\n'
                        + '\n'.join(f'- {p}' for p in pr.finding_problems),
-                       remove=[lb.review, lb.changes, lb.ready_to_merge])
+                       remove=[lb.review, lb.changes, lb.ready_to_merge], cls='unattributable')
 
     def _do_lost_meta(self, pr):
         lb = self.cfg.labels
@@ -2317,14 +2783,14 @@ class Dispatcher:
                                   f'della issue #{pr.issue}, quindi implementer e reviewer non sono '
                                   'noti. Ripristinare la riga del marker (si trova nella cronologia '
                                   'delle modifiche della descrizione) come ultima riga.',
-                       remove=[lb.review, lb.changes, lb.ready_to_merge])
+                       remove=[lb.review, lb.changes, lb.ready_to_merge], cls='lost_meta')
 
     def _do_round_limit(self, pr):
         lb = self.cfg.labels
         self._escalate(pr.number, f'Raggiunto il limite di {self.cfg.max_review_rounds} round di '
                                   'review: un nuovo round (review o CI fallita) non parte senza una '
                                   'decisione umana.',
-                       remove=[lb.review, lb.changes, lb.ready_to_merge])
+                       remove=[lb.review, lb.changes, lb.ready_to_merge], cls='round_limit')
 
     def _do_implement(self, number):
         cfg, lb = self.cfg, self.cfg.labels
@@ -2341,24 +2807,33 @@ class Dispatcher:
                                 labeled=ready_approval(issue['labeled'], lb.ready,
                                                        issue['admitters']),
                                 comments=_trusted_comments(issue.get('comments') or [],
-                                                           cfg.trusted_users))
+                                                           cfg.trusted_users)
+                                + issue['accepted'])
         self.gh.edit_labels(number, add=[lb.working], remove=[lb.ready])
         name, branch = f'issue-{number}', f'{cfg.branch_prefix}{number}'
         path = self.ws.new_branch(name, branch)
+        # The input the turn runs on (#182), bound before it runs: the commit its branch starts
+        # from and the request its prompt gets.
+        key = self._issue_key('implement', self.ws.head(path), issue['request'])
         criteria = acceptance_criteria(issue.get('body'))
         prompt = _template('implement', repo=cfg.repo, base_branch=cfg.base_branch,
                            issue_number=number, issue_title=issue['title'],
                            issue_body=issue.get('body') or '', issue_comments=comments,
                            acceptance_criteria=format_criteria(criteria),
                            test_cmd=cfg.test_cmd, language=cfg.language)
-        result, failure, used, tested, local = self._write_turn(
-            agent, prompt, 'implement', path, f'issue-{number}-implement',
-            where=(number, 'implement'))
+        try:
+            result, failure, used, tested, local = self._write_turn(
+                agent, prompt, 'implement', path, f'issue-{number}-implement',
+                where=(number, 'implement'))
+        except AgentError as exc:
+            exc.key = key
+            raise
         if result['status'] == 'blocked':
             return self._blocked(number, used, result['blocked_reason'], remove=[lb.working],
                                  on_pr=False)
         if failure:
-            return self._escalate(number, failure[0], failure[1], remove=[lb.working])
+            return self._escalate(number, failure[0], failure[1], remove=[lb.working],
+                                  cls='tests_failed')
         auth = self._git_auth(agent.key, IMPLEMENT)
         commit = self.ws.commit_all(
             path, self._commit_message(agent, result['commit_message'], number), author=auth)
@@ -2546,9 +3021,11 @@ class Dispatcher:
                 return self._turn(Models(cfg.agent(key)), 'review', prompt, 'review', copy,
                                   f'pr-{pr.number}-review', allowed_for(key),
                                   where=(pr.number, 'review'))
-            except BaseException:
+            except BaseException as exc:
                 with reserving:
                     reserved.pop(key, None)
+                if isinstance(exc, AgentError):
+                    exc.reviewer = key  # part of the key of the supervisor's retries (#182)
                 raise
             finally:
                 self.ws.remove(copy_name)
@@ -2647,25 +3124,26 @@ class Dispatcher:
                                   'hanno eseguito la suite completa. La suite completa '
                                   f'(`{self.cfg.test_cmd}`), eseguita in locale prima della '
                                   'review, fallisce: la review non parte.', tail,
-                       remove=[lb.review])
+                       remove=[lb.review], cls='tests_failed')
         return False
 
     def _do_fix(self, pr):
         cfg, lb = self.cfg, self.cfg.labels
         if not pr.reviews:
             return self._escalate(pr.number, 'Modifiche richieste ma nessuna review devloop da '
-                                             'correggere.', remove=[lb.changes])
+                                             'correggere.', remove=[lb.changes],
+                                  cls='inconsistent')
         # One fix answers the whole round, with every finding still open, whoever owns it.
         latest = current_round(pr.reviews)[0]
         findings = open_findings(pr.reviews, pr.closures)
         if not findings:
             return self._escalate(pr.number, 'Modifiche richieste ma nessun finding aperto.',
-                                  remove=[lb.changes])
+                                  remove=[lb.changes], cls='inconsistent')
         if pr.meta['implementer'] not in cfg.agents:
             return self._escalate(
                 pr.number, f'L\'implementer della PR (`{pr.meta["implementer"]}`) non è più '
                            'configurato: serve una decisione su chi corregge.',
-                remove=[lb.changes])
+                remove=[lb.changes], cls='configuration')
         agent = cfg.agent(pr.meta['implementer'])
         issue, _ = self._issue_context(pr.issue)
         name = f'pr-{pr.number}'
@@ -2688,7 +3166,8 @@ class Dispatcher:
             return self._blocked(pr.number, used, result['blocked_reason'], remove=[lb.changes],
                                  on_pr=True)
         if failure:
-            return self._escalate(pr.number, failure[0], failure[1], remove=[lb.changes])
+            return self._escalate(pr.number, failure[0], failure[1], remove=[lb.changes],
+                                  cls='tests_failed')
         if self.ws.has_changes(path):
             auth = self._git_auth(agent.key, IMPLEMENT)
             commit = self.ws.commit_all(
@@ -2716,7 +3195,8 @@ class Dispatcher:
             return self._escalate(
                 pr.number, f'La PR è in conflitto con `{cfg.base_branch}` e il suo implementer '
                            f'(`{pr.meta["implementer"]}`) non è più configurato: serve una '
-                           'decisione su chi risolve i conflitti.', remove=remove)
+                           'decisione su chi risolve i conflitti.', remove=remove,
+                cls='configuration')
         agent = cfg.agent(pr.meta['implementer'])
         issue, _ = self._issue_context(pr.issue)
         name = f'pr-{pr.number}'
@@ -2737,10 +3217,17 @@ class Dispatcher:
         if files:
             message += '\n\nConflicts resolved in:\n' + '\n'.join(f'- {f}' for f in files)
 
+            # A failed sync is non-critical (#182) unless a file in conflict is sensitive: a
+            # path of the review policy's sensitive level or of ``operator_only_paths``.
+            sensitive = [f for f in files if self.cfg.review_policy.covers(f)
+                         or self.cfg.merge.operator_only(f)]
+
             def fail(reason, detail=''):
+                cls = 'sync_sensitive' if sensitive else SYNC_FAILED
+                supervised, why = self._supervised(pr.number, cls, 'sync', pr)
                 self._escalate(pr.number, f'Sincronizzazione con `{cfg.base_branch}` non '
                                           f'riuscita. {reason}\n\nFile in conflitto:\n\n{listed}',
-                               detail, remove=remove)
+                               detail, remove=remove, cls=cls, supervised=supervised, why=why)
             prompt = _template('sync', repo=cfg.repo, pr_number=pr.number, issue_number=pr.issue,
                                issue_title=issue['title'], issue_body=issue.get('body') or '',
                                base_branch=cfg.base_branch, conflicts=listed,
@@ -2816,8 +3303,10 @@ def _review_failure(failures):
     failed: the only one, or one that lists them all when every one is an agent failure."""
     if len(failures) == 1 or not all(isinstance(exc, AgentError) for _, exc in failures):
         return failures[0][1]
-    return AgentError('; '.join(f'`{key}`: {str(exc).strip()}' for key, exc in failures),
-                      getattr(failures[0][1], 'log', None))
+    error = AgentError('; '.join(f'`{key}`: {str(exc).strip()}' for key, exc in failures),
+                       getattr(failures[0][1], 'log', None))
+    error.reviewer = ','.join(key for key, _ in failures)
+    return error
 
 
 def _trusted_comments(comments, trusted_users):
@@ -2825,11 +3314,23 @@ def _trusted_comments(comments, trusted_users):
     return [c for c in comments if (c.get('author') or {}).get('login') in trusted_users]
 
 
-def _render_issue_comments(comments, trusted_users):
-    """The comments of trusted users as model input, or ''."""
-    rendered = '\n\n'.join(f'### Comment by {c["author"]["login"]}\n\n{c["body"]}'
-                           for c in _trusted_comments(comments, trusted_users))
+def _render_issue_comments(comments, trusted_users, accepted=()):
+    """The comments of trusted users as model input, or ''. ``accepted``: the dispatcher's
+    records of defaults the supervisor accepted (#182), which count as trusted comments."""
+    parts = [f'### Comment by {c["author"]["login"]}\n\n{c["body"]}'
+             for c in _trusted_comments(comments, trusted_users)]
+    parts += [_render_acceptance(record) for record in accepted]
+    rendered = '\n\n'.join(parts)
     return ('## Issue comments\n\n' + rendered) if rendered else ''
+
+
+def _render_acceptance(record):
+    """A record of accepted defaults (#182) as model input."""
+    listed = '\n'.join(f'- {d["description"].strip()}\n  Accepted default: '
+                       f'{d["proposed_default"].strip()}' for d in record.get('defaults') or [])
+    return (f'### Defaults accepted by the supervisor ({record["by"]}), recorded by devloop\n\n'
+            'The defaults the readiness check proposed for these gaps are accepted: follow '
+            f'them.\n\n{listed}')
 
 
 def _failure_text(exc):

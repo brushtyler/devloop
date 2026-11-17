@@ -73,7 +73,9 @@ stalled with `agent_stall_action = "abort"` (see [Stalled agents](#stalled-agent
 untrusted user after `agent:ready`, or the PR body lost its marker. While `agent:needs-human` is
 set devloop ignores the PR or issue, so to resume: fix the cause, **remove `agent:needs-human`**
 and set the label that should run next (`agent:ready` on the issue, `agent:review` or
-`agent:changes` on the PR). Every escalation comment repeats this.
+`agent:changes` on the PR). Every escalation comment repeats this. Every escalation has a
+**class**, recorded in its marker; with `[merge].mode = "auto"` the non-critical ones go to
+`agent:needs-supervisor` instead (see [Escalations to the supervisor](#escalations-to-the-supervisor)).
 
 A round is one evaluation of a head: a CI failure, or the reviews of every reviewer the review
 level requires (one at level 1, two at level 2), whatever the number of reviewers. The round
@@ -500,7 +502,7 @@ PR already in `agent:ready-to-merge` keeps its label until something sends it ba
 |---|---|
 | `"off"` (default, and this repository's) | A person, as before |
 | `"strict"` | devloop, only when every merge directive below holds |
-| `"auto"` | As `"strict"`; in addition the supervisor can [hold a merge](#holding-a-merge) |
+| `"auto"` | As `"strict"`; in addition the supervisor can [hold a merge](#holding-a-merge) and [decide non-critical escalations](#escalations-to-the-supervisor) |
 
 - **Per level.** `[merge.levels]` gives a mode to a review level, for example `"2" = "off"`.
   The most restrictive of that mode and `mode` applies: `off`, then `strict`, then `auto`. An
@@ -513,8 +515,9 @@ PR already in `agent:ready-to-merge` keeps its label until something sends it ba
   ready PR that meets them in its snapshot, and the merge reads them all again just before it
   runs, reviews, finding closures and policy records included (read again from the comments,
   with the same identity checks as the snapshot):
-  - the PR is open and in `agent:ready-to-merge`, without `agent:needs-human` or
-    `agent:merge-hold`, and no hold or release command waits to be applied;
+  - the PR is open and in `agent:ready-to-merge`, without `agent:needs-human`,
+    `agent:needs-supervisor` or `agent:merge-hold`, and no hold or release command waits to be
+    applied;
   - the head is the approved commit (at level 0, the promoted one), unchanged since the
     snapshot;
   - GitHub reports `mergeable` `MERGEABLE` and `mergeStateStatus` `CLEAN`;
@@ -570,7 +573,8 @@ publishes (a comment that ends with a devloop marker). As for
 `agent:changes` or `agent:ready-to-merge`.
 
 `"auto"`, also as the override of a level, without `[roles].supervisor` stops devloop at
-startup. The supervisor names a configured agent; the escalations it decides are #182.
+startup. The supervisor names a configured agent; the escalations it decides are described
+below.
 
 ```toml
 [roles]
@@ -583,6 +587,107 @@ operator_only_paths = ["docs/adr/", "AGENTS.md", "CLAUDE.md"]
 [merge.levels]
 "2" = "off"
 ```
+
+### Escalations to the supervisor
+
+Every escalation of the dispatcher has a **class** (#182), recorded in its marker: the `notice`
+marker of an escalation comment (`class`, `critical`, and `to`, `operator` or `supervisor`), the
+`notice` of an agent that stopped (`blocked`), the `preflight` marker of a failed readiness
+check, and the `policy` marker of a level that cannot be reviewed or promoted. A reviewer's
+`needs_human` verdict gets an escalation comment of class `reviewer_decision` next to the review.
+
+| Class | When | Critical |
+|---|---|---|
+| `tool_failure` | The agent or its model produced no result: a crash, a timeout, a stall with `agent_stall_action = "abort"`, no model available, a denied permission | No |
+| `preflight_default` | A failed [readiness check](#readiness-check-before-implementation) whose gaps are all `default_available`, with no split | No |
+| `sync_failed` | A [sync](#conflicts-with-main) that failed, with no file in conflict under a sensitive path (`sensitive_paths`) or `operator_only_paths` | No |
+| `round_limit` | The limit of review rounds | Yes |
+| `operator_decision` | A readiness check with an `operator_decision` or `tool_unavailable` gap, or a split | Yes |
+| `untrusted` | The issue text changed after `agent:ready` by someone outside `trusted_users` | Yes |
+| `reviewer_decision`, `open_findings` | A reviewer asks for a decision; an approval leaves open findings only the operator can close | Yes |
+| `review_level`, `level_zero` | Not enough independent reviewers; a level-0 head that cannot be promoted | Yes |
+| `sync_sensitive`, `protected_paths` | A sync conflict on a sensitive or operator-only path; a change to `protected_paths` | Yes |
+| `tests_failed`, `blocked`, `interrupted`, `unattributable`, `lost_meta`, `inconsistent`, `configuration`, `failure` | Tests still failing (or no change), an agent that declared itself blocked, an interrupted implementation, findings without an owner, a lost PR marker, an inconsistent PR state, a configuration to decide, a `gh`, git or dispatcher error | Yes |
+| `retry_limit`, `supervisor_escalated`, `supervisor_refused` | The supervisor's retries are spent, it handed the escalation over, or it gave a command the escalation does not admit | Yes |
+
+Any other class, or none (escalations written before #182), is critical.
+
+**Routing.** With `[merge].mode = "auto"` a non-critical escalation adds
+`agent:needs-supervisor` instead of `agent:needs-human`, and an issue keeps `agent:ready`. It
+stays with the operator, with a comment that says why, when:
+
+- the merge mode of the PR is not `"auto"`: the override of its level, or a path of
+  `operator_only_paths` in its diff;
+- the supervisor's agent implemented the PR;
+- the issue was opened by someone outside `trusted_users` and devloop's apps, or its text is no
+  longer approved by `agent:ready`;
+- the issue (or the PR) has the label `phase:design`;
+- any of this cannot be verified.
+
+With `"off"` and `"strict"` every escalation goes to `agent:needs-human`, as before. An item in
+`agent:needs-supervisor` is not worked on, and a merge does not run, until the supervisor
+decides. `devloop setup` creates the label.
+
+**Commands.** A comment on the issue or PR whose first line, after the attribution header if
+any, is one of:
+
+```text
+/devloop retry
+/devloop accept-defaults
+/devloop escalate <reason>
+```
+
+They count only in `"auto"`, from the identity of `[roles].supervisor` (the GitHub App of that
+agent) or from `trusted_users`, only on an item in `agent:needs-supervisor` without
+`agent:needs-human`, and only when written after the latest escalation. Any other command is
+ignored and written to the dispatcher log; text devloop publishes is never a command. As for
+[holding a merge](#holding-a-merge), a dispatcher record spends the command it applied and every
+command before it, and among the commands that wait the latest wins.
+
+- `/devloop retry` runs the failed step again, for `tool_failure` and `sync_failed`. A PR goes
+  back to the label of its step (`agent:review` for a review or a sync, `agent:changes` for a
+  fix) and the next tick runs it; an issue's readiness check or implementation runs at once, and
+  takes a free PR slot as it would. A failed attempt writes no review record, so a retry
+  **counts no round**. After the initial failure the supervisor may authorise **two** retries
+  for the same key; the third command is not run and the item goes to `agent:needs-human`
+  (`retry_limit`). The automatic retries inside one run (a permission denied to agy,
+  [fallback models](#fallback-models)) do not count. The key is durable, read from the
+  escalation and the dispatcher's records on GitHub: the item, the step and, for a review, the
+  reviewer; for a PR the head the step failed on, for an issue the commit of the base branch and
+  the hash of the request (title, body and trusted comments). An issue's key is taken before the
+  step runs, from the commit its checkout starts at and the request its prompt gets, so a base
+  or a text that changes during the turn already makes the retry refer to a superseded input.
+  The retries are counted per reviewer: when several reviewers fail together and later only
+  some of them, each keeps the retries it already had. A retry whose input has changed
+  since (a new head, base or request) is refused, and the escalation stays with the supervisor.
+  Before a retry runs, what made the escalation non-critical is checked again on data read
+  then (the conditions of **Routing** above: `phase:design`, author and text of the issue, merge
+  mode and implementer of the PR): if one no longer holds, the retry is refused and the item
+  goes to `agent:needs-human` (`supervisor_refused`).
+- `/devloop accept-defaults` accepts the defaults of a `preflight_default` escalation, only when
+  **every** gap of the latest check is `default_available`, no split is needed, the issue has no
+  `phase:design` label, was opened by a trusted user or a devloop app, and the check is the one of
+  the current text. The dispatcher records the accepted defaults; that record counts as a
+  trusted comment, both in the hash of the request and in the agents' prompts. The issue goes
+  back in the queue: the readiness check runs again with the defaults and, if ready, the
+  implementer starts. An issue with an `operator_decision` gap is refused and goes to
+  `agent:needs-human`. The readiness prompt tells the checker that a gap touching a decision ADR
+  0001 reserves to the operator (rollout, budget and rounds, credentials and permissions, trust
+  rules, the replay gate baseline, the merge mode, the continuous loop and automatic pinning, ADR
+  approval), or a change to `operator_only_paths`, is always `operator_decision`.
+- `/devloop escalate <reason>` hands the escalation to the operator: `agent:needs-human`, with
+  the reason (`supervisor_escalated`). It needs a reason.
+
+An escalation whose class is critical or unknown, or that was not routed to the supervisor,
+accepts no command: the command is refused and the item goes to `agent:needs-human`. A command
+the class does not admit (`accept-defaults` on a tool failure, `retry` on defaults) is refused
+and the escalation stays with the supervisor.
+
+**Trace.** Every command applied leaves a dispatcher comment with a `supervision` marker: the
+command, its author, its reason, the id of the comment that carried it, the class and the outcome
+(`applied`, `accepted`, `escalated`, `refused` or `limit`), with the key and the attempt for a
+retry and the defaults for an acceptance. The record is written before the labels change, so a
+lost label change never runs a retry twice.
 
 ## Structured review
 
@@ -748,8 +853,9 @@ PR it also implemented the supervisor decides no escalation or hold: the operato
 ### Merge modes
 
 ADR 0002 sets three merge modes, configured with `[merge].mode` and an optional per-level
-override in `[merge.levels]`; the most restrictive one wins. **They are not implemented yet**: the
-implementation is tracked in #172 and #182, and until then devloop behaves as in `off`.
+override in `[merge.levels]`; the most restrictive one wins. #172 implements the merge (see
+[Merge modes](#merge-modes)) and #182 the
+[escalations to the supervisor](#escalations-to-the-supervisor).
 
 | Mode | Who decides | Behaviour |
 |---|---|---|
