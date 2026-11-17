@@ -21,6 +21,8 @@ Where a method went, when it was not obvious:
 - ``rerun_failed_jobs`` (#200) is in ``CI``: the dispatcher re-runs the failed jobs of a run
   whose failed test modules are not pertinent to the PR, with a token limited to
   ``actions: write``.
+- ``job_log`` (#300) is in ``CI``: the review and fix prompts summarize the CI of the head, with
+  the final lines of ``scripts/run-tests.py`` read from the log of each job.
 - ``commit_date`` and ``required_checks`` (#263) are in ``CI``: a head without CI waits for it
   from its push, or its commit date, and as long as the base branch requires checks.
 - ``merge_state`` is a ``CodeReview`` method: the adapter turns the mergeability of a PR, as
@@ -153,7 +155,7 @@ class CI(Protocol):
         """``summarize_checks(self.check_details(sha))``."""
 
     def check_details(self, sha):
-        """Every check of ``sha`` as ``{name, bucket, link, conclusion, run_id}``."""
+        """Every check of ``sha`` as ``{name, bucket, link, conclusion, run_id, duration_s}``."""
 
     def check_runs(self, sha):
         """Every check run of ``sha``, superseded ones included, as ``{id, name, app_id, status,
@@ -162,6 +164,9 @@ class CI(Protocol):
     def failed_log(self, run_id, max_lines=80, job_id=None):
         """The last ``max_lines`` of the failed steps of run ``run_id`` (all of them with None),
         or only of its job ``job_id`` when given."""
+
+    def job_log(self, job_id):
+        """The whole log of GitHub Actions job ``job_id`` (#300), or None when unreadable."""
 
     def rerun_failed_jobs(self, run_id):
         """Re-run the failed jobs of run ``run_id`` (#200); raises ``GitHubError`` if refused."""

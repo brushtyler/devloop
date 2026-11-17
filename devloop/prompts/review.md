@@ -15,7 +15,12 @@ it; run single test modules only when you need to confirm a specific behaviour. 
 the outcome of the tests is not known yet: judge the code, and do not assume it passes. An
 approval makes the PR ready only once the CI of this same commit passes; if it fails, the PR
 goes back to the implementer, with the failure.
+The implementer cannot run the full suite nor read the CI: the jobs, their durations and the
+summary of the suite are in "CI of the head" below. When the issue asks for a measure of the
+suite (its duration, the number of tests), take it from there instead of asking the implementer.
 Read `AGENTS.md` and the README section "Developing SSDLC".
+
+$ci_summary
 
 ## What to check
 

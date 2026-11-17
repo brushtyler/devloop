@@ -245,6 +245,28 @@ the `rerun` kind counts only when the dispatcher's identity wrote it.
 Only a `ci_failed` is re-run this way: a CI failure on a PR that has no round left goes to
 `agent:needs-operator` (`round_limit`), as before.
 
+### Summary of the CI in the prompts
+
+The agents have no network and cannot run the whole suite in their turn: they cannot measure the
+suite after their change (its duration, the number of tests). So the review and fix prompts get
+a **CI of the head** section that the dispatcher reads with its own identity (#300):
+
+- **Each check** of the head, with its outcome and its duration (from `started_at` to
+  `completed_at` of the check run; `still running` for one in progress, `duration not known`
+  for a commit status).
+- **The suite.** For each completed GitHub Actions job, the dispatcher reads the whole job log
+  (`gh run view --job <id> --log`; the job is the one in the check's link) and, when the job
+  runs `scripts/run-tests.py`, shows its final lines `Ran N tests in S (… modules, … split by
+  class, … jobs)` and `Slowest: …`. A job without the first of these lines (unittest's own
+  `Ran N tests in S` has no parentheses) shows only its outcome and duration.
+- **Log not readable.** A log `gh` cannot read (expired, deleted, an error from GitHub) shows
+  `the job log could not be read: its test summary is not available`, and the action goes on;
+  checks that cannot be read at all leave the section saying the summary is not available. The
+  review and the fix never wait for, nor fail on, the summary.
+
+The fix prompt shows the CI of the head the reviewer saw, the PR's head before the fix. The
+same values go to the `ci_round` event of the [ledger](protocol.md#evidence-and-telemetry).
+
 ### Documentation map
 
 `[docs] map` (#203) maps code paths to the documents that describe them, so that the documents

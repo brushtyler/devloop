@@ -19,10 +19,10 @@ from .agents import AgentError
 from .apps import DISPATCHER, IMPLEMENT, PR_COMMENT, RERUN, REVIEW
 from .context import (_failure_text, _format_conflicts, _format_findings, _review_failure,
                       _start_failure, _template, _trusted_comments, docs_diff_section,
-                      docs_map_section, docs_review_section, format_fix_requests,
-                      format_operator_comments, format_previous_rounds)
+                      docs_map_section, docs_review_section, format_ci_summary,
+                      format_fix_requests, format_operator_comments, format_previous_rounds)
 from .github import GitHubError, job_id
-from .localtests import failed_modules, select_modules
+from .localtests import failed_modules, select_modules, suite_summary
 from .markdown import (dispatcher_header, publishable, render_fix, render_native_review,
                        render_review)
 from .planning import (BASE_CHANGED, FIX_COMMAND, RESYNC_AFTER_APPROVAL, counted_rounds,
@@ -198,7 +198,7 @@ class ActionsMixin:
         if self.ledger is not None:
             details = self.gh.check_details(pr.head_sha)
             self._record_ci(pr, pr.head_sha, summarize_checks(details)[0], details,
-                            review['round'])
+                            review['round'], jobs=self._ci_jobs(details))
         self.gh.comment(pr.number, render_review(review, dispatcher_header()))
         self._apply_round(pr, [review], announce=True, reviews=pr.reviews + [review])
 
@@ -260,6 +260,44 @@ class ActionsMixin:
         self.log(f'  CI rerun of {", ".join(str(r) for r in runs)}: failed modules not '
                  f'pertinent to the PR ({", ".join(modules)})')
         return True
+
+    def _ci_jobs(self, details):
+        """The checks ``details`` (``check_details``) as the summary of the CI shows them
+        (#300): ``{name, outcome, bucket, duration_s}``, and for a completed GitHub Actions job
+        ``tests``, the final lines of ``scripts/run-tests.py`` its log holds
+        (``suite_summary``, None when it holds none), or ``log: unavailable`` when the log
+        could not be read: that only leaves the summary out, it never stops the action."""
+        jobs = []
+        for check in details:
+            job = {'name': check.get('name'), 'outcome': check.get('conclusion')
+                   or check.get('bucket'), 'bucket': check.get('bucket'),
+                   'duration_s': check.get('duration_s')}
+            number = job_id(check.get('link')) if check.get('run_id') is not None else None
+            if number is not None and check.get('bucket') != 'pending':
+                try:
+                    log = self.gh.job_log(number)
+                except GitHubError as exc:
+                    self.log(f'  log of the job {check.get("name")} not readable: {exc}')
+                    log = None
+                if log:
+                    job['tests'] = suite_summary(log)
+                else:
+                    job['log'] = 'unavailable'
+            jobs.append(job)
+        return jobs
+
+    def _ci_summary(self, pr):
+        """``(section, jobs)``: the summary of the CI of ``pr``'s head for the review and fix
+        prompts (#300, ``format_ci_summary``) and its jobs (``_ci_jobs``, None when the checks
+        could not be read). The checks of the snapshot when it read them."""
+        try:
+            details = (pr.check_details if pr.check_details is not None
+                       else self.gh.check_details(pr.head_sha))
+        except GitHubError as exc:
+            self.log(f'  checks of {pr.head_sha[:12]} not readable for the CI summary: {exc}')
+            return format_ci_summary(pr.head_sha, pr.checks, None), None
+        jobs = self._ci_jobs(details)
+        return format_ci_summary(pr.head_sha, summarize_checks(details)[0], jobs), jobs
 
     def _last_round_allowed(self, reviews):
         """The number of the last round ``max_review_rounds`` allows, given the waived rounds
@@ -359,10 +397,12 @@ class ActionsMixin:
         # The criteria of the issue text read now, and the latest map of the PR (#134).
         criteria = acceptance_criteria(issue.get('body'))
         acceptance_map = latest_map(pr.meta, pr.fixes)
+        # The jobs of the head's CI, their durations and test summaries (#300).
+        ci_summary, ci_jobs = self._ci_summary(pr)
         prompt = _template('review', repo=cfg.repo, base_branch=cfg.base_branch,
                            pr_number=pr.number, round=round_no, max_rounds=max_rounds,
                            implementer=pr.meta.get('implementer', cfg.implementer),
-                           ci=ci, test_cmd=cfg.test_cmd,
+                           ci=ci, ci_summary=ci_summary, test_cmd=cfg.test_cmd,
                            issue_number=pr.issue, issue_title=issue['title'],
                            issue_body=issue.get('body') or '', pr_body=pr.body,
                            acceptance_criteria=format_criteria(criteria),
@@ -464,7 +504,8 @@ class ActionsMixin:
         new = records[len(done):]
         if new and ci != 'pending':
             # The CI the round reviewed, whatever its verdict (#133).
-            self._record_ci(pr, pr.head_sha, pr.checks, pr.check_details, round_no)
+            self._record_ci(pr, pr.head_sha, pr.checks, pr.check_details, round_no,
+                            jobs=ci_jobs)
         waiting = pending_reviewers(records)
         if new and not waiting:
             self._apply_round(pr, records, announce=True, reviews=earlier + records)
@@ -555,12 +596,14 @@ class ActionsMixin:
         start, merged = self._align_fix(pr, agent, path, remove=[lb.changes])
         if start is None:
             return
+        ci_summary = self._ci_summary(pr)[0]
 
         def prompt(attempt):
             # The documents mapped to the diff each attempt starts from (#203).
             return _template('fix', repo=cfg.repo, pr_number=pr.number, issue_number=pr.issue,
                              issue_title=issue['title'], issue_body=issue.get('body') or '',
                              findings=_format_findings(findings), test_cmd=cfg.test_cmd,
+                             ci_summary=ci_summary,
                              acceptance_criteria=format_criteria(
                                  acceptance_criteria(issue.get('body'))),
                              acceptance_map=format_map(latest_map(pr.meta, pr.fixes)),
@@ -680,11 +723,13 @@ class ActionsMixin:
         start, merged = self._align_fix(pr, agent, path, remove=remove)
         if start is None:
             return
+        ci_summary = self._ci_summary(pr)[0]
 
         def prompt(attempt):
             return _template('fix', repo=cfg.repo, pr_number=pr.number, issue_number=pr.issue,
                              issue_title=issue['title'], issue_body=issue.get('body') or '',
                              findings=_format_findings(findings), test_cmd=cfg.test_cmd,
+                             ci_summary=ci_summary,
                              requests=format_fix_requests(requests),
                              acceptance_criteria=format_criteria(
                                  acceptance_criteria(issue.get('body'))),

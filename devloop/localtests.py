@@ -13,7 +13,8 @@ and a head without CI gets the full ``test_cmd`` locally first (``Dispatcher._do
 The same correspondence tells whether a CI failure concerns the PR (#200): ``failed_modules``
 reads the modules ``scripts/run-tests.py`` reports as failed in a CI log, and a failure none of
 whose modules ``select_modules`` picks for the PR's diff is re-run once instead of becoming a
-round.
+round. ``suite_summary`` reads the final lines of ``scripts/run-tests.py`` in a CI job log, for
+the summary of the CI in the review and fix prompts (#300).
 """
 
 import re
@@ -27,6 +28,12 @@ DEVLOOP_TESTS = 'test_devloop'
 _FAILED_MODULE = re.compile(r'(?:^|\s)FAILED MODULE (\S+)\s*$')
 _FAILED_SUMMARY = re.compile(r'(?:^|\s)FAILED \(modules=(\d+), worker problems=(\d+)\)\s*$')
 _MODULE = re.compile(r'test_\w+')
+# The last lines of every run of scripts/run-tests.py (#300): "Slowest: …" and "Ran N tests in
+# S (… modules, … split by class, … jobs)". unittest's own "Ran N tests in S" has no parentheses.
+_SUITE_RAN = re.compile(r'(?:^|\s)(Ran \d+ tests? in [\d.]+s \(\d+ modules?, [^()`\n]*jobs?\))'
+                        r'\s*$')
+_SUITE_SLOWEST = re.compile(r'(?:^|\s)(Slowest: [^`\n]*?)\s*$')
+SUITE_LINE_LIMIT = 300
 
 
 def failed_modules(log):
@@ -47,6 +54,23 @@ def failed_modules(log):
     if not all(_MODULE.fullmatch(m) for m in modules):
         return None
     return sorted({f'{m}.py' for m in modules})
+
+
+def suite_summary(log):
+    """``{ran, slowest}`` of the last run of ``scripts/run-tests.py`` in a CI job log (#300):
+    its final line "Ran N tests in S (… modules, … jobs)" and its "Slowest" line (None when
+    missing), each cut to ``SUITE_LINE_LIMIT`` characters. None when the log has no such final
+    line: the job did not run ``scripts/run-tests.py``, or did not reach its end."""
+    ran = slowest = None
+    for line in (log or '').splitlines():
+        if match := _SUITE_RAN.search(line):
+            ran = match.group(1)
+        elif match := _SUITE_SLOWEST.search(line):
+            slowest = match.group(1)
+    if ran is None:
+        return None
+    return {'ran': ran[:SUITE_LINE_LIMIT],
+            'slowest': slowest[:SUITE_LINE_LIMIT] if slowest is not None else None}
 
 
 def _prefixes(stem):

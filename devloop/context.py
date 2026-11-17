@@ -71,6 +71,48 @@ def _template(name, **values):
     return string.Template(text).safe_substitute({k: str(v) for k, v in values.items()})
 
 
+def _duration(job):
+    seconds = job.get('duration_s')
+    if seconds is None:
+        return 'still running' if job.get('bucket') == 'pending' else 'duration not known'
+    minutes, rest = divmod(int(seconds), 60)
+    return f'{seconds}s' if not minutes else f'{seconds}s ({minutes}m {rest:02d}s)'
+
+
+def _plain(text):
+    """``text`` fit for inline code in a prompt: no backticks, no line breaks."""
+    return ' '.join(str(text).replace('`', "'").split())
+
+
+def format_ci_summary(head, state, jobs):
+    """The section of the review and fix prompts with the CI of ``head`` (#300): each check
+    with its outcome and duration, and for a job whose log holds the final lines of
+    ``scripts/run-tests.py`` (``localtests.suite_summary``) those lines. ``jobs`` as
+    ``Dispatcher._ci_jobs`` returns them; None when the checks could not be read. A job log
+    that could not be read is reported as such: the summary is not available, nothing more."""
+    title = '## CI of the head\n\n'
+    if jobs is None:
+        return (title + f'The summary of the CI of `{head[:12]}` is not available: its checks '
+                        'could not be read.')
+    if not jobs:
+        return title + f'GitHub reports no CI check on `{head[:12]}` yet.'
+    lines = [title + f'The checks of `{head[:12]}` as GitHub reports them (CI state: **{state}**), '
+             'with the duration of each one and, for a job that runs `scripts/run-tests.py`, '
+             'the final lines of the suite read from the job log. The dispatcher read them for '
+             'you: use them when the issue asks for a measure of the suite.', '']
+    for job in jobs:
+        lines.append(f'- `{_plain(job.get("name"))}`: {_plain(job.get("outcome"))}, '
+                     f'{_duration(job)}')
+        tests = job.get('tests')
+        if tests:
+            lines.append(f'  - `{_plain(tests["ran"])}`')
+            if tests.get('slowest'):
+                lines.append(f'  - `{_plain(tests["slowest"])}`')
+        elif job.get('log') == 'unavailable':
+            lines.append('  - the job log could not be read: its test summary is not available')
+    return '\n'.join(lines)
+
+
 # The changed files shown for each mapped document in a prompt (#203); the rest are counted.
 DOCS_PATHS_SHOWN = 5
 

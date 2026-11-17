@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import threading
+from datetime import datetime
 from urllib.parse import quote
 
 from .ports import summarize_checks
@@ -355,12 +356,12 @@ class GitHub:
 
     def check_details(self, sha):
         """Every check of commit ``sha`` as ``normalize_checks`` returns it: check runs and
-        commit statuses, each with its outcome and, for a GitHub Actions run, its run id. Of the
-        check runs with the same name and app (a re-run in another suite) only the most recent
-        counts."""
+        commit statuses, each with its outcome, its duration and, for a GitHub Actions run, its
+        run id. Of the check runs with the same name and app (a re-run in another suite) only
+        the most recent counts."""
         runs = self._json_lines('api', '--paginate', f'repos/{self.repo}/commits/{sha}/check-runs',
                                 '--jq', '.check_runs[] | {id, name, app_id: .app.id, started_at, '
-                                        'status, conclusion, details_url}')
+                                        'completed_at, status, conclusion, details_url}')
         combined = self._json('api', f'repos/{self.repo}/commits/{sha}/status?per_page=100')
         return normalize_checks(runs, combined or {})
 
@@ -387,6 +388,13 @@ class GitHub:
         done = self._gh('run', 'view', *target, '-R', self.repo, '--log-failed', check=False)
         lines = done.stdout.splitlines()
         return '\n'.join(lines if max_lines is None else lines[-max_lines:])
+
+    def job_log(self, job_id):
+        """The whole log of GitHub Actions job ``job_id`` (#300), or None when `gh` cannot read
+        it (expired, deleted, not yet available)."""
+        done = self._gh('run', 'view', '--job', str(int(job_id)), '-R', self.repo, '--log',
+                        check=False)
+        return done.stdout if done.returncode == 0 else None
 
     def rerun_failed_jobs(self, run_id):
         """Re-run the failed jobs of GitHub Actions run ``run_id`` (#200). It needs ``actions:
@@ -517,6 +525,24 @@ def latest_check_runs(check_runs):
     return [check_runs[index] for index in kept]
 
 
+def _instant(value):
+    try:
+        return datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def run_seconds(run):
+    """The whole seconds a completed check run took, from its ``started_at`` to its
+    ``completed_at`` (#300), or None: still running, or a time missing or unreadable."""
+    if run.get('status') != 'completed':
+        return None
+    start, end = _instant(run.get('started_at')), _instant(run.get('completed_at'))
+    if start is None or end is None:
+        return None
+    return max(0, int((end - start).total_seconds()))
+
+
 def job_id(link):
     """The GitHub Actions job of a check run, read from its link
     (``…/actions/runs/<run>/job/<job>``), or None (#200)."""
@@ -525,10 +551,12 @@ def job_id(link):
 
 
 def normalize_checks(check_runs, combined_status):
-    """Check runs and commit statuses as ``{name, bucket, link, conclusion, run_id}`` (bucket:
-    pass, fail, pending; conclusion: the run's conclusion, its status while it runs, or the
-    status's state). ``run_id`` is the GitHub Actions run of a check run, read from its link:
-    None for other check runs and for commit statuses.
+    """Check runs and commit statuses as ``{name, bucket, link, conclusion, run_id,
+    duration_s}`` (bucket: pass, fail, pending; conclusion: the run's conclusion, its status
+    while it runs, or the status's state). ``run_id`` is the GitHub Actions run of a check run,
+    read from its link: None for other check runs and for commit statuses. ``duration_s`` is
+    what a completed check run took (:func:`run_seconds`, #300): None while it runs and for
+    commit statuses, which have no duration.
 
     Of the check runs with the same name and app only the most recent counts
     (:func:`latest_check_runs`), as in GitHub's own rollup of a PR. Commit statuses are already
@@ -551,15 +579,18 @@ def normalize_checks(check_runs, combined_status):
         checks.append({'name': run.get('name'), 'bucket': bucket, 'link': run.get('details_url'),
                        'conclusion': (run.get('conclusion') if run.get('status') == 'completed'
                                       else run.get('status')),
-                       'run_id': int(run_id.group(1)) if run_id else None})
+                       'run_id': int(run_id.group(1)) if run_id else None,
+                       'duration_s': run_seconds(run)})
     statuses = combined_status.get('statuses') or []
     listed = [{'name': s.get('context'), 'bucket': _status_bucket(s.get('state')),
-               'link': s.get('target_url'), 'conclusion': s.get('state'), 'run_id': None}
+               'link': s.get('target_url'), 'conclusion': s.get('state'), 'run_id': None,
+               'duration_s': None}
               for s in statuses]
     checks += listed
     if combined_status.get('total_count', len(statuses)):
         aggregate = _status_bucket(combined_status.get('state'))
         if aggregate != 'pass' and not any(c['bucket'] == aggregate for c in listed):
             checks.append({'name': 'commit status (aggregate)', 'bucket': aggregate, 'link': None,
-                           'conclusion': combined_status.get('state'), 'run_id': None})
+                           'conclusion': combined_status.get('state'), 'run_id': None,
+                           'duration_s': None})
     return checks
