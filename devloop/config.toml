@@ -1,6 +1,7 @@
 # devloop: dispatcher that moves issues labelled `agent:ready` through
 # implementation, independent structured review and fixes, up to a PR that a
-# human merges (or devloop, see [merge]). See docs/devloop.md.
+# human merges (or devloop, see [merge]). See docs/devloop/guide.md; every key is in
+# docs/devloop/reference.md.
 
 repo = "brushtyler/ssdlc"
 base_branch = "main"
@@ -133,7 +134,7 @@ operator_only_paths = ["docs/adr/", "AGENTS.md", "CLAUDE.md"]
 # [merge.levels]
 # "2" = "off"
 
-# Pinned installation (issue #174, see docs/devloop.md). With auto = true, after a merge by
+# Pinned installation (issue #174, see docs/devloop/guide.md). With auto = true, after a merge by
 # devloop whose diff touches devloop/ or a file of review_policy.sensitive_path_lists, the next
 # tick runs `pin origin/<base_branch>` before planning, and `run` and `tick` start again from the
 # new copy; a failed pin stops the tick and leaves the pinned copy as it was. Enabling it is the
@@ -156,7 +157,25 @@ auto = false
 # those whose described behaviour changes, and a reviewer reports a documented behaviour changed
 # without its document as a blocking finding. A file no key covers asks for nothing.
 [docs.map]
-"devloop/" = ["docs/devloop.md"]
+"devloop/" = ["docs/devloop/guide.md"]
+"devloop/config.py" = ["docs/devloop/reference.md"]
+"devloop/config.toml" = ["docs/devloop/reference.md"]
+"devloop/agents.py" = ["docs/devloop/reference.md"]
+"devloop/unavailability.py" = ["docs/devloop/reference.md"]
+"devloop/localtests.py" = ["docs/devloop/reference.md"]
+"devloop/workspace.py" = ["docs/devloop/reference.md"]
+"devloop/apps.py" = ["docs/devloop/reference.md"]
+"devloop/prompts/" = ["docs/devloop/reference.md"]
+"devloop/markdown.py" = ["docs/devloop/protocol.md"]
+"devloop/ledger.py" = ["docs/devloop/protocol.md"]
+"devloop/acceptance.py" = ["docs/devloop/protocol.md"]
+"devloop/review.py" = ["docs/devloop/protocol.md"]
+"devloop/policy.py" = ["docs/devloop/protocol.md", "docs/devloop/reference.md"]
+"devloop/schemas/" = ["docs/devloop/protocol.md"]
+"devloop/dispatcher.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
+"devloop/ports.py" = ["docs/architecture.md"]
+"devloop/github.py" = ["docs/architecture.md"]
+"scripts/devloop-pinned" = ["docs/devloop/guide.md"]
 "orchestrator.py" = ["README.md", "docs/architecture.md"]
 "ssdlc_tasks.py" = ["README.md", "docs/architecture.md"]
 "ssdlc_controller.py" = ["README.md", "docs/architecture.md"]

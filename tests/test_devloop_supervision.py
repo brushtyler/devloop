@@ -763,10 +763,10 @@ class DecideTests(Case):
 
 
 class DocsTests(unittest.TestCase):
-    """docs/devloop.md documents the classes, the routing and the commands (#182)."""
+    """docs/devloop/guide.md documents the classes, the routing and the commands (#182)."""
 
     def section(self):
-        text = (PROMPT_DIR.parents[1] / 'docs' / 'devloop.md').read_text(encoding='utf-8')
+        text = (PROMPT_DIR.parents[1] / 'docs' / 'devloop' / 'guide.md').read_text(encoding='utf-8')
         start = text.index('### Escalations to the supervisor')
         end = text.index('\n## ', start)
         return text[start:end]

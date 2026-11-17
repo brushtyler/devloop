@@ -1188,7 +1188,7 @@ class HttpDeadlineTest(unittest.TestCase):
 
 class DocsTest(unittest.TestCase):
     def test_the_guide_documents_both_modes_with_examples(self):
-        text = (Path(__file__).resolve().parents[1] / 'docs' / 'devloop.md').read_text()
+        text = (Path(__file__).resolve().parents[1] / 'docs' / 'devloop' / 'guide.md').read_text()
         section = text.split('### Waking the supervising agent', 1)[1].split('\n### ', 1)[0]
         for phrase in ('--until-change', '--exec', '--timeout', 'Claude Code',
                        'python3 -m devloop watch --until-change',
