@@ -231,8 +231,10 @@ class DispatcherTests(unittest.TestCase):
         self.assertIn('An approval can lead to an automatic merge: with merge mode `off` a person '
                       'merges the ready PR; with `strict` or `auto` devloop merges it itself, '
                       'once every merge directive holds', prompt)
-        self.assertIn('A stricter mode for the review level, or a diff that touches '
-                      'operator-only paths, leaves the merge to a person.', prompt)
+        self.assertIn('A mode set for the review level applies when it is stricter than the '
+                      'global one; the PR is merged by a person only when the resulting mode is '
+                      '`off` or its diff touches operator-only paths.', prompt)
+        self.assertNotIn('A stricter mode for the review level', prompt)
 
     def test_pr_without_map_gets_a_finding_and_the_fix_provides_it(self):
         runner = FakeRunner(raw_review())
