@@ -258,8 +258,9 @@ The trace of the commands of the [escalations to the supervisor](guide.md#escala
 
 **Trace.** Every command applied leaves a dispatcher comment with a `supervision` marker: the
 command, its author, its reason, the id of the comment that carried it, the class and the outcome
-(`applied`, `accepted`, `escalated`, `refused` or `limit`), with the key and the attempt for a
-retry and the defaults for an acceptance. The record is written before the labels change, so a
+(`applied`, `accepted`, `decided`, `escalated`, `refused` or `limit`), with the key and the
+attempt for a retry, the defaults for an acceptance and, for a decision, its text (in `reason`)
+and the gaps it answers. The record is written before the labels change, so a
 lost label change never runs a retry twice.
 
 ## Structured review
