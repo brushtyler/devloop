@@ -1010,7 +1010,15 @@ class DispatcherTests(unittest.TestCase):
                 self.assertTrue(agents.background_unfinished(reason))
         for reason in ('', None, 'unclear', 'Needs a product call on the background colour.',
                        'Dipende dalla issue #12, ancora in corso.',
-                       'Il servizio in background va configurato. La migrazione è in corso.'):
+                       'Il servizio in background va configurato. La migrazione è in corso.',
+                       # "Prima che" without a verb of completion is not work left running.
+                       'Il job in background va aggiunto prima che venga rilasciata la 1.2.',
+                       # An explicit request for the operator's decision stays a block.
+                       'Serve una decisione dell\'operatore prima che venga introdotto il job '
+                       'in background.',
+                       'Serve una decisione dell\'operatore prima che il job in background si '
+                       'concluda.',
+                       'Needs an operator decision before the background sync is completed.'):
             with self.subTest(reason=reason):
                 self.assertFalse(agents.background_unfinished(reason))
 

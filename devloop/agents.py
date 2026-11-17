@@ -20,17 +20,26 @@ MODES = ('write', 'review')
 CLAUDE_DENIED_TOOLS = ('Agent', 'Task', 'Workflow')
 # A blocked turn whose reason says that background work was still running (issue #219): the
 # turn ended before its own work, a failure of the tool rather than of the change. Both
-# patterns must match the same sentence.
+# patterns must match the same sentence. "Before" counts only with a verb of completion
+# ("prima che l'audit si concludesse"): "prima che venga introdotto il job" describes a
+# decision to take, not work left running. A reason that asks for the operator's decision
+# stays a block, whatever else it says.
 _BACKGROUND = re.compile(r'background|parallel|sotto-?agent|sub-?agent', re.I)
 _UNFINISHED = re.compile(r'in corso|ancora attiv|still (running|active|in progress)'
                          r'|not (yet )?(finish|complet|done|conclu)'
                          r'|non (ancora )?(conclus|terminat|finit|complet)'
-                         r'|prima che|before\b.*\b(finish|complet|conclu|end|done)', re.I)
+                         r'|prima che\b.*\b(conclud|conclus|termin|finiss|finit|complet)'
+                         r'|before\b.*\b(finish|complet|conclu|ended\b|(was|were) done)', re.I)
+_DECISION = re.compile(r'decisione|decidere|decida|operatore|\bdecision|\bdecide|operator'
+                       r'|product call', re.I)
 
 
 def background_unfinished(reason):
     """Whether the ``blocked_reason`` of a turn says that background work (sub-agents, parallel
-    tasks) was still running when the turn ended (issue #219)."""
+    tasks) was still running when the turn ended (issue #219). A reason that asks for a
+    decision of the operator is never one: the block is the operator's."""
+    if _DECISION.search(reason or ''):
+        return False
     return any(_BACKGROUND.search(s) and _UNFINISHED.search(s)
                for s in re.split(r'[.;:!?\n]+', reason or ''))
 CREDENTIAL_VARS = ('GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN',

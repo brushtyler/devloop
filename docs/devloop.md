@@ -1433,7 +1433,9 @@ once answered before they ended, and stopped with nothing written. So:
   `blocked` and a reason that, in the same sentence, cites background or parallel work
   (sub-agents, an audit in parallel) and says it was still running or ended after the answer
   is not published as `Lavoro bloccato`: it fails as an agent error, escalated as a
-  `tool_failure` that `/devloop retry` can run again.
+  `tool_failure` that `/devloop retry` can run again. A "before" counts only with a verb of
+  completion ("prima che l'audit parallelo si concludesse"), and a reason that asks for a
+  decision of the operator stays a `blocked`, whatever else it says.
 
 ### Parallel actions
 
