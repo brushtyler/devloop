@@ -203,7 +203,7 @@ follow the code. It is the documentation phase of devloop, the `07-docs` of an S
 ```toml
 [docs.map]
 "devloop/" = ["docs/devloop/guide.md"]
-"orchestrator.py" = ["README.md", "docs/architecture.md"]
+"orchestrator.py" = ["docs/getting-started.md", "docs/architecture.md"]
 "schemas/" = ["docs/configuration.md"]
 ```
 

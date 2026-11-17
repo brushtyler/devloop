@@ -1,6 +1,6 @@
 # Configuration
 
-This page is the reference for authentication, configuration inheritance, model routing, limits, container resources, remote synchronization and toolkit maintenance. For a first setup, the [README](../README.md#basic-configuration) is enough.
+This page is the reference for authentication, configuration inheritance, model routing, limits, container resources, remote synchronization and toolkit maintenance. For a first setup, [Getting started](getting-started.md#basic-configuration) is enough.
 
 ## Where configuration comes from
 
