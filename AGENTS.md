@@ -20,9 +20,13 @@ Esempio:
 > **Model:** Claude Opus 5.5
 > **Reasoning Level:** High
 
-### Bot senza AI
+Questa forma vale per i testi che un agent pubblica **fuori da devloop** con la propria identità: senza le righe `Bot` e `Version`.
 
-I testi scritti da un bot che non usa AI, come il dispatcher di devloop (e il merger, se un giorno pubblicherà testi), non hanno agent, modello né reasoning. Usano questa variante:
+### Testi pubblicati da devloop
+
+Su GitHub i testi di devloop li pubblica il dispatcher, anche quelli scritti dagli agent AI. L'intestazione la compone lui, in un unico punto del codice, come **un solo blocco** `> [!NOTE]` che inizia con `Bot` e `Version`.
+
+I bot senza AI, come il dispatcher (e il merger, se un giorno pubblicherà testi), non hanno agent, modello né reasoning: il blocco contiene solo `Bot` e `Version`.
 
 ```markdown
 > [!NOTE]
@@ -36,10 +40,32 @@ Esempio:
 > **Bot:** devloop dispatcher
 > **Version:** 0123456789ab
 
-- **`Bot`:** il nome del bot, per esempio `devloop dispatcher` o `devloop merger`.
-- **`Version`:** la versione di devloop che ha scritto il testo: i primi 12 caratteri del commit della copia fissata in uso (`pin.json`). Senza una copia fissata, il commit del checkout se disponibile, altrimenti `non nota`.
+Nei testi degli agent AI (review, correzioni, implementazione, controllo di prontezza, Lavoro bloccato) `Bot` e `Version` sono seguiti, nello stesso blocco, da Agent, Model e Reasoning Level.
 
-I testi del dispatcher pubblicati prima di questa variante hanno l'intestazione degli agent con `devloop dispatcher` come agent: devloop li riconosce ancora. Gli agent AI usano sempre l'intestazione con Agent, Model e Reasoning Level, anche quando è il dispatcher a pubblicare il loro testo.
+```markdown
+> [!NOTE]
+> **Bot:** <BOT_NAME>
+> **Version:** <VERSION>
+> **Agent:** <AGENT_NAME> (CLI v<CLI_VERSION>)
+> **Model:** <MODEL_NAME>
+> **Reasoning Level:** <REASONING_LEVEL>
+```
+
+Esempio:
+
+> [!NOTE]
+> **Bot:** devloop codex-agent
+> **Version:** 0123456789ab
+> **Agent:** Codex (CLI v0.5.1)
+> **Model:** GPT-5.5
+> **Reasoning Level:** High
+
+- **`Bot`:** il nome dell'identità che pubblica: `devloop dispatcher`, `devloop claude-agent`, `devloop codex-agent`, `devloop agy-agent` (o `devloop merger`).
+- **`Version`:** la versione di devloop che ha pubblicato il testo: i primi 12 caratteri del commit della copia fissata in uso (`pin.json`). Senza una copia fissata, il commit del checkout se disponibile, altrimenti `non nota`.
+
+**Nei turni di devloop gli agent non aggiungono nessuna intestazione** nei loro testi (summary, finding, note, corpo della PR): la compone il dispatcher, che altrimenti la duplicherebbe.
+
+I testi pubblicati prima di questa forma hanno solo l'intestazione Agent, Model e Reasoning Level; quelli del dispatcher con `devloop dispatcher` come agent. devloop li riconosce ancora.
 
 ### Come ricavare i valori
 

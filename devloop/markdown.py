@@ -27,9 +27,11 @@ _EFFORT_LABELS = {'xhigh': 'Extra High', 'max': 'Max'}
 _MARKER = re.compile(r'<!-- devloop:(?P<kind>[a-z]+):v1 (?P<payload>[A-Za-z0-9+/=]+) -->')
 _VERSION = re.compile(r'\d+\.\d+(?:\.\d+)?')
 
-# Bots without AI (the dispatcher, one day the merger) sign with their name and the version of
-# devloop, not with an agent, a model and a reasoning level (#232). Records published before
-# #232 carry the agent header with ``devloop dispatcher`` as the agent: both are devloop text.
+# Every text devloop publishes opens with the name of the identity it publishes with and the
+# version of devloop (#232): the texts of the AI agents add agent, model and reasoning level in
+# the same block, those of bots without AI (the dispatcher, one day the merger) nothing else.
+# Records published before #232 carry the agent header alone, the dispatcher's with ``devloop
+# dispatcher`` as the agent: every form is devloop text.
 DISPATCHER = 'devloop dispatcher'
 # The stamp ``devloop pin`` writes in the root of a pinned copy (``pin.STAMP``).
 PIN_STAMP = 'pin.json'
@@ -48,13 +50,35 @@ def effort_label(effort):
     return _EFFORT_LABELS.get(effort, effort.title())
 
 
-def header(agent_name, cli_version, model_label, effort):
-    """The header AGENTS.md requires on every text published to GitHub."""
-    agent = f'{agent_name} (CLI v{cli_version})' if cli_version else f'{agent_name} (CLI {UNKNOWN})'
-    return ('> [!NOTE]\n'
-            f'> **Agent:** {agent}\n'
-            f'> **Model:** {model_label or UNKNOWN}\n'
-            f'> **Reasoning Level:** {effort_label(effort)}\n')
+def attribution(bot=None, version=None, agent=None):
+    """The one ``> [!NOTE]`` block of a text published to GitHub (AGENTS.md, #232), composed
+    here only. ``bot``: the name of the identity devloop publishes with, followed by the
+    ``version`` of devloop; ``agent``: ``(name, cli_version, model_label, effort)`` of the AI
+    agent that wrote the text. A bot without AI has ``bot`` alone; a text of an agent that
+    devloop publishes has both, in one block; a text an agent publishes outside devloop has
+    ``agent`` alone."""
+    lines = ['> [!NOTE]']
+    if bot:
+        lines += [f'> **Bot:** {bot}', f'> **Version:** {version or UNKNOWN_VERSION}']
+    if agent:
+        name, cli_version, model_label, effort = agent
+        cli = f'CLI v{cli_version}' if cli_version else f'CLI {UNKNOWN}'
+        lines += [f'> **Agent:** {name} ({cli})', f'> **Model:** {model_label or UNKNOWN}',
+                  f'> **Reasoning Level:** {effort_label(effort)}']
+    return '\n'.join(lines) + '\n'
+
+
+def header(agent_name, cli_version, model_label, effort, bot=None, version=None):
+    """The header of a text an AI agent wrote. devloop publishes it with ``bot``, the name of
+    the agent's identity (``agent_bot``), and ``version``, the version of devloop (#232);
+    without ``bot`` it is the header an agent writes outside devloop."""
+    return attribution(bot, version, (agent_name, cli_version, model_label, effort))
+
+
+def agent_bot(key):
+    """The name of the identity devloop publishes the texts of agent ``key`` with (#232):
+    ``devloop claude-agent``, ``devloop codex-agent``, ``devloop agy-agent``."""
+    return f'devloop {key}-agent'
 
 
 def _checkout_sha(root):
@@ -92,9 +116,7 @@ def devloop_version(root=INSTALL_ROOT):
 def bot_header(bot, version):
     """The header of a text written by a bot without AI (#232): its name and the version of
     devloop, instead of an agent, a model and a reasoning level."""
-    return ('> [!NOTE]\n'
-            f'> **Bot:** {bot}\n'
-            f'> **Version:** {version or UNKNOWN_VERSION}\n')
+    return attribution(bot, version)
 
 
 def dispatcher_header(root=INSTALL_ROOT):

@@ -1,4 +1,5 @@
-"""devloop: the Bot/Version header of the dispatcher's texts, and the old one still read (#232)."""
+"""devloop: the one attribution block of the texts devloop publishes, Bot and Version first,
+and the old headers still read (#232)."""
 
 import json
 import re
@@ -6,8 +7,10 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from devloop import markdown
+from devloop.agents import AgentRunner
 from devloop.apps import DISPATCHER
 from devloop.dispatcher import (Dispatcher, fix_command, merge_command, operator_comments,
                                 preflight_hash)
@@ -23,6 +26,12 @@ OLD_HEADER = ('> [!NOTE]\n'
               '> **Reasoning Level:** n/a\n')
 NEW_HEADER = markdown.bot_header(markdown.DISPATCHER, COMMIT[:12])
 HEADERS = {'old': OLD_HEADER, 'new': NEW_HEADER}
+# The texts of an AI agent devloop publishes: before #232 the agent header alone, since then one
+# block with Bot and Version followed by Agent, Model and Reasoning Level.
+OLD_AGENT_HEADER = markdown.header('Codex', '0.5', 'GPT', 'high')
+NEW_AGENT_HEADER = markdown.header('Codex', '0.5', 'GPT', 'high',
+                                   bot=markdown.agent_bot(CFG.implementer), version=COMMIT[:12])
+ALL_HEADERS = dict(HEADERS, old_agent=OLD_AGENT_HEADER, new_agent=NEW_AGENT_HEADER)
 DISPATCHER_LOGIN = 'brushtyler-devloop-dispatcher[bot]'
 OPERATOR = 'brushtyler'
 
@@ -106,7 +115,33 @@ class HeaderTests(unittest.TestCase):
         self.assertNotIn('**Agent:**', body)
         self.assertNotIn('**Model:**', body)
 
-    def test_the_texts_of_ai_agents_keep_their_header(self):
+    def test_the_texts_of_ai_agents_carry_bot_and_version_in_the_same_block(self):
+        self.assertEqual(markdown.header('Codex', '0.5.1', 'GPT-5.5', 'high',
+                                         bot='devloop codex-agent', version=COMMIT[:12]),
+                         '> [!NOTE]\n> **Bot:** devloop codex-agent\n'
+                         f'> **Version:** {COMMIT[:12]}\n'
+                         '> **Agent:** Codex (CLI v0.5.1)\n'
+                         '> **Model:** GPT-5.5\n> **Reasoning Level:** High\n')
+        self.assertEqual([markdown.agent_bot(k) for k in ('claude', 'codex', 'agy')],
+                         ['devloop claude-agent', 'devloop codex-agent', 'devloop agy-agent'])
+
+    def test_the_runner_composes_one_block_for_the_texts_of_an_agent(self):
+        def fake_run(argv, **kw):
+            return SimpleNamespace(returncode=0, stdout='2.1.322 (Claude Code)', stderr='')
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = CFG.agent('claude')
+            head = AgentRunner(tmp, 10, run=fake_run).header(agent)
+        lines = head.splitlines()
+        self.assertEqual(lines[:2], ['> [!NOTE]', '> **Bot:** devloop claude-agent'])
+        self.assertTrue(re.fullmatch(r'> \*\*Version:\*\* ([0-9a-f]{12}|non nota)', lines[2]))
+        self.assertEqual(lines[3:], [f'> **Agent:** {agent.display_name} (CLI v2.1.322)',
+                                     f'> **Model:** {agent.model_label}',
+                                     f'> **Reasoning Level:** '
+                                     f'{markdown.effort_label(agent.effort)}'])
+        self.assertEqual(head.count('[!NOTE]'), 1)
+        self.assertEqual(lines[2], f'> **Version:** {markdown.devloop_version()}')
+
+    def test_outside_devloop_an_agent_header_has_no_bot_lines(self):
         self.assertEqual(markdown.header('Claude Code', '2.1.322', 'Claude Opus 5.5', 'high'),
                          '> [!NOTE]\n> **Agent:** Claude Code (CLI v2.1.322)\n'
                          '> **Model:** Claude Opus 5.5\n> **Reasoning Level:** High\n')
@@ -137,6 +172,18 @@ class RecognitionTests(unittest.TestCase):
                     self.assertEqual(d._marker_entries(
                         pr(), [comment(login, closed_finding(header))], 'finding'), [])
 
+    def test_agent_records_with_either_header_only_from_the_agent_app(self):
+        d = self.make(apps=True)
+        fix = {'round': 1, 'head_sha': COMMIT, 'responses': []}
+        for name, header in (('old', OLD_AGENT_HEADER), ('new', NEW_AGENT_HEADER)):
+            body = markdown.publishable(header + '\n## Correzioni\n\nx', 'fix', fix)
+            with self.subTest(header=name):
+                implementer = f'{CFG.implementer}-agent[bot]'
+                self.assertEqual(len(d._marker_entries(pr(), [comment(implementer, body)],
+                                                       'fix')), 1)
+                for login in ('stranger', OPERATOR, DISPATCHER_LOGIN):
+                    self.assertEqual(d._marker_entries(pr(), [comment(login, body)], 'fix'), [])
+
     def test_without_apps_both_headers_from_a_trusted_login_are_records(self):
         d = self.make(apps=False)
         for name, header in HEADERS.items():
@@ -164,11 +211,13 @@ class OperatorTextTests(unittest.TestCase):
                     comment(OPERATOR, OLD_HEADER + '\n## Escalation\n\nx'),
                     comment(OPERATOR, NEW_HEADER + '\n## Escalation\n\nx'),
                     comment(OPERATOR, markdown.dispatcher_header() + '\nx'),
+                    comment(OPERATOR, OLD_AGENT_HEADER + '\n## Review\n\nx'),
+                    comment(OPERATOR, NEW_AGENT_HEADER + '\n## Review\n\nx'),
                     comment('stranger', 'Anche io.')]
         self.assertEqual(operator_comments(comments, CFG.trusted_users), [comments[0]])
 
     def test_commands_after_either_header(self):
-        for name, header in HEADERS.items():
+        for name, header in ALL_HEADERS.items():
             with self.subTest(header=name):
                 self.assertEqual(supervisor_command(header + '\n/devloop retry'), ('retry', ''))
                 self.assertEqual(supervisor_command(header + '\n/devloop escalate perché'),
