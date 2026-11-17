@@ -101,7 +101,8 @@ from pathlib import Path
 
 from .acceptance import (acceptance_criteria, acceptance_findings, format_criteria, format_map,
                          latest_map, render_map)
-from .agents import AgentError, ModelsUnavailable, ModelUnavailable, PermissionDenied
+from .agents import (AgentError, ModelsUnavailable, ModelUnavailable, PermissionDenied,
+                     background_unfinished)
 from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, PR_COMMENT, REVIEW
 from .config import INSTALL_ROOT, ConfigError
 from .github import GitHubError, author_login
@@ -2407,6 +2408,11 @@ class Dispatcher:
             result, used = self._turn(models, 'write', text, schema, path,
                                       f'{label}-{attempt + 1}', where=where)
             if result['status'] == 'blocked':
+                if background_unfinished(result.get('blocked_reason')):
+                    # The turn ended before its own background work (#219): a failure of the
+                    # tool, retryable, not a block of the change.
+                    raise AgentError(f'{used.key} stopped while background work was still '
+                                     f'running: {result["blocked_reason"].strip()}')
                 return result, None, used, None, None
             if not self.ws.has_changes(path) and schema == 'implement':
                 return result, ('Implementazione senza modifiche ai file.', ''), used, None, None
