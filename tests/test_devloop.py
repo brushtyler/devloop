@@ -1596,7 +1596,7 @@ class DispatcherTests(unittest.TestCase):
             cli.main(['status'])
         pr_line = next(line for line in lines if line.startswith('PR #100 '))
         self.assertIn('merge=conflict CONFLICT with main', pr_line)
-        self.assertEqual(lines[-1], 'next: sync #100')
+        self.assertEqual(lines[-1], 'next: sync #100: conflicts with the base branch')
 
 
 class RereviewTests(unittest.TestCase):

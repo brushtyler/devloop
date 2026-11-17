@@ -137,6 +137,15 @@ and fewer parked PRs than `max_parked_prs`, since many open PRs make conflicts m
 progress (max_open_prs), <n>/<max_parked_prs> parked (max_parked_prs)`. Issues with a
 `blocked_labels` label are skipped.
 
+**Exception for high-priority issues** (#274): once `max_parked_prs` is reached, a ready issue
+with priority `high` (`priority:high`, or a label in `priority_labels` such as `prerequisito`,
+see [Start order](#start-order-of-ready-issues)) still starts, because it may be the fix the
+parked PRs wait for. It still needs a free slot of `max_open_prs`. Issues with priority `normal`
+or `low` wait, as do supervisor retries of an issue step. The tick log and the `next:` lines of
+`devloop status` give the reason: `implement #<n>: priority high: starts although
+<n>/<max_parked_prs> PRs are parked (max_parked_prs)` (with the readiness check, the same reason
+follows the one of the `preflight` action).
+
 ### Start order of ready issues
 
 New issues start in this order (#146):
