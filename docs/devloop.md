@@ -82,11 +82,16 @@ The escalation of a failed agent turn names its local log, `<time>-<label>-<agen
 stalled or could not start: it holds what the agent wrote on stdout and stderr until then. A
 descendant that left the agent's process group and still holds its output open does not lose
 what was read before it. For a timeout the comment also quotes the last lines of that output, at
-most 10, each cut to 300 characters: private keys, tokens and the values of variables whose name
-looks secret (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`) become `[REDACTED]`, paths in
-the worktree become relative and any other absolute path keeps only its last segment
-(`…/name`). The full output stays in the local log. A CLI that writes its output only at the end,
-such as `claude --output-format json`, may leave nothing to quote.
+most 10, each cut to 300 characters. Terminal escape sequences (colours, titles), raw or written
+as `\u001b` in JSON events, are removed first. Private keys, tokens, the value assigned to a name
+that looks secret (`DB_PASSWORD=…`, `"token": "…"`, whatever its length) and the values of the
+agent's variables whose name looks secret (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`)
+become `[REDACTED]`: such a value of 8 characters or more wherever it appears, a shorter one, from
+4 characters, as a whole word. Paths in the worktree become relative and any other absolute path
+keeps only its last segment (`…/name`). The full output stays in the local log. A CLI that writes
+its output only at the end, such as `claude --output-format json`, may leave nothing to quote. The
+turn's [ledger record](#evidence-and-telemetry) keeps its duration and, when the CLI exposes it,
+the last command it ran or started.
 
 A round is one evaluation of a head: a CI failure, or the reviews of every reviewer the review
 level requires (one at level 1, two at level 2), whatever the number of reviewers. The round
@@ -1227,7 +1232,7 @@ readiness check, on the PR for review, fix, sync and CI. They publish no receipt
 | Record | When | Content |
 |---|---|---|
 | `request` | The issue goes from `agent:ready` to `agent:working` | SHA-256 of title and body, author and time of the trusted `labeled` event of `agent:ready`, ids of the trusted comments given to the implementer, time of the takeover. It is a snapshot **at the takeover**, not at the time of the label |
-| `turn` | Every invocation of an agent CLI, retries, fallback models and failures included: implement, fix, sync with an agent, review, readiness check | Kind, agent, GitHub identity (none: the operator's `gh` login), configured model and effort (for a fallback, the fallback model and the model it replaces), real model, start, end, duration, outcome (`success`, `failure`, `unavailable`), the error if any, telemetry |
+| `turn` | Every invocation of an agent CLI, retries, fallback models and failures included: implement, fix, sync with an agent, review, readiness check | Kind, agent, GitHub identity (none: the operator's `gh` login), configured model and effort (for a fallback, the fallback model and the model it replaces), real model, start, end, duration, outcome (`success`, `failure`, `unavailable`), the error if any, telemetry, and the last command the turn ran or started when the CLI exposes it (`last_command`: only codex, from the `command_execution` items of `--json`; cleaned like the tail of a timeout, on one line, at most 200 characters; absent otherwise), also for a turn that timed out |
 | `verification` | Every test command the dispatcher runs after a writing turn (none when the [local tests](#local-tests) select nothing), and the full suite it runs before a review of a head without CI | Command, outcome, duration, the tree hash before and after the test, and the commit (none before a review) |
 | `event` | The CI of a head (`ci_round`): a failed CI round, the checks a review round saw whatever its verdict (`approve`, `request_changes` or `needs_human`), or the passing checks read again just before the PR is promoted to `agent:ready-to-merge` (also at level 0); a sync without an agent (`sync`) | For the CI, the head, the state (`fail`, `pass`, or `none` without checks), the review round (none at level 0) and each check with its outcome and the id of its GitHub Actions run (none for a commit status or a check outside Actions); the same checks read again for the same head and round are not recorded twice, a new run is. For a sync, the merged base commit and the old and new heads |
 

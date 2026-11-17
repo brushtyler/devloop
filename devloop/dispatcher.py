@@ -2106,13 +2106,14 @@ class Dispatcher:
             fallback_for=candidate.fallback_for, label=label)
 
     def _close_turn(self, entry, outcome, error=None):
-        """Close a turn's record with what the CLI attested. A failed write leaves the turn
-        open, and the next tick marks it incomplete."""
+        """Close a turn's record with what the CLI attested and the last command its output
+        exposes (#215). A failed write leaves the turn open, and the next tick marks it
+        incomplete."""
         if entry is None:
             return
         try:
             self.ledger.close_turn(entry, outcome, getattr(self.runner, 'last_report', None),
-                                   error)
+                                   error, getattr(self.runner, 'last_command', None))
         except GitHubError as exc:
             self.log(f'  turn record on #{entry.number} not closed: {exc}')
 

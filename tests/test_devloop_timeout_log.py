@@ -1,5 +1,6 @@
 """devloop: the log and the escalation of an agent turn that does not end on its own (#215)."""
 
+import json
 import os
 import re
 import subprocess
@@ -12,6 +13,8 @@ from unittest import mock
 
 from devloop import agents
 from devloop.dispatcher import Action, Dispatcher, Snapshot
+from devloop.ledger import Ledger
+from devloop.markdown import read_marker
 from devloop.workspace import run_in_group
 from helpers.devloop_fakes import FakeGH
 from test_devloop import CFG, FakeWS
@@ -189,6 +192,131 @@ class OutputTailTests(unittest.TestCase):
         self.assertIn('[REDACTED]', tail)
         self.assertIn('abc', tail)  # values too short to be a secret stay
 
+    def test_short_known_secrets_are_redacted_as_words(self):
+        env = {'DATABASE_PASSWORD': 'hunter2', 'KEYTIMEOUT': '1', 'HOME': '/home/op'}
+        tail = agents.output_tail('connect with hunter2 now\nhunter22 and ran 1 test', '',
+                                  env=env)
+        self.assertEqual(tail, 'connect with [REDACTED] now\nhunter22 and ran 1 test')
+
+    def test_values_assigned_to_secret_names_are_redacted(self):
+        out = '\n'.join([
+            'DATABASE_PASSWORD=pw1 export GH_TOKEN="t0k" api-key: k3y',
+            '{"password": "abc", "input_tokens": 3}',
+            '{"aggregated_output":"DB_SECRET=\\"s3c\\"\\n"}',
+            "KeyError: 'name' in monkey: banana",
+        ])
+        tail = agents.output_tail(out, '', env={})
+        for secret in ('pw1', 't0k', 'k3y', 'abc', 's3c'):
+            self.assertNotIn(secret, tail)
+        lines = tail.splitlines()
+        self.assertEqual(lines[0], 'DATABASE_PASSWORD=[REDACTED] export GH_TOKEN="[REDACTED]" '
+                                   'api-key: [REDACTED]')
+        self.assertEqual(lines[1], '{"password": "[REDACTED]", "input_tokens": 3}')
+        self.assertEqual(lines[3], out.splitlines()[3])
+
+    def test_terminal_colours_do_not_hide_absolute_paths(self):
+        raw = '\x1b[31m/home/operator/private/file.py\x1b[0m: \x1b[1;32mok\x1b[0m'
+        self.assertEqual(agents.output_tail(raw, '', env={}), '…/file.py: ok')
+        title = '\x1b]0;/home/operator/title\x07done'
+        self.assertEqual(agents.output_tail(title, '', env={}), 'done')
+        # As the JSON events of a CLI write them: escaped, with \n between the lines.
+        event = ('{"aggregated_output":"\\u001b[31m/home/operator/private/file.py\\u001b[0m'
+                 '\\n/etc/passwd\\n"}')
+        tail = agents.output_tail(event, '', env={})
+        self.assertEqual(tail, '{"aggregated_output":"…/file.py\\n…/passwd\\n"}')
+        self.assertNotIn('/home/', tail)
+        self.assertNotIn('/etc/', tail)
+
+
+def codex_events(command, progress):
+    """The ``--json`` stdout of a codex turn that started ``command`` and then wrote
+    ``progress`` lines."""
+    events = [{'type': 'thread.started', 'thread_id': 't'},
+              {'type': 'item.started', 'item': {'id': 'i1', 'type': 'command_execution',
+                                                'command': 'bash -lc ls', 'status': 'in_progress'}},
+              {'type': 'item.completed', 'item': {'id': 'i1', 'type': 'command_execution',
+                                                  'command': 'bash -lc ls', 'exit_code': 0}},
+              {'type': 'item.started', 'item': {'id': 'i2', 'type': 'command_execution',
+                                                'command': command, 'aggregated_output': '',
+                                                'status': 'in_progress'}}]
+    return '\n'.join([json.dumps(e) for e in events] + [f'progress {i}' for i in range(progress)])
+
+
+class LastCommandTests(unittest.TestCase):
+    def test_the_last_codex_command_is_cleaned(self):
+        out = codex_events('bash -lc "cd /wt/issue-7 && DB_PASSWORD=pw python3 /opt/x/run.py"', 0)
+        self.assertEqual(agents.public_command('codex', out, '/wt/issue-7', env={}),
+                         'bash -lc "cd . && DB_PASSWORD=[REDACTED] python3 …/run.py"')
+        self.assertEqual(len(agents.public_command('codex', codex_events('x' * 500, 0), env={})),
+                         agents.COMMAND_WIDTH)
+
+    def test_no_command_when_the_cli_does_not_expose_it(self):
+        self.assertIsNone(agents.public_command('codex', 'plain text\n{"type": "x"}', env={}))
+        self.assertIsNone(agents.public_command('claude', codex_events('ls', 0), env={}))
+        self.assertIsNone(agents.public_command('agy', '', env={}))
+
+    def test_a_timed_out_turn_records_its_last_command(self):
+        command = 'bash -lc "python3 -m unittest discover -s tests"'
+
+        def fake_run(argv, **kw):
+            raise subprocess.TimeoutExpired(argv, 1, output=codex_events(command, 12))
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = agents.AgentRunner(tmp, 1, run=fake_run, env={})
+            with self.assertRaises(agents.AgentError) as ctx:
+                runner.run(CFG.agent('codex'), 'write', 'p', 'implement', tmp, 'x')
+            self.assertNotIn('unittest', ctx.exception.tail)  # out of the last 10 lines
+            self.assertEqual(runner.last_command, command)
+            runner._run = lambda argv, **kw: SimpleNamespace(returncode=1, stdout='',
+                                                             stderr='boom')
+            with self.assertRaises(agents.AgentError):
+                runner.run(CFG.agent('codex'), 'write', 'p', 'implement', tmp, 'x')
+            self.assertIsNone(runner.last_command)  # a new turn starts without one
+
+    def test_the_turn_marker_records_the_duration_and_the_last_command(self):
+        command = 'bash -lc "cd /wt/issue-7 && python3 -m `echo unittest`"'
+
+        class GH(FakeGH):
+            bodies = {}
+
+            def comment(self, number, body):
+                self.bodies[len(self.bodies) + 1] = body
+                return len(self.bodies)
+
+            def edit_comment(self, comment_id, body):
+                self.bodies[comment_id] = body
+
+        def fake_run(argv, **kw):
+            raise subprocess.TimeoutExpired(argv, 5, output=codex_events(command, 12))
+        clock = iter([100.0, 103.5])
+        gh = GH()
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = agents.AgentRunner(tmp, 5, run=fake_run, env={})
+            d = Dispatcher(CFG, gh, FakeWS(), runner, log=lambda m: None,
+                           ledger=Ledger(gh, monotonic=lambda: next(clock)))
+            entry = d._open_turn((7, 'implement'), CFG.agent('codex'), 'write', 'issue-7')
+            with self.assertRaises(agents.AgentError) as ctx:
+                runner.run(CFG.agent('codex'), 'write', 'p', 'implement', '/wt/issue-7', 'x')
+            d._close_turn(entry, 'failure', ctx.exception)
+        record = read_marker(gh.bodies[1], 'ledger')
+        self.assertEqual(record['duration_ms'], 3500)
+        self.assertEqual(record['last_command'],
+                         'bash -lc "cd . && python3 -m `echo unittest`"')
+        self.assertIn('- **Ultimo comando (esposto dalla CLI):** `` bash -lc "cd . && '
+                      'python3 -m `echo unittest`" ``', gh.bodies[1])
+        self.assertNotIn('/wt/', gh.bodies[1])
+
+    def test_no_last_command_in_the_marker_when_the_cli_does_not_expose_it(self):
+        gh = FakeGH()
+        recorded = []
+        gh.comment = lambda number, body: 1
+        gh.edit_comment = lambda cid, body: recorded.append(read_marker(body, 'ledger'))
+        runner = SimpleNamespace(last_report=None, last_command=None)
+        d = Dispatcher(CFG, gh, FakeWS(), runner, log=lambda m: None, ledger=Ledger(gh))
+        d._close_turn(d._open_turn((7, 'implement'), CFG.agent('claude'), 'write', 'l'),
+                      'failure', agents.AgentError('claude timed out after 5s'))
+        self.assertNotIn('last_command', recorded[-1])
+        self.assertIsInstance(recorded[-1]['duration_ms'], int)
+
 
 class EscalationTests(unittest.TestCase):
     def test_the_escalation_of_a_timeout_cites_the_log_and_quotes_the_tail(self):
@@ -223,6 +351,29 @@ class EscalationTests(unittest.TestCase):
         self.assertNotIn(TOKEN, body)
         self.assertNotIn('/wt/', body)
         self.assertNotIn('/usr/lib', body)
+
+    def test_the_escalation_hides_short_passwords_and_coloured_paths(self):
+        out = ('DATABASE_PASSWORD=hunter2\nlogin with hunter2\n'
+               '\x1b[31m/home/operator/private/file.py\x1b[0m\n')
+
+        def fake_run(argv, **kw):
+            if argv[-1] == '--version':
+                return SimpleNamespace(returncode=0, stdout='2.1.0 (Claude Code)', stderr='')
+            raise subprocess.TimeoutExpired(argv, 5, output=out)
+        with tempfile.TemporaryDirectory() as tmp:
+            gh = FakeGH()
+            runner = agents.AgentRunner(tmp, 5, run=fake_run, env={'DATABASE_PASSWORD': 'hunter2'})
+            d = Dispatcher(CFG, gh, FakeWS(), runner, log=lambda m: None)
+            d.snapshot = lambda: Snapshot([], [{'number': 7, 'title': 't',
+                                                'labels': {'agent:ready'},
+                                                'labeler': 'brushtyler', 'admitted': True}], [])
+            d.tick()
+        body = gh.comments[-1][1]
+        self.assertEqual(code_block(body).splitlines(),
+                         ['DATABASE_PASSWORD=[REDACTED]', 'login with [REDACTED]', '…/file.py'])
+        self.assertNotIn('hunter2', body)
+        self.assertNotIn('/home/operator', body)
+        self.assertNotIn('\x1b', body)
 
     def test_an_escalation_without_output_has_no_block(self):
         def fake_run(argv, **kw):
