@@ -14,7 +14,7 @@ from devloop.github import GitHub, GitHubError
 from devloop.unavailability import iso
 
 from helpers.devloop_fakes import SHA1, SnapshotGH
-from test_devloop import CFG, FakeRunner, FakeWS, norm, pr, raw_review
+from test_devloop import CFG, FakeRunner, FakeWS, finding, fixed, norm, pr, raw_review
 
 NOW = 1_795_000_000.0  # the controlled clock: 2026-11-18, any fixed moment will do
 SUITE = (Path('/wt/pr-100-review'), CFG.test_cmd)  # the full suite before a review
@@ -271,6 +271,55 @@ class ReviewDuringCITests(unittest.TestCase):
         snap = d.snapshot()
         self.assertEqual([a.kind for a in plan(snap, cfg)], ['fix'])
 
+    def changes(self, ci='pending', committed=NOW - 6 * 60):
+        """PR #100 after a review that asked for changes before its CI was known."""
+        d = self.make(ci=ci, committed=committed)
+        self.runner.outputs = [raw_review('request_changes', [finding('reviewer bug')]),
+                               fixed()]
+        self.assertEqual(self.step(d), ['review'])
+        self.assertEqual(self.gh.labels[100], {'agent:changes'})
+        return d
+
+    def test_changes_asked_with_ci_pending_wait_and_a_failure_joins_the_same_fix(self):
+        d = self.changes()
+        # While the CI of the reviewed head runs, the fix does not start.
+        self.assertEqual(self.step(d), [])
+        self.assertEqual(len(self.runner.calls), 1)
+        self.gh.ci = 'fail'
+        self.assertEqual(self.step(d), ['ci_failed'])
+        records = [m for _, body in self.gh.comments
+                   if (m := markdown.read_marker(body, 'review')) is not None]
+        self.assertEqual([(r['source'], r['round'], r['verdict']) for r in records],
+                         [('agent', 1, 'request_changes'), ('ci', 2, 'request_changes')])
+        self.assertEqual(self.gh.labels[100], {'agent:changes'})
+        # One fix, with the reviewer's finding and the CI failure.
+        snap = d.snapshot()
+        self.assertEqual([a.kind for a in plan(snap, self.cfg)], ['fix'])
+        d._do_fix(snap.prs[0])
+        self.assertEqual(len(self.runner.calls), 2)
+        prompt = self.prompt()
+        self.assertIn('reviewer bug', prompt)
+        self.assertIn('CI fallita', prompt)
+
+    def test_changes_asked_with_ci_pending_go_to_the_fix_once_the_ci_passes(self):
+        d = self.changes()
+        self.gh.ci = 'pass'
+        self.assertEqual(self.step(d), ['fix'])
+        self.assertEqual(len(self.runner.calls), 2)
+        self.assertNotIn('CI fallita', self.prompt())
+
+    def test_changes_asked_within_the_window_wait_for_it(self):
+        d = self.changes(ci='none', committed=NOW - 30)
+        self.assertEqual(self.step(d), [])
+        self.assertEqual(self.ws.commands, [])
+        self.gh.ci = 'fail'
+        self.assertEqual(self.step(d), ['ci_failed'])
+        # Past the window without any CI, the fix starts: no local suite in its place.
+        d = self.changes(ci='none', committed=NOW - 30)
+        self.now += 5 * 60
+        self.assertEqual(self.step(d), ['fix'])
+        self.assertEqual(self.ws.commands.count(SUITE), 0)
+
     def test_a_ci_failed_before_the_review_takes_the_path_of_today(self):
         d = self.make(ci='fail')
         self.assertEqual(self.step(d), ['ci_failed'])
@@ -303,6 +352,25 @@ class PlanTests(unittest.TestCase):
             approved = dataclasses.replace(pr(checks=checks, reviews=[approval]), ci_wait=wait)
             self.assertEqual(plan(SimpleNamespace(prs=[approved], ready_issues=[],
                                                   working_issues=[], supervised=[]), CFG), [])
+        # Changes asked before the CI was known (#271): the fix waits for the CI of the head,
+        # also for a re-run of #200; a failure is a CI round, then the same fix.
+        seen = norm(raw_review('request_changes', [finding()]))
+        blind = dict(seen, ci='pending')
+        cases = (('pending', '', False, []), ('none', 'waiting', False, []),
+                 ('fail', '', True, []), ('fail', '', False, ['ci_failed']),
+                 ('pass', '', False, ['fix']), ('none', '', False, ['fix']))
+        for checks, wait, rerun, kinds in cases:
+            with self.subTest(checks=checks, wait=wait, rerun=rerun):
+                waiting = dataclasses.replace(pr(checks=checks, reviews=[blind],
+                                                 labels={'agent:changes'}),
+                                              ci_wait=wait, rerun_waiting=rerun)
+                self.assertEqual([a.kind for a in plan(SimpleNamespace(
+                    prs=[waiting], ready_issues=[], working_issues=[], supervised=[]), CFG)],
+                    kinds)
+        # A review that saw its CI goes to the fix at once, as before.
+        known = pr(checks='pending', reviews=[seen], labels={'agent:changes'})
+        self.assertEqual([a.kind for a in plan(SimpleNamespace(
+            prs=[known], ready_issues=[], working_issues=[], supervised=[]), CFG)], ['fix'])
         missing = dataclasses.replace(pr(checks='none'), ci_missing=['unittest'])
         self.assertEqual(plan(SimpleNamespace(prs=[missing], ready_issues=[], working_issues=[],
                                               supervised=[]), CFG),

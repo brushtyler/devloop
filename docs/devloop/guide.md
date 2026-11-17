@@ -32,8 +32,10 @@ The review starts while the CI of the head runs (#271), and the reviewer is told
 once the CI of the **same head** passes, without a second review. If that CI fails, the approval
 does not count for the merge: the failure becomes a CI round, counted as today, and the PR goes
 to `agent:changes` for the fix (or its failed jobs are re-run once, when no failed test module is
-pertinent to the PR). A CI that already failed before the review sends the PR to the fix without
-a review, as before. A PR with the [level 0](reference.md#level-0-no-review) label, when level 0
+pertinent to the PR). A review that asks for changes while the CI runs sends the PR to
+`agent:changes`, but the fix waits for that CI: if it fails, the failure becomes a CI round and
+the same fix answers the reviewer's findings and the CI failure together. A CI that already
+failed before the review sends the PR to the fix without a review, as before. A PR with the [level 0](reference.md#level-0-no-review) label, when level 0
 is enabled, has no review to start early: it still waits for its CI.
 
 A head just pushed, without CI yet, is reviewed as if its CI were pending: with `local_tests`
@@ -119,8 +121,9 @@ new review of the same commit:
    The lines below it can explain the decision.
 2. Remove `agent:needs-operator` and set `agent:review`.
 
-The next tick runs a new review. It is a new round: it waits for CI like any review, and it
-does not start once `max_review_rounds` is reached. The reviewer's prompt includes every
+The next tick runs a new review. It is a new round: like any review it may start while the CI
+of the head runs, and an approval leads to `agent:ready-to-merge` only once the CI of the same
+head passes; it does not start once `max_review_rounds` is reached. The reviewer's prompt includes every
 comment the trusted users wrote after the previous verdict. Only a request written after the
 latest verdict counts, so it starts one review: once the new verdict is recorded, that verdict
 is replayed again until another request. The request is ignored when it comes from anyone

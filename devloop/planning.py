@@ -474,8 +474,19 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
         # is left to fix, and the head needs a new review.
         settled = verdict == 'request_changes' and bool(pr.closures) and not still_open
         if lb.changes in pr.labels:
-            actions.append(Action('reconcile', pr.number, 'every open finding is closed')
-                           if settled else Action('fix', pr.number))
+            blind = not settled and changes_before_ci(pr)
+            if settled:
+                actions.append(Action('reconcile', pr.number, 'every open finding is closed'))
+            elif blind and (pr.checks == 'pending' or pr.ci_wait
+                            or (pr.checks == 'fail' and pr.rerun_waiting)):
+                # The review asked for changes with the CI of this head running (#271): the
+                # fix waits for its outcome, so that a failure joins the same fix.
+                continue
+            elif blind and pr.checks == 'fail':
+                actions.append(Action('ci_failed', pr.number, 'CI failed after the review')
+                               if rounds_left else Action('round_limit', pr.number))
+            else:
+                actions.append(Action('fix', pr.number))
         elif lb.review in pr.labels:
             answered = bool(latest) and any(f['round'] == latest[0]['round'] for f in pr.fixes)
             # A trusted user's rereview request voids the recorded verdict for this head.
@@ -701,6 +712,21 @@ def _resynced(reviews, record):
             and not pending_reviewers(approved) and round_verdict(approved) == 'approve'
             and all(r.get('head_sha') == resync.get('from') for r in approved)
             and same == (resync['reason'] == BASE_CHANGED))
+
+
+def ci_unknown(records):
+    """Whether a reviewer of the round ``records`` judged its head before the CI outcome was
+    known (#271): its record says CI ``pending``, also for a head without CI yet in the window
+    of #263."""
+    return any(r.get('ci') == 'pending' for r in records)
+
+
+def changes_before_ci(pr):
+    """Whether ``pr``, in agent:changes, waits for the CI of its head before the fix (#271):
+    its latest round asked for changes on this very head before the CI outcome was known.
+    A CI that then fails joins the same fix as a ``ci_failed`` round."""
+    latest = current_round(pr.reviews)
+    return bool(latest) and latest[0]['head_sha'] == pr.head_sha and ci_unknown(latest)
 
 
 def counted_rounds(reviews):

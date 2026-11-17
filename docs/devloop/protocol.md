@@ -165,6 +165,14 @@ same head decides what the approval is worth:
 - **No CI after the window.** With `local_tests` other than `full` the full suite runs locally
   before the promotion; if it fails, the PR goes to `agent:needs-operator`.
 
+A round that asks for changes while the CI is pending, or within the window, sends the PR to
+`agent:changes`, and the fix waits for the CI of the same head. If that CI fails, the failure
+becomes a CI round first, as above (or its failed jobs are re-run once), and the one fix that
+follows answers the reviewer's findings and the CI failure together. If it passes, or the
+window ends without CI, the fix starts with the reviewer's findings; checks the base branch
+requires and that never appeared are not escalated then: the fix pushes a new head, which gets
+its own CI.
+
 A CI already failed before the review is a CI round, as before: no review runs on that head.
 
 ## PR marker

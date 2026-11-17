@@ -175,7 +175,8 @@ whole suite locally ([Local tests](#local-tests)) while the CI is about to start
 in `agent:review` whose head has no CI at all is treated as if its CI were pending (#271): the
 review starts, its prompt says the CI is `pending`, and no full suite runs locally. An approval
 waits for the CI of that head, as with a CI pending: it is applied, without a new review, once
-the CI passes.
+the CI passes. A request for changes waits for it too, in `agent:changes`, so that a CI failure
+joins the same fix (see [Approval and CI](protocol.md#approval-and-ci)).
 
 - **Grace window.** The wait lasts `[ci] grace_minutes` (default 5) from the push of the head:
   the push the running dispatcher made (implement, fix, sync), else the commit date of the head
