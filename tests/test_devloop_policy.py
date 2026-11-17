@@ -196,7 +196,7 @@ class PolicyDispatcherTests(unittest.TestCase):
         self.assertEqual(self.runner.calls, [])
         self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
         body = self.gh.comments[-1][1]
-        self.assertTrue(body.startswith('> [!NOTE]\n> **Agent:** devloop dispatcher'))
+        self.assertTrue(body.startswith('> [!NOTE]\n> **Bot:** devloop dispatcher'))
         self.assertIn('livello 2', body)
         self.assertIn(why, body)
         record = markdown.read_marker(body, 'policy')
@@ -244,7 +244,7 @@ class PolicyDispatcherTests(unittest.TestCase):
         self.assertEqual(markdown.read_marker(review_body, 'review')['receipt'], receipt())
         record = markdown.read_marker(promotion, 'policy')
         self.assertEqual((record['event'], record['receipt']), ('promoted', receipt()))
-        self.assertTrue(promotion.startswith('> [!NOTE]\n> **Agent:** devloop dispatcher'))
+        self.assertTrue(promotion.startswith('> [!NOTE]\n> **Bot:** devloop dispatcher'))
 
     def test_ci_round_records_a_receipt(self):
         d = self.make()

@@ -287,7 +287,7 @@ class OperatorCommandTests(Flow, unittest.TestCase):
         self.d.tick()
         (closed,) = self.published('finding')
         self.assertEqual(closed['closed'][0]['reason'], 'corretto a mano in #12')
-        self.assertIn('**Agent:** devloop dispatcher', self.gh.comments[-1][1])
+        self.assertIn('**Bot:** devloop dispatcher', self.gh.comments[-1][1])
         # Nothing left to fix: back to review, then a new review of the head.
         self.assertEqual([a.kind for a in self.planned()], ['reconcile'])
         self.d.tick()

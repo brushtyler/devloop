@@ -240,7 +240,7 @@ class StrictTests(Case):
         self.assertEqual(record, {'head': SHA1, 'level': 1, 'mode': 'strict',
                                   'receipt': receipt()})
         body = self.gh.comments[-1][1]
-        self.assertTrue(body.startswith('> [!NOTE]\n> **Agent:** devloop dispatcher'))
+        self.assertTrue(body.startswith('> [!NOTE]\n> **Bot:** devloop dispatcher'))
         self.assertIn('`--match-head-commit`', body)
 
     def test_the_merge_uses_its_own_client(self):

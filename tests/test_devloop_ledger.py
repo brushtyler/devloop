@@ -228,7 +228,7 @@ class LedgerDispatcherTests(unittest.TestCase):
         body = self.gh.thread[7][0]['body']
         self.assertIn('alla presa in carico', body)
         self.assertIn('non all\'istante della label', body)
-        self.assertTrue(body.startswith('> [!NOTE]\n> **Agent:** devloop dispatcher'))
+        self.assertTrue(body.startswith('> [!NOTE]\n> **Bot:** devloop dispatcher'))
 
     def test_every_cli_invocation_is_a_turn_retries_included(self):
         report = agents.telemetry('claude', json.dumps(CLAUDE_ENVELOPE))

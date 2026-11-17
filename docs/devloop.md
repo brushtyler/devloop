@@ -964,14 +964,66 @@ link.
 
 ## Attribution
 
-Every text devloop publishes starts with the header that [AGENTS.md](../AGENTS.md) requires. The
-values come from the configured agent: CLI version from its `--version`, model and reasoning level
-as passed on the command line. A known version is cached for the life of the process; a failed
-`--version` is retried at the next publication, and the header says `CLI non noto` only for texts
-published while it keeps failing. When a turn ran on a [fallback model](#fallback-models), the
-header names that model and its reasoning level, not the configured ones. Text the dispatcher
-writes on its own, such as escalations and CI rounds, names `devloop dispatcher` as the agent and
-no model.
+Every text devloop publishes starts with an attribution header. This section is the reference for
+its format: [AGENTS.md](../AGENTS.md) only tells the agents to add no header in devloop turns, and
+keeps the Agent, Model and Reasoning Level header for texts an agent publishes outside devloop
+with its own identity. The dispatcher composes the header in one place (`markdown.attribution`)
+as a single `> [!NOTE]` block (#232). It opens with `Bot`, the name of the identity that
+publishes, and `Version`, the version of devloop:
+
+- text the dispatcher writes on its own, such as markers, escalations, CI rounds, merges, ledger
+  records and closed findings, comes from a bot without AI: the block holds `Bot` and `Version`
+  only;
+- text of an AI agent (review, fix, implementation, readiness check, `Lavoro bloccato`) adds, in
+  the same block, the agent with its CLI version, the model and the reasoning level.
+
+```markdown
+> [!NOTE]
+> **Bot:** devloop dispatcher
+> **Version:** 0123456789ab
+```
+
+```markdown
+> [!NOTE]
+> **Bot:** devloop codex-agent
+> **Version:** 0123456789ab
+> **Agent:** Codex (CLI v0.5.1)
+> **Model:** GPT-5.5
+> **Reasoning Level:** High
+```
+
+`Bot` is `devloop dispatcher` for the dispatcher and `devloop <key>-agent` for the agent
+configured as `[agents.<key>]` (`devloop claude-agent`, `devloop codex-agent`, `devloop
+agy-agent`); the merger, if it ever publishes texts, will be `devloop merger`. `Version` is the first 12 characters of the commit in the `pin.json` of the
+[pinned copy](#run-from-a-pinned-installation) in use. Without a pinned copy, in development or
+in the tests, it is the commit of the checkout devloop runs from, if that directory is the top
+level of a git checkout, otherwise `non nota`. It is read once per process: a new pin starts a
+new process.
+
+The agent's values come from the configured agent: CLI version from its `--version`, model and
+reasoning level as passed on the command line. A known version is cached for the life of the
+process; a failed `--version` is retried at the next publication, and the header says `CLI non
+noto` only for texts published while it keeps failing. When a turn ran on a
+[fallback model](#fallback-models), the header names that model and its reasoning level, not the
+configured ones. The agents add no header of their own to the text they return (summary,
+findings, notes, PR body): the dispatcher would duplicate it.
+
+Texts published before #232 carry the agent header alone, without `Bot` and `Version`; the
+dispatcher's names `devloop dispatcher` as the agent and no model:
+
+```markdown
+> [!NOTE]
+> **Agent:** devloop dispatcher
+> **Model:** nessuno (testo generato dal dispatcher)
+> **Reasoning Level:** n/a
+```
+
+All forms stay valid: devloop
+recognizes its texts by the `> [!NOTE]` that opens every header, by the identity that wrote them
+and, for records, by a valid marker, never by the header alone. A text with the `Bot` header from
+an identity that may not write devloop records is no record. `operator_comments` leaves out texts
+with any of these headers, and the `/devloop` commands are read on the first line after any of
+them.
 
 ## Who does what
 
