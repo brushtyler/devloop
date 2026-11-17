@@ -59,6 +59,9 @@ class MapConfigTests(unittest.TestCase):
                          ['docs/architecture.md', 'docs/devloop/guide.md'])
         self.assertEqual(CFG.docs.documents(['scripts/devloop-pinned']),
                          {'docs/devloop/guide.md': ['scripts/devloop-pinned']})
+        # #246: the development guide (ADR 0003, I9) describes the test runner.
+        self.assertEqual(CFG.docs.documents(['scripts/run-tests.py']),
+                         {'docs/development.md': ['scripts/run-tests.py']})
         # #242: the README is an index (ADR 0003, I6); the engine maps to the getting-started guide.
         for path in ('orchestrator.py', 'ssdlc_tasks.py', 'ssdlc_controller.py'):
             self.assertEqual(CFG.docs.documents([path]),
@@ -311,6 +314,33 @@ class DocumentationTests(unittest.TestCase):
                        'checks its shape only', 'omitted from the list'):
             self.assertIn(phrase, section)
         self.assertIn('documentation map](#documentation-map)', text)
+
+
+class GuideWithoutDuplicatesTests(unittest.TestCase):
+    """docs/devloop/guide.md links to ADR 0002 and describes the merge modes once (#243)."""
+
+    def setUp(self):
+        self.text = (REPO / 'docs/devloop/guide.md').read_text(encoding='utf-8')
+        self.headings = [line for line in self.text.splitlines() if line.startswith('#')]
+
+    def test_the_merge_modes_are_described_once(self):
+        self.assertEqual([h for h in self.headings if 'merge modes' in h.lower()],
+                         ['## Merge modes'])
+        # One table of the modes, and none copied from ADR 0002.
+        self.assertEqual(self.text.count('| `mode` | Who merges |'), 1)
+        self.assertNotIn('| Mode | Who decides | Behaviour |', self.text)
+        self.assertEqual(self.text.count('The most restrictive of that mode and `mode` applies'), 1)
+        self.assertEqual(self.text.count('a `[merge.levels]` override `"off"`'), 0)
+
+    def test_the_roles_of_adr_0002_are_a_link(self):
+        start = self.text.index('\n## Who does what\n')
+        section = self.text[start:self.text.index('\n## ', start + 1)]
+        self.assertIn('](../adr/0002-ruoli-e-responsabilita.md)', section)
+        self.assertNotIn('|', section)
+        # The role table and the critical and non-critical lists of ADR 0002 are not copied.
+        for copied in ('| Role | Actor today |', '| **Operator** |', '| **Supervisor** |',
+                       '**Critical: always to the operator', '**Non-critical: in `auto`'):
+            self.assertNotIn(copied, self.text)
 
 
 if __name__ == '__main__':

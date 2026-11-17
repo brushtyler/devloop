@@ -6,6 +6,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -924,8 +925,117 @@ class LauncherTests(unittest.TestCase):
         section = ' '.join(text[start:text.index('#### Pin\n', start)].split())
         self.assertIn('disable their automatic updates: for Claude Code, '
                       '`DISABLE_AUTOUPDATER=1` in the launcher\'s environment', section)
-        self.assertIn('install them in the home of the `devloop` user, as `codex` and `agy`',
+        # #243: every agent CLI belongs to the devloop user, Claude Code included.
+        self.assertIn('install them in the home of the `devloop` user, Claude Code included',
                       section)
+
+    def installation(self):
+        """The guide from "Installation as a dedicated user" up to "Pin", whitespace joined."""
+        text = (REPO / 'docs' / 'devloop' / 'guide.md').read_text(encoding='utf-8')
+        start = text.index('#### Installation as a dedicated user')
+        return text[start:text.index('#### Pin\n', start)]
+
+    def subsection(self, heading):
+        section = self.installation()
+        start = section.index(f'#### {heading}\n')
+        end = section.find('\n#### ', start + 1)
+        return ' '.join(section[start:end if end >= 0 else len(section)].split())
+
+    def test_the_installation_path_goes_from_the_user_to_the_rollback(self):
+        # #243 (ADR 0003, I5): one path, in order: user, keys, CLIs, overlay, pin, start, rollback.
+        section = self.subsection('Installation as a dedicated user')
+        steps = ('**User and clone.**', '**Keys.**', '**Agent CLIs.**', '**Overlay.**',
+                 '**Pin.**', '**Checks.**', '**Start.**', '**Rollback.**')
+        positions = [section.index(step) for step in steps]
+        self.assertEqual(positions, sorted(positions))
+        for needle in ('sudo useradd --create-home devloop', 'install -d -m 700 /home/devloop/.ghapps',
+                       '<slug>.<date>.private-key.pem', 'mode `600`', 'config.local.toml',
+                       '`[pin] auto`', '`[run] alert_issue`', '(#rollback)',
+                       'devloop-pinned apps', 'devloop-pinned tick --dry-run'):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, section)
+
+    def test_the_first_pin_is_the_one_the_launcher_asks_for(self):
+        # The launcher without a pin names the command the installation runs first (#174).
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        with self.assertRaises(SystemExit) as raised:
+            load_launcher().command(tmp, ['run'])
+        message = str(raised.exception.code)
+        command = message[message.index('`') + 1:message.rindex('`')]
+        self.assertEqual(command, 'python3 -m devloop pin origin/main')
+        section = self.subsection('Installation as a dedicated user')
+        self.assertIn(f"sudo -u devloop -H sh -c 'cd ~/ssdlc && {command}'", section)
+        # Every later command runs the pinned copy as the devloop user, never as root.
+        self.assertIn('sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned',
+                      section)
+        self.assertNotIn('--allow-root', self.installation())
+
+    def test_the_agent_clis_belong_to_the_devloop_user(self):
+        section = self.subsection('Agent CLIs')
+        for needle in ('`~/.local/bin`',
+                       'npm install -g --prefix /home/devloop/.local @anthropic-ai/claude-code',
+                       '"autoUpdates": false', '"DISABLE_AUTOUPDATER": "1"',
+                       '`~/.claude/settings.json`', '**codex** and **agy**',
+                       '**Updating them by hand, with the loop stopped**', '`STOP` file',
+                       'remove `STOP` and start `devloop run` again'):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, section)
+
+    def test_starting_and_stopping_the_loop_is_documented(self):
+        section = self.subsection('Starting and stopping the loop')
+        for needle in ('PYTHONUNBUFFERED=1 nohup python3 scripts/devloop-pinned run',
+                       '**Unbuffered log.**', 'touch /home/devloop/ssdlc/.ssdlc/devloop/STOP',
+                       'rm /home/devloop/ssdlc/.ssdlc/devloop/STOP', '**`[pin] auto`.**',
+                       '**`[run] alert_issue`.**', 'exit code 4'):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, section)
+        # The process the launcher starts keeps the operator's environment, PYTHONUNBUFFERED too.
+        self.fake_copy()
+        with mock.patch.dict(os.environ, {'PYTHONUNBUFFERED': '1'}):
+            _, env = load_launcher().command(self.root, ['run'])
+        self.assertEqual(env['PYTHONUNBUFFERED'], '1')
+
+    def test_the_start_command_finds_the_clis_in_the_home_of_the_devloop_user(self):
+        # `sh -c` under sudo is not a login shell: the command itself must put ~/.local/bin on
+        # the PATH, the same as the unit, or the agents' CLIs are not found (#243).
+        text = (REPO / 'docs' / 'devloop' / 'guide.md').read_text(encoding='utf-8')
+        unit = next(line.removeprefix('Environment=PATH=') for line in text.splitlines()
+                    if line.startswith('Environment=PATH='))
+        line = next(line for line in self.installation().splitlines()
+                    if 'nohup python3 scripts/devloop-pinned run' in line)
+        argv = shlex.split(line)
+        self.assertEqual(argv[:6], ['sudo', '-u', 'devloop', '-H', 'sh', '-c'])
+        script = argv[6]
+        self.assertIn(f'PATH={unit} ', script)
+        self.assertTrue(script.endswith(' &'))
+        # The documented command, in the foreground, for a home of its own and with the PATH
+        # of a sudo that leaves out ~/.local/bin.
+        home = self.tmp / 'home'
+        root = home / 'ssdlc'
+        (root / 'scripts').mkdir(parents=True)
+        shutil.copy(LAUNCHER, root / 'scripts' / 'devloop-pinned')
+        state = root / '.ssdlc' / 'devloop'
+        copy = state / 'pinned-0123456789ab'
+        self.write(copy / 'devloop' / '__init__.py', '')
+        self.write(copy / 'devloop' / '__main__.py', (
+            'import json, os, shutil\n'
+            'print(json.dumps({"claude": shutil.which("claude"), '
+            '"unbuffered": os.environ.get("PYTHONUNBUFFERED")}))\n'))
+        os.symlink(copy.name, state / 'current')
+        bin_dir = home / '.local' / 'bin'
+        self.write(bin_dir / 'claude', '#!/bin/sh\necho fake\n')
+        (bin_dir / 'claude').chmod(0o755)
+        os.symlink(sys.executable, bin_dir / 'python3')
+        minimal = {'PATH': '/usr/bin:/bin', 'HOME': str(home)}
+        self.assertIsNone(shutil.which('claude', path=minimal['PATH']))
+        foreground = script[:-len(' &')].replace('/home/devloop', str(home))
+        proc = subprocess.run(['/bin/sh', '-c', foreground], env=minimal, cwd=self.tmp,
+                              capture_output=True, text=True, timeout=120)
+        log = (state / 'run.log').read_text()
+        self.assertEqual(proc.returncode, 0, log)
+        seen = json.loads(log.splitlines()[-1])
+        self.assertEqual(seen, {'claude': str(bin_dir / 'claude'), 'unbuffered': '1'})
 
 
 class RestartTests(unittest.TestCase):
