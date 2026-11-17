@@ -123,6 +123,14 @@ operator_only_paths = ["docs/adr/", "AGENTS.md", "CLAUDE.md"]
 # [merge.levels]
 # "2" = "off"
 
+# Pinned installation (issue #174, see docs/devloop.md). With auto = true, after a merge by
+# devloop whose diff touches devloop/ or a file of review_policy.sensitive_path_lists, the next
+# tick runs `pin origin/<base_branch>` before planning, and `run` and `tick` start again from the
+# new copy; a failed pin stops the tick and leaves the pinned copy as it was. Enabling it is the
+# operator's decision.
+[pin]
+auto = false
+
 [roles]
 # The agent whose GitHub identity may hold and release merges in "auto" mode (issue #172),
 # besides trusted_users. Its app's agent:ready and priority labels count too, but only on issues
