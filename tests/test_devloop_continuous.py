@@ -543,6 +543,34 @@ class PlanAroundRunningTests(unittest.TestCase):
         self.assertEqual(self.kinds(plan(self.snap(), cfg, busy={8})),
                          [('fix', 100), ('implement', 9)])
 
+    def test_merges_waiting_for_the_lane_take_no_slot_of_the_plan(self):
+        # #264: with a limit of 3, three ready PRs and a review, the merges that cannot start
+        # do not fill the plan and leave the review waiting behind them.
+        def ready_pr(number, issue):
+            p = pr(number, issue=issue, labels=[READY], reviews=[norm(raw_review())])
+            p.mergeable, p.merge_status, p.merge_mode = 'MERGEABLE', 'CLEAN', 'strict'
+            return p
+        snap = Snapshot(prs=[ready_pr(100, 7), ready_pr(101, 8), ready_pr(102, 10),
+                             pr(103, issue=11, labels=['agent:review'])],
+                        ready_issues=[], working_issues=[])
+        cfg = dataclasses.replace(STRICT, max_parallel_actions=4, max_open_prs=5,
+                                  max_actions_per_tick=3)
+        issue_of = {p.number: p.issue for p in snap.prs}
+        # A tick keeps every merge, each a phase of its own, up to the limit.
+        self.assertEqual(self.kinds(plan(snap, cfg)),
+                         [('merge', 100), ('merge', 101), ('merge', 102)])
+        merges = [('merge', 100), ('merge', 101), ('merge', 102)]
+        # A merge runs: the review starts in a free slot, no merge does.
+        running = [(Action('merge', 99), frozenset({99, 12}))]
+        actions = plan(snap, cfg, busy={99, 12}, merging=True)
+        self.assertEqual(self.kinds(actions), merges + [('review', 103)])
+        self.assertEqual(self.kinds(admit(actions, issue_of, running, 3)), [('review', 103)])
+        # No merge runs: the first merge starts with the review.
+        actions = plan(snap, cfg, merging=False)
+        self.assertEqual(self.kinds(actions), merges + [('review', 103)])
+        self.assertEqual(self.kinds(admit(actions, issue_of, [], 4)),
+                         [('merge', 100), ('review', 103)])
+
     def test_reserved_slots_count_against_max_open_prs(self):
         cfg = dataclasses.replace(PCFG, max_open_prs=4, max_actions_per_tick=10)
         self.assertEqual(self.kinds(plan(self.snap(), cfg, busy={9}, reserved=1)),
@@ -595,6 +623,32 @@ class ContinuousTickTests(unittest.TestCase):
         self.assertEqual(d.tick(), [])
         d.snapshot.assert_not_called()
         pinner.pin.assert_not_called()
+        self.release.set()
+
+    def test_a_pin_requested_during_the_snapshot_starts_nothing(self):
+        # #264: a merge running alongside may end and request the pin while the tick reads
+        # GitHub; the tick, which saw no request before reading, starts nothing after it.
+        requests = []
+        pinner = mock.Mock()
+        pinner.pending.side_effect = lambda: requests[-1] if requests else None
+        d = self.make(pinner=pinner)
+        d.cfg = dataclasses.replace(PCFG, pin=dataclasses.replace(PCFG.pin, auto=True))
+        d.snapshot = lambda: Snapshot([], [ready(9)], [])
+        self.assertEqual(d.tick(), [Action('implement', 9)])
+
+        def snapshot():
+            requests.append({'pr': 100})  # the merge of #100 ends now
+            return Snapshot([], [ready(9), ready(10)], [])
+        d.snapshot = snapshot
+        logs = []
+        d.log.sink = logs.append
+        self.assertEqual(d.tick(), [])
+        self.assertEqual([action for action, _ in d.workers.running()],
+                         [Action('implement', 9)])
+        self.assertEqual(self.ran, [9])
+        pinner.pin.assert_not_called()
+        self.assertIn('auto-pin requested during the tick: no action starts until the running '
+                      'ones end', logs)
         self.release.set()
 
     def test_a_manual_tick_keeps_the_barrier(self):

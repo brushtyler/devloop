@@ -623,13 +623,17 @@ def pr_counts_line(snapshot, cfg):
             f'{held}/{cfg.max_parked_prs} parked (max_parked_prs)')
 
 
-def plan(snapshot, cfg, busy=frozenset(), reserved=0):
+def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
     """Pure planning: the actions one tick should take, in order.
 
     In continuous mode (#227) ``busy`` holds the numbers of the issues and PRs that actions
     still running touch (``numbers_of``): no action of the plan touches them. ``reserved`` is
     how many of those actions may open a PR (an implementation, a readiness check, a supervisor
-    command on an issue): each holds a slot of ``max_open_prs``, as it did in its own tick."""
+    command on an issue): each holds a slot of ``max_open_prs``, as it did in its own tick.
+    ``merging`` tells whether a merge runs (continuous mode only, None in a tick): merges run one
+    at a time (``MERGE_LANE``, #264), so only the first merge of the plan, and none while one
+    runs, takes a slot of ``max_actions_per_tick``. The others stay in the plan, where ``admit``
+    holds them back with their numbers, and take no slot from the actions that can start now."""
     lb = cfg.labels
     actions = []
     issue_of = {pr.number: pr.issue for pr in snapshot.prs}
@@ -804,6 +808,12 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0):
     for action in actions:
         if busy and numbers_of(action.number, issue_of) & busy:
             continue  # still running (#227): the plan after it ends decides
+        if merging is not None and action.kind in MERGE_LANE:
+            if merging:
+                # The merge lane is taken (#264): ``admit`` holds it back, with its numbers.
+                capped.append(action)
+                continue
+            merging = True
         if action.kind in EXPENSIVE:
             if spent >= cfg.max_actions_per_tick:
                 continue
@@ -1239,6 +1249,10 @@ class Dispatcher:
         # Continuous mode (#227): set by ``devloop run`` with parallel actions, a tick starts
         # its actions in these ``Workers`` and does not wait for them.
         self.workers = None
+        # Held by a merge while it requests the pin (#174), and by a continuous tick while it
+        # checks for that request and starts its actions (#264): a request made during the
+        # tick either stops it or comes after its actions started.
+        self._pin_lock = threading.Lock()
 
     # Identities ------------------------------------------------------------
     def _as(self, actor, permissions) -> Backend:
@@ -2263,14 +2277,16 @@ class Dispatcher:
         them. Returns the actions started.
 
         The pin after a merge needs every action ended, since a new copy restarts the process:
-        while one is pending and something runs, nothing starts."""
+        while one is pending and something runs, nothing starts. A merge runs alongside the
+        others (#264) and may request the pin while this tick reads GitHub: the request is
+        checked again, under ``_pin_lock``, right before the actions start."""
         workers = self.workers
         # An action that ends from here on wakes the loop again: its result is not in this plan.
         workers.clear()
         running = workers.running()
         if not running:
             self._auto_pin(False)
-        elif self.pinner is not None and self.cfg.pin.auto and self.pinner.pending():
+        elif self._pin_pending():
             self.log(f'auto-pin pending: no action starts until the {len(running)} running '
                      'ones end')
             return []
@@ -2286,14 +2302,26 @@ class Dispatcher:
         reserved = sum(1 for action, _ in running
                        if action.kind in ('implement', 'preflight')
                        or action.kind == 'supervise' and action.number not in prs)
-        actions = plan(snap, self.cfg, busy, reserved)
+        merging = any(action.kind in MERGE_LANE for action, _ in running)
+        actions = plan(snap, self.cfg, busy, reserved, merging)
         started = admit(actions, issue_of, running, workers.free())
         self.log(f'{pr_counts_line(snap, self.cfg)}; running: '
                  + (', '.join(f'{a.kind} #{a.number}' for a, _ in running) or 'none'))
-        for action in started:
-            workers.start(action, numbers_of(action.number, issue_of),
-                          lambda action=action: self._run_started(action, prs))
+        with self._pin_lock:
+            if started and self._pin_pending():
+                # Requested by a merge that ended while this tick read GitHub: drain, and pin
+                # once the running actions end.
+                self.log('auto-pin requested during the tick: no action starts until the '
+                         'running ones end')
+                return []
+            for action in started:
+                workers.start(action, numbers_of(action.number, issue_of),
+                              lambda action=action: self._run_started(action, prs))
         return started
+
+    def _pin_pending(self):
+        """Whether an automatic pin after a merge (#174) waits for its turn."""
+        return bool(self.pinner is not None and self.cfg.pin.auto and self.pinner.pending())
 
     def _run_started(self, action, prs):
         """Run an action of the continuous mode in its worker thread, as a lane of one, and log
@@ -3387,7 +3415,8 @@ class Dispatcher:
         if self.pinner is not None and cfg.pin.auto and cfg.pin.touches(paths):
             # The next tick pins the base with this merge, before planning (#174).
             try:
-                self.pinner.request(pr.number, head)
+                with self._pin_lock:
+                    self.pinner.request(pr.number, head)
                 self.log(f'  auto-pin of origin/{cfg.base_branch} requested for the next tick')
             except OSError as exc:
                 self.log(f'  auto-pin NOT requested, pin by hand: {exc}')

@@ -1865,7 +1865,8 @@ implementation or local test suite to end, and while it is planned or running it
 other action (a review, a readiness check, a fix). Merges have a lane of their own: **one merge
 at a time**. A merge planned while another one runs waits for a later tick, and still keeps its
 PR and its issue: no other action on them starts meanwhile. A merge takes a slot of
-`max_parallel_actions` like any action.
+`max_parallel_actions` like any action. Of `max_actions_per_tick`, a tick spends a slot only on
+the merge that can start: the merges waiting for the lane leave the slots to the other actions.
 
 Why a merge may run alongside the other actions:
 
@@ -1881,7 +1882,9 @@ Why a merge may run alongside the other actions:
 - actions on the same PR or on its issue never run with its merge, as for any action.
 
 The [pin after a merge](#pin-after-a-merge) stays global: after a merge that requests it, no
-new action starts until the running ones end, then the pin runs with nothing running. In
+new action starts until the running ones end, then the pin runs with nothing running. A tick
+checks for the request again right before it starts its actions, so a merge that requests the
+pin while the tick reads GitHub stops that tick's actions too. In
 `devloop tick` a merge still runs alone, as a global action
 ([Parallel actions](#parallel-actions)).
 
