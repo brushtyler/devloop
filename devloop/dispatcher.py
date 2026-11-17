@@ -2127,15 +2127,12 @@ class Dispatcher:
 
     # Memory of unavailable models (#151) -----------------------------------
     def _remembered(self, models, candidate):
-        """The memory record that makes ``candidate`` skipped, or None: only for an agent with
-        fallback models, and only while a later model of ``models`` is not remembered, so that
-        a chain remembered whole is tried as before."""
+        """The memory record that makes ``candidate`` skipped until it expires, or None: only
+        for an agent with fallback models. Every remembered model is skipped, the last of the
+        chain too: a chain remembered whole runs no CLI."""
         if self.memory is None or not models.agent.fallback_models:
             return None
-        entry = self.memory.active(candidate.key, candidate.model)
-        if entry is None or all(self.memory.active(c.key, c.model) for c in models.left):
-            return None
-        return entry
+        return self.memory.active(candidate.key, candidate.model)
 
     def _remember(self, agent, candidate, exc):
         """Record ``candidate`` unavailable for ``agent``, until the reset the error announces
@@ -2182,9 +2179,11 @@ class Dispatcher:
         invocation as a turn (#133): written before the CLI starts, closed when it ends.
 
         With a memory (#151), an agent with fallback models records each model found
-        unavailable, and skips a remembered one, while a later model of the chain is not
-        remembered, without running it: it leaves ``models`` and is listed in ``models.skipped``
-        and on the configuration returned (``skipped``). A model that answers is forgotten."""
+        unavailable, and skips a remembered one until its record expires, without running it:
+        it leaves ``models`` and is listed in ``models.skipped`` and on the configuration
+        returned (``skipped``). When every model of the chain is remembered, no CLI runs and
+        the turn fails listing each one with its reason and time (``ModelsUnavailable``). A
+        model that answers is forgotten."""
         failed = None
         retried = set()  # the models already denied a permission in this call
         while models.left:

@@ -1623,8 +1623,9 @@ sometimes days later. So that each turn does not try it again first, devloop rem
   `pr`, `review`, `fix` or `sync` marker of the turn lists it in `skipped_models` with the
   reason and the time (informative only: no receipt, independence check or approval reads
   it), the comment of a failure lists it among the models tried, and `devloop status` shows
-  each remembered model with its time and reason. When every model left in the chain is
-  remembered, the turn tries them in order as it would without memory.
+  each remembered model with its time and reason. When every model of the chain is
+  remembered, the turn runs no CLI: it fails as when no model is available, and the comment
+  lists each model with its reason and the time it is expected back.
 - **After.** Once that time has passed, the model is tried again. A new failure records it
   again, with a new time; a turn that succeeds on it forgets it.
 - **Reset.** `devloop fallback reset <agent>` forgets every model remembered for that agent,

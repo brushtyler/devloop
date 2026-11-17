@@ -192,16 +192,56 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(meta['skipped_models'], [{'model': ARGON, 'reason': 'quota',
                                                    'until': unavailability.iso(T0 + 60)}])
 
-    def test_a_chain_remembered_whole_is_tried_as_before(self):
+    def test_a_chain_remembered_whole_runs_no_cli_until_the_resets(self):
         memory = self.memory()
         memory.record('agy', ARGON, 'quota', T0 + 60)
-        memory.record('agy', HYDROGEN, 'quota', T0 + 60)
-        d = self.make(FakeRunner({'status': 'ok'}))
-        output, used = d._turn(Models(CFG.agent('agy')), 'review', 'p', 'review', '/wt', 'x')
+        memory.record('agy', HYDROGEN, 'limit', T0 + 120)
+        runner = FakeRunner({'status': 'ok'})
+        d = self.make(runner)
+        with self.assertRaises(agents.ModelsUnavailable) as ctx:
+            d._turn(Models(CFG.agent('agy')), 'review', 'p', 'review', '/wt', 'x')
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(ctx.exception.tried, [
+            (ARGON, f'skipped: unavailable until {unavailability.iso(T0 + 60)} (quota)'),
+            (HYDROGEN, f'skipped: unavailable until {unavailability.iso(T0 + 120)} (limit)')])
+        self.assertIn('no model of `agy` was available', str(ctx.exception))
+        # Once the first reset has passed, the primary is tried again; Hydrogen stays skipped.
+        self.clock.now = T0 + 60
+        runner = FakeRunner({'status': 'ok'})
+        output, used = self.make(runner)._turn(Models(CFG.agent('agy')), 'review', 'p',
+                                               'review', '/wt', 'x')
         self.assertEqual((output, used.model, used.skipped), ({'status': 'ok'}, ARGON, ()))
-        # The model that answered is forgotten, the other one is not.
+        self.assertEqual(len(runner.calls), 1)
         self.assertIsNone(self.memory().active('agy', ARGON))
         self.assertIsNotNone(self.memory().active('agy', HYDROGEN))
+
+    def test_a_chain_found_unavailable_whole_is_not_run_again_before_the_resets(self):
+        # Both models of the chain fail, Argon with the real fixture and Hydrogen without a
+        # reset: a second later, after a restart, the next turn runs no CLI at all.
+        cfg = config.parse_config(with_agent('agy', fallback_memory_seconds=600))
+        replies = {'gemini_4_argon_high': FIXTURE, 'gemini_4_hydrogen_high': (1, '', QUOTA)}
+        cli = FakeCLI(**replies)
+        runner = agents.AgentRunner(Path(self.tmp.name) / 'logs', 10, run=cli, clock=self.clock)
+        with self.assertRaises(agents.ModelsUnavailable):
+            self.make(runner, cfg)._turn(Models(cfg.agent('agy')), 'review', 'p', 'review',
+                                         self.tmp.name, 'x')
+        self.assertEqual(cli.models(), [ARGON, HYDROGEN])
+
+        self.clock.now = T0 + 1
+        cli = FakeCLI(**replies)
+        runner = agents.AgentRunner(Path(self.tmp.name) / 'logs', 10, run=cli, clock=self.clock)
+        with self.assertRaises(agents.ModelsUnavailable) as ctx:
+            self.make(runner, cfg)._turn(Models(cfg.agent('agy')), 'review', 'p', 'review',
+                                         self.tmp.name, 'x')
+        self.assertEqual(cli.models(), [])
+        (argon, why_argon), (hydrogen, why_hydrogen) = ctx.exception.tried
+        self.assertEqual((argon, hydrogen), (ARGON, HYDROGEN))
+        self.assertIn(f'until {unavailability.iso(T0 + FIXTURE_RESET)}', why_argon)
+        self.assertIn('RESOURCE_EXHAUSTED', why_argon)
+        self.assertIn(f'until {unavailability.iso(T0 + 600)}', why_hydrogen)
+        log = '\n'.join(self.logs)
+        self.assertIn(f'agy: model {HYDROGEN} skipped: unavailable until '
+                      f'{unavailability.iso(T0 + 600)}', log)
 
     def test_a_failure_after_a_skip_lists_the_skipped_model(self):
         self.memory().record('agy', ARGON, 'quota', T0 + 60)
