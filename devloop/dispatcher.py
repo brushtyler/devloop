@@ -107,6 +107,12 @@ Requested fixes (#195): ``/devloop fix`` from a trusted user or the supervisor's
 PR in agent:review or agent:changes, runs a fix of the current head with the rest of the comment
 as a requirement, without a review and without a round (``_do_requested_fix``). One such fix per
 head: a later command on the same head counts only after a new commit (``_fix_requests``).
+
+CI of a new head (#263, ``[ci]``): with ``local_tests`` other than ``full``, a PR in agent:review
+whose head has no CI is not reviewed for ``grace_minutes`` after its push, as if its CI were
+pending (``_ci_wait``): the push the dispatcher recorded, else the commit date. Then the full
+suite runs locally, as before, unless the base branch requires checks: the review waits for
+them, and after ``required_timeout_minutes`` the PR is escalated (``ci_missing``).
 """
 
 import hashlib
@@ -118,6 +124,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 
 from .acceptance import (acceptance_criteria, acceptance_findings, format_criteria, format_map,
@@ -284,6 +291,21 @@ class PullRequest:
     # not started yet, and the failure is not a new one.
     reruns: list = field(default_factory=list)
     rerun_waiting: bool = False
+    # In agent:review, a head without CI that the review waits for (#263): why, as the log says
+    # it ('' when it does not wait), and the checks the base branch requires that are still
+    # missing after ``required_timeout_minutes`` (empty unless the PR is to escalate).
+    ci_wait: str = ''
+    ci_missing: list = field(default_factory=list)
+
+
+def _timestamp(value):
+    """Seconds since the epoch of an ISO 8601 date with its zone, as GitHub writes them, or
+    None when ``value`` is not one."""
+    try:
+        moment = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    return moment.timestamp() if moment.tzinfo is not None else None
 
 
 def rerun_of(reruns, head):
@@ -745,6 +767,12 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0):
                 continue  # GitHub is still computing mergeability: next tick
             elif pr.checks == 'pending':
                 continue
+            elif pr.ci_missing:
+                # The checks the base branch requires never appeared on the head (#263).
+                actions.append(Action('ci_missing', pr.number, 'required checks missing: '
+                                      + ', '.join(pr.ci_missing)))
+            elif pr.ci_wait:
+                continue  # a head without CI yet (#263): as if its CI were pending
             elif pr.checks == 'fail' and pr.rerun_waiting:
                 continue  # the failed jobs were re-run (#200) and have not started yet
             elif replay and not unbound and not unmapped and pr.checks != 'fail':
@@ -1202,8 +1230,12 @@ class Dispatcher:
     status``. ``ledger`` (``ledger.Ledger``) records evidence and telemetry of each step (#133)."""
 
     def __init__(self, cfg, gh: Backend, ws, runner, log=print, identities=None, activity=None,
-                 ledger=None, merger=None, pinner=None, memory=None):
+                 ledger=None, merger=None, pinner=None, memory=None, clock=time.time):
         self.cfg = cfg
+        # Wall-clock seconds, and since when each head waits for its CI (#263): the time of
+        # the dispatcher's own push, else its commit date, read once.
+        self.clock = clock
+        self._ci_since = {}
         # The pin after a merge (#174, ``pin.AutoPin``), used only with ``[pin] auto = true``.
         self.pinner = pinner
         self.gh = gh
@@ -2007,6 +2039,9 @@ class Dispatcher:
                     details = (pr.check_details if pr.check_details is not None
                                else self.gh.check_details(pr.head_sha))
                     pr.rerun_waiting = rerun_waiting(record, details)
+                if (pr.meta and lb.review in pr.labels and pr.checks == 'none'
+                        and self.cfg.local_tests != 'full'):
+                    pr.ci_wait, pr.ci_missing = self._ci_wait(pr)
             if (lb.ready_to_merge in pr.labels and pr.zero_head is not None
                     and zero_labels_hold(pr, self.cfg.review_policy)):
                 pr.zero_problem = self._zero_problem(pr)
@@ -2046,6 +2081,58 @@ class Dispatcher:
         working = [raw['number'] for raw in self.gh.issues_with_label(lb.working)]
         return Snapshot(prs=prs, ready_issues=ready, working_issues=working,
                         supervised=self._supervised_items(prs))
+
+    def _pushed(self, path):
+        """Record that the head of worktree ``path`` was pushed now (#263): the wait for its CI
+        counts from here."""
+        self._ci_since[self.ws.head(path)] = self.clock()
+
+    def _ci_wait(self, pr):
+        """``(why, missing)`` for a PR in agent:review whose head has no CI, with ``local_tests``
+        other than ``full`` (#263). Within ``[ci] grace_minutes`` of the head's push the review
+        waits, as if its CI were pending (``why`` says it, and the log too). After that, when
+        the base branch requires checks, it waits for them up to ``required_timeout_minutes``,
+        and then ``missing`` lists them: the PR is escalated. Otherwise ``('', [])``: the full
+        suite runs locally before the review, as before.
+
+        The push counts from when this dispatcher pushed the head, else from the head's commit
+        date, read once; a date in the future, or one that cannot be read, counts from now, so
+        that the wait stays bounded."""
+        ci, sha = self.cfg.ci, pr.head_sha
+        now = self.clock()
+        since = self._ci_since.get(sha)
+        if since is None:
+            try:
+                committed = _timestamp(self.gh.commit_date(sha))
+            except GitHubError as exc:
+                self.log(f'  PR #{pr.number}: commit date of {sha[:12]} not read: {exc}')
+                committed = None
+            since = now if committed is None else min(committed, now)
+            self._ci_since[sha] = since
+        age = now - since
+        if age < ci.grace_minutes * 60:
+            why = (f'waiting for CI on {sha[:12]}: pushed {int(age)} s ago, within '
+                   f'[ci] grace_minutes = {ci.grace_minutes}')
+            self.log(f'  PR #{pr.number}: {why}')
+            return why, []
+        base = self.cfg.base_branch
+        try:
+            required = self.gh.required_checks(base)
+        except GitHubError as exc:
+            self.log(f'  PR #{pr.number}: the checks {base} requires not read, counted as none: '
+                     f'{exc}')
+            required = []
+        if not required:
+            return '', []
+        if age < ci.required_timeout_minutes * 60:
+            why = (f'waiting for CI on {sha[:12]}: {base} requires {", ".join(required)}, not '
+                   f'reported {int(age)} s after the push ([ci] required_timeout_minutes = '
+                   f'{ci.required_timeout_minutes})')
+            self.log(f'  PR #{pr.number}: {why}')
+            return why, []
+        self.log(f'  PR #{pr.number}: no CI on {sha[:12]} {int(age)} s after the push, but {base} '
+                 f'requires {", ".join(required)}')
+        return '', list(required)
 
     def _supervised_items(self, prs):
         """The issues and PRs in ``agent:needs-supervisor``, not in ``agent:needs-human``, with
@@ -3567,6 +3654,24 @@ class Dispatcher:
                                   'delle modifiche della descrizione) come ultima riga.',
                        remove=[lb.review, lb.changes, lb.ready_to_merge], cls='lost_meta')
 
+    def _do_ci_missing(self, pr):
+        """A head without CI, past ``[ci] required_timeout_minutes``, on a base branch that
+        requires checks (#263): to the operator, unless the head moved or some CI appeared."""
+        lb = self.cfg.labels
+        if self.gh.pr_head(pr.number) != pr.head_sha:
+            self.log('  head moved since the snapshot; retrying next tick')
+            return
+        if self.gh.checks(pr.head_sha)[0] != 'none':
+            self.log(f'  CI appeared on {pr.head_sha[:12]}; retrying next tick')
+            return
+        names = ', '.join(f'`{name}`' for name in pr.ci_missing)
+        self._escalate(pr.number, f'Sul head `{pr.head_sha[:12]}` non risulta alcuna CI '
+                                  f'{self.cfg.ci.required_timeout_minutes} minuti dopo il push, '
+                                  f'ma `{self.cfg.base_branch}` richiede i check {names}: la '
+                                  'review non parte senza la CI. Verificare che la CI sia '
+                                  'partita sul head, o rilanciarla.',
+                       remove=[lb.review], cls='ci_missing')
+
     def _do_round_limit(self, pr):
         lb = self.cfg.labels
         self._escalate(pr.number, f'Raggiunto il limite di {self.cfg.max_review_rounds} round di '
@@ -3630,6 +3735,7 @@ class Dispatcher:
         if protected:
             return self._escalate_protected(number, protected, remove=[lb.working])
         self.ws.push(path, branch, replace=True, auth=auth)
+        self._pushed(path)
         # The marker keeps the map the reviewer checks until a fix replaces it (#134).
         meta = {'issue': number, 'implementer': agent.key, 'reviewer': cfg.reviewer,
                 'profile': self._profile(agent.key, 'write', used),
@@ -4113,6 +4219,7 @@ class Dispatcher:
                 if protected:
                     return self._escalate_protected(pr.number, protected, remove=remove)
             self.ws.push(path, pr.head_ref, auth=auth)
+            self._pushed(path)
         if merged:
             # As for a sync without an agent (#133): an event, not a turn.
             self._ledger_event(pr.number, 'sync', base=merged['base'], head=merged['head'],
@@ -4262,6 +4369,7 @@ class Dispatcher:
         if protected:
             return self._escalate_protected(pr.number, protected, remove=remove)
         self.ws.push(path, pr.head_ref, auth=auth)
+        self._pushed(path)
         then = ('La PR torna in review sul nuovo head' if fix_remove is None else
                 'La correzione in attesa parte dal nuovo head al prossimo tick')
         text = (f'\n## Sincronizzazione con `{cfg.base_branch}`\n\n'

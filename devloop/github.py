@@ -306,6 +306,27 @@ class GitHub:
         self._gh('api', '-X', 'POST',
                  f'repos/{self.repo}/actions/runs/{int(run_id)}/rerun-failed-jobs')
 
+    def commit_date(self, sha):
+        """The committer date of commit ``sha``, as GitHub reports it (#263), or None."""
+        found = self._json('api', f'repos/{self.repo}/commits/{sha}',
+                           '--jq', '{date: .commit.committer.date}')
+        return (found or {}).get('date')
+
+    def required_checks(self, branch):
+        """The names of the checks required on ``branch`` (#263): those of the
+        ``required_status_checks`` rules of the rulesets that apply to it, and the contexts of
+        its classic branch protection, sorted and without repetitions."""
+        name = quote(branch)
+        rules = self._json_lines('api', '--paginate',
+                                 f'repos/{self.repo}/rules/branches/{name}?per_page=100',
+                                 '--jq', '.[] | select(.type == "required_status_checks") '
+                                         '| .parameters.required_status_checks[] | {context}')
+        found = {rule['context'] for rule in rules if rule.get('context')}
+        protection = self._json('api', f'repos/{self.repo}/branches/{name}',
+                                '--jq', '{contexts: .protection.required_status_checks.contexts}')
+        found.update(c for c in (protection or {}).get('contexts') or () if c)
+        return sorted(found)
+
     # Writes --------------------------------------------------------------
     def edit_labels(self, number, add=(), remove=()):
         if add:

@@ -156,6 +156,33 @@ The mode and the modules run (`local_tests`: `{mode, modules}`, only `{mode}` wi
 information only, to the markers of implement and fix: they are not part of the policy receipt
 and no approval depends on them.
 
+### CI of a new head
+
+In continuous mode a review can be planned a few seconds after a push, before GitHub registers
+the CI of the new head: with `local_tests` other than `"full"` the dispatcher would then run the
+whole suite locally ([Local tests](#local-tests)) while the CI is about to start (#263). So a PR
+in `agent:review` whose head has no CI at all waits, as if its CI were pending: the review is not
+planned and nothing runs locally.
+
+- **Grace window.** The wait lasts `[ci] grace_minutes` (default 5) from the push of the head:
+  the push the running dispatcher made (implement, fix, sync), else the commit date of the head
+  as GitHub reports it, read once. A date in the future, or one that cannot be read, counts from
+  the first time the dispatcher looks at the head, so the wait stays bounded.
+- **No CI after the window.** The [full suite runs locally](#local-tests) before the review, as
+  before.
+- **Required checks.** When the rulesets or the classic branch protection of `base_branch`
+  require checks, the review waits for them instead, up to `[ci] required_timeout_minutes`
+  (default 30) from the push. After that the PR goes to `agent:needs-human` with an escalation
+  of class `ci_missing`: it is not among the [classes](guide.md#escalations-to-the-supervisor),
+  so it is critical and always goes to the operator. If the required checks cannot be read, the
+  dispatcher writes a line to the tick log and counts them as none.
+
+The tick log says why a review waits, for example `PR #257: waiting for CI on 9ef3336dfbe6:
+pushed 12 s ago, within [ci] grace_minutes = 5`. With `local_tests = "full"` nothing waits: the
+gate stays the one of [Local tests](#local-tests). `grace_minutes` is a whole number of at least
+0 (0 turns the window off) and `required_timeout_minutes` one of at least 1; another value, or an
+unknown key of `[ci]`, stops devloop at startup.
+
 ### CI failures not pertinent to the PR
 
 A CI failure normally becomes a round (`ci_failed`). A failure that does not depend on the PR,

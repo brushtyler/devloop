@@ -26,6 +26,10 @@ plans the next steps and runs them. A crashed tick is resumed by the next one.
 | Level 0 | A trusted user's `reviews:0`, the whole diff in the operator's allowlist, every expected check `success` | `agent:ready-to-merge` without a review (see [Level 0](reference.md#level-0-no-review)); off by default |
 | Merge | `agent:ready-to-merge` | **A human merges** with `[merge].mode = "off"`, the default. With `"strict"` or `"auto"` devloop merges once every merge directive holds again (see [Merge modes](#merge-modes)) |
 
+A head just pushed, without CI yet, is not reviewed at once: with `local_tests` other than
+`full` the review waits for its CI for `[ci] grace_minutes`, and as long as `main` requires
+checks up to `[ci] required_timeout_minutes` (see [CI of a new head](reference.md#ci-of-a-new-head)).
+
 Readiness belongs to the approved commit. Every tick re-checks ready PRs:
 
 - if the head is no longer the approved commit, the approval is revoked and the PR goes back to

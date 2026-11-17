@@ -164,6 +164,17 @@ class FakeGH:
             raise self.rerun_error
         self.reruns = getattr(self, 'reruns', []) + [run_id]
 
+    # The committer date of every commit, and the checks the base branch requires (#263): an
+    # old commit and none by default, so that a head without CI is not waited for.
+    committed = '2026-01-01T00:00:00Z'
+    required = ()
+
+    def commit_date(self, sha):
+        return self.committed
+
+    def required_checks(self, branch):
+        return list(self.required)
+
 
 class SnapshotGH(FakeGH):
     """FakeGH with the reads of a snapshot: PR #100 for issue 7 at SHA1, with ``earlier``

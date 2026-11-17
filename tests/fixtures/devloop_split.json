@@ -387,6 +387,12 @@
     ["protocol", "dc35a027018ed387", "link"],
     ["protocol", "2f61de9e0fe04b37", "heading"],
     ["protocol", "dad745d17ff5a174", "link"],
-    ["protocol", "6aae63601da40d8c", "heading"]
+    ["protocol", "6aae63601da40d8c", "heading"],
+    ["guide", "6075f70616349bb2", "link"],
+    ["reference", "16397bd3df28117e", "heading"],
+    ["reference", "77c414bd4958a703", "link"],
+    ["reference", "cf6310b8261e3875", "link"],
+    ["reference", "4c3a5fbe27703ac5", "link"],
+    ["architecture", "b101d4bd5b9911aa", "link"]
   ]
 }

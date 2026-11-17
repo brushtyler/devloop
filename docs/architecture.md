@@ -137,6 +137,10 @@ The dispatcher reaches GitHub through three ports, declared in `devloop/ports.py
 | `CodeReview` | PRs and reviews: `open_prs`, `merged_prs`, `merge_state` (`clean`, `conflict` or `unknown`), `pr_head`, `pr_state`, `merge_pr`, `pr_reviews`, `create_pr`, `submit_review` |
 | `CI` | checks of a commit: `checks` (summarized by `summarize_checks`), `check_details`, `check_runs`, `failed_log`, `rerun_failed_jobs` (#200) |
 
+`CI` also has `commit_date` and `required_checks` (#263): the commit date of a head and the
+checks the base branch requires, for the wait for the
+[CI of a new head](devloop/reference.md#ci-of-a-new-head).
+
 The ports hold only the methods the dispatcher calls, with their current names and signatures,
 and return normalized data. `GitHub` (`devloop/github.py`) implements all three, and `Identities`
 (`devloop/apps.py`) hands one out for each actor: they are the concrete adapters. The
