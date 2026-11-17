@@ -12,7 +12,8 @@ from types import SimpleNamespace
 from unittest import mock
 
 from devloop import activity, agents, follow
-from devloop.dispatcher import Action, Dispatcher, Snapshot
+from devloop.dispatcher import Dispatcher
+from devloop.planning import Action, Snapshot
 from helpers.devloop_fakes import FakeGH
 from test_devloop import CFG, IMPL, FakeRunner, FakeWS, implemented, pr, raw_review, ready
 

@@ -15,11 +15,12 @@ from . import activity, follow, pin, report, runloop, unavailability, watch
 from .agents import AgentRunner, isolated_env
 from .apps import DISPATCHER, MERGER, Identities
 from .config import ConfigError, Reloader, load_config
-from .dispatcher import (Dispatcher, TickLog, Workers, both_labels_warning, ensure_labels,
-                         label_transition, plan, pr_counts_line, pr_status_line,
-                         queue_lines)
+from .context import both_labels_warning, label_transition
+from .dispatcher import (Dispatcher, TickLog, Workers, ensure_labels, pr_counts_line,
+                         pr_status_line)
 from .github import GitHub, GitHubError
 from .ledger import Ledger
+from .planning import plan, queue_lines
 from .stall import StallWatch
 from .workspace import Workspace
 

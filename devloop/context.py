@@ -4,7 +4,8 @@ Moved from ``devloop/dispatcher.py`` without changes (#292, step S2 of #261): th
 trusted users as prompt input, the prompt templates, the sections of the documentation map, the
 findings, fix requests and previous rounds of a fix or review prompt, the reasons and lists of
 the dispatcher's comments, and the transition of the operator label of #248 with the label
-styles it uses. ``devloop/dispatcher.py`` re-exports every name.
+styles it uses. Since #297 (step S7) ``devloop/dispatcher.py`` no longer re-exports these names:
+import them from here.
 """
 
 import string

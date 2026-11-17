@@ -12,8 +12,9 @@ from types import SimpleNamespace
 from devloop import markdown
 from devloop.agents import AgentRunner
 from devloop.apps import DISPATCHER
-from devloop.dispatcher import (Dispatcher, fix_command, merge_command, operator_comments,
-                                preflight_hash)
+from devloop.context import operator_comments
+from devloop.dispatch_supervision import fix_command, merge_command
+from devloop.dispatcher import Dispatcher, preflight_hash
 from devloop.supervision import supervisor_command
 from helpers.devloop_fakes import FakeGH
 from test_devloop import CFG, FakeRunner, FakeWS, pr

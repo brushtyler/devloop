@@ -18,9 +18,10 @@ from unittest import mock
 import devloop.__main__ as cli
 from devloop import activity, config, runloop
 from devloop.config import INSTALL_ROOT
-from devloop.dispatcher import Action, Dispatcher, Snapshot, Workers, admit, plan
+from devloop.dispatcher import Dispatcher, Workers
 from devloop.github import GitHub, GitHubError
 from devloop.pin import Repinned, SmokeError
+from devloop.planning import Action, Snapshot, admit, plan
 from devloop.watch import NOTHING_NEW
 from helpers.devloop_fakes import FakeGH
 from test_devloop import CFG, FakeRunner, FakeWS, norm, pr, raw_review, ready

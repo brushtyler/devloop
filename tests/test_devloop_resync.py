@@ -9,8 +9,9 @@ from pathlib import Path
 from unittest import mock
 
 from devloop import markdown
-from devloop.dispatcher import (RESYNC_AFTER_APPROVAL, Action, counted_rounds, pr_status_line,
-                                round_limit_reason, round_reasons, waived_rounds)
+from devloop.dispatcher import pr_status_line, round_limit_reason
+from devloop.planning import (RESYNC_AFTER_APPROVAL, Action, counted_rounds, round_reasons,
+                              waived_rounds)
 from devloop.workspace import Workspace, WorkspaceError
 from test_devloop import CFG, SHA1, SHA2, finding, fixed, pr, raw_review, receipt
 from test_devloop_quorum import FIRST, SECOND, Quorum

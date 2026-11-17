@@ -148,68 +148,44 @@ answers both.
 
 import functools
 import hashlib
-import itertools
 import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
-from .acceptance import (acceptance_criteria, acceptance_findings, format_criteria, format_map,
-                         latest_map, render_map)
 from .agents import (TAIL_LINES, AgentError, ModelsUnavailable, ModelUnavailable, NoOutput,
-                     PermissionDenied, StartFailure, background_unfinished)
-from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, MERGER, PR_COMMENT, RERUN, REVIEW
+                     PermissionDenied, background_unfinished)
+from .apps import DISPATCHER, ISSUE_COMMENT, PR_COMMENT
 from .config import INSTALL_ROOT, LEGACY_NEEDS_OPERATOR, ConfigError
-from .context import (DOCS_PATHS_SHOWN, LABEL_STYLE, PROMPT_DIR, REREVIEW_COMMAND,
-                      _describe_bases, _docs_list, _failure_text, _format_conflicts,
-                      _format_findings, _format_requested, _open_findings_reason,
-                      _render_acceptance, _render_issue_comments, _review_failure,
-                      _start_failure, _template, _trusted_comments, both_labels_warning,
-                      docs_diff_section, docs_map_section, docs_review_section,
-                      format_fix_requests, format_operator_comments, format_previous_rounds,
-                      label_transition, operator_comments, requested_fixes,
-                      requests_rereview, transition_labels)
-from .dispatch_actions import (ActionsMixin, Models, ready_approval, rerun_of, skipped_models,
-                               synced_from)
+from .context import (LABEL_STYLE, _describe_bases, _failure_text, _open_findings_reason,
+                      _render_issue_comments, both_labels_warning, label_transition,
+                      transition_labels)
+from .dispatch_actions import ActionsMixin, Models, ready_approval, rerun_of
 from .dispatch_merge import MergeMixin
-from .dispatch_preflight import PreflightMixin, devloop_text, normalize_preflight
-from .dispatch_supervision import (HOLD_COMMAND, RELEASE_COMMAND, RESUME_STEP, SupervisionMixin,
-                                   UntrustedChange, fix_command, merge_command)
-from .github import GitHubError, author_login, job_id
-from .ledger import entries as ledger_entries
+from .dispatch_preflight import PreflightMixin
+from .dispatch_supervision import SupervisionMixin, UntrustedChange
+from .github import GitHubError, author_login
 from .ledger import open_turns
-from .localtests import failed_modules, module_command, select_modules
-from .markdown import (RESUME, carries_record, dispatcher_header, publishable, read_marker,
-                       render_cycle, render_escalation, render_fix, render_native_review,
-                       render_operator_merge,
-                       render_preflight, render_review, render_supervision)
+from .localtests import module_command, select_modules
+from .markdown import (RESUME, dispatcher_header, publishable, read_marker, render_cycle,
+                       render_escalation, render_operator_merge)
 from .activity import iso, restart_line
 from .pin import PREFIX, PinError, Repinned, SmokeError
-from .planning import (BASE_CHANGED, EXPENSIVE, FIX_COMMAND, GLOBAL_ACTIONS, MERGE_LANE,
-                       MERGING, PRIORITY_LABELS, PRIORITY_RANK, RECHECK_COMMAND,
-                       RESYNC_AFTER_APPROVAL, Action, PullRequest, Snapshot, _lanes,
-                       _parents, _plan_preflight, _resynced, _round_records, admit,
-                       changes_before_ci, ci_unknown, counted_rounds, issue_priority,
-                       label_names, merge_ready,
-                       numbers_of, operator_blocked, operator_held, operator_merge_due,
-                       parked, pending_reviewers, plan, pr_counts, preflight_state,
-                       queue_lines, round_reasons, schedule, start_order, touched_by_base,
+from .planning import (BASE_CHANGED, MERGE_LANE, RESYNC_AFTER_APPROVAL, PullRequest, Snapshot,
+                       admit, changes_before_ci, ci_unknown, counted_rounds, issue_priority,
+                       label_names, numbers_of, operator_blocked, operator_held,
+                       pending_reviewers, plan, pr_counts, queue_lines, round_reasons, schedule,
                        waived_rounds, zero_labels_hold)
-from .policy import describe as describe_receipt
-from .policy import (BINDING, MAX_LISTED_PATHS, ZERO_LEVEL, agent_profile, changes_requested,
-                     check_outcome, check_states, differences, distinct, evaluate, independent,
-                     profile_of, receipt_of, recorded_level, zero_refused)
+from .policy import (BINDING, MAX_LISTED_PATHS, agent_profile, differences, profile_of,
+                     receipt_of)
 from .ports import Backend, Tracker, summarize_checks
-from .review import (CI, FINDING_COMMAND, OPERATOR, ci_failure_review, current_round,
-                     finding_commands, finding_key, finding_state, last_round, normalize_review,
-                     open_findings, owner_of, round_verdict)
-from .supervision import (ACCEPT_DEFAULTS, DECIDE, DESIGN_LABEL, ESCALATE, ISSUE_STEPS,
-                          MAX_RETRIES, MERGED_ISSUE, PREFLIGHT_DEFAULT, RETRY, RETRY_STEPS,
-                          SYNC_FAILED, TOOL_FAILURE, critical, preflight_class, retries_done,
+from .review import (CI, OPERATOR, current_round, finding_commands, finding_key, open_findings,
+                     owner_of, round_verdict)
+from .supervision import (ACCEPT_DEFAULTS, DECIDE, ISSUE_STEPS, RETRY, TOOL_FAILURE,
                           supervisor_command)
 from .workspace import WorkspaceError
 

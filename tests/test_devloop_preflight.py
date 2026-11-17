@@ -8,7 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from devloop import agents, config, markdown, schema
-from devloop.dispatcher import Dispatcher, Snapshot, plan, preflight_hash
+from devloop.dispatcher import Dispatcher, preflight_hash
+from devloop.planning import Snapshot, plan
 from devloop.workspace import Workspace
 from helpers.devloop_fakes import FakeGH
 from test_devloop import CFG, IMPL, REV, FakeRunner, FakeWS, implemented, pr

@@ -7,8 +7,9 @@ import unittest
 from types import SimpleNamespace
 
 from devloop import config, markdown, policy
-from devloop.dispatcher import Action, Dispatcher, Snapshot, ensure_labels, plan
+from devloop.dispatcher import Dispatcher, ensure_labels
 from devloop.github import GitHub
+from devloop.planning import Action, Snapshot, plan
 from helpers.devloop_fakes import FakeGH, SnapshotGH
 from test_devloop import (BASE, CFG, SHA1, SHA2, SHA3, FakeRunner, FakeWS, finding, norm, pr,
                           raw_review, receipt)

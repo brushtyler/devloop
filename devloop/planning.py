@@ -4,7 +4,8 @@ Moved from ``devloop/dispatcher.py`` without changes (#291, step S1 of #261): ``
 ``Snapshot`` into the ordered ``Action`` list of a tick, ``schedule`` and ``admit`` decide how
 those actions run in parallel and in continuous mode, and the helpers here give the priority and
 start order of ready issues, the state of a readiness check, the review rounds that count and the
-paths a base change reaches. ``devloop/dispatcher.py`` re-exports every name.
+paths a base change reaches. Since #297 (step S7) ``devloop/dispatcher.py`` no longer re-exports
+these names: import them from here.
 """
 
 from dataclasses import dataclass, field, replace

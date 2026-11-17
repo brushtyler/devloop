@@ -6,8 +6,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from devloop.dispatcher import Dispatcher, ensure_labels, issue_priority, plan
+from devloop.dispatcher import Dispatcher, ensure_labels
 from devloop.github import GitHub
+from devloop.planning import issue_priority, plan
 from helpers.devloop_fakes import FakeGH
 from test_devloop import CFG, FakeRunner, FakeWS
 

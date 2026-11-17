@@ -6,9 +6,10 @@ import unittest
 from types import SimpleNamespace
 
 from devloop import config, markdown
-from devloop.dispatcher import Dispatcher, plan
+from devloop.dispatcher import Dispatcher
 from devloop.github import GitHub, GitHubError, job_id
 from devloop.localtests import failed_modules
+from devloop.planning import plan
 from devloop.ports import summarize_checks
 
 from helpers.devloop_fakes import SHA1, FakeIdentities, SnapshotGH

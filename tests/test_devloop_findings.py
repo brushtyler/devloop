@@ -3,7 +3,8 @@
 import unittest
 
 from devloop import markdown, review
-from devloop.dispatcher import Action, Dispatcher, Snapshot, plan
+from devloop.dispatcher import Dispatcher
+from devloop.planning import Action, Snapshot, plan
 from helpers.devloop_fakes import SnapshotGH
 from test_devloop import (CFG, IMPL, REV, REV_NAME, SHA1, SHA2, FakeRunner, FakeWS, finding, pr,
                           raw_review, receipt)

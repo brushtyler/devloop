@@ -6,8 +6,9 @@ import unittest
 from types import SimpleNamespace
 
 from devloop import markdown
-from devloop.dispatcher import Action, Dispatcher, Snapshot, plan
+from devloop.dispatcher import Dispatcher
 from devloop.github import GitHub, GitHubError
+from devloop.planning import Action, Snapshot, plan
 from test_devloop import CFG, REV, SHA1, FakeRunner, FakeWS, implemented
 from test_devloop_merge import AUTO, STRICT, Identities, MergeGH
 from test_devloop_supervision import AUTO as SUP_AUTO

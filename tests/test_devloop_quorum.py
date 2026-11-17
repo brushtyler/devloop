@@ -6,7 +6,8 @@ import tomllib
 import unittest
 
 from devloop import agents, config, markdown, policy, review
-from devloop.dispatcher import Action, Dispatcher, plan
+from devloop.dispatcher import Dispatcher
+from devloop.planning import Action, plan
 from helpers.devloop_fakes import PORT_METHODS, FakeIdentities, SnapshotGH
 from test_devloop import (CFG, IMPL, SHA1, SHA2, FakeRunner, FakeWS, finding, fixed, raw_review)
 

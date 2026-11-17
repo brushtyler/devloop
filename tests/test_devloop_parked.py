@@ -8,7 +8,7 @@ from unittest import mock
 
 from devloop import config
 from devloop.config import ConfigError, MergePolicy
-from devloop.dispatcher import Snapshot, issue_priority, parked, plan, pr_counts
+from devloop.planning import Snapshot, issue_priority, parked, plan, pr_counts
 from test_devloop import CFG, FakeWS, norm, pr, raw_review, ready
 from test_devloop_merge import AUTO, STRICT, Case
 from test_devloop_zero import changes
