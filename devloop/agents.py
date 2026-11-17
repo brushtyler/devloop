@@ -89,22 +89,35 @@ TAIL_LINES = 10
 TAIL_WIDTH = 300
 COMMAND_WIDTH = 200
 _SECRET_NAME = re.compile(r'KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL', re.I)
-# Values of secret-looking variables shorter than this are replaced only as whole words, and
-# those shorter than ``_SECRET_MIN`` only after their name (``_ASSIGNED``): a value such as
-# ``1`` or ``yes`` would otherwise blank every occurrence of it in the output.
+# Values of secret-looking variables shorter than this are replaced only as whole words, however
+# short: a value such as ``pw1`` would otherwise be blanked inside longer words too. A known
+# secret is never published, even at the cost of blanking a common word (``1`` of ``ran 1 test``).
 _SECRET_WORD = 8
-_SECRET_MIN = 4
 _PEM = re.compile(r'-----BEGIN [^-]+-----.*?(?:-----END [^-]+-----|\Z)', re.S)
 _CREDENTIAL = re.compile(r'(?<![A-Za-z0-9_])(?:sk-[A-Za-z0-9_-]{20,}'
                          r'|(?:ghp_|ghs_|gho_|ghu_|ghr_|github_pat_)[A-Za-z0-9_]{20,}'
                          r'|AKIA[A-Z0-9]{16}|Bearer\s+[A-Za-z0-9._~+/-]{20,}=*)(?![A-Za-z0-9_])')
 # The value assigned to a secret-looking name, whatever its length: ``DB_PASSWORD=x``,
 # ``api-key: x``, ``"token": "x"``, also inside the JSON events of a CLI (``\"x\"``). The word
-# must be a whole part of the name: ``KeyError: 'x'`` and ``input_tokens: 3`` stay.
+# must be a whole part of the name: ``KeyError: 'x'`` and ``input_tokens: 3`` stay. A quoted
+# value is replaced up to its closing quote, spaces, separators and escaped quotes included, or
+# to the end of the line when the quote is not closed: ``"open \"se\" same"`` in shell or JSON,
+# ``'a b'``, and ``\"a \\\"b\\\" c\"`` inside a JSON string.
 _ASSIGNED = re.compile(
     r'(?<![A-Za-z0-9])((?:[A-Za-z0-9]+[_.-])*(?:key|token|secret|password|passwd|credentials?)'
-    r'(?:[_.-][A-Za-z0-9]+)*(?![A-Za-z0-9])\\?["\']?\s*[=:]\s*\\?["\']?)'
-    r'([^\s"\'`\\,;&|]+)', re.I)
+    r'(?:[_.-][A-Za-z0-9]+)*(?![A-Za-z0-9])\\?["\']?\s*[=:]\s*)'
+    r'(?:(\\")(?:\\\\(?:\\.|[^\\"\n])|\\[^"\\\n]|[^"\\\n])*(\\"|$)'  # inside a JSON string
+    r'|(")(?:\\.|[^"\\\n])*("|$)'
+    r"|(')[^'\n]*('|$)"
+    r'|[^\s"\'`\\,;&|]+)', re.I | re.M)
+
+
+def _redact_assigned(match):
+    quotes = [q for q in match.groups()[1:] if q is not None]
+    opening, closing = quotes if quotes else ('', '')
+    return f'{match.group(1)}{opening}[REDACTED]{closing}'
+
+
 # A terminal escape sequence (colours, cursor, titles), raw or as the JSON events of a CLI
 # write it (``\u001b``): it would hide what follows it, an absolute path for example.
 _ESC = r'(?:\x1b|\\u001[bB]|\\x1[bB]|\\033)'
@@ -130,7 +143,7 @@ def public_text(text, workdir=None, env=None):
     to its last segment."""
     text = _ANSI.sub('', text)
     values = {v for k, v in (os.environ if env is None else env).items()
-              if _SECRET_NAME.search(k) and isinstance(v, str) and len(v.strip()) >= _SECRET_MIN}
+              if _SECRET_NAME.search(k) and isinstance(v, str) and v.strip()}
     text = _PEM.sub('[REDACTED]', text)
     for secret in sorted(values, key=lambda v: (-len(v), v)):
         if len(secret) >= _SECRET_WORD:
@@ -139,7 +152,7 @@ def public_text(text, workdir=None, env=None):
             text = re.sub(r'(?<![A-Za-z0-9_])' + re.escape(secret) + r'(?![A-Za-z0-9_])',
                           '[REDACTED]', text)
     text = _CREDENTIAL.sub('[REDACTED]', text)
-    text = _ASSIGNED.sub(r'\1[REDACTED]', text)
+    text = _ASSIGNED.sub(_redact_assigned, text)
     if workdir is not None:
         roots = {str(Path(workdir)), os.path.realpath(workdir)}
         for root in sorted((r.rstrip('/') for r in roots if r.rstrip('/')), key=len,

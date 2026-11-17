@@ -84,10 +84,12 @@ descendant that left the agent's process group and still holds its output open d
 what was read before it. For a timeout the comment also quotes the last lines of that output, at
 most 10, each cut to 300 characters. Terminal escape sequences (colours, titles), raw or written
 as `\u001b` in JSON events, are removed first. Private keys, tokens, the value assigned to a name
-that looks secret (`DB_PASSWORD=…`, `"token": "…"`, whatever its length) and the values of the
-agent's variables whose name looks secret (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`)
-become `[REDACTED]`: such a value of 8 characters or more wherever it appears, a shorter one, from
-4 characters, as a whole word. Paths in the worktree become relative and any other absolute path
+that looks secret (`DB_PASSWORD=…`, `"token": "…"`, whatever its length; a quoted value up to
+its closing quote, spaces and escaped quotes included, also inside the JSON events of a CLI) and
+the values of the agent's variables whose name looks secret (`KEY`, `TOKEN`, `SECRET`,
+`PASSWORD`, `CREDENTIAL`) become `[REDACTED]`: such a value of 8 characters or more wherever it
+appears, a shorter one, however short, as a whole word, even when that blanks a common word
+(`1` in `ran 1 test`). Paths in the worktree become relative and any other absolute path
 keeps only its last segment (`…/name`). The full output stays in the local log. A CLI that writes
 its output only at the end, such as `claude --output-format json`, may leave nothing to quote. The
 turn's [ledger record](#evidence-and-telemetry) keeps its duration and, when the CLI exposes it,

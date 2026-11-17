@@ -190,13 +190,35 @@ class OutputTailTests(unittest.TestCase):
         for secret in (TOKEN, 'supersecretvalue123', 'z' * 30, 'AAAA', 'q' * 24):
             self.assertNotIn(secret, tail)
         self.assertIn('[REDACTED]', tail)
-        self.assertIn('abc', tail)  # values too short to be a secret stay
+        self.assertNotIn('abc', tail)  # a known secret, however short
 
     def test_short_known_secrets_are_redacted_as_words(self):
-        env = {'DATABASE_PASSWORD': 'hunter2', 'KEYTIMEOUT': '1', 'HOME': '/home/op'}
+        env = {'DATABASE_PASSWORD': 'hunter2', 'KEYTIMEOUT': '1', 'HOME': '/home/op',
+               'EMPTY_TOKEN': '', 'BLANK_KEY': ' '}
         tail = agents.output_tail('connect with hunter2 now\nhunter22 and ran 1 test', '',
                                   env=env)
-        self.assertEqual(tail, 'connect with [REDACTED] now\nhunter22 and ran 1 test')
+        self.assertEqual(tail, 'connect with [REDACTED] now\nhunter22 and ran [REDACTED] test')
+        tail = agents.output_tail('DATABASE_PASSWORD=pw1\nlogin with pw1, not pw12', '',
+                                  env={'DATABASE_PASSWORD': 'pw1'})
+        self.assertEqual(tail, 'DATABASE_PASSWORD=[REDACTED]\nlogin with [REDACTED], not pw12')
+
+    def test_quoted_values_assigned_to_secret_names_are_redacted_whole(self):
+        cases = [
+            ('DATABASE_PASSWORD="open sesame"', 'DATABASE_PASSWORD="[REDACTED]"'),
+            ('PASSWORD="open \\"se;same\\" x" tail', 'PASSWORD="[REDACTED]" tail'),
+            ("export TOKEN='a b, c' next", "export TOKEN='[REDACTED]' next"),
+            ('{"password": "open sesame", "n": 1}', '{"password": "[REDACTED]", "n": 1}'),
+            ('{"password": "a \\" b|c"}', '{"password": "[REDACTED]"}'),
+            # Inside the JSON string of a CLI event: the quotes are escaped once more.
+            ('{"cmd":"DB_PASSWORD=\\"open sesame\\" run"}',
+             '{"cmd":"DB_PASSWORD=\\"[REDACTED]\\" run"}'),
+            ('{"m":"{\\"password\\": \\"a \\\\\\"b c\\\\\\" d\\"}"}',
+             '{"m":"{\\"password\\": \\"[REDACTED]\\"}"}'),
+            ('DB_SECRET="never closed, the rest of the line', 'DB_SECRET="[REDACTED]'),
+        ]
+        for raw, cleaned in cases:
+            with self.subTest(raw=raw):
+                self.assertEqual(agents.output_tail(raw, '', env={}), cleaned)
 
     def test_values_assigned_to_secret_names_are_redacted(self):
         out = '\n'.join([
@@ -305,6 +327,29 @@ class LastCommandTests(unittest.TestCase):
                       'python3 -m `echo unittest`" ``', gh.bodies[1])
         self.assertNotIn('/wt/', gh.bodies[1])
 
+    def test_the_marker_hides_quoted_secrets_of_the_last_command(self):
+        command = ('bash -lc "DB_PASSWORD=\\"open sesame\\" API_TOKEN=\'a b;c\' '
+                   'run --login pw1"')
+        gh = FakeGH()
+        bodies = []
+        gh.comment = lambda number, body: 1
+        gh.edit_comment = lambda cid, body: bodies.append(body)
+
+        def fake_run(argv, **kw):
+            raise subprocess.TimeoutExpired(argv, 5, output=codex_events(command, 2))
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = agents.AgentRunner(tmp, 5, run=fake_run, env={'DB_PASSWORD': 'pw1'})
+            d = Dispatcher(CFG, gh, FakeWS(), runner, log=lambda m: None, ledger=Ledger(gh))
+            entry = d._open_turn((7, 'implement'), CFG.agent('codex'), 'write', 'issue-7')
+            with self.assertRaises(agents.AgentError) as ctx:
+                runner.run(CFG.agent('codex'), 'write', 'p', 'implement', tmp, 'x')
+            d._close_turn(entry, 'failure', ctx.exception)
+        self.assertEqual(read_marker(bodies[-1], 'ledger')['last_command'],
+                         'bash -lc "DB_PASSWORD=\\"[REDACTED]\\" API_TOKEN=\'[REDACTED]\' '
+                         'run --login [REDACTED]"')
+        for secret in ('open', 'sesame', 'a b', 'b;c', 'pw1'):
+            self.assertNotIn(secret, bodies[-1])
+
     def test_no_last_command_in_the_marker_when_the_cli_does_not_expose_it(self):
         gh = FakeGH()
         recorded = []
@@ -374,6 +419,31 @@ class EscalationTests(unittest.TestCase):
         self.assertNotIn('hunter2', body)
         self.assertNotIn('/home/operator', body)
         self.assertNotIn('\x1b', body)
+
+    def test_the_escalation_hides_very_short_and_quoted_secrets(self):
+        out = ('DATABASE_PASSWORD=pw1\nlogin with pw1\nAPI_SECRET="open sesame"\n'
+               '{"password": "a \\" b, c"}\n'
+               '{"cmd":"DB_TOKEN=\\"x y\\" run"}\n')
+
+        def fake_run(argv, **kw):
+            if argv[-1] == '--version':
+                return SimpleNamespace(returncode=0, stdout='2.1.0 (Claude Code)', stderr='')
+            raise subprocess.TimeoutExpired(argv, 5, output=out)
+        with tempfile.TemporaryDirectory() as tmp:
+            gh = FakeGH()
+            runner = agents.AgentRunner(tmp, 5, run=fake_run, env={'DATABASE_PASSWORD': 'pw1'})
+            d = Dispatcher(CFG, gh, FakeWS(), runner, log=lambda m: None)
+            d.snapshot = lambda: Snapshot([], [{'number': 7, 'title': 't',
+                                                'labels': {'agent:ready'},
+                                                'labeler': 'brushtyler', 'admitted': True}], [])
+            d.tick()
+        body = gh.comments[-1][1]
+        self.assertEqual(code_block(body).splitlines(),
+                         ['DATABASE_PASSWORD=[REDACTED]', 'login with [REDACTED]',
+                          'API_SECRET="[REDACTED]"', '{"password": "[REDACTED]"}',
+                          '{"cmd":"DB_TOKEN=\\"[REDACTED]\\" run"}'])
+        for secret in ('pw1', 'open', 'sesame', ' b, c', 'x y'):
+            self.assertNotIn(secret, body)
 
     def test_an_escalation_without_output_has_no_block(self):
         def fake_run(argv, **kw):
