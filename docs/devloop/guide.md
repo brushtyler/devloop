@@ -839,13 +839,47 @@ In `devloop run` a plan leaves out the issues and PRs of the running actions: no
 starts on the same number, nor on a PR and its issue, until the first has ended; of two actions
 planned on the same number only the first starts, and the next tick, which sees its result,
 decides the other. An implementation or readiness check that is running keeps its slot of
-`max_open_prs`. A global action (a merge) starts only when nothing runs, alone: while one is
+`max_open_prs`. A global action (a pin) starts only when nothing runs, alone: while one is
 planned and actions are running, no other action starts, so they end and the global action runs
 next; the actions planned with it start in the ticks after it. While a global action runs, no
 other action starts, even when news on GitHub start a tick and slots are free. The
 [pin after a merge](#pin-after-a-merge) runs only when no action runs, and while one is pending
-no action starts. The turns of running actions are not marked incomplete by the ticks that run
-meanwhile; they are checked once their action ends.
+no action starts. A merge is not a global action: it runs in [the merge lane](#the-merge-lane).
+The turns of running actions are not marked incomplete by the ticks that run meanwhile; they are
+checked once their action ends.
+
+#### The merge lane
+
+In `devloop run` a merge of a ready PR (#264) starts in the first tick that plans it with a free
+slot, alongside the actions running on other issues and PRs: it does not wait for a 40-minute
+implementation or local test suite to end, and while it is planned or running it holds back no
+other action (a review, a readiness check, a fix). Merges have a lane of their own: **one merge
+at a time**. A merge planned while another one runs waits for a later tick, and still keeps its
+PR and its issue: no other action on them starts meanwhile. A merge takes a slot of
+`max_parallel_actions` like any action. Of `max_actions_per_tick`, a tick spends a slot only on
+the merge that can start: the merges waiting for the lane leave the slots to the other actions.
+A merge that finds the limit already spent does not take the lane: it waits for a later tick,
+and so do the merges after it, so none of them starts past the limit.
+
+Why a merge may run alongside the other actions:
+
+- the merge reads every merge directive again just before merging, recomputes the policy
+  receipt on the current base, and GitHub merges into the current `main`
+  (`--match-head-commit`);
+- the actions on other numbers work in worktrees of their own and push only to their own
+  branches; a `main` that moves under them is the case of any merge made by a person, and the
+  existing mechanisms already handle it: the revocation when the base touches the PR's files
+  ([When `main` advances](reference.md#when-main-advances-during-a-round)), the sync of a PR that conflicts
+  with `main`, and the fix on an aligned base. No action depends on `main` in a way they do not
+  cover, so no action is exclusive with a merge;
+- actions on the same PR or on its issue never run with its merge, as for any action.
+
+The [pin after a merge](#pin-after-a-merge) stays global: after a merge that requests it, no
+new action starts until the running ones end, then the pin runs with nothing running. A tick
+checks for the request again right before it starts its actions, so a merge that requests the
+pin while the tick reads GitHub stops that tick's actions too. In
+`devloop tick` a merge still runs alone, as a global action
+([Parallel actions](reference.md#parallel-actions)).
 
 The dispatcher lock stays one: the loop runs the actions in threads of its own process. A stop
 (`SIGTERM`, `SIGINT`, the `STOP` file) starts no other tick and waits for the running actions to

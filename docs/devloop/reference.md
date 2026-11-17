@@ -100,7 +100,8 @@ This repository sets 3: implement, fix, sync and review of different issues and 
   at once. Two actions on the same number, or on a PR and its issue, run one after the other in
   plan order. A global action (a write to `main` or to the whole repository, such as a merge or
   a pin) runs alone: after every action planned before it has ended, and before any action
-  planned after it starts. `max_actions_per_tick` stays the limit on the total, and every agent
+  planned after it starts. This is the rule of `devloop tick`; in `devloop run` a merge is not
+  global, see [The merge lane](guide.md#the-merge-lane). `max_actions_per_tick` stays the limit on the total, and every agent
   turn and test run keeps its usual timeout.
 - **Level-2 reviewers.** A review action runs together every reviewer its round still waits
   for (see [Level 2](#level-2-two-independent-reviewers)), so a round no longer takes two
