@@ -16,7 +16,9 @@ dispatcher's: today's summary on top, then the index of the past days. When the 
 summary of the closed day, generated again from the records, is archived in a comment of its own
 (a ``report`` record with ``event: archive``), one per day, also for the days in between that had
 activity. An archive is recognized only when the dispatcher wrote it: a second run, or one
-repeated after a failure, edits it instead of writing another. ``devloop run`` publishes at the
+repeated after a failure, edits it instead of writing another. An archive written while a turn of
+its day was still open says so (``open: true``): every publication generates that day again and
+edits the archive if the records changed, until no turn of the day is open. ``devloop run`` publishes at the
 end of a tick, at most every ``[report] interval`` minutes (``AutoReport``).
 """
 
@@ -97,6 +99,7 @@ class Summary:
     merged: list = field(default_factory=list)       # PR numbers
     rounds: int = 0
     fallbacks: int = 0
+    open: int = 0                                    # turns not closed yet
 
     def empty(self):
         return not (self.actions or self.merges or self.escalations or self.ci or self.opened
@@ -208,6 +211,8 @@ class Records:
                                 outcome, record.get('duration_ms')))
             if record.get('fallback_for'):
                 out.fallbacks += 1
+            if record['state'] == 'open':
+                out.open += 1
             return
         if record['type'] != 'event':
             return
@@ -278,7 +283,8 @@ def render_text(summary):
 
 def archive_body(summary):
     return publishable(dispatcher_header() + f'\n## {TITLE} del {summary.day} (UTC)\n\n'
-                       + render(summary), 'report', {'event': 'archive', 'day': summary.day})
+                       + render(summary), 'report',
+                       {'event': 'archive', 'day': summary.day, 'open': summary.open > 0})
 
 
 @contextmanager
@@ -379,12 +385,13 @@ class Publisher:
                 shown = today.isoformat()
             self._write_body(head, archives, shown, body)
             return
-        days = self._closed_days(today, shown, archives)
+        days = sorted(set(self._closed_days(today, shown, archives))
+                      | set(self._open_archives(today, archives)))
         records = Records(self.gh, self.trust, days[0] if days else today, today, self.agents)
         for closed in days:
             summary = records.summary(closed)
-            # The day shown, and a day already archived, are archived again; the days in
-            # between only with activity.
+            # The day shown, and a day already archived (one with a turn still open, say), are
+            # archived again; the days in between only with activity.
             if closed.isoformat() in (shown, *archives) or not summary.empty():
                 self._archive(summary, archives)
         self._write_body(self._today_section(records.summary(today)), archives,
@@ -405,6 +412,19 @@ class Publisher:
         while first < today:
             days.append(first)
             first += datetime.timedelta(days=1)
+        return days
+
+    def _open_archives(self, today, archives):
+        """The archived days, in the last ``MAX_CATCH_UP_DAYS``, that had a turn still open when
+        they were archived last: their records may have changed since."""
+        first = today - datetime.timedelta(days=MAX_CATCH_UP_DAYS)
+        days = []
+        for day, comment in archives.items():
+            record = read_marker(comment.get('body') or '', 'report')
+            if record is not None and record.get('open') is True:
+                date = parse_day(day)
+                if first <= date < today:
+                    days.append(date)
         return days
 
     def _write_body(self, head, archives, shown, before):

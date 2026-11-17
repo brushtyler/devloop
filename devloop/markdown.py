@@ -322,9 +322,11 @@ _DAY = re.compile(r'\d{4}-\d{2}-\d{2}')
 
 def _valid_report(r):
     """The daily summary of ``devloop report`` (#256): ``today`` in the body of the report issue,
-    for the day it shows, or ``archive`` in the comment that archives a closed day."""
+    for the day it shows, or ``archive`` in the comment that archives a closed day, with ``open``
+    true when a turn of that day was still open."""
     return (r.get('event') in ('today', 'archive') and isinstance(r.get('day'), str)
-            and _DAY.fullmatch(r['day']) is not None)
+            and _DAY.fullmatch(r['day']) is not None
+            and isinstance(r.get('open', False), bool))
 
 
 _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy': _valid_policy,

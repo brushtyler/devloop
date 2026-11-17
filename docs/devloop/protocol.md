@@ -287,7 +287,9 @@ of a configured reviewer written with its identity (a CI round with the dispatch
 - `archive`, at the end of a dispatcher comment: the summary of a closed day. Only the first
   archive of each day that the dispatcher wrote counts; another identity's comment with the same
   marker is ignored. A publication edits the archive of a day instead of writing another, so a
-  second run, or a run repeated after a failure, leaves one comment per day.
+  second run, or a run repeated after a failure, leaves one comment per day. `open` is `true`
+  when a turn of the day was still open at the time: every publication then reconciles that
+  archive with the records, until it is written with `open` `false`.
 
 ## Structured review
 

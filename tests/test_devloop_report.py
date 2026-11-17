@@ -332,6 +332,38 @@ class PublishTest(PublishCase):
         archive = next(c for c in self.gh.comments if c['number'] == ISSUE)
         self.assertIn('classe `blocked`', archive['body'])
 
+    def test_a_turn_closed_after_the_archive_updates_it(self):
+        self.publisher.publish()
+        # The review of #13 started at 23:50 is still open when its day is archived.
+        self.clock.set('2026-11-17T00:01:00Z')
+        self.publisher.publish()
+        archive = next(c for c in self.gh.comments if c['number'] == ISSUE)
+        self.assertEqual(read_marker(archive['body'], 'report'),
+                         {'event': 'archive', 'day': '2026-11-16', 'open': True})
+        self.assertIn('| 23:50 | #13 | review | codex | in corso |', archive['body'])
+        self.assertEqual(self.shown()['day'], '2026-11-17')
+        # It closes at 00:05: the dispatcher edits its ledger record.
+        record = next(c for c in self.gh.comments if c['number'] == 13
+                      and (read_marker(c['body'], 'ledger') or {}).get('state') == 'open')
+        record.update(body=turn('review', 'codex', '2026-11-16T23:50:00Z', ms=900000),
+                      updated_at='2026-11-17T00:05:00Z')
+        self.clock.set('2026-11-17T00:16:00Z')
+        self.publisher.publish()
+        self.assertEqual(self.gh.archives(), ['2026-11-16'])
+        self.assertEqual(self.gh.count('comment'), 1)
+        self.assertEqual(self.gh.count('edit_comment'), 1)
+        self.assertEqual(read_marker(archive['body'], 'report'),
+                         {'event': 'archive', 'day': '2026-11-16', 'open': False})
+        self.assertIn('| 23:50 | #13 | review | codex | success | 15m 00s |', archive['body'])
+        self.assertNotIn('in corso', archive['body'])
+        self.assertNotIn('in corso', self.gh.body)  # not on the new day either
+        # No turn of the day is open any more: the next runs leave the archive alone.
+        self.gh.calls.clear()
+        self.clock.set('2026-11-17T00:31:00Z')
+        self.publisher.publish()
+        self.assertEqual(self.gh.count('edit_comment'), 0)
+        self.assertEqual(self.gh.calls[2], ('dated_comments', '2026-11-17T00:00:00Z', None))
+
     def test_days_in_between_are_archived_only_with_activity(self):
         self.gh.comments = [c for c in self.gh.comments if c['created_at'] < '2026-11-16']
         self.gh.prs = []
@@ -526,10 +558,12 @@ class ConfigTest(unittest.TestCase):
 class MarkerAndReadsTest(unittest.TestCase):
     def test_report_marker(self):
         for good in ({'event': 'today', 'day': '2026-11-17'},
-                     {'event': 'archive', 'day': '2026-11-16'}):
+                     {'event': 'archive', 'day': '2026-11-16'},
+                     {'event': 'archive', 'day': '2026-11-16', 'open': True}):
             self.assertEqual(read_marker(publishable('x', 'report', good), 'report'), good)
         for bad in ({}, {'event': 'other', 'day': '2026-11-17'}, {'event': 'today'},
-                    {'event': 'today', 'day': '17/11/2026'}):
+                    {'event': 'today', 'day': '17/11/2026'},
+                    {'event': 'archive', 'day': '2026-11-16', 'open': 'yes'}):
             self.assertIsNone(read_marker(publishable('x', 'report', bad), 'report'))
 
     def test_github_reads_and_write(self):

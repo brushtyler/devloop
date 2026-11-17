@@ -924,7 +924,10 @@ generates the summary of the closed day again from the records and archives it i
 its own, one per day; the days in between with activity are archived too (at most the last 31),
 the empty ones are not. An archive already written is edited if the records changed, never
 written again: more runs on the same day, or a run repeated after a failure, leave one comment
-per day. `--publish --day <past day>` writes or updates only the archive of that day and the
+per day. A day archived while one of its turns was still open (a turn started just before
+midnight, say) is generated again at every publication, and its archive edited when the records
+change, until none of its turns is open: the outcome and the duration of that turn reach the
+archive of the day it started. `--publish --day <past day>` writes or updates only the archive of that day and the
 index, and keeps today's summary as it is; a future day is refused. Without `[report] issue`,
 `--publish` stops with an error that says so, and nothing is read or written. Any error of a
 `devloop report` exits with a non-zero code and its message.
