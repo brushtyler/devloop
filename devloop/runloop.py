@@ -21,7 +21,9 @@ again from the new copy, unless a stop was requested during that tick: then the 
 Continuous mode (#227, with ``workers``, ``dispatcher.Workers``): a tick starts its actions in
 the free slots and returns without waiting for them. While some still run, the loop waits for
 one to end; with a slot free, also for news on GitHub, at most ``idle_timeout`` seconds. Either
-way the next tick plans at once, so a long action no longer holds the others. A stop, or the
+way the next tick plans at once, so a long action no longer holds the others. A pin after a merge
+does not stop the planning either (#301): the restart from the new copy (``Repinned``) comes from
+the first tick at which nothing runs. A stop, or the
 ``MAX_FAILURES``-th failed tick, waits for the running actions to end before the loop returns.
 """
 
@@ -159,7 +161,7 @@ class Loop:
             try:
                 actions = self.tick()
             except Repinned:
-                # A pin runs only when no action runs (continuous mode included).
+                # A restart happens only when no action runs (continuous mode included, #301).
                 reason = self.stop_reason()
                 if reason:  # the restart would forget a signal: no new copy, no further tick
                     self.log(f'stop requested ({reason}): no restart from the new pin, '

@@ -598,6 +598,10 @@ in the same action leaves the action's record as it is. `devloop status` shows i
 how long it has been running and, for a fallback, `on fallback model <model>`. If no dispatcher holds the
 lock, or the recorded process is gone, the action is reported as `interrupted`: the tick was
 killed before it could clean up, and the next tick overwrites the record when it starts an action.
+While a restart from a new pinned copy waits for the running actions
+([Pin after a merge](#pin-after-a-merge)), `state_dir/restart.json` records it, and
+`devloop status` shows `restart to <sha12> pending since <time> (<N> running)` as long as its
+dispatcher holds the lock.
 
 devloop writes an agent's log only when its turn ends. To follow the agent while it works,
 `devloop follow issue-<N>` (implementer) or `devloop follow pr-<N>` (reviewer or fixer) prints
@@ -843,8 +847,8 @@ decides the other. An implementation or readiness check that is running keeps it
 planned and actions are running, no other action starts, so they end and the global action runs
 next; the actions planned with it start in the ticks after it. While a global action runs, no
 other action starts, even when news on GitHub start a tick and slots are free. The
-[pin after a merge](#pin-after-a-merge) runs only when no action runs, and while one is pending
-no action starts. A merge is not a global action: it runs in [the merge lane](#the-merge-lane).
+[pin after a merge](#pin-after-a-merge) does not stop the planning: the pin runs at once, and
+only the restart from the new copy waits until no action runs. A merge is not a global action: it runs in [the merge lane](#the-merge-lane).
 The turns of running actions are not marked incomplete by the ticks that run meanwhile; they are
 checked once their action ends.
 
@@ -874,10 +878,12 @@ Why a merge may run alongside the other actions:
   cover, so no action is exclusive with a merge;
 - actions on the same PR or on its issue never run with its merge, as for any action.
 
-The [pin after a merge](#pin-after-a-merge) stays global: after a merge that requests it, no
-new action starts until the running ones end, then the pin runs with nothing running. A tick
-checks for the request again right before it starts its actions, so a merge that requests the
-pin while the tick reads GitHub stops that tick's actions too. In
+The [pin after a merge](#pin-after-a-merge) is not a global action either: the next tick pins
+at once, while the other actions run, and keeps planning with the code it loaded; the restart
+from the new copy waits for the first tick at which nothing runs, or for
+`[pin] restart_max_wait_minutes`, after which no new action starts until the restart. A merge
+that requests the pin while a tick reads GitHub does not stop that tick's actions: the next
+tick pins. In
 `devloop tick` a merge still runs alone, as a global action
 ([Parallel actions](reference.md#parallel-actions)).
 
@@ -1212,6 +1218,23 @@ stops with `auto-pin of origin/main failed, the pinned copy is unchanged: <reaso
 stays as it was, and the request stays: the next tick tries again (`run` counts it as a
 [failed tick](#continuous-loop), with its backoff; `tick` exits with it). With `auto = false` a merge requests nothing, and a request left
 from before is ignored.
+
+In the [continuous mode](#continuous-mode) of `devloop run` (#301) the pin does not wait for
+the running actions. The next tick runs `pin origin/main` at once, smoke test included, and
+moves `current`; the actions already running, and those the tick and the next ones start, run
+with the code the process loaded, as they would without `[pin] auto`. The log says
+`restart from pinned-<sha12> deferred`, and each tick while actions run says
+`restart to <sha12> pending since <time> (<N> running)`; `devloop status` shows the same line.
+The restart from the new copy happens at the first tick at which nothing runs, from the copy
+`current` points at then (a pin by hand meanwhile counts; when that is the running copy, no
+restart). A further merge that requests a pin while the restart waits pins again, and the
+restart goes to the newer copy; the wait keeps counting from the first pin. After
+`[pin] restart_max_wait_minutes` (default 30; 0 drains at once) of a pending restart, no new
+action starts, the log says `… over [pin] restart_max_wait_minutes (<M>), no action starts until
+the restart`, and the restart follows the end of the running ones. The fetch of the pin waits for
+the fetches of the running actions, and they for it. With one action at a time
+(`max_parallel_actions = 1`) and in `devloop tick` nothing runs between ticks, so the pin
+restarts at once, as above.
 
 A copy refused by the [smoke test](#pin) is not a failed tick: the request is dropped, `current`
 stays on the previous copy, the log says `auto-pin of origin/main refused, the pinned copy is

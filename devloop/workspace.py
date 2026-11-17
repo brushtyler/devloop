@@ -130,6 +130,12 @@ class Workspace:
         self._shared = threading.RLock()
         self._read_only = None
 
+    @property
+    def shared_lock(self):
+        """The lock held by the git commands of ``_SHARED_GIT``; the fetch of a pin that runs
+        while actions run holds it too (#301)."""
+        return self._shared
+
     def read_only(self, objects):
         """From now on write nothing to the repository (#260), for ``tick --dry-run``, which
         runs without the dispatcher's lock while a dispatcher may run. ``fetch`` is skipped, so

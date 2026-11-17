@@ -17,9 +17,11 @@ from pathlib import Path
 
 FILE = 'activity.json'
 LOCK = 'dispatcher.lock'
+# The restart from a new pinned copy that waits for the running actions (#301).
+RESTART = 'restart.json'
 
 
-def _iso(epoch):
+def iso(epoch):
     return datetime.fromtimestamp(epoch, timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
@@ -57,7 +59,7 @@ class Activity:
         with self._lock:
             self._records[threading.get_ident()] = {
                 'kind': kind, 'number': number, 'agent': None, 'prompt': None,
-                'started_at': _iso(self._clock()), 'pid': self._pid}
+                'started_at': iso(self._clock()), 'pid': self._pid}
             self._write()
 
     def turn(self, agent, prompt, fallback=None):
@@ -82,7 +84,7 @@ class Activity:
             record = self._record
             if record is None:
                 return
-            record['stalled'] = {'since': _iso(since), 'command': command}
+            record['stalled'] = {'since': iso(since), 'command': command}
             self._write()
 
     def resumed(self):
@@ -104,6 +106,19 @@ class Activity:
             yield
         finally:
             self.clear()
+
+    def restart(self, sha, since):
+        """A restart from the new pinned copy of ``sha`` waits, since ``since`` (epoch), for the
+        running actions to end (#301); None when it is no longer pending."""
+        path = self.path.with_name(RESTART)
+        if sha is None:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f'.{RESTART}.{self._pid}.tmp')
+        tmp.write_text(json.dumps({'sha': sha, 'since': iso(since), 'pid': self._pid}) + '\n',
+                       encoding='utf-8')
+        os.replace(tmp, path)
 
 
 def read(state_dir):
@@ -158,7 +173,7 @@ def duration(seconds):
 
 
 def _since(stamp, now):
-    """How long ago the ``_iso`` timestamp ``stamp`` was."""
+    """How long ago the ``iso`` timestamp ``stamp`` was."""
     try:
         begun = datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
     except (TypeError, ValueError):
@@ -179,6 +194,31 @@ def describe(state_dir, now=None, alive=pid_alive, held=lock_held):
         return '\n'.join(_describe(r, state_dir, now, alive, held) if isinstance(r, dict)
                          else 'current action: not an object' for r in record['actions'])
     return _describe(record, state_dir, now, alive, held)
+
+
+def restart_line(sha, since, running):
+    """The line of a pending restart (#301), in the log of the dispatcher and in ``status``."""
+    return f'restart to {sha} pending since {since} ({running} running)'
+
+
+def describe_restart(state_dir, alive=pid_alive, held=lock_held):
+    """The line of the restart from a new pinned copy that waits for the running actions (#301),
+    or None: none is recorded, or its dispatcher no longer runs."""
+    try:
+        record = json.loads((Path(state_dir) / RESTART).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict) or not (held(Path(state_dir) / LOCK)
+                                            and alive(record.get('pid'))):
+        return None
+    actions = read(state_dir)
+    if actions is None or 'error' in actions:
+        running = 0
+    elif isinstance(actions.get('actions'), list):
+        running = len(actions['actions'])
+    else:
+        running = 1
+    return restart_line(record.get('sha'), record.get('since'), running)
 
 
 def _describe(record, state_dir, now, alive, held):
