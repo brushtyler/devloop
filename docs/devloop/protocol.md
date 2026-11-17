@@ -273,6 +273,22 @@ the cycle is gone. A `cycle` record counts only from the dispatcher's identity, 
 cycle is reported once on each issue; another cycle on the same issue is reported again. The
 record adds no label and blocks nothing by itself: the open blocks do.
 
+## Daily summary
+
+The [daily summary](guide.md#daily-summary) (#256) reads only records bound to identities: the
+`ledger`, `merged` and `notice` (escalation) records the dispatcher signed, the `review` records
+of a configured reviewer written with its identity (a CI round with the dispatcher's), and the
+`pr` marker of a PR opened by the implementer it names. On `[report] issue` it writes two kinds of
+`report` record, both with the day (`YYYY-MM-DD`, UTC):
+
+- `today`, at the end of the issue body: the day the body shows. It counts only when the
+  dispatcher wrote the body last (its last editor, or its author if never edited): a body
+  edited by anyone else shows no day, and no closed day is archived from it;
+- `archive`, at the end of a dispatcher comment: the summary of a closed day. Only the first
+  archive of each day that the dispatcher wrote counts; another identity's comment with the same
+  marker is ignored. A publication edits the archive of a day instead of writing another, so a
+  second run, or a run repeated after a failure, leaves one comment per day.
+
 ## Structured review
 
 The reviewer returns JSON validated against [`devloop/schemas/review.json`](../../devloop/schemas/review.json):

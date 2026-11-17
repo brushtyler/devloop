@@ -88,6 +88,15 @@ class RunPolicy:
 
 
 @dataclass(frozen=True)
+class ReportPolicy:
+    """``[report]`` (#256): the issue of the daily summary of ``devloop report``, or 0 when none
+    is configured (``--publish`` refuses, ``run`` publishes nothing), and the minutes between
+    two automatic updates of ``devloop run``."""
+    issue: int = 0
+    interval: int = 15
+
+
+@dataclass(frozen=True)
 class CIPolicy:
     """``[ci]`` (#263): a head without CI, with ``local_tests`` other than ``full``, is not
     reviewed for ``grace_minutes`` after its push (the dispatcher's push, else the commit date):
@@ -278,6 +287,8 @@ class Config:
     supervisor: str = ''
     pin: PinPolicy = field(default_factory=PinPolicy)
     run: RunPolicy = field(default_factory=RunPolicy)
+    # The daily summary (#256).
+    report: ReportPolicy = field(default_factory=ReportPolicy)
     # The wait for the CI of a new head (#263).
     ci: CIPolicy = field(default_factory=CIPolicy)
     # Code paths and their documents, listed in the implement, fix and review prompts (#203).
@@ -553,6 +564,25 @@ def parse_run(table):
     return RunPolicy(alert_issue=alert)
 
 
+def parse_report(table):
+    """``[report]`` (#256): ``issue``, optional, the number of an issue (at least 1);
+    ``interval``, whole minutes of at least 1 (default 15)."""
+    if not isinstance(table, dict):
+        raise ConfigError('report: expected a table')
+    unknown = set(table) - {'issue', 'interval'}
+    if unknown:
+        raise ConfigError(f'report: unknown keys {sorted(unknown)}')
+    values = {}
+    for key, what in (('issue', 'the number of an issue'),
+                      ('interval', 'a whole number of minutes of at least 1')):
+        if key in table:
+            value = table[key]
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ConfigError(f'report.{key}: expected {what}')
+            values[key] = value
+    return ReportPolicy(**values)
+
+
 def parse_ci(table):
     """``[ci]`` (#263): ``grace_minutes`` (0 or more) and ``required_timeout_minutes`` (at least
     1), whole minutes."""
@@ -747,6 +777,7 @@ def parse_config(data, root=INSTALL_ROOT):
         merge=parse_merge(data.get('merge', {}), supervisor), supervisor=supervisor,
         pin=parse_pin(data.get('pin', {}), sensitive_lists(data)),
         run=parse_run(data.get('run', {})),
+        report=parse_report(data.get('report', {})),
         ci=parse_ci(data.get('ci', {})),
         docs=parse_docs(data),
         review_policy=parse_review_policy(
@@ -791,6 +822,7 @@ OVERLAY_KEYS = {
     'apps': {'key_dir': None, '*': dict.fromkeys(('app_id', 'slug'))},
     'pin': {'auto': None},
     'run': {'alert_issue': None},
+    'report': dict.fromkeys(('issue', 'interval')),
     'ci': dict.fromkeys(('grace_minutes', 'required_timeout_minutes')),
     'docs': {'map': {'*': None}},
 }

@@ -153,6 +153,15 @@ restart_max_wait_minutes = 30
 [run]
 # alert_issue = 123
 
+# `devloop report` (issue #256): the daily summary of devloop's records. With `--publish`, and in
+# `devloop run` at most every `interval` minutes, the dispatcher keeps today's summary in the
+# body of this issue, a dedicated one, and archives each closed day in a comment. Without it
+# `--publish` refuses and `run` publishes nothing. Which issue is the operator's choice (local
+# overlay).
+[report]
+# issue = 123
+interval = 15
+
 # The CI of a new head (issue #263). With local_tests other than "full", a PR in agent:review
 # whose head has no CI yet is not reviewed for grace_minutes after its push (the dispatcher's own
 # push, else the commit date): GitHub may not have registered the CI yet. After that the full
