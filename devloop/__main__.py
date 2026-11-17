@@ -114,7 +114,8 @@ def build(args):
     dispatcher = Dispatcher(cfg, gh, ws, runner, log=tick_log, identities=identities,
                             activity=current, ledger=Ledger(gh, state_dir=state),
                             merger=identities.merger(),
-                            pinner=pin.AutoPin(root, state, args.local_config, log=tick_log),
+                            pinner=pin.AutoPin(root, state, args.local_config, log=tick_log,
+                                               fetch_lock=ws.shared_lock),
                             memory=unavailability.Memory(state))
     return cfg, state, dispatcher
 
@@ -359,6 +360,9 @@ def main(argv=None):
     if args.command == 'status':
         for line in (activity.describe(state) or 'no action running').split('\n'):
             log(line)
+        restart = activity.describe_restart(state)
+        if restart:
+            log(restart)
         for line in unavailability.describe(state):
             log(line)
         if label_transition(dispatcher.gh, cfg.labels) == 'both':

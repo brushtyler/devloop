@@ -24,8 +24,11 @@ pertinent to the PR ([CI failures not pertinent to the PR](#ci-failures-not-pert
 another value stops devloop at startup.
 `[merge]` (`mode`, `levels`, `operator_only_paths`) and `roles.supervisor` set the
 [merge modes](guide.md#merge-modes); an unknown mode, level or key stops devloop at startup.
-`[pin]` (`auto`, default `false`) sets the [pin after a merge](guide.md#pin-after-a-merge); a value that is
-not a boolean, or an unknown key, stops devloop at startup. `[run]` (`alert_issue`, unset by
+`[pin]` (`auto`, default `false`; `restart_max_wait_minutes`, default 30) sets the
+[pin after a merge](guide.md#pin-after-a-merge) and how long, in the continuous mode, the restart
+from the new copy may wait for the running actions while new ones still start; an `auto` that is
+not a boolean, a `restart_max_wait_minutes` that is not a whole number of at least 0, or an
+unknown key, stops devloop at startup. `[run]` (`alert_issue`, unset by
 default) names the issue of the alert of the [continuous loop](guide.md#continuous-loop); a value that
 is not an issue number (an integer of at least 1), or an unknown key, stops devloop at startup.
 `[docs] map` sets the
@@ -237,7 +240,7 @@ follow the code. It is the documentation phase of devloop, the `07-docs` of an S
 [docs.map]
 "devloop/" = ["docs/devloop/guide.md"]
 "orchestrator.py" = ["docs/getting-started.md", "docs/architecture.md"]
-"schemas/" = ["docs/configuration.md"]
+"schemas/quality-contract.schema.json" = ["docs/configuration.md"]
 ```
 
 A key is a directory prefix ending in `/` (it covers every file under it) or a file, matched

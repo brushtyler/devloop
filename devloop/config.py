@@ -102,9 +102,12 @@ class CIPolicy:
 class PinPolicy:
     """``[pin]`` (#174): whether a merge by devloop that touches ``paths`` (``devloop/`` and the
     files of ``review_policy.sensitive_path_lists``) pins ``origin/<base_branch>`` at the next
-    tick."""
+    tick. In continuous mode the restart from the new copy waits for the running actions, while
+    new ones still start, for at most ``restart_max_wait_minutes`` (#301): after that no action
+    starts until the restart."""
     auto: bool = False
     paths: tuple = ('devloop/',) + DEFAULT_SENSITIVE_LISTS
+    restart_max_wait_minutes: int = 30
 
     def touches(self, changed):
         """Whether a path of ``changed`` is, or is under, an entry of ``paths``."""
@@ -518,17 +521,22 @@ def parse_merge(table, supervisor):
 
 
 def parse_pin(table, lists):
-    """``[pin]`` (#174): ``auto`` (default false). ``lists`` are the names of
-    ``review_policy.sensitive_path_lists``, watched with ``devloop/``."""
+    """``[pin]`` (#174): ``auto`` (default false) and ``restart_max_wait_minutes`` (#301, default
+    30, 0 or more). ``lists`` are the names of ``review_policy.sensitive_path_lists``, watched
+    with ``devloop/``."""
     if not isinstance(table, dict):
         raise ConfigError('pin: expected a table')
-    unknown = set(table) - {'auto'}
+    unknown = set(table) - {'auto', 'restart_max_wait_minutes'}
     if unknown:
         raise ConfigError(f'pin: unknown keys {sorted(unknown)}')
     auto = table.get('auto', False)
     if not isinstance(auto, bool):
         raise ConfigError('pin.auto: expected true or false')
-    return PinPolicy(auto=auto, paths=('devloop/', *lists))
+    wait = table.get('restart_max_wait_minutes', PinPolicy.restart_max_wait_minutes)
+    if not isinstance(wait, int) or isinstance(wait, bool) or wait < 0:
+        raise ConfigError('pin.restart_max_wait_minutes: expected a whole number of minutes, '
+                          'at least 0')
+    return PinPolicy(auto=auto, paths=('devloop/', *lists), restart_max_wait_minutes=wait)
 
 
 def parse_run(table):

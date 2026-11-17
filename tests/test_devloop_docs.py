@@ -87,6 +87,67 @@ class MapConfigTests(unittest.TestCase):
         self.assertEqual(sorted(k for k, _ in CFG.docs.entries if k.startswith('ssdlc_feedback')),
                          sorted(p.name for p in REPO.glob('ssdlc_feedback*.py')))
 
+    def test_the_remaining_modules_and_each_schema_map_to_their_documents(self):
+        # #247 (ADR 0003, I10): each entry checked against the module or schema it covers.
+        expected = {
+            'scripts/agent-token.py': ('AGENTS.md', 'docs/devloop/reference.md'),
+            'ssdlc_reconciliation.py': ('docs/historical-reconciliation.md', 'docs/recovery.md'),
+            'ssdlc_transitions.py': ('docs/recovery.md',),
+            'ssdlc_preparations.py': ('docs/continuations.md',
+                                      'docs/historical-reconciliation.md',
+                                      'docs/scope-amendments.md'),
+            'ssdlc_supervisor.py': ('docs/supervision.md', 'docs/writer-fencing.md'),
+            'ssdlc_bounce.py': ('docs/bounce-preview.md',),
+            'ssdlc_corrective.py': ('docs/bounce-preview.md', 'docs/native-gate-convergence.md'),
+            'ssdlc_corrective_owners.py': ('docs/bounce-preview.md', 'docs/developer-feedback.md'),
+            'ssdlc_candidates.py': ('docs/candidate-capture.md',),
+            'ssdlc_bootstrap.py': ('docs/task-mode.md', 'docs/native-gate-convergence.md'),
+            'ssdlc_design.py': ('docs/task-mode.md', 'docs/bounded-recovery.md'),
+            'ssdlc_planning.py': ('docs/task-mode.md',),
+            'ssdlc_requirements.py': ('docs/task-mode.md',),
+            'ssdlc_gate_reports.py': ('docs/native-gate-convergence.md', 'docs/task-mode.md'),
+            'ssdlc_findings.py': ('docs/native-gate-convergence.md', 'docs/task-mode.md'),
+            'ssdlc_usage_admission.py': ('docs/bounded-recovery.md', 'docs/cost-telemetry.md',
+                                         'docs/recovery.md'),
+            'ssdlc_replay_gate.py': ('docs/bounded-recovery.md', 'docs/development.md'),
+            'ssdlc_grader.py': ('docs/bounded-recovery.md',),
+            'ssdlc_owner_revalidation.py': ('docs/developer-feedback.md', 'docs/task-mode.md'),
+            'ssdlc_impact.py': ('docs/developer-feedback.md', 'docs/task-mode.md'),
+            'ssdlc_operator_recovery.py': ('docs/developer-feedback.md',),
+            'ssdlc_amendments.py': ('docs/scope-amendments.md',),
+            'ssdlc_verification_repair.py': ('docs/scope-amendments.md', 'docs/recovery.md'),
+            'ssdlc_deadline_extensions.py': ('docs/scope-amendments.md',),
+            'ssdlc_locks.py': ('docs/writer-fencing.md',),
+            'schemas/quality-contract.schema.json': ('docs/configuration.md',),
+            'schemas/recovery-grader-baseline.json': ('docs/bounded-recovery.md',
+                                                      'docs/devloop/reference.md'),
+            'schemas/recovery-limits.schema.json': ('docs/bounded-recovery.md',
+                                                    'docs/historical-reconciliation.md'),
+            'schemas/corrective-transaction.schema.json': ('docs/bounce-preview.md',
+                                                           'docs/native-gate-convergence.md'),
+        }
+        entries = dict(CFG.docs.entries)
+        for path, documents in expected.items():
+            with self.subTest(path=path):
+                self.assertTrue((REPO / path).is_file(), path)
+                self.assertEqual(entries[path], documents)
+                # No prefix adds a document: the entry alone gives the documents of the file.
+                self.assertEqual(sorted(CFG.docs.documents([path])), sorted(documents))
+        # One key per schema, towards the document that uses it; no "schemas/" prefix, which
+        # would add its document to every schema.
+        self.assertNotIn('schemas/', entries)
+        self.assertEqual(sorted(k for k in entries if k.startswith('schemas/')),
+                         sorted(f'schemas/{p.name}' for p in (REPO / 'schemas').iterdir()
+                                if p.is_file()))
+        # The documents of the map name the schemas they describe by file.
+        for key in ('plan', 'task-plan-review', 'design-review', 'candidate-capture',
+                    'continuation-snapshot', 'reconciliation-request',
+                    'reconciliation-authorization', 'recovery-limits', 'quality-contract'):
+            schema = f'schemas/{key}.schema.json'
+            with self.subTest(schema=schema):
+                self.assertTrue(any(schema in (REPO / document).read_text()
+                                    for document in entries[schema]), schema)
+
     def test_a_valid_map_loads_in_order(self):
         docs = self.parse({'devloop/': ['docs/a.md'], 'x.py': ['README.md', 'docs/a.md']})
         self.assertEqual(docs.entries, (('devloop/', ('docs/a.md',)),

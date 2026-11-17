@@ -12,7 +12,8 @@ fails the smoke test stays as ``rejected-<sha12>``, for the analysis.
 
 With ``[pin] auto = true`` a merge by devloop that touches ``devloop/`` or a list file records a
 request (``pin-pending.json``), and the next tick pins ``origin/<base_branch>`` before planning
-(``AutoPin``): ``run`` and ``tick`` then start again from the new copy (``Repinned``).
+(``AutoPin``): ``run`` and ``tick`` then start again from the new copy (``Repinned``). In the
+continuous mode of ``run`` the pin runs at once, and the restart waits until no action runs (#301).
 """
 
 import fcntl
@@ -27,7 +28,7 @@ import tarfile
 import tempfile
 import time
 import tomllib
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path, PurePosixPath
 
 from .config import DEFAULT_SENSITIVE_LISTS, ConfigError, apply_overlay, read_toml
@@ -137,13 +138,14 @@ def _verified_copies(state):
     return copies
 
 
-def resolve(root, state, ref, fetch=True):
+def resolve(root, state, ref, fetch=True, fetch_lock=None):
     """The commit of ``ref``. An abbreviation of a copy already verified is that copy's commit,
     without a fetch. Otherwise the branches and tags of ``origin`` are updated first, dropping
     those deleted on ``origin``; a bare name is a branch of ``origin``, else a tag of ``origin``;
     and the commit must be reachable from a branch or a tag of ``origin``: a commit only local
     (or reachable only from a local tag, or from a branch since deleted on ``origin``) is
-    refused."""
+    refused. ``fetch_lock``, when given, is held during the fetch: the one of the workspace, so
+    that the fetch of a pin does not run with those of the running actions (#301)."""
     if not ref or ref.startswith('-') or any(c.isspace() for c in ref):
         raise PinError(f'invalid ref {ref!r}')
     if HEX.fullmatch(ref):
@@ -155,8 +157,9 @@ def resolve(root, state, ref, fetch=True):
     if fetch:
         # The tags of origin go to a namespace of their own, apart from the local tags, which
         # prove nothing; --prune drops the branches and tags no longer on origin.
-        _git(root, 'fetch', '--quiet', '--prune', '--no-tags', 'origin',
-             f'+refs/heads/*:{REMOTE_BRANCHES}*', f'+refs/tags/*:{REMOTE_TAGS}*')
+        with fetch_lock or nullcontext():
+            _git(root, 'fetch', '--quiet', '--prune', '--no-tags', 'origin',
+                 f'+refs/heads/*:{REMOTE_BRANCHES}*', f'+refs/tags/*:{REMOTE_TAGS}*')
     name = ref
     if ref != 'HEAD' and not ref.startswith(('origin/', 'refs/')):
         for remote in (f'{REMOTE_BRANCHES}{ref}', f'{REMOTE_TAGS}{ref}'):
@@ -416,7 +419,7 @@ def _reject(state, sha, tmp):
     return kept
 
 
-def pin(root, state, ref, local=None, log=print, fetch=True, smoke=True):
+def pin(root, state, ref, local=None, log=print, fetch=True, smoke=True, fetch_lock=None):
     """Pin ``ref``: the verified copy of its commit, which ``state/current`` now points at.
     ``local`` is the overlay (used when the file exists). On any failure ``current`` is left as
     it was.
@@ -424,11 +427,12 @@ def pin(root, state, ref, local=None, log=print, fetch=True, smoke=True):
     A new copy passes the smoke test (#260) before ``current`` moves: ``smoke`` is True for
     ``Smoke``, a callable ``smoke(copy, local)`` raising ``StepFailed``, or False to skip it
     (``--no-smoke``, logged). A copy that fails it stays as ``rejected-<sha12>`` and the pin
-    raises ``SmokeError``. A copy already pinned (the rollback) is not tested again."""
+    raises ``SmokeError``. A copy already pinned (the rollback) is not tested again.
+    ``fetch_lock`` is held during the fetch (``resolve``)."""
     state = Path(state)
     state.mkdir(parents=True, exist_ok=True)
     with _locked(state):
-        sha = resolve(root, state, ref, fetch=fetch)
+        sha = resolve(root, state, ref, fetch=fetch, fetch_lock=fetch_lock)
         dest = state / f'{PREFIX}{sha[:12]}'
         reused = dest.exists() or dest.is_symlink()
         if reused:
@@ -495,11 +499,13 @@ def clear_pending(state):
 
 
 class AutoPin:
-    """The pin after a merge (#174), as the dispatcher uses it."""
+    """The pin after a merge (#174), as the dispatcher uses it. ``fetch_lock`` is the lock of
+    the workspace's shared git commands, held during the fetch of a pin that runs while actions
+    run (#301)."""
 
-    def __init__(self, root, state, local=None, log=print, smoke=True):
+    def __init__(self, root, state, local=None, log=print, smoke=True, fetch_lock=None):
         self.root, self.state, self.local, self.log = Path(root), Path(state), local, log
-        self.smoke = smoke
+        self.smoke, self.fetch_lock = smoke, fetch_lock
 
     def request(self, pr, head):
         request(self.state, pr, head)
@@ -512,7 +518,13 @@ class AutoPin:
         clear_pending(self.state)
 
     def pin(self, ref):
-        return pin(self.root, self.state, ref, self.local, log=self.log, smoke=self.smoke)
+        return pin(self.root, self.state, ref, self.local, log=self.log, smoke=self.smoke,
+                   fetch_lock=self.fetch_lock)
+
+    def current(self):
+        """The copy ``current`` points at now, or None: the operator may pin another one by
+        hand while a restart waits (#301)."""
+        return current(self.state)
 
     def _alerted(self):
         try:
