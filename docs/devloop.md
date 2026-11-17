@@ -707,6 +707,61 @@ header names that model and its reasoning level, not the configured ones. Text t
 writes on its own, such as escalations and CI rounds, names `devloop dispatcher` as the agent and
 no model.
 
+## Who does what
+
+Roles are assigned to actors, not to agents: an actor is an agent with its own GitHub App, or the
+operator. The assignment lives in the configuration (`[roles]`) or in
+[ADR 0002](adr/0002-ruoli-e-responsabilita.md), not in the code, and every decision of a role
+leaves a trace on GitHub signed by the identity that takes it. ADR 0002 is the source; its status
+is *proposed* until the operator approves and merges it.
+
+| Role | Actor today | Does | Does not |
+|---|---|---|---|
+| **Operator** | `brushtyler` | Takes the reserved decisions of ADR 0001; resolves escalations (`agent:needs-human`); approves ADRs; assigns roles; can always merge, block or resume any work | — |
+| **Coordinator** (optional, not assigned today) | — | Backlog plan and priorities, draft ADRs, checks the supervisor's work. A revocable delegation of the operator | The reserved decisions |
+| **Supervisor** | Claude Code (`claude-agent`) | Watches devloop; analyses runs; opens issues for problems and improvements; queues issues of trusted authors (`agent:ready`, priority) within the approved priorities; in `auto` mode holds or sequences merges and decides non-critical escalations; escalates to the operator | Implement, review, change configuration, policy, budget or credentials; merge: the dispatcher does |
+| **Dispatcher** | devloop (`dispatcher`) | Runs the steps: preflight, implement, review, fix, sync, CI rounds, promotion, merge (`strict` or `auto` mode), pin (if on), continuous loop (if on); writes the markers; escalates | The reserved decisions; merge with merging off |
+| **Preflight** | Codex (`codex-agent`) | Checks an issue's readiness, read-only | Write to GitHub: the dispatcher does |
+| **Implementer** | Claude (`claude-agent`) | Implements and fixes in the worktree | Publish, push, merge |
+| **Reviewer** | Codex (level 1); Codex + agy (level 2) | Structured review with a verdict | Fix |
+
+The implementer never reviews its own PR, the supervisor neither implements nor reviews, and on a
+PR it also implemented the supervisor decides no escalation or hold: the operator does.
+
+### Merge modes
+
+ADR 0002 sets three merge modes, configured with `[merge].mode` and an optional per-level
+override in `[merge.levels]`; the most restrictive one wins. **They are not implemented yet**: the
+implementation is tracked in #172 and #182, and until then devloop behaves as in `off`.
+
+| Mode | Who decides | Behaviour |
+|---|---|---|
+| `off` (default) | Operator | devloop brings the PR to `agent:ready-to-merge` and stops. A person merges. Every escalation goes to the operator |
+| `strict` | Merge directives | devloop merges **only** when the merge directives hold. Every escalation goes to the operator |
+| `auto` | Directives + supervisor | As `strict`. The supervisor can also hold a merge (`/devloop hold`, `/devloop release`) and **decides non-critical escalations on its own** (`agent:needs-supervisor`). Critical ones go to the operator |
+
+The merge directives are: an approval from every reviewer the level requires, no open finding,
+the head equal to the approved commit, a matching policy receipt, CI passed, the PR mergeable
+without conflicts, and neither `agent:needs-human` nor `agent:merge-hold`. **No mode, and no
+agent, merges with CI not green, with open blocking findings or without the required approvals.**
+
+**Critical: always to the operator, also in `auto`.**
+
+- The reserved decisions of ADR 0001, including rounds and budget beyond the limits.
+- PRs that touch `docs/adr/`, `AGENTS.md` or `CLAUDE.md` (`operator_only_paths`).
+- The preflight's `operator_decision` decisions.
+- Content from untrusted authors, or text changed after `agent:ready`.
+- Any unclassified case.
+
+**Non-critical: in `auto` the supervisor decides, with a trace on GitHub.**
+
+- Retrying a step that failed for a tool problem (agent crashed, model unavailable, permission
+  denied), without counting a round and with at most 2 attempts.
+- Accepting the preflight's technical defaults (`default_available`) on issues of trusted authors.
+- Holding or sequencing merges.
+- Asking for a new review.
+- Parking P2 work according to the operator's strategy.
+
 ## GitHub identities
 
 Each agent and the dispatcher can act on GitHub with its own GitHub App (#65), configured under
@@ -802,6 +857,7 @@ python3 -m devloop tick             # run one round
 python3 -m devloop run --interval 600
 python3 -m devloop cleanup          # remove worktrees left by failed steps
 python3 -m devloop follow issue-52  # follow live the implementer of issue #52 (pr-<N>: reviewer or fixer)
+python3 -m devloop watch --timeout 3600  # wait for the next change on GitHub, for the supervising agent
 ```
 
 Run it from any checkout of this repository. Worktrees, agent prompts and logs, and the lock that
@@ -833,6 +889,94 @@ reviewer's while a review runs, the fixer's while a fix runs. It reads local fil
 stops it. Antigravity sessions are not supported. For this reason devloop runs `codex exec`
 without `--ephemeral` (and with `--json`, for the [telemetry](#evidence-and-telemetry)): Codex saves the session of every turn in `~/.codex/sessions`, and these
 transcripts stay there after the turn.
+
+### Waking the supervising agent
+
+devloop works in ticks that someone starts. The agent that supervises it (Claude Code, Codex or
+Antigravity) needs to know when something changed on GitHub. `devloop watch` (#173) reads the
+repository every `--interval` seconds (default 60) and prints one line per change:
+
+```text
+HH:MM <type> #N <detail>
+```
+
+The time is UTC. A line carries no secret and no local path, and is a single line: titles and
+comment text are cut short and control characters removed. What it reports:
+
+| Change | Line |
+|---|---|
+| Issue or PR opened | `new PR #N [labels] title`, `new issue #N [labels] title` |
+| Issue or PR closed or merged | `PR #N merged: title`, `issue #N closed (completed): title` |
+| Labels added or removed | `PR #N labels +agent:changes -agent:review` |
+| New head of a PR | `PR #N new head abc1234` |
+| CI turning `pass` or `fail` on the head (the checks the dispatcher reads) | `PR #N CI pass @abc1234` |
+| devloop review: the valid `review` record in the conversation, from the identity that may write it (its native review is not reported again) | `PR #N review codex approve round 2 @abc1234` |
+| Native `APPROVED` or `CHANGES_REQUESTED` review of a trusted user | `PR #N review by brushtyler: APPROVED @abc1234` |
+| Comment of a trusted user or of a devloop app; one a trusted user wrote in person (no attribution header) is an `operator comment` | `issue #N operator comment by brushtyler: first line` |
+
+The [ledger](#evidence-and-telemetry) records (`## Registro devloop`) are not reported: they are
+too frequent. Trust follows [AGENTS.md](../AGENTS.md): an issue or PR counts if its author is in
+`trusted_users` or is one of devloop's apps (the `[apps]` logins). Anyone else's issue or PR
+produces only `new issue #N by an untrusted author (ignored)` (or `new PR`), with no title nor
+content, and nothing after it. The exception is an issue whose latest `agent:ready` was added by
+a user in `trusted_users`, whether the label is still there or the dispatcher already replaced it
+with `agent:working`: while so it is reported (`issue #N admitted with agent:ready by <login>`),
+its labels, closure and trusted comments, never its title. A later `agent:ready` added by anyone
+else ends the admission. The labeled events of an external issue are read when it is first seen
+and whenever its labels change. Labels, heads, CI and closures of a trusted issue or PR are
+reported whoever changed them; comments and reviews only when their author is trusted or a
+devloop app. A trusted comment on an issue or PR outside the open listings (closed before the
+baseline, say) is reported too: the watcher reads its author once and remembers it. On such an
+external issue the admission can change while it stays closed, so the watcher reads its latest
+`agent:ready` again in every round with a new trusted comment on it.
+
+Two modes:
+
+- **`--until-change`** (default): the command ends at the first round with news, exit code 0,
+  with its lines on stdout. With `--timeout <seconds>` it exits with code 3 once that many
+  seconds passed since it started without news, failed reads included (monotonic clock): each
+  `gh` call gets at most the time left, and a round that ends after the timeout is dropped
+  without saving, so what it read is reported by the next run. Without `--timeout` it waits
+  forever. It suits any agent that is woken when a command ends.
+  For Claude Code, run it as a background Bash command: Claude Code is woken when it exits, reads
+  the lines, acts and starts it again.
+
+  ```bash
+  python3 -m devloop watch --until-change --timeout 3600   # Bash tool, run_in_background: true
+  ```
+
+- **`--exec "<command>"`**: the watcher keeps running and, after each round with news, runs the
+  command with the lines on its stdin, and waits for it to end: never two at a time. The
+  command is split as a shell would (`shlex.split`) but runs without a shell. It suits agents
+  without a notification when a command ends, such as Codex or Antigravity resuming a session:
+
+  ```bash
+  python3 -m devloop watch --exec "codex exec resume --last -"   # "-": Codex reads the prompt from stdin
+  ```
+
+  A command that does not start or exits with an error is reported on stderr, and the watcher
+  goes on without delivering those lines again. `--timeout` is refused with `--exec`.
+
+The first run records the starting state and prints `watch baseline: N open PRs, M open issues`,
+which is not news. The state is saved in `state_dir/watch-state.json` of the main checkout
+(`--state <path>` for another file), atomically, after every successful round and **before** its
+lines are printed or delivered: a restarted watcher does not repeat lines, and the next run of
+`--until-change` reports at once what changed meanwhile. A state file that cannot be read gets a
+new baseline. Run one watcher per state file.
+
+A failed read of GitHub (a transient `gh` error) does not end the watcher: the round is retried
+after the interval and the state of the latest successful round is kept. After three consecutive
+failed rounds it emits one line, `watch error: 3 consecutive rounds could not read GitHub, the
+last valid state is kept`, without `gh`'s output; it counts as news (`--until-change` exits with
+0, `--exec` delivers it). A successful round resets the count. This includes the read of an issue
+or PR that left the open listings: only GitHub's answer that it does not exist (deleted or
+transferred) gives `no longer open`.
+
+The watcher reads with the local `gh` login and needs no app key. Each round reads the open PRs
+and issues (`gh pr list`, up to 200, and `gh issue list`, up to 300), the comments since the
+previous round, for each trusted open PR its checks and native reviews, and the labeled events
+of an external issue whose labels changed or, outside the open listings, with a new trusted
+comment.
 
 ### Evidence and telemetry
 
@@ -1192,6 +1336,13 @@ fallback_models = [
 - **Single host.** One dispatcher runs at a time. With `max_parallel_actions = 1` (the
   default) a tick runs its actions one at a time; above 1, actions on different issues and PRs
   run in threads of that one process ([Parallel actions](#parallel-actions)).
+- **`devloop watch` compares states.** Each round compares what it reads with the latest
+  successful round, so a change undone between two reads (a label added and removed, an issue
+  opened and closed, a CI that fails and passes again on the same head, an `agent:ready` removed
+  and added again by someone else on an external issue) is not reported.
+  Comments and reviews have persistent ids: each one still there at the next read is reported.
+  The state is saved before the lines are delivered, so an interruption in between (the watcher
+  killed, an `--exec` command that fails) loses those lines rather than repeating them.
 - **`gh` compatibility.** Checks, labels, comments and PR creation go through the REST API
   (`gh api`), so devloop does not depend on newer porcelain flags such as `gh pr checks --json`.
   For commit statuses the aggregate state counts, including contexts beyond the first page.

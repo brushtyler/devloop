@@ -85,7 +85,9 @@ class PortDeclarationTests(unittest.TestCase):
         # Whatever of the adapter the dispatcher calls is in a port.
         self.assertEqual((public_methods(GitHub) & called) - declared, set())
         # The adapter's methods outside the ports, documented in devloop/ports.py.
-        self.assertEqual(public_methods(GitHub) - declared, {'last_labeler'})
+        self.assertEqual(public_methods(GitHub) - declared,
+                         {'last_labeler', 'open_issues', 'comments_since', 'issue_state',
+                          'issue_author'})
 
     def test_the_dispatcher_depends_on_the_ports(self):
         from devloop import dispatcher, ledger

@@ -316,7 +316,10 @@ class ParallelReviewersTests(Quorum):
         self.gh.labels[100] = {'agent:review'}
         self.assertEqual(self.planned(), [Action('review', 100, f'the round waits for {SECOND}')])
         self.d.tick()
-        self.assertEqual(self.reviewed(), [FIRST, SECOND, SECOND])
+        # The first two ran together: their order is the order they ended in.
+        reviewed = self.reviewed()
+        self.assertEqual(sorted(reviewed[:2]), sorted([FIRST, SECOND]))
+        self.assertEqual(reviewed[2:], [SECOND])
         self.assertEqual([(r['reviewer'], r['round']) for r in self.records('review')],
                          [(FIRST, 1), (SECOND, 1)])
         self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})

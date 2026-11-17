@@ -25,6 +25,8 @@ Where a method went, when it was not obvious:
   them, because the ``strict`` merge mode requires exactly ``MERGEABLE`` and ``CLEAN``.
   ``merge_pr`` runs on the dispatcher's ``merger``, the local login, not on an app.
 - ``GitHub.last_labeler`` is not in any port: the dispatcher no longer calls it.
+- ``GitHub.open_issues``, ``comments_since``, ``issue_state`` and ``issue_author`` are not in
+  any port: only the ``watch`` command (``devloop/watch.py``) calls them, not the dispatcher.
 """
 
 import re

@@ -51,6 +51,10 @@ Unica eccezione: quando `brushtyler` aggiunge `agent:ready` a un'issue aperta da
 
 Prima di leggere commenti con `gh`, controllare l'autore. devloop applica la stessa regola nel codice: solo i commenti di `trusted_users` arrivano nei prompt, e i marker valgono solo se li scrive l'identità attesa.
 
+## Ruoli
+
+Operatore, coordinatore, supervisore, dispatcher, preflight, implementer e reviewer, con cosa fa e cosa non fa ciascuno, le modalità di merge e la distinzione fra decisioni critiche e non critiche, sono definiti in [ADR 0002](docs/adr/0002-ruoli-e-responsabilita.md).
+
 ## Identità GitHub degli agent
 
 Sull'host dell'operatore, dove sono configurate le GitHub App di [`devloop/config.toml`](devloop/config.toml) e le loro chiavi, commenti, review, issue e PR si pubblicano con l'app dell'agent, non con il login `gh` dell'operatore (`brushtyler`). Chi lavora su un fork o senza queste app usa il proprio account.
