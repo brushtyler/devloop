@@ -1732,3 +1732,8 @@ fallback_memory_seconds = 3600  # when the error does not say when the model is 
   `--json` fields, all known to `gh` 2.46; an issue's state and close reason are read with REST,
   since `gh issue view --json stateReason` is newer than that (#211).
   For commit statuses the aggregate state counts, including contexts beyond the first page.
+  Of the check runs with the same name and app (a re-run of the workflows starts a new suite,
+  and the old run stays on the commit) only the most recent counts: the greatest `started_at`
+  and, on a tie, the greatest id, as GitHub does in a PR's rollup. A superseded run still
+  `in_progress` does not keep the CI pending, an old failure does not fail it, and the failed
+  run ids (the logs sent back to the implementer) come only from the latest runs (#221).
