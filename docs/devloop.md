@@ -1642,6 +1642,19 @@ each agy turn its minimal permissions, and treats a stop without output as a fai
   unavailable model either, so it does not start the fallback. The message counts as the CLI's
   diagnostic on stderr, or on stdout only as a line of its own: a structured answer that quotes
   it is still a valid answer.
+- **An empty run moves to the next model.** A turn that exits 0 with an empty stdout and
+  `run ended with no output` on stderr (agy's `warning: run ended with no output and no recorded
+  error`), or with a JSON envelope that has no `structured_output`, no error and no
+  `denied_actions`, is an empty run (#222): the model was not usable for that turn. It fails
+  with `agy returned no output: <warning>` or `agy returned no structured_output`, and the next
+  model of the [fallback chain](#fallback-models) runs the turn, as for an unavailable model;
+  the tick log says `agy: model <model> returned no output; trying <next model>`. On the last
+  model of the chain, or on an agent without fallback models, the same model runs the turn once
+  more, with `-retry` in its log name; a second empty run escalates (`tool_failure`) with
+  `; no output again after one retry`. An empty run may be transient, so it is never recorded
+  in the [memory of unavailable models](#memory-of-unavailable-models). A stop with
+  `jetski: no output produced`, `denied_actions` or nothing at all on stderr is not an empty
+  run and keeps the path described above.
 - **A denied permission is retried once.** When that diagnostic names the permission (`a tool
   required the "read_file" permission …`) and the turn exited 0, the failure is the tool's,
   not the change's (#180): the same model runs the same turn once more, in the same directory
@@ -1650,7 +1663,7 @@ each agy turn its minimal permissions, and treats a stop without output as a fai
   none. A second denial on the same model escalates as before, and the comment ends with
   ``permission `<name>` denied again after one retry``. Any other failure (an unavailable
   model, a non-zero exit, a stop that names no permission, invalid output, a timeout) is not
-  retried: it escalates or starts the fallback as before. After a fallback, the next model gets
+  retried: it escalates or starts the fallback as before, except an empty run (see above). After a fallback, the next model gets
   its own single retry. The [readiness check](#readiness-check-before-implementation), which
   has no fallback, gets the same single retry, in the same checkout, with its own log and turn
   record (`issue-<n>-preflight-retry`).
@@ -1691,8 +1704,10 @@ fallback_models = [
   precedence even with a non-zero exit: only a missing or empty output, an envelope without
   `structured_output` or an explicit error envelope leave room for a match. A result, a parse
   error, a timeout and a stall never count, whatever the text, and follow the usual path to
-  `agent:needs-human`.
-- **Once.** Each model is tried at most once per action: a rate limit the CLI reports as
+  `agent:needs-human`. An agy [empty run](#agy-permissions) (exit 0, no result, no error) also
+  moves to the next model, without being remembered.
+- **Once.** Each model is tried at most once per action, but for the single retry of an agy
+  denied permission or of an empty run on the last model: a rate limit the CLI reports as
   terminal counts as persistent, and a model found unavailable is not tried again by the later
   attempts of the same action (`implement_test_retries`). When the last model fails too, the
   issue or PR goes to `agent:needs-human` with a comment listing the models tried and why. Any
@@ -1728,7 +1743,8 @@ sometimes days later. So that each turn does not try it again first, devloop rem
   whole hours, minutes and seconds, in this order, each optional and at least one present
   (`152h4m35s`, `4m`, `30s`), the model is skipped until the time the error was detected plus
   that duration. Any other format counts as no indication: the model is skipped for
-  `fallback_memory_seconds` of the agent (default 3600, at least 1).
+  `fallback_memory_seconds` of the agent (default 3600, at least 1). An agy empty run (#222)
+  is never recorded: it may be transient.
 - **During.** A turn of that agent skips a remembered model without running it and starts from
   the first model of the chain that is not remembered, configured model or fallback alike. The
   tick log says so (`<agent>: model <model> skipped: unavailable until <time> (<reason>)`), the
