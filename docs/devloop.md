@@ -95,6 +95,16 @@ its output only at the end, such as `claude --output-format json`, may leave not
 turn's [ledger record](#evidence-and-telemetry) keeps its duration and, when the CLI exposes it,
 the last command it ran or started.
 
+An agent CLI that could not start because its executable is missing or not executable
+(`FileNotFoundError`, `PermissionError`), as for the few seconds in which a CLI replaces itself
+while it updates, is started once more after 30 seconds, in the same turn (#218). Only if it
+fails again is the turn a failure: `<agent> could not start (again, after one retry)`, an
+escalation of class `tool_failure` whatever the step, a [sync](#conflicts-with-main) with files
+in conflict on sensitive paths included. Any other start error is not retried, and is a
+`tool_failure` too. To keep turns
+from depending on an update in progress, see the recommendation under
+[Installation as a dedicated user](#installation-as-a-dedicated-user).
+
 A round is one evaluation of a head: a CI failure, or the reviews of every reviewer the review
 level requires (one at level 1, two at level 2), whatever the number of reviewers. The round
 limit (`max_review_rounds`) is checked before every new round, whether a review or a CI failure,
@@ -655,9 +665,9 @@ check, and the `policy` marker of a level that cannot be reviewed or promoted. A
 
 | Class | When | Critical |
 |---|---|---|
-| `tool_failure` | The agent or its model produced no result: a crash, a timeout, a stall with `agent_stall_action = "abort"`, no model available, a denied permission, a block for [background work still running](#no-background-work-in-a-turn) | No |
+| `tool_failure` | The agent or its model produced no result: a crash, a timeout, a stall with `agent_stall_action = "abort"`, no model available, a denied permission, a block for [background work still running](#no-background-work-in-a-turn), an agent that [could not start](#the-loop) even after its retry (also in a sync with conflicts on sensitive paths) | No |
 | `preflight_default` | A failed [readiness check](#readiness-check-before-implementation) whose gaps are all `default_available`, with no split | No |
-| `sync_failed` | A [sync](#conflicts-with-main) that failed, with no file in conflict under a sensitive path (`sensitive_paths`) or `operator_only_paths` | No |
+| `sync_failed` | A [sync](#conflicts-with-main) that failed, with no file in conflict under a sensitive path (`sensitive_paths`) or `operator_only_paths`; one whose agent could not start is a `tool_failure` | No |
 | `round_limit` | The limit of review rounds | Yes |
 | `operator_decision` | A readiness check with an `operator_decision` or `tool_unavailable` gap, or a split | Yes |
 | `untrusted` | The issue text changed after `agent:ready` by someone outside `trusted_users` | Yes |
@@ -1329,6 +1339,15 @@ sudo -u devloop -H sh -c 'cd ~/ssdlc && python3 -m devloop pin origin/main'
 sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned run --interval 600
 ```
 
+Turns must not depend on an update of an agent CLI in progress: a CLI that replaces its own
+binary leaves, for a few seconds, nothing to start (#218; the start is retried once, see
+[The loop](#the-loop)). For the CLIs devloop uses, either:
+
+- disable their automatic updates: for Claude Code, `DISABLE_AUTOUPDATER=1` in the launcher's
+  environment. The [launcher](#launcher) exports it unless the environment already sets it;
+- or install them in the home of the `devloop` user, as `codex` and `agy` already are, so that
+  the updates of the operator's sessions do not touch them.
+
 #### Pin
 
 `python3 -m devloop pin <ref>`, from the main checkout (or `scripts/devloop-pinned pin <ref>`):
@@ -1377,6 +1396,8 @@ from the clone, and works both run directly by the `devloop` user and through `s
 first argument. `-P` is required: without it `python3 -m` puts the current directory first on
 the module path and imports the checkout's `devloop/` instead of the pinned one. Agents and test
 commands do not inherit that `PYTHONPATH`: the tests of a worktree import the worktree's code.
+It exports `DISABLE_AUTOUPDATER=1`, which the agents inherit, so that Claude Code does not update
+itself while devloop runs it; a value already in the environment (the operator's) is kept.
 
 #### Local config as an overlay
 
