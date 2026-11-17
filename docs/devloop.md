@@ -509,9 +509,8 @@ A head gets level 0 only when all of these hold:
 - **The allowlist.** Every path of the PR's full diff against the base (as for the level: both
   sides of a rename, deletions) is in `allowlist`: under a listed directory (`docs/`) or a
   listed file. A Markdown file (`.md`, `.markdown`, `.mdx`) counts only when listed by its exact
-  path, so `docs/` does not cover `docs/guide.md`. A symlink never counts. These are excluded
-  even when listed: `AGENTS.md` and `CLAUDE.md` at any depth (for example `docs/AGENTS.md`, any
-  case), `devloop/prompts/`, `standards/`, `.github/`, `schemas/` (with the replay gate
+  path, so `docs/` covers none of the Markdown files under it. A symlink never counts. These are
+  excluded even when listed: `AGENTS.md` and `CLAUDE.md` at any depth and in any case, `devloop/prompts/`, `standards/`, `.github/`, `schemas/` (with the replay gate
   baseline) and every sensitive path. Paths are compared exactly as Git names them, spaces
   included: only the configured entries are trimmed. One path outside the allowlist keeps the
   level computed above.
@@ -950,8 +949,8 @@ no model.
 Roles are assigned to actors, not to agents: an actor is an agent with its own GitHub App, or the
 operator. The assignment lives in the configuration (`[roles]`) or in
 [ADR 0002](adr/0002-ruoli-e-responsabilita.md), not in the code, and every decision of a role
-leaves a trace on GitHub signed by the identity that takes it. ADR 0002 is the source; its status
-is *proposed* until the operator approves and merges it.
+leaves a trace on GitHub signed by the identity that takes it. ADR 0002 is the source; the operator
+approved it by merging it (PR #189).
 
 | Role | Actor today | Does | Does not |
 |---|---|---|---|
@@ -1496,8 +1495,10 @@ stays as it was, and the request stays: the next tick tries again (`run` logs th
 goes on; `tick` exits with it). With `auto = false` a merge requests nothing, and a request left
 from before is ignored.
 
-devloop imports only the Python standard library and itself. A test enforces this, so the tool
-can later move to its own repository without changes.
+devloop imports only the Python standard library and itself, and a test enforces this
+(`tests/test_devloop_boundary.py`). [ADR 0001](adr/0001-prodotto-unico-fasi-su-tracker.md) keeps
+devloop and ssdlc in one repository and allows reuse of ssdlc code only through a declared `core`
+package, added to that test's allowlist; there is no such package yet.
 
 ## Configuration
 
@@ -1628,9 +1629,9 @@ index, unstaged changes and new files git does not ignore, computed again after 
 The pertinent modules, among the `tests/test_*.py` files of the worktree, are:
 
 - every changed or added `tests/test_*.py`;
-- for every other changed `X.py` (or `pkg/X.py`), the modules `tests/test_X*.py`; for
-  `ssdlc_<name>.py` also `tests/test_<name>*.py` (`ssdlc_impact.py` selects `test_ssdlc_impact*.py`
-  and `test_impact*.py`);
+- for every other changed `<module>.py` (or `<package>/<module>.py`), the modules
+  `test_<module>*.py`; for `ssdlc_<name>.py` also `test_<name>*.py` (`ssdlc_impact.py` selects
+  `test_ssdlc_impact*.py` and `test_impact*.py`);
 - for any file under `devloop/`, the modules `tests/test_devloop*.py`.
 
 When no module is pertinent, for example when only documentation changed, and with `"none"`,

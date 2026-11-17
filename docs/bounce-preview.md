@@ -23,10 +23,12 @@ developer dispatch stops for operator reconciliation without redispatch. Attempt
 retained evidence and frozen budget limits are preserved; raising or disabling an
 environment limit cannot lift a transaction's frozen limit.
 
-Advanced-target merge reconciliation, automatic scope migration, GitHub delivery
-(#4), provider accounting (#14), new billing units/quota polling, parallel scheduling,
-advisory acceptance and subgoals remain later milestones. No controller/runtime
-editing or new dependencies are introduced by this milestone.
+Advanced-target merge reconciliation, automatic scope migration, provider accounting
+(#14), new billing units/quota polling, parallel scheduling, advisory acceptance and
+subgoals remain later milestones. GitHub delivery (#4) is not one of them: it is
+absorbed by [ADR 0001](adr/0001-prodotto-unico-fasi-su-tracker.md), which moves phase
+outputs to the tracker, and its activation is discussed after parity. No
+controller/runtime editing or new dependencies are introduced by this milestone.
 
 Hashes are unkeyed integrity checks, not authentication. Verification provides
 point-in-time integrity checks; no continuous containment is claimed. A

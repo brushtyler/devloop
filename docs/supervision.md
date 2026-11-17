@@ -5,7 +5,7 @@ Plain `run`, `plan` and `design` are foreground commands. Detached supervision, 
 - It provides no distributed ownership.
 - It provides no authentication against a malicious process running under the same user.
 - Fingerprints, including the controller snapshot and the frozen configuration, are unkeyed drift checks, not signatures.
-- There is no GitHub adapter. Remote triggers (#1) and the GitHub lifecycle (#4) are separate issues, and provider accounting is tracked in #14.
+- There is no GitHub adapter. Remote triggers (#1) are a separate issue; the GitHub lifecycle (#4) is absorbed by [ADR 0001](adr/0001-prodotto-unico-fasi-su-tracker.md), which moves phase outputs to the tracker, with activation discussed after parity; provider accounting is tracked in #14.
 
 ## Commands
 

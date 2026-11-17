@@ -580,13 +580,15 @@ binds continuation amendment subjects (`impact_report` key) and is registered as
     directory would resolve an absolute import to a different module (a
     `sys.path` choice of the environment), that line is `UNKNOWN`
     (`ENVIRONMENT_DEPENDENT_IMPORT`) and no relation to that module is inferred.
-  - `tests`: test or fixture files (under `tests/`, `test/`, `fixtures/`, or
-    named `test_*`, `*_test.py`, `conftest.py`) that import it or cite its
+    <!-- doc-links: ignore -->
+  - `tests`: test or fixture files (named `test_*`, `*_test.py`, `conftest.py`, or
+    under `tests/`, `test/`, `fixtures/`) that import it or cite its
     repository-relative path literally.
   - `validators`: files in `schemas/` that cite the target's path, or that the
     target cites by path. No other schema link is inferred.
-  - `owners`: the last matching rule of `.github/CODEOWNERS`, `CODEOWNERS` or
-    `docs/CODEOWNERS`. Status `ABSENT` without such a file, `NONE` without a
+    <!-- doc-links: ignore -->
+  - `owners`: the last matching rule of `.github/CODEOWNERS`, `CODEOWNERS` or `docs/CODEOWNERS`.
+    Status `ABSENT` without such a file, `NONE` without a
     matching owner, `UNKNOWN` for unsupported pattern syntax. `docs/*` and
     `/*` own direct children only (`/*`: files in the repository root); text
     after a whitespace-preceded `#` is a comment, not an owner.
