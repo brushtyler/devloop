@@ -526,19 +526,23 @@ above describe how devloop applies them.
 python3 -m devloop setup            # create the agent:* labels, the priority:* labels and the review level labels (reviews:0 only when level 0 is on)
 python3 -m devloop status           # running action, devloop PRs (with merge state and conflicts), ready issues in start order with their priority, planned actions
 python3 -m devloop apps             # check the GitHub App of each actor
-python3 -m devloop tick --dry-run   # print the ready issues in start order and the plan, change nothing
+python3 -m devloop tick --dry-run   # print the ready issues in start order and the plan, change nothing (no lock: it runs beside a dispatcher)
 python3 -m devloop tick             # run one round
 python3 -m devloop run --idle-timeout 900  # tick continuously (see Continuous loop)
 python3 -m devloop cleanup          # remove worktrees left by failed steps
 python3 -m devloop follow issue-52  # follow live the implementer of issue #52 (pr-<N>: reviewer or fixer)
 python3 -m devloop watch --timeout 3600  # wait for the next change on GitHub, for the supervising agent
-python3 -m devloop pin origin/main  # pin a commit of origin (see Run from a pinned installation)
+python3 -m devloop pin origin/main  # pin a commit of origin, after its smoke test (see Run from a pinned installation)
 python3 -m devloop fallback reset agy  # forget the models agy remembers unavailable (see Memory of unavailable models)
 ```
 
 Run it from any checkout of this repository. Worktrees, agent prompts and logs, and the lock that
 prevents two dispatchers from running at once live under `state_dir` (default `.ssdlc/devloop`)
-in the main checkout. In daily use run it from the pinned copy, through
+in the main checkout. `tick --dry-run` writes nothing and does not take that lock, so the
+[smoke test of a pin](#pin) runs it while `run` is active. Not even its git commands write to
+the repository: it does not fetch, so it plans from the remote branches as last fetched (a
+branch never fetched leaves its merge mode not computable), and the objects that `git
+merge-tree` writes go to a temporary directory. In daily use run it from the pinned copy, through
 `scripts/devloop-pinned` ([Run from a pinned installation](#run-from-a-pinned-installation)).
 `--local-config <file>`, before the command, applies a local overlay to the configuration
 ([Local config as an overlay](#local-config-as-an-overlay)).
@@ -923,11 +927,26 @@ binary leaves, for a few seconds, nothing to start (#218; the start is retried o
 4. checks the copy: in a Python with only the copy on its module path, the package imports, and
    its configuration, with the overlay, loads (a `[docs] map` of the wrong shape fails here) and
    reads `sensitive_path_lists` from the copy;
-5. points `.ssdlc/devloop/current` at the copy, with an atomic rename of a symlink.
+5. runs the **smoke test** of a new copy: from the copy (only the copy on the module path), in
+   the main checkout and with the same overlay, `python3 -m devloop tick --dry-run` (it plans,
+   without agents and without writes, not even to the repository) and one round of `python3 -m devloop watch`, on a state
+   file of its own, at most 30 seconds. Step 4 has already loaded the configuration with the
+   overlay;
+6. points `.ssdlc/devloop/current` at the copy, with an atomic rename of a symlink.
 
-A failure at any step leaves `current` as it was, and leaves no new copy behind. A copy that
-already exists for the same commit is reused, but checked again against the current overlay: if
-a file it needs is missing, the pin fails. Earlier copies stay, for the rollback. `pin` uses the
+A failure at any step leaves `current` as it was, and leaves no new copy behind, with one
+exception: a copy that fails the smoke test stays in `.ssdlc/devloop/rejected-<sha12>` (replacing
+an earlier one of the same commit), for the analysis, and the pin fails with `smoke test of
+<sha12> failed at <step>: <error>`. A rejected copy is never reused: a later pin of the same
+commit extracts and tests it again. A step that fails with a transient error (a network error,
+a GitHub 5xx, its time limit) runs once more before the copy is refused; any other error (an
+import error, an invalid configuration, another GitHub error) refuses it at once. `pin --no-smoke
+<ref>` skips the smoke test, for exceptional cases, and the log says `smoke test of <sha12>
+skipped (--no-smoke)`. The smoke test needs the GitHub access of the dispatcher; a copy of a
+commit from before the smoke test takes the dispatcher lock in `tick --dry-run`, so its smoke
+test fails while `run` is active. A copy that already exists for the same commit is reused,
+without a smoke test, but checked again against the current overlay: if a file it needs is
+missing, the pin fails. Earlier copies stay, for the rollback. `pin` uses the
 overlay given with `--local-config`, or `.ssdlc/devloop/config.local.toml` when it exists. A
 `run` already started keeps the code it started with: restart it after a pin by hand (a pin
 after a merge restarts it by itself, see below). `devloop cleanup` removes only the agent
@@ -1002,6 +1021,14 @@ stops with `auto-pin of origin/main failed, the pinned copy is unchanged: <reaso
 stays as it was, and the request stays: the next tick tries again (`run` counts it as a
 [failed tick](#continuous-loop), with its backoff; `tick` exits with it). With `auto = false` a merge requests nothing, and a request left
 from before is ignored.
+
+A copy refused by the [smoke test](#pin) is not a failed tick: the request is dropped, `current`
+stays on the previous copy, the log says `auto-pin of origin/main refused, the pinned copy is
+unchanged and the request is dropped: <reason>`, and the tick plans and runs its actions from
+the running copy, so `run` goes on. With `[run].alert_issue` the dispatcher comments on that
+issue once per refused commit (its commit and failed step; the error stays in the local log),
+recorded in `.ssdlc/devloop/pin-alerted.json`; a comment that cannot be published is only
+logged. The next merge that requests a pin tries again, on the new `origin/main`.
 
 devloop imports only the Python standard library and itself, and a test enforces this
 (`tests/test_devloop_boundary.py`). [ADR 0001](../adr/0001-prodotto-unico-fasi-su-tracker.md) keeps
