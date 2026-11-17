@@ -14,7 +14,7 @@ plans the next steps and runs them. A crashed tick is resumed by the next one.
 |---|---|---|
 | Start | A trusted user adds `agent:ready` to an issue (or the [supervisor](#labels-from-the-supervisor), on an issue of a trusted user or of a devloop app) | `agent:working`; the implementer works in a fresh worktree |
 | Implement | Changes made and [local tests](#local-tests) pass | Dispatcher commits, pushes `agent/issue-<n>`, opens a PR labelled `agent:review` |
-| CI | Checks pending | Wait; failing checks become a review round sent back as `agent:changes` |
+| CI | Checks pending | Wait; failing checks become a review round sent back as `agent:changes`, unless no failed test module is pertinent to the PR: then the failed jobs are re-run once, without a round (see [CI failures not pertinent to the PR](#ci-failures-not-pertinent-to-the-pr)) |
 | Review | CI passed or absent (absent CI with `local_tests` other than `full`: the full suite first runs locally, see [Local tests](#local-tests)) | The dispatcher computes the PR's [review level](#review-level-and-policy-receipt); at level 1 a **different** agent posts a structured verdict (see below), at level 2 two [independent reviewers](#level-2-two-independent-reviewers) do, one per action, and their verdicts are applied together |
 | Fix | `agent:changes`, or a [`/devloop fix`](#fix-requested-by-the-operator-or-the-supervisor) command on a PR in `agent:review` or `agent:changes` | The implementer fixes or disputes every open finding of the round, and applies the requests of the command, then back to `agent:review` |
 | Sync | A PR in `agent:review` or `agent:ready-to-merge` conflicts with `main` | The implementer resolves the conflicts of a merge of `origin/main`; the dispatcher pushes the merge commit, back to `agent:review` (see below) |
@@ -29,7 +29,9 @@ Readiness belongs to the approved commit. Every tick re-checks ready PRs:
 - if CI is running again on the approved commit, readiness is suspended (`agent:review`) and the
   recorded approval is applied again, without a new review, once CI passes and if its policy
   receipt still matches;
-- if CI fails on the approved commit, the failure becomes a review round (`agent:changes`).
+- if CI fails on the approved commit, the failure becomes a review round (`agent:changes`), or,
+  when no failed test module is pertinent to the PR, a single re-run of the failed jobs
+  ([CI failures not pertinent to the PR](#ci-failures-not-pertinent-to-the-pr)).
 
 ### Conflicts with `main`
 
@@ -932,7 +934,7 @@ Each agent and the dispatcher can act on GitHub with its own GitHub App (#65), c
 
 | Actor | Does |
 |---|---|
-| dispatcher | every read, labels, escalations, CI rounds, finding closures, readiness |
+| dispatcher | every read, labels, escalations, CI rounds, re-runs of failed CI jobs not pertinent to the PR (needs `actions: write`, see [CI failures not pertinent to the PR](#ci-failures-not-pertinent-to-the-pr)), finding closures, readiness |
 | implementer | commits (author and committer are its bot), push, opens the PR, fix and blocked comments |
 | reviewer | the review comment and a native GitHub review (`APPROVE`, `REQUEST_CHANGES` or `COMMENT`) on the reviewed commit |
 | merger | only the merges of the `strict` and `auto` [merge modes](#merge-modes) (see [The merger app](#the-merger-app)) |
@@ -1044,7 +1046,7 @@ The dispatcher reaches GitHub through three ports, declared in `devloop/ports.py
 |---|---|
 | `Tracker` | issues and their history, comments of issues and PRs, labels: `issues_with_label`, `issue`, `issue_history`, `issue_comments`, `pr_comments`, `labelers`, `label_events`, `labeled_events`, `edit_labels`, `comment`, `edit_comment`, `ensure_label` |
 | `CodeReview` | PRs and reviews: `open_prs`, `merge_state` (`clean`, `conflict` or `unknown`), `pr_head`, `pr_state`, `merge_pr`, `pr_reviews`, `create_pr`, `submit_review` |
-| `CI` | checks of a commit: `checks` (summarized by `summarize_checks`), `check_details`, `check_runs`, `failed_log` |
+| `CI` | checks of a commit: `checks` (summarized by `summarize_checks`), `check_details`, `check_runs`, `failed_log`, `rerun_failed_jobs` (#200) |
 
 The ports hold only the methods the dispatcher calls, with their current names and signatures,
 and return normalized data. `GitHub` (`devloop/github.py`) implements all three, and `Identities`
@@ -1427,6 +1429,9 @@ and `agent_stall_action` (`"warn"`, the default, or `"abort"`) control the
 (default 1) sets how many actions of a tick run at once ([Parallel actions](#parallel-actions)).
 `max_open_prs` (default 2) and `max_parked_prs` (default 3), integers of at least 1, cap the
 open PRs in progress and those waiting for a person ([Open PR limits](#open-pr-limits)).
+`ci_rerun_unrelated` (a boolean, default `true`) re-runs once a CI failure in test modules not
+pertinent to the PR ([CI failures not pertinent to the PR](#ci-failures-not-pertinent-to-the-pr));
+another value stops devloop at startup.
 `[merge]` (`mode`, `levels`, `operator_only_paths`) and `roles.supervisor` set the
 [merge modes](#merge-modes); an unknown mode, level or key stops devloop at startup.
 `[pin]` (`auto`, default `false`) sets the [pin after a merge](#pin-after-a-merge); a value that is
@@ -1557,6 +1562,43 @@ review. With `"full"` the gate is unchanged: CI passed or absent.
 The mode and the modules run (`local_tests`: `{mode, modules}`, only `{mode}` with `"full"`) go to the tick log and, as
 information only, to the markers of implement and fix: they are not part of the policy receipt
 and no approval depends on them.
+
+### CI failures not pertinent to the PR
+
+A CI failure normally becomes a round (`ci_failed`). A failure that does not depend on the PR,
+such as a flaky test already on `main`, would spend one for nothing. So at the **first** CI
+failure of a head the dispatcher first reads, in the log of each failed job
+(`gh run view --log-failed`, whole), the test modules that failed: `scripts/run-tests.py`
+prints `FAILED MODULE <name>` for each of them and a final `FAILED (modules=N, worker problems=M)`
+(#200).
+
+- **None pertinent.** If no failed module is pertinent to the PR's diff, by the same
+  correspondence between sources and tests as `local_tests = "changed"`
+  ([Local tests](#local-tests)), the dispatcher re-runs the failed jobs once
+  (`POST /repos/<repo>/actions/runs/<id>/rerun-failed-jobs`) and opens no round. A dispatcher
+  comment with a `rerun` marker records the head, the runs, the modules and the links of the
+  failed checks; the ledger, when on, records a `ci_rerun` event.
+- **Pertinent, or not determinable.** A failed module pertinent to the diff, a failed check that
+  is not a GitHub Actions run (a commit status), a log without the `FAILED MODULE` lines or the
+  final summary, a count that does not match, a worker problem: the failure is a round at once,
+  as before.
+- **While the re-run starts.** As long as GitHub still shows the very failed checks the re-run
+  replaces (same links: a re-run job is a new check run), the dispatcher waits: no round, no
+  review, no merge. A ready PR stays in `agent:ready-to-merge` meanwhile, and goes back to
+  `agent:review` as for any CI running again on the approved commit.
+- **Second failure.** One re-run per head: if the re-run fails too, the failure is a normal
+  `ci_failed`, which counts as a round, and its comment cites the re-run (runs and modules). A new
+  head starts again from its first failure.
+
+The rerun needs **`actions: write`** on the dispatcher's app. Its token is minted with only that
+permission. Without it (GitHub answers 403, or refuses to mint the token; also when the
+dispatcher has no app and uses a `gh` login without the permission), or on any other GitHub error,
+the dispatcher writes one line to the tick log (`CI rerun refused, …`) and the failure is a round,
+as before. `ci_rerun_unrelated = false` turns the re-run off; the default is `true`. A marker of
+the `rerun` kind counts only when the dispatcher's identity wrote it.
+
+Only a `ci_failed` is re-run this way: a CI failure on a PR that has no round left goes to
+`agent:needs-human` (`round_limit`), as before.
 
 ### Documentation map
 

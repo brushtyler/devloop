@@ -138,8 +138,20 @@ class FakeGH:
     def check_runs(self, sha):
         return [dict(r) for r in self.runs]
 
+    # The failed logs of runs by run id (#200); any other run has a log without modules.
+    logs = {}
+
     def failed_log(self, run_id, max_lines=80):
-        return f'log of {run_id}'
+        log = self.logs.get(run_id, f'log of {run_id}')
+        return log if max_lines is None else '\n'.join(log.splitlines()[-max_lines:])
+
+    # What a re-run of failed jobs raises (#200), e.g. a GitHubError for a 403; None: it runs.
+    rerun_error = None
+
+    def rerun_failed_jobs(self, run_id):
+        if self.rerun_error is not None:
+            raise self.rerun_error
+        self.reruns = getattr(self, 'reruns', []) + [run_id]
 
 
 class SnapshotGH(FakeGH):

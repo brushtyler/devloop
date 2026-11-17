@@ -18,6 +18,9 @@ Where a method went, when it was not obvious:
   and pull requests.
 - ``edit_comment`` is in ``Tracker`` next to ``comment``: the ledger edits its own records.
 - ``pr_reviews`` (the native reviews) is in ``CodeReview``, and ``check_runs`` in ``CI``.
+- ``rerun_failed_jobs`` (#200) is in ``CI``: the dispatcher re-runs the failed jobs of a run
+  whose failed test modules are not pertinent to the PR, with a token limited to
+  ``actions: write``.
 - ``merge_state`` is a ``CodeReview`` method: the adapter turns the mergeability of a PR, as
   ``open_prs`` reports it, into ``clean``, ``conflict`` or ``unknown``.
 - ``pr_state`` and ``merge_pr`` (#172) are in ``CodeReview``: the merge of a ready PR re-reads
@@ -125,7 +128,10 @@ class CI(Protocol):
         conclusion}``."""
 
     def failed_log(self, run_id, max_lines=80):
-        """The last ``max_lines`` of the failed steps of run ``run_id``."""
+        """The last ``max_lines`` of the failed steps of run ``run_id`` (all of them with None)."""
+
+    def rerun_failed_jobs(self, run_id):
+        """Re-run the failed jobs of run ``run_id`` (#200); raises ``GitHubError`` if refused."""
 
 
 @runtime_checkable

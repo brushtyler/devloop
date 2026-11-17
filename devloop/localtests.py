@@ -9,13 +9,44 @@
 
 The CI stays the gate before review: with ``changed`` or ``none`` a review needs the CI passed,
 and a head without CI gets the full ``test_cmd`` locally first (``Dispatcher._do_review``).
+
+The same correspondence tells whether a CI failure concerns the PR (#200): ``failed_modules``
+reads the modules ``scripts/run-tests.py`` reports as failed in a CI log, and a failure none of
+whose modules ``select_modules`` picks for the PR's diff is re-run once instead of becoming a
+round.
 """
 
+import re
 import shlex
 
 MODES = ('full', 'changed', 'none')
 DEVLOOP_DIR = 'devloop/'
 DEVLOOP_TESTS = 'test_devloop'
+# What scripts/run-tests.py prints for each failed module and at the end of a failed suite.
+# In a `gh run view --log-failed` log each line starts with the job, the step and a timestamp.
+_FAILED_MODULE = re.compile(r'(?:^|\s)FAILED MODULE (\S+)\s*$')
+_FAILED_SUMMARY = re.compile(r'(?:^|\s)FAILED \(modules=(\d+), worker problems=(\d+)\)\s*$')
+_MODULE = re.compile(r'test_\w+')
+
+
+def failed_modules(log):
+    """The test modules (``test_x.py``) that a CI log of ``scripts/run-tests.py`` reports as
+    failed, sorted, or None when the log does not say which failed for sure: no final summary,
+    a worker problem, as many ``FAILED MODULE`` lines as the summary counts, or a name that is
+    not a test module."""
+    names, summary = [], None
+    for line in (log or '').splitlines():
+        if match := _FAILED_MODULE.search(line):
+            names.append(match.group(1))
+        elif match := _FAILED_SUMMARY.search(line):
+            summary = (int(match.group(1)), int(match.group(2)))
+    if summary is None or summary[1] or not names or summary[0] != len(names):
+        return None
+    # The label of a module is its dotted name (``test_x``, or ``tests.test_x``).
+    modules = [name.rsplit('.', 1)[-1] for name in names]
+    if not all(_MODULE.fullmatch(m) for m in modules):
+        return None
+    return sorted({f'{m}.py' for m in modules})
 
 
 def _prefixes(stem):

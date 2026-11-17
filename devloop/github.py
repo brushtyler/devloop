@@ -271,8 +271,17 @@ class GitHub:
                                 '--jq', '.[] | {id, login: .user.login, state}')
 
     def failed_log(self, run_id, max_lines=80):
+        """The last ``max_lines`` of the failed steps of run ``run_id`` (all of them with None);
+        empty when `gh` cannot read the log."""
         done = self._gh('run', 'view', str(run_id), '-R', self.repo, '--log-failed', check=False)
-        return '\n'.join(done.stdout.splitlines()[-max_lines:])
+        lines = done.stdout.splitlines()
+        return '\n'.join(lines if max_lines is None else lines[-max_lines:])
+
+    def rerun_failed_jobs(self, run_id):
+        """Re-run the failed jobs of GitHub Actions run ``run_id`` (#200). It needs ``actions:
+        write``: without it GitHub answers 403 and this raises ``GitHubError``."""
+        self._gh('api', '-X', 'POST',
+                 f'repos/{self.repo}/actions/runs/{int(run_id)}/rerun-failed-jobs')
 
     # Writes --------------------------------------------------------------
     def edit_labels(self, number, add=(), remove=()):

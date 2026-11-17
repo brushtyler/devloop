@@ -37,7 +37,7 @@ EXPECTED = {
                     'comment', 'edit_comment', 'ensure_label'],
     ports.CodeReview: ['open_prs', 'merge_state', 'pr_head', 'pr_state', 'merge_pr',
                        'pr_reviews', 'create_pr', 'submit_review'],
-    ports.CI: ['checks', 'check_details', 'check_runs', 'failed_log'],
+    ports.CI: ['checks', 'check_details', 'check_runs', 'failed_log', 'rerun_failed_jobs'],
 }
 # Fakes defined as classes: their methods are compared as the adapter's, unbound.
 FAKE_CLASSES = (FakeGH, SnapshotGH, AcceptanceIssueGH, SnapshotIssueGH, LedgerGH, SnapLedgerGH,

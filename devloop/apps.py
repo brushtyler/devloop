@@ -34,6 +34,7 @@ REVIEW = {'contents': 'read', 'pull_requests': 'write'}
 PR_COMMENT = {'pull_requests': 'write'}
 ISSUE_COMMENT = {'issues': 'write'}
 MERGE = {'contents': 'write', 'pull_requests': 'write'}  # only the merger's token (#201)
+RERUN = {'actions': 'write'}  # only the dispatcher's, to re-run failed CI jobs (#200)
 
 _REFRESH_MARGIN = 300  # seconds of validity a cached token must still have
 STEP_TIMEOUT = 30  # seconds, for each step of a token's mint (signature, HTTP request)
