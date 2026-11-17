@@ -5,7 +5,8 @@ The check reads README.md, AGENTS.md and every Markdown page under docs/ and rep
 - relative links whose file does not exist, or that leave the repository;
 - anchors (``#section``) that match no heading of the target page, using GitHub's
   slugs: lower case, punctuation removed, spaces turned into ``-``, and ``-1``, ``-2``
-  suffixes for duplicate headings; ``id``/``name`` HTML attributes also count;
+  suffixes for duplicate headings, after removing formatting such as emphasis;
+  ``id``/``name`` attributes of HTML tags outside inline code also count;
 - paths cited in inline code that start with a known repository directory
   (``CODE_DIRS``) or name a ``*.py`` file at the root, and do not exist.
 
@@ -41,9 +42,11 @@ ALLOWED = frozenset({
 _FENCE = re.compile(r'^\s*(`{3,}|~{3,})')
 _HEADING = re.compile(r'^ {0,3}#{1,6}(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$')
 _CODE_SPAN = re.compile(r'(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)')
-_LINK = re.compile(r'\]\(\s*(<[^>]*>|[^)\s]+)(?:\s+"[^"]*")?\s*\)')
 _REFERENCE = re.compile(r'^ {0,3}\[[^\]]+\]:\s*(<[^>]*>|\S+)')
-_HTML_ANCHOR = re.compile(r'\b(?:id|name)\s*=\s*["\']([^"\']+)["\']')
+_LINK_TITLE = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|\((?:\\.|[^()\\])*\)')
+_HTML_TAG = re.compile(r'<[A-Za-z][A-Za-z0-9-]*(\s[^<>]*)>')
+_HTML_ANCHOR = re.compile(r'(?<![\w-])(?:id|name)\s*=\s*(?:"([^"]+)"|\'([^\']+)\')')
+_EMPHASIS = re.compile(r'(?<![\w\\])([*_]{1,3})(?=\S)(.+?)(?<=[^\s\\])\1(?!\w)')
 _SCHEME = re.compile(r'^[A-Za-z][A-Za-z0-9+.-]*:')
 _ROOT_PY = re.compile(r'[\w.-]+\.py')
 
@@ -71,20 +74,89 @@ def _lines(text):
         ignore_next = line.strip() == IGNORE
 
 
+def _link_destination(text, start):
+    """The destination of an inline link whose ``(`` is at ``start``, or None if it is not one.
+
+    Follows GFM: the destination is ``<...>`` or a run without spaces whose parentheses
+    are balanced; an optional title in ``"..."``, ``'...'`` or ``(...)`` may follow.
+    """
+    position = start + 1
+    while position < len(text) and text[position].isspace():
+        position += 1
+    if text.startswith('<', position):
+        end = text.find('>', position)
+        if end < 0:
+            return None
+        destination, position = text[position:end + 1], end + 1
+    else:
+        depth, begin = 0, position
+        while position < len(text) and not text[position].isspace():
+            char = text[position]
+            if char == '\\' and position + 1 < len(text):
+                position += 2
+                continue
+            if char == '(':
+                depth += 1
+            elif char == ')':
+                if depth == 0:
+                    break
+                depth -= 1
+            position += 1
+        if depth:
+            return None
+        destination = re.sub(r'\\([!-/:-@\[-`{-~])', r'\1', text[begin:position])
+    rest = text[position:]
+    stripped = rest.lstrip()
+    if stripped != rest and (title := _LINK_TITLE.match(stripped)):
+        stripped = stripped[title.end():].lstrip()
+    return destination if stripped.startswith(')') else None
+
+
+def _inline_links(prose):
+    """Destinations of the inline links ``[text](destination "title")`` in a line."""
+    return [destination for match in re.finditer(r'\]\(', prose)
+            if (destination := _link_destination(prose, match.end() - 1)) is not None]
+
+
 def slug(heading):
-    """GitHub's anchor for a heading's text, before the duplicate suffix."""
-    text = re.sub(r'!?\[([^\]]*)\]\([^)]*\)', r'\1', heading)
-    text = re.sub(r'<[^>]+>', '', text).replace('`', '').lower()
+    """GitHub's anchor for a heading's text, before the duplicate suffix.
+
+    Formatting is removed first, as GitHub derives the anchor from the rendered text:
+    emphasis delimiters go, while intraword, escaped and inline-code underscores stay.
+    """
+    def plain(part):
+        part = re.sub(r'!?\[([^\]]*)\]\([^)]*\)', r'\1', part)
+        part = re.sub(r'<[^>]+>', '', part)
+        previous = None
+        while previous != part:
+            previous, part = part, _EMPHASIS.sub(r'\2', part)
+        return part
+
+    parts, position = [], 0
+    for code in _CODE_SPAN.finditer(heading):
+        content = code.group(2)
+        if content.startswith(' ') and content.endswith(' ') and content.strip():
+            content = content[1:-1]
+        parts += [plain(heading[position:code.start()]), content]
+        position = code.end()
+    text = ''.join(parts + [plain(heading[position:])]).lower()
     kept = ''.join(ch for ch in text
                    if ch in ' -' or unicodedata.category(ch)[0] in 'LNM' or unicodedata.category(ch) == 'Pc')
     return kept.replace(' ', '-')
+
+
+def _html_anchors(line):
+    """``id``/``name`` attributes of the HTML tags in a line, outside inline code."""
+    return {first or second
+            for tag in _HTML_TAG.finditer(_CODE_SPAN.sub('', line))
+            for first, second in _HTML_ANCHOR.findall(tag.group(1))}
 
 
 def anchors(text):
     """Every anchor a page offers: heading slugs with duplicate suffixes, and HTML ids."""
     found, occurrences = set(), {}
     for _, line, _ in _lines(text):
-        found.update(_HTML_ANCHOR.findall(line))
+        found.update(_html_anchors(line))
         heading = _HEADING.match(line)
         if not heading:
             continue
@@ -145,7 +217,7 @@ def broken_references(root):
                 continue
             spans = [match.group(2).strip() for match in _CODE_SPAN.finditer(line)]
             prose = _CODE_SPAN.sub('', line)
-            targets = _LINK.findall(prose) + _REFERENCE.findall(prose)
+            targets = _inline_links(prose) + _REFERENCE.findall(prose)
             for target in targets:
                 message = _check_link(root, page, target, cache)
                 if message:
@@ -195,6 +267,23 @@ class DocLinkCheckTests(unittest.TestCase):
             ('docs/guide.md', 'gone.md', 'file not found'),
         ])
 
+    def test_link_titles_and_parentheses_in_destinations(self):
+        self.assertEqual(self.broken({
+            'README.md': (
+                "[a](docs/missing.md 'Guide') [b](docs/gone.md (Guide)) [c](docs/lost.md \"Guide\")\n"
+                '[d](docs/old(v1).md) [e](docs/guide(v2).md#nowhere \'T\')\n'
+                "[ok](docs/guide(v2).md) [ok](docs/guide(v2).md#usage 'Usage') "
+                '[ok](docs/guide(v2).md (Usage)) [ok](<docs/guide(v2).md> "Usage") '
+                '[ok](docs/guide\\(v2\\).md)\n'),
+            'docs/guide(v2).md': '# Usage\n',
+        }), [
+            ('README.md', 'docs/missing.md', 'file not found'),
+            ('README.md', 'docs/gone.md', 'file not found'),
+            ('README.md', 'docs/lost.md', 'file not found'),
+            ('README.md', 'docs/old(v1).md', 'file not found'),
+            ('README.md', 'docs/guide(v2).md#nowhere', 'no heading with this anchor'),
+        ])
+
     def test_reports_a_missing_anchor(self):
         self.assertEqual(self.broken({
             'README.md': '# Title\n[a](docs/g.md#old-name) [b](#nowhere) [c](docs/g.md#new-name)\n',
@@ -223,6 +312,26 @@ class DocLinkCheckTests(unittest.TestCase):
         self.assertEqual(anchors(text), {
             'local-config-as-an-overlay', 'devloop-and-roles-what', 'ruoli-e-responsabilità',
             'notes', 'notes-1', 'notes-1-1', 'notes-2', 'custom'})
+
+    def test_slugs_drop_emphasis_delimiters_but_keep_literal_underscores(self):
+        text = ('# _Usage_\n# Usage\n## __Bold__ and ***both*** and _a_ _b_\n'
+                '## snake_case, `__init__` and `_x_`\n## \\_escaped\\_\n## _nested *mix*_\n')
+        self.assertEqual(anchors(text), {
+            'usage', 'usage-1', 'bold-and-both-and-a-b', 'snake_case-__init__-and-_x_',
+            '_escaped_', 'nested-mix'})
+        self.assertEqual(self.broken({
+            'README.md': '# _Usage_\n[ok](#usage) [bad](#_usage_)\n',
+        }), [('README.md', '#_usage_', 'no heading with this anchor')])
+
+    def test_html_anchors_come_only_from_real_tags(self):
+        self.assertEqual(self.broken({
+            'README.md': ('[bad](#missing) [ok](#custom) [ok](#named) [bad](#data)\n'
+                          'Write `id="missing"` or `<a id="missing">` to add one.\n'
+                          '<a id="custom"></a> <span name=\'named\'></span> <div data-id="data"></div>\n'),
+        }), [
+            ('README.md', '#missing', 'no heading with this anchor'),
+            ('README.md', '#data', 'no heading with this anchor'),
+        ])
 
     def test_external_links_code_blocks_and_ignored_lines_are_not_checked(self):
         self.assertEqual(self.broken({
