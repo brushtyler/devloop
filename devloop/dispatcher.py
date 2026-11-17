@@ -1005,6 +1005,9 @@ class Dispatcher:
         try:
             labels = set()
             if pr is not None:
+                if not pr.meta.get('implementer'):
+                    return None, ('il corpo della PR non termina più con il suo marker: chi l\'ha '
+                                  'implementata e la sua modalità di merge non sono verificabili')
                 labels |= pr.labels
                 if pr.meta.get('implementer') == cfg.supervisor:
                     return None, 'il supervisore ha implementato questa PR'
@@ -1134,7 +1137,8 @@ class Dispatcher:
         is_pr = isinstance(target, PullRequest)
         number = target.number if is_pr else target
         if is_pr:
-            labels = label_names(self.gh.pr_state(number).get('labels') or [])
+            fresh = self.gh.pr_state(number)
+            labels = label_names(fresh.get('labels') or [])
             comments = self.gh.pr_comments(number)
         else:
             labels = label_names(self.gh.issue(number).get('labels') or [])
@@ -1191,9 +1195,33 @@ class Dispatcher:
             return self._to_operator(number, 'L\'escalation non registra un passo che il '
                                      f'supervisore possa ripetere: `/devloop {name}` di `{by}` è '
                                      'stato rifiutato.', 'supervisor_refused', human_remove)
+        current = self._current_key(number, key, target if is_pr else None)
+
+        def superseded():
+            return trace('refused', 'rifiutato: l\'input del passo è cambiato dopo '
+                         'l\'escalation (' + ', '.join(f'`{k}`' for k in sorted(current)
+                                                        if current[k] != key.get(k))
+                         + '), quindi il comando si riferisce a un input superato. Il comando è '
+                         'speso; l\'escalation resta al supervisore.')
+
         # What made the escalation non-critical is checked again, on data read now: a
         # phase:design label, an untrusted text or author, the PR's own merge mode or its
-        # implementer may have changed while it waited.
+        # implementer may have changed while it waited. A PR is checked on its labels and head
+        # read now and on its thread rebuilt from the comments read now, as the merge does: the
+        # snapshot does not read the thread of a PR in agent:needs-supervisor, and without its
+        # review and policy records the level recorded earlier would be lost. A PR whose head
+        # moved is refused first: its merge mode would be the one of another diff.
+        if is_pr:
+            if current != key:
+                return superseded()
+            target = replace(target, labels=labels,
+                             head_sha=fresh.get('headRefOid') or target.head_sha, reviews=[],
+                             fixes=[], syncs=[], closures=[], commands=[], finding_problems=[],
+                             policy=[], zero_head=None, zero_problem='', stale_receipt=False,
+                             operator_comments=[], rereview=False, round_comments=[],
+                             acceptance=[], hold=None)
+            if target.meta:
+                self._read_thread(target, comments)
         route, why = self._supervised(number, cls, step, target if is_pr else None,
                                       key.get('reviewer'), key=key)
         if route is None:
@@ -1202,13 +1230,8 @@ class Dispatcher:
             return self._to_operator(number, 'Il supervisore non può più decidere questa '
                                      f'escalation: {why}. `/devloop {name}` di `{by}` è stato '
                                      'rifiutato.', 'supervisor_refused', human_remove)
-        current = self._current_key(number, key, target if is_pr else None)
         if current != key:
-            return trace('refused', 'rifiutato: l\'input del passo è cambiato dopo '
-                         'l\'escalation (' + ', '.join(f'`{k}`' for k in sorted(current)
-                                                        if current[k] != key.get(k))
-                         + '), quindi il comando si riferisce a un input superato. Il comando è '
-                         'speso; l\'escalation resta al supervisore.')
+            return superseded()
         # Counted per reviewer: a review whose reviewers failed together, then one by one, keeps
         # the retries each one already had.
         done = retries_done(key, [r.get('key') for _, r in

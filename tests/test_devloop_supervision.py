@@ -7,7 +7,7 @@ from devloop import agents, markdown, supervision
 from devloop.config import MergePolicy
 from devloop.dispatcher import PROMPT_DIR, Action, Dispatcher, plan
 from test_devloop import (CFG, REV, SHA1, SHA2, FakeRunner, FakeWS, SnapshotGH, implemented,
-                          pr, raw_review)
+                          norm, pr, raw_review, receipt)
 from test_devloop_preflight import checked, gap
 
 SUPERVISOR = 'agy'  # neither the implementer nor the level-1 reviewer of the tests
@@ -356,6 +356,46 @@ class RetryTests(Case):
                 self.assertEqual(self.escalations(100)[-1]['class'], 'supervisor_refused')
                 self.assertIn('diventata critica', self.gh.threads[100][-2]['body'])
                 self.assertEqual(len(self.runner.calls), 1)  # not run again
+
+    def test_a_retry_checks_the_level_the_thread_records(self):
+        # The snapshot does not read the thread of a PR in agent:needs-supervisor: the retry
+        # reads it again, so that a level 2 recorded earlier keeps its merge mode.
+        cfg = dataclasses.replace(AUTO, merge=MergePolicy(mode='auto', levels=((2, 'strict'),)))
+        d = self.make(cfg, crash())
+        self.fail_review(d)
+        record = norm(raw_review(verdict='request_changes'))
+        record['receipt'] = receipt(previous=2)
+        self.assertEqual(record['receipt']['level'], 2)
+        self.gh.say(100, 'brushtyler', markdown.publishable('review', 'review', record))
+        self.gh.command(100, '/devloop retry')
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertEqual(self.gh.labels[100], {HUMAN})
+        self.assertEqual(self.decisions(100)[-1]['outcome'], 'refused')
+        self.assertIn('`strict`', self.gh.threads[100][-2]['body'])
+        self.assertEqual(len(self.runner.calls), 1)  # not run again
+
+    def test_a_retry_checks_the_labels_of_the_pr_read_now(self):
+        d = self.make(AUTO, crash())
+        self.fail_review(d)
+        self.gh.command(100, '/devloop retry')
+        (stale,) = [p for p in d.snapshot().prs if p.number == 100]
+        self.gh.labels[100].add('phase:design')  # on the PR, after the snapshot
+        d._do_supervise(stale)
+        self.assertEqual(self.gh.labels[100], {HUMAN, 'phase:design'})
+        self.assertEqual(self.decisions(100)[-1]['outcome'], 'refused')
+        self.assertIn('phase:design', self.gh.threads[100][-2]['body'])
+
+    def test_a_retry_on_a_pr_that_lost_its_marker_goes_to_the_operator(self):
+        d = self.make(AUTO, crash())
+        self.fail_review(d)
+        raws = SupGH.open_prs(self.gh)
+        self.gh.open_prs = lambda: [dict(raw, body='b') for raw in raws]
+        self.gh.command(100, '/devloop retry')
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertEqual(self.gh.labels[100], {HUMAN})
+        self.assertEqual(self.decisions(100)[-1]['outcome'], 'refused')
+        self.assertIn('marker', self.gh.threads[100][-2]['body'])
+        self.assertEqual(len(self.runner.calls), 1)  # not run again
 
     def test_a_command_from_someone_not_allowed_is_ignored(self):
         d = self.make(AUTO, crash())
