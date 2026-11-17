@@ -7,15 +7,18 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 from devloop import watch
 from devloop.__main__ import main
-from devloop.apps import DISPATCHER, STEP_TIMEOUT, AppAuth, Identities
+from devloop.apps import DISPATCHER, STEP_TIMEOUT, AppAuth, Identities, http_json
 from devloop.config import load_config
 from devloop.github import GitHub, GitHubError, GitHubNotFound
 from devloop.markdown import marker
@@ -1026,6 +1029,68 @@ class TokenTimeoutTest(unittest.TestCase):
              {'id': 77, 'app_id': 11}))
         self.assertEqual(app.token(), 't')
         self.assertEqual({timeout for _, timeout in steps}, {STEP_TIMEOUT})
+
+
+class _SlowHandler(BaseHTTPRequestHandler):
+    """Answers ``server.plan = (status, header_delay, body_delay)``: the headers after the first
+    delay, the body after the second."""
+
+    def do_GET(self):
+        status, header_delay, body_delay = self.server.plan
+        body = b'{"id": 77}'
+        time.sleep(header_delay)
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.flush()
+        time.sleep(body_delay)
+        try:
+            self.wfile.write(body)
+        except OSError:
+            pass  # the client gave up
+
+    def log_message(self, *args):
+        pass
+
+
+class HttpDeadlineTest(unittest.TestCase):
+    """``http_json``'s timeout bounds the whole request (#197), not each socket operation: slow
+    headers and a slow body do not add up beyond it, for an error response too. Real urllib and
+    sockets, against a local server."""
+
+    def setUp(self):
+        self.server = ThreadingHTTPServer(('127.0.0.1', 0), _SlowHandler)
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.api = f'http://127.0.0.1:{self.server.server_address[1]}'
+        proxies = mock.patch.dict(os.environ, {'no_proxy': '*', 'NO_PROXY': '*'})
+        proxies.start()
+        self.addCleanup(proxies.stop)
+
+    def _call(self, plan, timeout):
+        self.server.plan = plan
+        start = time.monotonic()
+        try:
+            return http_json('GET', '/x', 'Bearer j', timeout=timeout, api=self.api), None
+        except GitHubError as exc:
+            return exc, time.monotonic() - start
+
+    def test_slow_headers_and_body_do_not_add_up_beyond_the_timeout(self):
+        for status in (200, 404):
+            with self.subTest(status=status):
+                # Each delay fits the timeout of one socket operation; together they do not.
+                result, elapsed = self._call((status, 0.4, 0.4), timeout=0.6)
+                self.assertIsInstance(result, GitHubError)
+                self.assertIn('timed out after 0.6s', str(result))
+                self.assertLess(elapsed, 0.8)
+
+    def test_a_timely_answer_is_returned(self):
+        self.assertEqual(self._call((200, 0, 0), timeout=5), ({'id': 77}, None))
+        error, _ = self._call((404, 0, 0), timeout=5)
+        self.assertIn('HTTP 404: {"id": 77}', str(error))
 
 
 class DocsTest(unittest.TestCase):

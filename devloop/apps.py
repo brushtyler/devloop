@@ -63,19 +63,45 @@ def sign_rs256(key_path, data, run=subprocess.run, timeout=STEP_TIMEOUT):
     return done.stdout
 
 
-def http_json(method, path, auth, body=None, timeout=STEP_TIMEOUT):
+def http_json(method, path, auth, body=None, timeout=STEP_TIMEOUT, api=API):
+    """``method`` on ``api + path``, its JSON answer. ``timeout`` bounds the whole request: name
+    resolution, connection, the response's headers and body, of an error too. ``urlopen``'s own
+    timeout applies to each socket operation only, so slow headers and a slow body could add up
+    beyond it (#197): the request runs in a worker thread, awaited at most ``timeout`` seconds."""
     req = urllib.request.Request(
-        API + path, method=method, data=json.dumps(body).encode() if body is not None else None,
+        api + path, method=method, data=json.dumps(body).encode() if body is not None else None,
         headers={'Authorization': auth, 'Accept': 'application/vnd.github+json',
                  'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'devloop'})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read()
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode(errors='replace')[:300]
-        raise GitHubError(f'{method} {path}: HTTP {exc.code}: {detail}') from exc
-    except (urllib.error.URLError, OSError) as exc:
+    outcome = {}
+
+    def fetch():
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                outcome['raw'] = resp.read()
+        except urllib.error.HTTPError as exc:
+            try:
+                outcome['detail'] = exc.read().decode(errors='replace')[:300]
+            except Exception:  # an error body that fails to arrive: the status is enough
+                outcome['detail'] = ''
+            outcome['error'] = exc
+        except Exception as exc:  # re-raised by the caller, in its thread
+            outcome['error'] = exc
+
+    # A daemon thread: one still blocked after the timeout does not keep the process alive, and
+    # its socket timeout ends it soon after.
+    worker = threading.Thread(target=fetch, name='devloop-http', daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        raise GitHubError(f'{method} {path}: timed out after {timeout}s')
+    exc = outcome.get('error')
+    if isinstance(exc, urllib.error.HTTPError):
+        raise GitHubError(f'{method} {path}: HTTP {exc.code}: {outcome["detail"]}') from exc
+    if isinstance(exc, (urllib.error.URLError, OSError)):
         raise GitHubError(f'{method} {path}: {exc}') from exc
+    if exc is not None:
+        raise exc
+    raw = outcome['raw']
     return json.loads(raw) if raw else None
 
 
