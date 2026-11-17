@@ -13,7 +13,8 @@ from unittest import mock
 
 from devloop import activity, agents, follow
 from devloop.dispatcher import Action, Dispatcher, Snapshot
-from test_devloop import CFG, IMPL, FakeGH, FakeRunner, FakeWS, implemented, pr, raw_review, ready
+from helpers.devloop_fakes import FakeGH
+from test_devloop import CFG, IMPL, FakeRunner, FakeWS, implemented, pr, raw_review, ready
 
 
 class ActivityRecordTests(unittest.TestCase):

@@ -4,8 +4,9 @@ import unittest
 
 from devloop import markdown, review
 from devloop.dispatcher import Action, Dispatcher, Snapshot, plan
-from test_devloop import (CFG, IMPL, REV, REV_NAME, SHA1, SHA2, FakeRunner, FakeWS, SnapshotGH,
-                          finding, pr, raw_review, receipt)
+from helpers.devloop_fakes import SnapshotGH
+from test_devloop import (CFG, IMPL, REV, REV_NAME, SHA1, SHA2, FakeRunner, FakeWS, finding, pr,
+                          raw_review, receipt)
 
 # A third agent, neither the PR's implementer nor its recorded reviewer.
 OTHER = next(k for k in sorted(CFG.agents) if k not in (IMPL, REV))

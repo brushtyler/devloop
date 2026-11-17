@@ -34,6 +34,7 @@ from pathlib import Path
 from .agents import TELEMETRY_FIELDS
 from .github import GitHubError
 from .markdown import dispatcher_header, publishable, read_marker
+from .ports import Tracker
 
 NOT_REPORTED = 'non riportato'
 PENDING = 'ledger-open-turns.json'  # in state_dir: issues and PRs with turns not closed
@@ -74,8 +75,8 @@ class LedgerError(GitHubError):
 
 
 class Ledger:
-    """Writes ledger records with ``gh``, the dispatcher's client (``comment`` returns the new
-    comment's id, ``edit_comment`` replaces a body).
+    """Writes ledger records with ``gh``, the dispatcher's ``ports.Tracker`` (``comment``
+    returns the new comment's id, ``edit_comment`` replaces a body).
 
     ``state_dir`` keeps, in ``PENDING``, the issues and PRs where a turn was opened and not
     closed yet, with how many: a number is counted before the turn's record is written and
@@ -84,7 +85,7 @@ class Ledger:
     removed, ``agent:needs-human`` added). Without ``state_dir`` it lasts as long as the
     process."""
 
-    def __init__(self, gh, clock=time.time, monotonic=time.monotonic, state_dir=None):
+    def __init__(self, gh: Tracker, clock=time.time, monotonic=time.monotonic, state_dir=None):
         self.gh = gh
         self._clock = clock
         self._monotonic = monotonic

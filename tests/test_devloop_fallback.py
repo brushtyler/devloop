@@ -11,8 +11,8 @@ from types import SimpleNamespace
 
 from devloop import activity, agents, config, markdown, policy
 from devloop.dispatcher import Action, Dispatcher, Models, Snapshot
-from test_devloop import (CFG, IMPL, SHA1, FakeGH, FakeIdentities, FakeRunner, FakeWS,
-                          implemented, pr, raw_review)
+from helpers.devloop_fakes import FakeGH, FakeIdentities
+from test_devloop import CFG, IMPL, SHA1, FakeRunner, FakeWS, implemented, pr, raw_review
 from test_devloop_quorum import FIRST, SECOND, Quorum
 
 # One action at a time, as in test_devloop.CFG: parallel actions (#176) are tested on their own.

@@ -12,8 +12,9 @@ from pathlib import Path
 from devloop import config, markdown, policy
 from devloop.dispatcher import Action, Dispatcher, Snapshot, plan
 from devloop.workspace import Workspace
-from test_devloop import (BASE, CFG, SHA1, FakeGH, FakeRunner, FakeWS, SnapshotGH, finding,
-                          fixed, norm, pr, raw_review, receipt)
+from helpers.devloop_fakes import FakeGH, SnapshotGH
+from test_devloop import (BASE, CFG, SHA1, FakeRunner, FakeWS, finding, fixed, norm, pr,
+                          raw_review, receipt)
 
 POLICY = CFG.review_policy
 DATA = tomllib.loads(config.DEFAULT_CONFIG.read_text())
