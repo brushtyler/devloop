@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Run devloop from its pinned copy (#174), with the local config as an overlay.
+
+    scripts/devloop-pinned [--allow-root] <devloop arguments>
+
+From the clone this script belongs to, it runs ``python3 -P -m devloop`` with ``PYTHONPATH`` on
+the copy that ``.ssdlc/devloop/current`` points at (made by ``python3 -m devloop pin <ref>``)
+and, when ``.ssdlc/devloop/config.local.toml`` exists, ``--local-config`` on it: the keys it sets
+replace those of the copy's ``devloop/config.toml``. It works run directly by the dedicated user
+or through ``sudo -u devloop -H``, and refuses to run as root without ``--allow-root``.
+
+It imports nothing from the clone: the copy is the only devloop code that runs.
+"""
+
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+STATE = Path('.ssdlc') / 'devloop'
+ALLOW_ROOT = '--allow-root'
+
+
+def command(root, argv, python=sys.executable):
+    """``(argv, env)`` of devloop run from the pinned copy of ``root``, or SystemExit."""
+    state = root / STATE
+    pointer = state / 'current'
+    copy = pointer.resolve() if pointer.is_symlink() else None
+    if copy is None or not (copy / 'devloop' / '__main__.py').is_file():
+        sys.exit(f'devloop-pinned: no pinned copy at {pointer}: run '
+                 '`python3 -m devloop pin origin/main` from the main checkout first')
+    local = state / 'config.local.toml'
+    extra = ['--local-config', str(local)] if local.is_file() else []
+    env = {k: v for k, v in os.environ.items() if k not in ('PYTHONPATH', 'PYTHONHOME')}
+    env['PYTHONPATH'] = str(copy)
+    return [python, '-P', '-m', 'devloop', *extra, *argv], env
+
+
+def main(argv=None, euid=None, execve=os.execve, root=ROOT):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    allow_root = bool(argv) and argv[0] == ALLOW_ROOT
+    if allow_root:
+        argv = argv[1:]
+    if (os.geteuid() if euid is None else euid) == 0 and not allow_root:
+        sys.exit('devloop-pinned: refusing to run as root; run it as the devloop user '
+                 f'(sudo -u devloop -H {sys.argv[0]} ...) or pass {ALLOW_ROOT} first')
+    args, env = command(root, argv)
+    # From the clone, so that devloop finds its main checkout whatever the caller's directory.
+    os.chdir(root)
+    execve(args[0], args, env)
+
+
+if __name__ == '__main__':
+    main()
