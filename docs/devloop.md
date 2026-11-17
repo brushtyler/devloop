@@ -858,11 +858,15 @@ python3 -m devloop run --interval 600
 python3 -m devloop cleanup          # remove worktrees left by failed steps
 python3 -m devloop follow issue-52  # follow live the implementer of issue #52 (pr-<N>: reviewer or fixer)
 python3 -m devloop watch --timeout 3600  # wait for the next change on GitHub, for the supervising agent
+python3 -m devloop pin origin/main  # pin a commit of origin (see Run from a pinned installation)
 ```
 
 Run it from any checkout of this repository. Worktrees, agent prompts and logs, and the lock that
 prevents two dispatchers from running at once live under `state_dir` (default `.ssdlc/devloop`)
-in the main checkout.
+in the main checkout. In daily use run it from the pinned copy, through
+`scripts/devloop-pinned` ([Run from a pinned installation](#run-from-a-pinned-installation)).
+`--local-config <file>`, before the command, applies a local overlay to the configuration
+([Local config as an overlay](#local-config-as-an-overlay)).
 
 ### Watching a tick
 
@@ -1060,20 +1064,125 @@ the CPU signal counts: a long silence of the model alone is reported as a stall.
 
 ### Run from a pinned installation
 
-devloop works on this repository, including on its own code, so run a pinned copy rather than
-the checkout it is changing. This is the same rule as the pinned controller SSDLC uses to develop
-itself:
+devloop works on this repository, including on its own code, so it runs from a pinned,
+read-only copy of one commit of `origin`, never from the checkout it is changing (#174). This is
+the same rule as the pinned controller SSDLC uses to develop itself. The configuration, schemas
+and prompts come from the pinned copy; GitHub state and worktrees come from the clone.
+
+#### Installation as a dedicated user
+
+The installation in use since 2026-11-16 (#185):
+
+- an unprivileged system user `devloop`, with a clone of its own (`/home/devloop/ssdlc`);
+- state, pinned copies and the local config in `.ssdlc/devloop` of that clone;
+- the GitHub App keys in `~/.ghapps` of that user (each key mode `600`), the agent CLIs logged
+  in with logins of that user, and no `gh` login: devloop acts with its apps. A
+  [merge mode](#merge-modes) other than `off` merges with the local `gh` login, so it needs one.
 
 ```bash
-cd /path/to/ssdlc                                        # the repository devloop works on
-git worktree add --detach .ssdlc/devloop/pinned <commit> # once per devloop version
-PYTHONPATH=.ssdlc/devloop/pinned python3 -P -m devloop tick
+sudo useradd --create-home devloop
+sudo -u devloop -H git clone https://github.com/brushtyler/ssdlc.git /home/devloop/ssdlc
+sudo -u devloop -H install -d -m 700 /home/devloop/.ghapps   # then the keys, mode 600
+# The first pin runs the clone's devloop; every later command runs the pinned copy.
+sudo -u devloop -H sh -c 'cd ~/ssdlc && python3 -m devloop pin origin/main'
+sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned run --interval 600
 ```
 
-`-P` is required: without it `python3 -m` puts the current directory first on the module path
-and imports the checkout's `devloop/` instead of the pinned one. The configuration, schemas and prompts come from the pinned copy; GitHub state and worktrees come
-from the current repository. Moving the pin to a newer commit is an explicit operator action.
-`devloop cleanup` removes only the agent worktrees under `state_dir/worktrees`, never the pin.
+#### Pin
+
+`python3 -m devloop pin <ref>`, from the main checkout (or `scripts/devloop-pinned pin <ref>`):
+
+1. updates the branches and tags of `origin`, dropping those deleted on `origin` (the tags of
+   `origin` go to `refs/devloop/origin-tags/`, apart from the local tags), and resolves `<ref>`:
+   a name without prefix is a branch of `origin` (`main` is `origin/main`, never a local
+   `main`), otherwise a tag of `origin`, and the commit must be reachable from a branch or a tag
+   of `origin`. A commit only local, or reachable only from a local tag or from a branch deleted
+   on `origin`, is refused. The commit of a copy already pinned (also abbreviated) is used
+   without a fetch: that is the rollback;
+2. reads `devloop/config.toml` of that commit with the local overlay applied, and takes the files
+   of `review_policy.sensitive_path_lists`: each must be a relative path inside the root and a
+   regular file of the commit;
+3. extracts `devloop/` and those files into `.ssdlc/devloop/pinned-<sha12>`, with a `pin.json`
+   naming the commit, and makes the copy read-only;
+4. checks the copy: in a Python with only the copy on its module path, the package imports, and
+   its configuration, with the overlay, loads and reads `sensitive_path_lists` from the copy;
+5. points `.ssdlc/devloop/current` at the copy, with an atomic rename of a symlink.
+
+A failure at any step leaves `current` as it was, and leaves no new copy behind. A copy that
+already exists for the same commit is reused, but checked again against the current overlay: if
+a file it needs is missing, the pin fails. Earlier copies stay, for the rollback. `pin` uses the
+overlay given with `--local-config`, or `.ssdlc/devloop/config.local.toml` when it exists. A
+`run` already started keeps the code it started with: restart it after a pin by hand (a pin
+after a merge restarts it by itself, see below). `devloop cleanup` removes only the agent
+worktrees under `state_dir/worktrees`, never a pinned copy.
+
+#### Launcher
+
+`scripts/devloop-pinned [--allow-root] <devloop arguments>` runs devloop from the copy that
+`.ssdlc/devloop/current` points at:
+
+```bash
+python3 scripts/devloop-pinned status
+python3 scripts/devloop-pinned run --interval 600
+sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned tick --dry-run
+```
+
+It runs `python3 -P -m devloop` from the root of its clone, with `PYTHONPATH` on the copy only
+and, when `.ssdlc/devloop/config.local.toml` exists, `--local-config` on it. It imports nothing
+from the clone, and works both run directly by the `devloop` user and through `sudo -u devloop
+-H`. Without a pin it stops and says so. It refuses to run as root, unless `--allow-root` is its
+first argument. `-P` is required: without it `python3 -m` puts the current directory first on
+the module path and imports the checkout's `devloop/` instead of the pinned one. Agents and test
+commands do not inherit that `PYTHONPATH`: the tests of a worktree import the worktree's code.
+
+#### Local config as an overlay
+
+`.ssdlc/devloop/config.local.toml` holds **only the keys the operator overrides**, for example:
+
+```toml
+preflight = "codex"
+max_open_prs = 3
+max_review_rounds = 4
+
+[merge]
+mode = "strict"
+
+[pin]
+auto = true
+```
+
+devloop applies it over `devloop/config.toml` of the pinned copy: a table merges key by key
+(`[merge]` above keeps `operator_only_paths` of the copy), any other value, a list too, replaces
+the one of the copy. A new pin therefore needs no realignment of the config by hand. A key that
+`config.toml` cannot have (`bogus = 1`, `[merge] method = "squash"`) stops devloop, and so does
+any value the copy's config would refuse. An overlay cannot remove a key of the copy, only
+replace it.
+
+#### Rollback
+
+Pin the earlier commit again: its copy is reused, checked against the current overlay, and
+`current` points back at it, with no fetch needed.
+
+```bash
+python3 scripts/devloop-pinned pin 1a2b3c4d5e6f   # the sha12 of an earlier pinned-<sha12>
+```
+
+Any pin, by hand or after a merge, also drops a pin requested by a merge and not yet done, so a
+rollback is not undone by the next tick.
+
+#### Pin after a merge
+
+With `[pin] auto = true` (default `false`: the operator's decision), after a merge done by
+devloop ([merge modes](#merge-modes)) whose diff touches `devloop/` or a file of
+`sensitive_path_lists` (those of the running configuration), devloop records the request in
+`.ssdlc/devloop/pin-pending.json`. The next tick, before planning, runs `pin origin/main` (the
+`base_branch` of `origin`). If the pin succeeds, `run` and `tick` start again from the new copy
+with the same arguments: configuration, policy and dispatcher load again, and the lock stays
+held across the restart, so no other dispatcher can start in between. If the pin fails, the tick
+stops with `auto-pin of origin/main failed, the pinned copy is unchanged: <reason>`, `current`
+stays as it was, and the request stays: the next tick tries again (`run` logs the failure and
+goes on; `tick` exits with it). With `auto = false` a merge requests nothing, and a request left
+from before is ignored.
 
 devloop imports only the Python standard library and itself. A test enforces this, so the tool
 can later move to its own repository without changes.
@@ -1093,6 +1202,9 @@ and `agent_stall_action` (`"warn"`, the default, or `"abort"`) control the
 (default 1) sets how many actions of a tick run at once ([Parallel actions](#parallel-actions)).
 `[merge]` (`mode`, `levels`, `operator_only_paths`) and `roles.supervisor` set the
 [merge modes](#merge-modes); an unknown mode, level or key stops devloop at startup.
+`[pin]` (`auto`, default `false`) sets the [pin after a merge](#pin-after-a-merge); a value that is
+not a boolean, or an unknown key, stops devloop at startup. Operator overrides go into the
+[local overlay](#local-config-as-an-overlay), not into this file.
 `[review_policy]` sets the
 [review level](#review-level-and-policy-receipt): `default_level` (1 or 2, default 1), the level
 `label` (default `reviews:2`), `sensitive_paths` and `sensitive_path_lists`; changing any of them,

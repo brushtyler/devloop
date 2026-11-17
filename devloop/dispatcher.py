@@ -91,12 +91,14 @@ from .acceptance import (acceptance_criteria, acceptance_findings, format_criter
                          latest_map, render_map)
 from .agents import AgentError, ModelsUnavailable, ModelUnavailable, PermissionDenied
 from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, PR_COMMENT, REVIEW
+from .config import INSTALL_ROOT, ConfigError
 from .github import GitHubError, author_login
 from .ledger import entries as ledger_entries
 from .ledger import open_turns
 from .localtests import module_command, select_modules
 from .markdown import (RESUME, carries_record, dispatcher_header, publishable, read_marker,
                        render_escalation, render_fix, render_native_review, render_preflight, render_review)
+from .pin import PinError, Repinned
 from .policy import describe as describe_receipt
 from .policy import (BINDING, MAX_LISTED_PATHS, ZERO_LEVEL, agent_profile, changes_requested,
                      check_outcome, check_states, differences, distinct, evaluate, independent,
@@ -783,8 +785,10 @@ class Dispatcher:
     status``. ``ledger`` (``ledger.Ledger``) records evidence and telemetry of each step (#133)."""
 
     def __init__(self, cfg, gh: Backend, ws, runner, log=print, identities=None, activity=None,
-                 ledger=None, merger=None):
+                 ledger=None, merger=None, pinner=None):
         self.cfg = cfg
+        # The pin after a merge (#174, ``pin.AutoPin``), used only with ``[pin] auto = true``.
+        self.pinner = pinner
         self.gh = gh
         # Merges run with the local ``gh`` login devloop runs with, never with an app (#172):
         # the dispatcher's app has no ``contents=write``.
@@ -1282,6 +1286,7 @@ class Dispatcher:
 
     # Tick ----------------------------------------------------------------
     def tick(self, dry_run=False):
+        self._auto_pin(dry_run)
         snap = self.snapshot()
         self._flag_incomplete(snap, dry_run)
         actions = plan(snap, self.cfg)
@@ -1299,6 +1304,30 @@ class Dispatcher:
                 continue
             self._run_action(action, prs)
         return actions
+
+    def _auto_pin(self, dry_run):
+        """With ``[pin] auto = true`` and a pin requested by a merge (#174), pin
+        ``origin/<base_branch>`` before planning. A failed pin stops the tick with ``PinError``
+        and leaves the pointer and the request as they were; a new copy raises ``Repinned``, so
+        that the process starts again from it."""
+        if self.pinner is None or not self.cfg.pin.auto:
+            return
+        request = self.pinner.pending()
+        if not request:
+            return
+        ref = f'origin/{self.cfg.base_branch}'
+        why = f'the merge of #{request.get("pr")}' if request.get('pr') else 'a merge'
+        if dry_run:
+            self.log(f'[dry-run] auto-pin of {ref} pending after {why}')
+            return
+        self.log(f'auto-pin of {ref} after {why}')
+        try:
+            copy = self.pinner.pin(ref)
+        except (PinError, ConfigError, OSError) as exc:
+            raise PinError(f'auto-pin of {ref} failed, the pinned copy is unchanged: {exc}') \
+                from exc
+        if Path(copy).resolve() != INSTALL_ROOT.resolve():
+            raise Repinned(copy)
 
     def _run_action(self, action, prs):
         """Run one action; a failure of an agent, ``gh``, git or trust escalates its issue or
@@ -2173,6 +2202,13 @@ class Dispatcher:
                 return None
         self.merger.merge_pr(pr.number, head)
         self.log(f'  merged {head[:12]} at level {current["level"]} in mode {mode}')
+        if self.pinner is not None and cfg.pin.auto and cfg.pin.touches(paths):
+            # The next tick pins the base with this merge, before planning (#174).
+            try:
+                self.pinner.request(pr.number, head)
+                self.log(f'  auto-pin of origin/{cfg.base_branch} requested for the next tick')
+            except OSError as exc:
+                self.log(f'  auto-pin NOT requested, pin by hand: {exc}')
         payload = {'head': head, 'level': current['level'], 'mode': mode, 'receipt': current}
         if bases:
             payload['bases'] = bases
@@ -2814,6 +2850,6 @@ def run_forever(dispatcher, interval, sleep=time.sleep):
     while True:
         try:
             dispatcher.tick()
-        except (GitHubError, WorkspaceError) as exc:
+        except (GitHubError, WorkspaceError, PinError) as exc:
             dispatcher.log(f'tick failed: {exc}')
         sleep(interval)
