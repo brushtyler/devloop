@@ -818,6 +818,21 @@ def _resynced(reviews, record):
             and record.get('head_sha') != resync.get('from'))
 
 
+def synced_from(syncs, head, reviewed, limit=10):
+    """Whether ``head`` comes from ``reviewed`` only through syncs whose conflicts an agent
+    resolved (#250): walking back from ``head``, each step is a ``sync`` marker whose
+    ``head_sha`` is the current commit and whose ``from`` is the previous one, up to
+    ``reviewed`` (at most ``limit`` steps). A head that someone else moved is not."""
+    back = {s['head_sha']: s.get('from') for s in syncs if isinstance(s.get('from'), str)}
+    for _ in range(limit):
+        if head not in back:
+            return False
+        head = back[head]
+        if head == reviewed:
+            return True
+    return False
+
+
 def counted_rounds(reviews):
     """How many rounds count against ``max_review_rounds``: every round, CI rounds and rereviews
     included, except the waived ones (``waived_rounds``). Round numbers stay progressive."""
@@ -1277,6 +1292,11 @@ class Dispatcher:
                     # A `/devloop fix` asked in agent:review (#195) resumes there: agent:changes
                     # would answer findings already fixed, or have none to fix.
                     resume = lb.review
+                if step == 'sync' and lb.changes in pr.labels:
+                    # A sync that a fix started in agent:changes (#250) resumes there: from
+                    # agent:review the next tick would review the synced head, or answer only
+                    # the `/devloop fix` requests, leaving the round's findings unfixed.
+                    resume = lb.changes
                 return {'step': step, 'key': key, 'resume': resume}, ''
             if key is None and cls in (PREFLIGHT_DEFAULT, MERGED_ISSUE):
                 # A failed check reused, not run again, or an issue a merged PR resolved (#228),
@@ -3745,9 +3765,15 @@ class Dispatcher:
         issue, _ = self._issue_context(pr.issue)
         name = f'pr-{pr.number}'
         path = self.ws.existing_branch(name, pr.head_ref)
-        if self.ws.head(path) != latest['head_sha']:
+        head = self.ws.head(path)
+        # A sync that a fix started, because the base conflicted with the branch, moved the
+        # reviewed head on purpose (#250): the fix answers the round on the synced head.
+        if head != latest['head_sha'] and not synced_from(pr.syncs, head, latest['head_sha']):
             self.log('  branch changed after the review; sending it back to review')
             self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.changes])
+            return
+        start, merged = self._align_fix(pr, agent, path, remove=[lb.changes])
+        if start is None:
             return
 
         def prompt(attempt):
@@ -3759,19 +3785,56 @@ class Dispatcher:
                                  acceptance_criteria(issue.get('body'))),
                              acceptance_map=format_map(latest_map(pr.meta, pr.fixes)),
                              docs=docs_diff_section(self._mapped_docs(path)),
-                             requests='', language=cfg.language)
+                             requests='', base_branch=cfg.base_branch, language=cfg.language)
         result, failure, used, tested, local = self._write_turn(
             agent, prompt, 'fix', path, f'pr-{pr.number}-fix-r{latest["round"]}',
             where=(pr.number, 'fix'))
         self._publish_fix(pr, agent, name, path, (result, failure, used, tested, local),
-                          since=latest['head_sha'], round_no=latest['round'],
-                          remove=[lb.changes])
+                          since=start, round_no=latest['round'], remove=[lb.changes],
+                          merged=merged)
 
-    def _publish_fix(self, pr, agent, name, path, turn, since, round_no, remove, extra=None):
+    def _align_fix(self, pr, agent, path, remove):
+        """Bring the branch of a fix in ``path`` up to ``origin/<base>`` before its agent starts
+        (#250): CI runs on the PR's merge commit with the base, so a branch behind the base may
+        fail for code the fix would not see. Returns ``(start, merged)``: the head the agent
+        starts from, and the ``{base, head, from}`` of the merge commit the dispatcher made, or
+        None when the branch already contained the base. A merge without conflicts is committed
+        with the implementer's identity, as a sync's, and pushed with the fix. With conflicts
+        the fix does not start: the usual sync runs instead, leaving the PR's labels as they are,
+        and the fix runs on a later tick. ``start`` is None when the fix does not start (the
+        sync, or a merge that touches ``protected_paths``, escalated with ``remove``)."""
+        base = f'origin/{self.cfg.base_branch}'
+        previous = self.ws.head(path)
+        if self.ws.contains_base(path):
+            return previous, None
+        auth = self._git_auth(agent.key, IMPLEMENT)
+        files = self.ws.start_merge(path, author=auth)
+        if files is None:
+            return previous, None
+        if files:
+            self.log(f'  the branch is behind {base} with conflicts in {", ".join(files)}: '
+                     'sync first, the fix runs on a later tick')
+            self._do_sync(pr, fix_remove=remove)
+            return None, None
+        target = self.ws.merge_head(path)
+        head = self.ws.commit_all(path, f'Merge {base} into {pr.head_ref}\n\nRefs #{pr.issue}\n',
+                                  author=auth)
+        # As for a sync, the merge never differs from the base under protected_paths.
+        protected = self._protected_changes(path, since=base)
+        if protected:
+            self._escalate_protected(pr.number, protected, remove=remove)
+            return None, None
+        self.log(f'  merged {base} ({target[:12]}) into {pr.head_ref} before the fix: {head[:12]}')
+        return head, {'base': target, 'head': head, 'from': previous}
+
+    def _publish_fix(self, pr, agent, name, path, turn, since, round_no, remove, extra=None,
+                     merged=None):
         """Publish the outcome of a fix ``turn`` (``_write_turn``'s result) in worktree
         ``path``: escalate a blocked agent or failing tests (removing ``remove``), otherwise
         commit and push the changes made since commit ``since``, record the fix of round
-        ``round_no`` (with ``extra`` fields in its marker) and send the PR back to review."""
+        ``round_no`` (with ``extra`` fields in its marker) and send the PR back to review.
+        ``merged``: the merge of the base the dispatcher made before the turn (``_align_fix``),
+        pushed with the fix even when the agent changed nothing."""
         lb = self.cfg.labels
         result, failure, used, tested, local = turn
         if result['status'] == 'blocked':
@@ -3780,18 +3843,27 @@ class Dispatcher:
         if failure:
             return self._escalate(pr.number, failure[0], failure[1], remove=remove,
                                   cls='tests_failed')
-        if self.ws.has_changes(path):
+        changes = self.ws.has_changes(path)
+        if changes or merged:
             auth = self._git_auth(agent.key, IMPLEMENT)
-            commit = self.ws.commit_all(
-                path, self._commit_message(agent, result['commit_message'], pr.issue), author=auth)
-            self._bind_tested(tested, path, commit)
-            protected = self._protected_changes(path, since=since)
-            if protected:
-                return self._escalate_protected(pr.number, protected, remove=remove)
+            if changes:
+                commit = self.ws.commit_all(
+                    path, self._commit_message(agent, result['commit_message'], pr.issue),
+                    author=auth)
+                self._bind_tested(tested, path, commit)
+                protected = self._protected_changes(path, since=since)
+                if protected:
+                    return self._escalate_protected(pr.number, protected, remove=remove)
             self.ws.push(path, pr.head_ref, auth=auth)
+        if merged:
+            # As for a sync without an agent (#133): an event, not a turn.
+            self._ledger_event(pr.number, 'sync', base=merged['base'], head=merged['head'],
+                               previous_head=merged['from'])
         fix = dict(result, head_sha=self.ws.head(path),
                    profile=self._profile(agent.key, 'write', used), local_tests=local,
                    **skipped_models(used), **(extra or {}))
+        if merged:
+            fix['base_merge'] = dict(merged, branch=self.cfg.base_branch)
         self._as(agent.key, PR_COMMENT).comment(
             pr.number, render_fix(fix, self.runner.header(used), round_no))
         self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.changes])
@@ -3824,6 +3896,9 @@ class Dispatcher:
         if self.ws.head(path) != pr.head_sha:
             self.log('  head moved since the snapshot; retrying next tick')
             return
+        start, merged = self._align_fix(pr, agent, path, remove=remove)
+        if start is None:
+            return
 
         def prompt(attempt):
             return _template('fix', repo=cfg.repo, pr_number=pr.number, issue_number=pr.issue,
@@ -3834,18 +3909,23 @@ class Dispatcher:
                                  acceptance_criteria(issue.get('body'))),
                              acceptance_map=format_map(latest_map(pr.meta, pr.fixes)),
                              docs=docs_diff_section(self._mapped_docs(path)),
-                             language=cfg.language)
+                             base_branch=cfg.base_branch, language=cfg.language)
         turn = self._write_turn(agent, prompt, 'fix', path, f'pr-{pr.number}-fix-request',
                                 where=(pr.number, 'fix'))
-        self._publish_fix(pr, agent, name, path, turn, since=pr.head_sha, round_no=round_no,
-                          remove=remove, extra={'requests': requests, 'from': pr.head_sha})
+        self._publish_fix(pr, agent, name, path, turn, since=start, round_no=round_no,
+                          remove=remove, extra={'requests': requests, 'from': pr.head_sha},
+                          merged=merged)
 
-    def _do_sync(self, pr):
+    def _do_sync(self, pr, fix_remove=None):
         """Merge the base branch into a conflicting PR. The implementer resolves the conflicts
         in the PR worktree, the dispatcher concludes the merge, pushes it and sends the PR back
-        to review. No review record is written, so no round is spent."""
+        to review. No review record is written, so no round is spent.
+
+        ``fix_remove``: the sync was started by a fix whose branch conflicts with the base
+        (#250). Escalations remove these labels, and on success the labels stay as they are, so
+        that the fix runs on the synced head on a later tick."""
         cfg, lb = self.cfg, self.cfg.labels
-        remove = [lb.review, lb.ready_to_merge]
+        remove = [lb.review, lb.ready_to_merge] if fix_remove is None else fix_remove
         base = f'origin/{cfg.base_branch}'
         if pr.meta['implementer'] not in cfg.agents:
             return self._escalate(
@@ -3924,17 +4004,19 @@ class Dispatcher:
         if protected:
             return self._escalate_protected(pr.number, protected, remove=remove)
         self.ws.push(path, pr.head_ref, auth=auth)
+        then = ('La PR torna in review sul nuovo head' if fix_remove is None else
+                'La correzione in attesa parte dal nuovo head al prossimo tick')
         text = (f'\n## Sincronizzazione con `{cfg.base_branch}`\n\n'
-                f'Merge di `{base}` (`{target[:12]}`) nel branch, nuovo head `{head[:12]}`. La PR '
-                'torna in review sul nuovo head; la sincronizzazione non consuma un round di '
-                'review.\n\n')
+                f'Merge di `{base}` (`{target[:12]}`) nel branch, nuovo head `{head[:12]}`. '
+                f'{then}; la sincronizzazione non consuma un round di review.\n\n')
         if files:
             text += f'File in conflitto risolti:\n\n{listed}\n\n{result["summary"].strip()}'
             # Who resolved the conflicts wrote code on the PR: the marker keeps its profile,
             # so a later change of configuration cannot make it a reviewer of its own code.
+            # ``from``: the head it synced, which a fix waiting for it recognizes (#250).
             self._as(agent.key, PR_COMMENT).comment(
                 pr.number, publishable(self.runner.header(used) + text, 'sync',
-                                       {'head_sha': head,
+                                       {'head_sha': head, 'from': pr.head_sha,
                                         'profile': self._profile(agent.key, 'write', used),
                                         **skipped_models(used)}))
         else:
@@ -3942,7 +4024,8 @@ class Dispatcher:
             self._ledger_event(pr.number, 'sync', base=target, head=head, previous_head=pr.head_sha)
             self.gh.comment(pr.number, publishable(dispatcher_header() + text
                                                    + 'Il merge locale non aveva conflitti.'))
-        self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.ready_to_merge, lb.changes])
+        if fix_remove is None:
+            self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.ready_to_merge, lb.changes])
         self.ws.remove(name)
         self.log(f'  merged {base} into {pr.head_ref}: {head[:12]}')
 

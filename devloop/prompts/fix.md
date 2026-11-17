@@ -3,6 +3,9 @@ An independent reviewer (or CI) found blocking problems, or the operator asked f
 You work alone and headless.
 
 The working directory is a git worktree on the PR branch at its current head.
+The branch already contains the latest `origin/$base_branch`: the dispatcher merged it before your
+turn when it was missing, since CI runs on the merge of the PR with `$base_branch`. Do not fetch,
+merge or rebase the branch yourself.
 Read `AGENTS.md` before changing anything.
 
 ## Rules
