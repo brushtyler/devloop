@@ -101,7 +101,7 @@ from pathlib import Path
 
 from .acceptance import (acceptance_criteria, acceptance_findings, format_criteria, format_map,
                          latest_map, render_map)
-from .agents import (AgentError, ModelsUnavailable, ModelUnavailable, NoOutput,
+from .agents import (TAIL_LINES, AgentError, ModelsUnavailable, ModelUnavailable, NoOutput,
                      PermissionDenied, background_unfinished)
 from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, MERGER, PR_COMMENT, REVIEW
 from .config import INSTALL_ROOT, ConfigError
@@ -2041,7 +2041,11 @@ class Dispatcher:
 
     def _log_hint(self, exc):
         log = getattr(exc, 'log', None)
-        return f' Log locale: `{Path(log).name}` in `{self.cfg.state_dir}/logs`.' if log else ''
+        hint = f' Log locale: `{Path(log).name}` in `{self.cfg.state_dir}/logs`.' if log else ''
+        if getattr(exc, 'tail', ''):
+            hint += (f' Le ultime righe dell\'output (al massimo {TAIL_LINES}, senza segreti né '
+                     'percorsi assoluti) sono in fondo al commento.')
+        return hint
 
     def _escalate_failure(self, action, pr, exc):
         """Escalate a failed action. Its class (#182): ``tool_failure`` when the agent or its
@@ -2059,8 +2063,8 @@ class Dispatcher:
             supervised, why = self._supervised(number, cls, action.kind, pr,
                                                getattr(exc, 'reviewer', None),
                                                key=getattr(exc, 'key', None))
-            self._escalate(number, reason, remove=remove, cls=cls, supervised=supervised,
-                           why=why)
+            self._escalate(number, reason, getattr(exc, 'tail', ''), remove=remove, cls=cls,
+                           supervised=supervised, why=why)
         except GitHubError as gh_exc:
             self.log(f'  could not escalate: {gh_exc}')
 
@@ -2102,13 +2106,14 @@ class Dispatcher:
             fallback_for=candidate.fallback_for, label=label)
 
     def _close_turn(self, entry, outcome, error=None):
-        """Close a turn's record with what the CLI attested. A failed write leaves the turn
-        open, and the next tick marks it incomplete."""
+        """Close a turn's record with what the CLI attested and the last command its output
+        exposes (#215). A failed write leaves the turn open, and the next tick marks it
+        incomplete."""
         if entry is None:
             return
         try:
             self.ledger.close_turn(entry, outcome, getattr(self.runner, 'last_report', None),
-                                   error)
+                                   error, getattr(self.runner, 'last_command', None))
         except GitHubError as exc:
             self.log(f'  turn record on #{entry.number} not closed: {exc}')
 
@@ -2380,8 +2385,10 @@ class Dispatcher:
                 # Any other failure ends the turn as before, but after models were tried or left
                 # out the escalation lists them all, this one included.
                 models.tried.append((candidate.model, str(exc)))
-                raise ModelsUnavailable(models.agent.key, models.tried, exc.log,
-                                        last_failed=True) from exc
+                error = ModelsUnavailable(models.agent.key, models.tried, exc.log,
+                                          last_failed=True)
+                error.tail = exc.tail
+                raise error from exc
             self._close_turn(entry, 'success')
             models.left.insert(0, candidate)  # available: later attempts of the action use it
             self._forget(models.agent, candidate)
@@ -3615,7 +3622,7 @@ class Dispatcher:
                     where=(pr.number, 'sync'))
             except AgentError as exc:
                 return fail(f'Il passo `sync` è fallito: {_failure_text(exc)}'
-                            f'{self._log_hint(exc)}')
+                            f'{self._log_hint(exc)}', exc.tail)
             if result['status'] == 'blocked':
                 return self._blocked(pr.number, used, result['blocked_reason'].strip()
                                      + f'\n\nFile in conflitto con `{cfg.base_branch}`:\n\n'
