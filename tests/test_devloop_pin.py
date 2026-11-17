@@ -6,6 +6,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -994,6 +995,47 @@ class LauncherTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {'PYTHONUNBUFFERED': '1'}):
             _, env = load_launcher().command(self.root, ['run'])
         self.assertEqual(env['PYTHONUNBUFFERED'], '1')
+
+    def test_the_start_command_finds_the_clis_in_the_home_of_the_devloop_user(self):
+        # `sh -c` under sudo is not a login shell: the command itself must put ~/.local/bin on
+        # the PATH, the same as the unit, or the agents' CLIs are not found (#243).
+        text = (REPO / 'docs' / 'devloop' / 'guide.md').read_text(encoding='utf-8')
+        unit = next(line.removeprefix('Environment=PATH=') for line in text.splitlines()
+                    if line.startswith('Environment=PATH='))
+        line = next(line for line in self.installation().splitlines()
+                    if 'nohup python3 scripts/devloop-pinned run' in line)
+        argv = shlex.split(line)
+        self.assertEqual(argv[:6], ['sudo', '-u', 'devloop', '-H', 'sh', '-c'])
+        script = argv[6]
+        self.assertIn(f'PATH={unit} ', script)
+        self.assertTrue(script.endswith(' &'))
+        # The documented command, in the foreground, for a home of its own and with the PATH
+        # of a sudo that leaves out ~/.local/bin.
+        home = self.tmp / 'home'
+        root = home / 'ssdlc'
+        (root / 'scripts').mkdir(parents=True)
+        shutil.copy(LAUNCHER, root / 'scripts' / 'devloop-pinned')
+        state = root / '.ssdlc' / 'devloop'
+        copy = state / 'pinned-0123456789ab'
+        self.write(copy / 'devloop' / '__init__.py', '')
+        self.write(copy / 'devloop' / '__main__.py', (
+            'import json, os, shutil\n'
+            'print(json.dumps({"claude": shutil.which("claude"), '
+            '"unbuffered": os.environ.get("PYTHONUNBUFFERED")}))\n'))
+        os.symlink(copy.name, state / 'current')
+        bin_dir = home / '.local' / 'bin'
+        self.write(bin_dir / 'claude', '#!/bin/sh\necho fake\n')
+        (bin_dir / 'claude').chmod(0o755)
+        os.symlink(sys.executable, bin_dir / 'python3')
+        minimal = {'PATH': '/usr/bin:/bin', 'HOME': str(home)}
+        self.assertIsNone(shutil.which('claude', path=minimal['PATH']))
+        foreground = script[:-len(' &')].replace('/home/devloop', str(home))
+        proc = subprocess.run(['/bin/sh', '-c', foreground], env=minimal, cwd=self.tmp,
+                              capture_output=True, text=True, timeout=120)
+        log = (state / 'run.log').read_text()
+        self.assertEqual(proc.returncode, 0, log)
+        seen = json.loads(log.splitlines()[-1])
+        self.assertEqual(seen, {'claude': str(bin_dir / 'claude'), 'unbuffered': '1'})
 
 
 class RestartTests(unittest.TestCase):

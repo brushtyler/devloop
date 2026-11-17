@@ -972,7 +972,8 @@ binary leaves, for a few seconds, nothing to start (#218; the start is retried o
 
 The agent CLIs devloop runs belong to the `devloop` user: installed in its home, on its `PATH`,
 and logged in with its logins. devloop finds them on the `PATH` of the process that runs it
-(the [unit](#continuous-loop) sets `/home/devloop/.local/bin` first).
+(the [unit](#continuous-loop) and the [start command](#starting-and-stopping-the-loop) set
+`/home/devloop/.local/bin` first).
 
 - **Claude Code** in `~/.local/bin`, installed with npm under the prefix `~/.local`, with its
   automatic updates off in `~/.claude/settings.json` of the `devloop` user:
@@ -1016,10 +1017,15 @@ To go back, install the earlier version the same way, again with the loop stoppe
 user, started through the [launcher](#launcher) from the clone:
 
 ```bash
-sudo -u devloop -H sh -c 'cd ~/ssdlc && PYTHONUNBUFFERED=1 nohup python3 scripts/devloop-pinned run --idle-timeout 900 < /dev/null >> .ssdlc/devloop/run.log 2>&1 &'
+sudo -u devloop -H sh -c 'cd ~/ssdlc && PATH=/home/devloop/.local/bin:/usr/local/bin:/usr/bin:/bin PYTHONUNBUFFERED=1 nohup python3 scripts/devloop-pinned run --idle-timeout 900 < /dev/null >> .ssdlc/devloop/run.log 2>&1 &'
 sudo -u devloop -H tail -f /home/devloop/ssdlc/.ssdlc/devloop/run.log   # follow the log
 ```
 
+- **`PATH`.** The command sets the same `PATH` as the [unit](#continuous-loop), with
+  `/home/devloop/.local/bin` first. `sh -c` is not a login shell and does not read the profile
+  of the `devloop` user: without it the loop would keep the `PATH` of `sudo`, which may leave
+  out `~/.local/bin`, and every agent turn would fail to start, even though `--version` answers
+  in an interactive session. The launcher passes this `PATH` to the agents.
 - **Unbuffered log.** `PYTHONUNBUFFERED=1` makes every line reach the log as it is written, so
   `tail -f` shows the tick in progress and a crash leaves its last lines. The launcher passes its
   environment to the pinned copy it starts; a `-u` given to the launcher would not reach it.
