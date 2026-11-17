@@ -63,7 +63,7 @@ round is left. The PR goes back to `agent:review`, also from `agent:ready-to-mer
 round reviews the new head after CI as usual; that round counts against `max_review_rounds`,
 except after an approval (see [Resync after approval](#resync-after-approval)). A
 sync that fails (the implementer is blocked, tests still fail, markers are left, the merge was
-concluded or aborted by the agent, or the agent run failed) goes to `agent:needs-human` with a
+concluded or aborted by the agent, or the agent run failed) goes to `agent:needs-operator` with a
 comment that lists the files in conflict and their commits.
 
 #### Fixes start from the latest `main`
@@ -112,7 +112,7 @@ review counts. The review records `resync`, with the reason `resync_after_approv
 approved round and its head (`from`), and its comment says it does not count. Every later sync
 after a new approval is free in the same way. The limit stays the same for the implementer's
 changes: a request for changes in that round needs a fix, whose review is a round that counts,
-so with no round left it goes to `agent:needs-human` at once.
+so with no round left it goes to `agent:needs-operator` at once.
 
 The same holds when the head did not move at all (#252). Before promoting or merging, the
 dispatcher recomputes the receipt; when `main` advanced touching a file of the PR (or the
@@ -132,7 +132,7 @@ The review records `resync` with the reason `base_changed`, the approved round a
 (`from`), and its comment says it does not count; the revocation comment says so too. A new
 commit of the implementer in the meantime changes the head, and its review counts as before.
 
-Any step can stop at `agent:needs-human` with a comment explaining why: the
+Any step can stop at `agent:needs-operator` with a comment explaining why: the
 [readiness check](#readiness-check-before-implementation) found the issue not ready, the agent declared itself
 blocked, tests still fail after the retry, the reviewer asked for a decision, the round limit
 was reached, the reviewer pool has not enough independent reviewers for the review level, a
@@ -140,10 +140,12 @@ was reached, the reviewer pool has not enough independent reviewers for the revi
 request for changes, an approval left open a finding of another owner, the
 owner of a finding cannot be reconstructed from the markers, a sync with `main` failed, an agent, `gh` or `git` call failed or timed out, an agent
 stalled with `agent_stall_action = "abort"` (see [Stalled agents](#stalled-agents)), the issue text was changed by an
-untrusted user after `agent:ready`, or the PR body lost its marker. While `agent:needs-human` is
-set devloop ignores the PR or issue, so to resume: fix the cause, **remove `agent:needs-human`**
+untrusted user after `agent:ready`, or the PR body lost its marker. While `agent:needs-operator` is
+set devloop ignores the PR or issue, so to resume: fix the cause, **remove `agent:needs-operator`**
 and set the label that should run next (`agent:ready` on the issue, `agent:review` or
-`agent:changes` on the PR). Every escalation comment repeats this. Every escalation has a
+`agent:changes` on the PR). Every escalation comment repeats this. The only exception is the
+`agent:needs-operator` the dispatcher adds to a ready PR it does not merge (see
+[Ready PRs whose merge is the operator's](#ready-prs-whose-merge-is-the-operators)). Every escalation has a
 **class**, recorded in its marker; with `[merge].mode = "auto"` the non-critical ones go to
 `agent:needs-supervisor` instead (see [Escalations to the supervisor](#escalations-to-the-supervisor)).
 
@@ -207,7 +209,7 @@ Add the fakes that came with the merge to the conformance test.
 - It counts from a user in `trusted_users` and, only when `[roles].supervisor` is configured,
   from the supervisor's GitHub App, in any merge mode. A command from anyone else is ignored and
   logged, and so is text devloop publishes with a record.
-- It applies to a PR in `agent:review` or `agent:changes`. On a PR in `agent:needs-human`,
+- It applies to a PR in `agent:review` or `agent:changes`. On a PR in `agent:needs-operator`,
   `agent:needs-supervisor` or `agent:ready-to-merge` nothing runs.
 - The next tick runs a fix of the **current head** with the request as a requirement, before any
   review. In `agent:changes` the fix also answers every finding still open. Every rule of a
@@ -221,21 +223,21 @@ Add the fakes that came with the merge to the conformance test.
   requests) and the head it ran on, and belongs to the latest round (round 0 before any
   review). The next review sees the request among the comments of the trusted users, as for
   any comment, and in the previous rounds of its prompt.
-- A fix that stops at `agent:needs-human` (the agent is blocked, tests still fail) records
+- A fix that stops at `agent:needs-operator` (the agent is blocked, tests still fail) records
   nothing, so the command is still to apply when the PR is resumed in `agent:review` or
   `agent:changes`. To drop it, delete the comment or remove its first line.
 
-### Resuming after a `needs_human` verdict without code changes
+### Resuming after a `needs_operator` verdict without code changes
 
 A verdict is bound to the reviewed commit. Back in `agent:review` with the same head, devloop
-applies the recorded verdict again without a new review, so a `needs_human` verdict sends the
-PR straight back to `agent:needs-human`. When the decision the reviewer asked for needs no code
+applies the recorded verdict again without a new review, so a `needs_operator` verdict sends the
+PR straight back to `agent:needs-operator`. When the decision the reviewer asked for needs no code
 change (for example a linked issue was opened, or the PR description was updated), ask for a
 new review of the same commit:
 
 1. A user in `trusted_users` comments on the PR with `/devloop rereview` as the **first line**.
    The lines below it can explain the decision.
-2. Remove `agent:needs-human` and set `agent:review`.
+2. Remove `agent:needs-operator` and set `agent:review`.
 
 The next tick runs a new review. It is a new round: it waits for CI like any review, and it
 does not start once `max_review_rounds` is reached. The reviewer's prompt includes every
@@ -250,7 +252,7 @@ A devloop PR is recognised by its branch, `agent/issue-<n>`, opened by a trusted
 ends with a hidden marker that records the issue, implementer and reviewer: text may be edited
 above it, but the marker must stay the last line. A PR whose marker is missing stays in the flow
 (it still counts as an open PR and its issue does not restart) and goes to
-`agent:needs-human`. A PR left without a state label, for example after a crash right after it
+`agent:needs-operator`. A PR left without a state label, for example after a crash right after it
 was opened, is put back into `agent:review`, and its issue loses `agent:working`.
 
 ### Open PR limits
@@ -262,9 +264,11 @@ capacity:
   CI running, a PR without a state label or without its marker, and any other state not listed
   below.
 - `max_parked_prs` (default 3) counts the **parked** PRs, those waiting for a person:
-  `agent:needs-human`, and `agent:ready-to-merge` when devloop does not merge it: `[merge]`
+  `agent:needs-operator`, and `agent:ready-to-merge` when devloop does not merge it: `[merge]`
   `mode = "off"`, a `[merge.levels]` override `"off"` for its review level, or a diff that
-  touches `operator_only_paths` ([merge modes](#merge-modes)). A ready PR that devloop merges
+  touches `operator_only_paths` ([merge modes](#merge-modes)); such a PR also gets
+  `agent:needs-operator` ([Ready PRs whose merge is the operator's](#ready-prs-whose-merge-is-the-operators)),
+  and still counts once. A ready PR that devloop merges
   itself (`strict` or `auto` for its level) is not parked, nor is one whose merge mode cannot
   be computed in that tick.
 
@@ -298,7 +302,7 @@ priority labels.
 position, priority, time of `agent:ready` and who added it, for example
 `ready 1. #122 priority=high agent:ready=2026-11-16T09:12:00Z labelled by brushtyler: …`. The
 list covers every issue labelled `agent:ready`; the planned actions that follow it say which ones
-start on this tick (free PR slots, `blocked_labels`, `agent:needs-human` and an untrusted
+start on this tick (free PR slots, `blocked_labels`, `agent:needs-operator` and an untrusted
 `agent:ready` still apply).
 
 ### Labels from the supervisor
@@ -355,20 +359,20 @@ requirement the check never saw. The outcome is reused while the hash stays the 
 
 - **ready**: the issue starts on a later tick, in the usual order and within `max_open_prs` and `max_parked_prs`.
   The implementer starts only if the hash read just before still matches;
-- **not ready**: the issue goes to `agent:needs-human` (it keeps `agent:ready`), and the comment
-  lists the gaps with the proposed defaults and the split. If `agent:needs-human` is removed
+- **not ready**: the issue goes to `agent:needs-operator` (it keeps `agent:ready`), and the comment
+  lists the gaps with the proposed defaults and the split. If `agent:needs-operator` is removed
   without changing the issue, the next tick blocks it again with the same outcome.
 
-An issue blocked by the check is examined again on every tick, even in `agent:needs-human`. A
+An issue blocked by the check is examined again on every tick, even in `agent:needs-operator`. A
 new check runs when the hash changed (a trusted user decided a point, accepted a default, or
 edited the issue) or when a trusted user wrote a comment whose **first line** is
 `/devloop recheck`. Each request starts one check: it counts only if written after devloop's
 latest record on the issue. The command is ignored, and logged, when anyone outside
-`trusted_users` writes it. If the new check passes, the dispatcher removes `agent:needs-human`
+`trusted_users` writes it. If the new check passes, the dispatcher removes `agent:needs-operator`
 and the issue goes back in the queue.
 
 The dispatcher removes only a block that belongs to the check. The check owns
-`agent:needs-human` only if it added the label when the label was absent: its record keeps the
+`agent:needs-operator` only if it added the label when the label was absent: its record keeps the
 number of earlier `labeled` events of the label, and the dispatcher must have written the only
 one since. The check loses the block, which then stays until a person removes it, if the label
 was removed and applied again, if a comment starting with the attribution header, written by an
@@ -381,7 +385,7 @@ check failed is never the check's. Rechecks run only for blocks the check owns.
 Each check is an agent action: it takes a slot of `max_actions_per_tick`, and a check of an
 issue that may start also takes one of the free PR slots of the tick. It runs under
 `agent_timeout_seconds`. A check that fails or times out sends the issue to
-`agent:needs-human` with a comment, removing `agent:ready` like any failed step, and the
+`agent:needs-operator` with a comment, removing `agent:ready` like any failed step, and the
 implementer does not start. An agy check stopped on a denied permission is first run once more
 ([agy permissions](#agy-permissions), #180).
 
@@ -429,7 +433,7 @@ listed file that does not exist yet is no error, and a PR that adds it gets leve
 **Level 1** works as before: one reviewer, the PR's recorded reviewer or else the first of the
 pool, never the PR's implementer. **Level 2** needs two independent reviewers (#111, below).
 When the pool has not enough of them, the PR is neither reviewed nor promoted: it goes to
-`agent:needs-human` with a dispatcher comment that gives the level, its reason (the label and
+`agent:needs-operator` with a dispatcher comment that gives the level, its reason (the label and
 who added it, or the sensitive paths) and why the pool falls short. Since the level does not go
 down, putting the PR back into `agent:review` escalates it again until the configuration
 changes: until then a person reviews the PR and decides on the merge.
@@ -449,7 +453,7 @@ receipt (`reviewers`).
 Since #111 the PR marker, every fix, every sync whose conflicts an agent resolved (`sync`
 marker) and every review record the identity and tuple actually used (`profile`). At level 2,
 when a PR or one of its fixes was recorded before, or a sync marker lacks the profile,
-independence cannot be verified and the PR goes to `agent:needs-human`. At level 1 older markers
+independence cannot be verified and the PR goes to `agent:needs-operator`. At level 1 older markers
 stay valid as before.
 
 A round at level 2 works as follows:
@@ -465,14 +469,14 @@ A round at level 2 works as follows:
   the same prompt, so each still sees only the earlier rounds. Each verdict is recorded as
   before, one per reviewer, and a round whose reviewers both answer is applied in the same tick.
   If a reviewer fails, the other verdict stays recorded and the round waits only for the
-  missing reviewer; the failure goes to `agent:needs-human` as any failure does, and once a
+  missing reviewer; the failure goes to `agent:needs-operator` as any failure does, and once a
   human sends the PR back to `agent:review` the next action runs only that reviewer.
-- **Aggregation.** The verdicts are applied once both are in: `needs_human` from either sends
-  the PR to `agent:needs-human`; otherwise a `request_changes` from either starts a single fix
+- **Aggregation.** The verdicts are applied once both are in: `needs_operator` from either sends
+  the PR to `agent:needs-operator`; otherwise a `request_changes` from either starts a single fix
   that receives every open finding of both; two approvals go to promotion.
 - **Quorum.** The PR is promoted only if every reviewer of the receipt recomputed just before
   approved the same head with that same receipt, and no blocking finding is open. A missing
-  reviewer, one that timed out (the step goes to `agent:needs-human`) or one that asked for a
+  reviewer, one that timed out (the step goes to `agent:needs-operator`) or one that asked for a
   human is not an approval, and the quorum never goes down. A second review of the same reviewer
   in the same round is ignored, so two approvals of one reviewer are not enough.
 - **Another owner's findings.** An approval stays an approval even if another reviewer's
@@ -574,15 +578,15 @@ At level 0 the dispatcher runs no reviewer. Before promoting it re-reads the hea
   `app_id` of the GitHub App that produces it; commit statuses do not count. For each, the most
   recent run on the current head decides, and only `success` is a success. While one is still
   running the PR waits; a check that is missing (also a filtered workflow), `skipped`,
-  `neutral`, `cancelled` or failed sends the PR to `agent:needs-human`. The test command is
+  `neutral`, `cancelled` or failed sends the PR to `agent:needs-operator`. The test command is
   `test_cmd` of the running dispatcher and the workflows are under `.github/`, which a PR cannot
   change at level 0; still, do not list in the allowlist files that the CI runs as its own
   harness (for example `scripts/run-tests.py`).
 - **No open finding.** A blocking finding still open from an earlier round sends the PR to
-  `agent:needs-human`; the operator can close it with a `/devloop finding` command.
+  `agent:needs-operator`; the operator can close it with a `/devloop finding` command.
 - **No standing request for changes.** A native `REQUEST_CHANGES` review from a user in
   `trusted_users` blocks, also after new commits, until it is dismissed or the same user
-  approves; a comment does not withdraw it. It sends the PR to `agent:needs-human`.
+  approves; a comment does not withdraw it. It sends the PR to `agent:needs-operator`.
 
 The promotion is a dispatcher comment with a `policy` marker that records the receipt (level 0,
 the label, who added it and when, the allowlist outcome) and the state of each expected check.
@@ -653,7 +657,7 @@ PR already in `agent:ready-to-merge` keeps its label until something sends it ba
   ready PR that meets them in its snapshot, and the merge reads them all again just before it
   runs, reviews, finding closures and policy records included (read again from the comments,
   with the same identity checks as the snapshot):
-  - the PR is open and in `agent:ready-to-merge`, without `agent:needs-human`,
+  - the PR is open and in `agent:ready-to-merge`, without `agent:needs-operator`,
     `agent:needs-supervisor` or `agent:merge-hold`, and no hold or release command waits to be
     applied;
   - the head is the approved commit (at level 0, the promoted one), unchanged since the
@@ -670,7 +674,7 @@ PR already in `agent:ready-to-merge` keeps its label until something sends it ba
   When one is missing devloop does not merge, and the revocation already in place applies: a
   moved head, CI running again or failing, or a level 0 that no longer holds is revoked as on
   any tick of a ready PR; a receipt that no longer matches is recorded as `stale` and the PR goes
-  back to `agent:review` for a new review; an open finding sends it to `agent:needs-human`. A
+  back to `agent:review` for a new review; an open finding sends it to `agent:needs-operator`. A
   PR that is `BLOCKED`, `BEHIND` or `UNSTABLE` stays ready and waits. **No mode, and no agent,
   merges with CI not green, with blocking findings open or without the approvals required.**
 - **How.** `gh pr merge --merge --match-head-commit <approved head>`: a merge commit, only if
@@ -678,7 +682,7 @@ PR already in `agent:ready-to-merge` keeps its label until something sends it ba
   `[apps.merger]` is configured, with a token minted at that moment and limited to
   `contents=write` and `pull_requests=write`; without it, with the local `gh` login devloop runs
   with. No other GitHub App, the dispatcher's included, gets `contents=write`. The branch is
-  kept. A merge that GitHub refuses goes to `agent:needs-human` like any `gh` failure.
+  kept. A merge that GitHub refuses goes to `agent:needs-operator` like any `gh` failure.
 - **Slot.** A merge takes a slot of `max_actions_per_tick` and runs alone, after the actions
   planned before it and before those planned after it ([Parallel actions](#parallel-actions)).
 - **Record.** A dispatcher comment with a `merged` marker records the head, the receipt, the
@@ -699,12 +703,35 @@ dispatcher log and leaves the merge as it is.
 its branch, `<branch_prefix><issue>`, by a trusted user or a devloop app, merged by anyone) is
 never checked nor implemented again. It becomes a `merged_issue` escalation, non-critical: in
 `"auto"` it goes to `agent:needs-supervisor` and keeps `agent:ready`, otherwise to
-`agent:needs-human` without `agent:ready`. `/devloop retry` is refused for it: closing the issue,
+`agent:needs-operator` without `agent:ready`. `/devloop retry` is refused for it: closing the issue,
 or `/devloop escalate <reason>`, settles it. More work on the same subject needs a new issue.
 The same check runs before a `/devloop retry` of an issue already escalated for another class
 (a `tool_failure` of its readiness check or implementation, for example): with a merged devloop
 PR the retry is refused, the step is not run, and the issue gets a `merged_issue` escalation
 routed as above.
+
+### Ready PRs whose merge is the operator's
+
+In `"auto"` or `"strict"`, `agent:ready-to-merge` usually means that devloop merges the PR. When
+it does not (#248), because `mode = "off"`, a `[merge.levels]` override `"off"` for the PR's
+review level, or a diff that touches `operator_only_paths`, the dispatcher also adds
+`agent:needs-operator` once the PR is ready, with a comment ("Il merge spetta all'operatore")
+that says why: the reserved paths the diff touches, or the mode or the level. The comment
+carries a `notice` marker of event `operator_merge` with the head and how many `labeled` events
+of the label came before; there is one per head and promotion (a head promoted again, after its
+CI ran again for example, gets a new one). `agent:merge-hold` is not such a case: there the
+supervisor decides.
+
+That label does not stop devloop, which keeps working on the PR as on any ready PR: it
+[syncs](#conflicts-with-main) it when it conflicts with `main`, re-checks its CI, and with a new
+commit revokes the readiness and sends the PR back to review. Whenever the readiness decays
+without an escalation (a revocation, a sync, a failed CI round, a stale receipt), the dispatcher
+removes `agent:needs-operator` together with `agent:ready-to-merge`. It recognises its own label
+by the notice: the latest of the dispatcher's notices is the `operator_merge` one, no escalation
+was recorded after it, and the label's only `labeled` event since is the dispatcher's. Any other
+`agent:needs-operator`, such as one added by an escalation, an agent that stopped, or a person,
+keeps today's behaviour: devloop leaves the PR alone. These PRs are already counted among the
+[parked PRs](#open-pr-limits): the count does not change.
 
 ### Holding a merge
 
@@ -756,7 +783,7 @@ Every escalation of the dispatcher has a **class** (#182), recorded in its marke
 marker of an escalation comment (`class`, `critical`, and `to`, `operator` or `supervisor`), the
 `notice` of an agent that stopped (`blocked`), the `preflight` marker of a failed readiness
 check, and the `policy` marker of a level that cannot be reviewed or promoted. A reviewer's
-`needs_human` verdict gets an escalation comment of class `reviewer_decision` next to the review.
+`needs_operator` verdict gets an escalation comment of class `reviewer_decision` next to the review.
 
 | Class | When | Critical |
 |---|---|---|
@@ -776,7 +803,7 @@ check, and the `policy` marker of a level that cannot be reviewed or promoted. A
 Any other class, or none (escalations written before #182), is critical.
 
 **Routing.** With `[merge].mode = "auto"` a non-critical escalation adds
-`agent:needs-supervisor` instead of `agent:needs-human`, and an issue keeps `agent:ready`. It
+`agent:needs-supervisor` instead of `agent:needs-operator`, and an issue keeps `agent:ready`. It
 stays with the operator, with a comment that says why, when:
 
 - the merge mode of the PR is not `"auto"`: the override of its level, or a path of
@@ -787,7 +814,7 @@ stays with the operator, with a comment that says why, when:
 - the issue (or the PR) has the label `phase:design`;
 - any of this cannot be verified.
 
-With `"off"` and `"strict"` every escalation goes to `agent:needs-human`, as before. An item in
+With `"off"` and `"strict"` every escalation goes to `agent:needs-operator`, as before. An item in
 `agent:needs-supervisor` is not worked on, and a merge does not run, until the supervisor
 decides. `devloop setup` creates the label.
 
@@ -802,7 +829,7 @@ any, is one of:
 
 They count only in `"auto"`, from the identity of `[roles].supervisor` (the GitHub App of that
 agent) or from `trusted_users`, only on an item in `agent:needs-supervisor` without
-`agent:needs-human`, and only when written after the latest escalation. Any other command is
+`agent:needs-operator`, and only when written after the latest escalation. Any other command is
 ignored and written to the dispatcher log; text devloop publishes is never a command. As for
 [holding a merge](#holding-a-merge), a dispatcher record spends the command it applied and every
 command before it, and among the commands that wait the latest wins.
@@ -814,7 +841,7 @@ command before it, and among the commands that wait the latest wins.
   its branch conflicted with `main`) and the next tick runs it; an issue's readiness check or implementation runs at once, and
   takes a free PR slot as it would. A failed attempt writes no review record, so a retry
   **counts no round**. After the initial failure the supervisor may authorise **two** retries
-  for the same key; the third command is not run and the item goes to `agent:needs-human`
+  for the same key; the third command is not run and the item goes to `agent:needs-operator`
   (`retry_limit`). The automatic retries inside one run (a permission denied to agy,
   [fallback models](#fallback-models)) do not count. The key is durable, read from the
   escalation and the dispatcher's records on GitHub: the item, the step and, for a review, the
@@ -828,7 +855,7 @@ command before it, and among the commands that wait the latest wins.
   Before a retry runs, what made the escalation non-critical is checked again on data read
   then (the conditions of **Routing** above: `phase:design`, author and text of the issue, merge
   mode and implementer of the PR): if one no longer holds, the retry is refused and the item
-  goes to `agent:needs-human` (`supervisor_refused`).
+  goes to `agent:needs-operator` (`supervisor_refused`).
 - `/devloop accept-defaults` accepts the defaults of a `preflight_default` escalation, only when
   **every** gap of the latest check is `default_available`, no split is needed, the issue has no
   `phase:design` label, was opened by a trusted user or a devloop app, and the check is the one of
@@ -836,15 +863,15 @@ command before it, and among the commands that wait the latest wins.
   trusted comment, both in the hash of the request and in the agents' prompts. The issue goes
   back in the queue: the readiness check runs again with the defaults and, if ready, the
   implementer starts. An issue with an `operator_decision` gap is refused and goes to
-  `agent:needs-human`. The readiness prompt tells the checker that a gap touching a decision ADR
+  `agent:needs-operator`. The readiness prompt tells the checker that a gap touching a decision ADR
   0001 reserves to the operator (rollout, budget and rounds, credentials and permissions, trust
   rules, the replay gate baseline, the merge mode, the continuous loop and automatic pinning, ADR
   approval), or a change to `operator_only_paths`, is always `operator_decision`.
-- `/devloop escalate <reason>` hands the escalation to the operator: `agent:needs-human`, with
+- `/devloop escalate <reason>` hands the escalation to the operator: `agent:needs-operator`, with
   the reason (`supervisor_escalated`). It needs a reason.
 
 An escalation whose class is critical or unknown, or that was not routed to the supervisor,
-accepts no command: the command is refused and the item goes to `agent:needs-human`. A command
+accepts no command: the command is refused and the item goes to `agent:needs-operator`. A command
 the class does not admit (`accept-defaults` on a tool failure, `retry` on defaults) is refused
 and the escalation stays with the supervisor.
 
@@ -857,14 +884,14 @@ lost label change never runs a retry twice.
 ## Structured review
 
 The reviewer returns JSON validated against [`devloop/schemas/review.json`](../devloop/schemas/review.json):
-`verdict` (`approve`, `request_changes`, `needs_human`), blocking and non-blocking findings with
+`verdict` (`approve`, `request_changes`, `needs_operator`), blocking and non-blocking findings with
 file, line and a suggested fix, and the status of every earlier blocking finding (`resolved`,
 `unresolved`, `withdrawn`). devloop then enforces consistency:
 
 - `approve` with a blocking finding, or with one of the reviewer's own earlier findings
   unresolved, becomes `request_changes` (another owner's open finding does not change it: the
   dispatcher checks it before promoting);
-- `request_changes` with nothing to fix becomes `needs_human`;
+- `request_changes` with nothing to fix becomes `needs_operator`;
 - an earlier finding the reviewer does not assess stays open.
 
 Findings get stable ids (`R<round>-<n>`). The fix step answers each one (`fixed`, `disputed`,
@@ -915,7 +942,7 @@ the issue text again and applies the rules above to the latest map. If one of th
 finding, the approval is neither replayed nor kept: a ready PR goes back to `agent:review` with an
 "Approvazione sospesa" comment that lists why, and the PR gets a new review, whose
 `normalize_review()` adds the finding. That review is a new round: it counts against
-`max_review_rounds` like any other, and at the limit the PR goes to `agent:needs-human`. An issue
+`max_review_rounds` like any other, and at the limit the PR goes to `agent:needs-operator`. An issue
 text changed by someone outside `trusted_users` cannot be checked: the approval does not hold, and
 the new review escalates as for any untrusted change.
 
@@ -924,7 +951,7 @@ the new review escalates as for any untrusted change.
 Every blocking finding has an owner, the reviewer that opened it, and its identity is the triple
 `round/reviewer/ID`, for example `2/codex/R2-1`. The key is recorded in the review marker; a
 review whose keys name another round or another owner is not accepted, and the PR goes to
-`agent:needs-human` (#110). A CI round is
+`agent:needs-operator` (#110). A CI round is
 a review of the reviewer `ci`. A finding stays open until one of these closes it:
 
 | Who | How |
@@ -936,7 +963,7 @@ a review of the reviewer `ci`. A finding stays open until one of these closes it
 Another reviewer's assessment does not close a finding: it is recorded in its review, with a
 note, and the finding stays open. When every reviewer of a round approves but a finding of an
 owner outside the round (CI, or an earlier reviewer) is still open, the round is not promoted:
-the PR goes to `agent:needs-human` with a comment that lists the open findings. When a reviewer
+the PR goes to `agent:needs-operator` with a comment that lists the open findings. When a reviewer
 of the round asks for changes, the fix receives every open finding, whoever owns it.
 Once the operator has closed them, putting the PR back into `agent:review` applies the recorded
 approval again, without a new review. The round count does not change.
@@ -963,7 +990,7 @@ anyone outside `trusted_users`, malformed, or naming a finding that does not exi
 and written to the dispatcher log; one naming a finding already closed has no effect. Text
 devloop publishes is never a command. devloop reads the comments of a PR only while it is in
 `agent:review`, `agent:changes` or `agent:ready-to-merge`: a command written while the PR is in
-`agent:needs-human` takes effect once the label is back.
+`agent:needs-operator` takes effect once the label is back.
 
 #### Markers written before #110
 
@@ -974,7 +1001,7 @@ review on, only the owner, CI or the operator closes them. These rules cover onl
 that precede the first keyed one: a later review marker without keys, or with keys on only some
 findings, closes nothing, and its own findings stay open, attributed to its reviewer. When the owner cannot be
 reconstructed (a review marker without a reviewer, or one that leaves open a finding whose
-round is unknown), the PR goes to `agent:needs-human` with a comment that lists the problem:
+round is unknown), the PR goes to `agent:needs-operator` with a comment that lists the problem:
 the review and the decision on the merge are up to a person.
 
 Markers are control records, while the rest of each comment is text written by a model, and both
@@ -1056,7 +1083,7 @@ approved it by merging it (PR #189).
 
 | Role | Actor today | Does | Does not |
 |---|---|---|---|
-| **Operator** | `brushtyler` | Takes the reserved decisions of ADR 0001; resolves escalations (`agent:needs-human`); approves ADRs; assigns roles; can always merge, block or resume any work | — |
+| **Operator** | `brushtyler` | Takes the reserved decisions of ADR 0001; resolves escalations (`agent:needs-operator`); approves ADRs; assigns roles; can always merge, block or resume any work | — |
 | **Coordinator** (optional, not assigned today) | — | Backlog plan and priorities, draft ADRs, checks the supervisor's work. A revocable delegation of the operator | The reserved decisions |
 | **Supervisor** | Claude Code (`claude-agent`) | Watches devloop; analyses runs; opens issues for problems and improvements; queues issues of trusted authors (`agent:ready`, priority) within the approved priorities; asks for a fix of a PR in review (`/devloop fix`, any mode); in `auto` mode holds or sequences merges and decides non-critical escalations; escalates to the operator | Implement, review, change configuration, policy, budget or credentials; merge: the dispatcher does |
 | **Dispatcher** | devloop (`dispatcher`) | Runs the steps: preflight, implement, review, fix, sync, CI rounds, promotion, merge (`strict` or `auto` mode), pin (if on), continuous loop (if on); writes the markers; escalates | The reserved decisions; merge with merging off |
@@ -1082,7 +1109,7 @@ override in `[merge.levels]`; the most restrictive one wins. #172 implements the
 
 The merge directives are: an approval from every reviewer the level requires, no open finding,
 the head equal to the approved commit, a matching policy receipt, CI passed, the PR mergeable
-without conflicts, and neither `agent:needs-human` nor `agent:merge-hold`. **No mode, and no
+without conflicts, and neither `agent:needs-operator` nor `agent:merge-hold`. **No mode, and no
 agent, merges with CI not green, with open blocking findings or without the required approvals.**
 
 **Critical: always to the operator, also in `auto`.**
@@ -1148,7 +1175,7 @@ permissions.
 
 The apps have no `Workflows` permission, and devloop never pushes changes under
 `protected_paths` (default `.github/`): a workflow or a local action pushed to a branch of this
-repository would run in CI before any review. Such a change goes to `agent:needs-human` and is
+repository would run in CI before any review. Such a change goes to `agent:needs-operator` and is
 applied by a person.
 
 Agent CLIs and the test command run without GitHub credentials in reach: `GH_TOKEN` and
@@ -1219,7 +1246,7 @@ The dispatcher reaches GitHub through three ports, declared in `devloop/ports.py
 
 | Port | Methods |
 |---|---|
-| `Tracker` | issues and their history, comments of issues and PRs, labels: `issues_with_label`, `issue`, `issue_history`, `issue_comments`, `pr_comments`, `labelers`, `label_events`, `labeled_events`, `edit_labels`, `comment`, `close_issue`, `edit_comment`, `ensure_label` |
+| `Tracker` | issues and their history, comments of issues and PRs, labels: `issues_with_label`, `issue`, `issue_history`, `issue_comments`, `pr_comments`, `labelers`, `label_events`, `labeled_events`, `edit_labels`, `comment`, `close_issue`, `edit_comment`, `ensure_label`, `repo_labels`, `rename_label` |
 | `CodeReview` | PRs and reviews: `open_prs`, `merged_prs`, `merge_state` (`clean`, `conflict` or `unknown`), `pr_head`, `pr_state`, `merge_pr`, `pr_reviews`, `create_pr`, `submit_review` |
 | `CI` | checks of a commit: `checks` (summarized by `summarize_checks`), `check_details`, `check_runs`, `failed_log`, `rerun_failed_jobs` (#200) |
 
@@ -1255,6 +1282,26 @@ in the main checkout. In daily use run it from the pinned copy, through
 `scripts/devloop-pinned` ([Run from a pinned installation](#run-from-a-pinned-installation)).
 `--local-config <file>`, before the command, applies a local overlay to the configuration
 ([Local config as an overlay](#local-config-as-an-overlay)).
+
+### From `agent:needs-human` to `agent:needs-operator`
+
+Before #248 the label `agent:needs-operator` was called `agent:needs-human`, and the reviewers'
+verdict `needs_operator` was `needs_human`. The configuration has no alias: `[labels]` is not
+configurable, only the default name changed.
+
+- **`devloop setup` renames the label** when the repository has `agent:needs-human` and not
+  `agent:needs-operator`: it edits the label's name (with its new colour and description,
+  "devloop: serve una decisione dell'operatore"), so the issues and PRs that have it keep it,
+  and logs `labels: renamed …`. When **both** labels exist it renames nothing and touches
+  neither: it logs a warning, and `devloop status` shows the same warning while both exist. Move
+  the issues and PRs of the old label to the new one, then delete the old one.
+- **Until the rename**, and while both exist, `agent:needs-human` blocks exactly as
+  `agent:needs-operator` wherever that label blocks or authorizes: planning, merge, promotion,
+  readiness check, the supervisor's commands. The tick does not stop. Who added the label counts
+  under both names (the events recorded before the rename keep the old name), and the
+  dispatcher removes only the label it added itself, under whichever name it has.
+- **Records already published** are read as before: a review marker with the verdict
+  `needs_human` counts as `needs_operator`.
 
 ### Watching a tick
 
@@ -1504,7 +1551,7 @@ readiness check, on the PR for review, fix, sync and CI. They publish no receipt
 | `request` | The issue goes from `agent:ready` to `agent:working` | SHA-256 of title and body, author and time of the trusted `labeled` event of `agent:ready`, ids of the trusted comments given to the implementer, time of the takeover. It is a snapshot **at the takeover**, not at the time of the label |
 | `turn` | Every invocation of an agent CLI, retries, fallback models and failures included: implement, fix, sync with an agent, review, readiness check | Kind, agent, GitHub identity (none: the operator's `gh` login), configured model and effort (for a fallback, the fallback model and the model it replaces), real model, start, end, duration, outcome (`success`, `failure`, `unavailable`), the error if any, telemetry, and the last command the turn ran or started when the CLI exposes it (`last_command`: only codex, from the `command_execution` items of `--json`; cleaned like the tail of a timeout, on one line, at most 200 characters; absent otherwise), also for a turn that timed out |
 | `verification` | Every test command the dispatcher runs after a writing turn (none when the [local tests](#local-tests) select nothing), and the full suite it runs before a review of a head without CI | Command, outcome, duration, the tree hash before and after the test, and the commit (none before a review) |
-| `event` | The CI of a head (`ci_round`): a failed CI round, the checks a review round saw whatever its verdict (`approve`, `request_changes` or `needs_human`), or the passing checks read again just before the PR is promoted to `agent:ready-to-merge` (also at level 0); a sync without an agent, or the merge of `main` before a fix (`sync`) | For the CI, the head, the state (`fail`, `pass`, or `none` without checks), the review round (none at level 0) and each check with its outcome and the id of its GitHub Actions run (none for a commit status or a check outside Actions); the same checks read again for the same head and round are not recorded twice, a new run is. For a sync, the merged base commit and the old and new heads |
+| `event` | The CI of a head (`ci_round`): a failed CI round, the checks a review round saw whatever its verdict (`approve`, `request_changes` or `needs_operator`), or the passing checks read again just before the PR is promoted to `agent:ready-to-merge` (also at level 0); a sync without an agent, or the merge of `main` before a fix (`sync`) | For the CI, the head, the state (`fail`, `pass`, or `none` without checks), the review round (none at level 0) and each check with its outcome and the id of its GitHub Actions run (none for a commit status or a check outside Actions); the same checks read again for the same head and round are not recorded twice, a new run is. For a sync, the merged base commit and the old and new heads |
 
 **Telemetry** is what the CLI attests, not authenticated:
 
@@ -1526,9 +1573,10 @@ logs it with `--dry-run`). Where to look does not depend on labels, which change
 ends: before writing a turn's record the dispatcher notes the issue or PR in
 `<state_dir>/ledger-open-turns.json`, and removes it when the turn is closed. If that note cannot
 be written, the turn does not start either. The next tick checks every issue or PR still noted,
-for example an issue whose PR is already open or a PR escalated to `agent:needs-human`, and then
+for example an issue whose PR is already open or a PR escalated to `agent:needs-operator`, and then
 forgets it. In case the note is lost, it also looks at open devloop PRs not in
-`agent:needs-human`, issues in `agent:working` and issues waiting for a readiness check.
+`agent:needs-operator` (or in it only for an [operator merge](#ready-prs-whose-merge-is-the-operators)),
+issues in `agent:working` and issues waiting for a readiness check.
 
 **Tests and commits.** A passing test is bound to the commit created right after it only if the
 tree is the same at three points: before the test, after the test and in the commit. The tree is
@@ -1564,7 +1612,7 @@ If the agent becomes active again, the log says so and the mark is removed.
 | Value | Effect |
 |---|---|
 | `warn` (default) | Report only. The turn goes on; stopping it is the operator's decision |
-| `abort` | Also stop the turn (its whole process group) and escalate it like any agent failure: the issue or PR goes to `agent:needs-human` with a comment giving the reason |
+| `abort` | Also stop the turn (its whole process group) and escalate it like any agent failure: the issue or PR goes to `agent:needs-operator` with a comment giving the reason |
 
 The CPU signal reads `/proc`, so the check works on Linux only; elsewhere it is off and the tick
 log says so once per turn. Antigravity writes no transcript that devloop can read, so for it only
@@ -1748,7 +1796,7 @@ Each PR records its implementer and the first reviewer of the pool when it is op
 changing the roles does not affect the level-1 reviewer of open PRs. If the recorded reviewer is
 no longer configured, the first of the pool takes over, but never the agent that implemented the
 PR: without an independent reviewer, or if the PR's implementer is no longer configured, the PR
-goes to `agent:needs-human`. The level-2 pair always comes from the current pool.
+goes to `agent:needs-operator`. The level-2 pair always comes from the current pool.
 
 Agents run headless: `claude -p`, `codex exec`, `agy -p`, with the schema in
 [`devloop/schemas/`](../devloop/schemas/). Implementers edit only their worktree; the
@@ -1760,7 +1808,7 @@ at the same commit, `pr-<n>-review`, which shares the repository's refs (so
 `git diff origin/main...HEAD` works) and is removed after the review. The tests the reviewer runs
 can therefore write files and temporary directories. After the review the dispatcher checks
 that the PR worktree is still at the reviewed commit with no change and no new file, not even
-an ignored one; otherwise the verdict is discarded and the PR goes to `agent:needs-human`.
+an ignored one; otherwise the verdict is discarded and the PR goes to `agent:needs-operator`.
 
 | Reviewer | Sandbox |
 |---|---|
@@ -1885,12 +1933,12 @@ The pertinent modules, among the `tests/test_*.py` files of the worktree, are:
 When no module is pertinent, for example when only documentation changed, and with `"none"`,
 no test runs locally and the PR goes on to the CI. `implement_test_retries` applies to the tests
 that ran: a failure goes back to the implementer with the output, and after the last attempt the
-issue or PR goes to `agent:needs-human`, as with `"full"`.
+issue or PR goes to `agent:needs-operator`, as with `"full"`.
 
 **The CI stays the gate.** A defect the local modules miss becomes a CI round. When the full suite
 did not run locally (`"changed"` or `"none"`), a review needs the CI passed: if the head has no
 CI at all, the first reviewer's action of the round runs `test_cmd` locally, in a disposable copy
-of the PR worktree, before the review, and a failure sends the PR to `agent:needs-human` without a
+of the PR worktree, before the review, and a failure sends the PR to `agent:needs-operator` without a
 review. With `"full"` the gate is unchanged: CI passed or absent.
 
 The mode and the modules run (`local_tests`: `{mode, modules}`, only `{mode}` with `"full"`) go to the tick log and, as
@@ -1934,7 +1982,7 @@ as before. `ci_rerun_unrelated = false` turns the re-run off; the default is `tr
 the `rerun` kind counts only when the dispatcher's identity wrote it.
 
 Only a `ci_failed` is re-run this way: a CI failure on a PR that has no round left goes to
-`agent:needs-human` (`round_limit`), as before.
+`agent:needs-operator` (`round_limit`), as before.
 
 ### Documentation map
 
@@ -2014,7 +2062,7 @@ each agy turn its minimal permissions, and treats a stop without output as a fai
   agents' prompts do not get it.
 - **No output is an error.** An agy turn that exits with no output, or with
   `jetski: no output produced`, fails with `<agent> stopped without output: <message>`, which
-  goes to the turn's log and to the `agent:needs-human` comment. When agy's JSON lists
+  goes to the turn's log and to the `agent:needs-operator` comment. When agy's JSON lists
   `denied_actions`, the message ends with `; denied_actions: [...]` (#155), so the escalation
   says which action was denied. It is never an empty result; with exit 0 it never counts as an
   unavailable model either, so it does not start the fallback. The message counts as the CLI's
@@ -2082,13 +2130,13 @@ fallback_models = [
   precedence even with a non-zero exit: only a missing or empty output, an envelope without
   `structured_output` or an explicit error envelope leave room for a match. A result, a parse
   error, a timeout and a stall never count, whatever the text, and follow the usual path to
-  `agent:needs-human`. An agy [empty run](#agy-permissions) (exit 0, no result, no error) also
+  `agent:needs-operator`. An agy [empty run](#agy-permissions) (exit 0, no result, no error) also
   moves to the next model, without being remembered.
 - **Once.** Each model is tried at most once per action, but for the single retry of an agy
   denied permission or of an empty run on the last model: a rate limit the CLI reports as
   terminal counts as persistent, and a model found unavailable is not tried again by the later
   attempts of the same action (`implement_test_retries`). When the last model fails too, the
-  issue or PR goes to `agent:needs-human` with a comment listing the models tried and why. Any
+  issue or PR goes to `agent:needs-operator` with a comment listing the models tried and why. Any
   other failure after a fallback ends the action without trying further models, and its
   comment lists the models tried too, the failed one included.
 - **Worktree.** The fallback is a new session with the same prompt and worktree. Partial changes
@@ -2157,10 +2205,10 @@ fallback_memory_seconds = 3600  # when the error does not say when the model is 
   read only from the identity that may write them (see GitHub identities). Labelling approves the issue's title and body as they are: if someone outside
   `trusted_users` changes them later (or in the same second, since GitHub timestamps cannot
   order the two), implementation, review and fixes stop at
-  `agent:needs-human` until a trusted user adds `agent:ready` again. Issue text is still model
+  `agent:needs-operator` until a trusted user adds `agent:ready` again. Issue text is still model
   input: do not label untrusted content.
 - **Failures escalate immediately.** A timeout or a transient error of an agent, `gh` or `git`
-  goes to `agent:needs-human` rather than being retried. The only exception is an unavailable
+  goes to `agent:needs-operator` rather than being retried. The only exception is an unavailable
   model of an agent with [fallback models](#fallback-models), which runs the turn again on the
   next one.
 - **Single host.** One dispatcher runs at a time. With `max_parallel_actions = 1` (the

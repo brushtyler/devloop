@@ -306,7 +306,9 @@ class ReusedApprovalTests(unittest.TestCase):
         d.tick()  # approved and promoted while the issue had no criteria: no map needed
         self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
         self.assertEqual(d.snapshot().prs[0].acceptance, [])
-        self.assertEqual(d.tick(), [])
+        # [merge] is off: the merge is the operator's (#248), with the dispatcher's own label,
+        # which goes with the readiness.
+        self.assertEqual([a.kind for a in d.tick()], ['operator_merge'])
         # The issue now has criteria, and the PR still records no map.
         self.gh.body = ISSUE
         self.assertEqual(d.tick(), [Action('revoke', 100, 'the acceptance map does not hold')])
@@ -340,6 +342,7 @@ class ReusedApprovalTests(unittest.TestCase):
         d.tick()
         self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
         self.assertEqual(d.snapshot().prs[0].acceptance, [])
+        self.assertEqual([a.kind for a in d.tick()], ['operator_merge'])  # [merge] off (#248)
         self.assertEqual(d.tick(), [])
 
     def test_untrusted_issue_text_does_not_hold(self):

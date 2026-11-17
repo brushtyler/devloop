@@ -29,14 +29,15 @@ trusted_users = ["brushtyler"]
 
 # Readiness check before implement (issue #114): a read-only agent, other than the implementer,
 # checks on a checkout of main that the issue can be implemented in one run, and an issue that
-# is not ready goes to agent:needs-human without starting the implementer. Each check takes a
+# is not ready goes to agent:needs-operator without starting the implementer. Each check takes a
 # slot of max_actions_per_tick. Disabled here: enabling it is the operator's decision.
 # preflight = "codex"
 
 max_open_prs = 2            # devloop PRs in progress at once; new issues wait
-# PRs waiting for a person (issue #199): agent:needs-human, and agent:ready-to-merge when devloop
-# does not merge them ([merge] mode "off", a level override "off", operator_only_paths). They do
-# not take the slots of max_open_prs; once this many are open, no new issue starts.
+# PRs waiting for a person (issue #199): agent:needs-operator, and agent:ready-to-merge when
+# devloop does not merge them ([merge] mode "off", a level override "off", operator_only_paths;
+# since issue #248 these get agent:needs-operator too). They do not take the slots of
+# max_open_prs; once this many are open, no new issue starts.
 max_parked_prs = 3
 max_review_rounds = 3       # review rounds (including CI failures) before escalating
 max_actions_per_tick = 3
@@ -53,7 +54,7 @@ agent_command_timeout_seconds = 600
 # An agent turn with no new event in its session transcript and no child process using CPU for
 # this long is reported as stalled in the tick log and in `devloop status` (issue #100).
 # agent_stall_action: "warn" only reports it; "abort" also stops the turn and escalates it to
-# agent:needs-human with a comment.
+# agent:needs-operator with a comment.
 agent_stall_seconds = 900
 agent_stall_action = "warn"
 
@@ -117,7 +118,7 @@ checks = []
 #   again just before the merge: the conditions of the promotion still hold (every required
 #   approve, no open finding, head = approved commit, policy receipt recomputed and matching;
 #   at level 0 the checks of its promotion), CI is `pass`, GitHub reports MERGEABLE and CLEAN,
-#   and neither agent:needs-human nor agent:merge-hold is set. The branch is kept;
+#   and neither agent:needs-operator nor agent:merge-hold is set. The branch is kept;
 # - "auto": as "strict", and the supervisor (roles.supervisor) or a trusted user can hold a
 #   merge with `/devloop hold <reason>` and allow it again with `/devloop release`. Needs
 #   roles.supervisor.
@@ -126,7 +127,8 @@ checks = []
 [merge]
 mode = "off"
 # A PR touching one of these paths (directories ending in "/" or files from the root) is merged
-# by a person, whatever the mode.
+# by a person, whatever the mode. A ready PR that devloop does not merge, for these paths, the
+# mode or a level "off", gets agent:needs-operator and a dispatcher comment (issue #248).
 operator_only_paths = ["docs/adr/", "AGENTS.md", "CLAUDE.md"]
 # A mode per review level: the most restrictive of this and `mode` applies (off, then strict,
 # then auto).
@@ -193,7 +195,7 @@ implementer = "claude"
 # reviewer (the first of the pool when the PR was opened). Level 2 takes the first pair that
 # differs both in GitHub identity (app) and in (kind, model, effort, review_args), and neither of
 # which shares the identity or (kind, model, effort) of the implementer or of a fixer of the PR;
-# without such a pair the PR goes to agent:needs-human. `reviewer = "codex"` is a pool of one.
+# without such a pair the PR goes to agent:needs-operator. `reviewer = "codex"` is a pool of one.
 reviewers = ["codex", "agy"]
 
 [agents.claude]

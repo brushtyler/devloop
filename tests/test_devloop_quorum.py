@@ -116,8 +116,9 @@ class QuorumTests(Quorum):
         self.assertEqual(self.gh.written[:2], [FakeIdentities.LOGINS[FIRST],
                                                FakeIdentities.LOGINS[SECOND]])
         self.assertEqual(len(self.gh.native), 2)
-        # Ready: nothing more to do; the replay needs no inference.
-        self.assertEqual(self.planned(), [])
+        # Ready: the replay needs no inference; with [merge] off only the operator merge is
+        # left to tell (#248).
+        self.assertEqual([a.kind for a in self.planned()], ['operator_merge'])
 
     def test_two_approvals_of_the_same_reviewer_are_not_enough(self):
         self.make(raw_review(), raw_review())
@@ -161,12 +162,12 @@ class QuorumTests(Quorum):
         self.assertEqual(self.gh.labels[100], {'agent:changes'})
         self.assertEqual(self.records('policy'), [])
 
-    def test_a_needs_human_verdict_stops_the_round_and_a_rereview_reaches_both(self):
-        self.make(raw_review('needs_human', human='manca una decisione'), raw_review(),
+    def test_a_needs_operator_verdict_stops_the_round_and_a_rereview_reaches_both(self):
+        self.make(raw_review('needs_operator', human='manca una decisione'), raw_review(),
                   raw_review(), raw_review())
         self.d.tick(), self.d.tick()
         # Not an approval, and the quorum is not lowered: a human decides.
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         self.gh.labels[100] = {'agent:review'}
         self.assertEqual(self.planned(), [Action('apply_review', 100, 'verdict already recorded')])
         self.gh.comments.append((100, '/devloop rereview\n\nDecisione presa: va bene così.'))
@@ -207,10 +208,10 @@ class PoolTests(Quorum):
         return dataclasses.replace(CFG, agents=dict(CFG.agents, alias=alias),
                                    reviewers=(FIRST, 'alias'))
 
-    def assert_needs_human(self, why):
+    def assert_needs_operator(self, why):
         self.assertEqual(self.d.tick(), [Action('review', 100)])
         self.assertEqual(self.runner.calls, [])
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         (record,) = self.records('policy')
         self.assertEqual((record['event'], record['receipt']['reviewers']), ('level', []))
         self.assertIn(why, self.gh.comments[-1][1])
@@ -219,13 +220,13 @@ class PoolTests(Quorum):
         # Different keys and descriptions, and different identities (the alias has no app):
         # the same (kind, model, effort, review_args) still makes them one.
         self.make(cfg=self.alias_cfg())
-        self.assert_needs_human('non ne ha abbastanza')
+        self.assert_needs_operator('non ne ha abbastanza')
 
     def test_a_different_tuple_is_not_enough_with_the_same_identity(self):
         # e.g. an alias that publishes with the same app.
         self.make(cfg=self.alias_cfg(review_args=('--x',)))
         self.d.identities.LOGINS = dict(FakeIdentities.LOGINS, alias=FakeIdentities.LOGINS[FIRST])
-        self.assert_needs_human('non ne ha abbastanza')
+        self.assert_needs_operator('non ne ha abbastanza')
         # The same alias with an identity of its own is a second reviewer.
         self.d.identities.LOGINS = dict(FakeIdentities.LOGINS, alias='alias[bot]')
         self.assertEqual(self.d._select(self.d.snapshot().prs[0], 2)[0], [FIRST, 'alias'])
@@ -235,7 +236,7 @@ class PoolTests(Quorum):
         twin = dataclasses.replace(CFG.agents[FIRST], kind=impl.kind, model=impl.model,
                                    effort=impl.effort)
         self.make(cfg=dataclasses.replace(CFG, agents=dict(CFG.agents, **{FIRST: twin})))
-        self.assert_needs_human('non ne ha abbastanza')
+        self.assert_needs_operator('non ne ha abbastanza')
 
     def test_the_pool_is_scanned_in_order_for_the_first_independent_pair(self):
         cfg = self.alias_cfg()
@@ -281,7 +282,7 @@ class PoolTests(Quorum):
     def test_unverifiable_history_goes_to_a_human(self):
         # A PR opened before #111 records no profile of its implementer.
         self.make(profile=False)
-        self.assert_needs_human('non è verificabile')
+        self.assert_needs_operator('non è verificabile')
         # Nor does a fix recorded before #111.
         d = self.make()
         p = d.snapshot().prs[0]
@@ -301,7 +302,7 @@ class RecoveryTests(Quorum):
         self.d.tick()
         self.d.tick()
         # A reviewer in timeout is no approval: a human looks first.
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         self.assertEqual(self.records('policy'), [])
         self.gh.labels[100] = {'agent:review'}
         self.assertEqual(self.planned(), [Action('review', 100, f'the round waits for {SECOND}')])
@@ -404,12 +405,12 @@ class NormalizationTests(unittest.TestCase):
     def test_round_helpers(self):
         a = {'round': 1, 'source': 'agent', 'reviewer': 'x', 'verdict': 'approve'}
         b = dict(a, reviewer='y', verdict='request_changes')
-        c = dict(a, reviewer='y', verdict='needs_human')
+        c = dict(a, reviewer='y', verdict='needs_operator')
         self.assertEqual(review.last_round([]), 0)
         self.assertEqual(review.current_round([a, b, dict(b, verdict='approve')]), [a, b])
         self.assertEqual(review.round_verdict([a]), 'approve')
         self.assertEqual(review.round_verdict([a, b]), 'request_changes')
-        self.assertEqual(review.round_verdict([b, c]), 'needs_human')
+        self.assertEqual(review.round_verdict([b, c]), 'needs_operator')
 
 
 class ConfigTests(unittest.TestCase):

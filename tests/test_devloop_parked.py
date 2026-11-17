@@ -13,15 +13,17 @@ from test_devloop import CFG, FakeWS, norm, pr, raw_review, ready
 from test_devloop_merge import AUTO, STRICT, Case
 from test_devloop_zero import changes
 
-NEEDS_HUMAN, READY = 'agent:needs-human', 'agent:ready-to-merge'
+NEEDS_OPERATOR, READY = 'agent:needs-operator', 'agent:ready-to-merge'
 OFF = dataclasses.replace(CFG, merge=MergePolicy(mode='off'), max_open_prs=3, max_parked_prs=3,
                           max_actions_per_tick=10)
 
 
 def ready_pr(number, mode=None):
-    """An approved PR in agent:ready-to-merge, its merge mode as the snapshot computed it."""
+    """An approved PR in agent:ready-to-merge, its merge mode as the snapshot computed it. A
+    merge that is the operator's was already told (#248)."""
     p = pr(number=number, issue=number, labels=[READY], reviews=[norm(raw_review())])
     p.mergeable, p.merge_status, p.merge_mode = 'MERGEABLE', 'CLEAN', mode
+    p.operator_merges = [p.head_sha]
     return p
 
 
@@ -42,7 +44,7 @@ class PlanTests(unittest.TestCase):
     def test_parked_prs_leave_the_slots_of_max_open_prs_free(self):
         # Three open PRs, two of them waiting for a person: with max_open_prs = 3 a new issue
         # starts, as many as the slots left by the PRs in progress.
-        prs = [in_review(1), pr(number=2, issue=2, labels=[NEEDS_HUMAN]), ready_pr(3)]
+        prs = [in_review(1), pr(number=2, issue=2, labels=[NEEDS_OPERATOR]), ready_pr(3)]
         snap = snapshot(prs, ready(10), ready(11), ready(12))
         self.assertEqual(pr_counts(snap, OFF), (1, 2))
         self.assertEqual(started(snap, OFF), [10, 11])
@@ -52,9 +54,19 @@ class PlanTests(unittest.TestCase):
         snap.prs.append(in_review(5))
         self.assertEqual(started(snap, OFF), [])
 
+    def test_the_operator_merge_label_does_not_change_the_count(self):
+        # A ready PR devloop does not merge was already parked (#199); the label the dispatcher
+        # adds to it (#248) does not count it twice, nor does an escalation's label.
+        told = ready_pr(2)
+        told.labels.add(NEEDS_OPERATOR)
+        told.operator_owned = True
+        for prs in ([told], [ready_pr(2)], [pr(number=2, issue=2, labels=[NEEDS_OPERATOR])]):
+            with self.subTest(labels=prs[0].labels):
+                self.assertEqual(pr_counts(snapshot(prs), OFF), (0, 1))
+
     def test_no_new_issue_once_max_parked_prs_is_reached(self):
         cfg = dataclasses.replace(OFF, max_parked_prs=2)
-        prs = [pr(number=1, issue=1, labels=[NEEDS_HUMAN]), ready_pr(2)]
+        prs = [pr(number=1, issue=1, labels=[NEEDS_OPERATOR]), ready_pr(2)]
         snap = snapshot(prs, ready(10))
         self.assertEqual(pr_counts(snap, cfg), (0, 2))
         self.assertEqual(started(snap, cfg), [])
@@ -85,10 +97,10 @@ class PlanTests(unittest.TestCase):
                 self.assertEqual(started(snapshot([ready_pr(1, 'off')], ready(10)), one), [10])
                 # A mode not computable in this tick: devloop may still merge it.
                 self.assertFalse(parked(ready_pr(1, None), cfg))
-        # With [merge] off every ready PR waits for a person; agent:needs-human always does.
+        # With [merge] off every ready PR waits for a person; agent:needs-operator always does.
         self.assertTrue(parked(ready_pr(1, None), OFF))
-        self.assertTrue(parked(pr(labels=[NEEDS_HUMAN]), STRICT))
-        self.assertTrue(parked(pr(labels=[READY, NEEDS_HUMAN]), STRICT))
+        self.assertTrue(parked(pr(labels=[NEEDS_OPERATOR]), STRICT))
+        self.assertTrue(parked(pr(labels=[READY, NEEDS_OPERATOR]), STRICT))
         for labels in (['agent:review'], ['agent:changes'], []):
             with self.subTest(labels=labels):
                 self.assertFalse(parked(pr(labels=labels), OFF))

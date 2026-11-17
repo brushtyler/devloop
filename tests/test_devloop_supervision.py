@@ -15,7 +15,7 @@ SUPERVISOR_LOGIN = 'agy-agent[bot]'
 AUTO = dataclasses.replace(CFG, merge=MergePolicy(mode='auto'), supervisor=SUPERVISOR)
 STRICT = dataclasses.replace(CFG, merge=MergePolicy(mode='strict'))
 PREFLIGHT_AUTO = dataclasses.replace(AUTO, preflight=REV)
-HUMAN, SUPER = 'agent:needs-human', 'agent:needs-supervisor'
+HUMAN, SUPER = 'agent:needs-operator', 'agent:needs-supervisor'
 REVIEW, READY = 'agent:review', 'agent:ready'
 
 
@@ -185,7 +185,7 @@ class ClassTests(Case):
         self.assertIn('**Classe:** `round_limit`', body)
 
     def test_a_reviewer_asking_for_a_decision_is_a_critical_escalation(self):
-        d = self.make(AUTO, raw_review('needs_human', human='product call'))
+        d = self.make(AUTO, raw_review('needs_operator', human='product call'))
         self.assertEqual(self.tick(d), [('review', 100)])
         self.assertEqual(self.gh.labels[100], {HUMAN})
         self.assertEqual([r['class'] for r in self.escalations(100)], ['reviewer_decision'])
@@ -636,9 +636,9 @@ class DocsTests(unittest.TestCase):
     def test_the_routing_is_documented(self):
         text = ' '.join(self.section().split())
         self.assertIn('With `[merge].mode = "auto"` a non-critical escalation adds '
-                      '`agent:needs-supervisor` instead of `agent:needs-human`', text)
+                      '`agent:needs-supervisor` instead of `agent:needs-operator`', text)
         self.assertIn('With `"off"` and `"strict"` every escalation goes to '
-                      '`agent:needs-human`', text)
+                      '`agent:needs-operator`', text)
         self.assertIn(f'`{supervision.DESIGN_LABEL}`', text)
 
     def test_the_commands_are_documented(self):

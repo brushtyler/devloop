@@ -5,7 +5,7 @@ non-critical, which the supervisor may decide in merge mode ``auto``, or critica
 goes to the operator. A class that is not known here is critical.
 
 With ``[merge].mode = "auto"`` a non-critical escalation goes to ``agent:needs-supervisor``
-instead of ``agent:needs-human``; with ``off`` and ``strict`` every escalation goes to the
+instead of ``agent:needs-operator``; with ``off`` and ``strict`` every escalation goes to the
 operator, as before. The supervisor answers with a command, the first line of a comment after
 the attribution header:
 

@@ -165,7 +165,7 @@ class TrustedUserTests(Case):
         self.assertTrue(self.ignored('malformed'))
 
     def test_not_applied_to_a_ready_or_parked_pr(self):
-        for label in ('agent:ready-to-merge', 'agent:needs-human', 'agent:needs-supervisor'):
+        for label in ('agent:ready-to-merge', 'agent:needs-operator', 'agent:needs-supervisor'):
             with self.subTest(label=label):
                 d = self.make(labels=(label,))
                 self.approve()

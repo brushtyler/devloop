@@ -237,7 +237,7 @@ class ReviewNormalizationTests(unittest.TestCase):
 
     def test_request_changes_without_findings_goes_to_a_human(self):
         r = norm(raw_review('request_changes'))
-        self.assertEqual(r['verdict'], 'needs_human')
+        self.assertEqual(r['verdict'], 'needs_operator')
         self.assertTrue(r['human_reason'])
 
     def test_unassessed_previous_findings_stay_open(self):
@@ -723,7 +723,7 @@ class PlanTests(unittest.TestCase):
     def test_new_work_respects_wip_trust_blocks_and_priority(self):
         snap = Snapshot(prs=[], working_issues=[], ready_issues=[
             ready(5), ready(3, labeler='stranger'), ready(9, ['prerequisito'], priority='high'),
-            ready(2, ['bloccata']), ready(4, ['agent:needs-human'])])
+            ready(2, ['bloccata']), ready(4, ['agent:needs-operator'])])
         self.assertEqual(self.kinds(snap), [('implement', 9), ('implement', 5)])
         snap.prs = [pr(number=100, labels=['agent:review'], reviews=[norm(raw_review())],
                        checks='pending')]
@@ -758,7 +758,12 @@ class PlanTests(unittest.TestCase):
     def test_ready_prs_are_rechecked_against_the_approved_commit(self):
         done = norm(raw_review())
         ready_pr = dict(labels=['agent:ready-to-merge'], reviews=[done])
-        self.assertEqual(self.kinds(Snapshot([pr(**ready_pr)], [], [])), [])
+        # With [merge] off the merge is the operator's (#248): told once per head.
+        self.assertEqual(self.kinds(Snapshot([pr(**ready_pr)], [], [])),
+                         [('operator_merge', 100)])
+        told = pr(**ready_pr)
+        told.operator_merges = [SHA1]
+        self.assertEqual(self.kinds(Snapshot([told], [], [])), [])
         # CI re-running on the approved commit suspends readiness.
         self.assertEqual(self.kinds(Snapshot([pr(**ready_pr, checks='pending')], [], [])),
                          [('revoke', 100)])
@@ -841,6 +846,7 @@ class PlanTests(unittest.TestCase):
                 self.assertEqual(self.kinds(Snapshot([p], [], [])), [])
         # Readiness already granted stays: nothing is planned until the state is known.
         ready_pr = pr(labels=['agent:ready-to-merge'], reviews=[approval], merge='unknown')
+        ready_pr.operator_merges = [SHA1]  # the operator merge (#248) was already told
         self.assertEqual(self.kinds(Snapshot([ready_pr], [], [])), [])
 
 
@@ -1110,13 +1116,13 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(len(runner.calls), 2)
         self.assertIn('FAILED test_x', runner.calls[1][3])
         self.assertEqual(self.gh.created, [])
-        self.assertEqual(self.gh.labels[7], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[7], {'agent:needs-operator'})
         self.assertIn('FAILED test_x', self.gh.comments[-1][1])
 
     def test_blocked_implementer_comments_with_its_header(self):
         d = self.make(FakeRunner(implemented('blocked')))
         d._do_implement(7)
-        self.assertEqual(self.gh.labels[7], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[7], {'agent:needs-operator'})
         self.assertTrue(self.gh.comments[0][1].startswith(f'> [!NOTE]\n> **Agent:** {IMPL_NAME}'))
         self.assertIn('unclear', self.gh.comments[0][1])
 
@@ -1162,7 +1168,7 @@ class DispatcherTests(unittest.TestCase):
     def test_review_posts_structured_verdict_and_routes_labels(self):
         for raw, labels in ((raw_review(), {'agent:ready-to-merge'}),
                             (raw_review('request_changes', [finding()]), {'agent:changes'}),
-                            (raw_review('needs_human', human='product call'), {'agent:needs-human'})):
+                            (raw_review('needs_operator', human='product call'), {'agent:needs-operator'})):
             with self.subTest(verdict=raw['verdict']):
                 runner = FakeRunner(raw)
                 d = self.make(runner)
@@ -1243,7 +1249,7 @@ class DispatcherTests(unittest.TestCase):
         d = self.make(FakeRunner(raw_review('request_changes', [finding()])))
         p = pr(reviews=rounds, fixes=[{'round': 2, 'head_sha': SHA1, 'responses': []}])
         d._do_review(p)
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         self.assertIn('limite di 3 round', self.gh.comments[-1][1])
 
     def test_review_runs_in_a_disposable_copy(self):
@@ -1351,7 +1357,7 @@ class DispatcherTests(unittest.TestCase):
         gh.labels[100] = set(p.labels)
         Dispatcher(cfg, gh, FakeWS(), runner, log=lambda m: None)._do_review(p)
         self.assertEqual(runner.calls, [])
-        self.assertEqual(gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(gh.labels[100], {'agent:needs-operator'})
         self.assertIn('indipendente', gh.comments[-1][1])
 
     def test_fix_escalates_when_the_implementer_is_no_longer_configured(self):
@@ -1363,7 +1369,7 @@ class DispatcherTests(unittest.TestCase):
         self.gh.labels[100] = set(p.labels)
         d._do_fix(p)
         self.assertEqual(runner.calls, [])
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
 
     def test_issue_edited_after_the_label_does_not_reach_the_implementer(self):
         runner = FakeRunner(implemented())
@@ -1373,9 +1379,9 @@ class DispatcherTests(unittest.TestCase):
         d.snapshot = lambda: Snapshot([], [ready(7)], [])
         self.assertEqual(d.tick(), [Action('implement', 7)])
         self.assertEqual(runner.calls, [])
-        self.assertEqual(self.gh.labels[7], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[7], {'agent:needs-operator'})
         self.assertIn('modificato da `stranger`', self.gh.comments[-1][1])
-        self.assertIn('rimuovere `agent:needs-human`', self.gh.comments[-1][1])
+        self.assertIn('rimuovere `agent:needs-operator`', self.gh.comments[-1][1])
 
     def test_issue_edited_during_review_stops_the_pr(self):
         d = self.make(FakeRunner(raw_review()))
@@ -1392,8 +1398,8 @@ class DispatcherTests(unittest.TestCase):
         for action in ('_do_lost_meta', '_do_round_limit'):
             self.gh.labels[100] = {'agent:review'}
             getattr(d, action)(pr())
-            self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
-            self.assertIn('rimuovere `agent:needs-human`', self.gh.comments[-1][1])
+            self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
+            self.assertIn('rimuovere `agent:needs-operator`', self.gh.comments[-1][1])
 
     def test_fix_on_moved_branch_goes_back_to_review(self):
         first = norm(raw_review('request_changes', [finding()]))
@@ -1419,7 +1425,7 @@ class DispatcherTests(unittest.TestCase):
         self.gh.labels[100] = set(p.labels)
         d.snapshot = lambda: Snapshot([p], [], [])
         self.assertEqual(d.tick(), [Action('review', 100)])
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         self.assertIn('exited with 1', self.gh.comments[-1][1])
 
     def test_dry_run_changes_nothing(self):
@@ -1521,13 +1527,13 @@ class DispatcherTests(unittest.TestCase):
                 p = pr(merge='conflict')
                 self.gh.labels[100] = set(p.labels)
                 d._do_sync(p)
-                self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+                self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
                 self.assertEqual((ws.commits, ws.pushes), ([], []))
                 body = self.gh.comments[-1][1]
                 self.assertIn(reason, body)
                 self.assertIn('`devloop/agents.py`', body)
                 self.assertIn('`abc1234`', body)
-                self.assertIn('rimuovere `agent:needs-human`', body)
+                self.assertIn('rimuovere `agent:needs-operator`', body)
 
     def test_a_sync_whose_agent_starts_on_the_retry_goes_on(self):
         # The sync of #217: claude was updating itself when the turn started (#218).
@@ -1584,7 +1590,7 @@ class DispatcherTests(unittest.TestCase):
         self.gh.labels[100] = set(p.labels)
         d._do_sync(p)
         self.assertEqual(runner.calls, [])
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
 
     def test_status_shows_conflicting_prs(self):
         import devloop.__main__ as cli
@@ -1600,21 +1606,21 @@ class DispatcherTests(unittest.TestCase):
 
 
 class RereviewTests(unittest.TestCase):
-    """#101: after a needs_human verdict that needs no code change, a trusted user can ask for a
+    """#101: after a needs_operator verdict that needs no code change, a trusted user can ask for a
     new review of the same head."""
 
-    def needs_human_then(self, *after, rounds=1):
+    def needs_operator_then(self, *after, rounds=1):
         reviewer = markdown.header(REV_NAME, '9.9', 'm', 'high')
         reviews = [{'author': {'login': 'brushtyler'},
                     'body': markdown.render_review(
-                        norm(raw_review('needs_human', human='manca una issue collegata'),
+                        norm(raw_review('needs_operator', human='manca una issue collegata'),
                              round_no=i), reviewer)}
                    for i in range(1, rounds + 1)]
         return reviews + [{'author': {'login': who}, 'body': body} for who, body in after]
 
     def make(self, comments, runner=None):
         self.gh = SnapshotGH(comments)
-        # The operator removed agent:needs-human and set agent:review again.
+        # The operator removed agent:needs-operator and set agent:review again.
         self.gh.labels[100] = {'agent:review'}
         self.runner = runner or FakeRunner()
         return Dispatcher(CFG, self.gh, FakeWS(), self.runner, log=lambda m: None)
@@ -1624,7 +1630,7 @@ class RereviewTests(unittest.TestCase):
 
     def test_trusted_request_runs_a_new_review_round_with_the_operator_comments(self):
         request = '/devloop rereview\n\nAperta la #100 per il punto 3; descrizione aggiornata.'
-        d = self.make(self.needs_human_then(('brushtyler', request)), FakeRunner(raw_review()))
+        d = self.make(self.needs_operator_then(('brushtyler', request)), FakeRunner(raw_review()))
         snap = d.snapshot()
         self.assertTrue(snap.prs[0].rereview)
         self.assertEqual(plan(snap, CFG),
@@ -1642,7 +1648,7 @@ class RereviewTests(unittest.TestCase):
         self.assertEqual(self.planned(d), [('apply_review', 100)])
 
     def test_untrusted_request_is_ignored(self):
-        d = self.make(self.needs_human_then(('stranger', '/devloop rereview')))
+        d = self.make(self.needs_operator_then(('stranger', '/devloop rereview')))
         snap = d.snapshot()
         self.assertFalse(snap.prs[0].rereview)
         self.assertEqual(snap.prs[0].operator_comments, [])
@@ -1657,20 +1663,20 @@ class RereviewTests(unittest.TestCase):
                       (('brushtyler', markdown.header(IMPL_NAME, '9.9', 'm', 'high')
                         + '/devloop rereview'),)):
             with self.subTest(after=after):
-                d = self.make(self.needs_human_then(*after))
+                d = self.make(self.needs_operator_then(*after))
                 self.assertEqual(self.planned(d), [('apply_review', 100)])
                 d.tick()
                 self.assertEqual(self.runner.calls, [])
-                self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+                self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
 
     def test_a_request_before_the_latest_verdict_is_spent(self):
-        comments = self.needs_human_then(('brushtyler', '/devloop rereview'), rounds=1)
-        comments += self.needs_human_then(rounds=2)[1:]
+        comments = self.needs_operator_then(('brushtyler', '/devloop rereview'), rounds=1)
+        comments += self.needs_operator_then(rounds=2)[1:]
         d = self.make(comments)
         self.assertEqual(self.planned(d), [('apply_review', 100)])
 
     def test_a_requested_review_respects_the_round_limit(self):
-        d = self.make(self.needs_human_then(('brushtyler', '/devloop rereview'), rounds=3))
+        d = self.make(self.needs_operator_then(('brushtyler', '/devloop rereview'), rounds=3))
         self.assertEqual(self.planned(d), [('round_limit', 100)])
         self.gh.ci = 'pending'
         self.assertEqual(self.planned(d), [])  # waits for CI like any new round
@@ -2280,20 +2286,20 @@ class IdentityTests(unittest.TestCase):
         d = self.make(FakeRunner(implemented()), FakeWS(files=['a.py', '.github/workflows/ci.yml']))
         d._do_implement(7)
         self.assertEqual((self.ws.pushes, self.gh.created), ([], []))
-        self.assertEqual(self.gh.labels[7], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[7], {'agent:needs-operator'})
         self.assertIn('.github/workflows/ci.yml', self.gh.comments[-1][1])
         # A fix is checked only on what it adds to the reviewed head.
         first = norm(raw_review('request_changes', [finding()]))
         d = self.make(FakeRunner(fixed()), FakeWS(files=['.github/actions/x/action.yml']))
         d._do_fix(pr(labels=['agent:changes'], reviews=[first]))
         self.assertEqual((self.ws.pushes, self.ws.spans), ([], [SHA1]))
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         # A sync merge may not differ from the base under protected paths.
         synced = {'status': 'completed', 'summary': 's', 'blocked_reason': ''}
         d = self.make(FakeRunner(synced), FakeWS(files=['.github/workflows/ci.yml']))
         d._do_sync(pr(merge='conflict'))
         self.assertEqual((self.ws.pushes, self.ws.spans), ([], ['origin/main']))
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
 
     def test_the_implementer_starts_and_concludes_a_sync_merge(self):
         # Issue #99: git wants a committer even for `merge --no-commit`.
@@ -2307,7 +2313,7 @@ class IdentityTests(unittest.TestCase):
     def test_the_reviewer_posts_its_verdict_and_a_native_review(self):
         for raw, event in ((raw_review(), 'APPROVE'),
                            (raw_review('request_changes', [finding()]), 'REQUEST_CHANGES'),
-                           (raw_review('needs_human', human='call'), 'COMMENT')):
+                           (raw_review('needs_operator', human='call'), 'COMMENT')):
             with self.subTest(event=event):
                 d = self.make(FakeRunner(raw))
                 d._do_review(pr())
