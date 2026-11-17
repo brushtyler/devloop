@@ -59,10 +59,33 @@ alone until GitHub recomputes. As for any push, the merge must not differ from `
 
 A sync writes no review record, so it does not consume a review round, and it runs even when no
 round is left. The PR goes back to `agent:review`, also from `agent:ready-to-merge`, and the next
-round reviews the new head after CI as usual; that round counts against `max_review_rounds`. A
+round reviews the new head after CI as usual; that round counts against `max_review_rounds`,
+except after an approval (see [Resync after approval](#resync-after-approval)). A
 sync that fails (the implementer is blocked, tests still fail, markers are left, the merge was
 concluded or aborted by the agent, or the agent run failed) goes to `agent:needs-human` with a
 comment that lists the files in conflict and their commits.
+
+#### Resync after approval
+
+A PR approved and then synced, for example because GitHub reported the mergeability as unknown
+and another PR was merged before devloop could merge it, needs a new review of the new head
+(#235). That review does **not** count against `max_review_rounds` when all of these hold:
+
+- the latest round is complete and approved a head, the same for every reviewer;
+- the new head differs from it only by merges of `origin/main`: walking back from the new head,
+  each commit up to the approved one (at most 10) has two parents, the second a commit of
+  `main`, and exactly the tree `git merge-tree --write-tree` writes, without conflicts, for those
+  two parents. A merge whose conflicts the implementer resolved, a fix, or any other commit
+  changes the PR's content, and the review counts as before;
+- the review is not a `/devloop rereview`, and CI did not fail on the new head (a CI round
+  counts).
+
+The dispatcher checks this when it reads the PR; when git cannot tell (a missing commit), the
+review counts. The review records `resync`, with the reason `resync_after_approval`, the
+approved round and its head (`from`), and its comment says it does not count. Every later sync
+after a new approval is free in the same way. The limit stays the same for the implementer's
+changes: a request for changes in that round needs a fix, whose review is a round that counts,
+so with no round left it goes to `agent:needs-human` at once.
 
 Any step can stop at `agent:needs-human` with a comment explaining why: the
 [readiness check](#readiness-check-before-implementation) found the issue not ready, the agent declared itself
@@ -114,7 +137,8 @@ so a PR whose head keeps moving cannot be reviewed indefinitely. Replaying a ver
 already recorded is not a new round, and neither is a sync with `main` nor the second review of
 a round already open. A round that `main` advancing interrupted before it was complete does not
 count either (see [When `main` advances](#when-main-advances-during-a-round)): the round that
-replaces it counts once. Round numbers stay progressive, because they also name the findings
+replaces it counts once. Nor does the review of an approved head that only a sync without
+conflicts moved (see [Resync after approval](#resync-after-approval)). Round numbers stay progressive, because they also name the findings
 (`round/reviewer/ID`), so the round shown as the limit (`round 4 of at most 4`, `round 4/4`) is
 `max_review_rounds` plus the rounds that did not count.
 

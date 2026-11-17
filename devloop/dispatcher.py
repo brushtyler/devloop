@@ -35,6 +35,11 @@ join an open round and to promote, if no commit of the base branch in between to
 the PR's diff (``_base_check``). An open round abandoned only because the base touched the PR
 is replaced by a new one and does not count against ``max_review_rounds`` (``counted_rounds``).
 
+Resync after approval (#235): when the latest round approved a head and the PR's head differs
+from it only by merges of the base branch that git concludes without conflicts
+(``Workspace.clean_resync``), the review of the new head records ``resync`` and does not count
+either. A sync whose conflicts an agent resolved changes the PR's content: its review counts.
+
 Level 0 (#107) needs no review: when a trusted user's label allows it and the whole diff is in
 the operator's allowlist, the head goes to ready-to-merge once every expected check run
 succeeded on it, no finding is open and no trusted user's request for changes stands.
@@ -145,6 +150,9 @@ RELEASE_COMMAND = '/devloop release'
 FIX_COMMAND = '/devloop fix'
 # The modes in which devloop merges (#172).
 MERGING = ('strict', 'auto')
+# Why a review round does not count (#235): the round before approved a head that the new one
+# differs from only by clean merges of the base branch.
+RESYNC_AFTER_APPROVAL = 'resync_after_approval'
 # Actions that take a slot of ``max_actions_per_tick``.
 EXPENSIVE = ('review', 'fix', 'implement', 'sync', 'preflight', 'merge', 'supervise')
 # Actions that write to the base branch or to the whole repository (the merge of #172, the pin
@@ -251,6 +259,10 @@ class PullRequest:
     # Fixes asked with ``FIX_COMMAND`` and not run yet (#195), oldest first, as
     # ``{comment, by, request}``: one fix of the current head answers all of them.
     fix_requests: list = field(default_factory=list)
+    # In agent:review, when the latest round approved an earlier head and the head differs from
+    # it only by clean merges of the base branch (#235): ``{reason, round, from}``, what the
+    # next review records as ``resync``. None otherwise.
+    resync: dict = None
     # Re-runs of failed CI jobs the dispatcher recorded (``rerun`` markers, #200), and whether
     # the CI still shows the very failed checks a re-run of the head replaces: the re-run has
     # not started yet, and the failure is not a new one.
@@ -609,6 +621,9 @@ def plan(snapshot, cfg):
             # Nor is an approval reused when the acceptance map does not hold (#134): a new
             # review adds the finding, as a new round within the usual limit.
             unmapped = replay and verdict == 'approve' and bool(pr.acceptance)
+            # A review needed only because a clean sync moved the approved head (#235) is not
+            # a new round against the limit; a CI failure or a rereview still is.
+            resync = pr.resync is not None and not pr.rereview and pr.checks != 'fail'
             if replay and verdict != 'approve':
                 actions.append(Action('apply_review', pr.number, 'verdict already recorded'))
             elif pr.merge_state == 'conflict':
@@ -625,13 +640,14 @@ def plan(snapshot, cfg):
             elif partial and pr.checks != 'fail':
                 actions.append(Action('review', pr.number, 'the round waits for '
                                       + ', '.join(pending)))
-            elif not rounds_left:
+            elif not rounds_left and not resync:
                 # Every new round, a CI failure or a review, counts against the limit.
                 actions.append(Action('round_limit', pr.number))
             elif pr.checks == 'fail':
                 actions.append(Action('ci_failed', pr.number))
             else:
                 reason = ('new review requested by a trusted user' if pr.rereview
+                          else 'the approved head was synced with the base' if resync
                           else 'the approval has no matching policy receipt' if unbound
                           else 'the acceptance map does not hold' if unmapped
                           else 'every finding of the request for changes is closed' if settled
@@ -769,9 +785,11 @@ def _round_records(reviews, number):
 
 
 def waived_rounds(reviews):
-    """The rounds that do not count against ``max_review_rounds`` (#160): each incomplete agent
-    round that a later round replaced only because the base branch advanced, as the later
-    round's records say (``restarts``)."""
+    """The rounds that do not count against ``max_review_rounds``: each incomplete agent round
+    that a later round replaced only because the base branch advanced, as the later round's
+    records say (``restarts``, #160); and each round that reviewed a head differing only by
+    clean merges of the base from the head the round just before approved (``resync``,
+    #235)."""
     waived = set()
     for record in reviews:
         restart = record.get('restarts')
@@ -779,7 +797,25 @@ def waived_rounds(reviews):
         if (isinstance(number, int) and not isinstance(number, bool) and number < record['round']
                 and pending_reviewers(_round_records(reviews, number))):
             waived.add(number)
+        if _resynced(reviews, record):
+            waived.add(record['round'])
     return waived
+
+
+def _resynced(reviews, record):
+    """Whether ``record`` reviewed a resync after approval (#235): its ``resync`` names the
+    round just before its own, a complete agent round that approved the head ``from``."""
+    resync = record.get('resync')
+    if not isinstance(resync, dict) or resync.get('reason') != RESYNC_AFTER_APPROVAL:
+        return False
+    number = resync.get('round')
+    if isinstance(number, bool) or number != record['round'] - 1:
+        return False
+    approved = _round_records(reviews, number)
+    return (bool(approved) and approved[0]['source'] == 'agent'
+            and not pending_reviewers(approved) and round_verdict(approved) == 'approve'
+            and all(r.get('head_sha') == resync.get('from') for r in approved)
+            and record.get('head_sha') != resync.get('from'))
 
 
 def counted_rounds(reviews):
@@ -1661,6 +1697,26 @@ class Dispatcher:
             found.append({'comment': ident, 'by': login, 'request': request})
         return found
 
+    def _resync(self, pr):
+        """``PullRequest.resync`` (#235): when the latest round is a complete agent round that
+        approved an earlier head, and the PR's head differs from it only by merges of the base
+        branch that git concludes without conflicts, ``{reason, round, from}``; otherwise None.
+        A sync whose conflicts an agent resolved, a fix or any other commit gives None."""
+        latest = current_round(pr.reviews)
+        if (not latest or latest[0]['source'] != 'agent' or pending_reviewers(latest)
+                or round_verdict(latest) != 'approve'):
+            return None
+        approved = latest[0]['head_sha']
+        if approved == pr.head_sha or any(r['head_sha'] != approved for r in latest):
+            return None
+        try:
+            if not self.ws.clean_resync(pr.head_ref, pr.head_sha, approved):
+                return None
+        except WorkspaceError as exc:
+            self.log(f'  resync of #{pr.number} not verifiable: {exc}')
+            return None
+        return {'reason': RESYNC_AFTER_APPROVAL, 'round': latest[0]['round'], 'from': approved}
+
     def _merge_mode(self, pr):
         """The merge mode of ``pr`` now (#172): ``[merge]`` with the override of its review
         level, ``off`` when its diff touches an operator-only path. None when it cannot be
@@ -1741,6 +1797,8 @@ class Dispatcher:
                 pr.zero_problem = self._zero_problem(pr)
             if pr.meta and pr.labels & {lb.review, lb.ready_to_merge} and pr.zero_head is None:
                 pr.acceptance = self._acceptance_problems(pr)
+            if pr.meta and lb.review in pr.labels:
+                pr.resync = self._resync(pr)
             # Also for a ready PR that may not be merged now: its mode tells whether it waits
             # for a person, outside max_open_prs (#199). ``plan`` merges only with merge_ready.
             if (self.cfg.merge.enabled() and pr.meta and lb.ready_to_merge in pr.labels
@@ -3444,7 +3502,10 @@ class Dispatcher:
         When only the base changed since the round's reviews (#160), the round continues if no
         commit of the base branch in between reached the PR's files, and the review records the
         check (``bases``). Otherwise the round restarts, and the new one records which round it
-        replaces (``restarts``): that round does not count against ``max_review_rounds``."""
+        replaces (``restarts``): that round does not count against ``max_review_rounds``.
+
+        A new round on a head that a clean sync moved from the approved one (#235,
+        ``PullRequest.resync``) records ``resync`` and does not count either."""
         cfg = self.cfg
         receipt, paths = self._current_receipt(pr)
         if receipt is None:
@@ -3461,7 +3522,7 @@ class Dispatcher:
             self.log('  the PR conflicts with the new base; no review until the sync')
             return
         joins = bases is not None and all(c['outcome'] == 'disjoint' for c in bases)
-        restarts = None
+        restarts = resync = None
         if joins:
             round_no, done, comments = latest[0]['round'], latest, pr.round_comments
             counted = counted_rounds(pr.reviews)
@@ -3473,6 +3534,12 @@ class Dispatcher:
                 restarts = {'round': latest[0]['round'], 'bases': bases}
                 counted -= 1
                 self.log(f'  round {latest[0]["round"]} restarts: the base touched the PR')
+            elif pr.resync and not pr.rereview:
+                # Only a clean sync moved the approved head (#235): this round does not count.
+                resync = pr.resync
+                counted -= 1
+                self.log(f'  the head approved in round {resync["round"]} was synced with the '
+                         'base: this round does not count')
         if counted > cfg.max_review_rounds:
             return self._do_round_limit(pr)
         max_rounds = cfg.max_review_rounds + round_no - counted
@@ -3583,6 +3650,8 @@ class Dispatcher:
                 review['bases'] = bases  # the round's earlier bases, checked up to this one
             if restarts:
                 review['restarts'] = restarts
+            if resync:
+                review['resync'] = resync
             review['profile'] = self._profile(key, 'review', used)
             review.update(skipped_models(used))
             reviewer_gh = self._as(key, REVIEW)
