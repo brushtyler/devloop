@@ -544,6 +544,27 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual([c[1][1:] for c in calls], [['-P', '-m', 'devloop', 'run']] * 2)
         self.assertEqual(calls[0][2]['PYTHONPATH'], str(self.copy.resolve()))
 
+    def test_it_disables_the_cli_autoupdater_unless_the_operator_set_it(self):
+        # A CLI that updates itself mid-tick leaves no binary for a turn to start (#218).
+        self.fake_copy()
+        launcher = load_launcher()
+        with mock.patch.dict(os.environ):
+            os.environ.pop('DISABLE_AUTOUPDATER', None)
+            _, env = launcher.command(self.root, ['run'])
+            self.assertEqual(env['DISABLE_AUTOUPDATER'], '1')
+            os.environ['DISABLE_AUTOUPDATER'] = '0'
+            _, env = launcher.command(self.root, ['run'])
+            self.assertEqual(env['DISABLE_AUTOUPDATER'], '0')
+
+    def test_the_installation_recommends_cli_without_automatic_updates(self):
+        text = (REPO / 'docs' / 'devloop.md').read_text(encoding='utf-8')
+        start = text.index('#### Installation as a dedicated user')
+        section = ' '.join(text[start:text.index('#### Pin\n', start)].split())
+        self.assertIn('disable their automatic updates: for Claude Code, '
+                      '`DISABLE_AUTOUPDATER=1` in the launcher\'s environment', section)
+        self.assertIn('install them in the home of the `devloop` user, as `codex` and `agy`',
+                      section)
+
 
 class RestartTests(unittest.TestCase):
     def setUp(self):

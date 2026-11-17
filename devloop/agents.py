@@ -534,9 +534,23 @@ def left_no_output(kind, stdout, out_file):
     return bool(envelope_error(kind, envelope)) or envelope.get('structured_output') is None
 
 
+class StartFailure(AgentError):
+    """The agent's CLI could not start (#218): its executable missing or not executable, for
+    example while it replaces itself during an update. A failure of the tool, never of the
+    change: its escalation is a ``tool_failure`` whatever the step."""
+
+
+# A CLI that could not start for a missing or non-executable binary is started once more, after
+# this pause, in the same turn (#218): an update that replaces the binary lasts a few seconds.
+START_RETRY_SECONDS = 30
+START_RETRY_ERRORS = (FileNotFoundError, PermissionError)
+
+
 class AgentRunner:
     """``on_turn(agent, prompt_path)``, if given, is called when a turn starts. ``stall``
-    (``stall.StallWatch``), if given, checks each turn for stalls while it runs.
+    (``stall.StallWatch``), if given, checks each turn for stalls while it runs. A CLI that cannot
+    start (``START_RETRY_ERRORS``) is started once more after ``START_RETRY_SECONDS``, waited
+    with ``sleep``; a second failure raises ``StartFailure``.
 
     ``last_report`` is the ``telemetry`` of the latest turn, ``(fields, models)``, set whether
     the turn succeeded or failed; None when the CLI did not complete (timeout, stall, failed
@@ -547,9 +561,10 @@ class AgentRunner:
     (#151)."""
 
     def __init__(self, log_dir, timeout, run=subprocess.run, env=None, on_turn=None, stall=None,
-                 clock=time.time):
+                 clock=time.time, sleep=time.sleep):
         self.log_dir = Path(log_dir)
         self._clock = clock
+        self._sleep = sleep
         self.timeout = timeout
         self._run = run
         self._env = env
@@ -613,11 +628,18 @@ class AgentRunner:
         kwargs = {'env': self._env} if self._env is not None else {}
         # Its own process group: a timeout also stops the commands the CLI left in the background.
         run = self._run
+        watched = run is subprocess.run and self._stall is not None
         if run is subprocess.run:
             run = run_in_group
-            if self._stall is not None:
-                kwargs.update(watch=self._stall.turn(agent.key, workdir),
-                              watch_interval=self._stall.interval)
+
+        def launch():
+            extra = dict(kwargs)
+            if watched:  # each start its own watch: a pause before it is no inactivity
+                extra.update(watch=self._stall.turn(agent.key, workdir),
+                             watch_interval=self._stall.interval)
+            return run(argv, input=stdin, cwd=workdir, capture_output=True, text=True,
+                       timeout=self.timeout, **extra)
+
         def write_log(status, stdout, stderr):
             log.write_text(f'$ {argv[0]} ({mode})\n{status}\n--- stdout\n{stdout}'
                            f'\n--- stderr\n{stderr}', encoding='utf-8')
@@ -631,9 +653,17 @@ class AgentRunner:
             except OSError:
                 pass
 
+        retried = ''
         try:
-            done = run(argv, input=stdin, cwd=workdir, capture_output=True, text=True,
-                       timeout=self.timeout, **kwargs)
+            try:
+                done = launch()
+            except START_RETRY_ERRORS as exc:
+                # A binary missing for a moment, as while a CLI updates itself (#218): once
+                # more, in the same turn, after a pause.
+                stopped_log(f'could not start: {exc}; retrying in {START_RETRY_SECONDS}s')
+                self._sleep(START_RETRY_SECONDS)
+                retried = ' (again, after one retry)'
+                done = launch()
         except AgentError as exc:  # the stall check stopped the turn
             out, err = (partial_text(p) for p in (getattr(exc, 'partial_output', None)
                                                   or ('', '')))
@@ -650,8 +680,8 @@ class AgentRunner:
             error.tail = output_tail(out, err, workdir, self._env)
             raise error from exc
         except OSError as exc:
-            stopped_log(f'could not start: {exc}')
-            raise AgentError(f'{agent.key} could not start: {exc}', log) from exc
+            stopped_log(f'could not start{retried}: {exc}')
+            raise StartFailure(f'{agent.key} could not start{retried}: {exc}', log) from exc
         self.last_report = telemetry(agent.kind, done.stdout)
         self.last_command = public_command(agent.kind, done.stdout, workdir, self._env)
         write_log(f'exit {done.returncode}', done.stdout, done.stderr)
