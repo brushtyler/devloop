@@ -720,7 +720,7 @@ class CommandTests(unittest.TestCase):
 
 class DocumentationTests(unittest.TestCase):
     def test_the_devloop_document_describes_both_modes(self):
-        text = (REPO / 'docs' / 'devloop.md').read_text(encoding='utf-8')
+        text = (REPO / 'docs' / 'devloop' / 'guide.md').read_text(encoding='utf-8')
         start = text.index('### Continuous mode')
         section = text[start:text.index('\n### ', start + 1)]
         for needle in ('`devloop run`', '`devloop tick`', 'max_parallel_actions', 'barrier',
@@ -728,13 +728,14 @@ class DocumentationTests(unittest.TestCase):
             self.assertIn(needle, section)
 
     def test_the_devloop_document_describes_the_merge_lane(self):
-        text = (REPO / 'docs' / 'devloop.md').read_text(encoding='utf-8')
+        text = (REPO / 'docs' / 'devloop' / 'guide.md').read_text(encoding='utf-8')
         start = text.index('#### The merge lane')
         section = text[start:text.index('\n### ', start)]
         for needle in ('one merge\nat a time', 'holds back no\nother action', 'pin after a merge',
                        'stays global', 'no action is exclusive with a merge', '`devloop tick`'):
             self.assertIn(needle, section)
-        self.assertIn('[merge lane](#the-merge-lane)', text)
+        protocol = (REPO / 'docs' / 'devloop' / 'protocol.md').read_text(encoding='utf-8')
+        self.assertIn('[merge lane](guide.md#the-merge-lane)', protocol)
 
 
 if __name__ == '__main__':
