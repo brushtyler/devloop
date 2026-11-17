@@ -797,6 +797,7 @@ any, is one of:
 ```text
 /devloop retry
 /devloop accept-defaults
+/devloop decide <decisions>
 /devloop escalate <reason>
 ```
 
@@ -840,18 +841,31 @@ command before it, and among the commands that wait the latest wins.
   0001 reserves to the operator (rollout, budget and rounds, credentials and permissions, trust
   rules, the replay gate baseline, the merge mode, the continuous loop and automatic pinning, ADR
   approval), or a change to `operator_only_paths`, is always `operator_decision`.
+- `/devloop decide <decisions>` decides the gaps of a `preflight_default` escalation otherwise
+  than `accept-defaults` does: the supervisor may accept some defaults and replace others. The
+  decisions are the rest of the comment, from the text after the command on its first line to
+  the end; a command without them is ignored. It admits the same escalations as
+  `accept-defaults`, under the same conditions, and is refused in the same cases. The dispatcher
+  records the decisions with the gaps they answer and removes `agent:needs-supervisor`; the
+  issue goes back in the queue and the readiness check runs again with the decisions as a
+  trusted comment, as it does with accepted defaults (they count in the hash of the request and
+  reach the prompts of the check and of the implementer). The decisions reach the prompts **only
+  through that record**: the supervisor's own comment, as any comment of an author outside
+  `trusted_users`, never does. Gaps reserved to the operator (`operator_decision`) are not the
+  supervisor's: the operator decides them with a comment of their own on GitHub.
 - `/devloop escalate <reason>` hands the escalation to the operator: `agent:needs-human`, with
   the reason (`supervisor_escalated`). It needs a reason.
 
 An escalation whose class is critical or unknown, or that was not routed to the supervisor,
 accepts no command: the command is refused and the item goes to `agent:needs-human`. A command
-the class does not admit (`accept-defaults` on a tool failure, `retry` on defaults) is refused
+the class does not admit (`accept-defaults` or `decide` on a tool failure, `retry` on defaults) is refused
 and the escalation stays with the supervisor.
 
 **Trace.** Every command applied leaves a dispatcher comment with a `supervision` marker: the
 command, its author, its reason, the id of the comment that carried it, the class and the outcome
-(`applied`, `accepted`, `escalated`, `refused` or `limit`), with the key and the attempt for a
-retry and the defaults for an acceptance. The record is written before the labels change, so a
+(`applied`, `accepted`, `decided`, `escalated`, `refused` or `limit`), with the key and the
+attempt for a retry, the defaults for an acceptance and, for a decision, its text (in `reason`)
+and the gaps it answers. The record is written before the labels change, so a
 lost label change never runs a retry twice.
 
 ## Structured review
