@@ -137,8 +137,9 @@ auto = false
 
 # Documentation map (issue #203): code paths and the documents that describe them. A key is a
 # directory prefix ending in "/" or a file, relative to the root, with no pattern characters;
-# each value lists one or more documents, each a file of this commit (a pin extracts them too).
-# The implement, fix and review prompts list the documents mapped to the files of the diff
+# each value lists one or more documents of the repository (a pin does not extract them, #210).
+# The implement, fix and review prompts list the documents mapped to the files of the diff that
+# the worktree holds (a missing one is omitted, with a line in the log)
 # (the first implement prompt, with an empty diff, gets the whole map): an implementer updates
 # those whose described behaviour changes, and a reviewer reports a documented behaviour changed
 # without its document as a blocking finding. A file no key covers asks for nothing.

@@ -1231,14 +1231,14 @@ sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned run --inte
    on `origin`, is refused. The commit of a copy already pinned (also abbreviated) is used
    without a fetch: that is the rollback;
 2. reads `devloop/config.toml` of that commit with the local overlay applied, and takes the files
-   of `review_policy.sensitive_path_lists` and the documents of the
-   [documentation map](#documentation-map): each must be a relative path inside the root and a
-   regular file of the commit;
+   of `review_policy.sensitive_path_lists`: each must be a relative path inside the root and a
+   regular file of the commit. The documents of the [documentation map](#documentation-map) are
+   not taken: they belong to the repository, not to the installation;
 3. extracts `devloop/` and those files into `.ssdlc/devloop/pinned-<sha12>`, with a `pin.json`
    naming the commit, and makes the copy read-only;
 4. checks the copy: in a Python with only the copy on its module path, the package imports, and
-   its configuration, with the overlay, loads and reads `sensitive_path_lists` and the mapped
-   documents from the copy;
+   its configuration, with the overlay, loads (a `[docs] map` of the wrong shape fails here) and
+   reads `sensitive_path_lists` from the copy;
 5. points `.ssdlc/devloop/current` at the copy, with an atomic rename of a symlink.
 
 A failure at any step leaves `current` as it was, and leaves no new copy behind. A copy that
@@ -1460,17 +1460,17 @@ A key is a directory prefix ending in `/` (it covers every file under it) or a f
 exactly; both are relative to the root. A value is a non-empty list of documents. devloop stops at
 startup on an absolute path, an empty key, list or document, a `.`, `..` or empty segment, a
 backslash or a pattern character (`*`, `?`, `[`, `]`: `ssdlc_feedback*.py` is written as one key
-per file), a directory given as a document, and a document that is not a regular file of the
-running installation. A [pin](#pin) checks that each document is a file of the commit and
-extracts it into the copy. The [local overlay](#local-config-as-an-overlay) may add or replace
-keys. A pinned copy from before #203 does not extract the documents, so its pin of a commit with
-the map fails and leaves `current` as it was (an auto-pin too): pin that commit once with
-`python3 -m devloop pin origin/main` from a main checkout that already holds it; later pins work
-from the pinned copy.
+per file), and a directory given as a document (a value ending in `/`). Loading the configuration
+checks its shape only, not whether the documents exist (#210): they belong to the repository
+devloop works on, not to the installation, and a [pin](#pin) does not extract them into the copy.
+The [local overlay](#local-config-as-an-overlay) may add or replace keys.
 
 The prompts list the documents mapped to the files of the diff, the same diff the
 [local tests](#local-tests) use: from the merge base with `origin/main` to the current content of
-the worktree, read again for each prompt.
+the worktree, read again for each prompt. A mapped document that is not a regular file of that
+worktree (absent, a directory or a symlink) is omitted from the list, with a line in the log
+(`docs.map: <document> is not a file of the worktree; omitted from the prompt`); a key of the
+whole map left without documents is omitted too. It is not an error.
 
 | Prompt | Documents |
 |---|---|

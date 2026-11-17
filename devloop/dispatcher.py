@@ -2185,10 +2185,32 @@ class Dispatcher:
 
     def _mapped_docs(self, path):
         """``{document: [paths]}`` of ``[docs] map`` for the diff of the worktree ``path``
-        (#203): the same diff as the local tests (``worktree_changes``, #169), read now."""
+        (#203): the same diff as the local tests (``worktree_changes``, #169), read now. A
+        document missing from that worktree is left out (``_missing_docs``, #210)."""
         if not self.cfg.docs.entries:
             return {}
-        return self.cfg.docs.documents(self.ws.worktree_changes(path))
+        found = self.cfg.docs.documents(self.ws.worktree_changes(path))
+        missing = self._missing_docs(path, found)
+        return {d: paths for d, paths in found.items() if d not in missing}
+
+    def _mapped_entries(self, path):
+        """The entries of ``[docs] map`` for the first implement prompt, without the documents
+        missing from the worktree ``path`` (#210), and without the keys left with none."""
+        entries = self.cfg.docs.entries
+        missing = self._missing_docs(path, [d for _, documents in entries for d in documents])
+        kept = ((key, tuple(d for d in documents if d not in missing))
+                for key, documents in entries)
+        return tuple((key, documents) for key, documents in kept if documents)
+
+    def _missing_docs(self, path, documents):
+        """The ``documents`` of ``[docs] map`` that are not a regular file of the worktree
+        ``path``, one log line each (#210): the configuration only checks the map's shape, so a
+        prompt omits them instead of failing."""
+        missing = set(self.ws.missing_files(path, sorted(set(documents)))) if documents else set()
+        for document in sorted(missing):
+            self.log(f'  docs.map: {document} is not a file of the worktree; omitted from the '
+                     'prompt')
+        return missing
 
     def _write_turn(self, agent, prompt, schema, path, label, where=None):
         """Run a writing agent, then the local tests (``_verify``); retry with the failures.
@@ -2885,7 +2907,7 @@ class Dispatcher:
         def prompt(attempt):
             # #203: the first attempt has no diff yet and gets the whole map; a later one the
             # documents mapped to the diff it left.
-            docs = (docs_map_section(cfg.docs.entries) if attempt == 0
+            docs = (docs_map_section(self._mapped_entries(path)) if attempt == 0
                     else docs_diff_section(self._mapped_docs(path)))
             return _template('implement', repo=cfg.repo, base_branch=cfg.base_branch,
                              issue_number=number, issue_title=issue['title'],

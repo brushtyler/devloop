@@ -29,7 +29,7 @@ REPO = Path(__file__).resolve().parent.parent
 LAUNCHER = REPO / 'scripts' / 'devloop-pinned'
 LIST = 'schemas/recovery-grader-baseline.json'
 DATA = tomllib.loads(config.DEFAULT_CONFIG.read_text())
-# The documents of [docs] map (#203), in the order a pin lists them.
+# The documents of [docs] map (#203): the commits of these tests hold the map, not the documents.
 DOCUMENTS = list(dict.fromkeys(d for _, docs in config.docs_entries(DATA) for d in docs))
 
 
@@ -42,13 +42,12 @@ def load_launcher():
 
 
 def copy_package(dest):
-    """The devloop package, the list file and the documents of ``[docs] map`` (#203) of this
-    checkout into ``dest``."""
+    """The devloop package and the list file of this checkout into ``dest``: its configuration
+    has a ``[docs] map``, but none of the documents it maps (#210)."""
     shutil.copytree(REPO / 'devloop', dest / 'devloop',
                     ignore=shutil.ignore_patterns('__pycache__'))
-    for name in [LIST, *DOCUMENTS]:
-        (dest / name).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(REPO / name, dest / name)
+    (dest / LIST).parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(REPO / LIST, dest / LIST)
 
 
 def git(cwd, *args):
@@ -116,13 +115,10 @@ class PinTests(GitCase):
         self.assertEqual(self.pointed(), copy.resolve())
         self.assertTrue((self.state / 'current').is_symlink())
         self.assertEqual(os.readlink(self.state / 'current'), copy.name)
-        # The mapped documents (#203) come along, nothing else of the commit.
-        self.assertEqual(sorted(p.name for p in copy.iterdir()),
-                         ['README.md', 'devloop', 'docs', 'pin.json', 'schemas'])
+        self.assertEqual(sorted(p.name for p in copy.iterdir()), ['devloop', 'pin.json', 'schemas'])
         self.assertEqual(json.loads((copy / 'pin.json').read_text()),
-                         {'commit': self.first, 'files': [LIST, *DOCUMENTS]})
-        for name in [LIST, *DOCUMENTS]:
-            self.assertEqual((copy / name).read_bytes(), (REPO / name).read_bytes())
+                         {'commit': self.first, 'files': [LIST]})
+        self.assertEqual((copy / LIST).read_bytes(), (REPO / LIST).read_bytes())
         self.assertTrue((copy / 'devloop' / 'dispatcher.py').is_file())
         for path in [copy, *copy.rglob('*')]:
             self.assertFalse(path.stat().st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH),
@@ -156,18 +152,31 @@ class PinTests(GitCase):
                     self.pin('main', local)
         self.assertEqual(self.pointed(), old.resolve())
 
-    def test_a_mapped_document_missing_from_the_commit_fails(self):
-        # #203: every document of [docs] map must be a regular file of the pinned commit.
+    def test_a_commit_with_a_docs_map_pins_without_its_documents(self):
+        # #210: the map is checked for shape only; its documents belong to the repository, and
+        # the pinned copy holds neither those the commit lacks nor those it has.
+        self.assertTrue(DOCUMENTS)
+        self.assertIn('docs/devloop.md', DOCUMENTS)
+        tree = git(self.root, 'ls-tree', '-r', '--name-only', self.first).splitlines()
+        self.assertFalse(set(DOCUMENTS) & set(tree))
+        copy = self.pin('main')
+        self.assertEqual(self.pointed(), copy.resolve())
+        self.assertFalse((copy / 'docs').exists())
+        second = self.push('a mapped document', 'docs/devloop.md', 'devloop\n')
+        copy = self.pin('main')
+        self.assertEqual(copy, self.state / f'pinned-{second[:12]}')
+        self.assertEqual(sorted(p.name for p in copy.iterdir()), ['devloop', 'pin.json', 'schemas'])
+        self.assertEqual(json.loads((copy / 'pin.json').read_text())['files'], [LIST])
+
+    def test_a_malformed_docs_map_still_fails_the_pin(self):
+        # #210: the copy's configuration still refuses a map of the wrong shape.
         old = self.pin('main')
-        git(self.root, 'rm', '--quiet', 'docs/devloop.md')
-        self.commit('no devloop document')
-        git(self.root, 'push', '--quiet', 'origin', 'main')
-        with self.assertRaisesRegex(pin.PinError, 'docs.map: docs/devloop.md is not a file'):
-            self.pin('main')
         local = self.tmp / 'config.local.toml'
-        local.write_text('[docs.map]\n"x.py" = ["/etc/passwd"]\n')
-        with self.assertRaisesRegex(pin.PinError, 'not a relative path'):
-            self.pin(self.first[:12], local)
+        for value in ('"x.py" = ["/etc/passwd"]', '"x*.py" = ["docs/a.md"]', '"x.py" = []'):
+            with self.subTest(value=value):
+                local.write_text(f'[docs.map]\n{value}\n')
+                with self.assertRaisesRegex(pin.PinError, 'the check failed:.*docs.map'):
+                    self.pin(self.first[:12], local)
         self.assertEqual(self.pointed(), old.resolve())
 
     def test_a_commit_only_local_is_refused(self):

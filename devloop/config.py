@@ -518,17 +518,12 @@ def docs_entries(data):
     return tuple(entries)
 
 
-def parse_docs(data, root):
-    """``[docs] map`` (#203): its entries (``docs_entries``), each document a regular file of
-    the installation at ``root`` (the pinned copy holds them, see ``pin.required_files``)."""
-    entries = docs_entries(data)
-    for key, documents in entries:
-        for document in documents:
-            path = Path(root) / document
-            if path.is_symlink() or not path.is_file():
-                raise ConfigError(f'docs.map.{key!r}: {document} is not a file of the '
-                                  'installation')
-    return DocsMap(entries=entries)
+def parse_docs(data):
+    """``[docs] map`` (#203): its entries (``docs_entries``), checked for shape only. The
+    documents belong to the repository devloop works on, not to the installation, and a pinned
+    copy does not hold them (#210): the dispatcher looks for each one in the worktree of the turn
+    when it lists the documents of a diff (``Dispatcher._mapped_docs``)."""
+    return DocsMap(entries=docs_entries(data))
 
 
 def _reviewer_pool(roles, agents, implementer):
@@ -650,7 +645,7 @@ def parse_config(data, root=INSTALL_ROOT):
         local_tests=local_tests,
         merge=parse_merge(data.get('merge', {}), supervisor), supervisor=supervisor,
         pin=parse_pin(data.get('pin', {}), sensitive_lists(data)),
-        docs=parse_docs(data, root),
+        docs=parse_docs(data),
         review_policy=parse_review_policy(
             data.get('review_policy', {}), root,
             [(k, apps[k].slug if k in apps else None, agents[k].kind, agents[k].model,
