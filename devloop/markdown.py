@@ -231,10 +231,12 @@ def _valid_notice(n):
     when both are written with the same login. Since #182 it carries the escalation's
     ``class``; a notice without one, or with one that is not known, is critical
     (``supervision.critical``). Since #248 also a ready PR whose merge is the operator's
-    (``operator_merge``): its head, and how many ``labeled`` events of ``agent:needs-operator``
-    (under both its names) came before the dispatcher added it."""
+    (``operator_merge``): its head, how many ``labeled`` events of ``agent:needs-operator``
+    (under both its names) came before the dispatcher added it, and the promotion it belongs
+    to, as the count of promotions recorded on the PR."""
     if n.get('event') == 'operator_merge':
-        return isinstance(n.get('head'), str) and _is_int(n.get('labeled'))
+        return (isinstance(n.get('head'), str) and _is_int(n.get('labeled'))
+                and _is_int(n.get('promotion')))
     return n.get('event') in NOTICES
 
 
@@ -542,10 +544,11 @@ def render_escalation(reason, detail='', cls='failure', supervised=None):
     return publishable(body, 'notice', payload)
 
 
-def render_operator_merge(head, labeled, reasons, label):
+def render_operator_merge(head, labeled, promotion, reasons, label):
     """The dispatcher's comment on a ready PR that devloop does not merge (#248): the merge is
     the operator's, for ``reasons`` (Markdown lines), and ``label`` stays only while the head
-    ``head`` is ready. ``labeled``: how many ``labeled`` events of ``label`` came before."""
+    ``head`` is ready. ``labeled``: how many ``labeled`` events of ``label`` came before;
+    ``promotion``: how many promotions the PR's policy records count."""
     body = (dispatcher_header() + '\n## Il merge spetta all\'operatore\n\n'
             f'Il commit `{head[:12]}` è pronto per il merge, ma devloop non lo mergia:\n\n'
             + reasons.strip() + '\n\n'
@@ -553,7 +556,7 @@ def render_operator_merge(head, labeled, reasons, label):
             'conflitto con la base, ricontrolla la CI e, con un nuovo commit, revoca la prontezza '
             f'e la rimanda in review, togliendo `{label}`.\n')
     return publishable(body, 'notice', {'event': 'operator_merge', 'head': head,
-                                        'labeled': labeled})
+                                        'labeled': labeled, 'promotion': promotion})
 
 
 def render_supervision(record, text):

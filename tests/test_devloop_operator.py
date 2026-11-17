@@ -14,9 +14,9 @@ import devloop.__main__ as cli
 from devloop import markdown, review
 from devloop.schema import load_schema
 from devloop.config import LEGACY_NEEDS_OPERATOR, Labels, MergePolicy
-from devloop.dispatcher import (Action, Dispatcher, Snapshot, ensure_labels, label_transition,
-                                plan)
-from devloop.github import GitHub
+from devloop.dispatcher import (Action, Dispatcher, Snapshot, Workers, ensure_labels,
+                                label_transition, plan)
+from devloop.github import GitHub, GitHubError
 from helpers.devloop_fakes import FakeGH
 from test_devloop import (CFG, REV_NAME, SHA1, SHA2, FakeRunner, FakeWS, norm, pr, raw_review,
                           ready)
@@ -172,6 +172,79 @@ class CommandTests(unittest.TestCase):
         self.assertFalse(any(line.startswith('labels:') for line in logged), logged)
 
 
+class TickTransitionTests(unittest.TestCase):
+    """The first tick of a process renames the old label as ``devloop setup`` does, in
+    ``devloop tick`` and in the continuous mode of ``devloop run``; a dry run only says so."""
+
+    def make(self, existing, workers=None):
+        self.gh = FakeGH()
+        self.gh.existing_labels = list(existing)
+        self.gh.labels = {7: {OLD}, 100: {READY, OLD}}
+        self.logs = []
+        d = Dispatcher(CFG, self.gh, FakeWS(), FakeRunner(), log=self.logs.append)
+        d.workers = workers
+        return d
+
+    def renamed(self):
+        return any(line.startswith(f'labels: renamed {OLD} to {OPERATOR}') for line in self.logs)
+
+    def test_the_first_tick_renames_the_old_label(self):
+        for workers in (None, Workers(2)):
+            with self.subTest(continuous=workers is not None):
+                d = self.make([OLD], workers)
+                d.tick()
+                self.assertEqual(self.gh.renamed_labels, [(OLD, OPERATOR)])
+                self.assertEqual(self.gh.labels, {7: {OPERATOR}, 100: {READY, OPERATOR}})
+                self.assertEqual(self.gh.label_styles[OPERATOR][1],
+                                 'devloop: serve una decisione dell\'operatore')
+                self.assertTrue(self.renamed(), self.logs)
+                # Once per process: the next ticks do not read the labels again.
+                with mock.patch.object(self.gh, 'repo_labels',
+                                       side_effect=AssertionError('read again')):
+                    d.tick()
+
+    def test_with_both_labels_the_tick_touches_neither_and_says_so(self):
+        d = self.make([OLD, OPERATOR])
+        d.tick()
+        self.assertFalse(hasattr(self.gh, 'renamed_labels'))
+        self.assertEqual(self.gh.labels, {7: {OLD}, 100: {READY, OLD}})
+        self.assertTrue(any(line.startswith(f'labels: both {OLD} and {OPERATOR} exist')
+                            for line in self.logs), self.logs)
+
+    def test_a_dry_run_only_says_what_it_would_rename(self):
+        d = self.make([OLD])
+        d.tick(dry_run=True)
+        self.assertFalse(hasattr(self.gh, 'renamed_labels'))
+        self.assertEqual(self.gh.labels[7], {OLD})
+        self.assertIn(f'[dry-run] labels: would rename {OLD} to {OPERATOR}', self.logs)
+        # The real tick that follows still renames it.
+        d.tick()
+        self.assertEqual(self.gh.renamed_labels, [(OLD, OPERATOR)])
+
+    def test_nothing_to_rename_says_nothing(self):
+        d = self.make([OPERATOR])
+        d.tick()
+        self.assertFalse(hasattr(self.gh, 'renamed_labels'))
+        self.assertFalse(any(line.startswith('labels:') for line in self.logs), self.logs)
+
+    def test_a_failed_rename_is_tried_again_at_the_next_tick(self):
+        d = self.make([OLD])
+        with mock.patch.object(self.gh, 'rename_label', side_effect=GitHubError('boom')):
+            d.tick()
+        self.assertEqual(self.gh.labels[7], {OLD})
+        self.assertTrue(any('could not be checked' in line for line in self.logs), self.logs)
+        d.tick()
+        self.assertEqual(self.gh.renamed_labels, [(OLD, OPERATOR)])
+
+    def test_devloop_tick_runs_the_transition(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        d = self.make([OLD])
+        with mock.patch.object(cli, 'build', return_value=(CFG, tmp, d)):
+            cli.main(['tick'])
+        self.assertEqual(self.gh.renamed_labels, [(OLD, OPERATOR)])
+
+
 class LegacyRecordTests(unittest.TestCase):
     """Records and verdicts published before #248 are read as before."""
 
@@ -200,11 +273,12 @@ class LegacyRecordTests(unittest.TestCase):
         self.assertEqual(gh.labels[100], {OPERATOR})
 
     def test_an_operator_merge_notice_needs_its_head_and_count(self):
-        body = markdown.render_operator_merge(SHA1, 2, '- motivo', OPERATOR)
+        body = markdown.render_operator_merge(SHA1, 2, 1, '- motivo', OPERATOR)
         self.assertEqual(markdown.read_marker(body, 'notice'),
-                         {'event': 'operator_merge', 'head': SHA1, 'labeled': 2})
-        for payload in ({'event': 'operator_merge', 'head': SHA1},
-                        {'event': 'operator_merge', 'labeled': 0}):
+                         {'event': 'operator_merge', 'head': SHA1, 'labeled': 2, 'promotion': 1})
+        for payload in ({'event': 'operator_merge', 'head': SHA1, 'promotion': 0},
+                        {'event': 'operator_merge', 'labeled': 0, 'promotion': 0},
+                        {'event': 'operator_merge', 'head': SHA1, 'labeled': 0}):
             with self.subTest(payload=payload):
                 self.assertIsNone(markdown.read_marker(
                     markdown.publishable('x', 'notice', payload), 'notice'))
@@ -277,11 +351,23 @@ class GitIdentities(MergeIdentities):
         return None
 
 
+class NoticeGH(MergeGH):
+    """``MergeGH`` whose ``edit_comment`` replaces the body of a comment of the thread, as
+    GitHub does: the comment keeps its id, its author and its place."""
+
+    def edit_comment(self, comment_id, body):
+        super().edit_comment(comment_id, body)
+        for c in self.thread:
+            if c['id'] == comment_id:
+                self.comments = [(n, body if b == c['body'] else b) for n, b in self.comments]
+                c['body'] = body
+
+
 class ReadyPrCase(unittest.TestCase):
     """PR #100, approved and ready, in merge mode "auto"."""
 
     def make(self, diff=('x.py', 'AGENTS.md'), cfg=AUTO):
-        self.gh, self.ws = MergeGH(), FakeWS(conflicts=())
+        self.gh, self.ws = NoticeGH(), FakeWS(conflicts=())
         self.ws.diff = changes(*diff)
         self.logs = []
         return Dispatcher(cfg, self.gh, self.ws, FakeRunner(), log=self.logs.append,
@@ -307,7 +393,8 @@ class OperatorMergeTests(ReadyPrCase):
         self.assertIn('## Il merge spetta all\'operatore', body)
         self.assertIn('`AGENTS.md`', body)
         self.assertNotIn('`x.py`', body)
-        self.assertEqual(self.notices(), [{'event': 'operator_merge', 'head': SHA1, 'labeled': 0}])
+        self.assertEqual(self.notices(), [{'event': 'operator_merge', 'head': SHA1, 'labeled': 0,
+                                           'promotion': 0}])
         # devloop keeps following the PR, and neither merges it nor tells it again.
         snap = d.snapshot()
         self.assertTrue(snap.prs[0].operator_owned)
@@ -346,6 +433,44 @@ class OperatorMergeTests(ReadyPrCase):
         self.assertEqual([a.kind for a in d.tick()], ['ci_failed'])
         self.assertEqual(self.gh.labels[100], {OPERATOR})
         self.assertIn('Review di livello 2', self.gh.comments[-1][1])
+
+    def test_a_head_promoted_again_keeps_its_one_comment(self):
+        # A level "off", as above: AGENTS.md would need level 2 at the new promotion.
+        off = dataclasses.replace(AUTO, merge=MergePolicy(mode='auto', levels=((1, 'off'),)))
+        d = self.told(cfg=off, diff=('x.py',))
+        (told,) = [c['id'] for c in self.gh.thread
+                   if (markdown.read_marker(c['body'], 'notice') or {}).get('event')
+                   == 'operator_merge']
+        # The CI runs again on the same commit: the readiness decays, and the dispatcher's
+        # label goes with it.
+        self.gh.ci = 'pending'
+        self.assertEqual(d.tick(), [Action('revoke', 100, 'CI pending on the approved commit')])
+        self.assertEqual(self.gh.labels[100], {REVIEW})
+        # The CI passes: the same head is promoted and made ready again.
+        self.gh.ci = 'pass'
+        self.assertEqual([a.kind for a in d.tick()], ['apply_review'])
+        self.assertEqual(self.gh.labels[100], {READY})
+        self.assertEqual(d.tick(), [Action('operator_merge', 100, 'merge mode off')])
+        self.assertEqual(self.gh.labels[100], {READY, OPERATOR})
+        # One comment for the head: the notice is edited, not written again.
+        self.assertEqual(self.notices(), [{'event': 'operator_merge', 'head': SHA1,
+                                           'labeled': 1, 'promotion': 1}])
+        self.assertEqual([cid for cid, _ in self.gh.comment_edits], [told])
+        # The label is still the dispatcher's: a new commit removes it.
+        self.assertTrue(d.snapshot().prs[0].operator_owned)
+        self.assertEqual(d.tick(), [])
+        self.gh.head = SHA2
+        self.assertEqual(d.tick(), [Action('revoke', 100, 'head is not the approved commit')])
+        self.assertEqual(self.gh.labels[100], {REVIEW})
+        self.assertEqual(len(self.notices()), 1)
+
+    def test_a_label_the_operator_removes_is_not_added_again(self):
+        d = self.told()
+        self.gh.edit_labels(100, remove=[OPERATOR])
+        self.assertEqual(d.tick(), [])
+        self.assertEqual(self.gh.labels[100], {READY})
+        self.assertEqual(len(self.notices()), 1)
+        self.assertEqual(self.gh.merged, [])
 
     def test_without_operator_only_paths_auto_still_merges(self):
         d = self.make(diff=('x.py',))

@@ -717,18 +717,21 @@ it does not (#248), because `mode = "off"`, a `[merge.levels]` override `"off"` 
 review level, or a diff that touches `operator_only_paths`, the dispatcher also adds
 `agent:needs-operator` once the PR is ready, with a comment ("Il merge spetta all'operatore")
 that says why: the reserved paths the diff touches, or the mode or the level. The comment
-carries a `notice` marker of event `operator_merge` with the head and how many `labeled` events
-of the label came before; there is one per head and promotion (a head promoted again, after its
-CI ran again for example, gets a new one). `agent:merge-hold` is not such a case: there the
-supervisor decides.
+carries a `notice` marker of event `operator_merge` with the head, how many `labeled` events of
+the label came before, and the promotion it belongs to (how many promotions the PR's policy
+records count). There is one comment per head: a head promoted again, after its CI ran again
+for example, gets the label back and its comment edited with the new promotion and count, not a
+second comment. A label the operator removes while the PR stays ready is not added again.
+`agent:merge-hold` is not such a case: there the supervisor decides.
 
 That label does not stop devloop, which keeps working on the PR as on any ready PR: it
 [syncs](#conflicts-with-main) it when it conflicts with `main`, re-checks its CI, and with a new
 commit revokes the readiness and sends the PR back to review. Whenever the readiness decays
 without an escalation (a revocation, a sync, a failed CI round, a stale receipt), the dispatcher
 removes `agent:needs-operator` together with `agent:ready-to-merge`. It recognises its own label
-by the notice: the latest of the dispatcher's notices is the `operator_merge` one, no escalation
-was recorded after it, and the label's only `labeled` event since is the dispatcher's. Any other
+by the notice of the current promotion: no other notice of the dispatcher and no escalation was
+recorded after it (or after the promotion, for a comment edited), and the label's only
+`labeled` event since is the dispatcher's. Any other
 `agent:needs-operator`, such as one added by an escalation, an agent that stopped, or a person,
 keeps today's behaviour: devloop leaves the PR alone. These PRs are already counted among the
 [parked PRs](#open-pr-limits): the count does not change.
@@ -1295,6 +1298,12 @@ configurable, only the default name changed.
   and logs `labels: renamed …`. When **both** labels exist it renames nothing and touches
   neither: it logs a warning, and `devloop status` shows the same warning while both exist. Move
   the issues and PRs of the old label to the new one, then delete the old one.
+- **The first tick of each process does the same**, before planning, in `devloop tick` and in
+  `devloop run` (also in its continuous mode), so that the label the dispatcher adds exists
+  even if nobody ran `setup` after the update: it renames the old label, or logs the warning
+  when both exist. `devloop tick --dry-run` only logs `[dry-run] labels: would rename …`. A
+  read or a rename that fails is logged and tried again at the next tick; meanwhile the old
+  label keeps blocking as the new one.
 - **Until the rename**, and while both exist, `agent:needs-human` blocks exactly as
   `agent:needs-operator` wherever that label blocks or authorizes: planning, merge, promotion,
   readiness check, the supervisor's commands. The tick does not stop. Who added the label counts

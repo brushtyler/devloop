@@ -221,7 +221,8 @@ class OffTests(Case):
         self.assertEqual(self.gh.merged, [])
         self.assertEqual(self.gh.labels[100], {READY, 'agent:needs-operator'})
         (notice,) = records(self.gh, 'notice')
-        self.assertEqual(notice, {'event': 'operator_merge', 'head': SHA1, 'labeled': 0})
+        self.assertEqual(notice, {'event': 'operator_merge', 'head': SHA1, 'labeled': 0,
+                                  'promotion': 0})
         self.assertIn('`[merge] mode = "off"`', self.gh.comments[-1][1])
         self.assertEqual(d.tick(), [])
         self.assertEqual(len(self.gh.comments), 1)

@@ -91,9 +91,10 @@ every merge directive holds again just before the merge: the conditions of the p
 or a trusted user. A level override or an operator-only path can only make the mode stricter.
 
 Operator merge (#248): a ready PR that devloop does not merge (mode ``off``, a level ``off``, an
-operator-only path) gets ``agent:needs-operator`` and an ``operator_merge`` notice, one per
-head, that says why (``_do_operator_merge``). That label, and only while the notice is the
-latest of the dispatcher's and the dispatcher added it after the notice, does not stop devloop
+operator-only path) gets ``agent:needs-operator`` and an ``operator_merge`` notice, one comment
+per head, edited when the head is promoted again, that says why (``_do_operator_merge``). That
+label, and only while the notice of the current promotion is the latest of the dispatcher's
+and the dispatcher added it after the notice, does not stop devloop
 (``_operator_merge_owned``): the PR is synced, its CI checked, and when its readiness decays the
 dispatcher removes the label with ``agent:ready-to-merge``. Any other ``agent:needs-operator``,
 or the name it had before #248 (``config.LEGACY_NEEDS_OPERATOR``), hands the PR or the issue
@@ -293,11 +294,15 @@ class PullRequest:
     # not started yet, and the failure is not a new one.
     reruns: list = field(default_factory=list)
     rerun_waiting: bool = False
-    # Operator merge (#248): the heads the dispatcher's ``operator_merge`` notices name, and
-    # whether ``agent:needs-operator`` is the dispatcher's own for such a notice
+    # Operator merge (#248): the heads whose ``operator_merge`` notice belongs to the current
+    # promotion, the comment id of the notice of the current head (one per head, edited when
+    # the head is promoted again), how many promotions the policy records count, and whether
+    # ``agent:needs-operator`` is the dispatcher's own for that notice
     # (``Dispatcher._operator_merge_owned``): then it does not stop devloop, and goes when the
     # readiness decays.
     operator_merges: list = field(default_factory=list)
+    operator_notice: int = None
+    promotions: int = 0
     operator_owned: bool = False
 
 
@@ -1266,6 +1271,9 @@ class Dispatcher:
         # Continuous mode (#227): set by ``devloop run`` with parallel actions, a tick starts
         # its actions in these ``Workers`` and does not wait for them.
         self.workers = None
+        # Whether a tick of this process already checked the rename of agent:needs-operator
+        # (#248, ``_transition_labels``).
+        self.labels_checked = False
 
     # Identities ------------------------------------------------------------
     def _as(self, actor, permissions) -> Backend:
@@ -1853,14 +1861,22 @@ class Dispatcher:
                           if record['round'] < latest), default=-1)
             pr.round_comments = operator_comments(comments[before + 1:],
                                                   self.cfg.trusted_users)
-        # Operator merge (#248): the notices of the current readiness, those written after the
-        # latest promotion, and whether agent:needs-operator is the dispatcher's own.
-        promoted = max((position for position, record in policy
-                        if record['event'] == 'promoted'), default=-1)
+        # Operator merge (#248): one notice per head, bound to the promotion it was written or
+        # last edited for, and whether agent:needs-operator is the dispatcher's own.
+        promotions = [position for position, record in policy if record['event'] == 'promoted']
+        pr.promotions = len(promotions)
         notices = self._dispatcher_records(comments, 'notice')
-        pr.operator_merges = [record['head'] for position, record in notices
-                              if record['event'] == 'operator_merge' and position > promoted]
-        pr.operator_owned = self._operator_merge_owned(pr, notices, policy)
+        merges = [(position, record) for position, record in notices
+                  if record['event'] == 'operator_merge']
+        current = [(position, record) for position, record in merges
+                   if record['promotion'] == pr.promotions]
+        pr.operator_merges = [record['head'] for _, record in current]
+        of_head = next((position for position, record in reversed(merges)
+                        if record['head'] == pr.head_sha), None)
+        pr.operator_notice = comments[of_head].get('id') if of_head is not None else None
+        pr.operator_owned = self._operator_merge_owned(
+            pr, current[-1] if current else None, notices, policy,
+            promotions[-1] if promotions else -1)
         if pr.labels & {self.cfg.labels.review, self.cfg.labels.changes}:
             pr.fix_requests = self._fix_requests(pr, comments)
         # Last: whether a command is accepted depends on the merge mode of the PR, which its
@@ -1917,19 +1933,25 @@ class Dispatcher:
         return (self.gh.labelers(number, LEGACY_NEEDS_OPERATOR)
                 + self.gh.labelers(number, lb.needs_operator))
 
-    def _operator_merge_owned(self, pr, notices, policy):
+    def _operator_merge_owned(self, pr, current, notices, policy, promoted):
         """Whether ``agent:needs-operator`` on the ready ``pr`` is the dispatcher's own label of
-        an operator merge (#248): the latest of the dispatcher's notices (``notices``) is an
-        ``operator_merge`` one, no escalation recorded in a policy record (``policy``) came
-        after it, the label has no ``labeled`` event but those the notice counted and one more,
+        an operator merge (#248). ``current``: ``(position, record)`` of the latest
+        ``operator_merge`` notice of the current promotion, which names the head made ready
+        (the PR's head may have moved since); it counts from its own position or from the
+        latest promotion (``promoted``, a position), whichever is later, since a head promoted
+        again edits its notice instead of writing a new one. From there no other notice of the
+        dispatcher (``notices``) and no escalation recorded in a policy record (``policy``) may
+        follow, the label has no ``labeled`` event but those the notice counted and one more,
         and the dispatcher wrote that one. The label under its name before #248 is never the
         dispatcher's. Anything else, or anything uncertain, leaves the PR to the operator."""
         lb = self.cfg.labels
         if (lb.needs_operator not in pr.labels or LEGACY_NEEDS_OPERATOR in pr.labels
-                or lb.ready_to_merge not in pr.labels or not notices
-                or notices[-1][1]['event'] != 'operator_merge'):
+                or lb.ready_to_merge not in pr.labels or current is None):
             return False
-        position, record = notices[-1]
+        record = current[1]
+        position = max(current[0], promoted)
+        if any(later > position for later, _ in notices):
+            return False
         # The escalations of the review level and of level 0 are policy records (#182).
         if any(later > position and entry.get('class') for later, entry in policy):
             return False
@@ -2316,6 +2338,7 @@ class Dispatcher:
         if self.workers is not None and not dry_run:
             return self._tick_continuous()
         self._auto_pin(dry_run)
+        self._transition_labels(dry_run)
         snap = self.snapshot()
         self._flag_incomplete(snap, dry_run)
         actions = plan(snap, self.cfg)
@@ -2352,6 +2375,7 @@ class Dispatcher:
             self.log(f'auto-pin pending: no action starts until the {len(running)} running '
                      'ones end')
             return []
+        self._transition_labels(False)
         snap = self.snapshot()
         prs = {pr.number: pr for pr in snap.prs}
         issue_of = {number: pr.issue for number, pr in prs.items()}
@@ -2379,6 +2403,34 @@ class Dispatcher:
         outcomes = {}
         self._run_lane([(0, action)], prs, outcomes)
         self.log(f'outcome of {action.kind} #{action.number}: ' + outcomes.get(0, 'not run'))
+
+    def _transition_labels(self, dry_run):
+        """At the first tick of the process (#248), as ``devloop setup`` does: rename
+        ``agent:needs-operator`` from its old name when only that exists, so that the label the
+        dispatcher adds exists and the issues and PRs that had the old one keep it; with both
+        names, touch neither and say so. A dry run only logs what it would do. A failed read
+        or rename is logged and tried again at the next tick: until then the old label blocks
+        as the new one."""
+        if self.labels_checked:
+            return
+        lb = self.cfg.labels
+        try:
+            if dry_run:
+                transition = label_transition(self.gh, lb)
+                if transition == 'rename':
+                    self.log(f'[dry-run] labels: would rename {LEGACY_NEEDS_OPERATOR} to '
+                             f'{lb.needs_operator}')
+                elif transition == 'both':
+                    self.log(f'[dry-run] labels: {both_labels_warning(lb)}')
+                return
+            note = transition_labels(self.gh, lb)[1]
+        except GitHubError as exc:
+            self.log(f'labels: the rename of {LEGACY_NEEDS_OPERATOR} could not be checked, '
+                     f'next tick: {exc}')
+            return
+        if note:
+            self.log(f'labels: {note}')
+        self.labels_checked = True
 
     def _auto_pin(self, dry_run):
         """With ``[pin] auto = true`` and a pin requested by a merge (#174), pin
@@ -3500,11 +3552,14 @@ class Dispatcher:
         return None
 
     def _do_operator_merge(self, pr):
-        """Tell that the merge of a ready PR is the operator's (#248), once per head and
-        promotion: an ``operator_merge`` notice that says why, then ``agent:needs-operator``.
-        The PR is read again first: a head, a state or labels changed since the snapshot leave
-        it to the next tick, and so does a merge mode that now lets devloop merge it. Notice
-        first: a label that cannot be added fails the step, which escalates the PR."""
+        """Tell that the merge of a ready PR is the operator's (#248), with one comment per
+        head: an ``operator_merge`` notice that says why, then ``agent:needs-operator``. A head
+        promoted again, after its readiness decayed (its CI ran again, for example), edits the
+        notice it already has, with the current promotion and count of ``labeled`` events,
+        instead of writing a second one. The PR is read again first: a head, a state or labels
+        changed since the snapshot leave it to the next tick, and so does a merge mode that now
+        lets devloop merge it. Notice first: a label that cannot be added fails the step, which
+        escalates the PR."""
         lb = self.cfg.labels
         fresh = self.gh.pr_state(pr.number)
         labels = label_names(fresh.get('labels') or [])
@@ -3518,8 +3573,13 @@ class Dispatcher:
         if not reasons:
             return
         labeled = len(self._operator_labelers(pr.number))
-        self.gh.comment(pr.number, render_operator_merge(pr.head_sha, labeled, reasons,
-                                                         lb.needs_operator))
+        body = render_operator_merge(pr.head_sha, labeled, pr.promotions, reasons,
+                                     lb.needs_operator)
+        if pr.operator_notice is None:
+            self.gh.comment(pr.number, body)
+        else:
+            self.gh.edit_comment(pr.operator_notice, body)
+            self.log(f'  promoted again: updated the notice of {pr.head_sha[:12]}')
         self.gh.edit_labels(pr.number, add=[lb.needs_operator])
         self.log(f'  the merge of {pr.head_sha[:12]} is the operator\'s')
 
@@ -4502,11 +4562,12 @@ def both_labels_warning(labels):
             f'{LEGACY_NEEDS_OPERATOR}')
 
 
-def ensure_labels(gh: Tracker, labels, review_policy=None):
-    """Create or update devloop's labels, and return what the transition of #248 did, for the
-    log ('' when nothing). ``agent:needs-operator`` is renamed from its old name when only that
-    exists, so that the issues and PRs that have it keep it; with both names, neither label is
-    touched (``both_labels_warning``)."""
+def transition_labels(gh: Tracker, labels):
+    """The transition of #248, for ``devloop setup`` and the first tick of a process:
+    ``agent:needs-operator`` is renamed from its old name when only that exists, so that the
+    issues and PRs that have it keep it; with both names, neither label is touched
+    (``both_labels_warning``). Returns ``(label_transition, note for the log)``, the note ''
+    when there is nothing to say."""
     transition = label_transition(gh, labels)
     note = ''
     if transition == 'rename':
@@ -4516,6 +4577,13 @@ def ensure_labels(gh: Tracker, labels, review_policy=None):
                 'that had it keep it')
     elif transition == 'both':
         note = both_labels_warning(labels)
+    return transition, note
+
+
+def ensure_labels(gh: Tracker, labels, review_policy=None):
+    """Create or update devloop's labels, and return what the transition of #248 did, for the
+    log ('' when nothing): see ``transition_labels``."""
+    transition, note = transition_labels(gh, labels)
     for attr, (color, description) in LABEL_STYLE.items():
         if attr == 'needs_operator' and transition == 'both':
             continue
