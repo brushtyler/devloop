@@ -266,7 +266,7 @@ class LockTests(unittest.TestCase):
     def test_a_manual_tick_is_refused_while_the_loop_runs(self):
         refused = []
 
-        def loop(cfg, state, dispatcher, timeout):
+        def loop(cfg, state, dispatcher, timeout, reloader=None):
             with self.assertRaisesRegex(SystemExit, 'another dispatcher is running'):
                 cli.main(['tick'])
             refused.append(timeout)
@@ -305,7 +305,8 @@ class CommandTests(unittest.TestCase):
         with mock.patch.object(cli, 'build', return_value=(None, self.tmp, None)), \
                 mock.patch.object(cli, 'log'), \
                 mock.patch.object(cli, 'run_loop',
-                                  lambda cfg, state, d, timeout: seen.append(timeout) or 0):
+                                  lambda cfg, state, d, timeout, reloader=None:
+                                  seen.append(timeout) or 0):
             cli.main(['run', *argv])
         return seen[0]
 

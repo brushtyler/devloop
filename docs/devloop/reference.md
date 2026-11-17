@@ -30,7 +30,10 @@ default) names the issue of the alert of the [continuous loop](guide.md#continuo
 is not an issue number (an integer of at least 1), or an unknown key, stops devloop at startup.
 `[docs] map` sets the
 [documentation map](#documentation-map). Operator overrides go into the
-[local overlay](guide.md#local-config-as-an-overlay), not into this file.
+[local overlay](guide.md#local-config-as-an-overlay), not into this file. A running
+`devloop run` takes a new `max_open_prs`, `max_parked_prs` or `max_review_rounds` from the next
+tick; any other key needs a restart
+([Changes while the loop runs](guide.md#changes-while-the-loop-runs)).
 `[review_policy]` sets the
 [review level](#review-level-and-policy-receipt): `default_level` (1 or 2, default 1), the level
 `label` (default `reviews:2`), `sensitive_paths` and `sensitive_path_lists`; changing any of them,

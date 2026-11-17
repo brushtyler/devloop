@@ -14,7 +14,7 @@ from pathlib import Path
 from . import activity, follow, pin, runloop, unavailability, watch
 from .agents import AgentRunner, isolated_env
 from .apps import DISPATCHER, MERGER, Identities
-from .config import ConfigError, load_config
+from .config import ConfigError, Reloader, load_config
 from .dispatcher import (Dispatcher, TickLog, Workers, both_labels_warning, ensure_labels,
                          label_transition, plan, pr_counts_line, queue_lines)
 from .github import GitHub, GitHubError
@@ -201,12 +201,14 @@ def idle_timeout(parser, args):
     return value
 
 
-def run_loop(cfg, state, dispatcher, timeout):
+def run_loop(cfg, state, dispatcher, timeout, reloader=None):
     """``devloop run`` (#177): ``runloop.Loop`` with the dispatcher's ticks, a watcher with the
     identity of the ticks' reads (as ``devloop watch``) on a state file of its own, and the
     alert on ``[run].alert_issue`` as the dispatcher. With ``max_parallel_actions`` above 1 the
     loop runs in continuous mode (#227): the dispatcher's ticks start their actions in
-    ``Workers`` and do not wait for them. Returns the exit code."""
+    ``Workers`` and do not wait for them. Before each tick ``reloader`` (``config.Reloader``,
+    #278), when given, gives the dispatcher the limits of the configuration files as they are
+    now; the actions already running go on. Returns the exit code."""
     trust = watch.Trust.from_config(cfg)
     workers = None
     if cfg.max_parallel_actions > 1:
@@ -231,7 +233,13 @@ def run_loop(cfg, state, dispatcher, timeout):
 
     issue = cfg.run.alert_issue
     alert = (lambda body: dispatcher.gh.comment(issue, body)) if issue else None
-    return runloop.Loop(dispatcher.tick, wait_for_news, state / runloop.STOP_FILE, log=log,
+
+    def tick():
+        if reloader is not None:
+            dispatcher.cfg = reloader.refresh()
+        return dispatcher.tick()
+
+    return runloop.Loop(tick, wait_for_news, state / runloop.STOP_FILE, log=log,
                         alert=alert, alert_issue=issue, idle_timeout=timeout,
                         workers=workers).run()
 
@@ -387,7 +395,8 @@ def main(argv=None):
             if args.command == 'tick':
                 dispatcher.tick(dry_run=args.dry_run)
             elif args.command == 'run':
-                code = run_loop(cfg, state, dispatcher, timeout)
+                code = run_loop(cfg, state, dispatcher, timeout,
+                                Reloader(cfg, args.config, args.local_config, log=log))
                 if code:
                     sys.exit(code)
         except pin.PinError as exc:
