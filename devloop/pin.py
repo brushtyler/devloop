@@ -38,6 +38,9 @@ PENDING = 'pin-pending.json'
 LOCK = 'pin.lock'
 SHA = re.compile(r'[0-9a-f]{40}')
 HEX = re.compile(r'[0-9a-f]{7,40}')
+# The branches of origin, and its tags, fetched apart from the local tags of refs/tags/.
+REMOTE_BRANCHES = 'refs/remotes/origin/'
+REMOTE_TAGS = 'refs/devloop/origin-tags/'
 # Run in the copy, with only the copy on the module path: the package and the configuration of
 # the copy, with the overlay, must load, and the lists must be read from the copy.
 VERIFY = '''
@@ -91,9 +94,11 @@ def _verified_copies(state):
 
 def resolve(root, state, ref, fetch=True):
     """The commit of ``ref``. An abbreviation of a copy already verified is that copy's commit,
-    without a fetch. Otherwise the refs of ``origin`` are updated first, a bare branch name is a
-    branch of ``origin``, and the commit must be reachable from a ref of ``origin``: a commit
-    only local is refused."""
+    without a fetch. Otherwise the branches and tags of ``origin`` are updated first, dropping
+    those deleted on ``origin``; a bare name is a branch of ``origin``, else a tag of ``origin``;
+    and the commit must be reachable from a branch or a tag of ``origin``: a commit only local
+    (or reachable only from a local tag, or from a branch since deleted on ``origin``) is
+    refused."""
     if not ref or ref.startswith('-') or any(c.isspace() for c in ref):
         raise PinError(f'invalid ref {ref!r}')
     if HEX.fullmatch(ref):
@@ -103,12 +108,16 @@ def resolve(root, state, ref, fetch=True):
         if known:
             return known[0]
     if fetch:
-        _git(root, 'fetch', '--quiet', 'origin')
+        # The tags of origin go to a namespace of their own, apart from the local tags, which
+        # prove nothing; --prune drops the branches and tags no longer on origin.
+        _git(root, 'fetch', '--quiet', '--prune', '--no-tags', 'origin',
+             f'+refs/heads/*:{REMOTE_BRANCHES}*', f'+refs/tags/*:{REMOTE_TAGS}*')
     name = ref
     if ref != 'HEAD' and not ref.startswith(('origin/', 'refs/')):
-        remote = f'refs/remotes/origin/{ref}'
-        if _git(root, 'for-each-ref', '--format=%(refname)', remote).strip() == remote:
-            name = remote
+        for remote in (f'{REMOTE_BRANCHES}{ref}', f'{REMOTE_TAGS}{ref}'):
+            if _git(root, 'for-each-ref', '--format=%(refname)', remote).strip() == remote:
+                name = remote
+                break
     try:
         sha = _git(root, 'rev-parse', '--verify', '--quiet', '--end-of-options',
                    f'{name}^{{commit}}').strip()
@@ -117,7 +126,7 @@ def resolve(root, state, ref, fetch=True):
     if not SHA.fullmatch(sha):
         raise PinError(f'{ref}: not a commit')
     if not _git(root, 'for-each-ref', '--contains', sha, '--count=1', '--format=%(refname)',
-                'refs/remotes/origin/').strip():
+                REMOTE_BRANCHES, REMOTE_TAGS).strip():
         raise PinError(f'{ref} ({sha[:12]}) is not reachable from the refs of origin: a local '
                        'commit is never pinned')
     return sha

@@ -1092,10 +1092,13 @@ sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned run --inte
 
 `python3 -m devloop pin <ref>`, from the main checkout (or `scripts/devloop-pinned pin <ref>`):
 
-1. updates the refs of `origin` and resolves `<ref>`: a branch name without prefix is a branch
-   of `origin` (`main` is `origin/main`, never a local `main`), and the commit must be reachable
-   from a ref of `origin`. A commit only local is refused. The commit of a copy already pinned
-   (also abbreviated) is used without a fetch: that is the rollback;
+1. updates the branches and tags of `origin`, dropping those deleted on `origin` (the tags of
+   `origin` go to `refs/devloop/origin-tags/`, apart from the local tags), and resolves `<ref>`:
+   a name without prefix is a branch of `origin` (`main` is `origin/main`, never a local
+   `main`), otherwise a tag of `origin`, and the commit must be reachable from a branch or a tag
+   of `origin`. A commit only local, or reachable only from a local tag or from a branch deleted
+   on `origin`, is refused. The commit of a copy already pinned (also abbreviated) is used
+   without a fetch: that is the rollback;
 2. reads `devloop/config.toml` of that commit with the local overlay applied, and takes the files
    of `review_policy.sensitive_path_lists`: each must be a relative path inside the root and a
    regular file of the commit;

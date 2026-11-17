@@ -159,6 +159,57 @@ class PinTests(GitCase):
                     self.pin(ref)
         self.assertEqual(self.pointed(), (self.state / f'pinned-{self.first[:12]}').resolve())
 
+    def side_commit(self, branch, path):
+        """A commit on ``branch``, off main, not on main."""
+        git(self.root, 'checkout', '--quiet', '-b', branch)
+        (self.root / path).write_text(branch)
+        git(self.root, 'add', '--', path)  # not the state directory
+        git(self.root, 'commit', '--quiet', '-m', branch)
+        git(self.root, 'checkout', '--quiet', 'main')
+        return git(self.root, 'rev-parse', branch)
+
+    def test_a_branch_deleted_on_origin_no_longer_counts(self):
+        old = self.pin('main')
+        sha = self.side_commit('feature', 'feature.txt')
+        git(self.root, 'push', '--quiet', 'origin', 'feature')
+        git(self.root, 'fetch', '--quiet', 'origin')  # a stale origin/feature stays locally
+        git(self.tmp / 'origin.git', 'branch', '--quiet', '-D', 'feature')
+        for ref in (sha, 'feature', 'origin/feature'):
+            with self.subTest(ref=ref):
+                with self.assertRaises(pin.PinError):
+                    self.pin(ref)
+        self.assertEqual(git(self.root, 'for-each-ref', 'refs/remotes/origin/feature'), '')
+        self.assertFalse((self.state / f'pinned-{sha[:12]}').exists())
+        self.assertEqual(self.pointed(), old.resolve())
+
+    def test_a_tag_of_origin_counts_a_local_tag_does_not(self):
+        published = self.side_commit('release', 'release.txt')
+        git(self.root, 'tag', '-a', '-m', 'v9', 'v9', published)
+        git(self.root, 'push', '--quiet', 'origin', 'refs/tags/v9')
+        git(self.root, 'branch', '--quiet', '-D', 'release')
+        local = self.side_commit('mine', 'mine.txt')
+        git(self.root, 'tag', '-f', 'v9', local)  # the local v9 is not the one of origin
+        git(self.root, 'tag', 'only-here', local)
+        copy = self.pin('v9')
+        self.assertEqual(copy.name, f'pinned-{published[:12]}')
+        self.assertEqual(self.pointed(), copy.resolve())
+        for ref in ('only-here', 'refs/tags/only-here', 'refs/tags/v9', local):
+            with self.subTest(ref=ref):
+                with self.assertRaisesRegex(pin.PinError, 'not reachable from the refs of origin'):
+                    self.pin(ref)
+        self.assertEqual(self.pointed(), copy.resolve())
+        # A tag deleted on origin no longer counts either.
+        gone = self.side_commit('gone', 'gone.txt')
+        git(self.root, 'tag', 'v10', gone)
+        git(self.root, 'push', '--quiet', 'origin', 'refs/tags/v10')
+        git(self.root, 'fetch', '--quiet', 'origin', '+refs/tags/*:refs/devloop/origin-tags/*')
+        git(self.tmp / 'origin.git', 'tag', '-d', 'v10')
+        for ref in ('v10', gone):
+            with self.subTest(ref=ref):
+                with self.assertRaisesRegex(pin.PinError, 'not reachable from the refs of origin'):
+                    self.pin(ref)
+        self.assertEqual(self.pointed(), copy.resolve())
+
     def test_rollback_reuses_a_verified_copy_without_fetch(self):
         old = self.pin('main')
         new_sha = self.push('new', 'devloop/extra.txt', 'new\n')
