@@ -2,8 +2,9 @@
 
 devloop moves issues through implementation, independent review and fixes, so that a human only
 decides what starts and, unless a [merge mode](#merge-modes) lets devloop merge, what gets
-merged. It is development tooling for this repository, not part
-of the SSDLC orchestrator, and it never touches SSDLC runs or the main checkout's working tree.
+merged. It is the SSDLC component that works on GitHub issues and PRs, next to the local engine
+(see the [README](../../README.md#components)); today it is configured for this repository only,
+and it never touches local-engine runs or the main checkout's working tree.
 
 This page is for the operator and the supervisor. Configuration keys, review levels and
 identities are in the [reference](reference.md), markers and records in the
@@ -24,7 +25,11 @@ plans the next steps and runs them. A crashed tick is resumed by the next one.
 | Sync | A PR in `agent:review` or `agent:ready-to-merge` conflicts with `main` | The implementer resolves the conflicts of a merge of `origin/main`; the dispatcher pushes the merge commit, back to `agent:review` (see [Conflicts with `main`](protocol.md#conflicts-with-main)) |
 | Approve | Verdict `approve` from every reviewer the level requires | `agent:ready-to-merge`, only if no [finding](protocol.md#findings-and-who-closes-them) is still open, the PR head is still the reviewed commit, CI passed and the policy receipt recomputed just before promotion matches the one of every approval (an earlier base is admitted only if `main` left the PR's files alone since, see [When `main` advances](reference.md#when-main-advances-during-a-round)) |
 | Level 0 | A trusted user's `reviews:0`, the whole diff in the operator's allowlist, every expected check `success` | `agent:ready-to-merge` without a review (see [Level 0](reference.md#level-0-no-review)); off by default |
-| Merge | `agent:ready-to-merge` | **A human merges** with `[merge].mode = "off"`, the default. With `"strict"` or `"auto"` devloop merges once every merge directive holds again (see [Merge modes](#merge-modes)) |
+| Merge | `agent:ready-to-merge` | **A human merges**, unless the [merge mode](#merge-modes) of the PR lets devloop merge |
+
+A head just pushed, without CI yet, is not reviewed at once: with `local_tests` other than
+`full` the review waits for its CI for `[ci] grace_minutes`, and as long as `main` requires
+checks up to `[ci] required_timeout_minutes` (see [CI of a new head](reference.md#ci-of-a-new-head)).
 
 Readiness belongs to the approved commit. Every tick re-checks ready PRs:
 
@@ -127,9 +132,8 @@ capacity:
   CI running, a PR without a state label or without its marker, and any other state not listed
   below.
 - `max_parked_prs` (default 3) counts the **parked** PRs, those waiting for a person:
-  `agent:needs-operator`, and `agent:ready-to-merge` when devloop does not merge it: `[merge]`
-  `mode = "off"`, a `[merge.levels]` override `"off"` for its review level, or a diff that
-  touches `operator_only_paths` ([merge modes](#merge-modes)); such a PR also gets
+  `agent:needs-operator`, and `agent:ready-to-merge` when devloop does not merge it, because
+  the [merge mode](#merge-modes) of the PR is `"off"`; such a PR also gets
   `agent:needs-operator` ([Ready PRs whose merge is the operator's](#ready-prs-whose-merge-is-the-operators)),
   and still counts once. A ready PR that devloop merges
   itself (`strict` or `auto` for its level) is not parked, nor is one whose merge mode cannot
@@ -292,19 +296,28 @@ implementer does not start. An agy check stopped on a denied permission is first
 
 ## Merge modes
 
+This is the only description of the merge modes in this guide; the other sections link here.
+Which modes exist, and that choosing one is the operator's decision, is set by
+[ADR 0002](../adr/0002-ruoli-e-responsabilita.md) (see [Who does what](#who-does-what)).
+
 `[merge].mode` decides who merges a PR in `agent:ready-to-merge` (#172):
 
 | `mode` | Who merges |
 |---|---|
 | `"off"` (default, and this repository's) | A person, as before |
-| `"strict"` | devloop, only when every merge directive below holds |
+| `"strict"` | devloop, only when every [merge directive](protocol.md#merge-directives-and-record) holds |
 | `"auto"` | As `"strict"`; in addition the supervisor can [hold a merge](#holding-a-merge) and [decide non-critical escalations](#escalations-to-the-supervisor) |
 
 - **Per level.** `[merge.levels]` gives a mode to a review level, for example `"2" = "off"`.
   The most restrictive of that mode and `mode` applies: `off`, then `strict`, then `auto`. An
   override never relaxes `mode`.
-- **Operator-only paths, merge directives and record.** See
-  [Merge directives and record](protocol.md#merge-directives-and-record).
+- **Operator-only paths.** A PR whose diff touches `operator_only_paths` (default `docs/adr/`,
+  `AGENTS.md` and `CLAUDE.md`) is merged by a person, whatever the mode.
+- **The merge mode of a PR** is therefore `mode`, made more restrictive by the override of the
+  PR's review level, and `"off"` when its diff touches an operator-only path. Elsewhere in this
+  guide, "the merge mode of a PR" means this one.
+- **Merge directives and record.** What devloop checks just before a merge, how it merges and
+  what it records: [Merge directives and record](protocol.md#merge-directives-and-record).
 
 ### Closing the issue
 
@@ -330,8 +343,7 @@ routed as above.
 ### Ready PRs whose merge is the operator's
 
 In `"auto"` or `"strict"`, `agent:ready-to-merge` usually means that devloop merges the PR. When
-it does not (#248), because `mode = "off"`, a `[merge.levels]` override `"off"` for the PR's
-review level, or a diff that touches `operator_only_paths`, the dispatcher also adds
+it does not (#248), because the [merge mode](#merge-modes) of the PR is `"off"`, the dispatcher also adds
 `agent:needs-operator` once the PR is ready, with a comment ("Il merge spetta all'operatore")
 that says why: the reserved paths the diff touches, or the mode or the level. The comment
 carries a `notice` marker of event `operator_merge` with the head, how many `labeled` events of
@@ -374,9 +386,9 @@ written after it, even one that arrived while the record was being written, stil
 applied. Among the commands that wait the latest wins. A command is applied before anything else
 on its PR in that tick, so no merge of the same tick overtakes it, and a merge about to run reads
 the comments again and stops if a command is waiting. A command is ignored, and written to the
-dispatcher log, when the merge mode of its PR is `"strict"` or `"off"` (the mode with the
-override of its level and its operator-only paths, so a PR at a level overridden to `"strict"`
-ignores it even with `mode = "auto"`), from anyone else, without a reason, and in text devloop
+dispatcher log, when the [merge mode](#merge-modes) of its PR is not `"auto"` (so a PR at a
+level overridden to `"strict"` ignores it even with `mode = "auto"`), from anyone else, without
+a reason, and in text devloop
 publishes (a comment that ends with a devloop marker). As for
 `/devloop finding`, devloop reads the comments of a PR only while it is in `agent:review`,
 `agent:changes` or `agent:ready-to-merge`.
@@ -426,8 +438,7 @@ Any other class, or none (escalations written before #182), is critical.
 `agent:needs-supervisor` instead of `agent:needs-operator`, and an issue keeps `agent:ready`. It
 stays with the operator, with a comment that says why, when:
 
-- the merge mode of the PR is not `"auto"`: the override of its level, or a path of
-  `operator_only_paths` in its diff;
+- the [merge mode](#merge-modes) of the PR is not `"auto"`;
 - the supervisor's agent implemented the PR;
 - the issue was opened by someone outside `trusted_users` and devloop's apps, or its text is no
   longer approved by `agent:ready`;
@@ -516,9 +527,11 @@ and the escalation stays with the supervisor.
 
 Roles (operator, coordinator, supervisor, dispatcher, preflight, implementer, reviewer), what
 each one does and does not do, the merge modes and the critical and non-critical decisions are
-defined in [ADR 0002](../adr/0002-ruoli-e-responsabilita.md), the source for them. The
-[merge modes](#merge-modes) and the [escalations to the supervisor](#escalations-to-the-supervisor)
-above describe how devloop applies them.
+defined in [ADR 0002](../adr/0002-ruoli-e-responsabilita.md). The ADR is the only source for
+them, and this guide does not repeat them: it describes how devloop applies them, in
+[Merge modes](#merge-modes), [Labels from the supervisor](#labels-from-the-supervisor) and
+[Escalations to the supervisor](#escalations-to-the-supervisor). Which agent holds each role is
+in `[roles]` of the configuration ([reference](reference.md#configuration)).
 
 ## Usage
 
@@ -526,19 +539,23 @@ above describe how devloop applies them.
 python3 -m devloop setup            # create the agent:* labels, the priority:* labels and the review level labels (reviews:0 only when level 0 is on)
 python3 -m devloop status           # running action, devloop PRs (with merge state and conflicts), ready issues in start order with their priority, planned actions
 python3 -m devloop apps             # check the GitHub App of each actor
-python3 -m devloop tick --dry-run   # print the ready issues in start order and the plan, change nothing
+python3 -m devloop tick --dry-run   # print the ready issues in start order and the plan, change nothing (no lock: it runs beside a dispatcher)
 python3 -m devloop tick             # run one round
 python3 -m devloop run --idle-timeout 900  # tick continuously (see Continuous loop)
 python3 -m devloop cleanup          # remove worktrees left by failed steps
 python3 -m devloop follow issue-52  # follow live the implementer of issue #52 (pr-<N>: reviewer or fixer)
 python3 -m devloop watch --timeout 3600  # wait for the next change on GitHub, for the supervising agent
-python3 -m devloop pin origin/main  # pin a commit of origin (see Run from a pinned installation)
+python3 -m devloop pin origin/main  # pin a commit of origin, after its smoke test (see Run from a pinned installation)
 python3 -m devloop fallback reset agy  # forget the models agy remembers unavailable (see Memory of unavailable models)
 ```
 
 Run it from any checkout of this repository. Worktrees, agent prompts and logs, and the lock that
 prevents two dispatchers from running at once live under `state_dir` (default `.ssdlc/devloop`)
-in the main checkout. In daily use run it from the pinned copy, through
+in the main checkout. `tick --dry-run` writes nothing and does not take that lock, so the
+[smoke test of a pin](#pin) runs it while `run` is active. Not even its git commands write to
+the repository: it does not fetch, so it plans from the remote branches as last fetched (a
+branch never fetched leaves its merge mode not computable), and the objects that `git
+merge-tree` writes go to a temporary directory. In daily use run it from the pinned copy, through
 `scripts/devloop-pinned` ([Run from a pinned installation](#run-from-a-pinned-installation)).
 `--local-config <file>`, before the command, applies a local overlay to the configuration
 ([Local config as an overlay](#local-config-as-an-overlay)).
@@ -822,13 +839,47 @@ In `devloop run` a plan leaves out the issues and PRs of the running actions: no
 starts on the same number, nor on a PR and its issue, until the first has ended; of two actions
 planned on the same number only the first starts, and the next tick, which sees its result,
 decides the other. An implementation or readiness check that is running keeps its slot of
-`max_open_prs`. A global action (a merge) starts only when nothing runs, alone: while one is
+`max_open_prs`. A global action (a pin) starts only when nothing runs, alone: while one is
 planned and actions are running, no other action starts, so they end and the global action runs
 next; the actions planned with it start in the ticks after it. While a global action runs, no
 other action starts, even when news on GitHub start a tick and slots are free. The
 [pin after a merge](#pin-after-a-merge) runs only when no action runs, and while one is pending
-no action starts. The turns of running actions are not marked incomplete by the ticks that run
-meanwhile; they are checked once their action ends.
+no action starts. A merge is not a global action: it runs in [the merge lane](#the-merge-lane).
+The turns of running actions are not marked incomplete by the ticks that run meanwhile; they are
+checked once their action ends.
+
+#### The merge lane
+
+In `devloop run` a merge of a ready PR (#264) starts in the first tick that plans it with a free
+slot, alongside the actions running on other issues and PRs: it does not wait for a 40-minute
+implementation or local test suite to end, and while it is planned or running it holds back no
+other action (a review, a readiness check, a fix). Merges have a lane of their own: **one merge
+at a time**. A merge planned while another one runs waits for a later tick, and still keeps its
+PR and its issue: no other action on them starts meanwhile. A merge takes a slot of
+`max_parallel_actions` like any action. Of `max_actions_per_tick`, a tick spends a slot only on
+the merge that can start: the merges waiting for the lane leave the slots to the other actions.
+A merge that finds the limit already spent does not take the lane: it waits for a later tick,
+and so do the merges after it, so none of them starts past the limit.
+
+Why a merge may run alongside the other actions:
+
+- the merge reads every merge directive again just before merging, recomputes the policy
+  receipt on the current base, and GitHub merges into the current `main`
+  (`--match-head-commit`);
+- the actions on other numbers work in worktrees of their own and push only to their own
+  branches; a `main` that moves under them is the case of any merge made by a person, and the
+  existing mechanisms already handle it: the revocation when the base touches the PR's files
+  ([When `main` advances](reference.md#when-main-advances-during-a-round)), the sync of a PR that conflicts
+  with `main`, and the fix on an aligned base. No action depends on `main` in a way they do not
+  cover, so no action is exclusive with a merge;
+- actions on the same PR or on its issue never run with its merge, as for any action.
+
+The [pin after a merge](#pin-after-a-merge) stays global: after a merge that requests it, no
+new action starts until the running ones end, then the pin runs with nothing running. A tick
+checks for the request again right before it starts its actions, so a merge that requests the
+pin while the tick reads GitHub stops that tick's actions too. In
+`devloop tick` a merge still runs alone, as a global action
+([Parallel actions](reference.md#parallel-actions)).
 
 The dispatcher lock stays one: the loop runs the actions in threads of its own process. A stop
 (`SIGTERM`, `SIGINT`, the `STOP` file) starts no other tick and waits for the running actions to
@@ -880,28 +931,163 @@ The installation in use since 2026-11-16 (#185):
 
 - an unprivileged system user `devloop`, with a clone of its own (`/home/devloop/ssdlc`);
 - state, pinned copies and the local config in `.ssdlc/devloop` of that clone;
-- the GitHub App keys in `~/.ghapps` of that user (each key mode `600`), the agent CLIs logged
-  in with logins of that user, and no `gh` login: devloop acts with its apps. A
-  [merge mode](#merge-modes) other than `off` merges with the [merger app](reference.md#the-merger-app),
-  whose key is there too; without that app it would need a local `gh` login.
+- the GitHub App keys in `~/.ghapps` of that user (each key mode `600`), and no `gh` login:
+  devloop acts with its apps. A [merge mode](#merge-modes) other than `off` merges with the
+  [merger app](reference.md#the-merger-app), whose key is there too; without that app it would
+  need a local `gh` login;
+- the agent CLIs installed in the home of that user and logged in with logins of that user
+  ([Agent CLIs](#agent-clis)).
 
-```bash
-sudo useradd --create-home devloop
-sudo -u devloop -H git clone https://github.com/brushtyler/ssdlc.git /home/devloop/ssdlc
-sudo -u devloop -H install -d -m 700 /home/devloop/.ghapps   # then the keys, mode 600
-# The first pin runs the clone's devloop; every later command runs the pinned copy.
-sudo -u devloop -H sh -c 'cd ~/ssdlc && python3 -m devloop pin origin/main'
-sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned run --idle-timeout 900
-```
+From the beginning to the end, as root or with `sudo`:
+
+1. **User and clone.** `python3`, `git`, `gh` and `openssl` (it signs the apps' tokens) come
+   from the system.
+
+   ```bash
+   sudo useradd --create-home devloop
+   sudo -u devloop -H git clone https://github.com/brushtyler/ssdlc.git /home/devloop/ssdlc
+   ```
+
+2. **Keys.** The apps are those of `[apps]` in `devloop/config.toml`, created once by the
+   operator ([GitHub identities](reference.md#github-identities), and
+   [The merger app](reference.md#the-merger-app) for the merger). Each private key goes to
+   `~/.ghapps` of the `devloop` user, under the name GitHub gives it,
+   `<slug>.<date>.private-key.pem`, mode `600`; a configured app whose key is missing stops
+   devloop at startup.
+
+   ```bash
+   sudo -u devloop -H install -d -m 700 /home/devloop/.ghapps
+   sudo install -o devloop -g devloop -m 600 <slug>.<date>.private-key.pem /home/devloop/.ghapps/
+   ```
+
+3. **Agent CLIs.** Install Claude Code, codex and agy as the `devloop` user and log in to each
+   one with that user's logins, as described in [Agent CLIs](#agent-clis).
+
+4. **Overlay.** Write `/home/devloop/ssdlc/.ssdlc/devloop/config.local.toml`, owned by
+   `devloop`, with only the keys the operator overrides
+   ([Local config as an overlay](#local-config-as-an-overlay)). Each of these is the operator's
+   choice: the merge mode, `[pin] auto` ([Pin after a merge](#pin-after-a-merge)) and
+   `[run] alert_issue` ([Continuous loop](#continuous-loop)). Without the file, the
+   configuration of the pinned copy applies as it is.
+
+5. **Pin.** The first pin runs the clone's devloop; every later command runs the pinned copy,
+   through the [launcher](#launcher). The pin applies the overlay and runs the
+   [smoke test](#pin), so a key the copy refuses stops here.
+
+   ```bash
+   sudo -u devloop -H sh -c 'cd ~/ssdlc && python3 -m devloop pin origin/main'
+   ```
+
+6. **Checks.** From the pinned copy, as the `devloop` user: every app, its installation and its
+   permissions, then the state and the plan, without changing anything.
+
+   ```bash
+   sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned apps
+   sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned status
+   sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned tick --dry-run
+   ```
+
+7. **Start.** `devloop run` in the background, with an unbuffered log
+   ([Starting and stopping the loop](#starting-and-stopping-the-loop)), or as a systemd unit
+   ([Continuous loop](#continuous-loop)).
+
+8. **Rollback.** A pin that turns out wrong goes back to an earlier copy
+   ([Rollback](#rollback)); an update of an agent CLI goes back to the earlier version the same
+   way it was installed ([Agent CLIs](#agent-clis)).
 
 Turns must not depend on an update of an agent CLI in progress: a CLI that replaces its own
 binary leaves, for a few seconds, nothing to start (#218; the start is retried once, see
-[Failed agent turns](protocol.md#failed-agent-turns)). For the CLIs devloop uses, either:
+[Failed agent turns](protocol.md#failed-agent-turns)). For the CLIs devloop uses, both:
 
 - disable their automatic updates: for Claude Code, `DISABLE_AUTOUPDATER=1` in the launcher's
-  environment. The [launcher](#launcher) exports it unless the environment already sets it;
-- or install them in the home of the `devloop` user, as `codex` and `agy` already are, so that
-  the updates of the operator's sessions do not touch them.
+  environment. The [launcher](#launcher) exports it unless the environment already sets it, and
+  the `devloop` user's `~/.claude/settings.json` sets it too;
+- and install them in the home of the `devloop` user, Claude Code included, so that the updates
+  of the operator's sessions do not touch them. They change only when the operator updates them
+  by hand, with the loop stopped.
+
+#### Agent CLIs
+
+The agent CLIs devloop runs belong to the `devloop` user: installed in its home, on its `PATH`,
+and logged in with its logins. devloop finds them on the `PATH` of the process that runs it
+(the [unit](#continuous-loop) and the [start command](#starting-and-stopping-the-loop) set
+`/home/devloop/.local/bin` first).
+
+- **Claude Code** in `~/.local/bin`, installed with npm under the prefix `~/.local`, with its
+  automatic updates off in `~/.claude/settings.json` of the `devloop` user:
+
+  ```bash
+  sudo -u devloop -H npm install -g --prefix /home/devloop/.local @anthropic-ai/claude-code
+  ```
+
+  ```json
+  {
+    "autoUpdates": false,
+    "env": {
+      "DISABLE_AUTOUPDATER": "1"
+    }
+  }
+  ```
+
+- **codex** and **agy**, also in the home of the `devloop` user and on its `PATH`.
+
+Log in to each CLI once, in an interactive session of the `devloop` user
+(`sudo -iu devloop`), and check that `claude --version`, `codex --version` and `agy --version`
+answer there.
+
+**Updating them by hand, with the loop stopped** (decision of the operator, 2026-11-17). No turn
+may start while a binary is being replaced, so:
+
+1. stop the loop with the `STOP` file and wait until `devloop run` has exited
+   ([Starting and stopping the loop](#starting-and-stopping-the-loop)): the tick in progress
+   and its actions end first;
+2. update the CLI as the `devloop` user, for Claude Code with the same `npm install` as above
+   (`@anthropic-ai/claude-code@<version>` for a given version), codex and agy each with its own
+   installer;
+3. check the new version with `--version`, as the `devloop` user;
+4. remove `STOP` and start `devloop run` again.
+
+To go back, install the earlier version the same way, again with the loop stopped.
+
+#### Starting and stopping the loop
+
+`devloop run` ([Continuous loop](#continuous-loop)) is a background process of the `devloop`
+user, started through the [launcher](#launcher) from the clone:
+
+```bash
+sudo -u devloop -H sh -c 'cd ~/ssdlc && PATH=/home/devloop/.local/bin:/usr/local/bin:/usr/bin:/bin PYTHONUNBUFFERED=1 nohup python3 scripts/devloop-pinned run --idle-timeout 900 < /dev/null >> .ssdlc/devloop/run.log 2>&1 &'
+sudo -u devloop -H tail -f /home/devloop/ssdlc/.ssdlc/devloop/run.log   # follow the log
+```
+
+- **`PATH`.** The command sets the same `PATH` as the [unit](#continuous-loop), with
+  `/home/devloop/.local/bin` first. `sh -c` is not a login shell and does not read the profile
+  of the `devloop` user: without it the loop would keep the `PATH` of `sudo`, which may leave
+  out `~/.local/bin`, and every agent turn would fail to start, even though `--version` answers
+  in an interactive session. The launcher passes this `PATH` to the agents.
+- **Unbuffered log.** `PYTHONUNBUFFERED=1` makes every line reach the log as it is written, so
+  `tail -f` shows the tick in progress and a crash leaves its last lines. The launcher passes its
+  environment to the pinned copy it starts; a `-u` given to the launcher would not reach it.
+- **Stop.** Create the `STOP` file. The loop logs `stop requested (…): no further tick`, ends
+  the tick in progress and waits for its running actions, then exits with code 0; while `STOP`
+  exists, a new `devloop run` exits at once, without a tick. The process has exited when
+  `pgrep` no longer finds it. Remove `STOP` to start again.
+
+  ```bash
+  sudo -u devloop -H touch /home/devloop/ssdlc/.ssdlc/devloop/STOP   # stop after the tick
+  pgrep -u devloop -af 'm devloop'                                    # nothing: it has exited
+  sudo -u devloop -H rm /home/devloop/ssdlc/.ssdlc/devloop/STOP      # then start it again
+  ```
+
+- **`[pin] auto`.** With `auto = true` in the overlay, a merge by devloop that touches
+  `devloop/` or a file of `sensitive_path_lists` pins `origin/main`, and the loop restarts by
+  itself from the new copy, in the same process and log ([Pin after a merge](#pin-after-a-merge)). Otherwise, after a pin by hand, stop the loop and
+  start it again: a running loop keeps the code it started with.
+- **`[run] alert_issue`.** Three failed ticks in a row stop the loop with exit code 4. With
+  `alert_issue` in the overlay the dispatcher also comments on that issue; without it the alert
+  is only a line in the log. The background process does not start again by itself: remove the
+  cause, then start it again.
+
+A systemd unit does the same with restarts on a crash: see [Continuous loop](#continuous-loop).
 
 #### Pin
 
@@ -923,11 +1109,26 @@ binary leaves, for a few seconds, nothing to start (#218; the start is retried o
 4. checks the copy: in a Python with only the copy on its module path, the package imports, and
    its configuration, with the overlay, loads (a `[docs] map` of the wrong shape fails here) and
    reads `sensitive_path_lists` from the copy;
-5. points `.ssdlc/devloop/current` at the copy, with an atomic rename of a symlink.
+5. runs the **smoke test** of a new copy: from the copy (only the copy on the module path), in
+   the main checkout and with the same overlay, `python3 -m devloop tick --dry-run` (it plans,
+   without agents and without writes, not even to the repository) and one round of `python3 -m devloop watch`, on a state
+   file of its own, at most 30 seconds. Step 4 has already loaded the configuration with the
+   overlay;
+6. points `.ssdlc/devloop/current` at the copy, with an atomic rename of a symlink.
 
-A failure at any step leaves `current` as it was, and leaves no new copy behind. A copy that
-already exists for the same commit is reused, but checked again against the current overlay: if
-a file it needs is missing, the pin fails. Earlier copies stay, for the rollback. `pin` uses the
+A failure at any step leaves `current` as it was, and leaves no new copy behind, with one
+exception: a copy that fails the smoke test stays in `.ssdlc/devloop/rejected-<sha12>` (replacing
+an earlier one of the same commit), for the analysis, and the pin fails with `smoke test of
+<sha12> failed at <step>: <error>`. A rejected copy is never reused: a later pin of the same
+commit extracts and tests it again. A step that fails with a transient error (a network error,
+a GitHub 5xx, its time limit) runs once more before the copy is refused; any other error (an
+import error, an invalid configuration, another GitHub error) refuses it at once. `pin --no-smoke
+<ref>` skips the smoke test, for exceptional cases, and the log says `smoke test of <sha12>
+skipped (--no-smoke)`. The smoke test needs the GitHub access of the dispatcher; a copy of a
+commit from before the smoke test takes the dispatcher lock in `tick --dry-run`, so its smoke
+test fails while `run` is active. A copy that already exists for the same commit is reused,
+without a smoke test, but checked again against the current overlay: if a file it needs is
+missing, the pin fails. Earlier copies stay, for the rollback. `pin` uses the
 overlay given with `--local-config`, or `.ssdlc/devloop/config.local.toml` when it exists. A
 `run` already started keeps the code it started with: restart it after a pin by hand (a pin
 after a merge restarts it by itself, see below). `devloop cleanup` removes only the agent
@@ -968,6 +1169,9 @@ mode = "strict"
 
 [pin]
 auto = true
+
+[run]
+alert_issue = 123
 ```
 
 devloop applies it over `devloop/config.toml` of the pinned copy: a table merges key by key
@@ -980,14 +1184,20 @@ replace it.
 #### Rollback
 
 Pin the earlier commit again: its copy is reused, checked against the current overlay, and
-`current` points back at it, with no fetch needed.
+`current` points back at it, with no fetch needed. The pinned copies are the directories
+`.ssdlc/devloop/pinned-<sha12>`.
 
 ```bash
-python3 scripts/devloop-pinned pin 1a2b3c4d5e6f   # the sha12 of an earlier pinned-<sha12>
+sudo -u devloop -H ls /home/devloop/ssdlc/.ssdlc/devloop/                  # the pinned-<sha12> copies
+sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned pin 1a2b3c4d5e6f   # an earlier sha12
 ```
 
 Any pin, by hand or after a merge, also drops a pin requested by a merge and not yet done, so a
-rollback is not undone by the next tick.
+rollback is not undone by the next tick. A running `devloop run` keeps the code it started with:
+stop it and start it again ([Starting and stopping the loop](#starting-and-stopping-the-loop))
+to run the earlier copy. With `[pin] auto = true` the next [merge that requests a
+pin](#pin-after-a-merge) pins `origin/main` again: to stay on the earlier copy, set
+`auto = false` in the overlay before starting the loop again.
 
 #### Pin after a merge
 
@@ -1003,6 +1213,14 @@ stays as it was, and the request stays: the next tick tries again (`run` counts 
 [failed tick](#continuous-loop), with its backoff; `tick` exits with it). With `auto = false` a merge requests nothing, and a request left
 from before is ignored.
 
+A copy refused by the [smoke test](#pin) is not a failed tick: the request is dropped, `current`
+stays on the previous copy, the log says `auto-pin of origin/main refused, the pinned copy is
+unchanged and the request is dropped: <reason>`, and the tick plans and runs its actions from
+the running copy, so `run` goes on. With `[run].alert_issue` the dispatcher comments on that
+issue once per refused commit (its commit and failed step; the error stays in the local log),
+recorded in `.ssdlc/devloop/pin-alerted.json`; a comment that cannot be published is only
+logged. The next merge that requests a pin tries again, on the new `origin/main`.
+
 devloop imports only the Python standard library and itself, and a test enforces this
 (`tests/test_devloop_boundary.py`). [ADR 0001](../adr/0001-prodotto-unico-fasi-su-tracker.md) keeps
 devloop and ssdlc in one repository and allows reuse of ssdlc code only through a declared `core`
@@ -1010,9 +1228,8 @@ package, added to that test's allowlist; there is no such package yet.
 
 ## Limits
 
-- **Merge off by default.** With `[merge].mode = "off"` a human merges every PR. The other
-  modes merge only under the [merge directives](#merge-modes), never a PR touching an
-  operator-only path or at a level whose override is `"off"`.
+- **Merge off by default.** A human merges every PR unless the operator chooses another
+  [merge mode](#merge-modes).
 - **Identities need apps.** An agent without a GitHub App publishes through the operator's `gh`
   login, and then cannot submit a native review of a PR opened with that same login.
 - **Trust comes from labels and identities.** Only issues whose `agent:ready` label was added by

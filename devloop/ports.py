@@ -21,6 +21,8 @@ Where a method went, when it was not obvious:
 - ``rerun_failed_jobs`` (#200) is in ``CI``: the dispatcher re-runs the failed jobs of a run
   whose failed test modules are not pertinent to the PR, with a token limited to
   ``actions: write``.
+- ``commit_date`` and ``required_checks`` (#263) are in ``CI``: a head without CI waits for it
+  from its push, or its commit date, and as long as the base branch requires checks.
 - ``merge_state`` is a ``CodeReview`` method: the adapter turns the mergeability of a PR, as
   ``open_prs`` reports it, into ``clean``, ``conflict`` or ``unknown``.
 - ``pr_state`` and ``merge_pr`` (#172) are in ``CodeReview``: the merge of a ready PR re-reads
@@ -160,6 +162,13 @@ class CI(Protocol):
 
     def rerun_failed_jobs(self, run_id):
         """Re-run the failed jobs of run ``run_id`` (#200); raises ``GitHubError`` if refused."""
+
+    def commit_date(self, sha):
+        """The committer date of commit ``sha`` as ``YYYY-MM-DDTHH:MM:SSZ``, or None (#263)."""
+
+    def required_checks(self, branch):
+        """The names of the checks that the rulesets and the branch protection of ``branch``
+        require, sorted (#263); empty when none does."""
 
 
 @runtime_checkable

@@ -150,6 +150,16 @@ auto = false
 [run]
 # alert_issue = 123
 
+# The CI of a new head (issue #263). With local_tests other than "full", a PR in agent:review
+# whose head has no CI yet is not reviewed for grace_minutes after its push (the dispatcher's own
+# push, else the commit date): GitHub may not have registered the CI yet. After that the full
+# suite runs locally before the review, as before, unless the rulesets or the branch protection
+# of base_branch require checks: then the review waits for them, and after
+# required_timeout_minutes from the push the PR goes to agent:needs-operator (class ci_missing).
+[ci]
+grace_minutes = 5
+required_timeout_minutes = 30
+
 # Documentation map (issue #203): code paths and the documents that describe them. A key is a
 # directory prefix ending in "/" or a file, relative to the root, with no pattern characters;
 # each value lists one or more documents of the repository (a pin does not extract them, #210).
@@ -178,9 +188,11 @@ auto = false
 "devloop/ports.py" = ["docs/architecture.md"]
 "devloop/github.py" = ["docs/architecture.md"]
 "scripts/devloop-pinned" = ["docs/devloop/guide.md"]
-"orchestrator.py" = ["README.md", "docs/architecture.md"]
-"ssdlc_tasks.py" = ["README.md", "docs/architecture.md"]
-"ssdlc_controller.py" = ["README.md", "docs/architecture.md"]
+"scripts/run-tests.py" = ["docs/development.md"]
+"orchestrator.py" = ["docs/getting-started.md", "docs/architecture.md"]
+"ssdlc_tasks.py" = ["docs/getting-started.md", "docs/architecture.md"]
+"ssdlc_controller.py" = ["docs/getting-started.md", "docs/architecture.md"]
+"setup-ssdlc.sh" = ["docs/getting-started.md", "docs/configuration.md"]
 "ssdlc_writer_gate.py" = ["docs/writer-fencing.md"]
 "ssdlc_role_fencing.py" = ["docs/writer-fencing.md"]
 "ssdlc_container_holder.py" = ["docs/writer-fencing.md"]
@@ -195,9 +207,9 @@ auto = false
 "ssdlc_feedback_return.py" = ["docs/developer-feedback.md"]
 "ssdlc_feedback_roles.py" = ["docs/developer-feedback.md"]
 "ssdlc_feedback_workflow.py" = ["docs/developer-feedback.md"]
-"ssdlc_scope_amendments.py" = ["docs/scope-amendments.md"]
-"ssdlc_continuations.py" = ["docs/continuations.md", "docs/historical-reconciliation.md"]
-"ssdlc_historical.py" = ["docs/continuations.md", "docs/historical-reconciliation.md"]
+"ssdlc_scope_amendments.py" = ["docs/scope-amendments.md", "docs/recovery.md"]
+"ssdlc_continuations.py" = ["docs/continuations.md", "docs/historical-reconciliation.md", "docs/recovery.md"]
+"ssdlc_historical.py" = ["docs/continuations.md", "docs/historical-reconciliation.md", "docs/recovery.md"]
 "schemas/" = ["docs/configuration.md"]
 "ssdlc_catalogues.py" = ["docs/configuration.md"]
 

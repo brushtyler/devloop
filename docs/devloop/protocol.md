@@ -244,8 +244,10 @@ How devloop merges in the `"strict"` and `"auto"` [merge modes](guide.md#merge-m
   `contents=write` and `pull_requests=write`; without it, with the local `gh` login devloop runs
   with. No other GitHub App, the dispatcher's included, gets `contents=write`. The branch is
   kept. A merge that GitHub refuses goes to `agent:needs-operator` like any `gh` failure.
-- **Slot.** A merge takes a slot of `max_actions_per_tick` and runs alone, after the actions
-  planned before it and before those planned after it ([Parallel actions](reference.md#parallel-actions)).
+- **Slot.** A merge takes a slot of `max_actions_per_tick`. In `devloop tick` it runs alone,
+  after the actions planned before it and before those planned after it
+  ([Parallel actions](reference.md#parallel-actions)); in `devloop run` it runs in the
+  [merge lane](guide.md#the-merge-lane), one merge at a time, alongside the actions on other numbers.
 - **Record.** A dispatcher comment with a `merged` marker records the head, the receipt, the
   level and the mode, and in `merged_by` the login of the merger app when it merged (none with
   the local login).

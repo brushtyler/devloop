@@ -78,7 +78,7 @@ Before new planning or the first task, the host captures and registers `00-recon
 - A missing or altered contract blocks execution.
 - The fingerprint ignores global and system Git configuration, so it does not depend on `HOME`.
 
-Keep the executing installation pinned to a reviewed version. When SSDLC develops itself, run that pinned controller against a separate target checkout. A run continues on its pinned controller; changing controller requires an explicit migration (see the [recovery documents](../README.md#recovery-and-continuation)).
+Keep the executing installation pinned to a reviewed version. When SSDLC develops itself, run that pinned controller against a separate target checkout. A run continues on its pinned controller; changing controller requires an explicit migration (see the [recovery index](recovery.md)).
 
 ## Integrity model and its limits
 
@@ -141,6 +141,10 @@ The dispatcher reaches GitHub through three ports, declared in `devloop/ports.py
 issue, with the state of each blocking issue and who added each block, read with GraphQL (one
 query, more only when the events of an open block are older than the latest 100)
 ([Dependencies between issues](devloop/guide.md#dependencies-between-issues)).
+
+`CI` also has `commit_date` and `required_checks` (#263): the commit date of a head and the
+checks the base branch requires, for the wait for the
+[CI of a new head](devloop/reference.md#ci-of-a-new-head).
 
 The ports hold only the methods the dispatcher calls, with their current names and signatures,
 and return normalized data. `GitHub` (`devloop/github.py`) implements all three, and `Identities`

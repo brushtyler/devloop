@@ -5,7 +5,8 @@ split into three pages:
 
 - [Guide](devloop/guide.md), for the operator and the supervisor: the loop, labels and
   `/devloop` commands, merge modes and escalations, watching a tick and the continuous loop, the
-  pinned installation, limits.
+  installation from the dedicated user to the rollback (keys, agent CLIs, pin, overlay, start
+  and stop), limits.
 - [Reference](devloop/reference.md): configuration, local tests, documentation map, agents and
   fallback models, review levels and policy, GitHub identities and apps.
 - [Protocol](devloop/protocol.md): sync mechanics, rounds, markers and records (receipts, merge

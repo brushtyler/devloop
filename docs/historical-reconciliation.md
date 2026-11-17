@@ -4,6 +4,8 @@ This compatibility rule, `i1-cumulative-limits-v1`, admits a stopped, explicitly
 fenced I1 generation to native development with cumulative I2 limits. Preparation
 and activation never call a provider. They do not resume the historical #22 run,
 authorize a new budget implicitly, approve a PR, or grant global readiness.
+The [History](#history) at the end of this page records how it was verified and
+what remains for its rollout.
 
 ## Operator workflow
 
@@ -136,6 +138,15 @@ All invocations count toward total, role and phase caps exactly once. A legacy
 aggregate `budget` also remains enforced as `combined_reported_usd_cap`; raising
 it requires its own listed extension, even if individual cost-kind caps fit.
 
+An operator may choose a documented sample mean as a proxy allocation, but it
+must remain separate from observed usage and identify its source kind, engine,
+sample size and calculation in `unknown_usage_reserve.reason`. A cross-engine
+sample mean is neither a recovered observation nor a proven upper bound. It
+cannot be represented as actual billing or silently converted into a guarantee
+of a complete monetary total. Invocation/time limits continue to apply. The
+exclusive-kind mode prevents counting the same proxy allocation twice in the
+combined cap; it does not make the underlying unknown usage known.
+
 `limit_sources` optionally identifies exact hashed JSON/env files and an explicit
 mapping of canonical numeric cap names to JSON pointers/env keys. Env files are
 parsed as data, never sourced as shell. Conflicting evidence is refused. Missing
@@ -182,10 +193,13 @@ A fresh failure of an already committed checkpoint refuses admission; rewriting
 that checkpoint automatically belongs to I5a's corrective loop. This rule does
 not support task identity changes, planning restart or a second execution-profile
 migration. Hashes assume host-owned references and authorization are protected;
-full egress/host containment remains I3. Hardening of other new-run I2 paths is
-tracked separately in #29.
+full egress/host containment remains I3.
 
-## Verification and next rollout
+## History
+
+Hardening of other new-run I2 paths is tracked separately in #29.
+
+### Verification and next rollout
 
 `tests/test_reconciliation.py`, `tests/test_historical_accounting.py`,
 `tests/test_not_dispatched.py` and `tests/test_continuation_hardening.py` run in the existing
@@ -201,13 +215,3 @@ its authorization before resuming through SSDLC. Record before/after logical and
 live calls, attempts, duplicated work, model/check/elapsed/operator-wait time and
 required/avoidable interventions. Preserve the historical baseline and report
 fresh global-gate outcomes; completing this offline PR is not that evaluation.
-
-
-An operator may choose a documented sample mean as a proxy allocation, but it
-must remain separate from observed usage and identify its source kind, engine,
-sample size and calculation in `unknown_usage_reserve.reason`. A cross-engine
-sample mean is neither a recovered observation nor a proven upper bound. It
-cannot be represented as actual billing or silently converted into a guarantee
-of a complete monetary total. Invocation/time limits continue to apply. The
-exclusive-kind mode prevents counting the same proxy allocation twice in the
-combined cap; it does not make the underlying unknown usage known.

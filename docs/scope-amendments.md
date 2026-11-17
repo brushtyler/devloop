@@ -1,5 +1,10 @@
 # Explicit scope amendments after a checkpoint
 
+An admitted I2 generation can prepare a separate, reviewed generation
+when exactly one uncompleted task stopped with `SCOPE_REQUIRED`.
+I1's `pre-checkpoint-import-v1` remains unchanged. The [History](#history) at
+the end of this page records how this rule was built.
+
 Added targets that were changed by a completed task now carry the native
 [owner-revalidation contract](developer-feedback.md#completed-owner-scope-recovery-38).
 Preview lists the owners and check obligations; preparation requires explicit
@@ -9,14 +14,6 @@ can be bound through `--feedback-request`, with exact operator authorization
 and no repeated model calls. A changed overall feedback-evidence hash requires
 the separately declared `--reconcile-feedback-evidence` path; semantic inputs
 and recorded request evidence must remain unchanged.
-
-Offline validation and its limits are recorded in
-[the sanitized validation summary](evidence/post-checkpoint-scope-validation.json).
-
-This implements the post-checkpoint scope-recovery case needed by #22 under A6a
-of `PLAN_AUTONOMY_WORKSTREAMS.md`. I1's `pre-checkpoint-import-v1` remains
-unchanged. An admitted I2 generation can prepare a separate, reviewed generation
-when exactly one uncompleted task stopped with `SCOPE_REQUIRED`.
 
 A captured `CHECK_FAILURE` can also use this manual path when the host classifies
 all failed checks as outside the task manifest. This is a scope hint, not proof
@@ -153,9 +150,8 @@ The ordinary scope-only rule does not merge/split tasks, alter requirements, loo
 verification environments, grant attempts or raise budgets. Arbitrary controller
 migration, invalidated-task recovery and automatic replanning still require their
 own compatibility rules. Final review/QA/AppSec and delivery requirements remain
-those of the original run. #36 separately tracks native phase-boundary stops and
-retaining failed-baseline diagnostics during I1/I2 preparation; scope-amendment
-refusals keep their own [refusal records](#refusal-records).
+those of the original run. Scope-amendment refusals keep their own
+[refusal records](#refusal-records).
 
 ## Operator repair after a verification timeout
 
@@ -247,3 +243,17 @@ expired feedback-recording policy: its authority, expiry, requests and funded
 role history remain unchanged. Such a recording policy still requires its own
 admission before further automatic consultations; deterministic checks and
 authorized native development use the new execution deadline.
+
+## History
+
+### Post-checkpoint scope recovery (A6a)
+
+This implements the post-checkpoint scope-recovery case needed by #22 under A6a
+of `PLAN_AUTONOMY_WORKSTREAMS.md`.
+
+Offline validation and its limits are recorded in
+[the sanitized validation summary](evidence/post-checkpoint-scope-validation.json).
+
+Issue #36 separately tracks native phase-boundary stops and
+retaining failed-baseline diagnostics during I1/I2 preparation; scope-amendment
+refusals keep their own [refusal records](#refusal-records).

@@ -81,7 +81,7 @@ trusted user's label counts. The issue text stays trusted only while no one outs
 Parallel actions (#176, ``max_parallel_actions`` above 1): the actions of a tick on different
 issues and PRs run at once, up to that many (``schedule``). Actions on the same number, or on a
 PR and its issue, run one after the other in plan order; a global action (``GLOBAL_ACTIONS``)
-runs alone. Each log line carries the number of its action (``TickLog``), a failed action does
+or a merge runs alone. Each log line carries the number of its action (``TickLog``), a failed action does
 not stop the others, and a review action at level 2 runs together every reviewer its round
 still waits for.
 
@@ -90,7 +90,8 @@ barrier at the end of a tick. A tick plans and starts actions in the free slots,
 for them; the loop runs the next tick as soon as one ends, or as news on GitHub arrive while a
 slot is free. The issues and PRs of the running actions are left out of the plan (``plan``'s
 ``busy``), so no two actions on the same number overlap, and a global action starts only when
-nothing runs, alone (``admit``). ``devloop tick`` keeps the barrier.
+nothing runs, alone (``admit``). A merge runs in a lane of its own (#264, ``MERGE_LANE``): one
+at a time, alongside the actions on other numbers. ``devloop tick`` keeps the barrier.
 
 Merge (#172, ``[merge]``): with ``mode = "off"`` (the default) a person merges. With ``strict``
 the dispatcher merges a ready PR, with the local ``gh`` login and ``--match-head-commit``, once
@@ -126,6 +127,12 @@ Requested fixes (#195): ``/devloop fix`` from a trusted user or the supervisor's
 PR in agent:review or agent:changes, runs a fix of the current head with the rest of the comment
 as a requirement, without a review and without a round (``_do_requested_fix``). One such fix per
 head: a later command on the same head counts only after a new commit (``_fix_requests``).
+
+CI of a new head (#263, ``[ci]``): with ``local_tests`` other than ``full``, a PR in agent:review
+whose head has no CI is not reviewed for ``grace_minutes`` after its push, as if its CI were
+pending (``_ci_wait``): the push the dispatcher recorded, else the commit date. Then the full
+suite runs locally, as before, unless the base branch requires checks: the review waits for
+them, and after ``required_timeout_minutes`` the PR is escalated (``ci_missing``).
 """
 
 import hashlib
@@ -137,6 +144,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 
 from .acceptance import (acceptance_criteria, acceptance_findings, format_criteria, format_map,
@@ -153,7 +161,7 @@ from .markdown import (RESUME, carries_record, dispatcher_header, publishable, r
                        render_cycle, render_escalation, render_fix, render_native_review,
                        render_operator_merge,
                        render_preflight, render_review, render_supervision)
-from .pin import PinError, Repinned
+from .pin import PinError, Repinned, SmokeError
 from .policy import describe as describe_receipt
 from .policy import (BINDING, MAX_LISTED_PATHS, ZERO_LEVEL, agent_profile, changes_requested,
                      check_outcome, check_states, differences, distinct, evaluate, independent,
@@ -188,10 +196,16 @@ RESYNC_AFTER_APPROVAL = 'resync_after_approval'
 BASE_CHANGED = 'base_changed'
 # Actions that take a slot of ``max_actions_per_tick``.
 EXPENSIVE = ('review', 'fix', 'implement', 'sync', 'preflight', 'merge', 'supervise')
-# Actions that write to the base branch or to the whole repository (the merge of #172, the pin
-# of #174): with ``max_parallel_actions`` above 1 each runs alone, after the actions planned
-# before it and before those planned after it (#176).
-GLOBAL_ACTIONS = frozenset({'merge', 'pin'})
+# Actions that write to the whole repository or to devloop itself (the pin of #174): with
+# ``max_parallel_actions`` above 1 each runs alone, after the actions planned before it and
+# before those planned after it (#176), and in continuous mode only when nothing runs (#227).
+GLOBAL_ACTIONS = frozenset({'pin'})
+# Actions that write to the base branch (the merge of #172). In continuous mode they run in a
+# lane of their own (#264): one at a time, alongside the actions on other numbers, since those
+# work in their own worktrees and already handle a base that moves (#160, #235, #250, #252),
+# as they must for a merge made by a person. In a tick's ``schedule`` each is still a phase of
+# its own, as a global action.
+MERGE_LANE = frozenset({'merge'})
 LABEL_STYLE = {
     'ready': ('0e8a16', 'devloop: pronta per essere implementata da un agent'),
     'working': ('fbca04', 'devloop: implementazione in corso'),
@@ -307,6 +321,11 @@ class PullRequest:
     # not started yet, and the failure is not a new one.
     reruns: list = field(default_factory=list)
     rerun_waiting: bool = False
+    # In agent:review, a head without CI that the review waits for (#263): why, as the log says
+    # it ('' when it does not wait), and the checks the base branch requires that are still
+    # missing after ``required_timeout_minutes`` (empty unless the PR is to escalate).
+    ci_wait: str = ''
+    ci_missing: list = field(default_factory=list)
     # Operator merge (#248): the heads whose ``operator_merge`` notice belongs to the current
     # promotion, the comment id of the notice of the current head (one per head, edited when
     # the head is promoted again), how many promotions the policy records count, and whether
@@ -317,6 +336,16 @@ class PullRequest:
     operator_notice: int = None
     promotions: int = 0
     operator_owned: bool = False
+
+
+def _timestamp(value):
+    """Seconds since the epoch of an ISO 8601 date with its zone, as GitHub writes them, or
+    None when ``value`` is not one."""
+    try:
+        moment = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    return moment.timestamp() if moment.tzinfo is not None else None
 
 
 def operator_blocked(labels, lb):
@@ -388,11 +417,12 @@ def schedule(actions, issue_of):
 
     Actions on the same number share a lane, in plan order, and so do an action on a PR and one
     on its issue (``issue_of``: PR number to issue number). A global action
-    (``GLOBAL_ACTIONS``) is a phase of its own: it starts after every action planned before it
-    has ended, and those planned after it start once it has ended."""
+    (``GLOBAL_ACTIONS``) or a merge (``MERGE_LANE``) is a phase of its own: it starts after
+    every action planned before it has ended, and those planned after it start once it has
+    ended."""
     phases, batch = [], []
     for position, action in enumerate(actions):
-        if action.kind in GLOBAL_ACTIONS:
+        if action.kind in GLOBAL_ACTIONS or action.kind in MERGE_LANE:
             if batch:
                 phases.append(_lanes(batch, issue_of))
             phases.append([[(position, action)]])
@@ -436,14 +466,17 @@ def admit(actions, issue_of, running, slots):
 
     A global action (``GLOBAL_ACTIONS``) starts only when nothing runs, alone and before the
     others; while one is planned and something runs, nothing starts, so that the running actions
-    end and it runs next. While a global action runs, nothing starts either. Of several actions
-    on the same number, or on a PR and its issue, only the first starts: the next plan, which
-    sees its result, decides the others."""
+    end and it runs next. While a global action runs, nothing starts either. A merge
+    (``MERGE_LANE``, #264) is not global: it starts alongside the actions on other numbers and
+    holds back none of them, but only one merge runs at a time; a merge planned while another
+    runs waits for a later plan. Of several actions on the same number, or on a PR and its
+    issue, only the first starts: the next plan, which sees its result, decides the others."""
     if any(action.kind in GLOBAL_ACTIONS for action, _ in running):
         return []
     first = next((a for a in actions if a.kind in GLOBAL_ACTIONS), None)
     if first is not None:
         return [] if running else [first]
+    merging = any(action.kind in MERGE_LANE for action, _ in running)
     chosen, taken = [], set()
     for action in actions:
         if len(chosen) >= slots:
@@ -452,6 +485,10 @@ def admit(actions, issue_of, running, slots):
         if numbers & taken:
             continue
         taken |= numbers
+        if action.kind in MERGE_LANE:
+            if merging:
+                continue
+            merging = True
         chosen.append(action)
     return chosen
 
@@ -706,13 +743,19 @@ def pr_counts_line(snapshot, cfg):
             f'{held}/{cfg.max_parked_prs} parked (max_parked_prs)')
 
 
-def plan(snapshot, cfg, busy=frozenset(), reserved=0):
+def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
     """Pure planning: the actions one tick should take, in order.
 
     In continuous mode (#227) ``busy`` holds the numbers of the issues and PRs that actions
     still running touch (``numbers_of``): no action of the plan touches them. ``reserved`` is
     how many of those actions may open a PR (an implementation, a readiness check, a supervisor
-    command on an issue): each holds a slot of ``max_open_prs``, as it did in its own tick."""
+    command on an issue): each holds a slot of ``max_open_prs``, as it did in its own tick.
+    ``merging`` tells whether a merge runs (continuous mode only, None in a tick): merges run one
+    at a time (``MERGE_LANE``, #264), so only the first merge of the plan, and none while one
+    runs, takes a slot of ``max_actions_per_tick``. The others stay in the plan, where ``admit``
+    holds them back with their numbers, and take no slot from the actions that can start now.
+    A merge that finds the limit already spent is dropped and does not take the lane: so is
+    every merge after it, which would otherwise start in its place past the limit."""
     lb = cfg.labels
     actions = []
     issue_of = {pr.number: pr.issue for pr in snapshot.prs}
@@ -852,6 +895,12 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0):
                 continue  # GitHub is still computing mergeability: next tick
             elif pr.checks == 'pending':
                 continue
+            elif pr.ci_missing:
+                # The checks the base branch requires never appeared on the head (#263).
+                actions.append(Action('ci_missing', pr.number, 'required checks missing: '
+                                      + ', '.join(pr.ci_missing)))
+            elif pr.ci_wait:
+                continue  # a head without CI yet (#263): as if its CI were pending
             elif pr.checks == 'fail' and pr.rerun_waiting:
                 continue  # the failed jobs were re-run (#200) and have not started yet
             elif replay and not unbound and not unmapped and pr.checks != 'fail':
@@ -912,10 +961,17 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0):
     for action in actions:
         if busy and numbers_of(action.number, issue_of) & busy:
             continue  # still running (#227): the plan after it ends decides
+        lane = merging is not None and action.kind in MERGE_LANE
+        if lane and merging:
+            # The merge lane is taken (#264): ``admit`` holds it back, with its numbers.
+            capped.append(action)
+            continue
         if action.kind in EXPENSIVE:
             if spent >= cfg.max_actions_per_tick:
                 continue
             spent += 1
+        if lane:
+            merging = True  # only a merge the plan keeps takes the lane
         capped.append(action)
     return capped
 
@@ -1328,8 +1384,12 @@ class Dispatcher:
     status``. ``ledger`` (``ledger.Ledger``) records evidence and telemetry of each step (#133)."""
 
     def __init__(self, cfg, gh: Backend, ws, runner, log=print, identities=None, activity=None,
-                 ledger=None, merger=None, pinner=None, memory=None):
+                 ledger=None, merger=None, pinner=None, memory=None, clock=time.time):
         self.cfg = cfg
+        # Wall-clock seconds, and since when each head waits for its CI (#263): the time of
+        # the dispatcher's own push, else its commit date, read once.
+        self.clock = clock
+        self._ci_since = {}
         # The pin after a merge (#174, ``pin.AutoPin``), used only with ``[pin] auto = true``.
         self.pinner = pinner
         self.gh = gh
@@ -1350,6 +1410,10 @@ class Dispatcher:
         # Continuous mode (#227): set by ``devloop run`` with parallel actions, a tick starts
         # its actions in these ``Workers`` and does not wait for them.
         self.workers = None
+        # Held by a merge while it requests the pin (#174), and by a continuous tick while it
+        # checks for that request and starts its actions (#264): a request made during the
+        # tick either stops it or comes after its actions started.
+        self._pin_lock = threading.Lock()
         # Whether a tick of this process already checked the rename of agent:needs-operator
         # (#248, ``_transition_labels``).
         self.labels_checked = False
@@ -2201,6 +2265,9 @@ class Dispatcher:
                     details = (pr.check_details if pr.check_details is not None
                                else self.gh.check_details(pr.head_sha))
                     pr.rerun_waiting = rerun_waiting(record, details)
+                if (pr.meta and lb.review in pr.labels and pr.checks == 'none'
+                        and self.cfg.local_tests != 'full'):
+                    pr.ci_wait, pr.ci_missing = self._ci_wait(pr)
             if (lb.ready_to_merge in pr.labels and pr.zero_head is not None
                     and zero_labels_hold(pr, self.cfg.review_policy)):
                 pr.zero_problem = self._zero_problem(pr)
@@ -2249,6 +2316,67 @@ class Dispatcher:
         working = [raw['number'] for raw in self.gh.issues_with_label(lb.working)]
         return Snapshot(prs=prs, ready_issues=ready, working_issues=working,
                         supervised=self._supervised_items(prs))
+
+    def _pushed(self, path):
+        """Record that the head of worktree ``path`` was pushed now (#263): the wait for its CI
+        counts from here."""
+        self._ci_since[self.ws.head(path)] = self.clock()
+
+    def _ci_wait(self, pr):
+        """``(why, missing)`` for a PR in agent:review whose head has no CI, with ``local_tests``
+        other than ``full`` (#263). Within ``[ci] grace_minutes`` of the head's push the review
+        waits, as if its CI were pending (``why`` says it, and the log too). After that, when
+        the base branch requires checks, it waits for them up to ``required_timeout_minutes``,
+        and then ``missing`` lists them: the PR is escalated, even within a grace window longer
+        than that timeout. Otherwise ``('', [])``: the full suite runs locally before the
+        review, as before.
+
+        The push counts from when this dispatcher pushed the head, else from the head's commit
+        date, read once; a date in the future, or one that cannot be read, counts from now, so
+        that the wait stays bounded."""
+        ci, sha = self.cfg.ci, pr.head_sha
+        now = self.clock()
+        since = self._ci_since.get(sha)
+        if since is None:
+            try:
+                committed = _timestamp(self.gh.commit_date(sha))
+            except GitHubError as exc:
+                self.log(f'  PR #{pr.number}: commit date of {sha[:12]} not read: {exc}')
+                committed = None
+            since = now if committed is None else min(committed, now)
+            self._ci_since[sha] = since
+        age = now - since
+        grace = age < ci.grace_minutes * 60
+        timed_out = age >= ci.required_timeout_minutes * 60
+
+        def in_grace():
+            why = (f'waiting for CI on {sha[:12]}: pushed {int(age)} s ago, within '
+                   f'[ci] grace_minutes = {ci.grace_minutes}')
+            self.log(f'  PR #{pr.number}: {why}')
+            return why, []
+
+        # A grace longer than the timeout of the required checks does not delay their
+        # escalation: past the timeout the required checks are read even within the grace.
+        if grace and not timed_out:
+            return in_grace()
+        base = self.cfg.base_branch
+        try:
+            required = self.gh.required_checks(base)
+        except GitHubError as exc:
+            self.log(f'  PR #{pr.number}: the checks {base} requires not read, counted as none: '
+                     f'{exc}')
+            required = []
+        if not required:
+            return in_grace() if grace else ('', [])
+        if not timed_out:
+            why = (f'waiting for CI on {sha[:12]}: {base} requires {", ".join(required)}, not '
+                   f'reported {int(age)} s after the push ([ci] required_timeout_minutes = '
+                   f'{ci.required_timeout_minutes})')
+            self.log(f'  PR #{pr.number}: {why}')
+            return why, []
+        self.log(f'  PR #{pr.number}: no CI on {sha[:12]} {int(age)} s after the push, but {base} '
+                 f'requires {", ".join(required)}')
+        return '', list(required)
 
     def _supervised_items(self, prs):
         """The issues and PRs in ``agent:needs-supervisor``, not in ``agent:needs-operator``,
@@ -2602,14 +2730,16 @@ class Dispatcher:
         them. Returns the actions started.
 
         The pin after a merge needs every action ended, since a new copy restarts the process:
-        while one is pending and something runs, nothing starts."""
+        while one is pending and something runs, nothing starts. A merge runs alongside the
+        others (#264) and may request the pin while this tick reads GitHub: the request is
+        checked again, under ``_pin_lock``, right before the actions start."""
         workers = self.workers
         # An action that ends from here on wakes the loop again: its result is not in this plan.
         workers.clear()
         running = workers.running()
         if not running:
             self._auto_pin(False)
-        elif self.pinner is not None and self.cfg.pin.auto and self.pinner.pending():
+        elif self._pin_pending():
             self.log(f'auto-pin pending: no action starts until the {len(running)} running '
                      'ones end')
             return []
@@ -2626,14 +2756,26 @@ class Dispatcher:
         reserved = sum(1 for action, _ in running
                        if action.kind in ('implement', 'preflight')
                        or action.kind == 'supervise' and action.number not in prs)
-        actions = plan(snap, self.cfg, busy, reserved)
+        merging = any(action.kind in MERGE_LANE for action, _ in running)
+        actions = plan(snap, self.cfg, busy, reserved, merging)
         started = admit(actions, issue_of, running, workers.free())
         self.log(f'{pr_counts_line(snap, self.cfg)}; running: '
                  + (', '.join(f'{a.kind} #{a.number}' for a, _ in running) or 'none'))
-        for action in started:
-            workers.start(action, numbers_of(action.number, issue_of),
-                          lambda action=action: self._run_started(action, prs))
+        with self._pin_lock:
+            if started and self._pin_pending():
+                # Requested by a merge that ended while this tick read GitHub: drain, and pin
+                # once the running actions end.
+                self.log('auto-pin requested during the tick: no action starts until the '
+                         'running ones end')
+                return []
+            for action in started:
+                workers.start(action, numbers_of(action.number, issue_of),
+                              lambda action=action: self._run_started(action, prs))
         return started
+
+    def _pin_pending(self):
+        """Whether an automatic pin after a merge (#174) waits for its turn."""
+        return bool(self.pinner is not None and self.cfg.pin.auto and self.pinner.pending())
 
     def _run_started(self, action, prs):
         """Run an action of the continuous mode in its worker thread, as a lane of one, and log
@@ -2674,7 +2816,11 @@ class Dispatcher:
         """With ``[pin] auto = true`` and a pin requested by a merge (#174), pin
         ``origin/<base_branch>`` before planning. A failed pin stops the tick with ``PinError``
         and leaves the pointer and the request as they were; a new copy raises ``Repinned``, so
-        that the process starts again from it."""
+        that the process starts again from it.
+
+        A copy refused by the smoke test (``SmokeError``, #260) is not a failed tick: the request
+        is dropped, ``current`` stays, planning goes on from the running copy, and an alert goes
+        to ``[run].alert_issue`` once per refused commit."""
         if self.pinner is None or not self.cfg.pin.auto:
             return
         request = self.pinner.pending()
@@ -2688,11 +2834,45 @@ class Dispatcher:
         self.log(f'auto-pin of {ref} after {why}')
         try:
             copy = self.pinner.pin(ref)
+        except SmokeError as exc:
+            self.pinner.cancel()
+            self.log(f'auto-pin of {ref} refused, the pinned copy is unchanged and the request '
+                     f'is dropped: {exc}')
+            self._alert_refused_pin(ref, exc)
+            return
         except (PinError, ConfigError, OSError) as exc:
             raise PinError(f'auto-pin of {ref} failed, the pinned copy is unchanged: {exc}') \
                 from exc
         if Path(copy).resolve() != INSTALL_ROOT.resolve():
             raise Repinned(copy)
+
+    def _alert_refused_pin(self, ref, exc):
+        """The alert of a copy refused by the smoke test of an auto-pin (#260), on
+        ``[run].alert_issue``, once per commit: its commit and failed step, never the error's
+        text (it stays in the local log). One attempt; a failure is logged."""
+        issue = self.cfg.run.alert_issue
+        if not issue:
+            self.log('  no [run].alert_issue is configured: no alert for the refused pin')
+            return
+        if self.pinner.alerted(exc.sha):
+            self.log(f'  the refusal of {exc.sha[:12]} was already reported on #{issue}')
+            return
+        body = publishable(
+            dispatcher_header()
+            + '\n## Pin automatico rifiutato dallo smoke test\n\n'
+            + f'La copia di `{ref}` al commit `{exc.sha[:12]}` non ha superato lo smoke test '
+              f'al passo `{exc.step}`. `current` resta sulla copia precedente, la richiesta di '
+              'pin è annullata e il ciclo continua.\n\n'
+            + 'Il dettaglio è nel log locale; la copia rifiutata resta in '
+              f'`rejected-{exc.sha[:12]}` nella directory di stato, per l\'analisi.')
+        try:
+            self.gh.comment(issue, body)
+        except Exception as exc_:  # one attempt only: its class, never its output
+            self.log(f'  the alert of the refused pin on #{issue} could not be published '
+                     f'({type(exc_).__name__})')
+            return
+        self.pinner.mark_alerted(exc.sha)
+        self.log(f'  alert of the refused pin published on #{issue}')
 
     def _run_action(self, action, prs):
         """Run one action; a failure of an agent, ``gh``, git or trust escalates its issue or
@@ -3762,7 +3942,8 @@ class Dispatcher:
         if self.pinner is not None and cfg.pin.auto and cfg.pin.touches(paths):
             # The next tick pins the base with this merge, before planning (#174).
             try:
-                self.pinner.request(pr.number, head)
+                with self._pin_lock:
+                    self.pinner.request(pr.number, head)
                 self.log(f'  auto-pin of origin/{cfg.base_branch} requested for the next tick')
             except OSError as exc:
                 self.log(f'  auto-pin NOT requested, pin by hand: {exc}')
@@ -3968,6 +4149,24 @@ class Dispatcher:
                                   'delle modifiche della descrizione) come ultima riga.',
                        remove=[lb.review, lb.changes, lb.ready_to_merge], cls='lost_meta')
 
+    def _do_ci_missing(self, pr):
+        """A head without CI, past ``[ci] required_timeout_minutes``, on a base branch that
+        requires checks (#263): to the operator, unless the head moved or some CI appeared."""
+        lb = self.cfg.labels
+        if self.gh.pr_head(pr.number) != pr.head_sha:
+            self.log('  head moved since the snapshot; retrying next tick')
+            return
+        if self.gh.checks(pr.head_sha)[0] != 'none':
+            self.log(f'  CI appeared on {pr.head_sha[:12]}; retrying next tick')
+            return
+        names = ', '.join(f'`{name}`' for name in pr.ci_missing)
+        self._escalate(pr.number, f'Sul head `{pr.head_sha[:12]}` non risulta alcuna CI '
+                                  f'{self.cfg.ci.required_timeout_minutes} minuti dopo il push, '
+                                  f'ma `{self.cfg.base_branch}` richiede i check {names}: la '
+                                  'review non parte senza la CI. Verificare che la CI sia '
+                                  'partita sul head, o rilanciarla.',
+                       remove=[lb.review], cls='ci_missing')
+
     def _do_round_limit(self, pr):
         lb = self.cfg.labels
         self._escalate(pr.number, f'Raggiunto il limite di {self.cfg.max_review_rounds} round di '
@@ -4031,6 +4230,7 @@ class Dispatcher:
         if protected:
             return self._escalate_protected(number, protected, remove=[lb.working])
         self.ws.push(path, branch, replace=True, auth=auth)
+        self._pushed(path)
         # The marker keeps the map the reviewer checks until a fix replaces it (#134).
         meta = {'issue': number, 'implementer': agent.key, 'reviewer': cfg.reviewer,
                 'profile': self._profile(agent.key, 'write', used),
@@ -4514,6 +4714,7 @@ class Dispatcher:
                 if protected:
                     return self._escalate_protected(pr.number, protected, remove=remove)
             self.ws.push(path, pr.head_ref, auth=auth)
+            self._pushed(path)
         if merged:
             # As for a sync without an agent (#133): an event, not a turn.
             self._ledger_event(pr.number, 'sync', base=merged['base'], head=merged['head'],
@@ -4663,6 +4864,7 @@ class Dispatcher:
         if protected:
             return self._escalate_protected(pr.number, protected, remove=remove)
         self.ws.push(path, pr.head_ref, auth=auth)
+        self._pushed(path)
         then = ('La PR torna in review sul nuovo head' if fix_remove is None else
                 'La correzione in attesa parte dal nuovo head al prossimo tick')
         text = (f'\n## Sincronizzazione con `{cfg.base_branch}`\n\n'

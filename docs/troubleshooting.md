@@ -23,7 +23,7 @@ Resume from a phase without repeating approved upstream work:
 
 Use the same goal and test command as the original run. In task mode, `po`, `design` and `plan` resume their own phases ([Task mode](task-mode.md)). Supervised runs use `resume` ([Supervision](supervision.md)).
 
-A run that stopped and cannot simply be resumed needs an explicit transition: changed controller, captured candidate, `SCOPE_REQUIRED` after a checkpoint, or exhausted frozen limits. See the [recovery documents](../README.md#recovery-and-continuation). Never edit journals, attempts or limits by hand: the controller detects it and refuses to continue.
+A run that stopped and cannot simply be resumed needs an explicit transition: changed controller, captured candidate, `SCOPE_REQUIRED` after a checkpoint, or exhausted frozen limits. See the [recovery index](recovery.md). Never edit journals, attempts or limits by hand: the controller detects it and refuses to continue.
 
 ## Common stops
 
