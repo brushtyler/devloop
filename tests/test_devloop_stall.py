@@ -298,7 +298,7 @@ class StalledTickTests(unittest.TestCase):
                             f'{self.finish()}', action='abort')
         self.assertLess(elapsed, 30)
         self.assertEqual(self.gh.created, [])
-        self.assertEqual(self.gh.labels[5], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[5], {'agent:needs-operator'})
         number, body = self.gh.comments[-1]
         self.assertEqual(number, 5)
         self.assertIn(f'{IMPL} in issue-5 stalled: no transcript event nor child process', body)

@@ -141,7 +141,7 @@ class DispatcherTests(unittest.TestCase):
         runner = self.implement(['ssdlc_impact.py'], tests=(False, False))
         self.assertEqual(len(runner.calls), 1 + CFG.implement_test_retries)
         self.assertEqual(self.gh.created, [])
-        self.assertEqual(self.gh.labels[7], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[7], {'agent:needs-operator'})
         self.assertIn('I test locali falliscono', self.gh.comments[-1][1])
         self.assertIn('FAILED test_x', self.gh.comments[-1][1])
 
@@ -180,7 +180,7 @@ class CiGateTests(unittest.TestCase):
     def test_a_failing_full_suite_escalates_without_review(self):
         runner = self.review('changed', 'none', tests=(False,))
         self.assertEqual(runner.calls, [])
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         self.assertIn('FAILED test_x', self.gh.comments[-1][1])
         self.assertIn('pr-100-review', self.ws.removed)
 

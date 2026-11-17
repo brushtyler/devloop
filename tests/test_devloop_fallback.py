@@ -291,7 +291,7 @@ class FallbackTurnTests(unittest.TestCase):
                 d.snapshot = lambda: Snapshot([p], [], [])
                 self.assertEqual(d.tick(), [Action('review', 100)])
                 self.assertEqual(cli.models(), [ARGON])
-                self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+                self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
                 self.assertNotIn(HYDROGEN, self.gh.comments[-1][1])
 
     def test_unparsable_output_on_a_failed_turn_does_not_fall_back(self):
@@ -304,7 +304,7 @@ class FallbackTurnTests(unittest.TestCase):
                 d.snapshot = lambda: Snapshot([p], [], [])
                 self.assertEqual(d.tick(), [Action('review', 100)])
                 self.assertEqual(cli.models(), [ARGON])
-                self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+                self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
                 body = self.gh.comments[-1][1]
                 self.assertIn('Il passo `review` è fallito: agy exited with 1.', body)
                 self.assertNotIn(HYDROGEN, body)
@@ -321,7 +321,7 @@ class FallbackTurnTests(unittest.TestCase):
             d.snapshot = lambda: Snapshot([p], [], [])
             self.assertEqual(d.tick(), [Action('review', 100)])
         self.assertEqual(cli.calls, [model])
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         body = self.gh.comments[-1][1]
         self.assertIn('Il passo `review` è fallito: codex exited with 1.', body)
         self.assertNotIn(CODEX_FALLBACK, body)
@@ -335,7 +335,7 @@ class FallbackTurnTests(unittest.TestCase):
             d.snapshot = lambda: Snapshot([p], [], [])
             d.tick()
         self.assertEqual(cli.models(), [ARGON, HYDROGEN])  # once each, no retry on a model
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         body = self.gh.comments[-1][1]
         self.assertIn('Il passo `review` è fallito: no model of `agy` was available', body)
         self.assertIn(f'- `{ARGON}`: agy exited with 1 (`RESOURCE_EXHAUSTED`', body)
@@ -354,7 +354,7 @@ class FallbackTurnTests(unittest.TestCase):
                 d.snapshot = lambda: Snapshot([p], [], [])
                 d.tick()
                 self.assertEqual(cli.models(), [ARGON, HYDROGEN])
-                self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+                self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
                 body = self.gh.comments[-1][1]
                 self.assertIn('Il passo `review` è fallito: the last model tried for `agy` failed',
                               body)
@@ -369,7 +369,7 @@ class FallbackTurnTests(unittest.TestCase):
                                             'labeler': 'brushtyler', 'admitted': True}], [])
         self.assertEqual(d.tick(), [Action('implement', 7)])
         self.assertEqual(len(runner.calls), 1)
-        self.assertEqual(self.gh.labels[7], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[7], {'agent:needs-operator'})
         self.assertIn('Il passo `implement` è fallito: claude exited with 1.', self.gh.comments[-1][1])
         self.assertNotIn('models tried', self.gh.comments[-1][1])
 
@@ -396,7 +396,7 @@ class FallbackIndependenceTests(Quorum):
         self.d.tick()
         self.d.tick()
         self.assertEqual(self.reviewed(), [FIRST, SECOND])  # the fallback never ran
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         self.assertIn(f'- `{first.model}`: not independent', self.gh.comments[-1][1])
 
 

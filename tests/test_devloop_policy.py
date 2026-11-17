@@ -194,7 +194,7 @@ class PolicyDispatcherTests(unittest.TestCase):
 
     def assert_escalated_at_level_2(self, why):
         self.assertEqual(self.runner.calls, [])
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         body = self.gh.comments[-1][1]
         self.assertTrue(body.startswith('> [!NOTE]\n> **Bot:** devloop dispatcher'))
         self.assertIn('livello 2', body)
@@ -316,7 +316,7 @@ class StickyLevelTests(unittest.TestCase):
         snap.prs[0].head_sha = ws._head
         d.snapshot = lambda: snap
         self.assertEqual(d.tick(), [Action('review', 100)])
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         self.assertIn('`devloop/dispatcher.py`', published(self.gh)[-1])
         del d.snapshot
         # The operator resumes the PR and the core change is gone: the level stays 2.
@@ -325,7 +325,7 @@ class StickyLevelTests(unittest.TestCase):
         snap = d.snapshot()
         self.assertEqual(policy.recorded_level(snap.prs[0].reviews + snap.prs[0].policy), 2)
         d._do_review(dataclasses.replace(snap.prs[0], head_sha=ws._head))
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         self.assertIn('già richiesto in precedenza', published(self.gh)[-1])
         self.assertEqual(len(self.runner.calls), 2)  # the first review and the fix only
 
@@ -333,12 +333,12 @@ class StickyLevelTests(unittest.TestCase):
         d = self.make(FakeWS(), FakeRunner(raw_review()))
         self.gh.level_labelers = ['brushtyler']
         self.assertEqual(d.tick(), [Action('review', 100)])
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         # Even if the events were no longer visible, the recorded level holds.
         self.gh.level_labelers = []
         self.gh.labels[100] = {'agent:review'}
         d.tick()
-        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         self.assertEqual(self.runner.calls, [])
         self.assertEqual([r['receipt']['level'] for r in policy_records(self.gh)], [2, 2])
 

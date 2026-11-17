@@ -82,7 +82,7 @@ class Ledger:
     closed yet, with how many: a number is counted before the turn's record is written and
     uncounted when the turn is closed; a tick that has marked its turns incomplete forgets it.
     The trace does not depend on labels, which change once a step ends (``agent:working``
-    removed, ``agent:needs-human`` added). Without ``state_dir`` it lasts as long as the
+    removed, ``agent:needs-operator`` added). Without ``state_dir`` it lasts as long as the
     process."""
 
     def __init__(self, gh: Tracker, clock=time.time, monotonic=time.monotonic, state_dir=None):

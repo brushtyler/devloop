@@ -146,7 +146,8 @@ class StartOrderTests(unittest.TestCase):
 
     def test_setup_creates_the_priority_labels(self):
         created = []
-        ensure_labels(SimpleNamespace(ensure_label=lambda name, *style: created.append(name)),
+        ensure_labels(SimpleNamespace(ensure_label=lambda name, *style: created.append(name),
+                                      repo_labels=lambda: []),
                       CFG.labels, CFG.review_policy)
         for name in (HIGH, NORMAL, LOW):
             self.assertIn(name, created)

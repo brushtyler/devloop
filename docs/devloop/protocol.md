@@ -34,7 +34,7 @@ round is left. The PR goes back to `agent:review`, also from `agent:ready-to-mer
 round reviews the new head after CI as usual; that round counts against `max_review_rounds`,
 except after an approval (see [Resync after approval](#resync-after-approval)). A
 sync that fails (the implementer is blocked, tests still fail, markers are left, the merge was
-concluded or aborted by the agent, or the agent run failed) goes to `agent:needs-human` with a
+concluded or aborted by the agent, or the agent run failed) goes to `agent:needs-operator` with a
 comment that lists the files in conflict and their commits.
 
 ### Fixes start from the latest `main`
@@ -83,7 +83,7 @@ review counts. The review records `resync`, with the reason `resync_after_approv
 approved round and its head (`from`), and its comment says it does not count. Every later sync
 after a new approval is free in the same way. The limit stays the same for the implementer's
 changes: a request for changes in that round needs a fix, whose review is a round that counts,
-so with no round left it goes to `agent:needs-human` at once.
+so with no round left it goes to `agent:needs-operator` at once.
 
 The same holds when the head did not move at all (#252). Before promoting or merging, the
 dispatcher recomputes the receipt; when `main` advanced touching a file of the PR (or the
@@ -168,7 +168,7 @@ GitHub Apps devloop and the operator share a login, and the header alone would h
 requirement the check never saw.
 
 The dispatcher removes only a block that belongs to the check. The check owns
-`agent:needs-human` only if it added the label when the label was absent: its record keeps the
+`agent:needs-operator` only if it added the label when the label was absent: its record keeps the
 number of earlier `labeled` events of the label, and the dispatcher must have written the only
 one since. The check loses the block, which then stays until a person removes it, if the label
 was removed and applied again, if a comment starting with the attribution header, written by an
@@ -218,7 +218,7 @@ How devloop merges in the `"strict"` and `"auto"` [merge modes](guide.md#merge-m
   ready PR that meets them in its snapshot, and the merge reads them all again just before it
   runs, reviews, finding closures and policy records included (read again from the comments,
   with the same identity checks as the snapshot):
-  - the PR is open and in `agent:ready-to-merge`, without `agent:needs-human`,
+  - the PR is open and in `agent:ready-to-merge`, without `agent:needs-operator`,
     `agent:needs-supervisor` or `agent:merge-hold`, and no hold or release command waits to be
     applied;
   - the head is the approved commit (at level 0, the promoted one), unchanged since the
@@ -235,7 +235,7 @@ How devloop merges in the `"strict"` and `"auto"` [merge modes](guide.md#merge-m
   When one is missing devloop does not merge, and the revocation already in place applies: a
   moved head, CI running again or failing, or a level 0 that no longer holds is revoked as on
   any tick of a ready PR; a receipt that no longer matches is recorded as `stale` and the PR goes
-  back to `agent:review` for a new review; an open finding sends it to `agent:needs-human`. A
+  back to `agent:review` for a new review; an open finding sends it to `agent:needs-operator`. A
   PR that is `BLOCKED`, `BEHIND` or `UNSTABLE` stays ready and waits. **No mode, and no agent,
   merges with CI not green, with blocking findings open or without the approvals required.**
 - **How.** `gh pr merge --merge --match-head-commit <approved head>`: a merge commit, only if
@@ -243,7 +243,7 @@ How devloop merges in the `"strict"` and `"auto"` [merge modes](guide.md#merge-m
   `[apps.merger]` is configured, with a token minted at that moment and limited to
   `contents=write` and `pull_requests=write`; without it, with the local `gh` login devloop runs
   with. No other GitHub App, the dispatcher's included, gets `contents=write`. The branch is
-  kept. A merge that GitHub refuses goes to `agent:needs-human` like any `gh` failure.
+  kept. A merge that GitHub refuses goes to `agent:needs-operator` like any `gh` failure.
 - **Slot.** A merge takes a slot of `max_actions_per_tick` and runs alone, after the actions
   planned before it and before those planned after it ([Parallel actions](reference.md#parallel-actions)).
 - **Record.** A dispatcher comment with a `merged` marker records the head, the receipt, the
@@ -264,14 +264,14 @@ lost label change never runs a retry twice.
 ## Structured review
 
 The reviewer returns JSON validated against [`devloop/schemas/review.json`](../../devloop/schemas/review.json):
-`verdict` (`approve`, `request_changes`, `needs_human`), blocking and non-blocking findings with
+`verdict` (`approve`, `request_changes`, `needs_operator`), blocking and non-blocking findings with
 file, line and a suggested fix, and the status of every earlier blocking finding (`resolved`,
 `unresolved`, `withdrawn`). devloop then enforces consistency:
 
 - `approve` with a blocking finding, or with one of the reviewer's own earlier findings
   unresolved, becomes `request_changes` (another owner's open finding does not change it: the
   dispatcher checks it before promoting);
-- `request_changes` with nothing to fix becomes `needs_human`;
+- `request_changes` with nothing to fix becomes `needs_operator`;
 - an earlier finding the reviewer does not assess stays open.
 
 Findings get stable ids (`R<round>-<n>`). The fix step answers each one (`fixed`, `disputed`,
@@ -322,7 +322,7 @@ the issue text again and applies the rules above to the latest map. If one of th
 finding, the approval is neither replayed nor kept: a ready PR goes back to `agent:review` with an
 "Approvazione sospesa" comment that lists why, and the PR gets a new review, whose
 `normalize_review()` adds the finding. That review is a new round: it counts against
-`max_review_rounds` like any other, and at the limit the PR goes to `agent:needs-human`. An issue
+`max_review_rounds` like any other, and at the limit the PR goes to `agent:needs-operator`. An issue
 text changed by someone outside `trusted_users` cannot be checked: the approval does not hold, and
 the new review escalates as for any untrusted change.
 
@@ -331,7 +331,7 @@ the new review escalates as for any untrusted change.
 Every blocking finding has an owner, the reviewer that opened it, and its identity is the triple
 `round/reviewer/ID`, for example `2/codex/R2-1`. The key is recorded in the review marker; a
 review whose keys name another round or another owner is not accepted, and the PR goes to
-`agent:needs-human` (#110). A CI round is
+`agent:needs-operator` (#110). A CI round is
 a review of the reviewer `ci`. A finding stays open until one of these closes it:
 
 | Who | How |
@@ -343,7 +343,7 @@ a review of the reviewer `ci`. A finding stays open until one of these closes it
 Another reviewer's assessment does not close a finding: it is recorded in its review, with a
 note, and the finding stays open. When every reviewer of a round approves but a finding of an
 owner outside the round (CI, or an earlier reviewer) is still open, the round is not promoted:
-the PR goes to `agent:needs-human` with a comment that lists the open findings. When a reviewer
+the PR goes to `agent:needs-operator` with a comment that lists the open findings. When a reviewer
 of the round asks for changes, the fix receives every open finding, whoever owns it.
 Once the operator has closed them, putting the PR back into `agent:review` applies the recorded
 approval again, without a new review. The round count does not change.
@@ -370,7 +370,7 @@ anyone outside `trusted_users`, malformed, or naming a finding that does not exi
 and written to the dispatcher log; one naming a finding already closed has no effect. Text
 devloop publishes is never a command. devloop reads the comments of a PR only while it is in
 `agent:review`, `agent:changes` or `agent:ready-to-merge`: a command written while the PR is in
-`agent:needs-human` takes effect once the label is back.
+`agent:needs-operator` takes effect once the label is back.
 
 #### Markers written before #110
 
@@ -381,7 +381,7 @@ review on, only the owner, CI or the operator closes them. These rules cover onl
 that precede the first keyed one: a later review marker without keys, or with keys on only some
 findings, closes nothing, and its own findings stay open, attributed to its reviewer. When the owner cannot be
 reconstructed (a review marker without a reviewer, or one that leaves open a finding whose
-round is unknown), the PR goes to `agent:needs-human` with a comment that lists the problem:
+round is unknown), the PR goes to `agent:needs-operator` with a comment that lists the problem:
 the review and the decision on the merge are up to a person.
 
 Markers are control records, while the rest of each comment is text written by a model, and both
@@ -480,7 +480,7 @@ readiness check, on the PR for review, fix, sync and CI. They publish no receipt
 | `request` | The issue goes from `agent:ready` to `agent:working` | SHA-256 of title and body, author and time of the trusted `labeled` event of `agent:ready`, ids of the trusted comments given to the implementer, time of the takeover. It is a snapshot **at the takeover**, not at the time of the label |
 | `turn` | Every invocation of an agent CLI, retries, fallback models and failures included: implement, fix, sync with an agent, review, readiness check | Kind, agent, GitHub identity (none: the operator's `gh` login), configured model and effort (for a fallback, the fallback model and the model it replaces), real model, start, end, duration, outcome (`success`, `failure`, `unavailable`), the error if any, telemetry, and the last command the turn ran or started when the CLI exposes it (`last_command`: only codex, from the `command_execution` items of `--json`; cleaned like the tail of a timeout, on one line, at most 200 characters; absent otherwise), also for a turn that timed out |
 | `verification` | Every test command the dispatcher runs after a writing turn (none when the [local tests](reference.md#local-tests) select nothing), and the full suite it runs before a review of a head without CI | Command, outcome, duration, the tree hash before and after the test, and the commit (none before a review) |
-| `event` | The CI of a head (`ci_round`): a failed CI round, the checks a review round saw whatever its verdict (`approve`, `request_changes` or `needs_human`), or the passing checks read again just before the PR is promoted to `agent:ready-to-merge` (also at level 0); a sync without an agent, or the merge of `main` before a fix (`sync`) | For the CI, the head, the state (`fail`, `pass`, or `none` without checks), the review round (none at level 0) and each check with its outcome and the id of its GitHub Actions run (none for a commit status or a check outside Actions); the same checks read again for the same head and round are not recorded twice, a new run is. For a sync, the merged base commit and the old and new heads |
+| `event` | The CI of a head (`ci_round`): a failed CI round, the checks a review round saw whatever its verdict (`approve`, `request_changes` or `needs_operator`), or the passing checks read again just before the PR is promoted to `agent:ready-to-merge` (also at level 0); a sync without an agent, or the merge of `main` before a fix (`sync`) | For the CI, the head, the state (`fail`, `pass`, or `none` without checks), the review round (none at level 0) and each check with its outcome and the id of its GitHub Actions run (none for a commit status or a check outside Actions); the same checks read again for the same head and round are not recorded twice, a new run is. For a sync, the merged base commit and the old and new heads |
 
 **Telemetry** is what the CLI attests, not authenticated:
 
@@ -502,9 +502,10 @@ logs it with `--dry-run`). Where to look does not depend on labels, which change
 ends: before writing a turn's record the dispatcher notes the issue or PR in
 `<state_dir>/ledger-open-turns.json`, and removes it when the turn is closed. If that note cannot
 be written, the turn does not start either. The next tick checks every issue or PR still noted,
-for example an issue whose PR is already open or a PR escalated to `agent:needs-human`, and then
+for example an issue whose PR is already open or a PR escalated to `agent:needs-operator`, and then
 forgets it. In case the note is lost, it also looks at open devloop PRs not in
-`agent:needs-human`, issues in `agent:working` and issues waiting for a readiness check.
+`agent:needs-operator` (or in it only for an [operator merge](guide.md#ready-prs-whose-merge-is-the-operators)),
+issues in `agent:working` and issues waiting for a readiness check.
 
 **Tests and commits.** A passing test is bound to the commit created right after it only if the
 tree is the same at three points: before the test, after the test and in the commit. The tree is

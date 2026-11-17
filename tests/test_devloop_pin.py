@@ -307,6 +307,7 @@ class AutoPinTests(GitCase):
         d = Dispatcher(cfg, None, FakeWS(), FakeRunner(), log=self.logs.append,
                        pinner=pin.AutoPin(self.root, self.state, log=self.logs.append,
                                           smoke=self.passing_smoke))
+        d.labels_checked = True  # no GitHub here: the label rename of #248 is not under test
         d.snapshot = lambda: snapshots.append(1) or (_ for _ in ()).throw(AssertionError('plan'))
         return d, snapshots
 
@@ -602,6 +603,7 @@ class AutoPinSmokeTests(GitCase):
         d = Dispatcher(cfg, gh, FakeWS(), FakeRunner(), log=self.logs.append,
                        pinner=pin.AutoPin(self.root, self.state, log=self.logs.append,
                                           smoke=self.refusing_smoke))
+        d.labels_checked = True  # the label rename of #248 is not under test
         self.snapshots = []
         d.snapshot = lambda: self.snapshots.append(1) or Snapshot([], [], [])
         return d
