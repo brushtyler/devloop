@@ -626,9 +626,12 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0):
                         if not numbers_of(s['number'], issue_of) & busy])
     pr_issues = {pr.issue for pr in snapshot.prs}
     # Only the PRs devloop works on take the slots of max_open_prs; those waiting for a person
-    # have their own limit, and once it is reached no new issue starts (#199).
+    # have their own limit, and once it is reached no new issue starts (#199), except a
+    # priority:high one (#274): it may be the fix the parked PRs wait for.
     working, held = pr_counts(snapshot, cfg)
-    free = 0 if held >= cfg.max_parked_prs else cfg.max_open_prs - working - reserved
+    slots = cfg.max_open_prs - working - reserved
+    parked_full = held >= cfg.max_parked_prs
+    free = 0 if parked_full else slots
     for item in snapshot.supervised:
         # A supervisor command (#182). A retry of an issue's step runs that step, and takes a
         # free PR slot as the step itself would; without one it waits for a later tick.
@@ -776,15 +779,23 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0):
             if not issue['labels'] & {lb.needs_human, lb.needs_supervisor}:
                 actions.append(Action('merged_issue', issue['number'], 'resolved by merged PR '
                                       + ', '.join(f'#{n}' for n in issue['merged'])))
+    # With max_parked_prs reached only priority:high issues start, still within the slots of
+    # max_open_prs (#274), and the reason says why.
+    urgent = ''
+    if parked_full:
+        urgent = (f'priority high: starts although {held}/{cfg.max_parked_prs} PRs are parked '
+                  '(max_parked_prs)')
+        free = slots
     if cfg.preflight:
-        actions += _plan_preflight(snapshot, cfg, pr_issues | resolved, free)
+        actions += _plan_preflight(snapshot, cfg, pr_issues | resolved, free, urgent)
     elif free > 0:
         blocked = set(cfg.blocked_labels) | {lb.working, lb.needs_human, lb.needs_supervisor}
         candidates = [i for i in snapshot.ready_issues
                       if not (i['labels'] & blocked) and i['number'] not in pr_issues
-                      and i['number'] not in resolved and i['admitted']]
+                      and i['number'] not in resolved and i['admitted']
+                      and (not urgent or i.get('priority') == 'high')]
         candidates.sort(key=start_order)
-        actions += [Action('implement', i['number']) for i in candidates[:free]]
+        actions += [Action('implement', i['number'], urgent) for i in candidates[:free]]
     capped, spent = [], 0
     for action in actions:
         if busy and numbers_of(action.number, issue_of) & busy:
@@ -797,11 +808,13 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0):
     return capped
 
 
-def _plan_preflight(snapshot, cfg, pr_issues, free):
+def _plan_preflight(snapshot, cfg, pr_issues, free, urgent=''):
     """New work with the readiness check (#114), for the ready issues not in ``pr_issues`` (an
     open PR, or a merged one, #228). Issues start in the usual order, up to
     ``free``: one whose check for its current text passed is implemented, one without a valid
-    check is checked first (implemented on a later tick if ready). A failed check that is still
+    check is checked first (implemented on a later tick if ready). With ``urgent``, the reason
+    why ``max_parked_prs`` is reached (#274), only ``priority:high`` issues start, and their
+    actions carry it. A failed check that is still
     valid blocks the issue again if its ``agent:needs-human`` was removed. An issue the check
     blocked is checked again, whatever ``free``, when its text changed or a trusted user asked
     for it; any other ``agent:needs-human`` is left alone. An issue in
@@ -824,10 +837,11 @@ def _plan_preflight(snapshot, cfg, pr_issues, free):
         elif state == 'not_ready':
             actions.append(Action('preflight_block', issue['number'],
                                   'the readiness check of the current text failed'))
-        elif taken < free:
+        elif taken < free and (not urgent or issue.get('priority') == 'high'):
             taken += 1
-            actions.append(Action('implement', issue['number']) if state == 'ready'
-                           else Action('preflight', issue['number'], reason))
+            actions.append(Action('implement', issue['number'], urgent) if state == 'ready'
+                           else Action('preflight', issue['number'],
+                                       f'{reason}; {urgent}' if urgent else reason))
     return actions
 
 
