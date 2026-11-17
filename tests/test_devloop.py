@@ -823,6 +823,12 @@ class FakeWS:
     def has_changes(self, path):
         return self.changes
 
+    # The documents of [docs] map absent from the worktree (#210): none by default.
+    absent = ()
+
+    def missing_files(self, path, names):
+        return [name for name in names if name in self.absent]
+
     def run_tests(self, path, command, timeout):
         self.commands.append((path, command))
         return (self.tests.pop(0) if len(self.tests) > 1 else self.tests[0]), 'FAILED test_x'

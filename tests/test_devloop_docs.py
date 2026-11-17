@@ -8,6 +8,7 @@ from pathlib import Path
 
 from devloop import config
 from devloop.dispatcher import Dispatcher
+from devloop.workspace import Workspace
 
 from helpers.devloop_fakes import FakeGH
 from test_devloop import (CFG, FakeRunner, FakeWS, finding, fixed, implemented, norm, pr,
@@ -82,14 +83,22 @@ class MapConfigTests(unittest.TestCase):
             with self.subTest(table=table), self.assertRaises(config.ConfigError):
                 config.parse_config(dict(config_data(), docs=table), self.root)
 
-    def test_documents_missing_from_the_installation_are_refused(self):
-        with self.assertRaisesRegex(config.ConfigError, 'docs/none.md is not a file'):
-            self.parse({'x.py': ['docs/a.md', 'docs/none.md']})
-        with self.assertRaisesRegex(config.ConfigError, 'docs is not a file'):
-            self.parse({'x.py': ['docs']})  # a directory
+    def test_documents_missing_from_the_installation_load(self):
+        # #210: the configuration checks the shape of the map only. A pinned copy holds no
+        # documents; the dispatcher looks for them in the worktree of each turn.
         (self.root / 'docs/link.md').symlink_to('a.md')
-        with self.assertRaisesRegex(config.ConfigError, 'docs/link.md is not a file'):
-            self.parse({'x.py': ['docs/link.md']})
+        mapping = {'x.py': ['docs/a.md', 'docs/none.md'], 'y.py': ['docs'],
+                   'z.py': ['docs/link.md']}
+        self.assertEqual(self.parse(mapping).entries,
+                         (('x.py', ('docs/a.md', 'docs/none.md')), ('y.py', ('docs',)),
+                          ('z.py', ('docs/link.md',))))
+        # The repository's own map loads in an installation with none of its documents.
+        empty = tempfile.TemporaryDirectory()
+        self.addCleanup(empty.cleanup)
+        root = Path(empty.name)
+        (root / 'schemas').mkdir()
+        (root / 'schemas/recovery-grader-baseline.json').write_text('{"files": {}}')
+        self.assertEqual(config.parse_config(config_data(), root).docs, CFG.docs)
 
     def test_the_overlay_may_set_the_map(self):
         data = config.apply_overlay(config_data(), {'docs': {'map': {'x.py': ['README.md']}}})
@@ -113,27 +122,43 @@ class MapConfigTests(unittest.TestCase):
                                          'tests/test_x.py', 'docs/devloop.md']), {})
 
 
+class WorkspaceFilesTests(unittest.TestCase):
+    def test_missing_files_are_those_not_regular_files_of_the_worktree(self):
+        # #210: a mapped document counts only as a regular file of the worktree.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'docs').mkdir()
+            (root / 'docs/a.md').write_text('a')
+            (root / 'docs/link.md').symlink_to('a.md')
+            ws = Workspace.__new__(Workspace)  # missing_files reads only the worktree
+            self.assertEqual(ws.missing_files(root, ['docs/a.md', 'docs/none.md', 'docs',
+                                                     'docs/link.md']),
+                             ['docs/none.md', 'docs', 'docs/link.md'])
+
+
 class PromptTests(unittest.TestCase):
-    def make(self, runner, files, tests=(True,)):
+    def make(self, runner, files, tests=(True,), absent=()):
         self.gh, self.ws = FakeGH(), FakeWS(files=files, tests=tests)
+        self.ws.absent = absent
+        self.logs = []
         # The full suite runs after each write turn, so a failure makes a second attempt.
         cfg = dataclasses.replace(CFG, local_tests='full')
-        return Dispatcher(cfg, self.gh, self.ws, runner, log=lambda m: None)
+        return Dispatcher(cfg, self.gh, self.ws, runner, log=self.logs.append)
 
-    def implement(self, files, tests=(True,)):
+    def implement(self, files, tests=(True,), absent=()):
         runner = FakeRunner(implemented(), implemented())
-        self.make(runner, files, tests)._do_implement(7)
+        self.make(runner, files, tests, absent)._do_implement(7)
         return [call[3] for call in runner.calls]
 
-    def fix(self, files):
+    def fix(self, files, absent=()):
         runner = FakeRunner(fixed())
         first = norm(raw_review('request_changes', [finding()]))
-        self.make(runner, files)._do_fix(pr(labels=['agent:changes'], reviews=[first]))
+        self.make(runner, files, absent=absent)._do_fix(pr(labels=['agent:changes'], reviews=[first]))
         return runner.calls[0][3]
 
-    def review(self, files):
+    def review(self, files, absent=()):
         runner = FakeRunner(raw_review())
-        d = self.make(runner, files)
+        d = self.make(runner, files, absent=absent)
         p = pr()
         self.gh.labels[100] = set(p.labels)
         d._do_review(p)
@@ -189,6 +214,39 @@ class PromptTests(unittest.TestCase):
         self.assertIn('`devloop/m4.py` and 2 more', prompt)
         self.assertNotIn('devloop/m5.py', prompt)
 
+    def test_a_document_missing_from_the_worktree_is_omitted_with_a_log_line(self):
+        # #210: the review lists only the mapped documents the worktree holds.
+        files = ['devloop/dispatcher.py', 'orchestrator.py']
+        line = '  docs.map: docs/devloop.md is not a file of the worktree; omitted from the prompt'
+        prompt = self.review(files, absent=('docs/devloop.md',))
+        self.assertNotIn('docs/devloop.md', prompt)
+        self.assertIn('- `README.md`, mapped from `orchestrator.py`', prompt)
+        self.assertIn(BLOCKING, prompt)
+        self.assertIn(line, self.logs)
+        # Every mapped document missing: no section at all.
+        prompt = self.review(['devloop/dispatcher.py'], absent=('docs/devloop.md',))
+        self.assertNotIn('## Documents mapped to the diff', prompt)
+        self.assertIn(line, self.logs)
+        prompt = self.fix(['devloop/dispatcher.py'], absent=('docs/devloop.md',))
+        self.assertNotIn('docs/devloop.md', prompt)
+        self.assertIn(line, self.logs)
+        # Nothing missing, nothing logged.
+        self.review(files)
+        self.assertFalse([m for m in self.logs if 'docs.map' in m])
+
+    def test_the_whole_map_omits_the_documents_missing_from_the_worktree(self):
+        first, second = self.implement(['devloop/dispatcher.py'], tests=(False, True),
+                                       absent=('docs/devloop.md', 'docs/architecture.md'))
+        self.assertIn('## Documentation map', first)
+        self.assertNotIn('docs/devloop.md', first)
+        self.assertNotIn('`devloop/` →', first)  # a key left with no document
+        self.assertIn('- `orchestrator.py` → `README.md`\n', first)
+        self.assertNotIn('docs/devloop.md', second)
+        self.assertNotIn('## Documents mapped to the diff', second)
+        for document in ('docs/architecture.md', 'docs/devloop.md'):
+            self.assertIn(f'  docs.map: {document} is not a file of the worktree; omitted from '
+                          'the prompt', self.logs)
+
     def test_without_a_map_no_section_is_added(self):
         runner = FakeRunner(implemented(), raw_review())
         gh, ws = FakeGH(), FakeWS(files=['devloop/dispatcher.py'])
@@ -206,7 +264,7 @@ class DocumentationTests(unittest.TestCase):
         section = section[:section.index('\n### ', 1)]
         for phrase in ('[docs.map]', '"devloop/" = ["docs/devloop.md"]', 'First implement attempt',
                        'blocking', '`checks_performed`', 'asks for nothing',
-                       'is not a regular file of the'):
+                       'checks its shape only', 'omitted from the list'):
             self.assertIn(phrase, section)
         self.assertIn('documentation map](#documentation-map)', text)
 

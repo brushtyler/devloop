@@ -236,6 +236,13 @@ class Workspace:
         new = self._git('ls-files', '--others', '--exclude-standard', '-z', cwd=path)
         return sorted({name for name in (tracked + '\0' + new).split('\0') if name})
 
+    def missing_files(self, path, names):
+        """The ``names`` (relative paths) that are not a regular file in the worktree ``path``:
+        absent, a directory or a symlink (#210)."""
+        root = Path(path)
+        return [name for name in names
+                if (root / name).is_symlink() or not (root / name).is_file()]
+
     def test_modules(self, path):
         """The names of the ``tests/test_*.py`` files in ``path``."""
         tests = Path(path) / 'tests'
