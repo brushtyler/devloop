@@ -34,9 +34,13 @@ class MergeMixin:
     """The methods of ``Dispatcher`` for receipts, review levels and merges (#295). They use
     the dispatcher state and its other methods through ``self``."""
 
-    def _approval_current(self, pr, review):
+    def _approval_current(self, pr, review, blind=False):
         """Re-read head and CI just before promoting: approval holds only for the reviewed commit
-        with CI passed or absent. Otherwise the PR stays in review for the next tick."""
+        with CI passed or absent. Otherwise the PR stays in review for the next tick.
+
+        ``blind``: the round approved the head before its CI was known (#271), and no full suite
+        ran locally since. Then an absent CI is not enough, unless ``local_tests = "full"``:
+        the approval waits for the CI of the same head, or for the full suite."""
         head = self.gh.pr_head(pr.number)
         if head != review['head_sha']:
             self.log(f'  not promoted: head moved to {head[:12]} after the review')
@@ -44,6 +48,9 @@ class MergeMixin:
         state, details = self._read_ci(head)
         if state not in ('pass', 'none'):
             self.log(f'  not promoted: CI is {state}')
+            return False
+        if state == 'none' and blind and self.cfg.local_tests != 'full':
+            self.log(f'  not promoted: no CI on {head[:12]} yet, and the approval did not see it')
             return False
         self._record_ci(pr, head, state, details, review['round'])
         return True

@@ -131,10 +131,19 @@ as a requirement, without a review and without a round (``_do_requested_fix``). 
 head: a later command on the same head counts only after a new commit (``_fix_requests``).
 
 CI of a new head (#263, ``[ci]``): with ``local_tests`` other than ``full``, a PR in agent:review
-whose head has no CI is not reviewed for ``grace_minutes`` after its push, as if its CI were
-pending (``_ci_wait``): the push the dispatcher recorded, else the commit date. Then the full
-suite runs locally, as before, unless the base branch requires checks: the review waits for
-them, and after ``required_timeout_minutes`` the PR is escalated (``ci_missing``).
+whose head has no CI is treated for ``grace_minutes`` after its push as if its CI were pending
+(``_ci_wait``): the push the dispatcher recorded, else the commit date. Then the full suite runs
+locally, as before, unless the base branch requires checks: the PR waits for them, and after
+``required_timeout_minutes`` it is escalated (``ci_missing``).
+
+Review during the CI (#271): a review starts with the CI of the head pending, or within that
+window, without the full suite locally; its record says CI ``pending``. The approval is promoted
+only once the CI of the same head passes, replayed without a new review (``_approval_current``);
+a CI that fails makes it a ``ci_failed`` round. An approval that saw no CI, on a head still
+without CI past the window, gets the full suite locally before its promotion
+(``_do_apply_review``). A request for changes made before the CI was known waits for that CI in
+agent:changes (``changes_before_ci``): a failure is a ``ci_failed`` round first, so that one fix
+answers both.
 """
 
 import functools
@@ -184,7 +193,8 @@ from .planning import (BASE_CHANGED, EXPENSIVE, FIX_COMMAND, GLOBAL_ACTIONS, MER
                        MERGING, PRIORITY_LABELS, PRIORITY_RANK, RECHECK_COMMAND,
                        RESYNC_AFTER_APPROVAL, Action, PullRequest, Snapshot, _lanes,
                        _parents, _plan_preflight, _resynced, _round_records, admit,
-                       counted_rounds, issue_priority, label_names, merge_ready,
+                       changes_before_ci, ci_unknown, counted_rounds, issue_priority,
+                       label_names, merge_ready,
                        numbers_of, operator_blocked, operator_held, operator_merge_due,
                        parked, pending_reviewers, plan, pr_counts, preflight_state,
                        queue_lines, round_reasons, schedule, start_order, touched_by_base,
@@ -789,10 +799,13 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
                 continue
             if pr.meta and pr.labels & {lb.review, lb.changes, lb.ready_to_merge}:
                 self._read_thread(pr, self.gh.pr_comments(pr.number))
-            # In agent:changes CI matters only to close an open CI finding (``plan``).
+            # In agent:changes CI matters to close an open CI finding, and after a review that
+            # asked for changes before the CI of the head was known: the fix waits for it, so
+            # that a failure joins the same fix (#271, ``plan``).
             ci_open = lb.changes in pr.labels and any(
                 f['owner'] == CI for f in open_findings(pr.reviews, pr.closures))
-            if pr.labels & {lb.review, lb.ready_to_merge} or ci_open:
+            blind = lb.changes in pr.labels and changes_before_ci(pr)
+            if pr.labels & {lb.review, lb.ready_to_merge} or ci_open or blind:
                 if self.ledger is not None:
                     pr.check_details = self.gh.check_details(pr.head_sha)
                     pr.checks, pr.failed_checks, pr.failed_runs = summarize_checks(
@@ -807,6 +820,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
                 if (pr.meta and lb.review in pr.labels and pr.checks == 'none'
                         and self.cfg.local_tests != 'full'):
                     pr.ci_wait, pr.ci_missing = self._ci_wait(pr)
+                elif blind and pr.checks == 'none' and self.cfg.local_tests != 'full':
+                    # While #263 waits for the CI of a just pushed head, so does the fix. Past
+                    # that wait the fix starts: checks still missing are not escalated, and the
+                    # new head of the fix gets its own CI.
+                    pr.ci_wait = self._ci_wait(pr)[0]
             if (lb.ready_to_merge in pr.labels and pr.zero_head is not None
                     and zero_labels_hold(pr, self.cfg.review_policy)):
                 pr.zero_problem = self._zero_problem(pr)
@@ -1844,10 +1862,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
             return None
         return bases
 
-    def _apply_round(self, pr, records, announce, reviews):
+    def _apply_round(self, pr, records, announce, reviews, tested=False):
         """Apply a complete round, ``records`` (one per reviewer). ``reviews``: every review of
         the PR up to the round included. Every finding still open counts here, whoever owns
-        it: an approval does not close another owner's finding."""
+        it: an approval does not close another owner's finding. ``tested``: the full suite
+        passed locally on the head after a review that did not know its CI (#271)."""
         lb = self.cfg.labels
         transient = [lb.review, lb.changes, lb.ready_to_merge]
         verdict = round_verdict(records)
@@ -1857,7 +1876,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
                 # Owners outside the round (CI, an earlier reviewer): no agent closes them.
                 self._escalate(pr.number, _open_findings_reason(left), remove=transient,
                                cls='open_findings')
-            elif self._approval_current(pr, records[0]):
+            elif self._approval_current(pr, records[0],
+                                        blind=not tested and ci_unknown(records)):
                 self._promote(pr, records)
         elif verdict == 'needs_operator':
             if announce:
@@ -2021,7 +2041,23 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
             pr.syncs, limit), remove=[lb.review, lb.changes, lb.ready_to_merge], cls='round_limit')
 
     def _do_apply_review(self, pr):
-        self._apply_round(pr, current_round(pr.reviews), announce=False, reviews=pr.reviews)
+        """Apply the round already recorded. An approval given while the CI was not known
+        (#271), on a head that got no CI past the window of #263 and with ``local_tests`` other
+        than ``full``, gets the full suite locally first, as a review would have before it."""
+        records = current_round(pr.reviews)
+        tested = False
+        if (round_verdict(records) == 'approve' and pr.checks == 'none'
+                and self.cfg.local_tests != 'full' and ci_unknown(records)):
+            name = f'pr-{pr.number}'
+            path = self.ws.existing_branch(name, pr.head_ref)
+            if self.ws.head(path) != pr.head_sha:
+                self.log('  head moved since the snapshot; retrying next tick')
+                return
+            if not self._full_suite_without_ci(pr, path, name, approved=True):
+                return
+            self.ws.remove(name)
+            tested = True
+        self._apply_round(pr, records, announce=False, reviews=pr.reviews, tested=tested)
 
 
 def ensure_labels(gh: Tracker, labels, review_policy=None):

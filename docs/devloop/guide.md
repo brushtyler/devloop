@@ -19,17 +19,30 @@ plans the next steps and runs them. A crashed tick is resumed by the next one.
 |---|---|---|
 | Start | A trusted user adds `agent:ready` to an issue (or the [supervisor](#labels-from-the-supervisor), on an issue of a trusted user or of a devloop app) | `agent:working`; the implementer works in a fresh worktree |
 | Implement | Changes made and [local tests](reference.md#local-tests) pass | Dispatcher commits, pushes `agent/issue-<n>`, opens a PR labelled `agent:review` |
-| CI | Checks pending | Wait; failing checks become a review round sent back as `agent:changes`, unless no failed test module is pertinent to the PR: then the failed jobs are re-run once, without a round (see [CI failures not pertinent to the PR](reference.md#ci-failures-not-pertinent-to-the-pr)) |
-| Review | CI passed or absent (absent CI with `local_tests` other than `full`: the full suite first runs locally, see [Local tests](reference.md#local-tests)) | The dispatcher computes the PR's [review level](reference.md#review-level-and-policy-receipt); at level 1 a **different** agent posts a structured verdict (see [Structured review](protocol.md#structured-review)), at level 2 two [independent reviewers](reference.md#level-2-two-independent-reviewers) do, one per action, and their verdicts are applied together |
+| CI | Checks pending | The review does not wait for them (#271); failing checks become a review round sent back as `agent:changes`, unless no failed test module is pertinent to the PR: then the failed jobs are re-run once, without a round (see [CI failures not pertinent to the PR](reference.md#ci-failures-not-pertinent-to-the-pr)) |
+| Review | CI pending, passed or absent, not failed (absent CI with `local_tests` other than `full`: the full suite first runs locally, except within the [window of a new head](reference.md#ci-of-a-new-head), see [Local tests](reference.md#local-tests)) | The dispatcher computes the PR's [review level](reference.md#review-level-and-policy-receipt); at level 1 a **different** agent posts a structured verdict (see [Structured review](protocol.md#structured-review)), at level 2 two [independent reviewers](reference.md#level-2-two-independent-reviewers) do, one per action, and their verdicts are applied together |
 | Fix | `agent:changes`, or a [`/devloop fix`](#fix-requested-by-the-operator-or-the-supervisor) command on a PR in `agent:review` or `agent:changes` | The implementer fixes or disputes every open finding of the round, and applies the requests of the command, then back to `agent:review` |
 | Sync | A PR in `agent:review` or `agent:ready-to-merge` conflicts with `main` | The implementer resolves the conflicts of a merge of `origin/main`; the dispatcher pushes the merge commit, back to `agent:review` (see [Conflicts with `main`](protocol.md#conflicts-with-main)) |
 | Approve | Verdict `approve` from every reviewer the level requires | `agent:ready-to-merge`, only if no [finding](protocol.md#findings-and-who-closes-them) is still open, the PR head is still the reviewed commit, CI passed and the policy receipt recomputed just before promotion matches the one of every approval (an earlier base is admitted only if `main` left the PR's files alone since, see [When `main` advances](reference.md#when-main-advances-during-a-round)) |
 | Level 0 | A trusted user's `reviews:0`, the whole diff in the operator's allowlist, every expected check `success` | `agent:ready-to-merge` without a review (see [Level 0](reference.md#level-0-no-review)); off by default |
 | Merge | `agent:ready-to-merge` | **A human merges**, unless the [merge mode](#merge-modes) of the PR lets devloop merge |
 
-A head just pushed, without CI yet, is not reviewed at once: with `local_tests` other than
-`full` the review waits for its CI for `[ci] grace_minutes`, and as long as `main` requires
-checks up to `[ci] required_timeout_minutes` (see [CI of a new head](reference.md#ci-of-a-new-head)).
+The review starts while the CI of the head runs (#271), and the reviewer is told the CI is
+`pending`. The merge still waits for that CI: an approval leads to `agent:ready-to-merge` only
+once the CI of the **same head** passes, without a second review. If that CI fails, the approval
+does not count for the merge: the failure becomes a CI round, counted as today, and the PR goes
+to `agent:changes` for the fix (or its failed jobs are re-run once, when no failed test module is
+pertinent to the PR). A review that asks for changes while the CI runs sends the PR to
+`agent:changes`, but the fix waits for that CI: if it fails, the failure becomes a CI round and
+the same fix answers the reviewer's findings and the CI failure together. A CI that already
+failed before the review sends the PR to the fix without a review, as before. A PR with the [level 0](reference.md#level-0-no-review) label, when level 0
+is enabled, has no review to start early: it still waits for its CI.
+
+A head just pushed, without CI yet, is reviewed as if its CI were pending: with `local_tests`
+other than `full` no full suite runs locally in place of the CI for `[ci] grace_minutes`, and as
+long as `main` requires checks up to `[ci] required_timeout_minutes` (see
+[CI of a new head](reference.md#ci-of-a-new-head)). The ruleset of `main` still requires its
+checks for any merge on GitHub.
 
 Readiness belongs to the approved commit. Every tick re-checks ready PRs:
 
@@ -108,8 +121,9 @@ new review of the same commit:
    The lines below it can explain the decision.
 2. Remove `agent:needs-operator` and set `agent:review`.
 
-The next tick runs a new review. It is a new round: it waits for CI like any review, and it
-does not start once `max_review_rounds` is reached. The reviewer's prompt includes every
+The next tick runs a new review. It is a new round: like any review it may start while the CI
+of the head runs, and an approval leads to `agent:ready-to-merge` only once the CI of the same
+head passes; it does not start once `max_review_rounds` is reached. The reviewer's prompt includes every
 comment the trusted users wrote after the previous verdict. Only a request written after the
 latest verdict counts, so it starts one review: once the new verdict is recorded, that verdict
 is replayed again until another request. The request is ignored when it comes from anyone

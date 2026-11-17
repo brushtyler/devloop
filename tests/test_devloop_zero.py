@@ -479,6 +479,16 @@ class ZeroReadinessTests(unittest.TestCase):
         self.assertEqual([a.kind for a in plan(Snapshot([self.ready_pr(checks='fail')], [], []),
                                                ZCFG)], ['ci_failed'])
 
+    def test_a_level_0_pr_in_review_still_waits_for_its_ci(self):
+        # Reviews start with the CI running (#271), but level 0 has no review to start early.
+        for checks, wait in (('pending', ''), ('none', 'waiting for CI')):
+            with self.subTest(checks=checks):
+                p = dataclasses.replace(pr(labels=('agent:review', 'reviews:0'), checks=checks),
+                                        ci_wait=wait)
+                self.assertEqual(plan(Snapshot([p], [], []), ZCFG), [])
+                # Without level 0 enabled the label means nothing: the review starts.
+                self.assertEqual([a.kind for a in plan(Snapshot([p], [], []), CFG)], ['review'])
+
     def test_through_ticks(self):
         gh = SnapshotGH([])
         gh.labels[100] = set(ZERO_LABELS)

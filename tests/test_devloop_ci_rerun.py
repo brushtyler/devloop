@@ -121,8 +121,9 @@ class RerunTests(unittest.TestCase):
     def test_a_rerun_that_passes_goes_on_to_review(self):
         d = self.make()
         self.step(d)
+        # Once the re-run started the review no longer waits for it (#271): the merge does.
         self.gh.details = [dict(failed(RERUN_LINK), bucket='pending', conclusion='in_progress')]
-        self.assertEqual(self.kinds(d), [])
+        self.assertEqual(self.kinds(d), ['review'])
         self.gh.details = [dict(failed(RERUN_LINK), bucket='pass', conclusion='success')]
         self.assertEqual(self.kinds(d), ['review'])
         self.assertEqual(self.reviews(), [])
