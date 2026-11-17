@@ -8,7 +8,8 @@ from pathlib import Path
 
 from devloop.dispatcher import Action, counted_rounds, synced_from
 from devloop.workspace import Workspace
-from test_devloop import CFG, SHA1, SHA2, SHA3, finding, fixed, raw_review
+import test_devloop_supervision as supervision_tests
+from test_devloop import CFG, SHA1, SHA2, SHA3, finding, fixed, pr, raw_review
 from test_devloop_quorum import Quorum
 
 LEVEL1 = [{'path': 'x.py', 'links': []}]  # a diff reviewed at level 1
@@ -159,6 +160,43 @@ class FixBaseTests(Quorum):
         self.d.tick()
         self.assertEqual(self.seen, [])
         self.assertEqual(self.gh.labels[100], {'agent:review'})
+
+
+class SupervisedSyncTests(supervision_tests.Case):
+    def test_a_sync_started_by_a_fix_in_changes_is_retried_from_changes(self):
+        # The sync a fix started in agent:changes fails: the supervisor's retry resumes the PR
+        # in agent:changes, where the fix of the round is still to run, not in agent:review.
+        d = self.make(supervision_tests.AUTO, CHANGES, supervision_tests.crash(), SYNCED,
+                      fixed())
+        self.assertEqual(self.tick(d), [('review', 100)])
+        self.assertEqual(self.gh.labels[100], {'agent:changes'})
+        self.ws.behind, self.ws.conflicts = True, ('x.py',)
+        self.assertEqual(self.tick(d), [('fix', 100)])
+        self.assertEqual(self.gh.labels[100], {supervision_tests.SUPER})
+        (record,) = self.escalations(100)
+        self.assertEqual((record['step'], record['resume']), ('sync', 'agent:changes'))
+        self.gh.command(100, '/devloop retry')
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertEqual(self.gh.labels[100], {'agent:changes'})
+        # The fix starts the sync again, which now succeeds, and runs on the synced head.
+        self.assertEqual(self.tick(d), [('fix', 100)])
+        self.assertEqual(self.gh.records(100, 'fix'), [])
+        self.assertEqual(self.gh.labels[100], {'agent:changes'})
+        self.gh.head = SHA2
+        self.ws.behind = False
+        self.assertEqual(self.tick(d), [('fix', 100)])
+        (fix,) = self.gh.records(100, 'fix')
+        self.assertEqual(fix['round'], 1)
+        self.assertEqual(self.gh.labels[100], {'agent:review'})
+
+    def test_a_sync_resumes_from_the_label_of_the_fix_that_started_it(self):
+        d = self.make(supervision_tests.AUTO)
+        for labels, resume in ((('agent:changes',), 'agent:changes'),
+                               (('agent:review',), 'agent:review'),
+                               (('agent:ready-to-merge',), 'agent:review')):
+            with self.subTest(labels=labels):
+                route, _ = d._supervised(100, 'sync_failed', 'sync', pr(labels=labels))
+                self.assertEqual(route['resume'], resume)
 
 
 class SyncedFromTests(unittest.TestCase):

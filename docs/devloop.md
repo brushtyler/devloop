@@ -84,7 +84,8 @@ dispatcher checks, in the fix worktree, whether the branch contains `origin/main
   instead (the implementer resolves the conflicts, tests, push), but the PR keeps its label
   (`agent:changes`, or `agent:review` for a `/devloop fix`), and the fix runs at the next tick on
   the synced head. The `sync` marker records the head it synced (`from`), so that the fix
-  recognizes the synced head as its own; a sync that fails escalates as usual.
+  recognizes the synced head as its own; a sync that fails escalates as usual, and a
+  supervisor's `/devloop retry` resumes the PR from the fix's label, so that the fix still runs.
 
 The fix prompt tells the agent that the branch already contains the latest `origin/main`, so
 that it does not try to fetch, merge or rebase it. The merge of the base writes no review
@@ -789,7 +790,8 @@ command before it, and among the commands that wait the latest wins.
 - `/devloop retry` runs the failed step again, for `tool_failure` and `sync_failed`. A PR goes
   back to the label of its step (`agent:review` for a review or a sync, `agent:changes` for a
   fix, `agent:review` for a [requested fix](#fix-requested-by-the-operator-or-the-supervisor)
-  that started there) and the next tick runs it; an issue's readiness check or implementation runs at once, and
+  that started there, `agent:changes` for a sync that a fix in `agent:changes` started because
+  its branch conflicted with `main`) and the next tick runs it; an issue's readiness check or implementation runs at once, and
   takes a free PR slot as it would. A failed attempt writes no review record, so a retry
   **counts no round**. After the initial failure the supervisor may authorise **two** retries
   for the same key; the third command is not run and the item goes to `agent:needs-human`

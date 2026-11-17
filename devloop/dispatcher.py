@@ -1292,6 +1292,11 @@ class Dispatcher:
                     # A `/devloop fix` asked in agent:review (#195) resumes there: agent:changes
                     # would answer findings already fixed, or have none to fix.
                     resume = lb.review
+                if step == 'sync' and lb.changes in pr.labels:
+                    # A sync that a fix started in agent:changes (#250) resumes there: from
+                    # agent:review the next tick would review the synced head, or answer only
+                    # the `/devloop fix` requests, leaving the round's findings unfixed.
+                    resume = lb.changes
                 return {'step': step, 'key': key, 'resume': resume}, ''
             if key is None and cls in (PREFLIGHT_DEFAULT, MERGED_ISSUE):
                 # A failed check reused, not run again, or an issue a merged PR resolved (#228),
