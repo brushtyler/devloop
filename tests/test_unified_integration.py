@@ -27,6 +27,7 @@ import test_corrective_creation as creation
 import test_bootstrap as bootstrap_fixtures
 import test_legacy_compat as legacy
 from test_full_checkpoint_review import framed
+from helpers.environment_cache import reuse_host_observations
 
 
 @contextlib.contextmanager
@@ -41,7 +42,12 @@ def existing_host(host):
 class StartupJourneys(unified.UnifiedExecutionTests):
     make_orchestrator = unified.UnifiedExecutionTests.make_orchestrator
     seed_inputs = unified.UnifiedExecutionTests.seed_inputs
-    setUp = unified.UnifiedExecutionTests.setUp
+
+    def setUp(self):
+        # The pipeline guards the unchanged controller checkout and probes the
+        # unchanged container image at every boundary.
+        reuse_host_observations(self)
+        unified.UnifiedExecutionTests.setUp(self)
 
     def new_run(self, flag=None, repair=False, bootstrap=False, outcome=None):
         if bootstrap:

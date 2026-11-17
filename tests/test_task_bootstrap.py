@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from orchestrator import EngineRunner, SSDLCOrchestrator
+from helpers.environment_cache import reuse_host_observations
 from replay.repository_fixtures import RepositoryTests
 from ssdlc_tasks import (
     PlanError, TaskError, DevelopmentBlocked, TaskJournal, TaskPlanValidator, TaskScheduler,
@@ -797,6 +798,8 @@ class SandboxTests(unittest.TestCase):
 
 class OrchestratorBootstrapTests(RepositoryTests):
     def setUp(self):
+        # The engine guards the unchanged controller checkout at every boundary.
+        reuse_host_observations(self)
         super().setUp()
         environment = patch.object(SSDLCOrchestrator, '_verification_environment', return_value={
             'mode': 'role_container', 'platform': 'fixture',
