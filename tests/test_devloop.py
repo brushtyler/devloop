@@ -424,6 +424,59 @@ class ChecksTests(unittest.TestCase):
                          ('pending', [], []))
         self.assertEqual(summarize_checks(normalize_checks(runs[:1], no_status)), ('pass', [], []))
 
+    @staticmethod
+    def _run(run_id, status, conclusion, started_at, name='bench', app_id=15368, url_run=None):
+        return {'id': run_id, 'name': name, 'app_id': app_id, 'started_at': started_at,
+                'status': status, 'conclusion': conclusion,
+                'details_url': (f'https://github.com/o/r/actions/runs/{url_run}/job/1'
+                                if url_run else '')}
+
+    NO_STATUS = {'state': 'pending', 'total_count': 0, 'statuses': []}
+
+    def test_a_stuck_in_progress_run_superseded_by_a_success_passes(self):
+        # PR #207: the old run stays in_progress (with a conclusion), the re-run succeeded.
+        old = self._run(1, 'in_progress', 'success', '2026-11-17T01:00:00Z')
+        new = self._run(2, 'completed', 'success', '2026-11-17T02:00:00Z')
+        for runs in ([old, new], [new, old]):
+            with self.subTest(order=[r['id'] for r in runs]):
+                checks = normalize_checks(runs, self.NO_STATUS)
+                self.assertEqual([(c['name'], c['bucket']) for c in checks], [('bench', 'pass')])
+                self.assertEqual(summarize_checks(checks), ('pass', [], []))
+
+    def test_only_the_latest_run_of_a_name_decides_pass_or_fail(self):
+        failed_old = self._run(1, 'completed', 'failure', '2026-11-17T01:00:00Z', url_run=11)
+        success_new = self._run(2, 'completed', 'success', '2026-11-17T02:00:00Z', url_run=12)
+        self.assertEqual(summarize_checks(normalize_checks([failed_old, success_new],
+                                                           self.NO_STATUS)),
+                         ('pass', [], []))
+        success_old = self._run(1, 'completed', 'success', '2026-11-17T01:00:00Z', url_run=11)
+        failed_new = self._run(2, 'completed', 'failure', '2026-11-17T02:00:00Z', url_run=12)
+        # The failed run ids come only from the selected (latest) run.
+        self.assertEqual(summarize_checks(normalize_checks([failed_new, success_old],
+                                                           self.NO_STATUS)),
+                         ('fail', ['bench'], ['12']))
+
+    def test_the_same_start_falls_back_to_the_greatest_id(self):
+        same = '2026-11-17T01:00:00Z'
+        runs = [self._run(8, 'completed', 'success', same),
+                self._run(7, 'completed', 'failure', same, url_run=7)]
+        self.assertEqual(summarize_checks(normalize_checks(runs, self.NO_STATUS)),
+                         ('pass', [], []))
+        self.assertEqual(summarize_checks(normalize_checks(runs[::-1], self.NO_STATUS)),
+                         ('pass', [], []))
+
+    def test_runs_of_other_names_or_apps_are_not_merged(self):
+        runs = [self._run(1, 'completed', 'failure', '2026-11-17T01:00:00Z', url_run=21),
+                self._run(2, 'completed', 'success', '2026-11-17T02:00:00Z', name='other'),
+                self._run(3, 'in_progress', None, '2026-11-17T03:00:00Z', app_id=99)]
+        checks = normalize_checks(runs, self.NO_STATUS)
+        self.assertEqual([(c['name'], c['bucket']) for c in checks],
+                         [('bench', 'fail'), ('other', 'pass'), ('bench', 'pending')])
+        self.assertEqual(summarize_checks(checks), ('fail', ['bench'], ['21']))
+        # The run of the other app alone keeps the CI pending: it is not hidden either.
+        self.assertEqual(summarize_checks(normalize_checks(runs[1:], self.NO_STATUS)),
+                         ('pending', [], []))
+
     def test_statuses_beyond_the_first_page_follow_the_aggregate_state(self):
         page = [{'context': f's{i}', 'state': 'success', 'target_url': None} for i in range(30)]
         failed = {'state': 'failure', 'total_count': 31, 'statuses': page}
@@ -458,6 +511,19 @@ class GitHubAdapterTests(unittest.TestCase):
         self.assertEqual(gh.checks(SHA1), ('pass', [], []))
         self.assertTrue(all(argv[1] == 'api' for argv, _ in self.calls))
         self.assertTrue(any(f'commits/{SHA1}/check-runs' in ' '.join(a) for a, _ in self.calls))
+
+    def test_checks_keep_only_the_latest_run_of_a_name_and_app(self):
+        gh = self.make([
+            ('check-runs', (0, '{"id":1,"name":"t","app_id":5,"started_at":"2026-11-17T01:00:00Z",'
+                               '"status":"in_progress","conclusion":"success","details_url":""}\n'
+                               '{"id":2,"name":"t","app_id":5,"started_at":"2026-11-17T02:00:00Z",'
+                               '"status":"completed","conclusion":"success","details_url":""}\n',
+                            '')),
+            (f'commits/{SHA1}/status', (0, '{"state":"pending","total_count":0,"statuses":[]}', ''))])
+        self.assertEqual(gh.checks(SHA1), ('pass', [], []))
+        jq = next(a for a, _ in self.calls if 'check-runs' in ' '.join(a))
+        self.assertIn('app_id: .app.id', jq[jq.index('--jq') + 1])
+        self.assertIn('started_at', jq[jq.index('--jq') + 1])
 
     def test_open_prs_carry_their_merge_state(self):
         gh = self.make([('pr list', (0, '[]', ''))])
