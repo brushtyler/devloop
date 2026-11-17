@@ -1291,6 +1291,10 @@ comment.
    `--idle-timeout` seconds (default 900, 15 minutes); at the first news, or at the timeout, it
    runs the next tick.
 
+With `max_parallel_actions` above 1 the loop runs in [continuous mode](#continuous-mode): a tick
+starts its actions without waiting for them, and while some run the loop waits for one to end
+or, with a slot free, for news on GitHub; either way the next tick plans at once.
+
 The wait reads GitHub every 60 seconds (less when `--idle-timeout` is shorter), with the same
 identity as the ticks' reads, and keeps its state in `state_dir/run-watch-state.json`, apart from
 the state of a `devloop watch` of the supervising agent. The first wait records the starting
@@ -1720,6 +1724,38 @@ This repository sets 3: implement, fix, sync and review of different issues and 
   Each run of `test_cmd` gets a temporary directory of its own (`TMPDIR`), removed afterwards,
   so parallel test runs do not share one.
 
+### Continuous mode
+
+With `max_parallel_actions` above 1, actions run in one of two modes (#227):
+
+- **`devloop tick`: one round with a barrier.** The tick plans, runs its actions as
+  [Parallel actions](#parallel-actions) describes, and ends when every one has ended. This is
+  the mode of manual use and of the tests, unchanged.
+- **`devloop run`: no barrier at the end of a tick.** A tick plans and starts in the free slots
+  the actions that fit, up to `max_parallel_actions` running at once, and returns without
+  waiting for them. As soon as one ends, the next tick reads GitHub again and plans the free
+  slots; while a slot is free, news on GitHub (a CI that passes, a new ready issue) starts a
+  tick too, within the usual `--idle-timeout`. A long action (a 45-minute implementation) no
+  longer holds the reviews and fixes that become ready meanwhile.
+
+In `devloop run` a plan leaves out the issues and PRs of the running actions: no second action
+starts on the same number, nor on a PR and its issue, until the first has ended; of two actions
+planned on the same number only the first starts, and the next tick, which sees its result,
+decides the other. An implementation or readiness check that is running keeps its slot of
+`max_open_prs`. A global action (a merge) starts only when nothing runs, alone: while one is
+planned and actions are running, no other action starts, so they end and the global action runs
+next; the actions planned with it start in the ticks after it. The
+[pin after a merge](#pin-after-a-merge) runs only when no action runs, and while one is pending
+no action starts. The turns of running actions are not marked incomplete by the ticks that run
+meanwhile; they are checked once their action ends.
+
+The dispatcher lock stays one: the loop runs the actions in threads of its own process. A stop
+(`SIGTERM`, `SIGINT`, the `STOP` file) starts no other tick and waits for the running actions to
+end before the loop exits; so does the failed tick that stops the loop, before the alert
+([Continuous loop](#continuous-loop)). Each action logs its
+`outcome of <action> #<N>: …` line when it ends. With `max_parallel_actions = 1`, `devloop run`
+runs ticks with the barrier, one action at a time, as before.
+
 ### Local tests
 
 After every writing turn (implement, fix, sync with conflicts) the dispatcher runs tests in the
@@ -2025,7 +2061,8 @@ fallback_memory_seconds = 3600  # when the error does not say when the model is 
   next one.
 - **Single host.** One dispatcher runs at a time. With `max_parallel_actions = 1` (the
   default) a tick runs its actions one at a time; above 1, actions on different issues and PRs
-  run in threads of that one process ([Parallel actions](#parallel-actions)).
+  run in threads of that one process ([Parallel actions](#parallel-actions)), and in
+  `devloop run` without waiting for the end of the tick ([Continuous mode](#continuous-mode)).
 - **`devloop watch` compares states.** Each round compares what it reads with the latest
   successful round, so a change undone between two reads (a label added and removed, an issue
   opened and closed, a CI that fails and passes again on the same head, an `agent:ready` removed

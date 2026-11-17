@@ -73,6 +73,13 @@ runs alone. Each log line carries the number of its action (``TickLog``), a fail
 not stop the others, and a review action at level 2 runs together every reviewer its round
 still waits for.
 
+Continuous mode (#227, ``devloop run`` with ``max_parallel_actions`` above 1, ``Workers``): no
+barrier at the end of a tick. A tick plans and starts actions in the free slots, without waiting
+for them; the loop runs the next tick as soon as one ends, or as news on GitHub arrive while a
+slot is free. The issues and PRs of the running actions are left out of the plan (``plan``'s
+``busy``), so no two actions on the same number overlap, and a global action starts only when
+nothing runs, alone (``admit``). ``devloop tick`` keeps the barrier.
+
 Merge (#172, ``[merge]``): with ``mode = "off"`` (the default) a person merges. With ``strict``
 the dispatcher merges a ready PR, with the local ``gh`` login and ``--match-head-commit``, once
 every merge directive holds again just before the merge: the conditions of the promotion, CI
@@ -348,6 +355,85 @@ def _lanes(batch, issue_of):
     return [entries for _, entries in lanes]
 
 
+def numbers_of(number, issue_of):
+    """The numbers an action on ``number`` touches: ``number``, and its issue when it is a PR
+    (``issue_of``: PR number to issue number)."""
+    return {number, issue_of[number]} if number in issue_of else {number}
+
+
+def admit(actions, issue_of, running, slots):
+    """Continuous mode (#227): the actions of a plan to start now, in plan order, while
+    ``running`` actions still run and ``slots`` places are free.
+
+    A global action (``GLOBAL_ACTIONS``) starts only when nothing runs, alone and before the
+    others; while one is planned and something runs, nothing starts, so that the running actions
+    end and it runs next. Of several actions on the same number, or on a PR and its issue, only
+    the first starts: the next plan, which sees its result, decides the others."""
+    first = next((a for a in actions if a.kind in GLOBAL_ACTIONS), None)
+    if first is not None:
+        return [] if running else [first]
+    chosen, taken = [], set()
+    for action in actions:
+        if len(chosen) >= slots:
+            break
+        numbers = numbers_of(action.number, issue_of)
+        if numbers & taken:
+            continue
+        taken |= numbers
+        chosen.append(action)
+    return chosen
+
+
+class Workers:
+    """The actions running in continuous mode (#227): up to ``slots`` at once, each in a thread
+    of its own. ``ended()`` tells whether an action ended since the latest ``clear()``. Safe
+    across threads."""
+
+    def __init__(self, slots):
+        self.slots = slots
+        self._pool = ThreadPoolExecutor(max_workers=slots, thread_name_prefix='devloop-action')
+        self._lock = threading.Lock()
+        self._running = {}  # key: (action, numbers it touches)
+        self._ended = threading.Event()
+
+    def running(self):
+        """``(action, numbers)`` of the actions running now, in the order they started."""
+        with self._lock:
+            return list(self._running.values())
+
+    def free(self):
+        return self.slots - len(self.running())
+
+    def full(self):
+        return self.free() <= 0
+
+    def ended(self):
+        return self._ended.is_set()
+
+    def clear(self):
+        self._ended.clear()
+
+    def start(self, action, numbers, job):
+        """Run ``job()`` in a free slot; ``action`` and ``numbers`` count as running from now
+        until it returns."""
+        key = object()
+        with self._lock:
+            self._running[key] = (action, frozenset(numbers))
+
+        def run():
+            try:
+                job()
+            finally:
+                with self._lock:
+                    del self._running[key]
+                self._ended.set()
+        self._pool.submit(run)
+
+    def close(self):
+        """Wait for the running actions and release the threads."""
+        self._pool.shutdown(wait=True)
+
+
 class TickLog:
     """The tick log, safe across threads: each message reaches ``sink`` whole, one at a time.
     While a thread runs inside ``prefixed(prefix)``, each line of its messages is written on its
@@ -509,15 +595,27 @@ def pr_counts_line(snapshot, cfg):
             f'{held}/{cfg.max_parked_prs} parked (max_parked_prs)')
 
 
-def plan(snapshot, cfg):
-    """Pure planning: the actions one tick should take, in order."""
+def plan(snapshot, cfg, busy=frozenset(), reserved=0):
+    """Pure planning: the actions one tick should take, in order.
+
+    In continuous mode (#227) ``busy`` holds the numbers of the issues and PRs that actions
+    still running touch (``numbers_of``): no action of the plan touches them. ``reserved`` is
+    how many of those actions may open a PR (an implementation, a readiness check, a supervisor
+    command on an issue): each holds a slot of ``max_open_prs``, as it did in its own tick."""
     lb = cfg.labels
     actions = []
+    issue_of = {pr.number: pr.issue for pr in snapshot.prs}
+    if busy:
+        snapshot = replace(
+            snapshot,
+            ready_issues=[i for i in snapshot.ready_issues if i['number'] not in busy],
+            supervised=[s for s in snapshot.supervised
+                        if not numbers_of(s['number'], issue_of) & busy])
     pr_issues = {pr.issue for pr in snapshot.prs}
     # Only the PRs devloop works on take the slots of max_open_prs; those waiting for a person
     # have their own limit, and once it is reached no new issue starts (#199).
     working, held = pr_counts(snapshot, cfg)
-    free = 0 if held >= cfg.max_parked_prs else cfg.max_open_prs - working
+    free = 0 if held >= cfg.max_parked_prs else cfg.max_open_prs - working - reserved
     for item in snapshot.supervised:
         # A supervisor command (#182). A retry of an issue's step runs that step, and takes a
         # free PR slot as the step itself would; without one it waits for a later tick.
@@ -673,6 +771,8 @@ def plan(snapshot, cfg):
         actions += [Action('implement', i['number']) for i in candidates[:free]]
     capped, spent = [], 0
     for action in actions:
+        if busy and numbers_of(action.number, issue_of) & busy:
+            continue  # still running (#227): the plan after it ends decides
         if action.kind in EXPENSIVE:
             if spent >= cfg.max_actions_per_tick:
                 continue
@@ -1070,6 +1170,9 @@ class Dispatcher:
         # The models found unavailable (``unavailability.Memory``, #151), or None: every turn
         # starts from the configured model.
         self.memory = memory
+        # Continuous mode (#227): set by ``devloop run`` with parallel actions, a tick starts
+        # its actions in these ``Workers`` and does not wait for them.
+        self.workers = None
 
     # Identities ------------------------------------------------------------
     def _as(self, actor, permissions) -> Backend:
@@ -2051,6 +2154,8 @@ class Dispatcher:
 
     # Tick ----------------------------------------------------------------
     def tick(self, dry_run=False):
+        if self.workers is not None and not dry_run:
+            return self._tick_continuous()
         self._auto_pin(dry_run)
         snap = self.snapshot()
         self._flag_incomplete(snap, dry_run)
@@ -2070,6 +2175,51 @@ class Dispatcher:
                 continue
             self._run_action(action, prs)
         return actions
+
+    def _tick_continuous(self):
+        """A tick of the continuous mode (#227): plan around the actions still running and
+        start in ``self.workers`` those that fit the free slots (``admit``), without waiting for
+        them. Returns the actions started.
+
+        The pin after a merge needs every action ended, since a new copy restarts the process:
+        while one is pending and something runs, nothing starts."""
+        workers = self.workers
+        # An action that ends from here on wakes the loop again: its result is not in this plan.
+        workers.clear()
+        running = workers.running()
+        if not running:
+            self._auto_pin(False)
+        elif self.pinner is not None and self.cfg.pin.auto and self.pinner.pending():
+            self.log(f'auto-pin pending: no action starts until the {len(running)} running '
+                     'ones end')
+            return []
+        snap = self.snapshot()
+        prs = {pr.number: pr for pr in snap.prs}
+        issue_of = {number: pr.issue for number, pr in prs.items()}
+        busy = set()
+        for action, numbers in running:
+            busy |= numbers | numbers_of(action.number, issue_of)
+        # A PR an implementation opened while it still runs belongs to it too.
+        busy |= {number for number, issue in issue_of.items() if issue in busy}
+        self._flag_incomplete(snap, False, busy)
+        reserved = sum(1 for action, _ in running
+                       if action.kind in ('implement', 'preflight')
+                       or action.kind == 'supervise' and action.number not in prs)
+        actions = plan(snap, self.cfg, busy, reserved)
+        started = admit(actions, issue_of, running, workers.free())
+        self.log(f'{pr_counts_line(snap, self.cfg)}; running: '
+                 + (', '.join(f'{a.kind} #{a.number}' for a, _ in running) or 'none'))
+        for action in started:
+            workers.start(action, numbers_of(action.number, issue_of),
+                          lambda action=action: self._run_started(action, prs))
+        return started
+
+    def _run_started(self, action, prs):
+        """Run an action of the continuous mode in its worker thread, as a lane of one, and log
+        its outcome."""
+        outcomes = {}
+        self._run_lane([(0, action)], prs, outcomes)
+        self.log(f'outcome of {action.kind} #{action.number}: ' + outcomes.get(0, 'not run'))
 
     def _auto_pin(self, dry_run):
         """With ``[pin] auto = true`` and a pin requested by a merge (#174), pin
@@ -2323,9 +2473,11 @@ class Dispatcher:
                           checks=checks)
         pr.ci_recorded.append(key)
 
-    def _flag_incomplete(self, snap, dry_run):
+    def _flag_incomplete(self, snap, dry_run, busy=()):
         """Report the turns a previous tick opened and never closed, and mark them incomplete:
-        no turn runs while a tick starts, since one dispatcher runs at a time.
+        no turn runs while a tick starts, since one dispatcher runs at a time, except on the
+        numbers in ``busy``, those of the actions still running in continuous mode (#227):
+        their turns are left alone, and checked once they end.
 
         It looks first where the ledger's trace (``Ledger.pending``) says a turn was opened and
         not closed, whatever labels the issue or PR has now: an issue whose PR is open or that
@@ -2345,6 +2497,8 @@ class Dispatcher:
         numbers += list(snap.working_issues)
         numbers += [i['number'] for i in snap.ready_issues if 'preflight' in i]
         for number in dict.fromkeys(numbers):
+            if number in busy:
+                continue
             try:
                 for comment_id, record in open_turns(self.gh.issue_comments(number),
                                                      self._signed):
