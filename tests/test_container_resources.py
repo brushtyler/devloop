@@ -35,7 +35,8 @@ class ContainerResourceTests(unittest.TestCase):
                     marker = '__SSDLC_RESOURCE_' + name + '__ '
                     stdout = 'QA_STATUS: PASSED' if engine == 'codex' else json.dumps({'result': 'QA_STATUS: PASSED'})
                     return subprocess.CompletedProcess(cmd, 0, stdout, marker+'pids.events.max=0\n')
-                with patch('orchestrator.__file__', str(toolkit/'orchestrator.py')), patch.object(EngineRunner, '_should_spawn_role_container', return_value=True), patch('orchestrator.subprocess.run', side_effect=invoke):
+                # Without a frozen profile codex needs its explicit unmetered_quota declaration (#165).
+                with patch('orchestrator.__file__', str(toolkit/'orchestrator.py')), patch.dict(os.environ, SSDLC_UNMETERED_QUOTA='codex'), patch.object(EngineRunner, '_should_spawn_role_container', return_value=True), patch('orchestrator.subprocess.run', side_effect=invoke):
                     result = getattr(EngineRunner, 'run_'+engine)('Review', root)
                 self.assertEqual(result[0], 'QA_STATUS: PASSED')
                 evidence = list((root/'.ssdlc/.runtime/resources').glob('*.json'))
@@ -116,7 +117,7 @@ class ContainerResourceTests(unittest.TestCase):
         result = subprocess.CompletedProcess([], 0, 'claimed success', '')
         result.resource_failure = True
         result.resource_evidence = 'resource.json'
-        with patch.object(EngineRunner, '_should_spawn_role_container', return_value=False), patch.object(EngineRunner, '_run_role_command', return_value=result) as invoke:
+        with patch.dict(os.environ, SSDLC_UNMETERED_QUOTA='codex'), patch.object(EngineRunner, '_should_spawn_role_container', return_value=False), patch.object(EngineRunner, '_run_role_command', return_value=result) as invoke:
             with self.assertRaises(ResourceLimitError):
                 EngineRunner.run_codex('task', Path.cwd())
         invoke.assert_called_once()

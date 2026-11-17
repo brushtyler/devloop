@@ -241,7 +241,9 @@ class FencedContainerTests(FencingTestCase):
             # The planner and reviewer roles the planning step dispatches.
             EngineRunner.run_claude('Plan', self.orch.repo_root)
             EngineRunner.run_codex('Review the plan', self.orch.repo_root)
+        # Without a frozen profile codex needs its explicit unmetered_quota declaration (#165).
         with patch('orchestrator.subprocess.run', side_effect=runner), \
+                patch.dict(os.environ, SSDLC_UNMETERED_QUOTA='codex'), \
                 patch.object(rf, 'probe_access', return_value=None), \
                 patch.object(self.orch, '_ensure_task_plan', side_effect=plan), \
                 contextlib.redirect_stdout(io.StringIO()) as printed:

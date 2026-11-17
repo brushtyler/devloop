@@ -38,7 +38,9 @@ class AgyAuthTests(unittest.TestCase):
                     EngineRunner._wrap_in_role_container(['agy', 'models'], root, pass_ai_keys=False, auth_profile='agy')
 
     def test_agy_adapter_requests_specific_auth_profile(self):
-        with patch.object(EngineRunner, '_should_spawn_role_container', return_value=True), patch.object(EngineRunner, '_wrap_in_role_container', side_effect=TaskError('stop')) as wrapper:
+        # Without a frozen profile the agy subscription route needs its explicit declaration (#165).
+        with patch.dict('os.environ', SSDLC_UNMETERED_QUOTA='agy'), \
+                patch.object(EngineRunner, '_should_spawn_role_container', return_value=True), patch.object(EngineRunner, '_wrap_in_role_container', side_effect=TaskError('stop')) as wrapper:
             with self.assertRaises(TaskError):
                 EngineRunner.run_agy('task', Path.cwd())
             self.assertEqual(wrapper.call_args.kwargs['auth_profile'], 'agy')

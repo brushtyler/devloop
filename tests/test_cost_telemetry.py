@@ -25,6 +25,8 @@ CODEX_EVENTS = [{'type': 'thread.started', 'thread_id': 't'}, {'type': 'turn.sta
                                                      'output_tokens': 300, 'reasoning_output_tokens': 120}},
                 {'type': 'turn.completed', 'usage': {'input_tokens': 500, 'cached_input_tokens': 400,
                                                      'output_tokens': 100}}]
+# Telemetry of routes the caps cannot bound is observable only with the caps disabled (#165).
+NO_CAPS = {'SSDLC_BUDGET_CAP_USD': '0', 'SSDLC_ESTIMATE_CAP_USD': '0'}
 
 
 def cli(stdout, code=0, stderr=''):
@@ -158,6 +160,9 @@ class AdapterTests(unittest.TestCase):
         self.runner = EngineRunner
         self.container = patch.object(EngineRunner, '_should_spawn_role_container', return_value=False)
         self.container.start(); self.addCleanup(self.container.stop)
+        # No frozen profile: the subscription CLIs need the operator's declaration (#165).
+        declared = patch.dict(os.environ, SSDLC_UNMETERED_QUOTA='codex,agy')
+        declared.start(); self.addCleanup(declared.stop)
 
     def run_with(self, fn, completed, *args, **kwargs):
         calls = []
@@ -236,8 +241,9 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(tuple(result), ('claude answer', 0.4213, 45012, 800, 'P:T:03-dev'))
         self.assertEqual(result.telemetry['estimate']['amount'], 0.4213)
         self.assertEqual(observed_tokens('claude', 'invoke_role', result), {'input_tokens': 45012, 'output_tokens': 800})
-        # An explicit OpenRouter route of the invocation is explicit configuration.
-        with patch.dict('os.environ', {'OPENROUTER_API_KEY': 'k'}):
+        # An explicit OpenRouter route of the invocation is explicit configuration. The Claude CLI
+        # reports no charge, so this route is admitted only with the spend cap disabled (#165).
+        with patch.dict('os.environ', dict(NO_CAPS, OPENROUTER_API_KEY='k')):
             result, _ = self.run_with(self.runner.run_claude, cli(json.dumps(CLAUDE)), 'prompt', self.root,
                                       use_openrouter=True)
         self.assertEqual(result.telemetry['route'], {'value': 'openrouter_api', 'provenance': 'explicit_config'})
@@ -254,7 +260,7 @@ class AdapterTests(unittest.TestCase):
                    if k not in ('ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY')}
         # The container reads its variables from the Docker command, not from the local env
         # the invocation configured: it does not receive the OpenRouter route.
-        with patch.dict('os.environ', dict(ambient, OPENROUTER_API_KEY='k'), clear=True):
+        with patch.dict('os.environ', dict(ambient, OPENROUTER_API_KEY='k', **NO_CAPS), clear=True):
             result, calls = self.run_with(self.runner.run_claude, cli(json.dumps(CLAUDE)), 'prompt', self.root,
                                           use_openrouter=True)
         docker = calls[0]
@@ -262,14 +268,14 @@ class AdapterTests(unittest.TestCase):
         self.assertNotIn('ANTHROPIC_BASE_URL', self.runner._container_env(docker))
         self.assertEqual(result.telemetry['route'], {'value': None, 'provenance': 'unknown'})
         # When the Docker command does pass the OpenRouter base URL, the route is attested.
-        with patch.dict('os.environ', dict(ambient, OPENROUTER_API_KEY='k',
+        with patch.dict('os.environ', dict(ambient, OPENROUTER_API_KEY='k', **NO_CAPS,
                                            ANTHROPIC_BASE_URL='https://openrouter.ai/api'), clear=True):
             result, calls = self.run_with(self.runner.run_claude, cli(json.dumps(CLAUDE)), 'prompt', self.root,
                                           use_openrouter=True)
         self.assertEqual(self.runner._container_env(calls[0])['ANTHROPIC_BASE_URL'], 'https://openrouter.ai/api')
         self.assertEqual(result.telemetry['route'], {'value': 'openrouter_api', 'provenance': 'explicit_config'})
         # Without the explicit request, an ambient base URL is not a route of this invocation.
-        with patch.dict('os.environ', dict(ambient, OPENROUTER_API_KEY='k',
+        with patch.dict('os.environ', dict(ambient, OPENROUTER_API_KEY='k', **NO_CAPS,
                                            ANTHROPIC_BASE_URL='https://openrouter.ai/api'), clear=True):
             result, _ = self.run_with(self.runner.run_claude, cli(json.dumps(CLAUDE)), 'prompt', self.root)
         self.assertEqual(result.telemetry['route']['provenance'], 'unknown')

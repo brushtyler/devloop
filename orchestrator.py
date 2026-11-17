@@ -217,20 +217,106 @@ def _prepaid_feedback(limits, invocation, role, engine):
         _dispatch_local.prepaid, _dispatch_local.limits = None, old_limits
 
 
+def _dev_budget_usd(tier):
+    """Per-invocation ``--max-budget-usd`` of the Claude developer: ``SSDLC_DEV_BUDGET_USD``,
+    else the tier default (S 1, M 2.5, L 8 USD). Independent of the spend and estimate caps."""
+    tier_budget = {"S": 1.0, "M": 2.5, "L": 8.0}.get(tier, 2.5)
+    return float(os.environ.get("SSDLC_DEV_BUDGET_USD") or tier_budget)
+
+
+def _admission_target(engine, bound, limits):
+    """The effective ``(provider, route)`` of an imminent call, from its own configuration only.
+
+    The route is ``None`` when it cannot be determined: OpenRouter was requested for the
+    Claude CLI but the process would not receive the OpenRouter base URL (a role container
+    passes only the host value), or the Claude CLI would receive another, unclassified base
+    URL. An OpenRouter call without a key and without a frozen profile falls back to a local
+    CLI (``call_cli_fallback``): that CLI is the effective backend."""
+    if engine == 'openrouter':
+        if limits is not None or os.environ.get('OPENROUTER_API_KEY', '').strip():
+            return 'openrouter', 'openrouter_api'
+        fallback = EngineRunner._cli_fallback_engine(str(bound.get('model') or ''))
+        if fallback is None:
+            # No CLI either: the call fails before launching anything.
+            return 'openrouter', 'openrouter_api'
+        engine, bound = fallback, {}
+    if engine == 'agy':
+        return 'agy', 'agy_cli'
+    openrouter = bool(bound.get('use_openrouter') and os.environ.get('OPENROUTER_API_KEY'))
+    if engine == 'codex':
+        return 'codex', 'openrouter_api' if openrouter else 'codex_cli'
+    ambient = os.environ.get('ANTHROPIC_BASE_URL')
+    if openrouter:
+        if ambient == telemetry_schema.OPENROUTER_ANTHROPIC_URL or not EngineRunner._should_spawn_role_container():
+            return 'claude', 'openrouter_api'
+        return 'claude', None
+    return 'claude', None if ambient else 'claude_cli'
+
+
+def _admit_route(engine, bound, limits, *, reserved=False):
+    """Refuse, before reserve and launch, a call that the caps in force could not bound.
+
+    Returns the effective provider. A frozen profile makes both its dollar caps mandatory and
+    declares its own ``live_unknown_usage``; without one, the environment caps are in force
+    unless explicitly set to zero, and ``SSDLC_UNMETERED_QUOTA`` is the only declaration.
+    ``reserved``: a reservation already exists (a prepaid feedback call), so the refusal is
+    the proven non-dispatch ``NotDispatched`` rather than a stop."""
+    from ssdlc_recovery import NotDispatched, RecoveryStop
+    refuse = NotDispatched if reserved else RecoveryStop
+    if limits is not None:
+        policy = limits._load(repair=False)[0]['policy']
+        spend_cap = estimate_cap = True
+        declarations = policy.get('live_unknown_usage', {})
+    else:
+        # Only an explicit zero disables a cap; a malformed value leaves it in force.
+        try:
+            spend_cap = corrective.effective_limits(dict(os.environ), [])['budget_cap_usd'] is not None
+        except (TaskError, ValueError):
+            spend_cap = True
+        try:
+            estimate_cap = telemetry_schema.estimate_cap(os.environ, 'M') is not None
+        except ValueError:
+            estimate_cap = True
+        try:
+            declarations = telemetry_schema.unmetered_declarations(os.environ)
+        except ValueError as exc:
+            raise refuse('LIMIT_REACHED', f'{exc}; dispatch refused before launch') from None
+    provider, route = _admission_target(engine, bound, limits)
+    try:
+        telemetry_schema.admit(provider, route, spend_cap=spend_cap, estimate_cap_active=estimate_cap,
+                               declarations=declarations)
+    except telemetry_schema.AdmissionRefused as exc:
+        raise refuse('LIMIT_REACHED', str(exc)) from None
+    return provider
+
+
+def admit_feedback_route(engine, limits):
+    """The route admission of a read-only feedback consultation, before its intent and its
+    reservation (``FundedFeedbackRoles.run``): the adapter launches the CLI without OpenRouter."""
+    _admit_route(engine, {'use_openrouter': False}, limits)
+
+
 def _supervised_dispatch(fn):
     signature = inspect.signature(fn)
     @functools.wraps(fn)
     def wrapped(*args, **kwargs):
+        if getattr(_dispatch_local, 'depth', 0):
+            return fn(*args, **kwargs)
         limits = getattr(_dispatch_local, 'limits', None)
         supervised = bool(os.environ.get('SSDLC_SUPERVISED_RUN_ID'))
-        if (not supervised and limits is None) or getattr(_dispatch_local, 'depth', 0):
-            return fn(*args, **kwargs)
         bound = signature.bind(*args, **kwargs).arguments
         engine = bound.get('engine', fn.__name__.removeprefix('run_'))
         if isinstance(engine, str):
             engine = engine.lower().strip()
         if fn.__name__ == 'call_openrouter' or engine not in {'agy', 'claude', 'codex'}:
             engine = 'openrouter'
+        # Admission of the effective backend and route (the CLI fallback of an OpenRouter
+        # call without a key included), before any reservation, intent or launch (#165); the
+        # intent keeps the requested engine. A prepaid feedback call was admitted before its
+        # reservation, and a refusal here still proves that nothing was launched.
+        _admit_route(engine, bound, limits, reserved=getattr(_dispatch_local, 'prepaid', None) is not None)
+        if not supervised and limits is None:
+            return fn(*args, **kwargs)
         fields = dict(getattr(_dispatch_local, 'context', {}))
         if 'phase' in bound:
             from ssdlc_supervisor import PHASES
@@ -1342,7 +1428,9 @@ KNOWN_PROJECT_ENV_VARS = ROLE_OVERRIDE_ENV_VARS | frozenset({
     "SSDLC_PROJECT_ID", "SSDLC_EXECUTION_MODE", "SSDLC_SYNC_REMOTE", "SSDLC_STANDARDS_PROFILE",
     "SSDLC_INHERIT_HOST_CODEX_AUTH", "SSDLC_INHERIT_HOST_CLAUDE_AUTH", "SSDLC_AUTONOMOUS",
     "SSDLC_DEV_USE_OPENROUTER", "SSDLC_REVIEW_MODELS", "SSDLC_DEFAULT_TIER", "SSDLC_MAX_REASONING_EFFORT",
-    "SSDLC_BUDGET_CAP_USD", "SSDLC_DEV_BUDGET_USD", "SSDLC_MAX_DEV_RETRIES", "SSDLC_MAX_DESIGN_ROUNDS",
+    "SSDLC_BUDGET_CAP_USD", "SSDLC_ESTIMATE_CAP_USD", "SSDLC_UNMETERED_QUOTA", "SSDLC_DEV_BUDGET_USD",
+    "SSDLC_MAX_DEV_RETRIES",
+    "SSDLC_MAX_DESIGN_ROUNDS",
     "SSDLC_DEV_TIMEOUT", "SSDLC_REVIEW_MAX_DIFF_CHARS", "SSDLC_SUPERVISOR_HARD_TIMEOUT",
     "SSDLC_PREFLIGHT_MIN_FREE_MB", "SSDLC_CONTAINER_MEMORY", "SSDLC_CONTAINER_CPUS",
     "SSDLC_CONTAINER_PIDS_LIMIT", "SSDLC_CONTAINER_PAYLOAD_USER",
@@ -1965,6 +2053,17 @@ class EngineRunner:
                               telemetry_schema.from_openrouter(usage))
 
     @staticmethod
+    def _cli_fallback_engine(model_hint: str) -> Optional[str]:
+        """The local CLI ``call_cli_fallback`` launches for ``model_hint``, or None."""
+        if "claude" in model_hint.lower() and shutil.which("claude"):
+            return "claude"
+        if shutil.which("codex"):
+            return "codex"
+        if shutil.which("claude"):
+            return "claude"
+        return None
+
+    @staticmethod
     def call_cli_fallback(
         model_hint: str,
         system_prompt: str,
@@ -1973,13 +2072,14 @@ class EngineRunner:
     ) -> Tuple[str, float, int, int]:
         from ssdlc_recovery import ReportedOutput
         full_prompt = f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nTASK:\n{user_prompt}"
-        if "claude" in model_hint.lower() and shutil.which("claude"):
+        engine = EngineRunner._cli_fallback_engine(model_hint)
+        if engine == "claude":
             result = EngineRunner.run_claude(
                 full_prompt, cwd=Path.cwd(), read_only=True, model=model_hint, reasoning_effort=reasoning_effort
             )
             out, _, c, ti, to = result
             return ReportedOutput((out, c, ti, to), None, getattr(result, "telemetry", None))
-        if shutil.which("codex"):
+        if engine == "codex":
             result = EngineRunner.run_codex(
                 full_prompt,
                 cwd=Path.cwd(),
@@ -1988,12 +2088,6 @@ class EngineRunner:
             )
             out, _ = result
             return ReportedOutput((out, 0.0, 0, 0), None, getattr(result, "telemetry", None))
-        if shutil.which("claude"):
-            result = EngineRunner.run_claude(
-                full_prompt, cwd=Path.cwd(), read_only=True, model=model_hint, reasoning_effort=reasoning_effort
-            )
-            out, _, c, ti, to = result
-            return ReportedOutput((out, c, ti, to), None, getattr(result, "telemetry", None))
         raise RuntimeError(
             "Neither OPENROUTER_API_KEY nor local 'codex'/'claude' CLI is available."
         )
@@ -3307,10 +3401,11 @@ class SSDLCOrchestrator:
         if store is not None:
             envelope, counters = store._load(repair=False)
             return store.accounted_total(counters, envelope['policy'])
-        # The historical legacy ledger cannot turn an unknown observation into
-        # a measured charge. Native bounded execution uses its reserved view.
-        return sum(row['cost_usd'] for row in self.state.get('ledger', [])
-                   if row.get('cost_usd') is not None)
+        # Without a frozen profile this is the measured spend SSDLC_BUDGET_CAP_USD bounds
+        # (#165): charges, plus figures that cannot be classified; never estimates.
+        # Native bounded execution uses its reserved view.
+        measures = telemetry_schema.ledger_measures(self.state.get('ledger', []))
+        return measures['spend_usd'] + measures['unclassified_usd']
 
     def _corrective_limits(self, transactions=None):
         store = getattr(_dispatch_local, 'limits', None)
@@ -4209,8 +4304,7 @@ class SSDLCOrchestrator:
             cost, tin, tout = 0.0, 0, 0
             with _dispatch_context(task_id=task["task_id"], attempt=attempt, phase="03-dev"):
                 if engine == "claude":
-                    tier_budget = {"S": 1.0, "M": 2.5, "L": 8.0}.get(self.state.get("risk_tier", "M"), 2.5)
-                    dev_budget = float(os.environ.get("SSDLC_DEV_BUDGET_USD") or tier_budget)
+                    dev_budget = _dev_budget_usd(self.state.get("risk_tier", "M"))
                     result = EngineRunner.run_claude(
                         prompt, cwd=workspace, read_only=False, use_openrouter=use_or,
                         writable_worktree=workspace, model=model, reasoning_effort=effort,
@@ -6046,19 +6140,47 @@ To **REJECT** and record feedback (free text authorizes no repair):
             if not transactions:
                 return
         budget_cap = self._corrective_limits(transactions)['budget_cap_usd']
-        if budget_cap is None:
+        if limits is not None:
+            # A frozen profile keeps its own separate metered/estimate caps (checked above)
+            # and the frozen combined authority of its corrective transactions.
+            total_spent = self._corrective_accounted_spend()
+            if budget_cap is not None and total_spent >= budget_cap:
+                self._halt_budget("BUDGET_CAP_GATE", f"Circuit Breaker: Accounted usage including reserves "
+                                  f"(${total_spent:.2f}) reached or exceeded budget cap (${budget_cap:.2f})!")
             return
-        total_spent = self._corrective_accounted_spend()
-        if total_spent >= budget_cap:
-            label = "Accounted usage including reserves" if limits is not None else "Total reported spend"
-            msg = f"Circuit Breaker: {label} (${total_spent:.2f}) reached or exceeded budget cap (${budget_cap:.2f})!"
-            print(f"\n[CIRCUIT-BREAKER] {msg}")
-            self.record_gate("BUDGET_CAP_GATE", False, msg)
-            self.state["status"] = "HALTED_BUDGET_EXCEEDED"
-            self._save_state()
-            error = TaskError(msg)
-            error.category = 'LIMIT_REACHED'
-            raise error
+        # Separate caps (#165): SSDLC_BUDGET_CAP_USD bounds measured spend only, and
+        # SSDLC_ESTIMATE_CAP_USD bounds API-equivalent estimates. A figure that cannot be
+        # classified (legacy rows, rows without telemetry) keeps counting as spend, as before.
+        measures = telemetry_schema.ledger_measures(self.state.get('ledger', []))
+        if budget_cap is not None:
+            if measures['unmeasured_spend']:
+                self._halt_budget("BUDGET_CAP_GATE", "Circuit Breaker: a call on a measured route reported no "
+                                  "charge, so measured spend is unknown and SSDLC_BUDGET_CAP_USD cannot be applied!")
+            spent = self._corrective_accounted_spend()
+            if spent >= budget_cap:
+                self._halt_budget("BUDGET_CAP_GATE", f"Circuit Breaker: Measured spend (${spent:.2f}) reached or "
+                                  f"exceeded budget cap (${budget_cap:.2f})!")
+        try:
+            estimate_cap = telemetry_schema.estimate_cap(os.environ, self.state.get('risk_tier') or 'M')
+        except ValueError:
+            raise corrective.CorrectiveError('limits_exceeded') from None
+        estimated = measures['estimate_usd']
+        if estimate_cap is not None and measures['unmeasured_estimate']:
+            self._halt_budget("ESTIMATE_CAP_GATE", "Circuit Breaker: a call on a route that needs an estimate "
+                              "reported none, so the estimates are unknown and SSDLC_ESTIMATE_CAP_USD cannot be "
+                              "applied!")
+        if estimate_cap is not None and estimated >= estimate_cap:
+            self._halt_budget("ESTIMATE_CAP_GATE", f"Circuit Breaker: API-equivalent estimates (${estimated:.2f}) "
+                              f"reached or exceeded the estimate cap (${estimate_cap:.2f})!")
+
+    def _halt_budget(self, gate, msg):
+        print(f"\n[CIRCUIT-BREAKER] {msg}")
+        self.record_gate(gate, False, msg)
+        self.state["status"] = "HALTED_BUDGET_EXCEEDED"
+        self._save_state()
+        error = TaskError(msg)
+        error.category = 'LIMIT_REACHED'
+        raise error
 
     @_bounded_entrypoint
     @_bootstrap_run_invocation

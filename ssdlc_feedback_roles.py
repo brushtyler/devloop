@@ -106,6 +106,10 @@ class FundedFeedbackRoles:
                 raise FeedbackError('No useful development attempt remains')
             # The imminent call, with its selected engine and candidate reserve,
             # must fit before any durable intent; reserve() rechecks atomically.
+            # A runner that knows its effective route admits it first (#165).
+            admit = getattr(runner, 'admit', None)
+            if admit is not None:
+                admit(copy.deepcopy(metadata))
             self.limits.require_capacity('feedback-' + role, 'feedback', metadata['engine'])
             call = self.feedback.reserve_role(request_id, role, metadata)
             fault('feedback_intent')

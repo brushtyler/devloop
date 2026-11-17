@@ -21,6 +21,14 @@ from helpers.supervisor_fakes import hook_environment
 from ssdlc_tasks import DevelopmentBlocked, TaskJournal
 
 
+def setUpModule():
+    # These fixtures run codex and agy without a frozen profile: their subscription route
+    # needs the operator's explicit unmetered_quota declaration (#165).
+    declared = patch.dict(os.environ, SSDLC_UNMETERED_QUOTA='codex,agy')
+    declared.start()
+    unittest.addModuleCleanup(declared.stop)
+
+
 class TestDispatchHooks(Case):
     def setUp(self):
         super().setUp()
@@ -273,7 +281,9 @@ class DevelopmentCase(bootstrap.RepositoryTests):
             self.assertEqual(getattr(o._dispatch_local, 'depth', 0), 1)
             if raised: raise subprocess.TimeoutExpired(['fake'], 1)
             if rc == 0: (Path(kw['cwd']) / 'app.py').write_text('value = 1\n')
-            output = json.dumps(dict(result='REVIEW_STATUS: APPROVED')) if engine == 'claude' else 'REVIEW_STATUS: APPROVED'
+            # The Claude CLI reports its API-equivalent estimate; without one the estimate cap stops the run (#165).
+            output = (json.dumps(dict(result='REVIEW_STATUS: APPROVED', total_cost_usd=0.01)) if engine == 'claude'
+                      else 'REVIEW_STATUS: APPROVED')
             return subprocess.CompletedProcess(argv, rc, output, '')
         # Task capture requires a container; this semantic adapter simulates its
         # command boundary while preserving the real supervised dispatch hooks.
@@ -383,7 +393,8 @@ class TestRouteDispatchParity(DevelopmentCase):
                     nonce = re.search(r'BEGIN SSDLC GATE REPORT ([a-f0-9]{16})', prompt)[1]
                     report = dict(schema_version='1.0', reviewed_commit=orch.state['task_verified_head'], source_gate='code_review', findings=[])
                     value = f'-----BEGIN SSDLC GATE REPORT {nonce}-----\n' + json.dumps(report) + f'\n-----END SSDLC GATE REPORT {nonce}-----\n' + value
-                return subprocess.CompletedProcess(argv, 0, json.dumps(dict(result=value)) if 'claude' in argv[0] else value, '')
+                return subprocess.CompletedProcess(argv, 0, json.dumps(dict(result=value, total_cost_usd=0.01))
+                                                   if 'claude' in argv[0] else value, '')
             with patch.dict(os.environ, hook_environment(store)), patch.object(o.EngineRunner, '_should_spawn_role_container', return_value=False), patch.object(o.EngineRunner, '_run_role_command', side_effect=command), contextlib.redirect_stdout(io.StringIO()):
                 orch.run_phase_review()
             observed = {e['engine'] for e in s.controller_events(store, store.read())[0] if e['type'] == 'dispatch_started'}
