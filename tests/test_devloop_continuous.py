@@ -795,6 +795,33 @@ class ContinuousTickTests(unittest.TestCase):
         self.assertIsNone(d._restart)
         self.assertFalse((tmp / activity.RESTART).exists())
 
+    def test_the_limit_passed_during_the_snapshot_starts_no_action(self):
+        # #301: the limit (30 minutes) is not over when the tick begins, 1799 s after the pin,
+        # but passes while the snapshot reads GitHub: #10 does not start.
+        pinner = mock.Mock()
+        pinner.pending.return_value = None
+        d = self.make(pinner=pinner)
+        now = [0]
+        d.clock = lambda: now[0]
+        d.cfg = dataclasses.replace(PCFG, pin=dataclasses.replace(PCFG.pin, auto=True,
+                                                                  restart_max_wait_minutes=30))
+        d.snapshot = lambda: Snapshot([], [ready(9)], [])
+        self.assertEqual(d.tick(), [Action('implement', 9)])
+        d._restart = ('0123456789ab', 0)
+        now[0] = 1799
+
+        def snapshot():
+            now[0] = 1801  # the reads of GitHub end past the limit
+            return Snapshot([], [ready(9), ready(10)], [])
+        d.snapshot = snapshot
+        logs = []
+        d.log.sink = logs.append
+        self.assertEqual(d.tick(), [])
+        self.assertEqual([a.number for a, _ in d.workers.running()], [9])
+        self.assertTrue(any('over [pin] restart_max_wait_minutes (30), no action starts until '
+                            'the restart' in line for line in logs), logs)
+        self.release.set()
+
     def test_a_restart_to_the_running_copy_is_dropped(self):
         # The operator pinned the running copy again by hand while the restart waited.
         pinner = mock.Mock()

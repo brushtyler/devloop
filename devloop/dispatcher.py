@@ -2054,15 +2054,9 @@ class Dispatcher:
         if not running:
             self._restart_if_pending()
         elif self._restart is not None:
-            sha, since = self._restart
-            line = restart_line(sha, iso(since), len(running))
-            waited = self.clock() - since
-            if waited >= self.cfg.pin.restart_max_wait_minutes * 60:
-                self.log(f'{line}: over [pin] restart_max_wait_minutes '
-                         f'({self.cfg.pin.restart_max_wait_minutes}), no action starts until '
-                         'the restart')
+            if self._restart_wait_over(running):
                 return []
-            self.log(line)
+            self.log(restart_line(self._restart[0], iso(self._restart[1]), len(running)))
         self._transition_labels(False)
         snap = self.snapshot()
         prs = {pr.number: pr for pr in snap.prs}
@@ -2078,6 +2072,9 @@ class Dispatcher:
                        or action.kind == 'supervise' and action.number not in prs)
         merging = any(action.kind in MERGE_LANE for action, _ in running)
         actions = plan(snap, self.cfg, busy, reserved, merging)
+        # The limit may pass while the snapshot reads GitHub: checked again before any start.
+        if running and self._restart is not None and self._restart_wait_over(running):
+            return []
         started = admit(actions, issue_of, running, workers.free())
         self.log(f'{pr_counts_line(snap, self.cfg)}; running: '
                  + (', '.join(f'{a.kind} #{a.number}' for a, _ in running) or 'none'))
@@ -2085,6 +2082,17 @@ class Dispatcher:
             workers.start(action, numbers_of(action.number, issue_of),
                           lambda action=action: self._run_started(action, prs))
         return started
+
+    def _restart_wait_over(self, running):
+        """Whether the pending restart waited ``[pin] restart_max_wait_minutes`` or more for the
+        ``running`` actions (#301); if so, log that no action starts until the restart."""
+        sha, since = self._restart
+        limit = self.cfg.pin.restart_max_wait_minutes
+        if self.clock() - since < limit * 60:
+            return False
+        self.log(f'{restart_line(sha, iso(since), len(running))}: over [pin] '
+                 f'restart_max_wait_minutes ({limit}), no action starts until the restart')
+        return True
 
     def _set_restart(self, copy):
         """Record that a restart from the new pinned ``copy`` waits for the running actions
