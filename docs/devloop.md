@@ -601,6 +601,27 @@ PR already in `agent:ready-to-merge` keeps its label until something sends it ba
   level and the mode, and in `merged_by` the login of the merger app when it merged (none with
   the local login).
 
+### Closing the issue
+
+With a merge made by the merger app, GitHub does not apply the PR's "Closes #N" (#228). After
+every merge in `"strict"` or `"auto"` the dispatcher therefore closes the issue named by the
+PR's marker itself, with its own identity (the merger app gets no new permission): a dispatcher
+comment with a `closed` marker records the PR, the merged head, the merge commit and the mode,
+then the issue is closed as completed and loses `agent:ready`. An issue that is already closed,
+because GitHub closed it or a person merged, is left alone. A failure to close is written to the
+dispatcher log and leaves the merge as it is.
+
+**Safety net in the planner.** An open issue in `agent:ready` with a merged devloop PR (a PR from
+its branch, `<branch_prefix><issue>`, by a trusted user or a devloop app, merged by anyone) is
+never checked nor implemented again. It becomes a `merged_issue` escalation, non-critical: in
+`"auto"` it goes to `agent:needs-supervisor` and keeps `agent:ready`, otherwise to
+`agent:needs-human` without `agent:ready`. `/devloop retry` is refused for it: closing the issue,
+or `/devloop escalate <reason>`, settles it. More work on the same subject needs a new issue.
+The same check runs before a `/devloop retry` of an issue already escalated for another class
+(a `tool_failure` of its readiness check or implementation, for example): with a merged devloop
+PR the retry is refused, the step is not run, and the issue gets a `merged_issue` escalation
+routed as above.
+
 ### Holding a merge
 
 Only in `"auto"`. A PR comment whose first line, after the attribution header if any, is
@@ -658,6 +679,7 @@ check, and the `policy` marker of a level that cannot be reviewed or promoted. A
 | `tool_failure` | The agent or its model produced no result: a crash, a timeout, a stall with `agent_stall_action = "abort"`, no model available, a denied permission, a block for [background work still running](#no-background-work-in-a-turn) | No |
 | `preflight_default` | A failed [readiness check](#readiness-check-before-implementation) whose gaps are all `default_available`, with no split | No |
 | `sync_failed` | A [sync](#conflicts-with-main) that failed, with no file in conflict under a sensitive path (`sensitive_paths`) or `operator_only_paths` | No |
+| `merged_issue` | An open issue in `agent:ready` that a merged devloop PR already resolved ([Closing the issue](#closing-the-issue)) | No |
 | `round_limit` | The limit of review rounds | Yes |
 | `operator_decision` | A readiness check with an `operator_decision` or `tool_unavailable` gap, or a split | Yes |
 | `untrusted` | The issue text changed after `agent:ready` by someone outside `trusted_users` | Yes |
@@ -1060,8 +1082,8 @@ The dispatcher reaches GitHub through three ports, declared in `devloop/ports.py
 
 | Port | Methods |
 |---|---|
-| `Tracker` | issues and their history, comments of issues and PRs, labels: `issues_with_label`, `issue`, `issue_history`, `issue_comments`, `pr_comments`, `labelers`, `label_events`, `labeled_events`, `edit_labels`, `comment`, `edit_comment`, `ensure_label` |
-| `CodeReview` | PRs and reviews: `open_prs`, `merge_state` (`clean`, `conflict` or `unknown`), `pr_head`, `pr_state`, `merge_pr`, `pr_reviews`, `create_pr`, `submit_review` |
+| `Tracker` | issues and their history, comments of issues and PRs, labels: `issues_with_label`, `issue`, `issue_history`, `issue_comments`, `pr_comments`, `labelers`, `label_events`, `labeled_events`, `edit_labels`, `comment`, `close_issue`, `edit_comment`, `ensure_label` |
+| `CodeReview` | PRs and reviews: `open_prs`, `merged_prs`, `merge_state` (`clean`, `conflict` or `unknown`), `pr_head`, `pr_state`, `merge_pr`, `pr_reviews`, `create_pr`, `submit_review` |
 | `CI` | checks of a commit: `checks` (summarized by `summarize_checks`), `check_details`, `check_runs`, `failed_log` |
 
 The ports hold only the methods the dispatcher calls, with their current names and signatures,

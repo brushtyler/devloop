@@ -19,7 +19,8 @@ the attribution header:
 TOOL_FAILURE = 'tool_failure'            # the agent or its model produced no result
 PREFLIGHT_DEFAULT = 'preflight_default'  # readiness gaps all ``default_available``
 SYNC_FAILED = 'sync_failed'              # a sync failed, no conflict on a sensitive path
-NON_CRITICAL = (TOOL_FAILURE, PREFLIGHT_DEFAULT, SYNC_FAILED)
+MERGED_ISSUE = 'merged_issue'            # a ready issue that a merged devloop PR resolved (#228)
+NON_CRITICAL = (TOOL_FAILURE, PREFLIGHT_DEFAULT, SYNC_FAILED, MERGED_ISSUE)
 
 # Critical classes: always to the operator. Any other value is critical too.
 CRITICAL = {
@@ -90,6 +91,8 @@ def describe(cls):
         return 'lacune del controllo di prontezza con un default proposto'
     if cls == SYNC_FAILED:
         return 'sincronizzazione con la base non riuscita'
+    if cls == MERGED_ISSUE:
+        return 'issue ancora aperta, ma risolta da una PR devloop già mergiata'
     return CRITICAL.get(cls, 'classe non riconosciuta, quindi critica')
 
 

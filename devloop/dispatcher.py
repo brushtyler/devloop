@@ -75,6 +75,12 @@ every merge directive holds again just before the merge: the conditions of the p
 ``auto`` adds ``/devloop hold <reason>`` and ``/devloop release`` from the supervisor's identity
 or a trusted user. A level override or an operator-only path can only make the mode stricter.
 
+Merged issues (#228): after a merge the dispatcher closes the PR's issue itself, with a
+``closed`` record, and removes ``agent:ready``: the keywords "Closes #N" have no effect when the
+merger's app merges. An issue already closed is left alone. A ready issue that a merged devloop
+PR resolved is never checked nor implemented again: it becomes a ``merged_issue`` escalation,
+non-critical (``_do_merged_issue``).
+
 Escalation classes (#182, ``supervision``): every escalation records its class. In ``auto`` a
 non-critical one (``tool_failure``, ``preflight_default``, ``sync_failed``) goes to
 agent:needs-supervisor, unless something makes it critical (``_supervised``), and the
@@ -122,8 +128,9 @@ from .review import (CI, FINDING_COMMAND, OPERATOR, ci_failure_review, current_r
                      finding_commands, finding_key, finding_state, last_round, normalize_review,
                      open_findings, owner_of, round_verdict)
 from .supervision import (ACCEPT_DEFAULTS, DESIGN_LABEL, ESCALATE, ISSUE_STEPS, MAX_RETRIES,
-                          PREFLIGHT_DEFAULT, RETRY, RETRY_STEPS, SYNC_FAILED, TOOL_FAILURE,
-                          critical, preflight_class, retries_done, supervisor_command)
+                          MERGED_ISSUE, PREFLIGHT_DEFAULT, RETRY, RETRY_STEPS, SYNC_FAILED,
+                          TOOL_FAILURE, critical, preflight_class, retries_done,
+                          supervisor_command)
 from .workspace import WorkspaceError
 
 PROMPT_DIR = Path(__file__).resolve().parent / 'prompts'
@@ -253,7 +260,8 @@ class Snapshot:
     # ``labeled`` event of agent:ready), admitted (whether that labeler may admit the issue,
     # ``label_admitters``), priority (``issue_priority``), and with ``preflight``
     # configured, for the issues that may start or are blocked by the check, ``preflight``
-    # (``_preflight_view``)
+    # (``_preflight_view``). For those same issues, ``merged``: the numbers of the merged
+    # devloop PRs that resolved them (#228), which ``plan`` never starts again.
     ready_issues: list
     working_issues: list  # issue numbers
     # Issues and PRs in agent:needs-supervisor with a supervisor command to apply (#182):
@@ -608,13 +616,22 @@ def plan(snapshot, cfg):
                           else 'every finding of the request for changes is closed' if settled
                           else '')
                 actions.append(Action('review', pr.number, reason))
+    # A ready issue that a merged devloop PR already resolved is never checked nor implemented
+    # again (#228): it is escalated, once, and waits for whoever decides it.
+    resolved = set()
+    for issue in snapshot.ready_issues:
+        if issue.get('merged'):
+            resolved.add(issue['number'])
+            if not issue['labels'] & {lb.needs_human, lb.needs_supervisor}:
+                actions.append(Action('merged_issue', issue['number'], 'resolved by merged PR '
+                                      + ', '.join(f'#{n}' for n in issue['merged'])))
     if cfg.preflight:
-        actions += _plan_preflight(snapshot, cfg, pr_issues, free)
+        actions += _plan_preflight(snapshot, cfg, pr_issues | resolved, free)
     elif free > 0:
         blocked = set(cfg.blocked_labels) | {lb.working, lb.needs_human, lb.needs_supervisor}
         candidates = [i for i in snapshot.ready_issues
                       if not (i['labels'] & blocked) and i['number'] not in pr_issues
-                      and i['admitted']]
+                      and i['number'] not in resolved and i['admitted']]
         candidates.sort(key=start_order)
         actions += [Action('implement', i['number']) for i in candidates[:free]]
     capped, spent = [], 0
@@ -628,7 +645,8 @@ def plan(snapshot, cfg):
 
 
 def _plan_preflight(snapshot, cfg, pr_issues, free):
-    """New work with the readiness check (#114). Issues start in the usual order, up to
+    """New work with the readiness check (#114), for the ready issues not in ``pr_issues`` (an
+    open PR, or a merged one, #228). Issues start in the usual order, up to
     ``free``: one whose check for its current text passed is implemented, one without a valid
     check is checked first (implemented on a later tick if ready). A failed check that is still
     valid blocks the issue again if its ``agent:needs-human`` was removed. An issue the check
@@ -1203,9 +1221,10 @@ class Dispatcher:
                     # would answer findings already fixed, or have none to fix.
                     resume = lb.review
                 return {'step': step, 'key': key, 'resume': resume}, ''
-            if key is None and cls == PREFLIGHT_DEFAULT:
-                # A failed check reused, not run again: no retry uses its key, and
-                # accept-defaults checks the hash of the check's own record.
+            if key is None and cls in (PREFLIGHT_DEFAULT, MERGED_ISSUE):
+                # A failed check reused, not run again, or an issue a merged PR resolved (#228),
+                # whose step never runs: no retry uses its key (a retry admits neither class),
+                # and accept-defaults checks the hash of the check's own record.
                 key = self._issue_key(step, self.ws.base_head(),
                                       self._request_hash(history, self.gh.issue_comments(number)))
             if not isinstance(key, dict) or key.get('step') != step:
@@ -1358,6 +1377,15 @@ class Dispatcher:
         if cls not in (TOOL_FAILURE, SYNC_FAILED):
             return trace('refused', 'rifiutato: vale solo per le escalation `tool_failure` e '
                          '`sync_failed`. Il comando è speso; l\'escalation resta al supervisore.')
+        # An issue a merged devloop PR already resolved is never checked nor implemented again
+        # (#228), whatever escalation it waits in: the retry becomes a merged_issue escalation.
+        merged = [] if is_pr else self._merged_prs(number)
+        if merged:
+            trace('refused', 'rifiutato: l\'issue è già risolta da una PR devloop mergiata ('
+                  + ', '.join(f'#{m["number"]}' for m in merged) + '), quindi ripeterne il '
+                  'passo duplicherebbe il lavoro. Il comando è speso; l\'issue passa a '
+                  'un\'escalation `merged_issue`.')
+            return self._do_merged_issue(number, merged)
         key, step = escalation.get('key'), escalation.get('step')
         if (not isinstance(key, dict) or step not in RETRY_STEPS or key.get('step') != step
                 or is_pr == (step in ISSUE_STEPS) or (step == 'preflight'
@@ -1624,6 +1652,18 @@ class Dispatcher:
             return None
         return self.cfg.merge.mode_for(receipt['level'], paths)
 
+    def _merged_prs(self, number):
+        """The merged devloop PRs of issue ``number`` (#228), newest first, as ``{number,
+        merge_commit}``: those from its branch that ``_devloop_pr`` recognises, whether or not
+        their body still ends with the marker. Who merged them does not matter."""
+        found = []
+        for raw in self.gh.merged_prs(f'{self.cfg.branch_prefix}{number}'):
+            pr = self._devloop_pr(dict(raw, headRefOid=raw.get('headRefOid') or ''))
+            if pr is not None and pr.issue == number:
+                found.append({'number': pr.number,
+                              'merge_commit': (raw.get('mergeCommit') or {}).get('oid')})
+        return found
+
     def _devloop_pr(self, raw):
         """A devloop PR is recognised by its branch, ``<branch_prefix><issue>``, so that it stays
         in the flow (and its branch is never overwritten) even if its marker is lost. ``meta`` is
@@ -1697,9 +1737,11 @@ class Dispatcher:
                      'priority': issue_priority(labels, events, admitters,
                                                 self.cfg.priority_labels)}
             # The readiness check of the issues that may start or are blocked by it (#114).
-            if (self.cfg.preflight and issue['admitted']
-                    and not issue['labels'] & skip and issue['number'] not in pr_issues):
-                issue['preflight'] = self._preflight_view(issue['number'], issue['labels'])
+            if issue['admitted'] and not issue['labels'] & skip and issue['number'] not in pr_issues:
+                # A merged PR that resolved it (#228): ``plan`` never starts it again.
+                issue['merged'] = [p['number'] for p in self._merged_prs(issue['number'])]
+                if self.cfg.preflight and not issue['merged']:
+                    issue['preflight'] = self._preflight_view(issue['number'], issue['labels'])
             ready.append(issue)
         working = [raw['number'] for raw in self.gh.issues_with_label(lb.working)]
         return Snapshot(prs=prs, ready_issues=ready, working_issues=working,
@@ -3041,7 +3083,72 @@ class Dispatcher:
         except GitHubError as exc:
             # The PR is merged: escalating it would only label a closed PR.
             self.log(f'  the merged record could not be written: {exc}')
+        self._close_merged_issue(pr, head, mode)
         return None
+
+    def _close_merged_issue(self, pr, head, mode):
+        """Close the issue of ``pr``, the one its marker names, after devloop merged it (#228),
+        with the dispatcher's identity: "Closes #N" has no effect when the merger's app merges.
+        A comment with a ``closed`` marker records the PR, the merged head, the merge commit
+        and the mode; then the issue is closed as completed and loses ``agent:ready``. An issue
+        that is not open (GitHub closed it, or a person did) is left alone. A failure is logged
+        and does not touch the merged PR: an issue left open with ``agent:ready`` is never
+        started again (``_do_merged_issue``)."""
+        lb = self.cfg.labels
+        number = pr.meta.get('issue')
+        if not isinstance(number, int):
+            self.log('  the PR marker names no issue: none closed')
+            return
+        try:
+            issue = self.gh.issue(number)
+            state = issue.get('state')
+            if state != 'OPEN':
+                self.log(f'  issue #{number} is {state or "in an unknown state"}: left alone')
+                return
+            commit = None
+            try:
+                commit = (self.gh.pr_state(pr.number).get('mergeCommit') or {}).get('oid')
+            except GitHubError as exc:
+                self.log(f'  merge commit of #{pr.number} not read: {exc}')
+            self.gh.comment(number, publishable(
+                dispatcher_header() + '\n## Risolta da una PR mergiata\n\n'
+                f'devloop ha mergiato la PR #{pr.number} (head `{head[:12]}`, merge commit '
+                + (f'`{commit[:12]}`' if commit else 'non letto') + f') in modalità `{mode}`, e '
+                'chiude questa issue come completata. Con il merge dell\'app merger le parole '
+                'chiave di chiusura della PR non hanno effetto, quindi la chiude il dispatcher.',
+                'closed', {'pr': pr.number, 'head': head, 'merge_commit': commit, 'mode': mode}))
+            self.gh.close_issue(number)
+            if lb.ready in label_names(issue.get('labels') or []):
+                self.gh.edit_labels(number, remove=[lb.ready])
+            self.log(f'  issue #{number} closed')
+        except GitHubError as exc:
+            self.log(f'  issue #{number} NOT closed, close it by hand: {exc}')
+
+    def _do_merged_issue(self, number, merged=None):
+        """Escalate a ready issue that a merged devloop PR already resolved (#228), instead of
+        checking or implementing it again: class ``merged_issue``, non-critical. In ``auto``
+        the supervisor decides it and the issue keeps ``agent:ready`` meanwhile (no retry is
+        admitted: closing the issue, or ``/devloop escalate``, settles it); otherwise it goes
+        to the operator, without ``agent:ready`` nor ``agent:needs-supervisor``. ``merged``:
+        the merged PRs already read (``_do_supervise``, a retry refused for them)."""
+        lb = self.cfg.labels
+        if merged is None:
+            merged = self._merged_prs(number)
+        if not merged:
+            self.log('  no merged devloop PR found any more; next tick')
+            return
+        listed = ', '.join(f'#{m["number"]}' + (f' (merge commit `{m["merge_commit"][:12]}`)'
+                                                if m['merge_commit'] else '') for m in merged)
+        reason = (f'L\'issue è aperta e ha `{lb.ready}`, ma è già stata mergiata una PR devloop '
+                  f'che la risolve: {listed}. devloop non la controlla né la implementa di nuovo, '
+                  'per non duplicare il lavoro. Se è risolta va chiusa; se serve altro lavoro, '
+                  'va aperta una nuova issue.')
+        supervised, why = self._supervised(number, MERGED_ISSUE, 'implement')
+        # From a refused retry the issue is in agent:needs-supervisor: it leaves it only for
+        # the operator.
+        remove = [lb.ready] if supervised else [lb.ready, lb.needs_supervisor]
+        self._escalate(number, reason, remove=remove, cls=MERGED_ISSUE,
+                       supervised=supervised, why=why)
 
     def _do_stale(self, number):
         lb = self.cfg.labels
