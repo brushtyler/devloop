@@ -8,9 +8,10 @@ import unittest
 from pathlib import Path
 
 from devloop import markdown
-from devloop.dispatcher import (RESYNC_AFTER_APPROVAL, Action, counted_rounds, waived_rounds)
+from devloop.dispatcher import (RESYNC_AFTER_APPROVAL, Action, counted_rounds, pr_status_line,
+                                round_limit_reason, round_reasons, waived_rounds)
 from devloop.workspace import Workspace, WorkspaceError
-from test_devloop import CFG, SHA1, SHA2, finding, fixed, raw_review, receipt
+from test_devloop import CFG, SHA1, SHA2, finding, fixed, pr, raw_review, receipt
 from test_devloop_quorum import FIRST, SECOND, Quorum
 
 LEVEL1 = [{'path': 'x.py', 'links': []}]  # a diff reviewed at level 1
@@ -75,6 +76,32 @@ class ResyncTests(Quorum):
         self.assertEqual((waived_rounds(reviews), counted_rounds(reviews)), ({2, 3}, 1))
         self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
 
+    def test_the_comment_of_a_clean_sync_says_the_review_does_not_count(self):
+        # #289: the sync comment says what the next review spends.
+        self.approved_then_synced()
+        body = self.gh.comments[-1][1]
+        self.assertIn('la sincronizzazione non consuma un round di review', body)
+        self.assertIn('La review del nuovo head **non conterà** come round', body)
+        self.assertNotIn('**conterà**', body)
+
+    def test_the_comment_of_a_sync_with_conflicts_says_the_review_counts(self):
+        # #289: with no round left, the comment says the operator decides; with rounds left,
+        # it says which round the review is and how many remain after it.
+        self.approved_then_synced(SYNCED, conflicts=('x.py',))
+        body = self.gh.comments[-1][1]
+        self.assertIn('La review successiva **conterà** come round, perché l\'agent ha risolto '
+                      'dei conflitti', body)
+        self.assertIn('contati già 1 round di 1 (`max_review_rounds`); nessun round rimasto: la '
+                      'review successiva richiederà una decisione dell\'operatore', body)
+        self.assertNotIn('non conterà', body)
+        for limit, left in ((2, 'round 2 di 2 (`max_review_rounds`), l\'ultimo rimasto'),
+                            (4, 'round 2 di 4 (`max_review_rounds`); dopo questo ne resteranno '
+                                '2')):
+            with self.subTest(limit=limit):
+                cfg = dataclasses.replace(CFG, max_review_rounds=limit)
+                self.approved_then_synced(SYNCED, conflicts=('x.py',), cfg=cfg)
+                self.assertIn(left, self.gh.comments[-1][1])
+
     def test_a_sync_whose_conflicts_an_agent_resolved_counts(self):
         # At the limit: the content of the PR changed, so the review is a new round.
         self.approved_then_synced(SYNCED, conflicts=('x.py',))
@@ -82,6 +109,12 @@ class ResyncTests(Quorum):
         self.d.tick()
         self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         self.assertEqual(len(self.records('review')), 1)
+        # #289: the escalation lists the rounds that count, with their reason.
+        body = self.gh.comments[-1][1]
+        self.assertIn('**Classe:** `round_limit`', body)
+        self.assertIn('Round contati sul limite (1 di 1, `max_review_rounds`):\n\n'
+                      '- round 1: prima review', body)
+        self.assertIn('alzando `max_review_rounds`', body)
 
     def test_a_sync_whose_conflicts_an_agent_resolved_spends_a_round(self):
         # With rounds left the review runs, and counts, without ``resync``.
@@ -119,7 +152,13 @@ class ResyncTests(Quorum):
         reviews = self.records('review')
         self.assertEqual((waived_rounds(reviews), counted_rounds(reviews)), ({2}, 2))
         self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
-        self.assertIn('Raggiunto il limite di 2 round', self.gh.comments[-1][1])
+        body = self.gh.comments[-1][1]
+        self.assertIn('Raggiunto il limite di 2 round', body)
+        # #289: the rounds that count and those that do not, each with its reason.
+        self.assertIn('Round contati sul limite (2 di 2, `max_review_rounds`):\n\n'
+                      '- round 1: prima review\n- round 3: review dopo una correzione', body)
+        self.assertIn('Non contano:\n\n- round 2: review di un head approvato, spostato solo da '
+                      'una sync senza conflitti', body)
 
     def test_a_rereview_or_a_ci_failure_after_the_sync_counts(self):
         self.approved_then_synced()
@@ -185,6 +224,51 @@ class CountingTests(unittest.TestCase):
         reviews = [dict(self.record(1, FIRST), receipt=bound),
                    self.record(2, FIRST, head=SHA2, resync=self.resync())]
         self.assertEqual(waived_rounds(reviews), set())
+
+    def test_each_round_has_a_reason(self):
+        # #289: why each round counts, or does not, as the round_limit escalation lists it.
+        third, fourth, fifth = 'c' * 40, 'd' * 40, 'e' * 40
+        reviews = [
+            self.record(1, FIRST, 'request_changes'),
+            dict(self.record(2, 'ci', 'request_changes', head=SHA2), source='ci'),
+            self.record(3, FIRST, head=third),
+            self.record(4, FIRST, head=fourth, resync=self.resync(3, third)),
+            self.record(5, FIRST, 'request_changes', head=fifth),
+            self.record(6, FIRST, 'request_changes', head=fifth),
+            self.record(7, FIRST, 'request_changes', head='f' * 40),
+        ]
+        fixes = [{'round': 1, 'head_sha': SHA2}, {'round': 2, 'head_sha': third}]
+        syncs = [{'head_sha': fifth, 'from': fourth}]
+        self.assertEqual(round_reasons(reviews, fixes, syncs), [
+            (1, 'prima review', True),
+            (2, 'CI fallita', True),
+            (3, 'review dopo una correzione', True),
+            (4, 'review di un head approvato, spostato solo da una sync senza conflitti', False),
+            (5, 'review dopo una sync con conflitti risolti dall\'agent', True),
+            (6, 'review dopo una sync con conflitti risolti dall\'agent', True),
+            (7, 'review di un nuovo head', True)])
+        restarted = [dict(self.record(1, FIRST), receipt=dict(receipt(), level=2,
+                                                              reviewers=[FIRST, SECOND])),
+                     dict(self.record(2, FIRST), restarts={'round': 1, 'bases': []}),
+                     self.record(3, FIRST)]
+        self.assertEqual(round_reasons(restarted), [
+            (1, 'round interrotto dall\'avanzare della base e sostituito dal successivo', False),
+            (2, 'prima review', True), (3, 'nuova review dello stesso head', True)])
+        text = round_limit_reason('Limite.', reviews, fixes, syncs, 6)
+        self.assertTrue(text.startswith('Limite.\n\nRound contati sul limite (6 di 6, '))
+        self.assertIn('- round 2: CI fallita\n', text)
+        self.assertIn('Non contano:\n\n- round 4: ', text)
+
+    def test_status_shows_the_rounds_counted_against_the_limit(self):
+        # #289: ``devloop status`` shows the counted rounds of each PR on the limit.
+        reviews = [self.record(1, FIRST), self.record(2, FIRST, head=SHA2, resync=self.resync())]
+        line = pr_status_line(pr(reviews=reviews, labels=['agent:ready-to-merge']), CFG)
+        self.assertEqual(line, 'PR #100 (issue #7) [agent:ready-to-merge] rounds=1/3 '
+                               '(+1 not counted) ci=pass merge=clean')
+        line = pr_status_line(pr(reviews=reviews[:1], merge='conflict'), ONE_ROUND)
+        self.assertEqual(line, 'PR #100 (issue #7) [agent:review] rounds=1/1 ci=pass '
+                               'merge=conflict CONFLICT with main')
+        self.assertIn(' rounds=0/3 ', pr_status_line(pr(), CFG))
 
     def test_the_review_shows_why_it_does_not_count(self):
         record = dict(self.record(2, FIRST, head=SHA2, resync=self.resync()), max_rounds=2,

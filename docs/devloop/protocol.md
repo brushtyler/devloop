@@ -32,7 +32,13 @@ alone until GitHub recomputes. As for any push, the merge must not differ from `
 A sync writes no review record, so it does not consume a review round, and it runs even when no
 round is left. The PR goes back to `agent:review`, also from `agent:ready-to-merge`, and the next
 round reviews the new head after CI as usual; that round counts against `max_review_rounds`,
-except after an approval (see [Resync after approval](#resync-after-approval)). A
+except after an approval (see [Resync after approval](#resync-after-approval)). The sync
+comment says so (#289): after conflicts the implementer resolved, it says that the next review
+(or the review after the fix the sync started) **counts**, which counted round it will be out of
+`max_review_rounds` and how many remain after it, or, with none left, that the next review
+needs an operator's decision. After a merge without conflicts of an approved head it says that
+the review of the new head does not count; otherwise the review counts as it would have without
+the sync, and the comment shows the round in the same way. A
 sync that fails (the implementer is blocked, tests still fail, markers are left, the merge was
 concluded or aborted by the agent, or the agent run failed) goes to `agent:needs-operator` with a
 comment that lists the files in conflict and their commits.
@@ -147,6 +153,13 @@ conflicts moved, nor the new review of an approved head whose approval the base 
 [Resync after approval](#resync-after-approval)). Round numbers stay progressive, because they also name the findings
 (`round/reviewer/ID`), so the round shown as the limit (`round 4 of at most 4`, `round 4/4`) is
 `max_review_rounds` plus the rounds that did not count.
+
+A `round_limit` escalation lists the rounds that count, each with its reason (the first review,
+a CI failure, a review after a fix, a review after a sync whose conflicts the implementer
+resolved, a new review of the same head or of a new one), then the rounds that do not count with
+theirs, and recalls that the operator can grant more rounds by raising `max_review_rounds` (#289).
+`devloop status` shows the counted rounds of each PR on the limit, as `rounds=<counted>/<max>`,
+followed by `(+<n> not counted)` when some rounds did not count.
 
 ## PR marker
 

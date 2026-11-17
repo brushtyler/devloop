@@ -112,6 +112,9 @@ class FixBaseTests(Quorum):
         (sync,) = self.records('sync')
         self.assertEqual((sync['head_sha'], sync['from']), (SHA2, SHA1))
         self.assertIn('La correzione in attesa parte dal nuovo head', self.gh.comments[-1][1])
+        # #289: the review after the fix counts, and the comment says which round it is.
+        self.assertIn('La review dopo la correzione **conterà** come round, come ogni review '
+                      'dopo una correzione: round 2 di 3', self.gh.comments[-1][1])
         # The PR keeps its label: the fix runs on the synced head at the next tick.
         self.assertEqual(self.gh.labels[100], {'agent:changes'})
         self.gh.head = SHA2

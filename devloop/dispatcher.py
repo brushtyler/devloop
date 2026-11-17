@@ -187,8 +187,8 @@ from .planning import (BASE_CHANGED, EXPENSIVE, FIX_COMMAND, GLOBAL_ACTIONS, MER
                        counted_rounds, issue_priority, label_names, merge_ready,
                        numbers_of, operator_blocked, operator_held, operator_merge_due,
                        parked, pending_reviewers, plan, pr_counts, preflight_state,
-                       queue_lines, schedule, start_order, touched_by_base, waived_rounds,
-                       zero_labels_hold)
+                       queue_lines, round_reasons, schedule, start_order, touched_by_base,
+                       waived_rounds, zero_labels_hold)
 from .policy import describe as describe_receipt
 from .policy import (BINDING, MAX_LISTED_PATHS, ZERO_LEVEL, agent_profile, changes_requested,
                      check_outcome, check_states, differences, distinct, evaluate, independent,
@@ -375,6 +375,35 @@ def pr_counts_line(snapshot, cfg):
     working, held = pr_counts(snapshot, cfg)
     return (f'open PRs: {working}/{cfg.max_open_prs} in progress (max_open_prs), '
             f'{held}/{cfg.max_parked_prs} parked (max_parked_prs)')
+
+
+def pr_status_line(pr, cfg):
+    """A PR as ``status`` shows it (#289): its labels, the rounds counted against
+    ``max_review_rounds`` (``rounds=3/3``, with the rounds that did not count, if any), CI and
+    the merge state."""
+    labels = ', '.join(sorted(l for l in pr.labels if l.startswith('agent:')))
+    waived = len(waived_rounds(pr.reviews))
+    rounds = (f'rounds={counted_rounds(pr.reviews)}/{cfg.max_review_rounds}'
+              + (f' (+{waived} not counted)' if waived else ''))
+    conflict = ' CONFLICT with ' + cfg.base_branch if pr.merge_state == 'conflict' else ''
+    return (f'PR #{pr.number} (issue #{pr.issue}) [{labels}] {rounds} ci={pr.checks} '
+            f'merge={pr.merge_state}{conflict}')
+
+
+def round_limit_reason(lead, reviews, fixes, syncs, limit):
+    """The reason of a ``round_limit`` escalation (#289): ``lead``, then the rounds of
+    ``reviews`` that count against ``limit`` (``max_review_rounds``), each with its reason, and
+    those that do not, so that the operator sees where the limit comes from."""
+    rounds = round_reasons(reviews, fixes, syncs)
+    counted = [(n, why) for n, why, counts in rounds if counts]
+    text = (lead.rstrip() + f'\n\nRound contati sul limite ({len(counted)} di {limit}, '
+            '`max_review_rounds`):\n\n'
+            + ('\n'.join(f'- round {n}: {why}' for n, why in counted) or '- nessuno'))
+    free = [(n, why) for n, why, counts in rounds if not counts]
+    if free:
+        text += ('\n\nNon contano:\n\n' + '\n'.join(f'- round {n}: {why}' for n, why in free))
+    return text + ('\n\nL\'operatore può concedere altri round alzando `max_review_rounds` '
+                   'prima di riprendere la PR.')
 
 
 def control_command(body):
@@ -1839,9 +1868,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
             self.gh.edit_labels(pr.number, add=[lb.needs_operator], remove=transient)
         elif counted_rounds(reviews) >= self.cfg.max_review_rounds:
             if announce:
-                self.gh.comment(pr.number, render_escalation(
+                self.gh.comment(pr.number, render_escalation(round_limit_reason(
                     f'Raggiunto il limite di {self.cfg.max_review_rounds} round di review con '
-                    'finding bloccanti ancora aperti.', cls='round_limit'))
+                    'finding bloccanti ancora aperti.', reviews, pr.fixes, pr.syncs,
+                    self.cfg.max_review_rounds), cls='round_limit'))
             self.gh.edit_labels(pr.number, add=[lb.needs_operator], remove=transient)
         else:
             # A CI failure on a ready PR (#248): the dispatcher's own operator label goes too.
@@ -1984,10 +2014,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
 
     def _do_round_limit(self, pr):
         lb = self.cfg.labels
-        self._escalate(pr.number, f'Raggiunto il limite di {self.cfg.max_review_rounds} round di '
-                                  'review: un nuovo round (review o CI fallita) non parte senza una '
-                                  'decisione dell\'operatore.',
-                       remove=[lb.review, lb.changes, lb.ready_to_merge], cls='round_limit')
+        limit = self.cfg.max_review_rounds
+        self._escalate(pr.number, round_limit_reason(
+            f'Raggiunto il limite di {limit} round di review: un nuovo round (review o CI '
+            'fallita) non parte senza una decisione dell\'operatore.', pr.reviews, pr.fixes,
+            pr.syncs, limit), remove=[lb.review, lb.changes, lb.ready_to_merge], cls='round_limit')
 
     def _do_apply_review(self, pr):
         self._apply_round(pr, current_round(pr.reviews), announce=False, reviews=pr.reviews)
