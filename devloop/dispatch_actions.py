@@ -346,7 +346,10 @@ class ActionsMixin:
         if self.ws.head(path) != pr.head_sha:
             self.log('  head moved since the snapshot; retrying next tick')
             return
-        if not joins and cfg.local_tests != 'full' and pr.checks == 'none':
+        # Within the window of a just pushed head (#263) the review starts as if its CI were
+        # pending (#271): the reviewer is told so, and no full suite runs locally in its place.
+        ci = 'pending' if pr.ci_wait else pr.checks
+        if not joins and cfg.local_tests != 'full' and ci == 'none':
             # The first reviewer of a round runs it; the next ones review the same head.
             if not self._full_suite_without_ci(pr, path, name):
                 return
@@ -359,7 +362,7 @@ class ActionsMixin:
         prompt = _template('review', repo=cfg.repo, base_branch=cfg.base_branch,
                            pr_number=pr.number, round=round_no, max_rounds=max_rounds,
                            implementer=pr.meta.get('implementer', cfg.implementer),
-                           ci=pr.checks, test_cmd=cfg.test_cmd,
+                           ci=ci, test_cmd=cfg.test_cmd,
                            issue_number=pr.issue, issue_title=issue['title'],
                            issue_body=issue.get('body') or '', pr_body=pr.body,
                            acceptance_criteria=format_criteria(criteria),
@@ -435,7 +438,7 @@ class ActionsMixin:
         for key, (raw, used), _ in (turn for turn in turns if turn[2] is None):
             review = normalize_review(raw, previous_open=previous_open, round_no=round_no,
                                       max_rounds=max_rounds, head_sha=pr.head_sha,
-                                      ci=pr.checks, reviewer=key, criteria=criteria,
+                                      ci=ci, reviewer=key, criteria=criteria,
                                       acceptance_map=acceptance_map)
             review['receipt'] = receipt
             if joins and bases:
@@ -459,7 +462,7 @@ class ActionsMixin:
                     self.log(f'  native review not submitted: {exc}')
             records.append(review)
         new = records[len(done):]
-        if new and pr.checks != 'pending':
+        if new and ci != 'pending':
             # The CI the round reviewed, whatever its verdict (#133).
             self._record_ci(pr, pr.head_sha, pr.checks, pr.check_details, round_no)
         waiting = pending_reviewers(records)
@@ -490,14 +493,17 @@ class ActionsMixin:
                                 thread_name_prefix='devloop-review') as pool:
             return list(pool.map(call, keys))
 
-    def _full_suite_without_ci(self, pr, path, name):
+    def _full_suite_without_ci(self, pr, path, name, approved=False):
         """The CI gate when the local tests may not have covered the whole suite (#169): with
         ``local_tests`` other than ``full`` a review needs the CI passed, and a head without CI
         gets the full ``test_cmd`` locally first, in a disposable copy of the PR worktree.
-        Returns whether the review may start; a failure escalates the PR."""
+        Returns whether the review may start; a failure escalates the PR. ``approved``: the
+        review already approved the head while its CI was not known (#271), and the suite
+        runs before the promotion instead."""
         lb = self.cfg.labels
+        when = 'promotion' if approved else 'review'
         self.log(f'  no CI on {pr.head_sha[:12]} with local_tests = {self.cfg.local_tests}: '
-                 'full suite before the review')
+                 f'full suite before the {when}')
         copy_name, copy = self.ws.review_copy(path)
         try:
             passed, tail, _ = self._run_tests((pr.number, 'review'), copy, 1, self.cfg.test_cmd)
@@ -510,7 +516,9 @@ class ActionsMixin:
                                   f'`local_tests = "{self.cfg.local_tests}"`, i test locali non '
                                   'hanno eseguito la suite completa. La suite completa '
                                   f'(`{self.cfg.test_cmd}`), eseguita in locale prima della '
-                                  'review, fallisce: la review non parte.', tail,
+                                  + ('promozione, fallisce: l\'approvazione, data prima che la CI '
+                                     'fosse nota, non porta la PR al merge.' if approved else
+                                     'review, fallisce: la review non parte.'), tail,
                        remove=[lb.review], cls='tests_failed')
         return False
 

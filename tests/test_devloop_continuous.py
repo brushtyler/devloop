@@ -80,7 +80,7 @@ class SimClock:
 
 class World:
     """What GitHub shows: open PRs and ready issues, changed by the simulated actions and by
-    ``events``, ``(time, description)`` that the clock makes true (``ci_green_at``,
+    ``events``, ``(time, description)`` that the clock makes true (``prs_at``,
     ``ready_at``)."""
 
     def __init__(self, clock):
@@ -88,13 +88,11 @@ class World:
         self.lock = threading.Lock()
         self.prs = {}
         self.issues = {}  # number: time it becomes ready
-        self.ci_green_at = {}  # PR number: time its CI passes
-        self.prs_at = {}  # PR number: time it shows up (moved to agent:changes, say)
+        self.prs_at = {}  # PR number: time it shows up (opened, or moved to agent:changes)
         self.announced = set()
 
     def events(self):
-        return sorted(set(self.ci_green_at.values()) | set(self.issues.values())
-                      | set(self.prs_at.values()))
+        return sorted(set(self.issues.values()) | set(self.prs_at.values()))
 
     def snapshot(self):
         now = self.clock()
@@ -104,8 +102,6 @@ class World:
                 if now < self.prs_at.get(p.number, 0):
                     continue
                 p = dataclasses.replace(p, labels=set(p.labels), reviews=list(p.reviews))
-                if p.number in self.ci_green_at:
-                    p.checks = 'pass' if now >= self.ci_green_at[p.number] else 'pending'
                 prs.append(p)
             issues = [ready(n) for n, at in sorted(self.issues.items()) if now >= at]
         return Snapshot(prs, issues, [])
@@ -260,16 +256,16 @@ class ContinuousLoopCase(unittest.TestCase):
 
 class NoBarrierTests(ContinuousLoopCase):
     def test_a_review_starts_while_a_long_implementation_runs(self):
-        # #165 is implemented for 46 minutes; the CI of #223 passes after 5 minutes.
+        # #165 is implemented for 46 minutes; #223 enters agent:review after 5 minutes.
         self.world.issues[165] = 0
-        self.world.prs[223] = pr(223, issue=220, labels=['agent:review'], checks='pending')
-        self.world.ci_green_at[223] = 5 * MINUTE
+        self.world.prs[223] = pr(223, issue=220, labels=['agent:review'])
+        self.world.prs_at[223] = 5 * MINUTE
         d = Sim(PCFG, self.world, self.clock,
                 {'implement': 46 * MINUTE, 'review': 10 * MINUTE},
                 stop_after=('implement', 165), stop_file=self.stop)
         self.run_loop(d)
         implement, review = d.spans[('implement', 165)], d.spans[('review', 223)]
-        # The review starts at the news of the green CI, not when the implementation ends.
+        # The review starts at the news of the PR, not when the implementation ends.
         self.assertGreaterEqual(review[0], 5 * MINUTE)
         self.assertLess(review[0], 8 * MINUTE)
         self.assertLess(review[1], implement[1])
@@ -399,9 +395,9 @@ class PinRestartTests(ContinuousLoopCase):
         p.mergeable, p.merge_status, p.merge_mode = 'MERGEABLE', 'CLEAN', 'strict'
         self.world.prs[100] = p
         self.world.issues[9] = 0
-        # The CI of #101 passes after 5 minutes; #102 goes to agent:changes after 10.
-        self.world.prs[101] = pr(101, issue=8, labels=['agent:review'], checks='pending')
-        self.world.ci_green_at[101] = 5 * MINUTE
+        # #101 enters agent:review after 5 minutes; #102 goes to agent:changes after 10.
+        self.world.prs[101] = pr(101, issue=8, labels=['agent:review'])
+        self.world.prs_at[101] = 5 * MINUTE
         self.world.prs[102] = pr(102, issue=11, labels=['agent:changes'])
         self.world.prs_at[102] = 10 * MINUTE
 
@@ -456,7 +452,7 @@ class PinRestartTests(ContinuousLoopCase):
         self.assertIsNone(d._restart)
 
     def test_over_the_limit_no_action_starts_until_the_restart(self):
-        # The limit is 3 minutes: the review of #101 (CI green after 5) and the fix of #102
+        # The limit is 3 minutes: the review of #101 (in review after 5) and the fix of #102
         # (after 10) do not start while #9 is implemented for 45 minutes.
         d, pinner, restarts = self.sim({'implement': 45 * MINUTE}, wait=3)
         self.run_loop(d, ends=Repinned)

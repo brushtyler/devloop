@@ -28,8 +28,8 @@ def ready_pr(number, mode=None):
 
 
 def in_review(number):
-    """A PR devloop is working on: in review, waiting for CI."""
-    return pr(number=number, issue=number, checks='pending')
+    """A PR devloop is working on: in review, its approval waiting for CI (#271)."""
+    return pr(number=number, issue=number, checks='pending', reviews=[norm(raw_review())])
 
 
 def snapshot(prs, *issues):
