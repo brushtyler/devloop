@@ -188,6 +188,7 @@ required_timeout_minutes = 30
 "devloop/policy.py" = ["docs/devloop/protocol.md", "docs/devloop/reference.md"]
 "devloop/schemas/" = ["docs/devloop/protocol.md"]
 "devloop/dispatcher.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
+"devloop/context.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
 "devloop/planning.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
 "devloop/ports.py" = ["docs/architecture.md"]
 "devloop/github.py" = ["docs/architecture.md"]

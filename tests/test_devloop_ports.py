@@ -29,7 +29,7 @@ from test_devloop_ports_equivalence import TrackerGH
 
 PACKAGE = Path(__file__).resolve().parents[1] / 'devloop'
 # The modules that act through the ports: the dispatcher (with ensure_labels) and its ledger.
-CLIENTS = ('dispatcher.py', 'ledger.py')
+CLIENTS = ('dispatcher.py', 'ledger.py', 'context.py')
 
 EXPECTED = {
     ports.Tracker: ['issues_with_label', 'issue', 'issue_history', 'issue_comments',
