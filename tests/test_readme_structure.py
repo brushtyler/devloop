@@ -51,7 +51,7 @@ class ReadmeStructureTests(unittest.TestCase):
                        for pattern in ('docs/*.md', 'docs/devloop/*.md')
                        for path in docs.ROOT.glob(pattern))
         self.assertEqual([page for page in pages if page not in names], [])
-        # The anchor linked by architecture, task mode, troubleshooting and the guide.
+        # The anchor that links published before the recovery index (#245) still use.
         docs.plan_section('README.md', 'Recovery and continuation', root=docs.ROOT)
 
 

@@ -2,7 +2,7 @@
 
 Task mode breaks development into a reviewed DAG of tasks. Each task has a strict file manifest, owned requirements and automated checks. It is the default for every new run, including Tier S, and there is nothing to enable: the obsolete `SSDLC_ENABLE_TASK_BREAKDOWN` variable is ignored, with a warning in the log.
 
-Before the first run, review any project-specific standards already installed. Global review, QA and AppSec still run after development. Recovery after a stop is covered by the [recovery documents](../README.md#recovery-and-continuation).
+Before the first run, review any project-specific standards already installed. Global review, QA and AppSec still run after development. Recovery after a stop is covered by the [recovery index](recovery.md).
 
 ## Requirements catalogue
 

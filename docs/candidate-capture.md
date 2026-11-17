@@ -1,9 +1,8 @@
 # Candidate capture and disposable task workspaces
 
-Scope: [issue #23](https://github.com/brushtyler/ssdlc/issues/23), increment I0 of
-`PLAN_AUTONOMY_WORKSTREAMS.md`. This is a direct bootstrap implementation, not an
-autonomous SSDLC delivery demonstration. Offline validation is recorded in
-`docs/evidence/i0-offline-validation.json`; final full-suite CI binds to the PR head.
+This page describes how developer output is captured and verified in disposable
+task workspaces. The [History](#history) at the end of this page records how it
+was built, increment by increment.
 
 New task runs use version 1 capture. An admitted sealed task journal retains its
 recorded execution mode: an absent isolation marker denotes the pre-I0 format
@@ -96,20 +95,9 @@ source. Checks never execute directly on the host through this task-mode path.
 Full network restriction, dependency provisioning, independent acceptance tests,
 instruction/tool hardening, publication scanning and final autonomous-profile
 enforcement remain later A/B/C increments. This receipt store is private runtime
-state, not a public evidence pack. The issue #22 preserved T01 has not been
-imported, verified or resumed by implementing I0.
+state, not a public evidence pack.
 
-## Offline acceptance
-
-`python3 -m unittest discover -s tests -p test_candidate_capture.py -v` discovers
-the protected fixture and semantic adapters under `tests/replay/`. It uses real
-Git operations and Python subprocesses with semantic role adapters. It exercises
-the issue #22 cache mechanism, guard/capture/verification/commit interruptions,
-tampering, unsafe changes, additions/deletions, persistent attempts and refusal
-to silently change historical execution mode. No provider, subscription login
-or real development run is needed for these cases.
-
-## I2 integrity rejection hardening (#29)
+## Integrity rejections
 
 After a confirmed return/termination, metadata failures no longer discard the
 source/output evidence. Missing/replaced `.git` or a corrupt index are recorded
@@ -144,3 +132,30 @@ in planning, snapshots and capture. Revising the grader or its fakes requires an
 explicit baseline review, rather than a candidate changing its own expectations.
 Full instruction/network containment and independent oracles retain their I3/I4
 scope; this change does not claim protection against a same-user host attacker.
+
+## History
+
+### Increment I0
+
+Scope: [issue #23](https://github.com/brushtyler/ssdlc/issues/23), increment I0 of
+`PLAN_AUTONOMY_WORKSTREAMS.md`. This is a direct bootstrap implementation, not an
+autonomous SSDLC delivery demonstration. Offline validation is recorded in
+`docs/evidence/i0-offline-validation.json`; final full-suite CI binds to the PR head.
+
+The issue #22 preserved T01 has not been imported, verified or resumed by
+implementing I0.
+
+### Offline acceptance
+
+`python3 -m unittest discover -s tests -p test_candidate_capture.py -v` discovers
+the protected fixture and semantic adapters under `tests/replay/`. It uses real
+Git operations and Python subprocesses with semantic role adapters. It exercises
+the issue #22 cache mechanism, guard/capture/verification/commit interruptions,
+tampering, unsafe changes, additions/deletions, persistent attempts and refusal
+to silently change historical execution mode. No provider, subscription login
+or real development run is needed for these cases.
+
+### I2 integrity rejection hardening (#29)
+
+Issue #29, part of the I2 hardening, added the behavior described in
+[Integrity rejections](#integrity-rejections).
