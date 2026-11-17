@@ -1129,7 +1129,9 @@ comment text are cut short and control characters removed. What it reports:
 
 The [ledger](#evidence-and-telemetry) records (`## Registro devloop`) are not reported: they are
 too frequent. Trust follows [AGENTS.md](../AGENTS.md): an issue or PR counts if its author is in
-`trusted_users` or is one of devloop's apps (the `[apps]` logins). Anyone else's issue or PR
+`trusted_users` or is one of devloop's apps (the `[apps]` logins of the agents and the
+dispatcher; not the [merger app](#the-merger-app), which only merges: its comments and the
+`review` records naming it are ignored). Anyone else's issue or PR
 produces only `new issue #N by an untrusted author (ignored)` (or `new PR`), with no title nor
 content, and nothing after it. The exception is an issue whose latest `agent:ready` was added by
 a user in `trusted_users`, whether the label is still there or the dispatcher already replaced it

@@ -190,8 +190,9 @@ class Clock:
 
 
 class Harness:
-    def __init__(self, test, gh=None):
+    def __init__(self, test, gh=None, trust=TRUST):
         self.gh = gh or FakeGitHub()
+        self.trust = trust
         self.dir = Path(tempfile.mkdtemp())
         test.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
         self.path = self.dir / 'state' / 'watch-state.json'
@@ -209,7 +210,7 @@ class Harness:
 
     def watcher(self, clock, **kwargs):
         kwargs.setdefault('run', self.runner)
-        return watch.Watcher(self.gh, TRUST, self.path, interval=60, clock=clock.monotonic,
+        return watch.Watcher(self.gh, self.trust, self.path, interval=60, clock=clock.monotonic,
                              sleep=clock.sleep, now=clock.now, out=self.out.append,
                              err=self.err.append, **kwargs)
 
@@ -517,6 +518,26 @@ class UntrustedTest(unittest.TestCase):
         self.assertEqual(h.out, [])
         self.assertNotIn(SECRET, h.path.read_text())
         self.assertNotIn('pr_state', gh.calls)
+
+    def test_the_merger_app_is_not_trusted(self):
+        # The merger only merges (#201): its comments and the records naming it are not news.
+        merger = 'dl-merger[bot]'
+        trust = watch.Trust({OPERATOR}, {'claude': CLAUDE, 'codex': CODEX, 'dispatcher': DISPATCH,
+                                         'merger': merger}, 'agent:ready')
+        self.assertNotIn(merger, trust.apps)
+        self.assertNotIn('merger', trust.writers)
+        h = Harness(self, trust=trust)
+        h.gh.add_pr(10)
+        h.run(timeout=1)
+        h.out.clear()
+        gh = h.gh
+        gh.comment(601, 10, merger, SECRET)
+        gh.comment(602, 10, merger, review_comment('merger'))
+        gh.comment(603, 10, merger, review_comment('codex'))
+        gh.comment(604, 10, OPERATOR, review_comment('merger'))
+        self.assertEqual(h.run(timeout=1)[0], 0)
+        self.assertEqual(h.lines(), ['PR #10 comment by brushtyler: ## Review'])
+        self.assertNotIn(SECRET, '\n'.join(h.out) + h.path.read_text())
 
     def test_an_external_issue_labelled_ready_by_a_trusted_user_is_admitted(self):
         h = Harness(self)
@@ -1029,6 +1050,13 @@ class CommandLineTest(unittest.TestCase):
         self.assertFalse(trust.wrote('brushtyler', 'codex'))
         no_apps = watch.Trust({'op'}, {}, 'agent:ready')
         self.assertTrue(no_apps.wrote('op', 'codex'))
+        # The merger app (#201) is configured but never trusted: it only merges.
+        self.assertIn('merger', cfg.apps)
+        self.assertNotIn('merger', trust.writers)
+        self.assertNotIn('brushtyler-devloop-merger[bot]', trust.apps)
+        self.assertFalse(trust.trusted('brushtyler-devloop-merger[bot]'))
+        self.assertFalse(trust.wrote('brushtyler-devloop-merger[bot]', 'merger'))
+        self.assertFalse(no_apps.wrote('op', 'merger'))
 
 
 class TokenTimeoutTest(unittest.TestCase):
