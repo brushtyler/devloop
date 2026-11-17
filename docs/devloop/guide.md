@@ -2,8 +2,9 @@
 
 devloop moves issues through implementation, independent review and fixes, so that a human only
 decides what starts and, unless a [merge mode](#merge-modes) lets devloop merge, what gets
-merged. It is development tooling for this repository, not part
-of the SSDLC orchestrator, and it never touches SSDLC runs or the main checkout's working tree.
+merged. It is the SSDLC component that works on GitHub issues and PRs, next to the local engine
+(see the [README](../../README.md#components)); today it is configured for this repository only,
+and it never touches local-engine runs or the main checkout's working tree.
 
 This page is for the operator and the supervisor. Configuration keys, review levels and
 identities are in the [reference](reference.md), markers and records in the
