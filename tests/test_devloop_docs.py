@@ -59,6 +59,9 @@ class MapConfigTests(unittest.TestCase):
                          ['docs/architecture.md', 'docs/devloop/guide.md'])
         self.assertEqual(CFG.docs.documents(['scripts/devloop-pinned']),
                          {'docs/devloop/guide.md': ['scripts/devloop-pinned']})
+        # #246: the development guide (ADR 0003, I9) describes the test runner.
+        self.assertEqual(CFG.docs.documents(['scripts/run-tests.py']),
+                         {'docs/development.md': ['scripts/run-tests.py']})
         # #242: the README is an index (ADR 0003, I6); the engine maps to the getting-started guide.
         for path in ('orchestrator.py', 'ssdlc_tasks.py', 'ssdlc_controller.py'):
             self.assertEqual(CFG.docs.documents([path]),

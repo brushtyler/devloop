@@ -6,6 +6,7 @@ import doc_contracts as docs
 
 README = docs.ROOT / 'README.md'
 GUIDE = 'docs/getting-started.md'
+DEVELOPMENT = 'docs/development.md'
 
 
 class ReadmeStructureTests(unittest.TestCase):
@@ -44,6 +45,28 @@ class ReadmeStructureTests(unittest.TestCase):
         readme = README.read_text()
         for moved in ('./setup-ssdlc.sh --bootstrap', 'SSDLC_EXECUTION_MODE', '## Requirements'):
             self.assertNotIn(moved, readme)
+
+    def test_the_development_guide_is_linked_and_covers_its_scope(self):
+        # Issue #246 (ADR 0003, I9): tests, documentation tests, devloop CI, map, pinned controller.
+        self.assertIn(DEVELOPMENT, docs.user_facing_docs().names)
+        developing = docs.plan_section('README.md', 'Developing SSDLC', root=docs.ROOT)
+        docs.assert_documented(self, developing, ['(docs/development.md)'])
+        sections = {
+            'Running the tests': ['scripts/run-tests.py', '-j N',
+                                  "python3 -m unittest discover -s tests -p 'test_name.py'"],
+            'Documentation tests': ['tests/test_doc_links.py', 'tests/doc_contracts.py',
+                                    '<!-- doc-links: ignore -->', 'user_facing_docs()'],
+            'CI': ['.github/workflows/devloop.yml', '.github/workflows/test.yml',
+                   'without installing the requirements'],
+            'Documents follow the code': ['[docs.map]', '#203',
+                                          'Who changes a mapped file updates its documents',
+                                          'blocking finding'],
+            'The pinned controller': ['pinned controller checkout', 'separate target checkout',
+                                      'python3 -m devloop pin <ref>', 'scripts/devloop-pinned'],
+        }
+        for heading, phrases in sections.items():
+            docs.assert_documented(self, docs.plan_section(DEVELOPMENT, heading, root=docs.ROOT),
+                                   phrases)
 
     def test_every_documentation_page_stays_reachable_from_the_readme(self):
         names = set(docs.user_facing_docs().names)

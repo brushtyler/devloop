@@ -178,6 +178,7 @@ auto = false
 "devloop/ports.py" = ["docs/architecture.md"]
 "devloop/github.py" = ["docs/architecture.md"]
 "scripts/devloop-pinned" = ["docs/devloop/guide.md"]
+"scripts/run-tests.py" = ["docs/development.md"]
 "orchestrator.py" = ["docs/getting-started.md", "docs/architecture.md"]
 "ssdlc_tasks.py" = ["docs/getting-started.md", "docs/architecture.md"]
 "ssdlc_controller.py" = ["docs/getting-started.md", "docs/architecture.md"]
