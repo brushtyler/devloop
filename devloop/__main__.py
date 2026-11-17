@@ -10,12 +10,11 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import activity, follow, pin, unavailability, watch
+from . import activity, follow, pin, runloop, unavailability, watch
 from .agents import AgentRunner, isolated_env
 from .apps import DISPATCHER, MERGER, Identities
 from .config import ConfigError, load_config
-from .dispatcher import (Dispatcher, TickLog, ensure_labels, plan, pr_counts_line, queue_lines,
-                         run_forever)
+from .dispatcher import Dispatcher, TickLog, ensure_labels, plan, pr_counts_line, queue_lines
 from .github import GitHub, GitHubError
 from .ledger import Ledger
 from .review import last_round
@@ -186,6 +185,43 @@ def run_watch(parser, args):
         return 130
 
 
+def idle_timeout(parser, args):
+    """The ``--idle-timeout`` of ``devloop run`` (#177); ``--interval`` is its deprecated alias,
+    and the two together are refused."""
+    if args.idle_timeout is not None and args.interval is not None:
+        parser.error('run: --interval is a deprecated alias of --idle-timeout: use only one')
+    value = args.idle_timeout if args.interval is None else args.interval
+    if value is None:
+        return runloop.IDLE_TIMEOUT
+    if value < 1:
+        parser.error('run: --idle-timeout must be at least 1 second')
+    return value
+
+
+def run_loop(cfg, state, dispatcher, timeout):
+    """``devloop run`` (#177): ``runloop.Loop`` with the dispatcher's ticks, a watcher with the
+    identity of the ticks' reads (as ``devloop watch``) on a state file of its own, and the
+    alert on ``[run].alert_issue`` as the dispatcher. Returns the exit code."""
+    trust = watch.Trust.from_config(cfg)
+    gh = dispatcher.identities.github(DISPATCHER) if dispatcher.identities else dispatcher.gh
+
+    def wait_for_news(seconds, sleep):
+        watcher = watch.Watcher(gh, trust, state / runloop.WATCH_STATE_FILE,
+                                interval=min(runloop.WATCH_INTERVAL, seconds), timeout=seconds,
+                                sleep=sleep, out=lambda line: log(f'news: {line}'), err=log)
+        # No gh call outlasts the wait; the client may be the ticks' own, so it is restored.
+        before, gh.time_left = gh.time_left, watcher.time_left
+        try:
+            return watcher.run()
+        finally:
+            gh.time_left = before
+
+    issue = cfg.run.alert_issue
+    alert = (lambda body: dispatcher.gh.comment(issue, body)) if issue else None
+    return runloop.Loop(dispatcher.tick, wait_for_news, state / runloop.STOP_FILE, log=log,
+                        alert=alert, alert_issue=issue, idle_timeout=timeout).run()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog='devloop', description=__doc__)
     parser.add_argument('--config', help='TOML config (default: devloop/config.toml)')
@@ -199,8 +235,13 @@ def main(argv=None):
     sub.add_parser('apps', help='check the GitHub App of each actor and its installation')
     tick = sub.add_parser('tick', help='plan and run one round of actions')
     tick.add_argument('--dry-run', action='store_true', help='only print the planned actions')
-    run = sub.add_parser('run', help='tick forever')
-    run.add_argument('--interval', type=int, default=600, help='seconds between ticks')
+    run = sub.add_parser('run', help='tick continuously: a tick with actions is followed by '
+                                     'another at once, one without waits for news on GitHub')
+    run.add_argument('--idle-timeout', type=int, metavar='SECONDS',
+                     help='after a tick without actions, run the next one after this many '
+                          'seconds without news (default 900)')
+    run.add_argument('--interval', type=int, metavar='SECONDS',
+                     help='deprecated alias of --idle-timeout')
     sub.add_parser('cleanup', help='remove devloop worktrees left by failed steps')
     follow_cmd = sub.add_parser('follow', help='follow live the agent working in a devloop worktree')
     follow_cmd.add_argument('target', help='the worktree: issue-<N> (implementer) or pr-<N> '
@@ -234,6 +275,10 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
     args = parser.parse_args(argv)
 
+    if args.command == 'run':
+        timeout = idle_timeout(parser, args)
+        if args.interval is not None:
+            log('run: --interval is deprecated, use --idle-timeout')
     if args.command == 'pin':
         return run_pin(args)
     if args.command == 'fallback':
@@ -311,7 +356,9 @@ def main(argv=None):
             if args.command == 'tick':
                 dispatcher.tick(dry_run=args.dry_run)
             elif args.command == 'run':
-                run_forever(dispatcher, args.interval)
+                code = run_loop(cfg, state, dispatcher, timeout)
+                if code:
+                    sys.exit(code)
         except pin.PinError as exc:
             sys.exit(f'devloop: {exc}')
         except pin.Repinned as exc:

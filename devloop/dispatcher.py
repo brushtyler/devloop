@@ -3978,12 +3978,3 @@ def ensure_labels(gh: Tracker, labels, review_policy=None):
             gh.ensure_label(review_policy.zero_label, *ZERO_LABEL_STYLE)
     for name, (color, description) in PRIORITY_LABEL_STYLE.items():
         gh.ensure_label(name, color, description)
-
-
-def run_forever(dispatcher, interval, sleep=time.sleep):
-    while True:
-        try:
-            dispatcher.tick()
-        except (GitHubError, WorkspaceError, PinError) as exc:
-            dispatcher.log(f'tick failed: {exc}')
-        sleep(interval)

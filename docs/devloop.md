@@ -1116,7 +1116,7 @@ python3 -m devloop status           # running action, devloop PRs (with merge st
 python3 -m devloop apps             # check the GitHub App of each actor
 python3 -m devloop tick --dry-run   # print the ready issues in start order and the plan, change nothing
 python3 -m devloop tick             # run one round
-python3 -m devloop run --interval 600
+python3 -m devloop run --idle-timeout 900  # tick continuously (see Continuous loop)
 python3 -m devloop cleanup          # remove worktrees left by failed steps
 python3 -m devloop follow issue-52  # follow live the implementer of issue #52 (pr-<N>: reviewer or fixer)
 python3 -m devloop watch --timeout 3600  # wait for the next change on GitHub, for the supervising agent
@@ -1159,7 +1159,8 @@ transcripts stay there after the turn.
 
 ### Waking the supervising agent
 
-devloop works in ticks that someone starts. The agent that supervises it (Claude Code, Codex or
+devloop works in ticks that someone starts, by hand or with the
+[continuous loop](#continuous-loop). The agent that supervises it (Claude Code, Codex or
 Antigravity) needs to know when something changed on GitHub. `devloop watch` (#173) reads the
 repository every `--interval` seconds (default 60) and prints one line per change:
 
@@ -1255,6 +1256,108 @@ and issues (`gh pr list`, up to 200, and `gh issue list`, up to 300), the commen
 previous round, for each trusted open PR its checks and native reviews, and the labeled events
 of an external issue whose labels changed or, outside the open listings, with a new trusted
 comment.
+
+### Continuous loop
+
+`devloop run` (#177) moves devloop forward without anyone starting the ticks:
+
+1. it runs a tick;
+2. if the tick ran at least one action, the next tick starts at once;
+3. otherwise it waits for news on GitHub, as `devloop watch --until-change` does
+   ([Waking the supervising agent](#waking-the-supervising-agent)), for at most
+   `--idle-timeout` seconds (default 900, 15 minutes); at the first news, or at the timeout, it
+   runs the next tick.
+
+The wait reads GitHub every 60 seconds (less when `--idle-timeout` is shorter), with the same
+identity as the ticks' reads, and keeps its state in `state_dir/run-watch-state.json`, apart from
+the state of a `devloop watch` of the supervising agent. The first wait records the starting
+state; a later one compares with the state of the previous wait, so changes made by ticks with
+actions in between count as news and cost at most one more tick. A wait that fails waits the
+rest of the timeout. `--interval <seconds>`, the option of the loop before #177, is a deprecated
+alias of `--idle-timeout`: it still works, with a warning in the log, and the two together are
+refused.
+
+**Clean stop.** `SIGTERM` or `SIGINT` (Ctrl-C), or the file `state_dir/STOP`
+(`.ssdlc/devloop/STOP` of the main checkout), stop the loop: the tick in progress ends, no other
+starts, and a wait in progress ends at once (after the read of GitHub in progress, if any). The
+exit code is 0. Agent turns and tests
+run in process groups of their own, so the signal reaches only devloop and the tick finishes its
+actions. devloop never removes `STOP`: while it exists `devloop run` says so in the log and exits
+with 0 at once, without a tick, so not even a restart by systemd starts the loop again. The
+operator removes it to start again.
+
+**Failed ticks.** A tick fails when it ends with an error (`gh` or `git` unreachable, a failed
+[pin after a merge](#pin-after-a-merge), any unexpected error), not when one of its actions
+fails: the tick escalates that action as usual and counts as a success. After a failed tick the
+loop waits 1 minute, after the second failure in a row 5 minutes, and the third failure in a row
+stops the loop at once (the 30 minutes that would follow it are never waited), with an alert:
+
+- with `[run].alert_issue` (an issue number, unset by default: the operator chooses it in the
+  [local overlay](#local-config-as-an-overlay)), a comment of the dispatcher on that issue, with
+  the attribution header and the class of each error (`network`, `authentication`, … as in
+  `devloop watch`, or the name of the error's type), never its message, paths or tokens. One
+  attempt only: if it fails, the log says so, with the class of that error;
+- without it, a line `ALERT: 3 consecutive ticks failed (…): the loop stops` in the local log.
+
+Either way the loop exits with code 4 and runs no other tick. A successful tick resets the count.
+The log keeps the full message of each failed tick.
+
+**Lock.** The loop holds the dispatcher lock (`state_dir/dispatcher.lock`) for as long as it
+runs, waits included: a manual `devloop tick` (or `cleanup`) exits with `another dispatcher is
+running (lock held)`, and a loop does not start while a manual tick runs. To run a tick by hand,
+stop the loop first. A [pin after a merge](#pin-after-a-merge) restarts the loop from the new
+copy with the same arguments and the lock still held.
+
+**Activation is the operator's.** The loop runs unsupervised and spends the agents' quotas, so
+devloop installs no service. An example unit, `devloop.service`, for the
+[installation as a dedicated user](#installation-as-a-dedicated-user), running the
+[launcher](#launcher) of the pinned copy, which applies `.ssdlc/devloop/config.local.toml` when
+it exists ([local overlay](#local-config-as-an-overlay)):
+
+```ini
+[Unit]
+Description=devloop continuous loop
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=devloop
+Group=devloop
+WorkingDirectory=/home/devloop/ssdlc
+# Where the agent CLIs, gh and git are found for the devloop user.
+Environment=PATH=/home/devloop/.local/bin:/usr/local/bin:/usr/bin:/bin
+# The launcher adds --local-config .ssdlc/devloop/config.local.toml when that file exists.
+ExecStart=/usr/bin/python3 /home/devloop/ssdlc/scripts/devloop-pinned run --idle-timeout 900
+# SIGTERM to devloop only: the tick in progress ends, its agent turns and tests are not killed.
+# The default KillMode=control-group would send SIGTERM to them too.
+KillMode=mixed
+# Longer than the longest tick; after it systemd kills the tick (its action shows as
+# interrupted in `devloop status`).
+TimeoutStopSec=4h
+# A crash restarts the loop; a clean stop (0, STOP file included) and exit code 4 (three failed
+# ticks in a row, alert sent) do not.
+Restart=on-failure
+RestartSec=5min
+RestartPreventExitStatus=4
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo install -m 644 devloop.service /etc/systemd/system/devloop.service
+sudo systemctl daemon-reload
+sudo systemctl start devloop      # start the loop now
+sudo systemctl enable devloop     # and at every boot (optional)
+journalctl -u devloop -f          # follow its log
+sudo systemctl stop devloop       # SIGTERM: the tick in progress ends, then the loop exits
+sudo -u devloop touch /home/devloop/ssdlc/.ssdlc/devloop/STOP  # stop after the tick, and stay stopped
+sudo -u devloop rm /home/devloop/ssdlc/.ssdlc/devloop/STOP     # then `systemctl start devloop`
+```
+
+After an alert (exit code 4) the unit stays stopped: remove the cause, then
+`systemctl start devloop`.
 
 ### Evidence and telemetry
 
@@ -1360,7 +1463,7 @@ sudo -u devloop -H git clone https://github.com/brushtyler/ssdlc.git /home/devlo
 sudo -u devloop -H install -d -m 700 /home/devloop/.ghapps   # then the keys, mode 600
 # The first pin runs the clone's devloop; every later command runs the pinned copy.
 sudo -u devloop -H sh -c 'cd ~/ssdlc && python3 -m devloop pin origin/main'
-sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned run --interval 600
+sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned run --idle-timeout 900
 ```
 
 Turns must not depend on an update of an agent CLI in progress: a CLI that replaces its own
@@ -1409,7 +1512,7 @@ worktrees under `state_dir/worktrees`, never a pinned copy.
 
 ```bash
 python3 scripts/devloop-pinned status
-python3 scripts/devloop-pinned run --interval 600
+python3 scripts/devloop-pinned run --idle-timeout 900
 sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned tick --dry-run
 ```
 
@@ -1468,8 +1571,8 @@ devloop ([merge modes](#merge-modes)) whose diff touches `devloop/` or a file of
 with the same arguments: configuration, policy and dispatcher load again, and the lock stays
 held across the restart, so no other dispatcher can start in between. If the pin fails, the tick
 stops with `auto-pin of origin/main failed, the pinned copy is unchanged: <reason>`, `current`
-stays as it was, and the request stays: the next tick tries again (`run` logs the failure and
-goes on; `tick` exits with it). With `auto = false` a merge requests nothing, and a request left
+stays as it was, and the request stays: the next tick tries again (`run` counts it as a
+[failed tick](#continuous-loop), with its backoff; `tick` exits with it). With `auto = false` a merge requests nothing, and a request left
 from before is ignored.
 
 devloop imports only the Python standard library and itself. A test enforces this, so the tool
@@ -1496,7 +1599,10 @@ another value stops devloop at startup.
 `[merge]` (`mode`, `levels`, `operator_only_paths`) and `roles.supervisor` set the
 [merge modes](#merge-modes); an unknown mode, level or key stops devloop at startup.
 `[pin]` (`auto`, default `false`) sets the [pin after a merge](#pin-after-a-merge); a value that is
-not a boolean, or an unknown key, stops devloop at startup. `[docs] map` sets the
+not a boolean, or an unknown key, stops devloop at startup. `[run]` (`alert_issue`, unset by
+default) names the issue of the alert of the [continuous loop](#continuous-loop); a value that
+is not an issue number (an integer of at least 1), or an unknown key, stops devloop at startup.
+`[docs] map` sets the
 [documentation map](#documentation-map). Operator overrides go into the
 [local overlay](#local-config-as-an-overlay), not into this file.
 `[review_policy]` sets the
