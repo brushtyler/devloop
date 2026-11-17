@@ -161,6 +161,7 @@ from .context import (DOCS_PATHS_SHOWN, LABEL_STYLE, PROMPT_DIR, REREVIEW_COMMAN
                       format_fix_requests, format_operator_comments, format_previous_rounds,
                       label_transition, operator_comments, requested_fixes,
                       requests_rereview, transition_labels)
+from .dispatch_preflight import PreflightMixin, devloop_text, normalize_preflight
 from .dispatch_supervision import (HOLD_COMMAND, RELEASE_COMMAND, RESUME_STEP, SupervisionMixin,
                                    UntrustedChange, fix_command, merge_command)
 from .github import GitHubError, author_login, job_id
@@ -375,11 +376,6 @@ def pr_counts_line(snapshot, cfg):
             f'{held}/{cfg.max_parked_prs} parked (max_parked_prs)')
 
 
-def devloop_text(body):
-    """Text devloop or its agents published: it starts with the AGENTS.md header."""
-    return (body or '').lstrip().startswith('> [!NOTE]')
-
-
 def control_command(body):
     """Whether a comment is a devloop command: its first line starts with ``/devloop``."""
     lines = (body or '').strip().splitlines()
@@ -399,14 +395,6 @@ def preflight_hash(title, body, comments, trusted_users, automatic, accepted=Non
                                and supervisor_command(c.get('body')) is None)]
     data = json.dumps([title or '', body or '', kept], ensure_ascii=False, separators=(',', ':'))
     return hashlib.sha256(data.encode('utf-8')).hexdigest()
-
-
-def normalize_preflight(raw):
-    """The outcome of a readiness check: ready only without gaps and without a split, whatever
-    the agent says (a ``default_available`` gap blocks too)."""
-    gaps = [dict(g, code_refs=list(g['code_refs'])) for g in raw['gaps']]
-    ready = bool(raw['ready']) and not gaps and not raw['split'].strip()
-    return {'ready': ready, 'gaps': gaps, 'split': raw['split']}
 
 
 def base_revocation(record, head):
@@ -493,7 +481,7 @@ def untrusted_change(history, ready_label, trusted_users, admitters=None):
     return None
 
 
-class Dispatcher(SupervisionMixin):
+class Dispatcher(SupervisionMixin, PreflightMixin):
     """``gh`` acts as the dispatcher: it implements the ports of ``ports.Backend`` (tracker,
     code review and CI), and the dispatcher uses nothing else of it. ``identities``
     (``apps.Identities``) gives each agent its own GitHub identity; without it every actor uses
@@ -1055,216 +1043,6 @@ class Dispatcher(SupervisionMixin):
             return
         self.gh.comment(number, render_cycle({'cycle': cycle}))
         self.log('  dependency cycle reported: ' + ', '.join(cycle))
-
-    # Readiness check (#114) ---------------------------------------------------
-    def _preflight_records(self, comments):
-        """``(position, record)`` of the readiness checks in ``comments``, each written by the
-        identity of the configured agent it names."""
-        found = []
-        for position, comment in enumerate(comments):
-            record = read_marker(comment.get('body', ''), 'preflight')
-            login = (comment.get('author') or {}).get('login')
-            if record and record['agent'] in self.cfg.agents and self._wrote(login, record['agent']):
-                found.append((position, record))
-        return found
-
-    def _published(self, comment):
-        """Whether ``comment`` may be text devloop published: the AGENTS.md header, from an
-        identity allowed to write devloop records. Without GitHub Apps that is the operator's
-        login too, so this alone cannot tell devloop from the operator."""
-        return (devloop_text(comment.get('body'))
-                and self._writes_records((comment.get('author') or {}).get('login')))
-
-    def _ledger_record(self, comment):
-        """Whether ``comment`` is a ledger record (#133) signed by the dispatcher."""
-        return (read_marker(comment.get('body', ''), 'ledger') is not None
-                and self._signed((comment.get('author') or {}).get('login')))
-
-    def _automatic(self, comment):
-        """Whether ``comment`` is one of devloop's own records: published text (``_published``)
-        that ends with a valid devloop marker. Only these leave the readiness hash: any other
-        trusted comment, even one starting with the header, may carry a requirement."""
-        return self._published(comment) and carries_record(comment.get('body'))
-
-    def _recheck_requested(self, number, comments):
-        """Whether a trusted user asked in person for a new check with ``RECHECK_COMMAND`` as
-        the first line of a comment written after devloop's latest record there: each request
-        starts one check. Requests from anyone else are ignored and logged."""
-        last = max((position for position, c in enumerate(comments) if self._automatic(c)),
-                   default=-1)
-        asked = False
-        for comment in comments[last + 1:]:
-            body = comment.get('body') or ''
-            lines = body.strip().splitlines()
-            if devloop_text(body) or not lines or lines[0].strip() != RECHECK_COMMAND:
-                continue
-            login = (comment.get('author') or {}).get('login')
-            if login in self.cfg.trusted_users:
-                asked = True
-            else:
-                self.log(f'  issue #{number}: ignored `{RECHECK_COMMAND}` by {login}: the author '
-                         'is not a trusted user')
-        return asked
-
-    def _owns_block(self, number, comments, records):
-        """Whether the issue's ``agent:needs-operator`` belongs to the readiness check: the
-        latest check added it when the label was absent (its record says how many ``labeled``
-        events of the label came before), the dispatcher wrote the only ``labeled`` event
-        since, and no other text devloop may have published (another escalation,
-        ``_published``) came after that check: an identity that writes no devloop record cannot
-        void the block's attribution. The label counts under both its names (#248), the events
-        of the old one included (``_operator_labelers``). Anything else, or anything uncertain,
-        leaves the block to the operator."""
-        if not records:
-            return False
-        position, record = records[-1]
-        # The dispatcher's ledger records (#133), such as the turn of a recheck, are no
-        # escalation: they leave the block's attribution as it is.
-        if not record['blocked'] or any(self._published(c) and not self._ledger_record(c)
-                                        for c in comments[position + 1:]):
-            return False
-        labelers = self._operator_labelers(number)
-        return (len(labelers) == record['labeled'] + 1
-                and self._wrote(labelers[-1], DISPATCHER))
-
-    def _owned_block(self, labels):
-        """Whether ``labels`` carry the operator label under one name only (#248): with both,
-        which one the readiness check added cannot be told, and the block is the operator's."""
-        return len(set(labels) & self.cfg.labels.operator()) == 1
-
-    def _preflight_view(self, number, labels):
-        """What planning needs about an issue's readiness check, read now from GitHub:
-        ``{hash, record, recheck, owned}``, ``record`` being the latest check or None."""
-        history = self.gh.issue_history(number)
-        comments = self.gh.issue_comments(number)
-        records = self._preflight_records(comments)
-        return {'hash': self._request_hash(history, comments),
-                'record': records[-1][1] if records else None,
-                'recheck': self._recheck_requested(number, comments),
-                'owned': (self._owned_block(labels)
-                          and self._owns_block(number, comments, records))}
-
-    def _publish_preflight(self, number, outcome, digest, agent_key, note='', base=None):
-        """Record a check's outcome on the issue and apply it to ``agent:needs-operator``: add
-        the label when the check fails and the label is absent, remove it when the check passes
-        and the label belongs to the readiness check, under whichever name it has (#248). A
-        label someone else set stays. ``base``: the commit the check ran on, None for an
-        outcome reused (the latest base then)."""
-        lb = self.cfg.labels
-        agent = self.cfg.agent(agent_key)
-        labels = label_names(self.gh.issue(number).get('labels') or [])
-        comments = self.gh.issue_comments(number)
-        records = self._preflight_records(comments)
-        present = operator_blocked(labels, lb)
-        owned = self._owned_block(labels) and self._owns_block(number, comments, records)
-        shown = ', '.join(f'`{name}`' for name in sorted(labels & lb.operator()))
-        record = dict(outcome, hash=digest, agent=agent_key, blocked=False, labeled=0)
-        author = self._as(agent_key, ISSUE_COMMENT)
-        head = self.runner.header(agent)
-        if outcome['ready']:
-            if owned:
-                # Label first: if the comment is lost, the next tick checks the issue again.
-                self.gh.edit_labels(number, remove=sorted(labels & lb.operator()))
-                note = note or 'Il blocco messo dal controllo di prontezza è stato rimosso.'
-            elif present:
-                note = (f'{shown} resta: non risulta messo dal controllo di prontezza, '
-                        'quindi lo rimuove una persona.')
-            author.comment(number, render_preflight(record, head, note))
-            self.log('  ready' + (', block removed' if owned else ''))
-            return
-        # The class of the escalation (#182): in "auto" gaps that are all defaults go to the
-        # supervisor, with a dispatcher escalation that carries the key of the check's input.
-        record['class'] = cls = preflight_class(outcome)
-        supervised, why = (None, '') if present else self._supervised(
-            number, cls, 'preflight',
-            key=self._issue_key('preflight', base, digest) if base else None)
-        if supervised:
-            author.comment(number, render_preflight(record, head, note))
-            self.gh.comment(number, render_escalation(
-                'Il controllo di prontezza ha trovato solo lacune con un default proposto '
-                '(`default_available`): il supervisore può accettarli con '
-                f'`/devloop {ACCEPT_DEFAULTS}`, o decidere diversamente con `/devloop {DECIDE} '
-                '<decisioni>`.', cls=cls, supervised=supervised))
-            self.gh.edit_labels(number, add=[lb.needs_supervisor])
-            self.log(f'  not ready: {len(record["gaps"])} gap(s), to the supervisor')
-            return
-        if why:
-            note = note or (f'In modalità di merge `auto` queste lacune andrebbero al supervisore, '
-                            f'ma l\'escalation resta all\'operatore: {why}.')
-        if owned:
-            record.update(blocked=True, labeled=records[-1][1]['labeled'])
-        elif present:
-            note = note or (f'{shown} era già presente e non è attribuito al controllo '
-                            'di prontezza: un nuovo esito positivo non lo rimuove.')
-        else:
-            record.update(blocked=True, labeled=len(self._operator_labelers(number)))
-        # Comment first: if the label is lost, the next tick blocks the issue again.
-        author.comment(number, render_preflight(record, head, note))
-        if record['blocked'] and not owned:
-            self.gh.edit_labels(number, add=[lb.needs_operator])
-        self.log(f'  not ready: {len(record["gaps"])} gap(s)')
-
-    def _do_preflight(self, number):
-        """Run the readiness check on a checkout of the base branch, with the context the
-        implementer gets, then record and apply its outcome."""
-        cfg = self.cfg
-        agent = cfg.agent(cfg.preflight)
-        history = self.gh.issue_history(number)
-        reason = self._untrusted_change(history)
-        if reason:
-            raise UntrustedChange(f'issue #{number}: {reason}')
-        comments = self.gh.issue_comments(number)
-        digest = self._request_hash(history, comments)
-        prompt = _template('preflight', repo=cfg.repo, base_branch=cfg.base_branch,
-                           issue_number=number, issue_title=history['title'],
-                           issue_body=history['body'],
-                           issue_comments=_render_issue_comments(
-                               comments, cfg.trusted_users,
-                               [read_marker(c['body'], 'supervision')
-                                for c in comments if self._accepted(c)]),
-                           language=cfg.language)
-        name = f'issue-{number}-preflight'
-        path = self.ws.base_copy(name)
-        try:
-            # The input the check runs on (#182), bound before it runs: the commit of its
-            # checkout and the hash of the request its prompt gets.
-            base = self.ws.head(path)
-            key = self._issue_key('preflight', base, digest)
-            # A denied permission is retried once, in the same checkout (#180), as in ``_turn``.
-            for label in (name, f'{name}-retry'):
-                entry = self._open_turn((number, 'preflight'), agent, 'review', label)
-                try:
-                    raw = self.runner.run(agent, 'review', prompt, 'preflight', path, label)
-                except PermissionDenied as exc:
-                    self._close_turn(entry, 'failure', exc)
-                    error = self._permission_denied(agent, exc, retry=label == name)
-                    if error is None:
-                        continue
-                    error.key = key
-                    raise error from exc
-                except AgentError as exc:
-                    self._close_turn(entry, 'unavailable' if isinstance(exc, ModelUnavailable)
-                                     else 'failure', exc)
-                    exc.key = key
-                    raise
-                self._close_turn(entry, 'success')
-                break
-        finally:
-            self.ws.remove(name)
-        self._publish_preflight(number, normalize_preflight(raw), digest, agent.key, base=base)
-
-    def _do_preflight_block(self, number):
-        """Block again an issue whose latest check, still valid for its text, failed, after its
-        ``agent:needs-operator`` was removed: the outcome is reused, not recomputed."""
-        view = self._preflight_view(number, ())
-        if preflight_state(view)[0] != 'not_ready':
-            self.log('  the readiness check changed since the snapshot; next tick')
-            return
-        record = view['record']
-        outcome = {k: record[k] for k in ('ready', 'gaps', 'split')}
-        self._publish_preflight(number, outcome, view['hash'], record['agent'],
-                                note='Esito del controllo precedente, riusato: il testo '
-                                     'dell\'issue non è cambiato.')
 
     # Tick ----------------------------------------------------------------
     def tick(self, dry_run=False):
