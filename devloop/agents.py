@@ -79,6 +79,14 @@ class PermissionDenied(AgentError):
         self.target = target
 
 
+class NoOutput(AgentError):
+    """An agy turn that exited 0 with no result and no error (issue #222): empty stdout with
+    ``run ended with no output`` on stderr, or a JSON envelope without ``structured_output``,
+    without an error and without ``denied_actions``. The model was not usable for that turn,
+    maybe only for a moment: the dispatcher moves on to the next model of the chain, or runs
+    the last one once more, and never remembers it as unavailable (#151)."""
+
+
 class ModelsUnavailable(AgentError):
     """Every model of an agent's chain was unavailable, or left out, in one action; or, with
     ``last_failed``, the last model tried failed otherwise after the others had been. ``tried``:
@@ -246,6 +254,17 @@ def turn_prompt(agent, mode, prompt):
 
 
 NO_OUTPUT = 'jetski: no output produced'
+# What agy writes on stderr when a session ends with neither a result nor an error (#222).
+EMPTY_RUN = 'run ended with no output'
+
+
+def empty_run(kind, stdout, stderr):
+    """The line of agy's stderr saying that the run ended with no output, when stdout is empty,
+    or None (issue #222)."""
+    if kind != 'agy' or (stdout or '').strip():
+        return None
+    lines = [line.strip() for line in (stderr or '').splitlines() if EMPTY_RUN in line]
+    return lines[0][:500] if lines else None
 
 
 def denied_actions(kind, stdout):
@@ -333,7 +352,9 @@ def extract_output(kind, stdout, out_file):
         raise EnvelopeError(error)
     output = envelope.get('structured_output')
     if output is None:
-        raise AgentError(f'{kind} returned no structured_output')
+        # For agy an envelope with no result and no error is an empty run (#222).
+        error = NoOutput if kind == 'agy' else AgentError
+        raise error(f'{kind} returned no structured_output')
     return output
 
 
@@ -456,6 +477,10 @@ class AgentRunner:
             if permission:
                 raise PermissionDenied(message, log, permission,
                                        denied_target(agent.kind, done.stdout))
+            # No diagnostic of a denial, only agy's note of an empty run (#222).
+            empty = stopped == 'no output' and empty_run(agent.kind, done.stdout, done.stderr)
+            if empty:
+                raise NoOutput(f'{agent.key} returned no output: {empty}', log)
             raise AgentError(message, log)
         if done.returncode != 0:
             message = f'{agent.key} exited with {done.returncode}'
@@ -480,7 +505,7 @@ class AgentRunner:
             exc.log = log
             raise
         except AgentError as exc:
-            if denied:
+            if denied:  # a denied action, not an empty run (#155): never ``NoOutput``
                 raise AgentError(f'{exc}{denied}', log) from exc
             exc.log = log
             raise
