@@ -228,6 +228,11 @@ effort = "high"
 fallback_models = [
     { model = "gemini-4-hydrogen-high", model_label = "Gemini 4 Hydrogen" },
 ]
+# A model found unavailable is remembered in <state_dir>/model-unavailability.json, and the
+# next turns start from the first model of the chain not remembered (issue #151): until the
+# reset the error announces ("Resets in 152h4m35s"), else for fallback_memory_seconds (default
+# 3600). `devloop fallback reset agy` forgets it. Without fallback_models nothing is remembered.
+# fallback_memory_seconds = 3600
 # Headless agy cannot ask for a permission (issue #122): each turn gets, with --settings, only
 # `command(<prefix>)` rules for these command prefixes. Default for both lists: test_cmd,
 # "python3 -m unittest", "git status", "git diff", "git log", "git show". A bare interpreter,

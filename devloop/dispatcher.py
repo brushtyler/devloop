@@ -761,14 +761,26 @@ def touched_by_base(paths, touched):
     return sorted({p for p in paths if p in touched or p in dirs or _parents(p) & touched})
 
 
+def skipped_models(used):
+    """``{"skipped_models": [{model, reason, until}]}`` for the marker of a turn that ran with
+    ``used`` after skipping models remembered unavailable (#151), or ``{}``. Informative only:
+    no receipt, independence check nor approval reads it."""
+    if not used.skipped:
+        return {}
+    return {'skipped_models': [{'model': model, 'reason': reason, 'until': until}
+                               for model, reason, until in used.skipped]}
+
+
 class Models:
     """The models one action may still run ``agent`` with (``AgentConfig.chain``), in order, and
-    those it tried or left out, as ``(model, why)`` pairs (#121)."""
+    those it tried or left out, as ``(model, why)`` pairs (#121); ``skipped``, those it left out
+    because remembered unavailable, ``(model, reason, until)`` each (#151)."""
 
     def __init__(self, agent):
         self.agent = agent
         self.left = agent.chain()
         self.tried = []
+        self.skipped = []
 
 
 class UntrustedChange(RuntimeError):
@@ -963,7 +975,7 @@ class Dispatcher:
     status``. ``ledger`` (``ledger.Ledger``) records evidence and telemetry of each step (#133)."""
 
     def __init__(self, cfg, gh: Backend, ws, runner, log=print, identities=None, activity=None,
-                 ledger=None, merger=None, pinner=None):
+                 ledger=None, merger=None, pinner=None, memory=None):
         self.cfg = cfg
         # The pin after a merge (#174, ``pin.AutoPin``), used only with ``[pin] auto = true``.
         self.pinner = pinner
@@ -978,6 +990,9 @@ class Dispatcher:
         self.identities = identities
         self.activity = activity
         self.ledger = ledger
+        # The models found unavailable (``unavailability.Memory``, #151), or None: every turn
+        # starts from the configured model.
+        self.memory = memory
 
     # Identities ------------------------------------------------------------
     def _as(self, actor, permissions) -> Backend:
@@ -2219,6 +2234,39 @@ class Dispatcher:
         return PermissionDenied(f'{exc}; permission `{exc.permission}` denied again after one '
                                 'retry', exc.log, exc.permission, exc.target)
 
+    # Memory of unavailable models (#151) -----------------------------------
+    def _remembered(self, models, candidate):
+        """The memory record that makes ``candidate`` skipped until it expires, or None: only
+        for an agent with fallback models. Every remembered model is skipped, the last of the
+        chain too: a chain remembered whole runs no CLI."""
+        if self.memory is None or not models.agent.fallback_models:
+            return None
+        return self.memory.active(candidate.key, candidate.model)
+
+    def _remember(self, agent, candidate, exc):
+        """Record ``candidate`` unavailable for ``agent``, until the reset the error announces
+        (``exc.resets_at``) or ``fallback_memory_seconds`` from now. Returns the text the log
+        line adds; an agent without fallback models records nothing."""
+        if self.memory is None or not agent.fallback_models:
+            return ''
+        until = exc.resets_at
+        if until is None:
+            until = self.memory.now() + agent.fallback_memory_seconds
+        try:
+            entry = self.memory.record(candidate.key, candidate.model, exc.reason, until)
+        except OSError as error:
+            return f'; not remembered: {error}'
+        return f'; skipped until {entry["until"]}'
+
+    def _forget(self, agent, candidate):
+        """Forget ``candidate`` once it answered: it is available again."""
+        if self.memory is None or not agent.fallback_models:
+            return
+        try:
+            self.memory.forget(candidate.key, candidate.model)
+        except OSError as error:
+            self.log(f'  {candidate.key}: model {candidate.model} not forgotten: {error}')
+
     def _turn(self, models, mode, prompt, schema, path, label, allowed=None, where=None):
         """Run one agent turn on the first of ``models`` (``Models``) that is available, and
         return its output and the agent configuration it ran with.
@@ -2237,11 +2285,28 @@ class Dispatcher:
         other error, naming the permission.
 
         ``where``, ``(number, kind)``, is the issue or PR whose ledger records each CLI
-        invocation as a turn (#133): written before the CLI starts, closed when it ends."""
+        invocation as a turn (#133): written before the CLI starts, closed when it ends.
+
+        With a memory (#151), an agent with fallback models records each model found
+        unavailable, and skips a remembered one until its record expires, without running it:
+        it leaves ``models`` and is listed in ``models.skipped`` and on the configuration
+        returned (``skipped``). When every model of the chain is remembered, no CLI runs and
+        the turn fails listing each one with its reason and time (``ModelsUnavailable``). A
+        model that answers is forgotten."""
         failed = None
         retried = set()  # the models already denied a permission in this call
         while models.left:
             candidate = models.left.pop(0)
+            remembered = self._remembered(models, candidate)
+            if remembered is not None:
+                models.skipped.append((candidate.model, remembered['reason'],
+                                       remembered['until']))
+                models.tried.append((candidate.model, 'skipped: unavailable until '
+                                                      f'{remembered["until"]} '
+                                                      f'({remembered["reason"]})'))
+                self.log(f'  {candidate.key}: model {candidate.model} skipped: unavailable until '
+                         f'{remembered["until"]} ({remembered["reason"]})')
+                continue
             if allowed is not None and not allowed(candidate):
                 models.tried.append((candidate.model, 'not independent of the authors of the PR '
                                                       'or of the other reviewers of the round'))
@@ -2257,7 +2322,8 @@ class Dispatcher:
             except ModelUnavailable as exc:
                 self._close_turn(entry, 'unavailable', exc)
                 models.tried.append((candidate.model, f'{exc} ({exc.reason})'))
-                self.log(f'  {candidate.key}: model {candidate.model} unavailable: {exc.reason}')
+                self.log(f'  {candidate.key}: model {candidate.model} unavailable: {exc.reason}'
+                         + self._remember(models.agent, candidate, exc))
                 failed = exc
                 continue
             except PermissionDenied as exc:
@@ -2284,9 +2350,12 @@ class Dispatcher:
                                         last_failed=True) from exc
             self._close_turn(entry, 'success')
             models.left.insert(0, candidate)  # available: later attempts of the action use it
+            self._forget(models.agent, candidate)
             if candidate.fallback_for:
                 self.log(f'  {candidate.key} ran on fallback model {candidate.model} '
                          f'({candidate.model_label}) instead of {candidate.fallback_for}')
+            if models.skipped:
+                candidate = replace(candidate, skipped=tuple(models.skipped))
             return output, candidate
         if failed is not None and not models.agent.fallback_models:
             raise failed  # an agent without fallback models: as before #121
@@ -3049,7 +3118,7 @@ class Dispatcher:
                 'profile': self._profile(agent.key, 'write', used),
                 'acceptance_map': result['acceptance_map'],
                 # Informative only (#169): no receipt nor approval depends on it.
-                'local_tests': local}
+                'local_tests': local, **skipped_models(used)}
         body = publishable(self.runner.header(used) + '\n' + result['pr_body'].strip()
                            + '\n\n' + render_map(result['acceptance_map'])
                            + f'\n\nCloses #{number}', 'pr', meta)
@@ -3262,6 +3331,7 @@ class Dispatcher:
             if restarts:
                 review['restarts'] = restarts
             review['profile'] = self._profile(key, 'review', used)
+            review.update(skipped_models(used))
             reviewer_gh = self._as(key, REVIEW)
             reviewer_gh.comment(pr.number, render_review(review, self.runner.header(used)))
             if self._app_login(key):
@@ -3399,7 +3469,7 @@ class Dispatcher:
             self.ws.push(path, pr.head_ref, auth=auth)
         fix = dict(result, head_sha=self.ws.head(path),
                    profile=self._profile(agent.key, 'write', used), local_tests=local,
-                   **(extra or {}))
+                   **skipped_models(used), **(extra or {}))
         self._as(agent.key, PR_COMMENT).comment(
             pr.number, render_fix(fix, self.runner.header(used), round_no))
         self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.changes])
@@ -3540,7 +3610,8 @@ class Dispatcher:
             self._as(agent.key, PR_COMMENT).comment(
                 pr.number, publishable(self.runner.header(used) + text, 'sync',
                                        {'head_sha': head,
-                                        'profile': self._profile(agent.key, 'write', used)}))
+                                        'profile': self._profile(agent.key, 'write', used),
+                                        **skipped_models(used)}))
         else:
             # A sync without an agent is an event, not a turn (#133).
             self._ledger_event(pr.number, 'sync', base=target, head=head, previous_head=pr.head_sha)
