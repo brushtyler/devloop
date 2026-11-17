@@ -41,7 +41,25 @@ class MapConfigTests(unittest.TestCase):
         return config.parse_config(data, self.root).docs
 
     def test_this_repository_maps_devloop_to_its_document(self):
-        self.assertEqual(dict(CFG.docs.entries)['devloop/'], ('docs/devloop.md',))
+        entries = dict(CFG.docs.entries)
+        self.assertEqual(entries['devloop/'], ('docs/devloop/guide.md',))
+        # #241: the three pages of docs/devloop/ (ADR 0003, I4); the generic entry adds the guide.
+        self.assertEqual(CFG.docs.documents(['devloop/dispatcher.py']),
+                         {document: ['devloop/dispatcher.py'] for document in
+                          ('docs/devloop/guide.md', 'docs/devloop/protocol.md',
+                           'docs/devloop/reference.md')})
+        self.assertEqual(sorted(CFG.docs.documents(['devloop/config.toml'])),
+                         ['docs/devloop/guide.md', 'docs/devloop/reference.md'])
+        self.assertEqual(sorted(CFG.docs.documents(['devloop/schemas/review.json'])),
+                         ['docs/devloop/guide.md', 'docs/devloop/protocol.md'])
+        self.assertEqual(sorted(CFG.docs.documents(['devloop/policy.py'])),
+                         ['docs/devloop/guide.md', 'docs/devloop/protocol.md',
+                          'docs/devloop/reference.md'])
+        self.assertEqual(sorted(CFG.docs.documents(['devloop/ports.py', 'devloop/github.py'])),
+                         ['docs/architecture.md', 'docs/devloop/guide.md'])
+        self.assertEqual(CFG.docs.documents(['scripts/devloop-pinned']),
+                         {'docs/devloop/guide.md': ['scripts/devloop-pinned']})
+        self.assertNotIn('docs/devloop.md', {d for _, docs in CFG.docs.entries for d in docs})
         for _, documents in CFG.docs.entries:
             for document in documents:
                 self.assertTrue((REPO / document).is_file(), document)
@@ -168,7 +186,9 @@ class PromptTests(unittest.TestCase):
         prompt = self.implement(['x.py'])[0]
         self.assertIn('## Documentation map', prompt)
         self.assertIn('Your diff is still empty, so this is the whole map.', prompt)
-        self.assertIn('- `devloop/` → `docs/devloop.md`', prompt)
+        self.assertIn('- `devloop/` → `docs/devloop/guide.md`', prompt)
+        self.assertIn('- `devloop/dispatcher.py` → `docs/devloop/reference.md`, '
+                      '`docs/devloop/protocol.md`', prompt)
         self.assertIn('- `orchestrator.py` → `README.md`, `docs/architecture.md`', prompt)
         self.assertLess(prompt.index('## Documentation map'), prompt.index('## Issue #7'))
 
@@ -177,7 +197,9 @@ class PromptTests(unittest.TestCase):
         self.assertIn('## Documentation map', first)
         self.assertNotIn('## Documentation map', second)
         self.assertIn('## Documents mapped to the diff', second)
-        self.assertIn('- `docs/devloop.md`, mapped from `devloop/dispatcher.py`', second)
+        for document in ('guide', 'protocol', 'reference'):
+            self.assertIn(f'- `docs/devloop/{document}.md`, mapped from `devloop/dispatcher.py`',
+                          second)
         self.assertIn('FAILED test_x', second)
 
     def test_a_later_implement_attempt_on_an_unmapped_file_adds_nothing(self):
@@ -185,20 +207,20 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(len(prompts), 2)
         self.assertNotIn('## Documentation map', prompts[1])
         self.assertNotIn('## Documents mapped to the diff', prompts[1])
-        self.assertNotIn('docs/devloop.md', prompts[1])
+        self.assertNotIn('docs/devloop/', prompts[1])
 
     def test_the_fix_prompt_lists_the_documents_of_the_diff(self):
         prompt = self.fix(['devloop/dispatcher.py'])
         self.assertIn('## Documents mapped to the diff', prompt)
-        self.assertIn('- `docs/devloop.md`, mapped from `devloop/dispatcher.py`', prompt)
+        self.assertIn('- `docs/devloop/guide.md`, mapped from `devloop/dispatcher.py`', prompt)
         self.assertLess(prompt.index('## Documents mapped'), prompt.index('## Issue #7'))
-        self.assertNotIn('docs/devloop.md', self.fix(['x.py']))
+        self.assertNotIn('docs/devloop/', self.fix(['x.py']))
         self.assertNotIn('## Documents mapped to the diff', self.fix(['x.py']))
 
     def test_the_review_prompt_lists_the_documents_and_the_blocking_rule(self):
         prompt = self.review(['devloop/dispatcher.py'])
         self.assertIn('## Documents mapped to the diff', prompt)
-        self.assertIn('- `docs/devloop.md`, mapped from `devloop/dispatcher.py`', prompt)
+        self.assertIn('- `docs/devloop/guide.md`, mapped from `devloop/dispatcher.py`', prompt)
         self.assertIn(BLOCKING, prompt)
         self.assertIn('When a mapped document stays correct without changes, say so in '
                       '`checks_performed`.', prompt)
@@ -206,7 +228,7 @@ class PromptTests(unittest.TestCase):
         unmapped = self.review(['x.py'])
         self.assertNotIn('## Documents mapped to the diff', unmapped)
         self.assertNotIn(BLOCKING, unmapped)
-        self.assertNotIn('docs/devloop.md', unmapped)
+        self.assertNotIn('docs/devloop/', unmapped)
 
     def test_many_files_are_counted_after_the_first_ones(self):
         files = [f'devloop/m{i}.py' for i in range(7)]
@@ -216,34 +238,38 @@ class PromptTests(unittest.TestCase):
 
     def test_a_document_missing_from_the_worktree_is_omitted_with_a_log_line(self):
         # #210: the review lists only the mapped documents the worktree holds.
-        files = ['devloop/dispatcher.py', 'orchestrator.py']
-        line = '  docs.map: docs/devloop.md is not a file of the worktree; omitted from the prompt'
-        prompt = self.review(files, absent=('docs/devloop.md',))
-        self.assertNotIn('docs/devloop.md', prompt)
+        # devloop/watch.py is covered only by the generic devloop/ entry, the guide.
+        files = ['devloop/watch.py', 'orchestrator.py']
+        guide = 'docs/devloop/guide.md'
+        line = f'  docs.map: {guide} is not a file of the worktree; omitted from the prompt'
+        prompt = self.review(files, absent=(guide,))
+        self.assertNotIn(guide, prompt)
         self.assertIn('- `README.md`, mapped from `orchestrator.py`', prompt)
         self.assertIn(BLOCKING, prompt)
         self.assertIn(line, self.logs)
         # Every mapped document missing: no section at all.
-        prompt = self.review(['devloop/dispatcher.py'], absent=('docs/devloop.md',))
+        prompt = self.review(['devloop/watch.py'], absent=(guide,))
         self.assertNotIn('## Documents mapped to the diff', prompt)
         self.assertIn(line, self.logs)
-        prompt = self.fix(['devloop/dispatcher.py'], absent=('docs/devloop.md',))
-        self.assertNotIn('docs/devloop.md', prompt)
+        prompt = self.fix(['devloop/watch.py'], absent=(guide,))
+        self.assertNotIn(guide, prompt)
         self.assertIn(line, self.logs)
         # Nothing missing, nothing logged.
         self.review(files)
         self.assertFalse([m for m in self.logs if 'docs.map' in m])
 
     def test_the_whole_map_omits_the_documents_missing_from_the_worktree(self):
-        first, second = self.implement(['devloop/dispatcher.py'], tests=(False, True),
-                                       absent=('docs/devloop.md', 'docs/architecture.md'))
+        guide = 'docs/devloop/guide.md'
+        first, second = self.implement(['devloop/watch.py'], tests=(False, True),
+                                       absent=(guide, 'docs/architecture.md'))
         self.assertIn('## Documentation map', first)
-        self.assertNotIn('docs/devloop.md', first)
+        self.assertNotIn(guide, first)
         self.assertNotIn('`devloop/` →', first)  # a key left with no document
+        self.assertNotIn('`devloop/ports.py` →', first)
         self.assertIn('- `orchestrator.py` → `README.md`\n', first)
-        self.assertNotIn('docs/devloop.md', second)
+        self.assertNotIn(guide, second)
         self.assertNotIn('## Documents mapped to the diff', second)
-        for document in ('docs/architecture.md', 'docs/devloop.md'):
+        for document in ('docs/architecture.md', guide):
             self.assertIn(f'  docs.map: {document} is not a file of the worktree; omitted from '
                           'the prompt', self.logs)
 
@@ -254,15 +280,15 @@ class PromptTests(unittest.TestCase):
         d = Dispatcher(cfg, gh, ws, runner, log=lambda m: None)
         d._do_implement(7)
         self.assertNotIn('## Documentation map', runner.calls[0][3])
-        self.assertNotIn('docs/devloop.md', runner.calls[0][3])
+        self.assertNotIn('docs/devloop/', runner.calls[0][3])
 
 
 class DocumentationTests(unittest.TestCase):
     def test_the_devloop_document_describes_the_map(self):
-        text = (REPO / 'docs/devloop.md').read_text(encoding='utf-8')
+        text = (REPO / 'docs/devloop/reference.md').read_text(encoding='utf-8')
         section = text[text.index('### Documentation map'):]
         section = section[:section.index('\n### ', 1)]
-        for phrase in ('[docs.map]', '"devloop/" = ["docs/devloop.md"]', 'First implement attempt',
+        for phrase in ('[docs.map]', '"devloop/" = ["docs/devloop/guide.md"]', 'First implement attempt',
                        'blocking', '`checks_performed`', 'asks for nothing',
                        'checks its shape only', 'omitted from the list'):
             self.assertIn(phrase, section)

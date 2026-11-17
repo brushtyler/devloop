@@ -20,7 +20,7 @@ Esempio:
 > **Model:** Claude Opus 5.5
 > **Reasoning Level:** High
 
-**Nei turni di devloop gli agent non aggiungono nessuna intestazione** nei loro testi (summary, finding, note, corpo della PR): la compone il dispatcher. Il formato è descritto in [docs/devloop.md](docs/devloop.md#attribution).
+**Nei turni di devloop gli agent non aggiungono nessuna intestazione** nei loro testi (summary, finding, note, corpo della PR): la compone il dispatcher. Il formato è descritto in [docs/devloop/protocol.md](docs/devloop/protocol.md#attribution).
 
 ### Come ricavare i valori
 
