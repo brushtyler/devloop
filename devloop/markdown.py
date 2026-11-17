@@ -284,10 +284,21 @@ def _valid_supervision(s):
                     and isinstance(d.get('proposed_default'), str) for d in defaults))
 
 
+def _valid_rerun(r):
+    """A re-run of the failed CI jobs of a head (#200): the head, the GitHub Actions runs
+    re-run, the failed test modules (none pertinent to the PR), and in ``checks`` the links of
+    the failed checks at the time, which tell when the re-run has replaced them."""
+    return (isinstance(r.get('head'), str)
+            and all(isinstance(r.get(k), list) for k in ('runs', 'modules', 'checks'))
+            and all(_is_int(run, 1) for run in r['runs'])
+            and all(isinstance(v, str) for k in ('modules', 'checks') for v in r[k]))
+
+
 _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy': _valid_policy,
           'finding': _valid_finding, 'sync': _valid_sync, 'preflight': _valid_preflight,
           'notice': _valid_notice, 'ledger': _valid_ledger, 'merged': _valid_merged,
-          'hold': _valid_hold, 'supervision': _valid_supervision, 'closed': _valid_closed}
+          'hold': _valid_hold, 'supervision': _valid_supervision, 'rerun': _valid_rerun,
+          'closed': _valid_closed}
 
 
 def read_marker(text, kind):
@@ -359,7 +370,13 @@ def render_review(review, head):
         parts += ['', f'> Il round {review["restarts"]["round"]} è stato abbandonato perché la '
                       'base è avanzata toccando file della PR, o senza che la non interferenza '
                       'fosse dimostrabile: quel round non conta per il limite dei round.']
-    parts += ['', review['summary'].strip()]
+    # #235: the approved head was synced with the base, without conflicts.
+    if review.get('resync'):
+        parts += ['', f'> Il round {review["resync"]["round"]} aveva approvato '
+                      f'`{review["resync"]["from"][:12]}`; il nuovo head ne differisce solo per '
+                      'il merge della base senza conflitti: questo round non conta per il limite '
+                      'dei round.']
+    parts +=['', review['summary'].strip()]
     if review['verdict'] == 'needs_human' and review['human_reason']:
         parts += ['', '### Decisione richiesta', '', review['human_reason'].strip()]
     if review['blocking_findings']:

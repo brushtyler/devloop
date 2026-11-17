@@ -80,6 +80,13 @@ class MergePolicy:
 
 
 @dataclass(frozen=True)
+class RunPolicy:
+    """``[run]`` (#177): the issue that gets the alert of ``devloop run`` after three consecutive
+    failed ticks, or 0 when none is configured (the alert goes to the local log only)."""
+    alert_issue: int = 0
+
+
+@dataclass(frozen=True)
 class PinPolicy:
     """``[pin]`` (#174): whether a merge by devloop that touches ``paths`` (``devloop/`` and the
     files of ``review_policy.sensitive_path_lists``) pins ``origin/<base_branch>`` at the next
@@ -225,6 +232,9 @@ class Config:
     implement_test_retries: int = 1
     # Which tests run locally after a writing turn (#169): see ``localtests``.
     local_tests: str = 'full'
+    # Re-run once, without a round, a CI failure whose test modules are not pertinent to the PR
+    # (#200, ``Dispatcher._rerun_unrelated``).
+    ci_rerun_unrelated: bool = True
     agent_timeout_seconds: int = 3600
     test_timeout_seconds: int = 3600
     agent_command_timeout_seconds: int = 600
@@ -242,6 +252,7 @@ class Config:
     # mode (#172), or '' when none is configured.
     supervisor: str = ''
     pin: PinPolicy = field(default_factory=PinPolicy)
+    run: RunPolicy = field(default_factory=RunPolicy)
     # Code paths and their documents, listed in the implement, fix and review prompts (#203).
     docs: DocsMap = field(default_factory=DocsMap)
 
@@ -496,6 +507,20 @@ def parse_pin(table, lists):
     return PinPolicy(auto=auto, paths=('devloop/', *lists))
 
 
+def parse_run(table):
+    """``[run]`` (#177): ``alert_issue``, optional, the number of an issue (at least 1)."""
+    if not isinstance(table, dict):
+        raise ConfigError('run: expected a table')
+    unknown = set(table) - {'alert_issue'}
+    if unknown:
+        raise ConfigError(f'run: unknown keys {sorted(unknown)}')
+    alert = table.get('alert_issue', 0)
+    if 'alert_issue' in table and (not isinstance(alert, int) or isinstance(alert, bool)
+                                   or alert < 1):
+        raise ConfigError('run.alert_issue: expected the number of an issue')
+    return RunPolicy(alert_issue=alert)
+
+
 def _docs_path(value, where, document):
     """``value`` as a path of ``[docs] map``: a non-empty path relative to the root, without
     surrounding spaces, ``.``, ``..`` or empty segments, backslashes or pattern characters. A key
@@ -652,6 +677,8 @@ def parse_config(data, root=INSTALL_ROOT):
     local_tests = data.get('local_tests', Config.local_tests)
     if not isinstance(local_tests, str) or local_tests not in LOCAL_TESTS_MODES:
         raise ConfigError(f'local_tests: must be one of {LOCAL_TESTS_MODES}')
+    ci_rerun = (_require(data, 'ci_rerun_unrelated', bool, 'config')
+                if 'ci_rerun_unrelated' in data else Config.ci_rerun_unrelated)
     return Config(
         repo=_require(data, 'repo', str, 'config'),
         base_branch=data.get('base_branch', 'main'),
@@ -666,9 +693,10 @@ def parse_config(data, root=INSTALL_ROOT):
         priority_labels=_str_list(data, 'priority_labels', 'config', ('prerequisito',)),
         protected_paths=_str_list(data, 'protected_paths', 'config', ('.github/',)),
         apps=apps, app_key_dir=key_dir, agent_stall_action=stall_action,
-        local_tests=local_tests,
+        local_tests=local_tests, ci_rerun_unrelated=ci_rerun,
         merge=parse_merge(data.get('merge', {}), supervisor), supervisor=supervisor,
         pin=parse_pin(data.get('pin', {}), sensitive_lists(data)),
+        run=parse_run(data.get('run', {})),
         docs=parse_docs(data),
         review_policy=parse_review_policy(
             data.get('review_policy', {}), root,
@@ -696,7 +724,7 @@ _AGENT_KEYS = dict.fromkeys(('kind', 'display_name', 'model', 'model_label', 'ef
                              'write_commands', 'review_commands'))
 OVERLAY_KEYS = {
     **dict.fromkeys(('repo', 'base_branch', 'branch_prefix', 'state_dir', 'test_cmd',
-                     'local_tests', 'language', 'trusted_users', 'preflight', 'max_open_prs',
+                     'local_tests', 'ci_rerun_unrelated', 'language', 'trusted_users', 'preflight', 'max_open_prs',
                      'max_parked_prs', 'max_review_rounds', 'max_actions_per_tick',
                      'max_parallel_actions', 'implement_test_retries', 'agent_timeout_seconds',
                      'test_timeout_seconds',
@@ -711,6 +739,7 @@ OVERLAY_KEYS = {
     'agents': {'*': _AGENT_KEYS},
     'apps': {'key_dir': None, '*': dict.fromkeys(('app_id', 'slug'))},
     'pin': {'auto': None},
+    'run': {'alert_issue': None},
     'docs': {'map': {'*': None}},
 }
 

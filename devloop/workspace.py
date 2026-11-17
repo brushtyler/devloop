@@ -320,6 +320,11 @@ class Workspace:
         renamed, where the PR adds a file, is a conflict on the file's location. Raises
         WorkspaceError when git cannot tell (a missing commit, a git without ``merge-tree
         --write-tree``)."""
+        _, clean, files = self._merge_tree(base, head)
+        return clean, files
+
+    def _merge_tree(self, base, head):
+        """``(tree, clean, files)`` of :meth:`merge_check`, with the tree git wrote."""
         for commit in (base, head):
             if self._git_run('rev-parse', '-q', '--verify', f'{commit}^{{commit}}',
                              check=False).returncode:
@@ -331,7 +336,35 @@ class Workspace:
         tree, *rest = done.stdout.split('\0')
         if done.returncode not in (0, 1) or not re.fullmatch(r'[0-9a-f]{40,64}', tree):
             raise WorkspaceError(f'git merge-tree: {done.stderr.strip()[:500]}')
-        return done.returncode == 0, sorted({name for name in rest if name})
+        return tree, done.returncode == 0, sorted({name for name in rest if name})
+
+    def clean_resync(self, branch, head, approved, limit=10):
+        """Whether ``head`` differs from ``approved`` only by merges of the base branch that git
+        concludes without conflicts (#235): walking back from ``head``, every commit up to
+        ``approved`` (at most ``limit``) has exactly two parents, the second a commit of
+        ``origin/<base>``, and the very tree ``git merge-tree --write-tree`` writes, without
+        conflicts, for its two parents. A merge whose conflicts someone resolved, or any other
+        commit, is not. Fetches ``branch`` and the base first. Raises WorkspaceError when git
+        cannot tell."""
+        self._git('fetch', 'origin', self.base_branch,
+                  f'+refs/heads/{branch}:refs/remotes/origin/{branch}')
+        base = f'origin/{self.base_branch}'
+        commit = head
+        for _ in range(limit):
+            if commit == approved:
+                return commit != head
+            line = self._git('rev-list', '--parents', '-n1', commit).split()
+            if len(line) != 3:
+                return False
+            first, merged = line[1:]
+            if self._git_run('merge-base', '--is-ancestor', merged, base,
+                             check=False).returncode:
+                return False
+            tree, clean, _ = self._merge_tree(first, merged)
+            if not clean or tree != self._git('rev-parse', f'{commit}^{{tree}}').strip():
+                return False
+            commit = first
+        return False
 
     def start_merge(self, path, author=None):
         """Merge ``origin/<base>`` into the branch in ``path`` without committing.

@@ -18,6 +18,7 @@ from urllib.parse import quote
 from .ports import summarize_checks
 
 _RUN_ID = re.compile(r'/actions/runs/(\d+)')
+_JOB_ID = re.compile(r'/actions/runs/\d+/job/(\d+)')
 _ISSUE_HISTORY = (
     'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){'
     'issue(number:$number){title body author{__typename login} lastEditedAt '
@@ -279,9 +280,19 @@ class GitHub:
                                 f'repos/{self.repo}/pulls/{number}/reviews?per_page=100',
                                 '--jq', '.[] | {id, login: .user.login, state}')
 
-    def failed_log(self, run_id, max_lines=80):
-        done = self._gh('run', 'view', str(run_id), '-R', self.repo, '--log-failed', check=False)
-        return '\n'.join(done.stdout.splitlines()[-max_lines:])
+    def failed_log(self, run_id, max_lines=80, job_id=None):
+        """The last ``max_lines`` of the failed steps of run ``run_id`` (all of them with None),
+        or only of its job ``job_id`` when given (#200); empty when `gh` cannot read the log."""
+        target = ('--job', str(int(job_id))) if job_id is not None else (str(run_id),)
+        done = self._gh('run', 'view', *target, '-R', self.repo, '--log-failed', check=False)
+        lines = done.stdout.splitlines()
+        return '\n'.join(lines if max_lines is None else lines[-max_lines:])
+
+    def rerun_failed_jobs(self, run_id):
+        """Re-run the failed jobs of GitHub Actions run ``run_id`` (#200). It needs ``actions:
+        write``: without it GitHub answers 403 and this raises ``GitHubError``."""
+        self._gh('api', '-X', 'POST',
+                 f'repos/{self.repo}/actions/runs/{int(run_id)}/rerun-failed-jobs')
 
     # Writes --------------------------------------------------------------
     def edit_labels(self, number, add=(), remove=()):
@@ -372,6 +383,13 @@ def latest_check_runs(check_runs):
             latest[key] = (rank, index)
     kept = sorted(index for _, index in latest.values())
     return [check_runs[index] for index in kept]
+
+
+def job_id(link):
+    """The GitHub Actions job of a check run, read from its link
+    (``…/actions/runs/<run>/job/<job>``), or None (#200)."""
+    found = _JOB_ID.search(link or '')
+    return int(found.group(1)) if found else None
 
 
 def normalize_checks(check_runs, combined_status):

@@ -14,7 +14,7 @@ plans the next steps and runs them. A crashed tick is resumed by the next one.
 |---|---|---|
 | Start | A trusted user adds `agent:ready` to an issue (or the [supervisor](#labels-from-the-supervisor), on an issue of a trusted user or of a devloop app) | `agent:working`; the implementer works in a fresh worktree |
 | Implement | Changes made and [local tests](#local-tests) pass | Dispatcher commits, pushes `agent/issue-<n>`, opens a PR labelled `agent:review` |
-| CI | Checks pending | Wait; failing checks become a review round sent back as `agent:changes` |
+| CI | Checks pending | Wait; failing checks become a review round sent back as `agent:changes`, unless no failed test module is pertinent to the PR: then the failed jobs are re-run once, without a round (see [CI failures not pertinent to the PR](#ci-failures-not-pertinent-to-the-pr)) |
 | Review | CI passed or absent (absent CI with `local_tests` other than `full`: the full suite first runs locally, see [Local tests](#local-tests)) | The dispatcher computes the PR's [review level](#review-level-and-policy-receipt); at level 1 a **different** agent posts a structured verdict (see below), at level 2 two [independent reviewers](#level-2-two-independent-reviewers) do, one per action, and their verdicts are applied together |
 | Fix | `agent:changes`, or a [`/devloop fix`](#fix-requested-by-the-operator-or-the-supervisor) command on a PR in `agent:review` or `agent:changes` | The implementer fixes or disputes every open finding of the round, and applies the requests of the command, then back to `agent:review` |
 | Sync | A PR in `agent:review` or `agent:ready-to-merge` conflicts with `main` | The implementer resolves the conflicts of a merge of `origin/main`; the dispatcher pushes the merge commit, back to `agent:review` (see below) |
@@ -29,7 +29,9 @@ Readiness belongs to the approved commit. Every tick re-checks ready PRs:
 - if CI is running again on the approved commit, readiness is suspended (`agent:review`) and the
   recorded approval is applied again, without a new review, once CI passes and if its policy
   receipt still matches;
-- if CI fails on the approved commit, the failure becomes a review round (`agent:changes`).
+- if CI fails on the approved commit, the failure becomes a review round (`agent:changes`), or,
+  when no failed test module is pertinent to the PR, a single re-run of the failed jobs
+  ([CI failures not pertinent to the PR](#ci-failures-not-pertinent-to-the-pr)).
 
 ### Conflicts with `main`
 
@@ -57,10 +59,33 @@ alone until GitHub recomputes. As for any push, the merge must not differ from `
 
 A sync writes no review record, so it does not consume a review round, and it runs even when no
 round is left. The PR goes back to `agent:review`, also from `agent:ready-to-merge`, and the next
-round reviews the new head after CI as usual; that round counts against `max_review_rounds`. A
+round reviews the new head after CI as usual; that round counts against `max_review_rounds`,
+except after an approval (see [Resync after approval](#resync-after-approval)). A
 sync that fails (the implementer is blocked, tests still fail, markers are left, the merge was
 concluded or aborted by the agent, or the agent run failed) goes to `agent:needs-human` with a
 comment that lists the files in conflict and their commits.
+
+#### Resync after approval
+
+A PR approved and then synced, for example because GitHub reported the mergeability as unknown
+and another PR was merged before devloop could merge it, needs a new review of the new head
+(#235). That review does **not** count against `max_review_rounds` when all of these hold:
+
+- the latest round is complete and approved a head, the same for every reviewer;
+- the new head differs from it only by merges of `origin/main`: walking back from the new head,
+  each commit up to the approved one (at most 10) has two parents, the second a commit of
+  `main`, and exactly the tree `git merge-tree --write-tree` writes, without conflicts, for those
+  two parents. A merge whose conflicts the implementer resolved, a fix, or any other commit
+  changes the PR's content, and the review counts as before;
+- the review is not a `/devloop rereview`, and CI did not fail on the new head (a CI round
+  counts).
+
+The dispatcher checks this when it reads the PR; when git cannot tell (a missing commit), the
+review counts. The review records `resync`, with the reason `resync_after_approval`, the
+approved round and its head (`from`), and its comment says it does not count. Every later sync
+after a new approval is free in the same way. The limit stays the same for the implementer's
+changes: a request for changes in that round needs a fix, whose review is a round that counts,
+so with no round left it goes to `agent:needs-human` at once.
 
 Any step can stop at `agent:needs-human` with a comment explaining why: the
 [readiness check](#readiness-check-before-implementation) found the issue not ready, the agent declared itself
@@ -112,7 +137,8 @@ so a PR whose head keeps moving cannot be reviewed indefinitely. Replaying a ver
 already recorded is not a new round, and neither is a sync with `main` nor the second review of
 a round already open. A round that `main` advancing interrupted before it was complete does not
 count either (see [When `main` advances](#when-main-advances-during-a-round)): the round that
-replaces it counts once. Round numbers stay progressive, because they also name the findings
+replaces it counts once. Nor does the review of an approved head that only a sync without
+conflicts moved (see [Resync after approval](#resync-after-approval)). Round numbers stay progressive, because they also name the findings
 (`round/reviewer/ID`), so the round shown as the limit (`round 4 of at most 4`, `round 4/4`) is
 `max_review_rounds` plus the rounds that did not count.
 
@@ -1034,7 +1060,7 @@ Each agent and the dispatcher can act on GitHub with its own GitHub App (#65), c
 
 | Actor | Does |
 |---|---|
-| dispatcher | every read, labels, escalations, CI rounds, finding closures, readiness |
+| dispatcher | every read, labels, escalations, CI rounds, re-runs of failed CI jobs not pertinent to the PR (needs `actions: write`, see [CI failures not pertinent to the PR](#ci-failures-not-pertinent-to-the-pr)), finding closures, readiness |
 | implementer | commits (author and committer are its bot), push, opens the PR, fix and blocked comments |
 | reviewer | the review comment and a native GitHub review (`APPROVE`, `REQUEST_CHANGES` or `COMMENT`) on the reviewed commit |
 | merger | only the merges of the `strict` and `auto` [merge modes](#merge-modes) (see [The merger app](#the-merger-app)) |
@@ -1146,7 +1172,7 @@ The dispatcher reaches GitHub through three ports, declared in `devloop/ports.py
 |---|---|
 | `Tracker` | issues and their history, comments of issues and PRs, labels: `issues_with_label`, `issue`, `issue_history`, `issue_comments`, `pr_comments`, `labelers`, `label_events`, `labeled_events`, `edit_labels`, `comment`, `close_issue`, `edit_comment`, `ensure_label` |
 | `CodeReview` | PRs and reviews: `open_prs`, `merged_prs`, `merge_state` (`clean`, `conflict` or `unknown`), `pr_head`, `pr_state`, `merge_pr`, `pr_reviews`, `create_pr`, `submit_review` |
-| `CI` | checks of a commit: `checks` (summarized by `summarize_checks`), `check_details`, `check_runs`, `failed_log` |
+| `CI` | checks of a commit: `checks` (summarized by `summarize_checks`), `check_details`, `check_runs`, `failed_log`, `rerun_failed_jobs` (#200) |
 
 The ports hold only the methods the dispatcher calls, with their current names and signatures,
 and return normalized data. `GitHub` (`devloop/github.py`) implements all three, and `Identities`
@@ -1166,7 +1192,7 @@ python3 -m devloop status           # running action, devloop PRs (with merge st
 python3 -m devloop apps             # check the GitHub App of each actor
 python3 -m devloop tick --dry-run   # print the ready issues in start order and the plan, change nothing
 python3 -m devloop tick             # run one round
-python3 -m devloop run --interval 600
+python3 -m devloop run --idle-timeout 900  # tick continuously (see Continuous loop)
 python3 -m devloop cleanup          # remove worktrees left by failed steps
 python3 -m devloop follow issue-52  # follow live the implementer of issue #52 (pr-<N>: reviewer or fixer)
 python3 -m devloop watch --timeout 3600  # wait for the next change on GitHub, for the supervising agent
@@ -1209,7 +1235,8 @@ transcripts stay there after the turn.
 
 ### Waking the supervising agent
 
-devloop works in ticks that someone starts. The agent that supervises it (Claude Code, Codex or
+devloop works in ticks that someone starts, by hand or with the
+[continuous loop](#continuous-loop). The agent that supervises it (Claude Code, Codex or
 Antigravity) needs to know when something changed on GitHub. `devloop watch` (#173) reads the
 repository every `--interval` seconds (default 60) and prints one line per change:
 
@@ -1305,6 +1332,110 @@ and issues (`gh pr list`, up to 200, and `gh issue list`, up to 300), the commen
 previous round, for each trusted open PR its checks and native reviews, and the labeled events
 of an external issue whose labels changed or, outside the open listings, with a new trusted
 comment.
+
+### Continuous loop
+
+`devloop run` (#177) moves devloop forward without anyone starting the ticks:
+
+1. it runs a tick;
+2. if the tick ran at least one action, the next tick starts at once;
+3. otherwise it waits for news on GitHub, as `devloop watch --until-change` does
+   ([Waking the supervising agent](#waking-the-supervising-agent)), for at most
+   `--idle-timeout` seconds (default 900, 15 minutes); at the first news, or at the timeout, it
+   runs the next tick.
+
+The wait reads GitHub every 60 seconds (less when `--idle-timeout` is shorter), with the same
+identity as the ticks' reads, and keeps its state in `state_dir/run-watch-state.json`, apart from
+the state of a `devloop watch` of the supervising agent. The first wait records the starting
+state; a later one compares with the state of the previous wait, so changes made by ticks with
+actions in between count as news and cost at most one more tick. A wait that fails waits the
+rest of the timeout. `--interval <seconds>`, the option of the loop before #177, is a deprecated
+alias of `--idle-timeout`: it still works, with a warning in the log, and the two together are
+refused.
+
+**Clean stop.** `SIGTERM` or `SIGINT` (Ctrl-C), or the file `state_dir/STOP`
+(`.ssdlc/devloop/STOP` of the main checkout), stop the loop: the tick in progress ends, no other
+starts, and a wait in progress ends at once (after the read of GitHub in progress, if any: no
+other read starts). A stop requested during a tick that ends with a new
+[pin after a merge](#pin-after-a-merge) ends the loop too, without the restart from the new copy;
+the next start runs the new copy. The exit code is 0. Agent turns and tests
+run in process groups of their own, so the signal reaches only devloop and the tick finishes its
+actions. devloop never removes `STOP`: while it exists `devloop run` says so in the log and exits
+with 0 at once, without a tick, so not even a restart by systemd starts the loop again. The
+operator removes it to start again.
+
+**Failed ticks.** A tick fails when it ends with an error (`gh` or `git` unreachable, a failed
+[pin after a merge](#pin-after-a-merge), any unexpected error), not when one of its actions
+fails: the tick escalates that action as usual and counts as a success. After a failed tick the
+loop waits 1 minute, after the second failure in a row 5 minutes, and the third failure in a row
+stops the loop at once (the 30 minutes that would follow it are never waited), with an alert:
+
+- with `[run].alert_issue` (an issue number, unset by default: the operator chooses it in the
+  [local overlay](#local-config-as-an-overlay)), a comment of the dispatcher on that issue, with
+  the attribution header and the class of each error (`network`, `authentication`, … as in
+  `devloop watch`, or the name of the error's type), never its message, paths or tokens. One
+  attempt only: if it fails, the log says so, with the class of that error;
+- without it, a line `ALERT: 3 consecutive ticks failed (…): the loop stops` in the local log.
+
+Either way the loop exits with code 4 and runs no other tick. A successful tick resets the count.
+The log keeps the full message of each failed tick.
+
+**Lock.** The loop holds the dispatcher lock (`state_dir/dispatcher.lock`) for as long as it
+runs, waits included: a manual `devloop tick` (or `cleanup`) exits with `another dispatcher is
+running (lock held)`, and a loop does not start while a manual tick runs. To run a tick by hand,
+stop the loop first. A [pin after a merge](#pin-after-a-merge) restarts the loop from the new
+copy with the same arguments and the lock still held, unless a stop was requested meanwhile.
+
+**Activation is the operator's.** The loop runs unsupervised and spends the agents' quotas, so
+devloop installs no service. An example unit, `devloop.service`, for the
+[installation as a dedicated user](#installation-as-a-dedicated-user), running the
+[launcher](#launcher) of the pinned copy, which applies `.ssdlc/devloop/config.local.toml` when
+it exists ([local overlay](#local-config-as-an-overlay)):
+
+```ini
+[Unit]
+Description=devloop continuous loop
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=devloop
+Group=devloop
+WorkingDirectory=/home/devloop/ssdlc
+# Where the agent CLIs, gh and git are found for the devloop user.
+Environment=PATH=/home/devloop/.local/bin:/usr/local/bin:/usr/bin:/bin
+# The launcher adds --local-config .ssdlc/devloop/config.local.toml when that file exists.
+ExecStart=/usr/bin/python3 /home/devloop/ssdlc/scripts/devloop-pinned run --idle-timeout 900
+# SIGTERM to devloop only: the tick in progress ends, its agent turns and tests are not killed.
+# The default KillMode=control-group would send SIGTERM to them too.
+KillMode=mixed
+# Longer than the longest tick; after it systemd kills the tick (its action shows as
+# interrupted in `devloop status`).
+TimeoutStopSec=4h
+# A crash restarts the loop; a clean stop (0, STOP file included) and exit code 4 (three failed
+# ticks in a row, alert sent) do not.
+Restart=on-failure
+RestartSec=5min
+RestartPreventExitStatus=4
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo install -m 644 devloop.service /etc/systemd/system/devloop.service
+sudo systemctl daemon-reload
+sudo systemctl start devloop      # start the loop now
+sudo systemctl enable devloop     # and at every boot (optional)
+journalctl -u devloop -f          # follow its log
+sudo systemctl stop devloop       # SIGTERM: the tick in progress ends, then the loop exits
+sudo -u devloop touch /home/devloop/ssdlc/.ssdlc/devloop/STOP  # stop after the tick, and stay stopped
+sudo -u devloop rm /home/devloop/ssdlc/.ssdlc/devloop/STOP     # then `systemctl start devloop`
+```
+
+After an alert (exit code 4) the unit stays stopped: remove the cause, then
+`systemctl start devloop`.
 
 ### Evidence and telemetry
 
@@ -1410,7 +1541,7 @@ sudo -u devloop -H git clone https://github.com/brushtyler/ssdlc.git /home/devlo
 sudo -u devloop -H install -d -m 700 /home/devloop/.ghapps   # then the keys, mode 600
 # The first pin runs the clone's devloop; every later command runs the pinned copy.
 sudo -u devloop -H sh -c 'cd ~/ssdlc && python3 -m devloop pin origin/main'
-sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned run --interval 600
+sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned run --idle-timeout 900
 ```
 
 Turns must not depend on an update of an agent CLI in progress: a CLI that replaces its own
@@ -1459,7 +1590,7 @@ worktrees under `state_dir/worktrees`, never a pinned copy.
 
 ```bash
 python3 scripts/devloop-pinned status
-python3 scripts/devloop-pinned run --interval 600
+python3 scripts/devloop-pinned run --idle-timeout 900
 sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned tick --dry-run
 ```
 
@@ -1518,8 +1649,8 @@ devloop ([merge modes](#merge-modes)) whose diff touches `devloop/` or a file of
 with the same arguments: configuration, policy and dispatcher load again, and the lock stays
 held across the restart, so no other dispatcher can start in between. If the pin fails, the tick
 stops with `auto-pin of origin/main failed, the pinned copy is unchanged: <reason>`, `current`
-stays as it was, and the request stays: the next tick tries again (`run` logs the failure and
-goes on; `tick` exits with it). With `auto = false` a merge requests nothing, and a request left
+stays as it was, and the request stays: the next tick tries again (`run` counts it as a
+[failed tick](#continuous-loop), with its backoff; `tick` exits with it). With `auto = false` a merge requests nothing, and a request left
 from before is ignored.
 
 devloop imports only the Python standard library and itself. A test enforces this, so the tool
@@ -1540,10 +1671,16 @@ and `agent_stall_action` (`"warn"`, the default, or `"abort"`) control the
 (default 1) sets how many actions of a tick run at once ([Parallel actions](#parallel-actions)).
 `max_open_prs` (default 2) and `max_parked_prs` (default 3), integers of at least 1, cap the
 open PRs in progress and those waiting for a person ([Open PR limits](#open-pr-limits)).
+`ci_rerun_unrelated` (a boolean, default `true`) re-runs once a CI failure in test modules not
+pertinent to the PR ([CI failures not pertinent to the PR](#ci-failures-not-pertinent-to-the-pr));
+another value stops devloop at startup.
 `[merge]` (`mode`, `levels`, `operator_only_paths`) and `roles.supervisor` set the
 [merge modes](#merge-modes); an unknown mode, level or key stops devloop at startup.
 `[pin]` (`auto`, default `false`) sets the [pin after a merge](#pin-after-a-merge); a value that is
-not a boolean, or an unknown key, stops devloop at startup. `[docs] map` sets the
+not a boolean, or an unknown key, stops devloop at startup. `[run]` (`alert_issue`, unset by
+default) names the issue of the alert of the [continuous loop](#continuous-loop); a value that
+is not an issue number (an integer of at least 1), or an unknown key, stops devloop at startup.
+`[docs] map` sets the
 [documentation map](#documentation-map). Operator overrides go into the
 [local overlay](#local-config-as-an-overlay), not into this file.
 `[review_policy]` sets the
@@ -1670,6 +1807,45 @@ review. With `"full"` the gate is unchanged: CI passed or absent.
 The mode and the modules run (`local_tests`: `{mode, modules}`, only `{mode}` with `"full"`) go to the tick log and, as
 information only, to the markers of implement and fix: they are not part of the policy receipt
 and no approval depends on them.
+
+### CI failures not pertinent to the PR
+
+A CI failure normally becomes a round (`ci_failed`). A failure that does not depend on the PR,
+such as a flaky test already on `main`, would spend one for nothing. So at the **first** CI
+failure of a head the dispatcher first reads, in the log of each failed job on its own
+(`gh run view --job <id> --log-failed`, whole; the job is the one in the check's link), the test
+modules that failed: `scripts/run-tests.py` prints `FAILED MODULE <name>` for each of them and a
+final `FAILED (modules=N, worker problems=M)` (#200). Every failed job must say it: a run where
+the suite fails only in modules not pertinent to the PR and another job fails without naming any
+(such as a benchmark) is not determinable.
+
+- **None pertinent.** If no failed module is pertinent to the PR's diff, by the same
+  correspondence between sources and tests as `local_tests = "changed"`
+  ([Local tests](#local-tests)), the dispatcher re-runs the failed jobs once
+  (`POST /repos/<repo>/actions/runs/<id>/rerun-failed-jobs`) and opens no round. A dispatcher
+  comment with a `rerun` marker records the head, the runs, the modules and the links of the
+  failed checks; the ledger, when on, records a `ci_rerun` event.
+- **Pertinent, or not determinable.** A failed module pertinent to the diff, a failed check that
+  is not a GitHub Actions job (a commit status), a failed job whose log lacks the
+  `FAILED MODULE` lines or the final summary, a count that does not match, a worker problem: the
+  failure is a round at once, as before, and nothing is re-run.
+- **While the re-run starts.** As long as GitHub still shows the very failed checks the re-run
+  replaces (same links: a re-run job is a new check run), the dispatcher waits: no round, no
+  review, no merge. A ready PR stays in `agent:ready-to-merge` meanwhile, and goes back to
+  `agent:review` as for any CI running again on the approved commit.
+- **Second failure.** One re-run per head: if the re-run fails too, the failure is a normal
+  `ci_failed`, which counts as a round, and its comment cites the re-run (runs and modules). A new
+  head starts again from its first failure.
+
+The rerun needs **`actions: write`** on the dispatcher's app. Its token is minted with only that
+permission. Without it (GitHub answers 403, or refuses to mint the token; also when the
+dispatcher has no app and uses a `gh` login without the permission), or on any other GitHub error,
+the dispatcher writes one line to the tick log (`CI rerun refused, …`) and the failure is a round,
+as before. `ci_rerun_unrelated = false` turns the re-run off; the default is `true`. A marker of
+the `rerun` kind counts only when the dispatcher's identity wrote it.
+
+Only a `ci_failed` is re-run this way: a CI failure on a PR that has no round left goes to
+`agent:needs-human` (`round_limit`), as before.
 
 ### Documentation map
 

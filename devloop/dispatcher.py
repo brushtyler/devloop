@@ -35,6 +35,11 @@ join an open round and to promote, if no commit of the base branch in between to
 the PR's diff (``_base_check``). An open round abandoned only because the base touched the PR
 is replaced by a new one and does not count against ``max_review_rounds`` (``counted_rounds``).
 
+Resync after approval (#235): when the latest round approved a head and the PR's head differs
+from it only by merges of the base branch that git concludes without conflicts
+(``Workspace.clean_resync``), the review of the new head records ``resync`` and does not count
+either. A sync whose conflicts an agent resolved changes the PR's content: its review counts.
+
 Level 0 (#107) needs no review: when a trusted user's label allows it and the whole diff is in
 the operator's allowlist, the head goes to ready-to-merge once every expected check run
 succeeded on it, no finding is open and no trusted user's request for changes stands.
@@ -109,12 +114,12 @@ from .acceptance import (acceptance_criteria, acceptance_findings, format_criter
                          latest_map, render_map)
 from .agents import (TAIL_LINES, AgentError, ModelsUnavailable, ModelUnavailable, NoOutput,
                      PermissionDenied, StartFailure, background_unfinished)
-from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, MERGER, PR_COMMENT, REVIEW
+from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, MERGER, PR_COMMENT, RERUN, REVIEW
 from .config import INSTALL_ROOT, ConfigError
-from .github import GitHubError, author_login
+from .github import GitHubError, author_login, job_id
 from .ledger import entries as ledger_entries
 from .ledger import open_turns
-from .localtests import module_command, select_modules
+from .localtests import failed_modules, module_command, select_modules
 from .markdown import (RESUME, carries_record, dispatcher_header, publishable, read_marker,
                        render_escalation, render_fix, render_native_review, render_preflight,
                        render_review, render_supervision)
@@ -145,6 +150,9 @@ RELEASE_COMMAND = '/devloop release'
 FIX_COMMAND = '/devloop fix'
 # The modes in which devloop merges (#172).
 MERGING = ('strict', 'auto')
+# Why a review round does not count (#235): the round before approved a head that the new one
+# differs from only by clean merges of the base branch.
+RESYNC_AFTER_APPROVAL = 'resync_after_approval'
 # Actions that take a slot of ``max_actions_per_tick``.
 EXPENSIVE = ('review', 'fix', 'implement', 'sync', 'preflight', 'merge', 'supervise')
 # Actions that write to the base branch or to the whole repository (the merge of #172, the pin
@@ -251,6 +259,27 @@ class PullRequest:
     # Fixes asked with ``FIX_COMMAND`` and not run yet (#195), oldest first, as
     # ``{comment, by, request}``: one fix of the current head answers all of them.
     fix_requests: list = field(default_factory=list)
+    # In agent:review, when the latest round approved an earlier head and the head differs from
+    # it only by clean merges of the base branch (#235): ``{reason, round, from}``, what the
+    # next review records as ``resync``. None otherwise.
+    resync: dict = None
+    # Re-runs of failed CI jobs the dispatcher recorded (``rerun`` markers, #200), and whether
+    # the CI still shows the very failed checks a re-run of the head replaces: the re-run has
+    # not started yet, and the failure is not a new one.
+    reruns: list = field(default_factory=list)
+    rerun_waiting: bool = False
+
+
+def rerun_of(reruns, head):
+    """The re-run recorded for ``head`` among ``reruns`` (#200), or None: one per head."""
+    return next((r for r in reruns if r['head'] == head), None)
+
+
+def rerun_waiting(record, details):
+    """Whether the checks ``details`` of a head still fail with exactly the checks its re-run
+    ``record`` replaces (#200): a re-run job is a new check run, with a new link."""
+    failed = {c.get('link') for c in details if c.get('bucket') == 'fail'}
+    return bool(failed) and failed <= set(record['checks'])
 
 
 @dataclass
@@ -544,6 +573,8 @@ def plan(snapshot, cfg):
                 actions.append(Action('revoke', pr.number, 'the acceptance map does not hold'))
             elif pr.merge_state == 'conflict':
                 actions.append(Action('sync', pr.number, 'conflicts with the base branch'))
+            elif pr.checks == 'fail' and pr.rerun_waiting:
+                pass  # the failed jobs were re-run (#200): not merged, nor a round, yet
             elif pr.checks == 'fail':
                 actions.append(Action('ci_failed', pr.number, 'CI failed after approval')
                                if rounds_left else Action('round_limit', pr.number))
@@ -590,6 +621,9 @@ def plan(snapshot, cfg):
             # Nor is an approval reused when the acceptance map does not hold (#134): a new
             # review adds the finding, as a new round within the usual limit.
             unmapped = replay and verdict == 'approve' and bool(pr.acceptance)
+            # A review needed only because a clean sync moved the approved head (#235) is not
+            # a new round against the limit; a CI failure or a rereview still is.
+            resync = pr.resync is not None and not pr.rereview and pr.checks != 'fail'
             if replay and verdict != 'approve':
                 actions.append(Action('apply_review', pr.number, 'verdict already recorded'))
             elif pr.merge_state == 'conflict':
@@ -599,18 +633,21 @@ def plan(snapshot, cfg):
                 continue  # GitHub is still computing mergeability: next tick
             elif pr.checks == 'pending':
                 continue
+            elif pr.checks == 'fail' and pr.rerun_waiting:
+                continue  # the failed jobs were re-run (#200) and have not started yet
             elif replay and not unbound and not unmapped and pr.checks != 'fail':
                 actions.append(Action('apply_review', pr.number, 'approval already recorded'))
             elif partial and pr.checks != 'fail':
                 actions.append(Action('review', pr.number, 'the round waits for '
                                       + ', '.join(pending)))
-            elif not rounds_left:
+            elif not rounds_left and not resync:
                 # Every new round, a CI failure or a review, counts against the limit.
                 actions.append(Action('round_limit', pr.number))
             elif pr.checks == 'fail':
                 actions.append(Action('ci_failed', pr.number))
             else:
                 reason = ('new review requested by a trusted user' if pr.rereview
+                          else 'the approved head was synced with the base' if resync
                           else 'the approval has no matching policy receipt' if unbound
                           else 'the acceptance map does not hold' if unmapped
                           else 'every finding of the request for changes is closed' if settled
@@ -748,9 +785,11 @@ def _round_records(reviews, number):
 
 
 def waived_rounds(reviews):
-    """The rounds that do not count against ``max_review_rounds`` (#160): each incomplete agent
-    round that a later round replaced only because the base branch advanced, as the later
-    round's records say (``restarts``)."""
+    """The rounds that do not count against ``max_review_rounds``: each incomplete agent round
+    that a later round replaced only because the base branch advanced, as the later round's
+    records say (``restarts``, #160); and each round that reviewed a head differing only by
+    clean merges of the base from the head the round just before approved (``resync``,
+    #235)."""
     waived = set()
     for record in reviews:
         restart = record.get('restarts')
@@ -758,7 +797,25 @@ def waived_rounds(reviews):
         if (isinstance(number, int) and not isinstance(number, bool) and number < record['round']
                 and pending_reviewers(_round_records(reviews, number))):
             waived.add(number)
+        if _resynced(reviews, record):
+            waived.add(record['round'])
     return waived
+
+
+def _resynced(reviews, record):
+    """Whether ``record`` reviewed a resync after approval (#235): its ``resync`` names the
+    round just before its own, a complete agent round that approved the head ``from``."""
+    resync = record.get('resync')
+    if not isinstance(resync, dict) or resync.get('reason') != RESYNC_AFTER_APPROVAL:
+        return False
+    number = resync.get('round')
+    if isinstance(number, bool) or number != record['round'] - 1:
+        return False
+    approved = _round_records(reviews, number)
+    return (bool(approved) and approved[0]['source'] == 'agent'
+            and not pending_reviewers(approved) and round_verdict(approved) == 'approve'
+            and all(r.get('head_sha') == resync.get('from') for r in approved)
+            and record.get('head_sha') != resync.get('from'))
 
 
 def counted_rounds(reviews):
@@ -1055,7 +1112,7 @@ class Dispatcher:
             login = (comment.get('author') or {}).get('login')
             if kind in ('fix', 'sync'):
                 actor = implementer
-            elif kind in ('policy', 'finding'):
+            elif kind in ('policy', 'finding', 'rerun'):
                 actor = DISPATCHER
             elif record['source'] == 'ci':
                 actor = DISPATCHER
@@ -1558,7 +1615,8 @@ class Dispatcher:
         pr.reviews = [record for _, record in entries]
         pr.fixes = self._markers(pr, comments, 'fix')
         pr.syncs = self._markers(pr, comments, 'sync')
-        pr.closures = [c for record in self._markers(pr, comments, 'finding')
+        pr.reruns = self._markers(pr, comments, 'rerun')
+        pr.closures =[c for record in self._markers(pr, comments, 'finding')
                        for c in record['closed']]
         state = finding_state(pr.reviews, pr.closures)
         pr.finding_problems = problems + state.problems
@@ -1639,6 +1697,26 @@ class Dispatcher:
             found.append({'comment': ident, 'by': login, 'request': request})
         return found
 
+    def _resync(self, pr):
+        """``PullRequest.resync`` (#235): when the latest round is a complete agent round that
+        approved an earlier head, and the PR's head differs from it only by merges of the base
+        branch that git concludes without conflicts, ``{reason, round, from}``; otherwise None.
+        A sync whose conflicts an agent resolved, a fix or any other commit gives None."""
+        latest = current_round(pr.reviews)
+        if (not latest or latest[0]['source'] != 'agent' or pending_reviewers(latest)
+                or round_verdict(latest) != 'approve'):
+            return None
+        approved = latest[0]['head_sha']
+        if approved == pr.head_sha or any(r['head_sha'] != approved for r in latest):
+            return None
+        try:
+            if not self.ws.clean_resync(pr.head_ref, pr.head_sha, approved):
+                return None
+        except WorkspaceError as exc:
+            self.log(f'  resync of #{pr.number} not verifiable: {exc}')
+            return None
+        return {'reason': RESYNC_AFTER_APPROVAL, 'round': latest[0]['round'], 'from': approved}
+
     def _merge_mode(self, pr):
         """The merge mode of ``pr`` now (#172): ``[merge]`` with the override of its review
         level, ``off`` when its diff touches an operator-only path. None when it cannot be
@@ -1709,11 +1787,18 @@ class Dispatcher:
                         pr.check_details)
                 else:
                     pr.checks, pr.failed_checks, pr.failed_runs = self.gh.checks(pr.head_sha)
+                record = rerun_of(pr.reruns, pr.head_sha)
+                if pr.checks == 'fail' and record is not None:
+                    details = (pr.check_details if pr.check_details is not None
+                               else self.gh.check_details(pr.head_sha))
+                    pr.rerun_waiting = rerun_waiting(record, details)
             if (lb.ready_to_merge in pr.labels and pr.zero_head is not None
                     and zero_labels_hold(pr, self.cfg.review_policy)):
                 pr.zero_problem = self._zero_problem(pr)
             if pr.meta and pr.labels & {lb.review, lb.ready_to_merge} and pr.zero_head is None:
                 pr.acceptance = self._acceptance_problems(pr)
+            if pr.meta and lb.review in pr.labels:
+                pr.resync = self._resync(pr)
             # Also for a ready PR that may not be merged now: its mode tells whether it waits
             # for a person, outside max_open_prs (#199). ``plan`` merges only with merge_ready.
             if (self.cfg.merge.enabled() and pr.meta and lb.ready_to_merge in pr.labels
@@ -3296,17 +3381,27 @@ class Dispatcher:
         return receipt, paths
 
     def _do_ci_failed(self, pr):
-        receipt, _ = self._current_receipt(pr)
+        receipt, paths = self._current_receipt(pr)
         if receipt is None:
             return
         if receipt['level'] > 1 and len(receipt['reviewers']) < receipt['level']:
             return self._escalate_level(pr, receipt)
+        if self._rerun_unrelated(pr, paths):
+            return
         log_tail = '\n'.join(self.gh.failed_log(run) for run in pr.failed_runs[:2])
         review = ci_failure_review(failed_checks=pr.failed_checks, log_tail=log_tail,
                                    previous_open=open_findings(pr.reviews, pr.closures),
                                    round_no=last_round(pr.reviews) + 1,
                                    max_rounds=self._last_round_allowed(pr.reviews),
                                    head_sha=pr.head_sha)
+        rerun = rerun_of(pr.reruns, pr.head_sha)
+        if rerun is not None:
+            review['note'] = (
+                'I job falliti di questo commit erano già stati rilanciati una volta, perché '
+                'nessun modulo fallito era pertinente alla PR (run '
+                + ', '.join(str(r) for r in rerun['runs']) + '; moduli: '
+                + (', '.join(rerun['modules']) or 'nessuno') + '). Anche il rilancio è fallito: '
+                'questo fallimento conta come round.')
         review['receipt'] = receipt
         if self.ledger is not None:
             details = self.gh.check_details(pr.head_sha)
@@ -3314,6 +3409,65 @@ class Dispatcher:
                             review['round'])
         self.gh.comment(pr.number, render_review(review, dispatcher_header()))
         self._apply_round(pr, [review], announce=True, reviews=pr.reviews + [review])
+
+    def _rerun_unrelated(self, pr, paths):
+        """Re-run once the failed jobs of the head's CI when its failure does not concern the
+        PR (#200); whether it did. Only at the first failure of a head (``rerun`` marker), with
+        ``ci_rerun_unrelated``, when every failed check is a GitHub Actions job whose own log
+        names the failed test modules (``failed_modules``) and none of them is pertinent to
+        ``paths``,
+        the PR's diff, as ``local_tests = "changed"`` would select them (``select_modules``).
+        A re-run that GitHub refuses, such as a 403 without ``actions: write``, is logged and
+        the failure is a round, as before."""
+        if not self.cfg.ci_rerun_unrelated or rerun_of(pr.reruns, pr.head_sha) is not None:
+            return False
+        details = self.gh.check_details(pr.head_sha)
+        failed = [c for c in details if c.get('bucket') == 'fail']
+        runs = sorted({c.get('run_id') for c in failed}, key=str)
+        if not failed or None in runs:
+            self.log('  CI rerun: ' + ('no failed check read again' if not failed else
+                                       'not every failed check is a GitHub Actions run')
+                     + '; CI round')
+            return False
+        # Each failed job on its own: a run whose suite fails only in modules not pertinent to
+        # the PR may hold another failed job, such as a benchmark, that names none.
+        modules = set()
+        for check in failed:
+            job = job_id(check.get('link'))
+            found = None if job is None else failed_modules(
+                self.gh.failed_log(check['run_id'], max_lines=None, job_id=job))
+            if found is None:
+                self.log(f'  CI rerun: the log of the failed job {check.get("name")} (run '
+                         f'{check["run_id"]}) does not tell which test modules failed; CI round')
+                return False
+            modules.update(found)
+        modules = sorted(modules)
+        pertinent = select_modules(paths, modules)
+        if pertinent:
+            self.log(f'  CI rerun: failed modules pertinent to the PR: {", ".join(pertinent)}; '
+                     'CI round')
+            return False
+        try:
+            rerunner = self._as(DISPATCHER, RERUN)
+            for run in runs:
+                rerunner.rerun_failed_jobs(run)
+        except GitHubError as exc:
+            self.log(f'  CI rerun refused, the failure is a round as before (the dispatcher\'s '
+                     f'app needs actions: write): {exc}')
+            return False
+        record = {'head': pr.head_sha, 'runs': runs, 'modules': modules,
+                  'checks': sorted(c['link'] for c in failed)}
+        self.gh.comment(pr.number, publishable(
+            dispatcher_header() + '\n## CI rilanciata\n\n'
+            f'La CI di `{pr.head_sha[:12]}` è fallita solo in moduli di test non pertinenti al '
+            f'diff della PR ({", ".join(f"`{m}`" for m in modules)}): il dispatcher ha '
+            'rilanciato una volta i job falliti (run '
+            + ', '.join(str(r) for r in runs) + '), senza aprire un round. Se anche il '
+            'rilancio fallisce, il fallimento conta come round.', 'rerun', record))
+        self._ledger_event(pr.number, 'ci_rerun', head=pr.head_sha, runs=runs, modules=modules)
+        self.log(f'  CI rerun of {", ".join(str(r) for r in runs)}: failed modules not '
+                 f'pertinent to the PR ({", ".join(modules)})')
+        return True
 
     def _last_round_allowed(self, reviews):
         """The number of the last round ``max_review_rounds`` allows, given the waived rounds
@@ -3348,7 +3502,10 @@ class Dispatcher:
         When only the base changed since the round's reviews (#160), the round continues if no
         commit of the base branch in between reached the PR's files, and the review records the
         check (``bases``). Otherwise the round restarts, and the new one records which round it
-        replaces (``restarts``): that round does not count against ``max_review_rounds``."""
+        replaces (``restarts``): that round does not count against ``max_review_rounds``.
+
+        A new round on a head that a clean sync moved from the approved one (#235,
+        ``PullRequest.resync``) records ``resync`` and does not count either."""
         cfg = self.cfg
         receipt, paths = self._current_receipt(pr)
         if receipt is None:
@@ -3365,7 +3522,7 @@ class Dispatcher:
             self.log('  the PR conflicts with the new base; no review until the sync')
             return
         joins = bases is not None and all(c['outcome'] == 'disjoint' for c in bases)
-        restarts = None
+        restarts = resync = None
         if joins:
             round_no, done, comments = latest[0]['round'], latest, pr.round_comments
             counted = counted_rounds(pr.reviews)
@@ -3377,6 +3534,12 @@ class Dispatcher:
                 restarts = {'round': latest[0]['round'], 'bases': bases}
                 counted -= 1
                 self.log(f'  round {latest[0]["round"]} restarts: the base touched the PR')
+            elif pr.resync and not pr.rereview:
+                # Only a clean sync moved the approved head (#235): this round does not count.
+                resync = pr.resync
+                counted -= 1
+                self.log(f'  the head approved in round {resync["round"]} was synced with the '
+                         'base: this round does not count')
         if counted > cfg.max_review_rounds:
             return self._do_round_limit(pr)
         max_rounds = cfg.max_review_rounds + round_no - counted
@@ -3487,6 +3650,8 @@ class Dispatcher:
                 review['bases'] = bases  # the round's earlier bases, checked up to this one
             if restarts:
                 review['restarts'] = restarts
+            if resync:
+                review['resync'] = resync
             review['profile'] = self._profile(key, 'review', used)
             review.update(skipped_models(used))
             reviewer_gh = self._as(key, REVIEW)
@@ -3882,12 +4047,3 @@ def ensure_labels(gh: Tracker, labels, review_policy=None):
             gh.ensure_label(review_policy.zero_label, *ZERO_LABEL_STYLE)
     for name, (color, description) in PRIORITY_LABEL_STYLE.items():
         gh.ensure_label(name, color, description)
-
-
-def run_forever(dispatcher, interval, sleep=time.sleep):
-    while True:
-        try:
-            dispatcher.tick()
-        except (GitHubError, WorkspaceError, PinError) as exc:
-            dispatcher.log(f'tick failed: {exc}')
-        sleep(interval)

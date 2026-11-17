@@ -954,6 +954,16 @@ class FakeWS:
             raise self.base_conflicts
         return not self.base_conflicts, list(self.base_conflicts)
 
+    # Whether the head differs from the approved one only by clean merges of the base (#235):
+    # no by default, or an exception to raise when git cannot tell.
+    resynced = False
+
+    def clean_resync(self, branch, head, approved):
+        self.resync_checks = getattr(self, 'resync_checks', []) + [(branch, head, approved)]
+        if isinstance(self.resynced, Exception):
+            raise self.resynced
+        return self.resynced
+
     def new_branch(self, name, branch):
         return Path('/wt') / name
 
