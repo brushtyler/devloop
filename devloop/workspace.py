@@ -174,6 +174,12 @@ class Workspace:
                   f'origin/{self.base_branch}')
         return path
 
+    def base_head(self):
+        """The commit of the latest remote base branch: the base an issue's step starts from,
+        part of the key of the supervisor's retries (#182)."""
+        self._git('fetch', 'origin', self.base_branch)
+        return self._git('rev-parse', f'origin/{self.base_branch}').strip()
+
     def review_copy(self, path, reviewer=None):
         """``(name, path)`` of a disposable worktree for a reviewer, detached at the HEAD of
         ``path`` and sharing its refs, so that ``origin/<base>`` resolves. What the reviewer and
@@ -229,6 +235,13 @@ class Workspace:
         tracked = self._git('diff', '--name-only', '-z', '--no-renames', base, cwd=path)
         new = self._git('ls-files', '--others', '--exclude-standard', '-z', cwd=path)
         return sorted({name for name in (tracked + '\0' + new).split('\0') if name})
+
+    def missing_files(self, path, names):
+        """The ``names`` (relative paths) that are not a regular file in the worktree ``path``:
+        absent, a directory or a symlink (#210)."""
+        root = Path(path)
+        return [name for name in names
+                if (root / name).is_symlink() or not (root / name).is_file()]
 
     def test_modules(self, path):
         """The names of the ``tests/test_*.py`` files in ``path``."""

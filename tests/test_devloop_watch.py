@@ -1,19 +1,24 @@
 """devloop watch: wakes the supervising agent when GitHub changes (#173)."""
 
 import json
+import os
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 from devloop import watch
 from devloop.__main__ import main
+from devloop.apps import DISPATCHER, STEP_TIMEOUT, AppAuth, Identities, http_json
 from devloop.config import load_config
 from devloop.github import GitHub, GitHubError, GitHubNotFound
 from devloop.markdown import marker
@@ -111,6 +116,52 @@ class FakeGitHub:
 
     def comment(self, cid, number, login, body):
         self.comments.append({'id': cid, 'number': number, 'login': login, 'body': body})
+
+
+class Gh246:
+    """A ``gh`` runner that knows only the ``--json`` fields of `gh` 2.46.0, the version on the
+    operator's host (#211): any other field fails as that `gh` fails. ``issues``, ``prs`` and
+    ``states`` are what `issue list`, `pr list` and REST ``issues/<n>`` answer."""
+
+    ISSUE_FIELDS = frozenset((
+        'assignees,author,body,closed,closedAt,comments,createdAt,id,labels,milestone,number,'
+        'projectCards,projectItems,reactionGroups,state,title,updatedAt,url').split(','))
+    PR_FIELDS = frozenset((
+        'additions,assignees,author,autoMergeRequest,baseRefName,body,changedFiles,closed,'
+        'closedAt,comments,commits,createdAt,deletions,files,headRefName,headRefOid,'
+        'headRepository,headRepositoryOwner,id,isCrossRepository,isDraft,labels,latestReviews,'
+        'maintainerCanModify,mergeCommit,mergeStateStatus,mergeable,mergedAt,mergedBy,milestone,'
+        'number,potentialMergeCommit,projectCards,projectItems,reactionGroups,reviewDecision,'
+        'reviewRequests,reviews,state,statusCheckRollup,title,updatedAt,url').split(','))
+
+    def __init__(self):
+        self.issues, self.prs, self.states = [], [], {}
+        self.calls, self.rejected = [], []
+
+    def run(self, args, **kwargs):
+        self.calls.append(args)
+        if '--json' in args:
+            known = self.ISSUE_FIELDS if args[1] == 'issue' else self.PR_FIELDS
+            unknown = [f for f in args[args.index('--json') + 1].split(',') if f not in known]
+            if unknown:
+                self.rejected.append(args)
+                return SimpleNamespace(returncode=1, stdout='',
+                                       stderr=f'Unknown JSON field: "{unknown[0]}"\n'
+                                              'Available fields:\n  ...')
+        if args[1:3] == ['issue', 'list']:
+            out = json.dumps(self.issues)
+        elif args[1:3] == ['pr', 'list']:
+            out = json.dumps(self.prs)
+        elif args[1:3] in (['issue', 'view'], ['pr', 'view']):
+            out = '{}'
+        elif args[1] == 'api' and '/issues/comments' in ' '.join(args):
+            out = ''
+        elif args[1] == 'api':
+            number = int(args[2].rsplit('/', 1)[1])
+            out = json.dumps(self.states[number])
+        else:
+            raise AssertionError(f'unexpected gh call: {args}')
+        return SimpleNamespace(returncode=0, stdout=out, stderr='')
 
 
 class Clock:
@@ -322,7 +373,7 @@ class ChangesTest(unittest.TestCase):
         del gh.prs[10]
         gh.states[10] = GitHubError('gh pr view 10: HTTP 502')
         self.assertEqual(self.news(), [])
-        self.assertEqual(self.h.err[-1], 'devloop watch: round failed (GitHubError)')
+        self.assertEqual(self.h.err[-1], 'devloop watch: round failed (server error)')
         self.assertIn('10', json.loads(self.h.path.read_text())['prs'])
         gh.states[10] = {'state': 'MERGED'}
         self.assertEqual(self.news(), ['PR #10 merged: PR 10'])
@@ -683,7 +734,65 @@ class ErrorsTest(unittest.TestCase):
         code, _ = h.run(steps=[recover])
         self.assertEqual(code, 0)
         self.assertEqual(h.lines(), ['PR #10 labels +agent:changes -agent:review'])
-        self.assertEqual(h.err, ['devloop watch: round failed (GitHubError)'])
+        self.assertEqual(h.err, ['devloop watch: round failed (server error)'])
+
+    def test_an_authentication_error_is_reported_as_such(self):
+        # A real adapter whose gh has no login (#197): only the class reaches stderr.
+        for stderr in ('To get started with GitHub CLI, please run:  gh auth login\n'
+                       'Alternatively, populate the GH_TOKEN environment variable.',
+                       'HTTP 401: Bad credentials (https://api.github.com/graphql) '
+                       'token=ghs_secret /home/operator/secret-path'):
+            with self.subTest(stderr=stderr):
+                gh = GitHub('o/r', run=lambda args, **kw: SimpleNamespace(
+                    returncode=1, stdout='', stderr=stderr))
+                h = Harness(self, gh=gh)
+                self.assertIsNone(h.watcher(Clock()).round())
+                self.assertEqual(h.err, ['devloop watch: round failed (authentication)'])
+                self.assertFalse(h.path.exists())
+
+    def test_an_issue_closed_between_two_rounds_on_gh_2_46(self):
+        # #211: the real adapter on a gh that has no `stateReason` in `issue view --json`.
+        fake = Gh246()
+        fake.issues = [{'number': 5, 'title': 'Crash', 'labels': [],
+                        'author': {'login': OPERATOR, 'is_bot': False}}]
+        h = Harness(self, gh=GitHub('o/r', run=fake.run))
+        self.assertEqual(h.run(timeout=1)[0], 3)
+        self.assertEqual(h.lines(), ['watch baseline: 0 open PRs, 1 open issues'])
+        h.out.clear()
+        fake.issues = []
+        fake.states[5] = {'state': 'closed', 'state_reason': 'not_planned'}
+        self.assertEqual(h.run(timeout=1)[0], 0)
+        self.assertEqual(h.lines(), ['issue #5 closed (not_planned): Crash'])
+        self.assertEqual(h.err, [])
+        self.assertEqual(fake.rejected, [])
+        self.assertIn(['gh', 'api', 'repos/o/r/issues/5', '--jq', '{state, state_reason}'],
+                      fake.calls)
+
+    def test_failure_classes(self):
+        cases = (
+            (GitHubError('POST /app/installations/1/access_tokens: HTTP 401: {}'),
+             'authentication'),
+            (GitHubError('openssl could not sign the app JWT: bad key'), 'authentication'),
+            (GitHubError('gh api: API rate limit exceeded for installation (HTTP 403)'),
+             'rate limit'),
+            (GitHubError('gh api: HTTP 429'), 'rate limit'),
+            (GitHubError('gh pr list: Resource not accessible by integration (HTTP 403)'),
+             'permission'),
+            (GitHubNotFound('gh pr view 9: Could not resolve to a PullRequest'), 'not found'),
+            (GitHubError('gh api: Not Found (HTTP 404)'), 'not found'),
+            (GitHubError('gh api: Server Error (HTTP 502)'), 'server error'),
+            (GitHubError('gh pr list: error connecting to api.github.com'), 'network'),
+            (GitHubError('gh pr list: timed out after 300s'), 'network'),
+            (GitHubError('GET /repos/o/r/installation: <urlopen error [Errno -3]>'), 'network'),
+            (GitHubError('gh could not start: [Errno 2] No such file'), 'gh unavailable'),
+            (GitHubError('gh issue view 203: Unknown JSON field: "stateReason"'), 'cli_version'),
+            (GitHubError('gh pr list: something else'), 'GitHubError'),
+            (OSError('disk full'), 'OSError'),
+            (ValueError('bad json'), 'ValueError'),
+        )
+        for exc, expected in cases:
+            with self.subTest(exc=exc):
+                self.assertEqual(watch.failure_class(exc), expected)
 
     def test_repeated_errors_give_one_watch_error_line(self):
         h = Harness(self)
@@ -827,7 +936,9 @@ class CommandLineTest(unittest.TestCase):
                         bounded=self.gh.time_left == self.time_left)
             return 3
 
+        ambient = Identities('o/r', {})
         with mock.patch.object(watch.Watcher, 'run', fake_run), \
+                mock.patch.object(Identities, 'from_config', return_value=ambient), \
                 self.assertRaises(SystemExit) as raised:
             main(['watch', '--timeout', '30', '--interval', '5', '--state',
                   str(tmp / 's.json')])
@@ -836,6 +947,77 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual((seen['timeout'], seen['interval'], seen['exec_argv']), (30, 5, None))
         self.assertIn('brushtyler', seen['trust'].users)
         self.assertTrue(seen['bounded'])  # each gh call gets at most the time left
+
+    def _watch_round(self, identities):
+        """Run ``devloop watch`` with ``identities`` and one real round of reads; the ``gh``
+        calls it made, as ``(argv, kwargs)``."""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        results = []
+
+        def one_round(self):
+            results.append(self.round())
+            return 3
+
+        # No gh login at all: an empty gh config and no token in the environment.
+        (tmp / 'gh').mkdir()
+        environ = {k: v for k, v in os.environ.items() if k not in ('GH_TOKEN', 'GITHUB_TOKEN')}
+        environ['GH_CONFIG_DIR'] = str(tmp / 'gh')
+        with mock.patch.dict(os.environ, environ, clear=True), mock.patch('sys.stdout'), \
+                mock.patch.object(watch.Watcher, 'run', one_round), \
+                mock.patch.object(Identities, 'from_config', return_value=identities) as built, \
+                self.assertRaises(SystemExit) as raised:
+            main(['watch', '--state', str(tmp / 's.json')])
+        self.assertEqual(raised.exception.code, 3)
+        self.assertEqual(built.call_args.args[0].repo, load_config().repo)
+        self.assertIsNotNone(results[0])  # the round succeeded
+        return results
+
+    @staticmethod
+    def _recording_run(calls):
+        def run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return SimpleNamespace(returncode=0, stdout='' if argv[1] == 'api' else '[]',
+                                   stderr='')
+        return run
+
+    def test_watch_reads_with_the_dispatcher_app_token(self):
+        calls, asked = [], []
+
+        def token(permissions=None, time_left=None):
+            asked.append(permissions)
+            return 'ghs_dispatcher'
+
+        app = SimpleNamespace(token=token, login=DISPATCH)
+        agent = SimpleNamespace(token=lambda permissions=None, time_left=None: 'ghs_agent',
+                                login=CLAUDE)
+        ids = Identities('o/r', {DISPATCHER: app, 'claude': agent},
+                         run=self._recording_run(calls))
+        self._watch_round(ids)
+        self.assertTrue(calls)
+        for argv, kwargs in calls:
+            self.assertEqual(argv[0], 'gh')
+            self.assertEqual(kwargs['env']['GH_TOKEN'], 'ghs_dispatcher')
+            self.assertNotIn('GITHUB_TOKEN', kwargs['env'])
+        self.assertEqual(set(asked), {None})  # the dispatcher's token, as the ticks read
+
+    def test_watch_without_a_dispatcher_app_uses_the_ambient_login(self):
+        calls = []
+        agent = SimpleNamespace(token=lambda permissions=None, time_left=None: 'ghs_agent',
+                                login=CLAUDE)
+        ids = Identities('o/r', {'claude': agent}, run=self._recording_run(calls))
+        self._watch_round(ids)
+        self.assertTrue(calls)
+        for argv, kwargs in calls:
+            self.assertEqual(argv[0], 'gh')
+            self.assertNotIn('env', kwargs)  # gh's own login, from the environment
+
+    def test_a_missing_dispatcher_key_is_a_config_error(self):
+        with mock.patch.object(Identities, 'from_config',
+                               side_effect=FileNotFoundError('no private key for dl-dispatcher')), \
+                self.assertRaises(SystemExit) as raised:
+            main(['watch'])
+        self.assertIn('invalid config: GitHub App key', str(raised.exception.code))
 
     def test_trust_comes_from_the_configuration_without_app_keys(self):
         cfg = load_config()
@@ -849,6 +1031,133 @@ class CommandLineTest(unittest.TestCase):
         self.assertTrue(no_apps.wrote('op', 'codex'))
 
 
+class TokenTimeoutTest(unittest.TestCase):
+    """``--timeout`` bounds the mint of the dispatcher's token too (#197): the JWT signature and
+    each HTTP request get at most the time left, and none starts once it is spent."""
+
+    def _slow_app(self, clock, costs, steps):
+        """A real ``AppAuth`` whose signature and HTTP requests take ``costs`` seconds of
+        ``clock`` (``inf``: hang until their timeout, then fail as a timeout would)."""
+
+        def step(kind, timeout):
+            steps.append((kind, timeout))
+            cost = costs[kind]
+            clock.t += min(cost, timeout)
+            if cost > timeout:
+                raise GitHubError(f'{kind}: timed out after {timeout}s')
+
+        def sign(key, data, timeout):
+            step('sign', timeout)
+            return b'sig'
+
+        def http(method, path, auth, body=None, timeout=None):
+            step('http', timeout)
+            return {'id': 77, 'app_id': 11}
+
+        return AppAuth(11, 'dl-dispatcher', '/keys/k.pem', 'o/r', http=http, sign=sign,
+                       clock=lambda: 1_800_000_000)
+
+    def _run(self, costs, timeout=1):
+        clock, steps, gh_calls = Clock(), [], []
+        app = self._slow_app(clock, costs, steps)
+        ids = Identities('o/r', {DISPATCHER: app},
+                         run=lambda argv, **kwargs: gh_calls.append(argv))
+        gh = ids.github(DISPATCHER)
+        harness = Harness(self, gh=gh)
+        watcher = harness.watcher(clock, timeout=timeout)
+        gh.time_left = watcher.time_left  # as run_watch does
+        return watcher.run(), clock, steps, gh_calls, harness
+
+    def test_a_hanging_token_request_ends_at_the_timeout(self):
+        code, clock, steps, gh_calls, harness = self._run({'sign': 0.4, 'http': float('inf')})
+        self.assertEqual(code, watch.NOTHING_NEW)
+        self.assertLessEqual(clock.t, 1)  # not the 30 seconds of the request's own timeout
+        self.assertEqual([kind for kind, _ in steps], ['sign', 'http'])
+        self.assertEqual(steps[0][1], 1)
+        self.assertAlmostEqual(steps[1][1], 0.6)
+        self.assertEqual(gh_calls, [])  # no gh call without a token
+        self.assertEqual(harness.out, [])
+
+    def test_no_step_starts_once_the_time_is_spent(self):
+        code, clock, steps, gh_calls, _ = self._run({'sign': 1, 'http': 0})
+        self.assertEqual(code, watch.NOTHING_NEW)
+        self.assertEqual(clock.t, 1)
+        self.assertEqual(steps, [('sign', 1)])  # the request never started
+        self.assertEqual(gh_calls, [])
+
+    def test_without_a_limit_each_step_keeps_its_own_timeout(self):
+        clock, steps = Clock(), []
+        app = self._slow_app(clock, {'sign': 0, 'http': 0}, steps)
+        app._http = lambda method, path, auth, body=None, timeout=None: (
+            steps.append(('http', timeout)) or
+            ({'token': 't', 'expires_at': '2030-01-01T00:00:00Z'} if body else
+             {'id': 77, 'app_id': 11}))
+        self.assertEqual(app.token(), 't')
+        self.assertEqual({timeout for _, timeout in steps}, {STEP_TIMEOUT})
+
+
+class _SlowHandler(BaseHTTPRequestHandler):
+    """Answers ``server.plan = (status, header_delay, body_delay)``: the headers after the first
+    delay, the body after the second."""
+
+    def do_GET(self):
+        status, header_delay, body_delay = self.server.plan
+        body = b'{"id": 77}'
+        time.sleep(header_delay)
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.flush()
+        time.sleep(body_delay)
+        try:
+            self.wfile.write(body)
+        except OSError:
+            pass  # the client gave up
+
+    def log_message(self, *args):
+        pass
+
+
+class HttpDeadlineTest(unittest.TestCase):
+    """``http_json``'s timeout bounds the whole request (#197), not each socket operation: slow
+    headers and a slow body do not add up beyond it, for an error response too. Real urllib and
+    sockets, against a local server."""
+
+    def setUp(self):
+        self.server = ThreadingHTTPServer(('127.0.0.1', 0), _SlowHandler)
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.api = f'http://127.0.0.1:{self.server.server_address[1]}'
+        proxies = mock.patch.dict(os.environ, {'no_proxy': '*', 'NO_PROXY': '*'})
+        proxies.start()
+        self.addCleanup(proxies.stop)
+
+    def _call(self, plan, timeout):
+        self.server.plan = plan
+        start = time.monotonic()
+        try:
+            return http_json('GET', '/x', 'Bearer j', timeout=timeout, api=self.api), None
+        except GitHubError as exc:
+            return exc, time.monotonic() - start
+
+    def test_slow_headers_and_body_do_not_add_up_beyond_the_timeout(self):
+        for status in (200, 404):
+            with self.subTest(status=status):
+                # Each delay fits the timeout of one socket operation; together they do not.
+                result, elapsed = self._call((status, 0.4, 0.4), timeout=0.6)
+                self.assertIsInstance(result, GitHubError)
+                self.assertIn('timed out after 0.6s', str(result))
+                self.assertLess(elapsed, 0.8)
+
+    def test_a_timely_answer_is_returned(self):
+        self.assertEqual(self._call((200, 0, 0), timeout=5), ({'id': 77}, None))
+        error, _ = self._call((404, 0, 0), timeout=5)
+        self.assertIn('HTTP 404: {"id": 77}', str(error))
+
+
 class DocsTest(unittest.TestCase):
     def test_the_guide_documents_both_modes_with_examples(self):
         text = (Path(__file__).resolve().parents[1] / 'docs' / 'devloop.md').read_text()
@@ -856,7 +1165,8 @@ class DocsTest(unittest.TestCase):
         for phrase in ('--until-change', '--exec', '--timeout', 'Claude Code',
                        'python3 -m devloop watch --until-change',
                        'python3 -m devloop watch --exec', 'watch-state.json', 'watch error',
-                       'untrusted author (ignored)'):
+                       'untrusted author (ignored)', "the dispatcher's app",
+                       'local `gh` login', 'round failed (<class>)', '`authentication`'):
             self.assertIn(phrase, section)
 
 
@@ -867,7 +1177,7 @@ class GitHubReadsTest(unittest.TestCase):
         def run(args, **kwargs):
             calls.append(args)
             out = ('{"id": 7, "login": "x[bot]", "body": "b", "number": 3}\n'
-                   if args[1] == 'api' else '{"state": "CLOSED", "stateReason": "NOT_PLANNED"}')
+                   if args[1] == 'api' else '[]')
             return SimpleNamespace(returncode=0, stdout=out, stderr='')
 
         gh = GitHub('o/r', run=run)
@@ -875,13 +1185,55 @@ class GitHubReadsTest(unittest.TestCase):
                          [{'id': 7, 'login': 'x[bot]', 'body': 'b', 'number': 3}])
         self.assertIn('repos/o/r/issues/comments?since=2026-11-16T10:00:00Z&per_page=100',
                       calls[-1])
-        self.assertEqual(gh.issue_state(3)['stateReason'], 'NOT_PLANNED')
-        self.assertEqual(calls[-1][1:4], ['issue', 'view', '3'])
         gh.open_issues()
         self.assertEqual(calls[-1][1:3], ['issue', 'list'])
         self.assertIn('number,title,author,labels', calls[-1])
         gh.issue_author(3)
         self.assertEqual(calls[-1][1:3], ['api', 'repos/o/r/issues/3'])
+
+    def test_issue_state_reads_rest_with_the_porcelain_contract(self):
+        # #211: `gh issue view --json stateReason` fails on gh 2.46; REST has state_reason.
+        calls = []
+        answers = {
+            '{"state":"closed","state_reason":"not_planned"}':
+                {'state': 'CLOSED', 'stateReason': 'NOT_PLANNED'},
+            '{"state":"closed","state_reason":"completed"}':
+                {'state': 'CLOSED', 'stateReason': 'COMPLETED'},
+            '{"state":"open","state_reason":null}': {'state': 'OPEN', 'stateReason': None},
+            '{"state":"open","state_reason":"reopened"}':
+                {'state': 'OPEN', 'stateReason': 'REOPENED'},
+        }
+        for out, expected in answers.items():
+            with self.subTest(out=out):
+                gh = GitHub('o/r', run=lambda args, **kw: calls.append(args) or SimpleNamespace(
+                    returncode=0, stdout=out + '\n', stderr=''))
+                self.assertEqual(gh.issue_state('3'), expected)
+                self.assertEqual(calls[-1], ['gh', 'api', 'repos/o/r/issues/3',
+                                             '--jq', '{state, state_reason}'])
+                self.assertNotIn('--json', calls[-1])
+
+    def test_issue_state_not_found_is_explicit(self):
+        gh = GitHub('o/r', run=lambda args, **kw: SimpleNamespace(
+            returncode=1, stdout='', stderr='gh: Not Found (HTTP 404)'))
+        with self.assertRaises(GitHubNotFound):
+            gh.issue_state(3)
+
+    def test_porcelain_reads_ask_only_for_fields_gh_2_46_knows(self):
+        fake = Gh246()
+        fake.states[3] = {'state': 'open', 'state_reason': None}
+        gh = GitHub('o/r', run=fake.run)
+        gh.issues_with_label('agent:ready')
+        gh.issue(3)
+        gh.open_issues()
+        gh.open_prs()
+        gh.pr_state(4)
+        gh.issue_state(3)
+        self.assertEqual(fake.rejected, [])
+        self.assertEqual(len([c for c in fake.calls if '--json' in c]), 5)
+        # The read #211 replaced is refused, and its error has a class of its own.
+        with self.assertRaises(GitHubError) as raised:
+            gh._json('issue', 'view', '3', '-R', 'o/r', '--json', 'state,stateReason')
+        self.assertEqual(watch.failure_class(raised.exception), 'cli_version')
 
     def test_time_left_bounds_each_call(self):
         timeouts = []

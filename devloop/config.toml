@@ -136,10 +136,46 @@ operator_only_paths = ["docs/adr/", "AGENTS.md", "CLAUDE.md"]
 [pin]
 auto = false
 
+# Documentation map (issue #203): code paths and the documents that describe them. A key is a
+# directory prefix ending in "/" or a file, relative to the root, with no pattern characters;
+# each value lists one or more documents of the repository (a pin does not extract them, #210).
+# The implement, fix and review prompts list the documents mapped to the files of the diff that
+# the worktree holds (a missing one is omitted, with a line in the log)
+# (the first implement prompt, with an empty diff, gets the whole map): an implementer updates
+# those whose described behaviour changes, and a reviewer reports a documented behaviour changed
+# without its document as a blocking finding. A file no key covers asks for nothing.
+[docs.map]
+"devloop/" = ["docs/devloop.md"]
+"orchestrator.py" = ["README.md", "docs/architecture.md"]
+"ssdlc_tasks.py" = ["README.md", "docs/architecture.md"]
+"ssdlc_controller.py" = ["README.md", "docs/architecture.md"]
+"ssdlc_writer_gate.py" = ["docs/writer-fencing.md"]
+"ssdlc_role_fencing.py" = ["docs/writer-fencing.md"]
+"ssdlc_container_holder.py" = ["docs/writer-fencing.md"]
+"ssdlc_telemetry.py" = ["docs/cost-telemetry.md", "docs/bounded-recovery.md"]
+"ssdlc_recovery.py" = ["docs/cost-telemetry.md", "docs/bounded-recovery.md"]
+"ssdlc_feedback.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_admission.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_analysis.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_bindings.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_delegation.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_delivery.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_return.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_roles.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_workflow.py" = ["docs/developer-feedback.md"]
+"ssdlc_scope_amendments.py" = ["docs/scope-amendments.md"]
+"ssdlc_continuations.py" = ["docs/continuations.md", "docs/historical-reconciliation.md"]
+"ssdlc_historical.py" = ["docs/continuations.md", "docs/historical-reconciliation.md"]
+"schemas/" = ["docs/configuration.md"]
+"ssdlc_catalogues.py" = ["docs/configuration.md"]
+
 [roles]
 # The agent whose GitHub identity may hold and release merges in "auto" mode (issue #172),
 # besides trusted_users. Its app's agent:ready and priority labels count too, but only on issues
-# opened by a trusted user or by a devloop app (issue #178).
+# opened by a trusted user or by a devloop app (issue #178). In "auto" it also decides the
+# non-critical escalations in agent:needs-supervisor with /devloop retry, accept-defaults and
+# escalate (issue #182). In any merge mode it may ask for a fix of a PR in agent:review or
+# agent:changes with /devloop fix, as a trusted user may (issue #195).
 # supervisor = "claude"
 implementer = "claude"
 # The reviewer pool, in order; none may be the implementer. Level 1 uses the PR's recorded
@@ -193,6 +229,11 @@ effort = "high"
 fallback_models = [
     { model = "gemini-4-hydrogen-high", model_label = "Gemini 4 Hydrogen" },
 ]
+# A model found unavailable is remembered in <state_dir>/model-unavailability.json, and the
+# next turns start from the first model of the chain not remembered (issue #151): until the
+# reset the error announces ("Resets in 152h4m35s"), else for fallback_memory_seconds (default
+# 3600). `devloop fallback reset agy` forgets it. Without fallback_models nothing is remembered.
+# fallback_memory_seconds = 3600
 # Headless agy cannot ask for a permission (issue #122): each turn gets, with --settings, only
 # `command(<prefix>)` rules for these command prefixes. Default for both lists: test_cmd,
 # "python3 -m unittest", "git status", "git diff", "git log", "git show". A bare interpreter,

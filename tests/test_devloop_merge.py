@@ -525,7 +525,7 @@ class StubApp:
     def __init__(self, login, token):
         self.login, self._token, self.asked = login, token, []
 
-    def token(self, permissions=None):
+    def token(self, permissions=None, time_left=None):
         self.asked.append(permissions)
         return self._token
 

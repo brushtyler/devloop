@@ -22,6 +22,15 @@ List every gap that would stop or mislead the implementer, each with one `kind`:
   still blocks until a trusted comment accepts it.
 - `tool_unavailable`: the work needs a tool, access or resource the implementer does not have.
 
+A gap that touches a decision reserved to the operator by ADR 0001 is **always**
+`operator_decision`, never `default_available`, even when a default looks obvious. The reserved
+decisions are: rollout and activation on real runs, budget and review rounds, credentials and
+permissions, trust rules, the replay gate baseline, the merge mode, the continuous loop and
+automatic pinning, and the approval of ADRs. The same holds for a gap whose resolution needs a
+change to a path reserved to the operator (`operator_only_paths` in `[merge]`: by default
+`docs/adr/`, `AGENTS.md` and `CLAUDE.md`). In merge mode `auto` a supervisor may accept
+`default_available` gaps on the operator's behalf, so classify conservatively.
+
 A choice the repository or the issue already prescribes is not a gap, and neither is a proposed
 default that a comment below has accepted. In `code_refs` list the files (`path` or `path:line`)
 that show the gap, or none. Use `proposed_default: ""` when there is no default to propose.

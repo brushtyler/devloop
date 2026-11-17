@@ -1,5 +1,5 @@
 """devloop command line: python3 -m devloop
-{setup,status,apps,tick,run,cleanup,follow,watch,pin}."""
+{setup,status,apps,tick,run,cleanup,follow,watch,pin,fallback}."""
 
 import argparse
 import fcntl
@@ -10,7 +10,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import activity, follow, pin, watch
+from . import activity, follow, pin, unavailability, watch
 from .agents import AgentRunner, isolated_env
 from .apps import DISPATCHER, MERGER, Identities
 from .config import ConfigError, load_config
@@ -113,8 +113,27 @@ def build(args):
     dispatcher = Dispatcher(cfg, gh, ws, runner, log=tick_log, identities=identities,
                             activity=current, ledger=Ledger(gh, state_dir=state),
                             merger=identities.merger(),
-                            pinner=pin.AutoPin(root, state, args.local_config, log=tick_log))
+                            pinner=pin.AutoPin(root, state, args.local_config, log=tick_log),
+                            memory=unavailability.Memory(state))
     return cfg, state, dispatcher
+
+
+def run_fallback(args):
+    """``devloop fallback reset <agent>`` (#151): forget the models ``agent`` remembers
+    unavailable, so that its next turn starts from the configured model. Local files only."""
+    try:
+        cfg = load_config(args.config, args.local_config)
+    except ConfigError as exc:
+        sys.exit(f'devloop: invalid config: {exc}')
+    memory = unavailability.Memory(main_checkout() / cfg.state_dir)
+    known = {key for key, _, _ in memory.entries()}
+    if args.agent not in cfg.agents and args.agent not in known:
+        sys.exit(f'devloop: fallback reset: unknown agent {args.agent!r}')
+    removed = memory.reset(args.agent)
+    if removed:
+        log(f'{args.agent}: forgot the unavailability of {", ".join(removed)}')
+    else:
+        log(f'{args.agent}: no model remembered unavailable')
 
 
 def run_pin(args):
@@ -133,9 +152,9 @@ def run_pin(args):
         sys.exit(f'devloop: pin failed, the pinned copy is unchanged: {exc}')
 
 
-def run_watch(parser, args, github=GitHub):
-    """``devloop watch`` (#173). It reads GitHub with the ambient ``gh`` login: no app key is
-    needed."""
+def run_watch(parser, args):
+    """``devloop watch`` (#173). It reads GitHub with the identity of the ticks' reads (#197):
+    the dispatcher's app when ``[apps]`` has one, else the ambient ``gh`` login."""
     if args.interval < 1:
         parser.error('watch: --interval must be at least 1 second')
     if args.timeout is not None and args.timeout < 1:
@@ -153,7 +172,11 @@ def run_watch(parser, args, github=GitHub):
     except ConfigError as exc:
         sys.exit(f'devloop: invalid config: {exc}')
     state = Path(args.state) if args.state else main_checkout() / cfg.state_dir / watch.STATE_FILE
-    gh = github(cfg.repo)
+    try:
+        gh = Identities.from_config(cfg).github(DISPATCHER)
+    except OSError as exc:
+        sys.exit(f'devloop: invalid config: GitHub App key: {exc}. Set $DEVLOOP_APP_KEY_DIR or '
+                 'remove the app from [apps] to use the ambient gh login.')
     watcher = watch.Watcher(gh, watch.Trust.from_config(cfg), state,
                             interval=args.interval, timeout=args.timeout, exec_argv=exec_argv)
     gh.time_left = watcher.time_left  # no gh call outlasts --timeout
@@ -202,11 +225,19 @@ def main(argv=None):
                                          '<state_dir>/current')
     pin_cmd.add_argument('ref', help='a branch or tag of origin, or a commit reachable from '
                                      'them or of a copy already pinned (rollback)')
+    fallback_cmd = sub.add_parser('fallback', help='the memory of the models found unavailable')
+    fallback_sub = fallback_cmd.add_subparsers(dest='fallback_command', required=True)
+    reset_cmd = fallback_sub.add_parser('reset', help='forget the models an agent remembers '
+                                                      'unavailable: its next turn starts from '
+                                                      'its configured model')
+    reset_cmd.add_argument('agent', help='the agent key, as in [agents.<key>]')
     argv = sys.argv[1:] if argv is None else list(argv)
     args = parser.parse_args(argv)
 
     if args.command == 'pin':
         return run_pin(args)
+    if args.command == 'fallback':
+        return run_fallback(args)
     if args.command == 'watch':
         sys.exit(run_watch(parser, args))
     if args.command == 'follow':
@@ -255,6 +286,8 @@ def main(argv=None):
         return
     if args.command == 'status':
         for line in (activity.describe(state) or 'no action running').split('\n'):
+            log(line)
+        for line in unavailability.describe(state):
             log(line)
         snap = dispatcher.snapshot()
         for pr in snap.prs:

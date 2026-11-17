@@ -3,8 +3,8 @@
 devloop runs from a read-only copy of one commit of ``origin``, never from the checkout it
 changes. ``pin`` resolves ``<ref>`` to a commit reachable from the refs of ``origin`` (or to a
 copy already verified, reused without a fetch: the rollback), extracts ``devloop/`` and the files
-of ``review_policy.sensitive_path_lists`` of that commit into ``<state_dir>/pinned-<sha12>``,
-makes it read-only, checks that it imports and that its configuration, with the local overlay,
+of ``review_policy.sensitive_path_lists`` of that commit into ``<state_dir>/pinned-<sha12>``
+(not the documents of ``[docs] map``: they belong to the repository, #210), makes it read-only, checks that it imports and that its configuration, with the local overlay,
 loads, and only then points ``<state_dir>/current`` at it with an atomic rename. A failure
 leaves ``current`` as it was. Earlier copies stay for the rollback.
 
@@ -157,12 +157,19 @@ def required_files(root, sha, local):
                 or any(p in ('.', '..') for p in parts) or name != '/'.join(parts)):
             raise PinError(f'sensitive_path_lists: {name!r} is not a relative path inside the '
                            'root')
-        entry = _git(root, 'ls-tree', '--full-tree', sha, '--', name).split('\t', 1)[0].split()
-        if not entry or entry[0] not in ('100644', '100755') or entry[1] != 'blob':
-            raise PinError(f'sensitive_path_lists: {name} is not a file of {sha[:12]}')
+        _require_blob(root, sha, name, 'sensitive_path_lists')
         if name not in files:
             files.append(name)
+    # The documents of [docs] map (#203) are not extracted (#210): they belong to the repository
+    # devloop works on, and the dispatcher looks for them in the worktree of each turn.
     return files
+
+
+def _require_blob(root, sha, name, what):
+    """PinError unless ``name`` is a regular file of commit ``sha``."""
+    entry = _git(root, 'ls-tree', '--full-tree', sha, '--', name).split('\t', 1)[0].split()
+    if not entry or entry[0] not in ('100644', '100755') or entry[1] != 'blob':
+        raise PinError(f'{what}: {name} is not a file of {sha[:12]}')
 
 
 def _set_mode(copy, writable):

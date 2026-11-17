@@ -15,6 +15,7 @@ import re
 
 from .acceptance import render_map
 from .policy import EVENTS, valid_receipt
+from .supervision import COMMANDS, OUTCOMES, critical, describe
 
 UNKNOWN = 'non noto'
 _EFFORT_LABELS = {'xhigh': 'Extra High', 'max': 'Max'}
@@ -93,8 +94,15 @@ def _valid_review(r):
 
 
 def _valid_fix(f):
-    return (_is_int(f.get('round'), 1) and isinstance(f.get('head_sha'), str)
-            and _list_of_dicts(f.get('responses')))
+    """A fix of a round. One asked with ``/devloop fix`` (#195) carries ``requests``, the
+    comments that asked for it, and ``from``, the head it ran on; before any review it belongs
+    to round 0."""
+    requests = f.get('requests', [])
+    requested = bool(requests)
+    return (_is_int(f.get('round'), 0 if requested else 1) and isinstance(f.get('head_sha'), str)
+            and _list_of_dicts(f.get('responses')) and _list_of_dicts(requests)
+            and all(isinstance(r.get('by'), str) for r in requests)
+            and (not requested or isinstance(f.get('from'), str)))
 
 
 def _valid_sync(s):
@@ -146,7 +154,8 @@ NOTICES = ('escalation', 'blocked')
 def _valid_notice(n):
     """A text devloop publishes without a record of its own (#114): an escalation to a human,
     or an agent that stopped. Its marker tells it apart from the operator's own text when both
-    are written with the same login."""
+    are written with the same login. Since #182 it carries the escalation's ``class``; a notice
+    without one, or with one that is not known, is critical (``supervision.critical``)."""
     return n.get('event') in NOTICES
 
 
@@ -186,10 +195,21 @@ def _valid_hold(h):
             and all(isinstance(h.get(k), str) for k in ('by', 'reason')))
 
 
+def _valid_supervision(s):
+    """A supervisor command the dispatcher handled (#182): the command, its author, the outcome
+    and in ``comment`` the id of the comment that carried it (the commands it spends)."""
+    defaults = s.get('defaults', [])
+    return (s.get('command') in COMMANDS and s.get('outcome') in OUTCOMES
+            and isinstance(s.get('by'), str) and isinstance(s.get('reason', ''), str)
+            and isinstance(defaults, list)
+            and all(isinstance(d, dict) and isinstance(d.get('description'), str)
+                    and isinstance(d.get('proposed_default'), str) for d in defaults))
+
+
 _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy': _valid_policy,
           'finding': _valid_finding, 'sync': _valid_sync, 'preflight': _valid_preflight,
           'notice': _valid_notice, 'ledger': _valid_ledger, 'merged': _valid_merged,
-          'hold': _valid_hold}
+          'hold': _valid_hold, 'supervision': _valid_supervision}
 
 
 def read_marker(text, kind):
@@ -294,13 +314,27 @@ def render_native_review(review, head):
 
 
 def render_fix(fix, head, round_no):
-    parts = [f'## Correzioni per il round {round_no}', '', fix['summary'].strip()]
+    requests = fix.get('requests') or []
+    if requests:
+        # A fix asked with /devloop fix (#195): it cites the comments that asked for it.
+        parts = [f'## Correzioni richieste con `/devloop fix` su `{fix["from"][:12]}`', '']
+        for r in requests:
+            cited = f'commento {r["comment"]}' if r.get('comment') is not None else 'commento'
+            parts += [f'Richiesta di `{r["by"]}` ({cited}):', '',
+                      '\n'.join('> ' + line for line in r['request'].splitlines()), '']
+        parts.append(fix['summary'].strip())
+    else:
+        parts = [f'## Correzioni per il round {round_no}', '', fix['summary'].strip()]
     if fix['responses']:
         parts += ['', '| Finding | Azione | Nota |', '|---|---|---|']
         for r in fix['responses']:
             note = r['note'].replace('|', '\\|').replace('\n', ' ')
             parts.append(f'| {r["finding_id"]} | {_ACTION_TEXT[r["action"]]} | {note} |')
     payload = {'round': round_no, 'head_sha': fix['head_sha'], 'responses': fix['responses']}
+    if requests:
+        payload['requests'] = [{'comment': r.get('comment'), 'by': r['by'],
+                                'request': r['request']} for r in requests]
+        payload['from'] = fix['from']
     if 'acceptance_map' in fix:
         # The latest map of the PR from now on (#134).
         parts += ['', render_map(fix['acceptance_map'])]
@@ -309,6 +343,8 @@ def render_fix(fix, head, round_no):
         payload['profile'] = fix['profile']  # who wrote the fix (#111)
     if 'local_tests' in fix:
         payload['local_tests'] = fix['local_tests']  # informative only (#169)
+    if fix.get('skipped_models'):
+        payload['skipped_models'] = fix['skipped_models']  # informative only (#151)
     return publishable(head + '\n' + '\n'.join(parts), 'fix', payload)
 
 
@@ -357,9 +393,36 @@ RESUME = ('Per riprendere: correggere la causa, **rimuovere `agent:needs-human`*
           '`agent:changes` sulla PR).')
 
 
-def render_escalation(reason, detail=''):
-    body = (dispatcher_header() + '\n## Serve un intervento umano\n\n' + reason.strip() + '\n\n'
-            + RESUME + '\n')
+SUPERVISOR_RESUME = (
+    'Escalation non critica: decide il supervisore (modalità di merge `auto`). Comandi, come prima '
+    'riga di un commento, dall\'identità di `[roles].supervisor` o da un utente fidato:\n\n'
+    '- `/devloop retry`: ripete il passo fallito, senza contare un round (al massimo 2 volte per '
+    'passo e input, poi l\'escalation passa all\'operatore);\n'
+    '- `/devloop accept-defaults`: accetta i default proposti dal controllo di prontezza e rimette '
+    'l\'issue in coda;\n'
+    '- `/devloop escalate <motivo>`: passa l\'escalation all\'operatore (`agent:needs-human`).')
+
+
+def render_escalation(reason, detail='', cls='failure', supervised=None):
+    """An escalation (#182: of class ``cls``). ``supervised``, for a non-critical one the
+    supervisor decides, holds the step, the key of its input and what a retry resumes; without
+    it the escalation goes to the operator."""
+    title = 'Escalation al supervisore' if supervised else 'Serve un intervento umano'
+    body = (dispatcher_header() + f'\n## {title}\n\n' + reason.strip() + '\n\n'
+            + f'**Classe:** `{cls}` ({describe(cls)}), '
+            + ('critica' if critical(cls) else 'non critica') + '.\n\n'
+            + (SUPERVISOR_RESUME if supervised else RESUME) + '\n')
     if detail:
         body += '\n```text\n' + detail.strip()[-6000:].replace('```', "'''") + '\n```\n'
-    return publishable(body, 'notice', {'event': 'escalation'})
+    payload = {'event': 'escalation', 'class': cls, 'critical': critical(cls),
+               'to': 'supervisor' if supervised else 'operator'}
+    if supervised:
+        payload.update(supervised)
+    return publishable(body, 'notice', payload)
+
+
+def render_supervision(record, text):
+    """The dispatcher's trace of a supervisor command (#182): what was asked, by whom, and the
+    outcome, in a ``supervision`` marker."""
+    return publishable(dispatcher_header() + f'\n## Decisione del supervisore\n\n{text.strip()}',
+                       'supervision', record)

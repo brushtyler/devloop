@@ -187,8 +187,8 @@ tracked separately in #29.
 
 ## Verification and next rollout
 
-`tests/test_reconciliation.py`, `test_historical_accounting.py`,
-`test_not_dispatched.py` and `test_continuation_hardening.py` run in the existing
+`tests/test_reconciliation.py`, `tests/test_historical_accounting.py`,
+`tests/test_not_dispatched.py` and `tests/test_continuation_hardening.py` run in the existing
 CI unit discovery gate. They exercise real Git/journals, native constructor and
 provider wrapper accounting with semantic/fake engines; there are no paid calls.
 The sanitized #22-shaped accounting replay includes 25 ledger entries, six

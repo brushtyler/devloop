@@ -99,6 +99,28 @@ class PinPolicy:
 
 
 @dataclass(frozen=True)
+class DocsMap:
+    """``[docs] map`` (#203): code paths and the documents that describe them. A key is a
+    directory prefix ending in ``/`` or a file, relative to the root; ``entries`` holds
+    ``(key, documents)`` pairs in configuration order."""
+    entries: tuple = ()
+
+    def documents(self, paths):
+        """``{document: [paths]}`` of the documents mapped to ``paths`` (the files of a diff),
+        sorted by document, each with the sorted paths of ``paths`` it comes from. A path that
+        no key covers maps to nothing."""
+        found = {}
+        for path in sorted(set(paths)):
+            for key, documents in self.entries:
+                if path == key or key.endswith('/') and path.startswith(key):
+                    for document in documents:
+                        found.setdefault(document, [])
+                        if path not in found[document]:
+                            found[document].append(path)
+        return dict(sorted(found.items()))
+
+
+@dataclass(frozen=True)
 class FallbackModel:
     """A model an agent falls back to when the ones before it are unavailable (issue #121)."""
     model: str
@@ -124,8 +146,14 @@ class AgentConfig:
     fallback_models: tuple = ()
     unavailable_patterns: tuple = DEFAULT_UNAVAILABLE_PATTERNS
     unavailable_exit_codes: tuple = ()
+    # How long a model found unavailable is skipped when the error does not say when it is
+    # back (``Resets in <duration>``), with fallback models only (issue #151).
+    fallback_memory_seconds: int = 3600
     # Set on the configurations ``chain`` derives for fallback models: the configured model.
     fallback_for: str = ''
+    # Set on the configuration a turn ran with (``Dispatcher._turn``, #151): the models of the
+    # chain skipped because remembered unavailable, ``(model, reason, until)`` each.
+    skipped: tuple = ()
     # agy only (issue #122): the command prefixes its write and review turns may run, passed
     # each turn as ``permissions.allow`` rules with ``--settings``.
     write_commands: tuple = ()
@@ -161,10 +189,12 @@ class Labels:
     ready_to_merge: str = 'agent:ready-to-merge'
     needs_human: str = 'agent:needs-human'
     merge_hold: str = 'agent:merge-hold'
+    # A non-critical escalation the supervisor decides in merge mode ``auto`` (#182).
+    needs_supervisor: str = 'agent:needs-supervisor'
 
     def all(self):
         return (self.ready, self.working, self.review, self.changes,
-                self.ready_to_merge, self.needs_human, self.merge_hold)
+                self.ready_to_merge, self.needs_human, self.merge_hold, self.needs_supervisor)
 
 
 @dataclass(frozen=True)
@@ -212,6 +242,8 @@ class Config:
     # mode (#172), or '' when none is configured.
     supervisor: str = ''
     pin: PinPolicy = field(default_factory=PinPolicy)
+    # Code paths and their documents, listed in the implement, fix and review prompts (#203).
+    docs: DocsMap = field(default_factory=DocsMap)
 
     def agent(self, key):
         return self.agents[key]
@@ -268,6 +300,16 @@ def _fallback_models(table, where, kind, model, effort):
         seen.add(name)
         models.append(FallbackModel(model=name, model_label=label, effort=level))
     return tuple(models)
+
+
+def _memory_seconds(table, where):
+    """``fallback_memory_seconds`` of an agent (#151): a positive number of seconds."""
+    if 'fallback_memory_seconds' not in table:
+        return AgentConfig.fallback_memory_seconds
+    value = _require(table, 'fallback_memory_seconds', int, where)
+    if value < 1:
+        raise ConfigError(f'{where}.fallback_memory_seconds: out of range')
+    return value
 
 
 def _unavailable(table, where):
@@ -454,6 +496,57 @@ def parse_pin(table, lists):
     return PinPolicy(auto=auto, paths=('devloop/', *lists))
 
 
+def _docs_path(value, where, document):
+    """``value`` as a path of ``[docs] map``: a non-empty path relative to the root, without
+    surrounding spaces, ``.``, ``..`` or empty segments, backslashes or pattern characters. A key
+    may end in ``/`` (a directory prefix); a ``document`` is a file and may not."""
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f'{where}: empty entry')
+    parts = (value[:-1] if value.endswith('/') else value).split('/')
+    if (value != value.strip() or value.startswith('/')
+            or any(p in ('', '.', '..') for p in parts) or any(c in value for c in '*?[]\\')):
+        raise ConfigError(f'{where}: {value!r} is not a relative path inside the root')
+    if document and value.endswith('/'):
+        raise ConfigError(f'{where}: {value!r} is a directory, not a document')
+    return value
+
+
+def docs_entries(data):
+    """The ``(key, documents)`` pairs of ``[docs] map`` in the raw configuration ``data``,
+    checked for syntax only (#203): every key a directory prefix (``devloop/``) or a file, every
+    value a non-empty list of document files, all relative to the root."""
+    table = data.get('docs', {})
+    if not isinstance(table, dict):
+        raise ConfigError('docs: expected a table')
+    unknown = set(table) - {'map'}
+    if unknown:
+        raise ConfigError(f'docs: unknown keys {sorted(unknown)}')
+    mapping = table.get('map', {})
+    if not isinstance(mapping, dict):
+        raise ConfigError('docs.map: expected a table of "<path>" = ["<document>", ...]')
+    entries = []
+    for key, value in mapping.items():
+        where = f'docs.map.{key!r}' if key else 'docs.map'
+        _docs_path(key, where, document=False)
+        if not isinstance(value, list) or not value:
+            raise ConfigError(f'{where}: expected a non-empty list of documents')
+        documents = []
+        for document in value:
+            _docs_path(document, where, document=True)
+            if document not in documents:
+                documents.append(document)
+        entries.append((key, tuple(documents)))
+    return tuple(entries)
+
+
+def parse_docs(data):
+    """``[docs] map`` (#203): its entries (``docs_entries``), checked for shape only. The
+    documents belong to the repository devloop works on, not to the installation, and a pinned
+    copy does not hold them (#210): the dispatcher looks for each one in the worktree of the turn
+    when it lists the documents of a diff (``Dispatcher._mapped_docs``)."""
+    return DocsMap(entries=docs_entries(data))
+
+
 def _reviewer_pool(roles, agents, implementer):
     """``roles.reviewers``, or ``roles.reviewer`` as a pool of one: known agents, no repeats,
     never the implementer."""
@@ -502,6 +595,7 @@ def parse_config(data, root=INSTALL_ROOT):
             commit_trailer=table.get('commit_trailer', ''),
             fallback_models=_fallback_models(table, where, kind, model, effort),
             unavailable_patterns=patterns, unavailable_exit_codes=codes,
+            fallback_memory_seconds=_memory_seconds(table, where),
             write_commands=write_commands, review_commands=review_commands)
     roles = data.get('roles') or {}
     implementer = _require(roles, 'implementer', str, 'roles')
@@ -575,6 +669,7 @@ def parse_config(data, root=INSTALL_ROOT):
         local_tests=local_tests,
         merge=parse_merge(data.get('merge', {}), supervisor), supervisor=supervisor,
         pin=parse_pin(data.get('pin', {}), sensitive_lists(data)),
+        docs=parse_docs(data),
         review_policy=parse_review_policy(
             data.get('review_policy', {}), root,
             [(k, apps[k].slug if k in apps else None, agents[k].kind, agents[k].model,
@@ -597,6 +692,7 @@ def sensitive_lists(data):
 _AGENT_KEYS = dict.fromkeys(('kind', 'display_name', 'model', 'model_label', 'effort',
                              'version_cmd', 'write_args', 'review_args', 'commit_trailer',
                              'fallback_models', 'unavailable_patterns', 'unavailable_exit_codes',
+                             'fallback_memory_seconds',
                              'write_commands', 'review_commands'))
 OVERLAY_KEYS = {
     **dict.fromkeys(('repo', 'base_branch', 'branch_prefix', 'state_dir', 'test_cmd',
@@ -615,6 +711,7 @@ OVERLAY_KEYS = {
     'agents': {'*': _AGENT_KEYS},
     'apps': {'key_dir': None, '*': dict.fromkeys(('app_id', 'slug'))},
     'pin': {'auto': None},
+    'docs': {'map': {'*': None}},
 }
 
 

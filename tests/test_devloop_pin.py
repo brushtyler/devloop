@@ -29,6 +29,8 @@ REPO = Path(__file__).resolve().parent.parent
 LAUNCHER = REPO / 'scripts' / 'devloop-pinned'
 LIST = 'schemas/recovery-grader-baseline.json'
 DATA = tomllib.loads(config.DEFAULT_CONFIG.read_text())
+# The documents of [docs] map (#203): the commits of these tests hold the map, not the documents.
+DOCUMENTS = list(dict.fromkeys(d for _, docs in config.docs_entries(DATA) for d in docs))
 
 
 def load_launcher():
@@ -40,7 +42,8 @@ def load_launcher():
 
 
 def copy_package(dest):
-    """The devloop package and the list file of this checkout into ``dest``."""
+    """The devloop package and the list file of this checkout into ``dest``: its configuration
+    has a ``[docs] map``, but none of the documents it maps (#210)."""
     shutil.copytree(REPO / 'devloop', dest / 'devloop',
                     ignore=shutil.ignore_patterns('__pycache__'))
     (dest / LIST).parent.mkdir(parents=True, exist_ok=True)
@@ -70,7 +73,7 @@ class GitCase(unittest.TestCase):
         git(self.tmp, 'clone', '--quiet', str(origin), str(self.root))
         git(self.root, 'checkout', '--quiet', '-b', 'main')
         copy_package(self.root)
-        (self.root / 'README.md').write_text('not pinned\n')
+        (self.root / 'NOTES.md').write_text('not pinned\n')
         self.first = self.commit('devloop')
         git(self.root, 'push', '--quiet', 'origin', 'main')
         self.state = self.root / '.ssdlc' / 'devloop'
@@ -149,6 +152,33 @@ class PinTests(GitCase):
                     self.pin('main', local)
         self.assertEqual(self.pointed(), old.resolve())
 
+    def test_a_commit_with_a_docs_map_pins_without_its_documents(self):
+        # #210: the map is checked for shape only; its documents belong to the repository, and
+        # the pinned copy holds neither those the commit lacks nor those it has.
+        self.assertTrue(DOCUMENTS)
+        self.assertIn('docs/devloop.md', DOCUMENTS)
+        tree = git(self.root, 'ls-tree', '-r', '--name-only', self.first).splitlines()
+        self.assertFalse(set(DOCUMENTS) & set(tree))
+        copy = self.pin('main')
+        self.assertEqual(self.pointed(), copy.resolve())
+        self.assertFalse((copy / 'docs').exists())
+        second = self.push('a mapped document', 'docs/devloop.md', 'devloop\n')
+        copy = self.pin('main')
+        self.assertEqual(copy, self.state / f'pinned-{second[:12]}')
+        self.assertEqual(sorted(p.name for p in copy.iterdir()), ['devloop', 'pin.json', 'schemas'])
+        self.assertEqual(json.loads((copy / 'pin.json').read_text())['files'], [LIST])
+
+    def test_a_malformed_docs_map_still_fails_the_pin(self):
+        # #210: the copy's configuration still refuses a map of the wrong shape.
+        old = self.pin('main')
+        local = self.tmp / 'config.local.toml'
+        for value in ('"x.py" = ["/etc/passwd"]', '"x*.py" = ["docs/a.md"]', '"x.py" = []'):
+            with self.subTest(value=value):
+                local.write_text(f'[docs.map]\n{value}\n')
+                with self.assertRaisesRegex(pin.PinError, 'the check failed:.*docs.map'):
+                    self.pin(self.first[:12], local)
+        self.assertEqual(self.pointed(), old.resolve())
+
     def test_a_commit_only_local_is_refused(self):
         self.pin('main')
         (self.root / 'x.txt').write_text('x')
@@ -222,8 +252,8 @@ class PinTests(GitCase):
         self.assertIn('(copy reused)', self.logs[-1])
         # A reused copy is checked again against the current overlay.
         local = self.tmp / 'config.local.toml'
-        local.write_text('[review_policy]\nsensitive_path_lists = ["README.md"]\n')
-        with self.assertRaisesRegex(pin.PinError, 'README.md is missing'):
+        local.write_text('[review_policy]\nsensitive_path_lists = ["NOTES.md"]\n')
+        with self.assertRaisesRegex(pin.PinError, 'NOTES.md is missing'):
             self.pin(new_sha, local)
         self.assertEqual(self.pointed(), old.resolve())
 

@@ -2,7 +2,8 @@
 
 Checks, labels, comments and pull request creation use the REST API through `gh api`, which
 behaves the same across `gh` versions. Porcelain commands are used only for reads whose `--json`
-output is long-standing (`issue list/view`, `pr list/view`).
+fields are long-standing (`issue list/view`, `pr list/view`); a field newer `gh` added (such as
+an issue's ``stateReason``) is read with REST instead.
 
 ``GitHub`` is the concrete adapter of the ports of ``devloop.ports`` (``Tracker``,
 ``CodeReview`` and ``CI``); the dispatcher depends on the ports, not on this class.
@@ -81,14 +82,13 @@ class GitHub:
 
     def _gh(self, *args, stdin=None, check=True):
         kwargs = {}
+        self._time_left(args)  # no token is minted once the time is spent
         if self._token is not None:
             env = {k: v for k, v in os.environ.items() if k not in ('GITHUB_TOKEN', 'GH_TOKEN')}
             kwargs['env'] = dict(env, GH_TOKEN=self._token())
         timeout = self.timeout
-        left = self.time_left() if self.time_left is not None else None
+        left = self._time_left(args)  # what the mint of the token left
         if left is not None:
-            if left <= 0:
-                raise GitHubError(f'gh {" ".join(args[:3])}: no time left')
             timeout = min(timeout, left)
         try:
             done = self._run(['gh', *args], input=stdin, capture_output=True, text=True,
@@ -101,6 +101,12 @@ class GitHub:
             error = GitHubNotFound if _NOT_FOUND.search(done.stderr or '') else GitHubError
             raise error(f'gh {" ".join(args[:3])}: {done.stderr.strip()[:500]}')
         return done
+
+    def _time_left(self, args):
+        left = self.time_left() if self.time_left is not None else None
+        if left is not None and left <= 0:
+            raise GitHubError(f'gh {" ".join(args[:3])}: no time left')
+        return left
 
     def _json(self, *args):
         return json.loads(self._gh(*args).stdout or 'null')
@@ -125,9 +131,14 @@ class GitHub:
                           str(limit), '--json', 'number,title,author,labels')
 
     def issue_state(self, number):
-        """``{state, stateReason}`` of issue ``number``, read fresh."""
-        return self._json('issue', 'view', str(number), '-R', self.repo,
-                          '--json', 'state,stateReason')
+        """``{state, stateReason}`` of issue ``number``, read fresh: ``state`` OPEN or CLOSED,
+        ``stateReason`` (COMPLETED, NOT_PLANNED, ...) or None, both in upper case as `gh issue
+        view` reports them. Read with REST: older `gh` (2.46 among them) has no ``stateReason``
+        field in `gh issue view --json` (#211)."""
+        raw = self._json('api', f'repos/{self.repo}/issues/{int(number)}',
+                         '--jq', '{state, state_reason}') or {}
+        return {'state': (raw.get('state') or '').upper() or None,
+                'stateReason': (raw.get('state_reason') or '').upper() or None}
 
     def issue_author(self, number):
         """``{login, pull_request}`` of issue or PR ``number``, whatever its state: its author's
