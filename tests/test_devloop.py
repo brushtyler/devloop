@@ -389,6 +389,61 @@ class AgentCommandTests(unittest.TestCase):
             self.assertIn('(CLI v2.1.325)', runner.header(agent))
         self.assertEqual(len(calls), 4)  # a known version stays cached
 
+    def test_an_agent_that_could_not_start_is_started_once_more_after_a_pause(self):
+        # A CLI that updates itself has no binary for a few seconds (#218).
+        out = json.dumps({'is_error': False, 'structured_output': raw_review()})
+        for error in (FileNotFoundError(2, 'No such file or directory', 'claude'),
+                      PermissionError(13, 'Permission denied', 'claude')):
+            with self.subTest(error=type(error).__name__), \
+                    tempfile.TemporaryDirectory() as tmp:
+                replies = [error, SimpleNamespace(returncode=0, stdout=out, stderr='')]
+                calls, sleeps = [], []
+
+                def fake_run(argv, **kw):
+                    calls.append(kw['input'])
+                    reply = replies.pop(0)
+                    if isinstance(reply, Exception):
+                        raise reply
+                    return reply
+                runner = agents.AgentRunner(tmp, 10, run=fake_run, sleep=sleeps.append)
+                result = runner.run(CFG.agent('claude'), 'review', 'p', 'review', tmp, 'pr-1')
+                self.assertEqual(result['verdict'], 'approve')
+                self.assertEqual(sleeps, [agents.START_RETRY_SECONDS])
+                self.assertEqual(agents.START_RETRY_SECONDS, 30)
+                self.assertEqual(len(calls), 2)  # the same turn, with the same prompt
+                self.assertEqual(calls[0], calls[1])
+                (log,) = Path(tmp).glob('*.log')
+                self.assertIn('exit 0', log.read_text())
+
+    def test_an_agent_that_could_not_start_twice_is_a_start_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            calls, sleeps = [], []
+
+            def fake_run(argv, **kw):
+                calls.append(argv)
+                raise FileNotFoundError(2, 'No such file or directory', 'claude')
+            runner = agents.AgentRunner(tmp, 10, run=fake_run, sleep=sleeps.append)
+            with self.assertRaises(agents.StartFailure) as ctx:
+                runner.run(CFG.agent('claude'), 'review', 'p', 'review', tmp, 'pr-1')
+            self.assertEqual((len(calls), sleeps), (2, [30]))
+            self.assertIn('claude could not start (again, after one retry)', str(ctx.exception))
+            self.assertIsInstance(ctx.exception, agents.AgentError)
+            self.assertIn('could not start (again, after one retry)',
+                          ctx.exception.log.read_text())
+            self.assertIsNone(runner.last_report)
+
+    def test_another_start_error_is_not_retried(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sleeps = []
+
+            def fake_run(argv, **kw):
+                raise OSError('exec format error')
+            runner = agents.AgentRunner(tmp, 10, run=fake_run, sleep=sleeps.append)
+            with self.assertRaises(agents.StartFailure) as ctx:
+                runner.run(CFG.agent('claude'), 'review', 'p', 'review', tmp, 'pr-1')
+            self.assertEqual(sleeps, [])
+            self.assertNotIn('retry', str(ctx.exception))
+
     def test_runner_reports_timeouts(self):
         def fake_run(argv, **kw):
             raise subprocess.TimeoutExpired(argv, 1)
@@ -1457,6 +1512,30 @@ class DispatcherTests(unittest.TestCase):
                 self.assertIn('`devloop/agents.py`', body)
                 self.assertIn('`abc1234`', body)
                 self.assertIn('rimuovere `agent:needs-human`', body)
+
+    def test_a_sync_whose_agent_starts_on_the_retry_goes_on(self):
+        # The sync of #217: claude was updating itself when the turn started (#218).
+        out = json.dumps({'is_error': False, 'structured_output': self.synced()})
+        replies = [FileNotFoundError(2, 'No such file or directory', 'claude'),
+                   SimpleNamespace(returncode=0, stdout=out, stderr='')]
+        sleeps = []
+
+        def fake_run(argv, **kw):
+            if argv[-1] == '--version':
+                return SimpleNamespace(returncode=0, stdout='2.1.326 (Claude Code)', stderr='')
+            reply = replies.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self.make(agents.AgentRunner(tmp, 10, run=fake_run, sleep=sleeps.append))
+            p = pr(merge='conflict')
+            self.gh.labels[100] = set(p.labels)
+            d._do_sync(p)
+        self.assertEqual((replies, sleeps), ([], [agents.START_RETRY_SECONDS]))
+        self.assertEqual(self.ws.pushes, [('agent/issue-7', False)])
+        self.assertEqual(self.gh.labels[100], {'agent:review'})
+        self.assertIn('Kept both sides.', self.gh.comments[-1][1])
 
     def test_a_clean_local_merge_needs_no_agent(self):
         runner = FakeRunner()

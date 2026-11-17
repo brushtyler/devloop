@@ -9,6 +9,10 @@ and, when ``.ssdlc/devloop/config.local.toml`` exists, ``--local-config`` on it:
 replace those of the copy's ``devloop/config.toml``. It works run directly by the dedicated user
 or through ``sudo -u devloop -H``, and refuses to run as root without ``--allow-root``.
 
+It exports ``DISABLE_AUTOUPDATER=1`` unless the environment already sets it (#218): Claude Code
+then does not update itself while devloop runs it, so no turn starts while its binary is being
+replaced. The agents inherit it (``isolated_env`` keeps the dispatcher's environment).
+
 It imports nothing from the clone: the copy is the only devloop code that runs.
 """
 
@@ -33,6 +37,8 @@ def command(root, argv, python=sys.executable):
     extra = ['--local-config', str(local)] if local.is_file() else []
     env = {k: v for k, v in os.environ.items() if k not in ('PYTHONPATH', 'PYTHONHOME')}
     env['PYTHONPATH'] = str(copy)
+    # The agents' CLIs do not update themselves under devloop (#218); an operator's value stays.
+    env.setdefault('DISABLE_AUTOUPDATER', '1')
     return [python, '-P', '-m', 'devloop', *extra, *argv], env
 
 

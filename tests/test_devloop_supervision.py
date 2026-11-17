@@ -258,6 +258,34 @@ class RoutingTests(Case):
                 self.assertEqual((record['class'], record['to']), ('tool_failure', 'operator'))
                 self.assertIn('andrebbe al supervisore', self.gh.threads[100][-1]['body'])
 
+    def test_an_agent_that_could_not_start_is_a_tool_failure_even_in_a_sensitive_sync(self):
+        # ``devloop/agents.py``, the file in conflict, is a sensitive path: a sync that fails
+        # is ``sync_sensitive``, unless its agent never started (#218).
+        cases = {
+            'start': (agents.StartFailure('claude could not start (again, after one retry): '
+                                          "[Errno 2] No such file or directory: 'claude'"),
+                      'tool_failure'),
+            'wrapped': (agents.ModelsUnavailable('claude', [('m', 'unavailable')]),
+                        'tool_failure'),
+            'crash': (crash(), 'sync_sensitive'),
+        }
+        cases['wrapped'][0].__cause__ = agents.StartFailure('claude could not start')
+        for cfg in (AUTO, STRICT):
+            for name, (error, cls) in cases.items():
+                with self.subTest(mode=cfg.merge.mode, case=name):
+                    d = self.make(cfg, error)
+                    p = pr(merge='conflict')
+                    self.gh.labels[100] = set(p.labels)
+                    d._do_sync(p)
+                    record = self.escalations(100)[-1]
+                    self.assertEqual((record['class'], record['critical']),
+                                     (cls, supervision.critical(cls)))
+                    body = self.gh.threads[100][-1]['body']
+                    self.assertIn('`devloop/agents.py`', body)
+                    self.assertEqual(self.ws.pushes, [])
+                    if cfg is STRICT:
+                        self.assertEqual(self.gh.labels[100], {HUMAN})
+
     def test_a_pr_the_supervisor_implemented_goes_to_the_operator(self):
         d = self.make(dataclasses.replace(AUTO, supervisor=CFG.implementer), crash())
         self.tick(d)

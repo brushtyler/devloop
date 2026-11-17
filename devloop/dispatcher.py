@@ -108,7 +108,7 @@ from pathlib import Path
 from .acceptance import (acceptance_criteria, acceptance_findings, format_criteria, format_map,
                          latest_map, render_map)
 from .agents import (TAIL_LINES, AgentError, ModelsUnavailable, ModelUnavailable, NoOutput,
-                     PermissionDenied, background_unfinished)
+                     PermissionDenied, StartFailure, background_unfinished)
 from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, MERGER, PR_COMMENT, REVIEW
 from .config import INSTALL_ROOT, ConfigError
 from .github import GitHubError, author_login
@@ -3713,8 +3713,8 @@ class Dispatcher:
             sensitive = [f for f in files if self.cfg.review_policy.covers(f)
                          or self.cfg.merge.operator_only(f)]
 
-            def fail(reason, detail=''):
-                cls = 'sync_sensitive' if sensitive else SYNC_FAILED
+            def fail(reason, detail='', cls=None):
+                cls = cls or ('sync_sensitive' if sensitive else SYNC_FAILED)
                 supervised, why = self._supervised(pr.number, cls, 'sync', pr)
                 self._escalate(pr.number, f'Sincronizzazione con `{cfg.base_branch}` non '
                                           f'riuscita. {reason}\n\nFile in conflitto:\n\n{listed}',
@@ -3728,8 +3728,11 @@ class Dispatcher:
                     agent, prompt, 'sync', path, f'pr-{pr.number}-sync',
                     where=(pr.number, 'sync'))
             except AgentError as exc:
+                # An agent that could not start, even after its retry (#218), is a failure of
+                # the tool, not a conflict to resolve: ``tool_failure`` prevails.
                 return fail(f'Il passo `sync` è fallito: {_failure_text(exc)}'
-                            f'{self._log_hint(exc)}', exc.tail)
+                            f'{self._log_hint(exc)}', exc.tail,
+                            cls=TOOL_FAILURE if _start_failure(exc) else None)
             if result['status'] == 'blocked':
                 return self._blocked(pr.number, used, result['blocked_reason'].strip()
                                      + f'\n\nFile in conflitto con `{cfg.base_branch}`:\n\n'
@@ -3830,6 +3833,12 @@ def _failure_text(exc):
     with a list (``ModelsUnavailable``) a blank line."""
     text = str(exc).rstrip()
     return text + ('\n\n' if '\n' in text else '.')
+
+
+def _start_failure(exc):
+    """Whether the failed turn ``exc`` is an agent that could not start (#218), also when the
+    chain of models wraps it (``ModelsUnavailable``)."""
+    return isinstance(exc, StartFailure) or isinstance(exc.__cause__, StartFailure)
 
 
 def _describe_bases(checks, branch):
