@@ -33,6 +33,8 @@ Where a method went, when it was not obvious:
 - ``close_issue`` (#228) is in ``Tracker`` and ``merged_prs`` in ``CodeReview``: after a merge
   the dispatcher closes the PR's issue itself, and the planner never starts an issue that a
   merged devloop PR already resolved.
+- ``issue_dependencies`` (#277) is in ``Tracker``: the native "blocked by" dependencies between
+  issues, which the planner reads to hold back an issue while a trusted block is open.
 - ``repo_labels`` and ``rename_label`` (#248) are in ``Tracker`` next to ``ensure_label``:
   ``ensure_labels`` renames ``agent:needs-operator`` from its old name, and ``devloop status``
   reports when both names exist.
@@ -67,6 +69,11 @@ class Tracker(Protocol):
 
     def pr_comments(self, number):
         """The conversation comments of a pull request, as :meth:`issue_comments`."""
+
+    def issue_dependencies(self, number):
+        """The issues that block issue ``number`` and who added each block (#277): ``{author,
+        blocked_by: [{repo, number, state}], added: [{repo, number, by, at}]}`` (see
+        ``GitHub.issue_dependencies``)."""
 
     def labelers(self, number, label):
         """Logins of every ``labeled`` event of ``label`` on ``number``, oldest first."""

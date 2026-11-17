@@ -309,11 +309,19 @@ def _valid_rerun(r):
             and all(isinstance(v, str) for k in ('modules', 'checks') for v in r[k]))
 
 
+def _valid_cycle(c):
+    """A dependency cycle the dispatcher reported on an issue of the queue (#277): the issues of
+    the cycle, as ``#N`` (``owner/name#N`` for another repository), sorted."""
+    cycle = c.get('cycle')
+    return (isinstance(cycle, list) and bool(cycle)
+            and all(isinstance(item, str) and item for item in cycle))
+
+
 _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy': _valid_policy,
           'finding': _valid_finding, 'sync': _valid_sync, 'preflight': _valid_preflight,
           'notice': _valid_notice, 'ledger': _valid_ledger, 'merged': _valid_merged,
           'hold': _valid_hold, 'supervision': _valid_supervision, 'rerun': _valid_rerun,
-          'closed': _valid_closed}
+          'closed': _valid_closed, 'cycle': _valid_cycle}
 
 
 def read_marker(text, kind):
@@ -548,6 +556,18 @@ def render_escalation(reason, detail='', cls='failure', supervised=None):
     if supervised:
         payload.update(supervised)
     return publishable(body, 'notice', payload)
+
+
+def render_cycle(record):
+    """The dispatcher's report of a dependency cycle (#277) on an issue of the queue, with a
+    ``cycle`` marker: the same cycle is reported once on each issue."""
+    issues = ', '.join(record['cycle'])
+    return publishable(
+        dispatcher_header() + '\n## Ciclo di dipendenze\n\n'
+        f'Le dipendenze "blocked by" fra {issues} formano un ciclo: nessuna di queste issue parte '
+        'finché il ciclo resta. Il supervisore o l\'operatore rimuove una delle dipendenze; '
+        'devloop ricalcola da solo quali issue possono partire, senza altri interventi.\n',
+        'cycle', record)
 
 
 def render_operator_merge(head, labeled, promotion, reasons, label):

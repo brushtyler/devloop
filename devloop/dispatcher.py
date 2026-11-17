@@ -63,6 +63,15 @@ Start order (#146): ready issues start by priority (``priority:high``, ``normal`
 ``priority_labels`` label counts as high), then by the oldest current ``agent:ready``, then by
 number. A priority label counts only if a trusted user added it.
 
+Dependencies (#277): a ready issue with a native "blocked by" dependency on an open issue is
+neither checked nor implemented, and takes no slot; it becomes eligible by itself once the last
+block closes. A supervisor's ``/devloop retry`` of a blocked issue's step waits the same way,
+unspent. A block counts only if the login that added it (the latest timeline event) may
+admit the issue (``_admitters``); any other is ignored and logged. With the same priority, an
+issue that blocks other ready issues starts first. The issues of the queue on a dependency cycle
+do not start, and the dispatcher reports the cycle once on each of them (``cycle`` record),
+without labels: once the cycle is gone, they start as usual.
+
 Supervisor labels (#178): with ``roles.supervisor`` and its GitHub App, ``agent:ready`` and the
 priority labels count also when the supervisor's app added them, but only on issues opened by a
 trusted user or by one of devloop's apps (``label_admitters``). On anyone else's issue only a
@@ -148,7 +157,8 @@ from .ledger import entries as ledger_entries
 from .ledger import open_turns
 from .localtests import failed_modules, module_command, select_modules
 from .markdown import (RESUME, carries_record, dispatcher_header, publishable, read_marker,
-                       render_escalation, render_fix, render_native_review, render_operator_merge,
+                       render_cycle, render_escalation, render_fix, render_native_review,
+                       render_operator_merge,
                        render_preflight, render_review, render_supervision)
 from .pin import PinError, Repinned
 from .policy import describe as describe_receipt
@@ -205,6 +215,9 @@ LEVEL_LABEL_STYLE = ('5319e7', 'devloop: la PR richiede una review di livello 2'
 # Priority labels of ready issues (#146) and their rank: the lower, the earlier an issue starts.
 PRIORITY_LABELS = {'priority:high': 'high', 'priority:normal': 'normal', 'priority:low': 'low'}
 PRIORITY_RANK = {'high': 0, 'normal': 1, 'low': 2}
+# How many prerequisites outside the queue a snapshot reads at most to follow the dependencies
+# of the ready issues (#277): beyond them, cycles are not looked for.
+MAX_DEPENDENCY_READS = 50
 PRIORITY_LABEL_STYLE = {
     'priority:high': ('b60205', 'devloop: priorità alta, parte prima delle altre issue pronte'),
     'priority:normal': ('c2e0c6', 'devloop: priorità normale (implicita)'),
@@ -370,11 +383,16 @@ class Snapshot:
     # ``label_admitters``), priority (``issue_priority``), and with ``preflight``
     # configured, for the issues that may start or are blocked by the check, ``preflight``
     # (``_preflight_view``). For those same issues, ``merged``: the numbers of the merged
-    # devloop PRs that resolved them (#228), which ``plan`` never starts again.
+    # devloop PRs that resolved them (#228), which ``plan`` never starts again. For those not
+    # resolved, their native dependencies (#277, ``Dispatcher._dependency_view``): ``blocked_by``
+    # (the open issues that block them, as ``issue_ref``), ``blocks`` (the numbers of those ready
+    # issues they block), ``cycle`` (the issues of the dependency cycle they are on, empty
+    # without one) and ``cycle_reported`` (whether the dispatcher already reported that cycle).
     ready_issues: list
     working_issues: list  # issue numbers
     # Issues and PRs in agent:needs-supervisor with a supervisor command to apply (#182):
-    # dicts ``{number, command, by, step, pr}`` (``_supervisor_view``).
+    # dicts ``{number, command, by, step, pr}`` (``_supervisor_view``); a retry of an issue's
+    # step has ``blocked_by`` too, its open blocks (#277), and waits while it is not empty.
     supervised: list = field(default_factory=list)
 
 
@@ -574,17 +592,55 @@ def issue_priority(labels, events, trusted_users, priority_labels=()):
 
 
 def start_order(issue):
-    """Sort key of the ready issues (#146): priority, the oldest current agent:ready, number."""
-    return (PRIORITY_RANK[issue.get('priority', 'normal')], issue.get('ready_at') or '',
-            issue['number'])
+    """Sort key of the ready issues (#146): priority, then (#277) an issue that blocks other
+    ready issues before one that blocks none, then the oldest current agent:ready, number."""
+    return (PRIORITY_RANK[issue.get('priority', 'normal')], 0 if issue.get('blocks') else 1,
+            issue.get('ready_at') or '', issue['number'])
+
+
+def issue_ref(key):
+    """``#N`` for an issue of the repository, ``owner/name#N`` for one of another (#277):
+    ``key`` is ``(repo, number)``, ``repo`` empty for the repository's own issues."""
+    repo, number = key
+    return f'{repo}#{number}' if repo else f'#{number}'
+
+
+def dependency_cycles(edges):
+    """The issues on a dependency cycle (#277), as ``{issue: members}``: ``edges`` maps each
+    issue to the open issues that block it, ``members`` are the issues of its cycle (those it
+    reaches and that reach it), sorted. An issue that blocks itself is a cycle of one."""
+    def reach(start):
+        seen, todo = set(), list(edges.get(start, ()))
+        while todo:
+            node = todo.pop()
+            if node not in seen:
+                seen.add(node)
+                todo.extend(edges.get(node, ()))
+        return seen
+
+    reached = {node: reach(node) for node in edges}
+    return {node: sorted(m for m in reached[node] if node in reached.get(m, ()))
+            for node in edges if node in reached[node]}
 
 
 def queue_lines(snapshot):
     """The ready issues in start order, with priority and agent:ready time, as ``status`` and
-    ``tick --dry-run`` show them. Which of them start, and when, is up to ``plan``."""
+    ``tick --dry-run`` show them, and their dependencies (#277): the open issues that block
+    them, the ready issues they block, the cycle they are on. Which of them start, and when, is
+    up to ``plan``."""
+    def dependencies(issue):
+        text = ''
+        if issue.get('blocked_by'):
+            text += ', blocked by ' + ', '.join(issue['blocked_by'])
+        if issue.get('blocks'):
+            text += ', blocks ' + ', '.join(f'#{n}' for n in issue['blocks'])
+        if issue.get('cycle'):
+            text += ', dependency cycle ' + ', '.join(issue['cycle'])
+        return text
+
     return [f'ready {position}. #{issue["number"]} priority={issue.get("priority", "normal")} '
-            f'agent:ready={issue.get("ready_at") or "?"} labelled by {issue["labeler"]}: '
-            f'{issue["title"]}'
+            f'agent:ready={issue.get("ready_at") or "?"} labelled by {issue["labeler"]}'
+            f'{dependencies(issue)}: {issue["title"]}'
             for position, issue in enumerate(sorted(snapshot.ready_issues, key=start_order), 1)]
 
 
@@ -698,9 +754,10 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0):
     free = 0 if parked_full else slots
     for item in snapshot.supervised:
         # A supervisor command (#182). A retry of an issue's step runs that step, and takes a
-        # free PR slot as the step itself would; without one it waits for a later tick.
+        # free PR slot as the step itself would; without one it waits for a later tick. While
+        # the issue is blocked by an open issue (#277) it waits too, and takes no slot.
         if item['command'] == RETRY and not item['pr'] and item['step'] in ISSUE_STEPS:
-            if free <= 0:
+            if item.get('blocked_by') or free <= 0:
                 continue
             free -= 1
         actions.append(Action('supervise', item['number'], f'{item["command"]} by {item["by"]}'))
@@ -847,13 +904,21 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0):
                 actions.append(Action('review', pr.number, reason))
     # A ready issue that a merged devloop PR already resolved is never checked nor implemented
     # again (#228): it is escalated, once, and waits for whoever decides it.
-    resolved = set()
+    held_back = set()
     for issue in snapshot.ready_issues:
         if issue.get('merged'):
-            resolved.add(issue['number'])
+            held_back.add(issue['number'])
             if not issue['labels'] & (lb.operator() | {lb.needs_supervisor}):
                 actions.append(Action('merged_issue', issue['number'], 'resolved by merged PR '
                                       + ', '.join(f'#{n}' for n in issue['merged'])))
+    # A ready issue blocked by an open issue (#277) neither is checked nor starts, and takes no
+    # slot; one on a dependency cycle is reported once, on the issue itself.
+    for issue in snapshot.ready_issues:
+        if issue.get('cycle') and not issue.get('cycle_reported'):
+            actions.append(Action('dependency_cycle', issue['number'],
+                                  'dependency cycle ' + ', '.join(issue['cycle'])))
+        if issue.get('blocked_by'):
+            held_back.add(issue['number'])
     # With max_parked_prs reached only priority:high issues start, still within the slots of
     # max_open_prs (#274), and the reason says why.
     urgent = ''
@@ -862,12 +927,12 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0):
                   '(max_parked_prs)')
         free = slots
     if cfg.preflight:
-        actions += _plan_preflight(snapshot, cfg, pr_issues | resolved, free, urgent)
+        actions += _plan_preflight(snapshot, cfg, pr_issues | held_back, free, urgent)
     elif free > 0:
         blocked = set(cfg.blocked_labels) | lb.operator() | {lb.working, lb.needs_supervisor}
         candidates = [i for i in snapshot.ready_issues
                       if not (i['labels'] & blocked) and i['number'] not in pr_issues
-                      and i['number'] not in resolved and i['admitted']
+                      and i['number'] not in held_back and i['admitted']
                       and (not urgent or i.get('priority') == 'high')]
         candidates.sort(key=start_order)
         actions += [Action('implement', i['number'], urgent) for i in candidates[:free]]
@@ -885,7 +950,7 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0):
 
 def _plan_preflight(snapshot, cfg, pr_issues, free, urgent=''):
     """New work with the readiness check (#114), for the ready issues not in ``pr_issues`` (an
-    open PR, or a merged one, #228). Issues start in the usual order, up to
+    open PR, a merged one, #228, or an open block, #277). Issues start in the usual order, up to
     ``free``: one whose check for its current text passed is implemented, one without a valid
     check is checked first (implemented on a later tick if ready). With ``urgent``, the reason
     why ``max_parked_prs`` is reached (#274), only ``priority:high`` issues start, and their
@@ -1633,10 +1698,11 @@ class Dispatcher:
         - ``retry``: only for ``tool_failure`` and ``sync_failed``, and only while the input of
           the step is the one that failed (the key of the escalation). A PR goes back to the
           label of its step, and the next tick runs it; an issue's step runs now. Retries
-          write no review record, so they count no round. After ``MAX_RETRIES`` retries for
-          the same key (counted per reviewer, ``retries_done``) the next one is not run and the
-          item goes to ``agent:needs-operator``, as it does when what made the escalation
-          non-critical (``_supervised``) no longer holds.
+          write no review record, so they count no round. A retry of an issue blocked by an
+          open issue (#277) waits, unspent, until the last block closes. After
+          ``MAX_RETRIES`` retries for the same key (counted per reviewer, ``retries_done``) the
+          next one is not run and the item goes to ``agent:needs-operator``, as it does when
+          what made the escalation non-critical (``_supervised``) no longer holds.
 
         An escalation whose class is critical or unknown, or that was not routed to the
         supervisor, accepts no command: the item goes to ``agent:needs-operator``."""
@@ -1750,6 +1816,13 @@ class Dispatcher:
                                      'rifiutato.', 'supervisor_refused', human_remove)
         if current != key:
             return superseded()
+        # An issue blocked by an open issue (#277), read again now, does not run its step: the
+        # command waits, with no record and no attempt spent, until the last block closes.
+        if not is_pr:
+            blocked_by = self._dependency_view([number])[number]['blocked_by']
+            if blocked_by:
+                self.log('  the retry waits, blocked by ' + ', '.join(blocked_by))
+                return
         # Counted per reviewer: a review whose reviewers failed together, then one by one, keeps
         # the retries each one already had.
         done = retries_done(key, [r.get('key') for _, r in
@@ -2192,13 +2265,22 @@ class Dispatcher:
                      'admitted': admitted.get('by') in admitters,
                      'priority': issue_priority(labels, events, admitters,
                                                 self.cfg.priority_labels)}
-            # The readiness check of the issues that may start or are blocked by it (#114).
             if issue['admitted'] and not issue['labels'] & skip and issue['number'] not in pr_issues:
                 # A merged PR that resolved it (#228): ``plan`` never starts it again.
                 issue['merged'] = [p['number'] for p in self._merged_prs(issue['number'])]
-                if self.cfg.preflight and not issue['merged']:
-                    issue['preflight'] = self._preflight_view(issue['number'], issue['labels'])
             ready.append(issue)
+        # Native dependencies (#277) of the issues that may start, then the readiness check of
+        # those without an open block (#114), that may start or are blocked by the check.
+        candidates = [i for i in ready if 'merged' in i and not i['merged']]
+        views = self._dependency_view([i['number'] for i in candidates]) if candidates else {}
+        for issue in candidates:
+            issue.update(views[issue['number']])
+            if issue['cycle']:
+                issue['cycle_reported'] = self._cycle_reported(issue['number'], issue['cycle'])
+                self.log(f'  issue #{issue["number"]}: dependency cycle '
+                         + ', '.join(issue['cycle']) + ': it does not start')
+            if self.cfg.preflight and not issue['blocked_by']:
+                issue['preflight'] = self._preflight_view(issue['number'], issue['labels'])
         working = [raw['number'] for raw in self.gh.issues_with_label(lb.working)]
         return Snapshot(prs=prs, ready_issues=ready, working_issues=working,
                         supervised=self._supervised_items(prs))
@@ -2278,7 +2360,102 @@ class Dispatcher:
             view = self._supervisor_view(number, read(number))
             if view is not None:
                 found.append(dict(view, number=number, pr=is_pr))
+        # A retry of an issue's step waits while the issue is blocked (#277), as a ready issue
+        # does: ``blocked_by`` holds its open blocks.
+        retries = [item for item in found if item['command'] == RETRY and not item['pr']
+                   and item.get('step') in ISSUE_STEPS]
+        views = self._dependency_view([item['number'] for item in retries]) if retries else {}
+        for item in retries:
+            item['blocked_by'] = views[item['number']]['blocked_by']
+            if item['blocked_by']:
+                self.log(f'  issue #{item["number"]}: the retry waits, blocked by '
+                         + ', '.join(item['blocked_by']))
         return found
+
+    # Dependencies (#277) -------------------------------------------------------
+    def _dependency_edges(self, numbers):
+        """The trusted "blocked by" dependencies that are open, from the issues ``numbers`` of
+        the repository: ``{(repo, number): {(repo, number), ...}}``, ``repo`` empty for the
+        repository's own issues (``issue_ref``).
+
+        A block counts only while its issue is open and only if the latest event that added it
+        comes from a login that may admit the blocked issue (``_admitters``: a trusted user, or
+        the supervisor's app on an issue of a trusted user or of devloop): any other is ignored
+        and logged. The open blocks of the repository are explored in turn, ``agent:ready`` or
+        not, up to ``MAX_DEPENDENCY_READS`` issues beyond ``numbers``; an issue of another
+        repository blocks as its state says, without reading its own blocks."""
+        home = self.cfg.repo.lower()
+
+        def key(item):
+            repo = item.get('repo') or ''
+            return ('' if repo.lower() == home else repo, item['number'])
+
+        todo = [('', number) for number in dict.fromkeys(numbers)]
+        seen, edges = set(todo), {}
+        budget = len(todo) + MAX_DEPENDENCY_READS
+        while todo:
+            node = todo.pop(0)
+            if budget <= 0:
+                self.log(f'  dependencies: more than {MAX_DEPENDENCY_READS} prerequisites to '
+                         f'read, {issue_ref(node)} and the others are not explored')
+                break
+            budget -= 1
+            read = self.gh.issue_dependencies(node[1])
+            admitters = self._admitters(read.get('author'))
+            added_by = {key(event): event.get('by') for event in read.get('added') or []}
+            blockers = set()
+            for item in read.get('blocked_by') or []:
+                if item.get('state') != 'OPEN':
+                    continue  # a closed block blocks nothing
+                blocker = key(item)
+                by = added_by.get(blocker)
+                if by not in admitters:
+                    self.log(f'  issue {issue_ref(node)}: ignored the block by '
+                             f'{issue_ref(blocker)}, added by {by or "an unknown author"}: '
+                             'neither a trusted user nor the supervisor')
+                    continue
+                blockers.add(blocker)
+                if not blocker[0] and blocker not in seen:
+                    seen.add(blocker)
+                    todo.append(blocker)
+            edges[node] = blockers
+        return edges
+
+    def _dependency_view(self, numbers):
+        """What planning needs about the dependencies of the ready issues ``numbers``, read now
+        from GitHub (#277): for each, ``{blocked_by, blocks, cycle}`` as ``Snapshot`` describes
+        them."""
+        edges = self._dependency_edges(numbers)
+        cycles = dependency_cycles(edges)
+        ready = set(numbers)
+        views = {}
+        for number in numbers:
+            blockers = sorted(edges.get(('', number), ()))
+            views[number] = {
+                'blocked_by': [issue_ref(b) for b in blockers],
+                'blocks': sorted(n for n in ready
+                                 if ('', number) in edges.get(('', n), ()) and n != number),
+                'cycle': [issue_ref(m) for m in cycles.get(('', number), ())]}
+        return views
+
+    def _cycle_reported(self, number, cycle):
+        """Whether the dispatcher already reported ``cycle`` on issue ``number``: a ``cycle``
+        record it signed, with the same issues."""
+        return any(record['cycle'] == cycle for _, record in
+                   self._dispatcher_records(self.gh.issue_comments(number), 'cycle'))
+
+    def _do_dependency_cycle(self, number):
+        """Report on a ready issue the dependency cycle it is on (#277), once per cycle. The
+        cycle is read again first: one removed since, or already reported, is not."""
+        cycle = self._dependency_view([number])[number]['cycle']
+        if not cycle:
+            self.log('  no longer on a dependency cycle')
+            return
+        if self._cycle_reported(number, cycle):
+            self.log('  cycle already reported')
+            return
+        self.gh.comment(number, render_cycle({'cycle': cycle}))
+        self.log('  dependency cycle reported: ' + ', '.join(cycle))
 
     # Readiness check (#114) ---------------------------------------------------
     def _preflight_records(self, comments):
