@@ -20,6 +20,27 @@ Esempio:
 > **Model:** Claude Opus 5.5
 > **Reasoning Level:** High
 
+### Bot senza AI
+
+I testi scritti da un bot che non usa AI, come il dispatcher di devloop (e il merger, se un giorno pubblicherà testi), non hanno agent, modello né reasoning. Usano questa variante:
+
+```markdown
+> [!NOTE]
+> **Bot:** <BOT_NAME>
+> **Version:** <VERSION>
+```
+
+Esempio:
+
+> [!NOTE]
+> **Bot:** devloop dispatcher
+> **Version:** 0123456789ab
+
+- **`Bot`:** il nome del bot, per esempio `devloop dispatcher` o `devloop merger`.
+- **`Version`:** la versione di devloop che ha scritto il testo: i primi 12 caratteri del commit della copia fissata in uso (`pin.json`). Senza una copia fissata, il commit del checkout se disponibile, altrimenti `non nota`.
+
+I testi del dispatcher pubblicati prima di questa variante hanno l'intestazione degli agent con `devloop dispatcher` come agent: devloop li riconosce ancora. Gli agent AI usano sempre l'intestazione con Agent, Model e Reasoning Level, anche quando è il dispatcher a pubblicare il loro testo.
+
 ### Come ricavare i valori
 
 Usare i valori **effettivi della sessione corrente** al momento della pubblicazione, non quelli di default o di una sessione precedente:

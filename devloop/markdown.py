@@ -10,20 +10,30 @@ by models (summaries, findings, notes, PR bodies, logs). Two rules keep the two 
 """
 
 import base64
+import functools
 import json
 import re
+import subprocess
+from pathlib import Path
 
 from .acceptance import render_map
+from .config import INSTALL_ROOT
 from .policy import EVENTS, valid_receipt
 from .supervision import COMMANDS, OUTCOMES, critical, describe
 
 UNKNOWN = 'non noto'
+UNKNOWN_VERSION = 'non nota'
 _EFFORT_LABELS = {'xhigh': 'Extra High', 'max': 'Max'}
 _MARKER = re.compile(r'<!-- devloop:(?P<kind>[a-z]+):v1 (?P<payload>[A-Za-z0-9+/=]+) -->')
 _VERSION = re.compile(r'\d+\.\d+(?:\.\d+)?')
 
-DISPATCHER = {'agent': 'devloop dispatcher', 'model': 'nessuno (testo generato dal dispatcher)',
-              'effort': 'n/a'}
+# Bots without AI (the dispatcher, one day the merger) sign with their name and the version of
+# devloop, not with an agent, a model and a reasoning level (#232). Records published before
+# #232 carry the agent header with ``devloop dispatcher`` as the agent: both are devloop text.
+DISPATCHER = 'devloop dispatcher'
+# The stamp ``devloop pin`` writes in the root of a pinned copy (``pin.STAMP``).
+PIN_STAMP = 'pin.json'
+_SHA = re.compile(r'[0-9a-f]{40}')
 
 
 def parse_version(text):
@@ -47,11 +57,49 @@ def header(agent_name, cli_version, model_label, effort):
             f'> **Reasoning Level:** {effort_label(effort)}\n')
 
 
-def dispatcher_header():
+def _checkout_sha(root):
+    """The commit of the checkout whose top level is ``root``, or None: a directory inside
+    another repository (a pinned copy without its stamp) is not a checkout of devloop."""
+    try:
+        proc = subprocess.run(['git', 'rev-parse', '--show-toplevel', 'HEAD'], cwd=root,
+                              capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    lines = proc.stdout.splitlines() if proc.returncode == 0 else []
+    if len(lines) != 2 or not _SHA.fullmatch(lines[1].strip()):
+        return None
+    try:
+        same = Path(lines[0].strip()).resolve() == Path(root).resolve()
+    except OSError:
+        return None
+    return lines[1].strip() if same else None
+
+
+@functools.cache
+def devloop_version(root=INSTALL_ROOT):
+    """The version of devloop running from ``root``: the first 12 characters of the commit of
+    the pinned copy (its ``pin.json``), else of the checkout, else ``UNKNOWN_VERSION``.
+    Computed once per process: a new pin starts a new process."""
+    try:
+        commit = json.loads((Path(root) / PIN_STAMP).read_text(encoding='utf-8')).get('commit')
+    except (OSError, ValueError, AttributeError):
+        commit = None
+    if not (isinstance(commit, str) and _SHA.fullmatch(commit)):
+        commit = _checkout_sha(root)
+    return commit[:12] if commit else UNKNOWN_VERSION
+
+
+def bot_header(bot, version):
+    """The header of a text written by a bot without AI (#232): its name and the version of
+    devloop, instead of an agent, a model and a reasoning level."""
     return ('> [!NOTE]\n'
-            f'> **Agent:** {DISPATCHER["agent"]}\n'
-            f'> **Model:** {DISPATCHER["model"]}\n'
-            f'> **Reasoning Level:** {DISPATCHER["effort"]}\n')
+            f'> **Bot:** {bot}\n'
+            f'> **Version:** {version or UNKNOWN_VERSION}\n')
+
+
+def dispatcher_header(root=INSTALL_ROOT):
+    """The header of every text the dispatcher writes on its own."""
+    return bot_header(DISPATCHER, devloop_version(root))
 
 
 def marker(kind, payload):

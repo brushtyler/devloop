@@ -915,9 +915,30 @@ values come from the configured agent: CLI version from its `--version`, model a
 as passed on the command line. A known version is cached for the life of the process; a failed
 `--version` is retried at the next publication, and the header says `CLI non noto` only for texts
 published while it keeps failing. When a turn ran on a [fallback model](#fallback-models), the
-header names that model and its reasoning level, not the configured ones. Text the dispatcher
-writes on its own, such as escalations and CI rounds, names `devloop dispatcher` as the agent and
-no model.
+header names that model and its reasoning level, not the configured ones.
+
+Text the dispatcher writes on its own, such as markers, escalations, CI rounds, merges, ledger
+records and closed findings, comes from a bot without AI, so it carries the bot variant of the
+header (#232) instead of agent, model and reasoning level:
+
+```markdown
+> [!NOTE]
+> **Bot:** devloop dispatcher
+> **Version:** 0123456789ab
+```
+
+`Version` is the version of devloop that wrote the text: the first 12 characters of the commit in
+the `pin.json` of the [pinned copy](#run-from-a-pinned-installation) in use. Without a pinned copy, in
+development or in the tests, it is the commit of the checkout devloop runs from, if that
+directory is the top level of a git checkout, otherwise `non nota`. It is read once per process:
+a new pin starts a new process. Texts of the AI agents keep the agent header.
+
+Records published before #232 carry the old dispatcher header (`**Agent:** devloop dispatcher`,
+no model). Both stay valid: devloop recognizes its texts by the `> [!NOTE]` that opens either
+header, by the identity that wrote them and, for records, by a valid marker, never by the header
+alone. A text with the bot header from an identity that may not write devloop records is no
+record. `operator_comments` leaves out texts with either header, and the `/devloop` commands are
+read on the first line after either header.
 
 ## Who does what
 

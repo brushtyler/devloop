@@ -72,7 +72,7 @@ class CloseAfterMergeTests(unittest.TestCase):
                                           'merge_commit': MERGE_COMMIT,
                                           'mode': cfg.merge.mode})
                 body = [b for n, b in gh.comments if n == 7][-1]
-                self.assertTrue(body.startswith('> [!NOTE]\n> **Agent:** devloop dispatcher'))
+                self.assertTrue(body.startswith('> [!NOTE]\n> **Bot:** devloop dispatcher'))
                 self.assertIn('#100', body)
                 self.assertIn(MERGE_COMMIT[:12], body)
                 self.assertIn(f'`{cfg.merge.mode}`', body)

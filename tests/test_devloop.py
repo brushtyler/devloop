@@ -1184,7 +1184,7 @@ class DispatcherTests(unittest.TestCase):
         self.gh.labels[100] = set(p.labels)
         d._do_revoke(p)
         self.assertEqual(self.gh.labels[100], {'agent:review'})
-        self.assertIn('**Agent:** devloop dispatcher', self.gh.comments[0][1])
+        self.assertIn('**Bot:** devloop dispatcher', self.gh.comments[0][1])
         self.assertIn(SHA1[:12], self.gh.comments[0][1])
 
     def _ci_rerun_on_ready_pr(self, final_ci):
@@ -1391,7 +1391,7 @@ class DispatcherTests(unittest.TestCase):
         d = self.make(FakeRunner())
         d._do_ci_failed(pr(checks='fail'))
         body = self.gh.comments[0][1]
-        self.assertIn('**Agent:** devloop dispatcher', body)
+        self.assertIn('**Bot:** devloop dispatcher', body)
         record = markdown.read_marker(body, 'review')
         self.assertEqual((record['source'], record['round']), ('ci', 1))
         self.assertIn('log of 42', record['blocking_findings'][0]['detail'])
@@ -1545,7 +1545,7 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(runner.calls, [])
         self.assertEqual(self.ws.pushes, [('agent/issue-7', False)])
         self.assertNotIn('Co-Authored-By', self.ws.commits[0])
-        self.assertIn('**Agent:** devloop dispatcher', self.gh.comments[-1][1])
+        self.assertIn('**Bot:** devloop dispatcher', self.gh.comments[-1][1])
         self.assertEqual(self.gh.labels[100], {'agent:review'})
 
     def test_a_branch_that_already_contains_the_base_is_left_alone(self):

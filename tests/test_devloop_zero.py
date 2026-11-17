@@ -313,7 +313,7 @@ class ZeroDispatcherTests(unittest.TestCase):
         self.assertEqual(record['checks'], [{'name': 'unittest', 'app_id': APP,
                                              'state': 'success'}])
         body = published(self.gh)[-1]
-        self.assertTrue(body.startswith('> [!NOTE]\n> **Agent:** devloop dispatcher'))
+        self.assertTrue(body.startswith('> [!NOTE]\n> **Bot:** devloop dispatcher'))
         self.assertIn('Il merge resta un\'azione dell\'operatore', body)
 
     def assert_refused(self, why):
