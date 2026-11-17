@@ -442,6 +442,30 @@ class RetryTests(Case):
         self.assertEqual(self.gh.labels[100], {REVIEW})
         self.assertEqual(self.decisions(7)[-1]['outcome'], 'applied')
 
+    def test_a_block_asking_the_operator_about_background_work_stays_critical(self):
+        # Issue #219: only a turn that ended with its own work still running is a tool_failure;
+        # a request for the operator's decision that mentions background work stays a block.
+        reason = ('Serve una decisione dell\'operatore prima che venga introdotto il job in '
+                  'background.')
+        d = self.make(AUTO, dict(implemented('blocked'), blocked_reason=reason), has_pr=False)
+        self.assertEqual(self.tick(d), [('implement', 7)])
+        self.assertEqual(self.gh.labels[7], {HUMAN})
+        self.assertEqual(self.escalations(7), [])
+        (record,) = self.gh.records(7, 'notice')
+        self.assertEqual((record['event'], record['class']), ('blocked', 'blocked'))
+        self.assertTrue(record['critical'])
+        self.assertEqual(self.gh.created, [])
+
+    def test_a_block_for_unfinished_background_work_goes_to_the_supervisor(self):
+        reason = ('Il risultato finale è stato richiesto prima che l\'audit parallelo si '
+                  'concludesse.')
+        d = self.make(AUTO, dict(implemented('blocked'), blocked_reason=reason), has_pr=False)
+        self.assertEqual(self.tick(d), [('implement', 7)])
+        self.assertEqual(self.gh.labels[7], {SUPER})
+        record = self.escalations(7)[-1]
+        self.assertEqual(record['class'], 'tool_failure')
+        self.assertFalse(record['critical'])
+
     def test_an_issue_retry_on_a_new_base_is_refused(self):
         d = self.make(AUTO, crash(), has_pr=False)
         self.tick(d)

@@ -637,7 +637,7 @@ check, and the `policy` marker of a level that cannot be reviewed or promoted. A
 
 | Class | When | Critical |
 |---|---|---|
-| `tool_failure` | The agent or its model produced no result: a crash, a timeout, a stall with `agent_stall_action = "abort"`, no model available, a denied permission | No |
+| `tool_failure` | The agent or its model produced no result: a crash, a timeout, a stall with `agent_stall_action = "abort"`, no model available, a denied permission, a block for [background work still running](#no-background-work-in-a-turn) | No |
 | `preflight_default` | A failed [readiness check](#readiness-check-before-implementation) whose gaps are all `default_available`, with no split | No |
 | `sync_failed` | A [sync](#conflicts-with-main) that failed, with no file in conflict under a sensitive path (`sensitive_paths`) or `operator_only_paths` | No |
 | `round_limit` | The limit of review rounds | Yes |
@@ -1466,6 +1466,28 @@ the system: the tests they run can still reach the network and write outside the
 code running as the same user. For them, the copy and the final check catch writes to the
 reviewed tree, not access to the rest of the system. With the network disabled, codex cannot run tests
 that open TCP sockets, even on loopback.
+
+### No background work in a turn
+
+A headless turn ends when the agent gives its final answer, without waiting for anything it
+left running (#219). An implementer that split its work among sub-agents in the background
+once answered before they ended, and stopped with nothing written. So:
+
+- **No sub-agents.** Every claude turn, write and review, runs with
+  `--disallowedTools Agent Task Workflow`, added by devloop before `write_args` or
+  `review_args`, whatever they say: the tools that start sub-agents can run them in the
+  background, so they are denied altogether. The agent still reads and analyses on its own,
+  one step after the other.
+- **Told in the prompt.** The implement and fix prompts ask to complete all the work within
+  the turn, in the foreground, without sub-agents or other background activity, and to give
+  the final answer only when the work is finished.
+- **A block for unfinished background work is a `tool_failure`.** A write turn that stops with
+  `blocked` and a reason that, in the same sentence, cites background or parallel work
+  (sub-agents, an audit in parallel) and says it was still running or ended after the answer
+  is not published as `Lavoro bloccato`: it fails as an agent error, escalated as a
+  `tool_failure` that `/devloop retry` can run again. A "before" counts only with a verb of
+  completion ("prima che l'audit parallelo si concludesse"), and a reason that asks for a
+  decision of the operator stays a `blocked`, whatever else it says.
 
 ### Parallel actions
 
