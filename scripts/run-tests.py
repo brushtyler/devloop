@@ -7,9 +7,17 @@ The suite is ``unittest.defaultTestLoader.discover('tests')``, the same as
 ``python3 -m unittest discover -s tests``: packages, ``load_tests`` hooks and modules with the same
 name in different packages are handled by unittest itself. Its top-level children (one per module)
 are split across N worker processes, slowest first, using the durations of the previous run
-(``.ssdlc/test-durations.json``, ignored by git). Each worker repeats the same discover and runs only
-its children. The summary at the end gives the total, the slowest modules and the output of every
-failed module; the exit code is non-zero if any test failed or a worker did not finish.
+(``.ssdlc/test-durations.json``, ignored by git). A module that took more than SPLIT_SECONDS, or that
+has no recorded duration (estimated at 0.5 seconds per test), is split by test class when ``units``
+allows it, so its classes run in different workers. Each worker repeats the same discover and runs
+only its parts. The summary at the end gives the total, the slowest modules and the output of every
+failed module, aggregated per module even when it was split; the exit code is non-zero if any test
+failed or a worker did not finish.
+
+Before the workers start, a root that is a git repository gets one ``git update-index -q
+--refresh``: in a fresh checkout, as in CI, the index has stale stat data and every ``git status``
+of the tests would otherwise rehash all files. It is only an optimisation: a failure is reported and
+the run goes on.
 
 A worker imports ``unittest`` and runs the discover before loading this file, as
 ``python3 -m unittest`` does: the discover puts ``tests/`` first on ``sys.path``, so a helper there
@@ -25,6 +33,10 @@ import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+# A module whose previous run took longer than this is split by class across the workers.
+SPLIT_SECONDS = 60
+# The estimated cost of a test that has no recorded duration.
+SECONDS_PER_TEST = 0.5
 # After the discover the boot loads this file with the builtins open, compile and exec only:
 # runpy, importlib.util and the like would import modules (pkgutil, ...) that tests/ can shadow.
 WORKER_BOOT = '\n'.join([
@@ -74,34 +86,128 @@ def inventory(children):
     return repr([test_ids(c) for c in children])
 
 
-def worker(children, indices, results_file, expected_file):
-    """Run ``children[i]`` for each index; ``children`` comes from the discover in WORKER_BOOT."""
+def units(child):
+    """The test classes of a module's suite, in order, each as the list of its tests; None when the
+    suite cannot be split by class without changing how it runs.
+
+    Only the instances the discover already found are used, so a ``load_tests`` hook keeps its
+    selection, also of classes defined in other modules. The suite stays whole when: it or a nested
+    suite is not a plain ``unittest.TestSuite`` (a custom suite may run its tests its own way); an
+    item is not a ``TestCase``; the tests of a class are not contiguous; a module of its classes has
+    ``setUpModule`` or ``tearDownModule`` (each worker would run them again); it has fewer than two
+    classes. A class is never split, so ``setUpClass`` runs once, as in the serial discover."""
+    tests = []
+
+    def flatten(suite):
+        if type(suite) is not unittest.TestSuite:
+            return False
+        for item in suite:
+            if isinstance(item, unittest.TestSuite):
+                if not flatten(item):
+                    return False
+            elif isinstance(item, unittest.TestCase):
+                tests.append(item)
+            else:
+                return False
+        return True
+
+    if not flatten(child):
+        return None
+    groups, seen = [], set()
+    for test in tests:
+        cls = type(test)
+        if groups and type(groups[-1][0]) is cls:
+            groups[-1].append(test)
+            continue
+        module = sys.modules.get(cls.__module__)
+        if (cls in seen or module is None or hasattr(module, 'setUpModule')
+                or hasattr(module, 'tearDownModule')):
+            return None
+        seen.add(cls)
+        groups.append([test])
+    return groups if len(groups) > 1 else None
+
+
+def worker(children, parts, results_file, expected_file):
+    """Run each part: ``(i, None)`` is ``children[i]``, ``(i, u)`` its class ``units(...)[u]``.
+    ``children`` comes from the discover in WORKER_BOOT."""
     with open(expected_file, encoding='utf-8') as fh:
         expected = fh.read()
     if inventory(children) != expected:
         print('The discovered tests differ from the ones the main process found: a module changes '
               'the test tree while it is imported, or discovery is not deterministic.', flush=True)
         return 3
+    # Every suite is built before any runs: running a suite empties it.
+    split = {i: units(children[i]) for i, u in parts if u is not None}
+    suites = [children[i] if u is None else unittest.TestSuite(split[i][u]) for i, u in parts]
     with open(results_file, 'a', encoding='utf-8') as out:
-        for index in indices:
-            child = children[index]
+        for (index, unit), suite in zip(parts, suites):
             stream = io.StringIO()
             start = time.monotonic()
-            result = unittest.TextTestRunner(stream=stream, verbosity=1).run(child)
+            result = unittest.TextTestRunner(stream=stream, verbosity=1).run(suite)
             # One Python literal per line, read back with ast.literal_eval: json is not loaded yet.
-            out.write(repr(dict(index=index, run=result.testsRun, ok=result.wasSuccessful(),
-                                skipped=len(result.skipped),
+            out.write(repr(dict(index=index, unit=unit, run=result.testsRun,
+                                ok=result.wasSuccessful(), skipped=len(result.skipped),
                                 seconds=round(time.monotonic() - start, 1),
                                 output=stream.getvalue())) + '\n')
             out.flush()
     return 0
 
 
+def parse_part(text):
+    """``I`` is the whole child I, ``I.U`` its class U: the inverse of ``format_part``."""
+    index, _, unit = text.partition('.')
+    return int(index), int(unit) if unit else None
+
+
+def format_part(part):
+    return str(part[0]) if part[1] is None else f'{part[0]}.{part[1]}'
+
+
 def worker_main(argv, children):
-    """Entry point of WORKER_BOOT: ``--worker I,J,... --results FILE --inventory FILE``."""
+    """Entry point of WORKER_BOOT: ``--worker P,Q,... --results FILE --inventory FILE``."""
     opts = dict(zip(argv[::2], argv[1::2]))
-    return worker(children, [int(i) for i in opts['--worker'].split(',') if i], opts['--results'],
-                  opts['--inventory'])
+    return worker(children, [parse_part(p) for p in opts['--worker'].split(',') if p],
+                  opts['--results'], opts['--inventory'])
+
+
+def plan(children, labels, previous):
+    """The parts to run with their estimated cost: ``[((index, unit), seconds), ...]``."""
+    parts = []
+    for i, child in enumerate(children):
+        seconds = previous.get(labels[i])
+        if not isinstance(seconds, (int, float)) or isinstance(seconds, bool):
+            seconds = None
+        groups = units(child) if seconds is None or seconds > SPLIT_SECONDS else None
+        if groups:
+            total = sum(len(g) for g in groups)
+            for u, group in enumerate(groups):
+                cost = (seconds * len(group) / total if seconds is not None
+                        else len(group) * SECONDS_PER_TEST)
+                parts.append(((i, u), cost))
+        else:
+            parts.append(((i, None), seconds if seconds is not None
+                          else child.countTestCases() * SECONDS_PER_TEST))
+    return parts
+
+
+def refresh_index():
+    """One ``git update-index -q --refresh`` on a root that is a git repository; a failure is
+    reported and ignored."""
+    import subprocess  # here, not at module level: see the module docstring
+    if not os.path.exists(os.path.join(ROOT, '.git')):
+        return
+    try:
+        done = subprocess.run(['git', 'update-index', '-q', '--refresh'], cwd=ROOT,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                              timeout=600)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f'git update-index --refresh failed, continuing: {type(exc).__name__}: {exc}',
+              flush=True)
+        return
+    if done.returncode != 0:
+        print(f'git update-index --refresh exited with {done.returncode}, continuing: '
+              f'{done.stdout.strip()}', flush=True)
 
 
 def main(argv):
@@ -120,23 +226,40 @@ def main(argv):
     args = parser.parse_args(argv)
 
     durations = Path(ROOT) / '.ssdlc' / 'test-durations.json'
+    refresh_index()
     children = discover()
     labels = [label(c) or f'#{i}' for i, c in enumerate(children)]
     try:
         previous = json.loads(durations.read_text())
     except (OSError, ValueError):
         previous = {}
-    cost = [previous.get(labels[i], c.countTestCases() * 0.5) for i, c in enumerate(children)]
-    jobs = max(1, min(args.jobs, len(children)))
+    if not isinstance(previous, dict):
+        previous = {}
+    parts = plan(children, labels, previous)
+    expected_parts = {}
+    for (i, u), _ in parts:
+        expected_parts.setdefault(i, []).append(u)
+    jobs = max(1, min(args.jobs, len(parts)))
     bins = [[] for _ in range(jobs)]
     load = [0.0] * jobs
-    for i in sorted(range(len(children)), key=lambda i: cost[i], reverse=True):
+    for part, cost in sorted(parts, key=lambda p: p[1], reverse=True):
         k = load.index(min(load))
-        bins[k].append(i)
-        load[k] += cost[i]
+        bins[k].append(part)
+        load[k] += cost
+
+    def module(i, partial=False):
+        """The results of child i, its parts merged; None until every part has one, unless
+        ``partial`` (then None only without any)."""
+        found = [rows[(i, u)] for u in expected_parts[i] if (i, u) in rows]
+        if not found or (len(found) < len(expected_parts[i]) and not partial):
+            return None
+        return dict(run=sum(r['run'] for r in found), ok=all(r['ok'] for r in found),
+                    skipped=sum(r.get('skipped', 0) for r in found),
+                    seconds=round(sum(r['seconds'] for r in found), 1),
+                    output='\n'.join(r['output'].rstrip() for r in found))
 
     start = time.monotonic()
-    rows, problems = {}, []
+    rows, problems, printed = {}, [], set()
     lock = threading.Lock()
     with tempfile.TemporaryDirectory() as tmp:
         expected = Path(tmp) / 'inventory.txt'
@@ -156,17 +279,21 @@ def main(argv):
                 # `python3 -m unittest` does; WORKER_BOOT then runs the discover before loading
                 # this file, so the tests see the same modules as in the serial discover.
                 code = subprocess.run([sys.executable, '-c', WORKER_BOOT, __file__, '--worker',
-                                       ','.join(map(str, bins[k])), '--results', str(results),
+                                       ','.join(map(format_part, bins[k])), '--results', str(results),
                                        '--inventory', str(expected)],
                                       cwd=ROOT, stdout=fh, stderr=subprocess.STDOUT).returncode
             done = ([ast.literal_eval(line) for line in results.read_text(encoding='utf-8').splitlines()]
                     if results.exists() else [])
             with lock:
                 for row in done:
-                    rows[row['index']] = row
-                    print(f'{"ok  " if row["ok"] else "FAIL"} {labels[row["index"]]} '
-                          f'({row["run"]} tests, {row["seconds"]:.0f}s)', flush=True)
-                missing = [labels[i] for i in bins[k] if i not in rows]
+                    rows[(row['index'], row['unit'])] = row
+                # A split module is reported once, when the last of its parts is in.
+                for i in sorted({row['index'] for row in done} - printed):
+                    if (merged := module(i)) is not None:
+                        printed.add(i)
+                        print(f'{"ok  " if merged["ok"] else "FAIL"} {labels[i]} '
+                              f'({merged["run"]} tests, {merged["seconds"]:.0f}s)', flush=True)
+                missing = list(dict.fromkeys(labels[i] for i, u in bins[k] if (i, u) not in rows))
                 if code != 0 or missing:
                     tail = '\n'.join(log.read_text(errors='replace').splitlines()[-40:])
                     problems.append(f'worker {k} exited with {code} before finishing '
@@ -177,27 +304,33 @@ def main(argv):
         for t in threads:
             t.join()
     elapsed = time.monotonic() - start
-    missing = [labels[i] for i in range(len(children)) if i not in rows]
+    modules = {i: m for i in range(len(children)) if (m := module(i)) is not None}
+    missing = [labels[i] for i in range(len(children)) if i not in modules]
     if missing and not problems:
         problems.append('no result for ' + ', '.join(missing))
 
     try:
         durations.parent.mkdir(exist_ok=True)
-        durations.write_text(json.dumps({**previous, **{labels[i]: r['seconds'] for i, r in rows.items()}},
+        durations.write_text(json.dumps({**previous, **{labels[i]: m['seconds'] for i, m in modules.items()}},
                                         indent=1, sort_keys=True))
     except OSError:
         pass
 
-    failed = [i for i, r in sorted(rows.items()) if not r['ok']]
+    # A module split by class still counts once, with the output of all its parts, so a CI log
+    # keeps one FAILED MODULE line per failed module (devloop/localtests.py reads them).
+    # A module with only some parts done (its worker died) is reported if one of them failed.
+    reported = {i: m for i in range(len(children)) if (m := module(i, partial=True)) is not None}
+    failed = [i for i, m in sorted(reported.items()) if not m['ok']]
     for i in failed:
-        print(f'\n{"=" * 70}\nFAILED MODULE {labels[i]}\n{"=" * 70}\n{rows[i]["output"].rstrip()}')
+        print(f'\n{"=" * 70}\nFAILED MODULE {labels[i]}\n{"=" * 70}\n{reported[i]["output"].rstrip()}')
     for problem in problems:
         print(f'\n{"=" * 70}\nWORKER PROBLEM\n{"=" * 70}\n{problem}')
-    slowest = sorted(rows.items(), key=lambda item: item[1]['seconds'], reverse=True)[:5]
-    print('\nSlowest: ' + ', '.join(f'{labels[i]} {r["seconds"]:.0f}s' for i, r in slowest))
+    slowest = sorted(modules.items(), key=lambda item: item[1]['seconds'], reverse=True)[:5]
+    print('\nSlowest: ' + ', '.join(f'{labels[i]} {m["seconds"]:.0f}s' for i, m in slowest))
     print('-' * 70)
+    split = sum(1 for us in expected_parts.values() if us != [None])
     print(f'Ran {sum(r["run"] for r in rows.values())} tests in {elapsed:.3f}s '
-          f'({len(children)} modules, {jobs} jobs)')
+          f'({len(children)} modules, {split} split by class, {jobs} jobs)')
     if failed or problems:
         print(f'\nFAILED (modules={len(failed)}, worker problems={len(problems)})')
         return 1
