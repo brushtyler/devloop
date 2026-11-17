@@ -12,10 +12,13 @@ name.
 from .agents import AgentError, ModelUnavailable, PermissionDenied
 from .apps import DISPATCHER, ISSUE_COMMENT
 from .context import _render_issue_comments, _template
+from .dispatch_actions import ready_approval
 from .dispatch_supervision import UntrustedChange
 from .markdown import carries_record, read_marker, render_escalation, render_preflight
-from .planning import RECHECK_COMMAND, label_names, operator_blocked, preflight_state
+from .planning import (RECHECK_COMMAND, label_names, operator_blocked, preflight_state,
+                       repository_bound)
 from .supervision import ACCEPT_DEFAULTS, DECIDE, preflight_class
+from .workspace import WorkspaceError
 
 
 def devloop_text(body):
@@ -25,8 +28,11 @@ def devloop_text(body):
 
 def normalize_preflight(raw):
     """The outcome of a readiness check: ready only without gaps and without a split, whatever
-    the agent says (a ``default_available`` gap blocks too)."""
-    gaps = [dict(g, code_refs=list(g['code_refs'])) for g in raw['gaps']]
+    the agent says (a ``default_available`` gap blocks too). A gap depends on the base branch
+    (``repository_dependent``, #270) only when the agent says so."""
+    gaps = [dict(g, code_refs=list(g['code_refs']),
+                 repository_dependent=g.get('repository_dependent') is True)
+            for g in raw['gaps']]
     ready = bool(raw['ready']) and not gaps and not raw['split'].strip()
     return {'ready': ready, 'gaps': gaps, 'split': raw['split']}
 
@@ -111,24 +117,55 @@ class PreflightMixin:
         which one the readiness check added cannot be told, and the block is the operator's."""
         return len(set(labels) & self.cfg.labels.operator()) == 1
 
-    def _preflight_view(self, number, labels):
+    def _preflight_view(self, number, labels, base_head=None):
         """What planning needs about an issue's readiness check, read now from GitHub:
-        ``{hash, record, recheck, owned}``, ``record`` being the latest check or None."""
+        ``{hash, record, recheck, owned, relabeled, base}``, ``record`` being the latest check
+        or None. ``relabeled`` and ``base`` (#270) are those of ``preflight_state``: the second
+        is read, with ``base_head`` (``ws.base_head`` by default), only for a failure that
+        depends on the base branch (``repository_bound``)."""
         history = self.gh.issue_history(number)
         comments = self.gh.issue_comments(number)
         records = self._preflight_records(comments)
+        record = records[-1][1] if records else None
+        base = None
+        if repository_bound(record):
+            try:
+                base = (base_head or self.ws.base_head)()
+            except WorkspaceError as exc:
+                self.log(f'  issue #{number}: the base branch not read, the failed readiness '
+                         f'check holds: {exc}')
         return {'hash': self._request_hash(history, comments),
-                'record': records[-1][1] if records else None,
+                'record': record,
                 'recheck': self._recheck_requested(number, comments),
                 'owned': (self._owned_block(labels)
-                          and self._owns_block(number, comments, records))}
+                          and self._owns_block(number, comments, records)),
+                'relabeled': self._relabeled(history, comments, records),
+                'base': base}
+
+    def _relabeled(self, history, comments, records):
+        """The login that added ``agent:ready`` again after the latest readiness check, when
+        that check failed (#270), else None. Only the latest ``labeled`` event of the label
+        counts, and only when one of the issue's admitters wrote it (``ready_approval``): a
+        trusted user or, where its labels count, the supervisor's app. It must come after the
+        comment of the check, by its time; a comment without one never counts as relabeled.
+        GitHub timestamps have one-second granularity: a label in the same second as the check
+        cannot be proven to follow it, and does not count."""
+        if not records or records[-1][1]['ready']:
+            return None
+        approved = ready_approval(history['labeled'], self.cfg.labels.ready,
+                                  self._admitters(history['author']))
+        written = comments[records[-1][0]].get('created_at')
+        if approved and isinstance(written, str) and approved[1] > written:
+            return approved[0]
+        return None
 
     def _publish_preflight(self, number, outcome, digest, agent_key, note='', base=None):
         """Record a check's outcome on the issue and apply it to ``agent:needs-operator``: add
         the label when the check fails and the label is absent, remove it when the check passes
         and the label belongs to the readiness check, under whichever name it has (#248). A
-        label someone else set stays. ``base``: the commit the check ran on, None for an
-        outcome reused (the latest base then)."""
+        label someone else set stays. ``base``: the commit the check ran on, recorded with the
+        outcome (#270); None for an outcome reused (the latest base then), which keeps the
+        commit of its own record, if any."""
         lb = self.cfg.labels
         agent = self.cfg.agent(agent_key)
         labels = label_names(self.gh.issue(number).get('labels') or [])
@@ -138,6 +175,8 @@ class PreflightMixin:
         owned = self._owned_block(labels) and self._owns_block(number, comments, records)
         shown = ', '.join(f'`{name}`' for name in sorted(labels & lb.operator()))
         record = dict(outcome, hash=digest, agent=agent_key, blocked=False, labeled=0)
+        if base:
+            record['base'] = base
         author = self._as(agent_key, ISSUE_COMMENT)
         head = self.runner.header(agent)
         if outcome['ready']:
@@ -233,14 +272,15 @@ class PreflightMixin:
         self._publish_preflight(number, normalize_preflight(raw), digest, agent.key, base=base)
 
     def _do_preflight_block(self, number):
-        """Block again an issue whose latest check, still valid for its text, failed, after its
-        ``agent:needs-operator`` was removed: the outcome is reused, not recomputed."""
+        """Block again an issue whose latest check, still valid for its text (and its base,
+        #270), failed, after its ``agent:needs-operator`` was removed: the outcome is reused,
+        not recomputed, with the commit it ran on."""
         view = self._preflight_view(number, ())
         if preflight_state(view)[0] != 'not_ready':
             self.log('  the readiness check changed since the snapshot; next tick')
             return
         record = view['record']
-        outcome = {k: record[k] for k in ('ready', 'gaps', 'split')}
+        outcome = {k: record[k] for k in ('ready', 'gaps', 'split', 'base') if k in record}
         self._publish_preflight(number, outcome, view['hash'], record['agent'],
                                 note='Esito del controllo precedente, riusato: il testo '
                                      'dell\'issue non è cambiato.')

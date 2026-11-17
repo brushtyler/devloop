@@ -9,13 +9,15 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["kind", "description", "code_refs", "proposed_default"],
+        "required": ["kind", "description", "code_refs", "proposed_default",
+                     "repository_dependent"],
         "properties": {
           "kind": {"type": "string",
                    "enum": ["operator_decision", "default_available", "tool_unavailable"]},
           "description": {"type": "string"},
           "code_refs": {"type": "array", "items": {"type": "string"}},
-          "proposed_default": {"type": "string"}
+          "proposed_default": {"type": "string"},
+          "repository_dependent": {"type": "boolean"}
         }
       }
     },

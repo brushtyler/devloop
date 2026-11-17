@@ -206,17 +206,22 @@ GAP_KINDS = ('operator_decision', 'default_available', 'tool_unavailable')
 
 
 def _valid_gap(g):
+    """A gap of a readiness check. ``repository_dependent`` (#270), true when its resolution
+    depends on the content of the base branch, is missing from the records written before."""
     return (isinstance(g, dict) and g.get('kind') in GAP_KINDS
             and isinstance(g.get('description'), str) and isinstance(g.get('proposed_default'), str)
             and isinstance(g.get('code_refs'), list)
-            and all(isinstance(ref, str) for ref in g['code_refs']))
+            and all(isinstance(ref, str) for ref in g['code_refs'])
+            and isinstance(g.get('repository_dependent', False), bool))
 
 
 def _valid_preflight(p):
     """A readiness check (#114): ``ready`` never with ``blocked``, which records that the check
     added ``agent:needs-operator`` after ``labeled`` earlier ``labeled`` events of that label
-    (#248: of the label under both its names)."""
+    (#248: of the label under both its names). ``base`` (#270), the commit of the base branch
+    the check ran on, is missing from the records written before."""
     return (all(isinstance(p.get(k), str) for k in ('hash', 'agent', 'split'))
+            and isinstance(p.get('base', ''), str)
             and all(isinstance(p.get(k), bool) for k in ('ready', 'blocked'))
             and not (p['ready'] and p['blocked']) and _is_int(p.get('labeled'))
             and isinstance(p.get('gaps'), list) and all(_valid_gap(g) for g in p['gaps']))
@@ -490,8 +495,10 @@ PREFLIGHT_RESUME = (
     'Per proseguire, un utente fidato risponde nella issue: decide i punti aperti o accetta i '
     'default proposti in un commento, oppure modifica titolo o corpo. Il controllo si ripete al '
     'tick successivo; per ripeterlo senza modifiche basta un commento con `/devloop recheck` '
-    'come prima riga. Se l\'esito è positivo devloop rimuove `agent:needs-operator` che aveva messo '
-    'e l\'issue torna in coda.')
+    'come prima riga, oppure rimettere `agent:ready` (un utente fidato o il supervisore). Se '
+    'una lacuna dipende dal contenuto del branch base, il controllo si ripete da solo quando il '
+    'branch base avanza. Se l\'esito è positivo devloop rimuove `agent:needs-operator` che aveva '
+    'messo e l\'issue torna in coda.')
 
 
 def render_preflight(record, head, note=''):
@@ -507,6 +514,9 @@ def render_preflight(record, head, note=''):
             for gap in record['gaps']:
                 parts.append(f'- **{_GAP_TEXT[gap["kind"]]}:** {gap["description"].strip()}'
                              .replace('\n', '\n  '))
+                if gap.get('repository_dependent'):
+                    parts.append('  *Dipende dal branch base:* il controllo si ripete quando '
+                                 'avanza.')
                 if gap['code_refs']:
                     parts.append('  *Riferimenti:* ' + ', '.join(f'`{ref}`'
                                                                  for ref in gap['code_refs']))

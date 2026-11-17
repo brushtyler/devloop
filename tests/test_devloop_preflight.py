@@ -18,9 +18,9 @@ PCFG = dataclasses.replace(CFG, preflight=REV)
 NEEDS_OPERATOR, READY = 'agent:needs-operator', 'agent:ready'
 
 
-def gap(kind='operator_decision', default=''):
+def gap(kind='operator_decision', default='', repository=False):
     return {'kind': kind, 'description': 'Quale formato usare?', 'code_refs': ['devloop/x.py:3'],
-            'proposed_default': default}
+            'proposed_default': default, 'repository_dependent': repository}
 
 
 def checked(ready=True, gaps=(), split=''):
@@ -344,7 +344,10 @@ class PreflightTests(unittest.TestCase):
         bad = [checked(1), checked('true'), dict(checked(), split=None),
                {'ready': True, 'gaps': []}, checked(False, [dict(gap(), kind='other')]),
                checked(False, [dict(gap(), code_refs='x.py')]),
-               checked(False, [{k: v for k, v in gap().items() if k != 'proposed_default'}])]
+               checked(False, [{k: v for k, v in gap().items() if k != 'proposed_default'}]),
+               checked(False, [{k: v for k, v in gap().items()
+                                if k != 'repository_dependent'}]),
+               checked(False, [dict(gap(), repository_dependent='yes')])]
         for value in bad:
             with self.subTest(value=value), self.assertRaises(schema.SchemaError):
                 schema.validate(value, s)
@@ -370,7 +373,9 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(markdown.read_marker(body, 'preflight'), record)
         self.assertNotIn('<!-- devloop:preflight:v1 x', body.rsplit('\n', 2)[0])
         for broken in (dict(record, ready=True), dict(record, labeled=-1),
-                       dict(record, ready='no'), dict(record, gaps=[{'kind': 'x'}])):
+                       dict(record, ready='no'), dict(record, gaps=[{'kind': 'x'}]),
+                       dict(record, base=1),
+                       dict(record, gaps=[dict(gap(), repository_dependent='yes')])):
             with self.subTest(broken=broken):
                 self.assertIsNone(markdown.read_marker(markdown.marker('preflight', broken),
                                                        'preflight'))
