@@ -64,6 +64,24 @@ def critical(cls):
     return cls not in NON_CRITICAL
 
 
+def _reviewers(key):
+    """``(input, reviewers)`` of a retry key: the key without its reviewer, and the set of the
+    reviewers it names (``{''}`` when it names none)."""
+    rest = {k: v for k, v in key.items() if k != 'reviewer'}
+    names = {name for name in str(key.get('reviewer') or '').split(',') if name}
+    return rest, names or {''}
+
+
+def retries_done(key, keys):
+    """How many retries of the input of ``key`` the keys of the applied retries ``keys`` already
+    count: the most among the reviewers ``key`` names. A review whose reviewers failed together
+    and then one by one keeps the count of each reviewer, so that none of them runs more than
+    ``MAX_RETRIES`` more times on the same input."""
+    rest, names = _reviewers(key)
+    spent = [_reviewers(k) for k in keys if isinstance(k, dict)]
+    return max(sum(1 for other, who in spent if other == rest and name in who) for name in names)
+
+
 def describe(cls):
     """A short Italian description of ``cls``, for comments."""
     if cls == TOOL_FAILURE:

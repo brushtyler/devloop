@@ -84,8 +84,42 @@ class SupGH(SnapshotGH):
 
 
 class SupWS(FakeWS):
+    """A checkout of the base, for a readiness check or a new branch, starts at the base it
+    was created from, until a commit moves it."""
+
+    def __init__(self):
+        super().__init__()
+        self.started = {}
+
     def base_head(self):
         return self.base
+
+    def new_branch(self, name, branch):
+        path = super().new_branch(name, branch)
+        self.started[path] = self.base
+        return path
+
+    def base_copy(self, name):
+        path = super().base_copy(name)
+        self.started[path] = self.base
+        return path
+
+    def head(self, path):
+        return self.started.get(path) or super().head(path)
+
+    def commit_all(self, path, message, author=None):
+        self.started.pop(path, None)
+        return super().commit_all(path, message, author)
+
+
+class StepRunner(FakeRunner):
+    """A runner whose outputs may be callables, run as the turn runs (something that changes
+    while the agent works) before the next output is returned."""
+
+    def run(self, *args):
+        while self.outputs and callable(self.outputs[0]):
+            self.outputs.pop(0)()
+        return super().run(*args)
 
 
 class Identities:
@@ -115,7 +149,7 @@ class Case(unittest.TestCase):
     def make(self, cfg=AUTO, *outputs, has_pr=True):
         self.cfg = cfg
         self.gh, self.ws = SupGH(has_pr), SupWS()
-        self.runner, self.logs = FakeRunner(*outputs), []
+        self.runner, self.logs = StepRunner(*outputs), []
         return Dispatcher(cfg, self.gh, self.ws, self.runner, log=self.logs.append,
                           identities=Identities(self.gh))
 
@@ -271,6 +305,58 @@ class RetryTests(Case):
         self.assertEqual(self.escalations(100)[-1]['class'], 'retry_limit')
         self.assertTrue(self.escalations(100)[-1]['critical'])
 
+    def test_each_reviewer_keeps_its_own_retries(self):
+        # Two reviewers fail together, then one of them fails alone: its retries go on from
+        # the first one, so it runs at most twice more on the same head.
+        d = self.make(AUTO)
+
+        def fail(reviewers):
+            exc = crash()
+            exc.reviewer = reviewers
+            d._escalate_failure(Action('review', 100), pr(), exc)
+            self.assertEqual(self.gh.labels[100], {SUPER})
+            self.assertEqual(self.escalations(100)[-1]['key'],
+                             {'step': 'review', 'head': SHA1, 'reviewer': reviewers})
+
+        fail('codex,claude')
+        self.gh.command(100, '/devloop retry')
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertEqual(self.decisions(100)[-1]['attempt'], 1)
+        fail('claude')  # codex reviewed, claude failed again
+        self.gh.command(100, '/devloop retry')
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertEqual(self.decisions(100)[-1]['attempt'], 2)
+        self.assertEqual(self.gh.labels[100], {REVIEW})
+        fail('claude')
+        self.gh.command(100, '/devloop retry')
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertEqual(self.decisions(100)[-1]['outcome'], 'limit')
+        self.assertEqual(self.gh.labels[100], {HUMAN})
+        self.assertEqual(self.escalations(100)[-1]['class'], 'retry_limit')
+        # A reviewer that failed only once has its own count.
+        self.assertEqual(supervision.retries_done(
+            {'step': 'review', 'head': SHA1, 'reviewer': 'codex'},
+            [{'step': 'review', 'head': SHA1, 'reviewer': 'codex,claude'},
+             {'step': 'review', 'head': SHA1, 'reviewer': 'claude'}]), 1)
+
+    def test_a_retry_is_refused_when_the_escalation_became_critical(self):
+        cases = {
+            'phase:design': lambda gh: gh.labels[7].add('phase:design'),
+            'untrusted author': lambda gh: setattr(gh, 'author', 'stranger'),
+        }
+        for name, change in cases.items():
+            with self.subTest(case=name):
+                d = self.make(AUTO, crash())
+                self.fail_review(d)
+                change(self.gh)  # while the escalation waits for the supervisor
+                self.gh.command(100, '/devloop retry')
+                self.assertEqual(self.tick(d), [('supervise', 100)])
+                self.assertEqual(self.gh.labels[100], {HUMAN})
+                self.assertEqual(self.decisions(100)[-1]['outcome'], 'refused')
+                self.assertEqual(self.escalations(100)[-1]['class'], 'supervisor_refused')
+                self.assertIn('diventata critica', self.gh.threads[100][-2]['body'])
+                self.assertEqual(len(self.runner.calls), 1)  # not run again
+
     def test_a_command_from_someone_not_allowed_is_ignored(self):
         d = self.make(AUTO, crash())
         self.fail_review(d)
@@ -325,6 +411,35 @@ class RetryTests(Case):
         self.assertEqual(self.gh.labels[7], {SUPER})
         self.assertEqual(self.decisions(7)[-1]['outcome'], 'refused')
         self.assertEqual(len(self.runner.calls), 1)
+
+    def test_an_issue_retry_is_bound_to_the_input_the_step_ran_on(self):
+        # The base or the request changes while the step runs: the escalation records the
+        # input the step got, so the retry refers to a superseded input and is refused.
+        new_base = 'e' * 40
+        changes = {
+            'implement, base': (AUTO, lambda: setattr(self.ws, 'base', new_base), 'base'),
+            'implement, request': (AUTO, lambda: self.gh.say(7, 'brushtyler', 'Anche Y.'),
+                                   'request'),
+            'preflight, base': (PREFLIGHT_AUTO, lambda: setattr(self.ws, 'base', new_base),
+                                'base'),
+        }
+        for name, (cfg, change, field) in changes.items():
+            with self.subTest(case=name):
+                d = self.make(cfg, change, crash(), implemented(), has_pr=False)
+                step = name.split(',')[0]
+                self.assertEqual(self.tick(d), [(step, 7)])
+                self.assertEqual(self.gh.labels[7] & {SUPER, HUMAN}, {SUPER})
+                key = self.escalations(7)[-1]['key']
+                self.assertEqual(key['step'], step)
+                if field == 'base':
+                    self.assertNotEqual(key['base'], new_base)
+                self.gh.command(7, '/devloop retry')
+                self.assertEqual(self.tick(d), [('supervise', 7)])
+                decision = self.decisions(7)[-1]
+                self.assertEqual(decision['outcome'], 'refused')
+                self.assertIn(f'`{field}`', self.gh.threads[7][-1]['body'])
+                self.assertEqual(len(self.runner.calls), 1)
+                self.assertEqual(self.gh.created, [])
 
 
 class EscalateTests(Case):
@@ -403,6 +518,47 @@ class AcceptDefaultsTests(Case):
         text = (PROMPT_DIR / 'preflight.md').read_text(encoding='utf-8')
         self.assertIn('**always**\n`operator_decision`, never `default_available`', text)
         self.assertIn('operator_only_paths', text)
+
+
+class DocsTests(unittest.TestCase):
+    """docs/devloop.md documents the classes, the routing and the commands (#182)."""
+
+    def section(self):
+        text = (PROMPT_DIR.parents[1] / 'docs' / 'devloop.md').read_text(encoding='utf-8')
+        start = text.index('### Escalations to the supervisor')
+        end = text.index('\n## ', start)
+        return text[start:end]
+
+    def test_the_classes_are_documented_with_whether_they_are_critical(self):
+        rows = {}
+        for line in self.section().splitlines():
+            cells = [c.strip() for c in line.strip().strip('|').split('|')]
+            if line.startswith('|') and len(cells) == 3 and cells[2] in ('Yes', 'No'):
+                for name in cells[0].split(','):
+                    rows[name.strip().strip('`')] = cells[2]
+        expected = {cls: 'No' for cls in supervision.NON_CRITICAL}
+        expected.update({cls: 'Yes' for cls in supervision.CRITICAL})
+        self.assertEqual(rows, expected)
+        self.assertIn('Any other class, or none', self.section())
+
+    def test_the_routing_is_documented(self):
+        text = ' '.join(self.section().split())
+        self.assertIn('With `[merge].mode = "auto"` a non-critical escalation adds '
+                      '`agent:needs-supervisor` instead of `agent:needs-human`', text)
+        self.assertIn('With `"off"` and `"strict"` every escalation goes to '
+                      '`agent:needs-human`', text)
+        self.assertIn(f'`{supervision.DESIGN_LABEL}`', text)
+
+    def test_the_commands_are_documented(self):
+        text = ' '.join(self.section().split())
+        for command in ('/devloop retry', '/devloop accept-defaults',
+                        '/devloop escalate <reason>'):
+            self.assertIn(f'- `{command}`', self.section())
+        self.assertIn('from the identity of `[roles].supervisor`', text)
+        self.assertIn('**counts no round**', text)
+        self.assertIn('**two** retries', text)
+        self.assertIn('counted per reviewer', text)
+        self.assertIn('checked again', text)
 
 
 class CommandTests(unittest.TestCase):

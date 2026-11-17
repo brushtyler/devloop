@@ -115,7 +115,7 @@ from .review import (CI, FINDING_COMMAND, OPERATOR, ci_failure_review, current_r
                      open_findings, owner_of, round_verdict)
 from .supervision import (ACCEPT_DEFAULTS, DESIGN_LABEL, ESCALATE, ISSUE_STEPS, MAX_RETRIES,
                           PREFLIGHT_DEFAULT, RETRY, RETRY_STEPS, SYNC_FAILED, TOOL_FAILURE,
-                          critical, preflight_class, supervisor_command)
+                          critical, preflight_class, retries_done, supervisor_command)
 from .workspace import WorkspaceError
 
 PROMPT_DIR = Path(__file__).resolve().parent / 'prompts'
@@ -978,12 +978,14 @@ class Dispatcher:
                 found.append((position, record))
         return found
 
-    def _supervised(self, number, cls, step, pr=None, reviewer=None):
+    def _supervised(self, number, cls, step, pr=None, reviewer=None, key=None):
         """``(route, why)`` of an escalation of class ``cls`` raised by ``step`` on issue or PR
         ``number`` (``pr``: the PR, None for an issue). ``route`` is None when it goes to the
         operator; otherwise the payload of an escalation the supervisor decides: the step, the
         key of its input and, for a PR, the label a retry resumes from. ``why`` says why a
-        non-critical class in ``auto`` still goes to the operator, '' otherwise.
+        non-critical class in ``auto`` still goes to the operator, '' otherwise. ``key``: for an
+        issue, the key of the input the step ran on (``_issue_key``), bound before it ran; an
+        issue step without one goes to the operator.
 
         Only in merge mode ``auto`` with a supervisor, and only when nothing makes the
         escalation critical: a PR whose own merge mode is not ``auto`` (the override of its
@@ -1023,11 +1025,24 @@ class Dispatcher:
                     key['reviewer'] = reviewer
                 return {'step': step, 'key': key,
                         'resume': getattr(lb, RESUME_STEP.get(step, 'review'))}, ''
-            key = {'step': step, 'base': self.ws.base_head(),
-                   'request': self._request_hash(history, self.gh.issue_comments(number))}
+            if key is None and cls == PREFLIGHT_DEFAULT:
+                # A failed check reused, not run again: no retry uses its key, and
+                # accept-defaults checks the hash of the check's own record.
+                key = self._issue_key(step, self.ws.base_head(),
+                                      self._request_hash(history, self.gh.issue_comments(number)))
+            if not isinstance(key, dict) or key.get('step') != step:
+                return None, 'l\'input del passo non è stato registrato prima dell\'esecuzione'
             return {'step': step, 'key': key}, ''
         except (GitHubError, WorkspaceError) as exc:
             return None, f'non è stato possibile verificare che l\'escalation non sia critica ({exc})'
+
+    @staticmethod
+    def _issue_key(step, base, request):
+        """The key of the input of an issue's ``step``: the commit of the base its checkout
+        started from and the hash of the request its prompt got, both taken before the step
+        runs, so that a base or a text that changes during the turn is not mistaken for the
+        input that failed."""
+        return {'step': step, 'base': base, 'request': request}
 
     def _current_key(self, number, key, pr):
         """The key ``key`` would have now, for the same step (and reviewer) on issue or PR
@@ -1105,7 +1120,9 @@ class Dispatcher:
           the step is the one that failed (the key of the escalation). A PR goes back to the
           label of its step, and the next tick runs it; an issue's step runs now. Retries
           write no review record, so they count no round. After ``MAX_RETRIES`` retries for
-          the same key the next one is not run and the item goes to ``agent:needs-human``.
+          the same key (counted per reviewer, ``retries_done``) the next one is not run and the
+          item goes to ``agent:needs-human``, as it does when what made the escalation
+          non-critical (``_supervised``) no longer holds.
 
         An escalation whose class is critical or unknown, or that was not routed to the
         supervisor, accepts no command: the item goes to ``agent:needs-human``."""
@@ -1170,6 +1187,17 @@ class Dispatcher:
             return self._to_operator(number, 'L\'escalation non registra un passo che il '
                                      f'supervisore possa ripetere: `/devloop {name}` di `{by}` è '
                                      'stato rifiutato.', 'supervisor_refused', human_remove)
+        # What made the escalation non-critical is checked again, on data read now: a
+        # phase:design label, an untrusted text or author, the PR's own merge mode or its
+        # implementer may have changed while it waited.
+        route, why = self._supervised(number, cls, step, target if is_pr else None,
+                                      key.get('reviewer'), key=key)
+        if route is None:
+            why = why or 'la modalità di merge non è più `auto` con un supervisore'
+            trace('refused', f'rifiutato: l\'escalation è diventata critica ({why}).')
+            return self._to_operator(number, 'Il supervisore non può più decidere questa '
+                                     f'escalation: {why}. `/devloop {name}` di `{by}` è stato '
+                                     'rifiutato.', 'supervisor_refused', human_remove)
         current = self._current_key(number, key, target if is_pr else None)
         if current != key:
             return trace('refused', 'rifiutato: l\'input del passo è cambiato dopo '
@@ -1177,8 +1205,11 @@ class Dispatcher:
                                                         if current[k] != key.get(k))
                          + '), quindi il comando si riferisce a un input superato. Il comando è '
                          'speso; l\'escalation resta al supervisore.')
-        done = sum(1 for _, r in self._dispatcher_records(comments, 'supervision')
-                   if r['command'] == RETRY and r['outcome'] == 'applied' and r.get('key') == key)
+        # Counted per reviewer: a review whose reviewers failed together, then one by one, keeps
+        # the retries each one already had.
+        done = retries_done(key, [r.get('key') for _, r in
+                                  self._dispatcher_records(comments, 'supervision')
+                                  if r['command'] == RETRY and r['outcome'] == 'applied'])
         if done >= MAX_RETRIES:
             trace('limit', f'non eseguito: il passo `{step}` è già stato ripetuto {done} volte '
                   'per lo stesso input.', key=key)
@@ -1526,10 +1557,11 @@ class Dispatcher:
                 'owned': (self.cfg.labels.needs_human in labels
                           and self._owns_block(number, comments, records))}
 
-    def _publish_preflight(self, number, outcome, digest, agent_key, note=''):
+    def _publish_preflight(self, number, outcome, digest, agent_key, note='', base=None):
         """Record a check's outcome on the issue and apply it to ``agent:needs-human``: add the
         label when the check fails and the label is absent, remove it when the check passes and
-        the label belongs to the readiness check. A label someone else set stays."""
+        the label belongs to the readiness check. A label someone else set stays. ``base``: the
+        commit the check ran on, None for an outcome reused (the latest base then)."""
         lb = self.cfg.labels
         agent = self.cfg.agent(agent_key)
         labels = label_names(self.gh.issue(number).get('labels') or [])
@@ -1554,7 +1586,9 @@ class Dispatcher:
         # The class of the escalation (#182): in "auto" gaps that are all defaults go to the
         # supervisor, with a dispatcher escalation that carries the key of the check's input.
         record['class'] = cls = preflight_class(outcome)
-        supervised, why = (None, '') if present else self._supervised(number, cls, 'preflight')
+        supervised, why = (None, '') if present else self._supervised(
+            number, cls, 'preflight',
+            key=self._issue_key('preflight', base, digest) if base else None)
         if supervised:
             author.comment(number, render_preflight(record, head, note))
             self.gh.comment(number, render_escalation(
@@ -1603,6 +1637,10 @@ class Dispatcher:
         name = f'issue-{number}-preflight'
         path = self.ws.base_copy(name)
         try:
+            # The input the check runs on (#182), bound before it runs: the commit of its
+            # checkout and the hash of the request its prompt gets.
+            base = self.ws.head(path)
+            key = self._issue_key('preflight', base, digest)
             # A denied permission is retried once, in the same checkout (#180), as in ``_turn``.
             for label in (name, f'{name}-retry'):
                 entry = self._open_turn((number, 'preflight'), agent, 'review', label)
@@ -1613,16 +1651,18 @@ class Dispatcher:
                     error = self._permission_denied(agent, exc, retry=label == name)
                     if error is None:
                         continue
+                    error.key = key
                     raise error from exc
                 except AgentError as exc:
                     self._close_turn(entry, 'unavailable' if isinstance(exc, ModelUnavailable)
                                      else 'failure', exc)
+                    exc.key = key
                     raise
                 self._close_turn(entry, 'success')
                 break
         finally:
             self.ws.remove(name)
-        self._publish_preflight(number, normalize_preflight(raw), digest, agent.key)
+        self._publish_preflight(number, normalize_preflight(raw), digest, agent.key, base=base)
 
     def _do_preflight_block(self, number):
         """Block again an issue whose latest check, still valid for its text, failed, after its
@@ -1746,7 +1786,8 @@ class Dispatcher:
                   else [lb.working, lb.ready])
         try:
             supervised, why = self._supervised(number, cls, action.kind, pr,
-                                               getattr(exc, 'reviewer', None))
+                                               getattr(exc, 'reviewer', None),
+                                               key=getattr(exc, 'key', None))
             self._escalate(number, reason, remove=remove, cls=cls, supervised=supervised,
                            why=why)
         except GitHubError as gh_exc:
@@ -1762,10 +1803,13 @@ class Dispatcher:
             raise UntrustedChange(f'issue #{number}: {reason}')
         # Defaults the supervisor accepted count as trusted comments (#182): read with REST, as
         # every other record of the dispatcher, so that its app's login is the one it signs with.
-        accepted = [c for c in self.gh.issue_comments(number) if self._accepted(c)]
+        listed = self.gh.issue_comments(number)
+        accepted = [c for c in listed if self._accepted(c)]
+        # ``request``: the hash of the request as read here (#182), part of the key of an
+        # implement turn's retries.
         issue = dict(self.gh.issue(number), title=history['title'], body=history['body'],
                      labeled=history['labeled'], admitters=self._admitters(history['author']),
-                     accepted=accepted)
+                     accepted=accepted, request=self._request_hash(history, listed))
         return issue, _render_issue_comments(issue.get('comments') or [], self.cfg.trusted_users,
                                              [read_marker(c['body'], 'supervision')
                                               for c in accepted])
@@ -2673,15 +2717,22 @@ class Dispatcher:
         self.gh.edit_labels(number, add=[lb.working], remove=[lb.ready])
         name, branch = f'issue-{number}', f'{cfg.branch_prefix}{number}'
         path = self.ws.new_branch(name, branch)
+        # The input the turn runs on (#182), bound before it runs: the commit its branch starts
+        # from and the request its prompt gets.
+        key = self._issue_key('implement', self.ws.head(path), issue['request'])
         criteria = acceptance_criteria(issue.get('body'))
         prompt = _template('implement', repo=cfg.repo, base_branch=cfg.base_branch,
                            issue_number=number, issue_title=issue['title'],
                            issue_body=issue.get('body') or '', issue_comments=comments,
                            acceptance_criteria=format_criteria(criteria),
                            test_cmd=cfg.test_cmd, language=cfg.language)
-        result, failure, used, tested, local = self._write_turn(
-            agent, prompt, 'implement', path, f'issue-{number}-implement',
-            where=(number, 'implement'))
+        try:
+            result, failure, used, tested, local = self._write_turn(
+                agent, prompt, 'implement', path, f'issue-{number}-implement',
+                where=(number, 'implement'))
+        except AgentError as exc:
+            exc.key = key
+            raise
         if result['status'] == 'blocked':
             return self._blocked(number, used, result['blocked_reason'], remove=[lb.working],
                                  on_pr=False)

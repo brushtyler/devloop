@@ -637,8 +637,16 @@ command before it, and among the commands that wait the latest wins.
   [fallback models](#fallback-models)) do not count. The key is durable, read from the
   escalation and the dispatcher's records on GitHub: the item, the step and, for a review, the
   reviewer; for a PR the head the step failed on, for an issue the commit of the base branch and
-  the hash of the request (title, body and trusted comments). A retry whose input has changed
+  the hash of the request (title, body and trusted comments). An issue's key is taken before the
+  step runs, from the commit its checkout starts at and the request its prompt gets, so a base
+  or a text that changes during the turn already makes the retry refer to a superseded input.
+  The retries are counted per reviewer: when several reviewers fail together and later only
+  some of them, each keeps the retries it already had. A retry whose input has changed
   since (a new head, base or request) is refused, and the escalation stays with the supervisor.
+  Before a retry runs, what made the escalation non-critical is checked again on data read
+  then (the conditions of **Routing** above: `phase:design`, author and text of the issue, merge
+  mode and implementer of the PR): if one no longer holds, the retry is refused and the item
+  goes to `agent:needs-human` (`supervisor_refused`).
 - `/devloop accept-defaults` accepts the defaults of a `preflight_default` escalation, only when
   **every** gap of the latest check is `default_available`, no split is needed, the issue has no
   `phase:design` label, was opened by a trusted user or a devloop app, and the check is the one of
