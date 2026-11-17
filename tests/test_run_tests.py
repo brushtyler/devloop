@@ -319,7 +319,21 @@ class RunTestsDistributionTests(ProjectMixin, unittest.TestCase):
         log = self.log(root)
         self.assertEqual(log['fast.A'][0], log['fast.B'][0], log)
 
-    def test_without_history_divisible_modules_are_split(self):
+    def versioned(self, root, durations):
+        (root / 'tests' / 'durations.json').write_text(json.dumps(durations))
+
+    def test_without_any_history_no_module_is_split(self):
+        # CI measure on #285: splitting every divisible module of a fresh checkout by estimate
+        # made the suite about 40% slower, since each class repeats the module's imports.
+        root = self.project({'tests/recorder.py': RECORDER, 'tests/test_new.py': two_classes('new')})
+        serial, parallel = self.both(root)
+        self.assertEqual(parallel.returncode, 0, parallel.stdout)
+        self.assertEqual(ran(parallel.stdout), ran(serial.stderr))
+        self.assertIn('(1 modules, 0 split by class, 1 jobs)', parallel.stdout)
+        log = self.log(root)
+        self.assertEqual(log['new.A'][0], log['new.B'][0], log)
+
+    def test_without_local_history_the_versioned_durations_decide(self):
         # load_tests may select classes defined elsewhere: the discovered instances are split.
         root = self.project({
             'tests/recorder.py': RECORDER,
@@ -329,14 +343,38 @@ class RunTestsDistributionTests(ProjectMixin, unittest.TestCase):
                 def load_tests(loader, tests, pattern):
                     return loader.loadTestsFromModule(cases_elsewhere)
             ''',
+            'tests/test_short.py': two_classes('short'),
+            'tests/test_absent.py': two_classes('absent'),
         })
-        serial, parallel = self.both(root)
+        # The label of a module is the module of its first test: cases_elsewhere for test_loader.
+        self.versioned(root, {'cases_elsewhere': 100, 'test_short': 10})
+        serial, parallel = self.both(root, jobs=4)
         self.assertEqual(parallel.returncode, 0, parallel.stdout)
         self.assertEqual(ran(parallel.stdout), ran(serial.stderr))
-        self.assertIn('(1 modules, 1 split by class, 2 jobs)', parallel.stdout)
+        self.assertIn('(3 modules, 1 split by class, 4 jobs)', parallel.stdout)
         log = self.log(root)
         self.assertEqual(len(log['elsewhere.A.setUpClass']), 1, log)
         self.assertNotEqual(log['elsewhere.A'][0], log['elsewhere.B'][0], log)
+        for name in ('short', 'absent'):
+            self.assertEqual(log[f'{name}.A'][0], log[f'{name}.B'][0], log)
+        # The versioned file is only read; the measured durations go to the local history.
+        self.assertEqual(json.loads((root / 'tests' / 'durations.json').read_text()),
+                         {'cases_elsewhere': 100, 'test_short': 10})
+        local = json.loads((root / '.ssdlc' / 'test-durations.json').read_text())
+        self.assertEqual(set(local), {'cases_elsewhere', 'test_short', 'test_absent'})
+
+    def test_the_local_history_wins_over_the_versioned_durations(self):
+        root = self.project({'tests/recorder.py': RECORDER, 'tests/test_slow.py': two_classes('slow'),
+                             'tests/test_other.py': two_classes('other')})
+        self.versioned(root, {'test_slow': 100, 'test_other': 100})
+        # The local history has test_slow only: test_other falls back to the versioned file.
+        self.history(root, {'test_slow': 10})
+        parallel = self.run_tests(root, jobs=4)
+        self.assertEqual(parallel.returncode, 0, parallel.stdout)
+        self.assertIn('(2 modules, 1 split by class, 3 jobs)', parallel.stdout)
+        log = self.log(root)
+        self.assertEqual(log['slow.A'][0], log['slow.B'][0], log)
+        self.assertNotEqual(log['other.A'][0], log['other.B'][0], log)
 
     def test_module_fixtures_and_custom_suites_are_not_split(self):
         root = self.project({

@@ -6,11 +6,13 @@
 The suite is ``unittest.defaultTestLoader.discover('tests')``, the same as
 ``python3 -m unittest discover -s tests``: packages, ``load_tests`` hooks and modules with the same
 name in different packages are handled by unittest itself. Its top-level children (one per module)
-are split across N worker processes, slowest first, using the durations of the previous run
-(``.ssdlc/test-durations.json``, ignored by git). A module that took more than SPLIT_SECONDS, or that
-has no recorded duration (estimated at 0.5 seconds per test), is split by test class when ``units``
-allows it, so its classes run in different workers. Each worker repeats the same discover and runs
-only its parts. The summary at the end gives the total, the slowest modules and the output of every
+are split across N worker processes, slowest first, using the durations of the previous local run
+(``.ssdlc/test-durations.json``, ignored by git) and, for the modules it does not list, those of the
+versioned ``tests/durations.json``, written from a full run: a fresh checkout, as in CI, has no
+local history. A module whose duration is above SPLIT_SECONDS is split by test class when ``units``
+allows it, so its classes run in different workers. A module with no duration in either file stays
+whole, since each class would repeat the imports and fixtures of the module, and is estimated at
+0.5 seconds per test. Each worker repeats the same discover and runs only its parts. The summary at the end gives the total, the slowest modules and the output of every
 failed module, aggregated per module even when it was split; the exit code is non-zero if any test
 failed or a worker did not finish.
 
@@ -33,9 +35,9 @@ import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-# A module whose previous run took longer than this is split by class across the workers.
+# A module whose recorded duration is longer than this is split by class across the workers.
 SPLIT_SECONDS = 60
-# The estimated cost of a test that has no recorded duration.
+# The estimated cost of a test whose module has no recorded duration; such a module is not split.
 SECONDS_PER_TEST = 0.5
 # After the discover the boot loads this file with the builtins open, compile and exec only:
 # runpy, importlib.util and the like would import modules (pkgutil, ...) that tests/ can shadow.
@@ -172,19 +174,18 @@ def worker_main(argv, children):
 
 
 def plan(children, labels, previous):
-    """The parts to run with their estimated cost: ``[((index, unit), seconds), ...]``."""
+    """The parts to run with their estimated cost: ``[((index, unit), seconds), ...]``.
+    ``previous`` maps a module label to its recorded duration; a module without one is not split."""
     parts = []
     for i, child in enumerate(children):
         seconds = previous.get(labels[i])
         if not isinstance(seconds, (int, float)) or isinstance(seconds, bool):
             seconds = None
-        groups = units(child) if seconds is None or seconds > SPLIT_SECONDS else None
+        groups = units(child) if seconds is not None and seconds > SPLIT_SECONDS else None
         if groups:
             total = sum(len(g) for g in groups)
             for u, group in enumerate(groups):
-                cost = (seconds * len(group) / total if seconds is not None
-                        else len(group) * SECONDS_PER_TEST)
-                parts.append(((i, u), cost))
+                parts.append(((i, u), seconds * len(group) / total))
         else:
             parts.append(((i, None), seconds if seconds is not None
                           else child.countTestCases() * SECONDS_PER_TEST))
@@ -225,17 +226,20 @@ def main(argv):
     parser.add_argument('-j', '--jobs', type=int, default=os.cpu_count() or 2)
     args = parser.parse_args(argv)
 
+    def read(path):
+        try:
+            found = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return {}
+        return found if isinstance(found, dict) else {}
+
     durations = Path(ROOT) / '.ssdlc' / 'test-durations.json'
     refresh_index()
     children = discover()
     labels = [label(c) or f'#{i}' for i, c in enumerate(children)]
-    try:
-        previous = json.loads(durations.read_text())
-    except (OSError, ValueError):
-        previous = {}
-    if not isinstance(previous, dict):
-        previous = {}
-    parts = plan(children, labels, previous)
+    previous = read(durations)
+    # The local history wins; the versioned file covers what it lacks, as in a fresh checkout.
+    parts = plan(children, labels, {**read(Path(ROOT) / 'tests' / 'durations.json'), **previous})
     expected_parts = {}
     for (i, u), _ in parts:
         expected_parts.setdefault(i, []).append(u)
