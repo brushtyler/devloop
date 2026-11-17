@@ -294,6 +294,24 @@ class ExclusionTests(ContinuousLoopCase):
         self.assertTrue(overlap(spans[('fix', 100)], spans[('implement', 9)]))
         self.assertTrue(overlap(spans[('review', 101)], spans[('implement', 9)]))
 
+    def test_news_during_a_merge_start_nothing_until_it_ends(self):
+        # The merge of #100 lasts 30 minutes; #10 becomes ready after 5, and that news plans a
+        # tick while the merge runs, with two slots free.
+        p = pr(100, issue=7, labels=[READY], reviews=[norm(raw_review())])
+        p.mergeable, p.merge_status, p.merge_mode = 'MERGEABLE', 'CLEAN', 'strict'
+        self.world.prs[100] = p
+        self.world.issues[10] = 5 * MINUTE
+        cfg = dataclasses.replace(STRICT, max_parallel_actions=3, max_open_prs=5)
+        d = Sim(cfg, self.world, self.clock, {'implement': 10 * MINUTE, 'merge': 30 * MINUTE},
+                stop_after=('implement', 10), stop_file=self.stop)
+        self.run_loop(d)
+        merge, implement = d.spans[('merge', 100)], d.spans[('implement', 10)]
+        self.assertEqual(merge[0], 0)
+        self.assertIn('news on GitHub: next tick', self.logs)
+        self.assertTrue(any(line.endswith('running: merge #100') for line in d.logs), d.logs)
+        self.assertFalse(overlap(merge, implement))
+        self.assertGreaterEqual(implement[0], merge[1])
+
 
 class StopAndFailureTests(ContinuousLoopCase):
     def test_a_stop_waits_for_the_running_actions_and_starts_no_other(self):
@@ -342,6 +360,65 @@ class StopAndFailureTests(ContinuousLoopCase):
         self.assertIn('waiting for implement #165 to end', self.logs)
 
 
+class EndDuringTickTests(unittest.TestCase):
+    def test_the_last_action_ending_during_the_snapshot_plans_again_at_once(self):
+        # max_open_prs=1: the running implementation of #9 holds the only PR slot. It ends,
+        # without a PR, while the second tick reads GitHub: that plan still reserves its slot
+        # and starts nothing, and the loop must plan again at once rather than wait 900 s.
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        stop = tmp / 'STOP'
+        cfg = dataclasses.replace(PCFG, max_open_prs=1)
+        d = Dispatcher(cfg, FakeGH(), FakeWS(), FakeRunner(), log=lambda line: None)
+        d.workers = Workers(3)
+        now = [0.0]
+        release, ran, reads, ticks, watches = threading.Event(), [], [], [], []
+
+        def implement(number):
+            ran.append(number)
+            if number == 9:
+                release.wait(timeout=10)
+        d._do_implement = implement
+
+        def snapshot():
+            reads.append(now[0])
+            if len(reads) == 2:  # #9 ends during this read
+                release.set()
+                deadline = time.monotonic() + 10
+                while d.workers.running() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+            return Snapshot([], [ready(n) for n in (9, 10) if n not in ran], [])
+        d.snapshot = snapshot
+
+        def tick():
+            ticks.append(now[0])
+            started = d.tick()
+            if len(ticks) == 3:
+                stop.touch()
+            return started
+
+        def watch(timeout, sleep, check):
+            watches.append(now[0])
+            check()
+            if len(watches) == 1:
+                return 0  # news: the second tick
+            now[0] += timeout
+            return NOTHING_NEW
+
+        def sleep(seconds):
+            now[0] += seconds
+            time.sleep(0.001)
+        logs = []
+        loop = runloop.Loop(tick, watch, stop, log=logs.append, idle_timeout=900,
+                            clock=lambda: now[0], sleep=sleep, workers=d.workers)
+        with mock.patch('signal.signal'):
+            self.assertEqual(loop.run(), 0)
+        self.assertEqual(ran, [9, 10])
+        self.assertEqual(ticks, [0, 0, 0])
+        self.assertEqual(watches, [0])
+        self.assertIn('an action ended during the tick: next tick', logs)
+
+
 class AdmitTests(unittest.TestCase):
     def test_only_the_first_action_on_a_number_or_a_pr_and_its_issue_starts(self):
         actions = [Action('settle', 7), Action('review', 100), Action('fix', 101),
@@ -359,6 +436,12 @@ class AdmitTests(unittest.TestCase):
         self.assertEqual(admit(actions, {}, [], 3), [Action('merge', 101)])
         running = [(Action('implement', 9), frozenset({9}))]
         self.assertEqual(admit(actions, {}, running, 2), [])
+
+    def test_nothing_starts_while_a_global_action_runs(self):
+        running = [(Action('merge', 100), frozenset({100, 7}))]
+        actions = [Action('fix', 101), Action('implement', 9)]
+        self.assertEqual(admit(actions, {101: 8}, running, 2), [])
+        self.assertEqual(admit([Action('pin', 0)], {}, running, 2), [])
 
 
 class PlanAroundRunningTests(unittest.TestCase):

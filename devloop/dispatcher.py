@@ -367,8 +367,11 @@ def admit(actions, issue_of, running, slots):
 
     A global action (``GLOBAL_ACTIONS``) starts only when nothing runs, alone and before the
     others; while one is planned and something runs, nothing starts, so that the running actions
-    end and it runs next. Of several actions on the same number, or on a PR and its issue, only
-    the first starts: the next plan, which sees its result, decides the others."""
+    end and it runs next. While a global action runs, nothing starts either. Of several actions
+    on the same number, or on a PR and its issue, only the first starts: the next plan, which
+    sees its result, decides the others."""
+    if any(action.kind in GLOBAL_ACTIONS for action, _ in running):
+        return []
     first = next((a for a in actions if a.kind in GLOBAL_ACTIONS), None)
     if first is not None:
         return [] if running else [first]
@@ -424,9 +427,10 @@ class Workers:
             try:
                 job()
             finally:
+                # Under the lock: whoever sees the action gone from running() sees ended() too.
                 with self._lock:
                     del self._running[key]
-                self._ended.set()
+                    self._ended.set()
         self._pool.submit(run)
 
     def close(self):

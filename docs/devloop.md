@@ -1736,7 +1736,8 @@ With `max_parallel_actions` above 1, actions run in one of two modes (#227):
   waiting for them. As soon as one ends, the next tick reads GitHub again and plans the free
   slots; while a slot is free, news on GitHub (a CI that passes, a new ready issue) starts a
   tick too, within the usual `--idle-timeout`. A long action (a 45-minute implementation) no
-  longer holds the reviews and fixes that become ready meanwhile.
+  longer holds the reviews and fixes that become ready meanwhile. An action that ends while a
+  tick reads GitHub starts the next tick at once, even when it was the last one running.
 
 In `devloop run` a plan leaves out the issues and PRs of the running actions: no second action
 starts on the same number, nor on a PR and its issue, until the first has ended; of two actions
@@ -1744,7 +1745,8 @@ planned on the same number only the first starts, and the next tick, which sees 
 decides the other. An implementation or readiness check that is running keeps its slot of
 `max_open_prs`. A global action (a merge) starts only when nothing runs, alone: while one is
 planned and actions are running, no other action starts, so they end and the global action runs
-next; the actions planned with it start in the ticks after it. The
+next; the actions planned with it start in the ticks after it. While a global action runs, no
+other action starts, even when news on GitHub start a tick and slots are free. The
 [pin after a merge](#pin-after-a-merge) runs only when no action runs, and while one is pending
 no action starts. The turns of running actions are not marked incomplete by the ticks that run
 meanwhile; they are checked once their action ends.

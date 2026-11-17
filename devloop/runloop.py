@@ -182,6 +182,11 @@ class Loop:
                 continue
             if actions:
                 continue
+            if self.workers is not None and self.workers.ended():
+                # The last action ended during the tick, after it read what runs: its result is
+                # not in that plan, and no wait would notice it.
+                self.log('an action ended during the tick: next tick')
+                continue
             self._wait(self._idle)
 
     def _drain(self):
