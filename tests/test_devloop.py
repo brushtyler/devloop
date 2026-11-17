@@ -301,6 +301,37 @@ class AgentCommandTests(unittest.TestCase):
                                          schema_file=schema.schema_path('fix'), out_file='o')
         self.assertEqual(claude[claude.index('--permission-mode') + 1], 'acceptEdits')
 
+    def test_claude_turns_deny_sub_agents(self):
+        # Issue #219: a headless claude turn ends with its final answer, without waiting for
+        # sub-agents still running in the background. Every claude turn denies the tools that
+        # start them, whatever write_args and review_args say.
+        def denied(argv):
+            tools, collecting = [], False
+            for arg in argv:
+                if arg.startswith('--'):
+                    collecting = arg == '--disallowedTools'
+                elif collecting:
+                    tools.append(arg)
+            return tools
+        bare = dataclasses.replace(CFG.agent('claude'), write_args=(), review_args=())
+        for agent in (CFG.agent('claude'), bare):
+            for mode in agents.MODES:
+                with self.subTest(args=bool(agent.write_args), mode=mode):
+                    argv, _ = agents.build_command(agent, mode, 'p',
+                                                   schema_file=schema.schema_path('fix'),
+                                                   out_file='o')
+                    for tool in ('Agent', 'Task', 'Workflow'):
+                        self.assertIn(tool, denied(argv))
+        # The documentation names the same tools.
+        docs = (Path(__file__).resolve().parent.parent / 'docs' / 'devloop.md').read_text()
+        self.assertIn('### No background work in a turn', docs)
+        self.assertIn('`--disallowedTools ' + ' '.join(agents.CLAUDE_DENIED_TOOLS) + '`',
+                      ' '.join(docs.split()))
+        # The operator's own denials still apply.
+        argv, _ = agents.build_command(CFG.agent('claude'), 'review', 'p',
+                                       schema_file=schema.schema_path('review'), out_file='o')
+        self.assertIn('Edit', denied(argv))
+
     def test_extract_output_per_cli(self):
         self.assertEqual(agents.extract_output(
             'claude', json.dumps({'is_error': False, 'structured_output': {'a': 1}}), None), {'a': 1})
@@ -951,6 +982,37 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(self.gh.labels[7], {'agent:needs-human'})
         self.assertTrue(self.gh.comments[0][1].startswith(f'> [!NOTE]\n> **Agent:** {IMPL_NAME}'))
         self.assertIn('unclear', self.gh.comments[0][1])
+
+    def test_block_for_unfinished_background_work_is_a_tool_failure(self):
+        # Issue #219: the turn ended before its own background work; not a block of the change.
+        reason = ('Il risultato finale è stato richiesto prima che l\'audit parallelo si '
+                  'concludesse, quindi docs/adr/0003 non è stato scritto.')
+        d = self.make(FakeRunner(dict(implemented('blocked'), blocked_reason=reason)))
+        with self.assertRaises(agents.AgentError) as ctx:
+            d._do_implement(7)
+        self.assertIn('background work was still running', str(ctx.exception))
+        self.assertIn('audit parallelo', str(ctx.exception))
+        self.assertEqual(self.gh.comments, [])
+        self.assertEqual(self.gh.created, [])
+        # As every agent failure of an action, it escalates as a tool_failure.
+        d._escalate_failure(Action('implement', 7), None, ctx.exception)
+        self.assertEqual(markdown.read_marker(self.gh.comments[-1][1], 'notice')['class'],
+                         'tool_failure')
+
+    def test_background_unfinished_recognises_only_unfinished_background_work(self):
+        for reason in ('Il risultato finale è stato richiesto prima che l\'audit parallelo si '
+                       'concludesse.',
+                       'The final answer was requested while background sub-agents were '
+                       'still running.',
+                       'Sotto-agent in background ancora in corso: lavoro non concluso.',
+                       'The parallel audit had not finished yet.'):
+            with self.subTest(reason=reason):
+                self.assertTrue(agents.background_unfinished(reason))
+        for reason in ('', None, 'unclear', 'Needs a product call on the background colour.',
+                       'Dipende dalla issue #12, ancora in corso.',
+                       'Il servizio in background va configurato. La migrazione è in corso.'):
+            with self.subTest(reason=reason):
+                self.assertFalse(agents.background_unfinished(reason))
 
     def test_review_posts_structured_verdict_and_routes_labels(self):
         for raw, labels in ((raw_review(), {'agent:ready-to-merge'}),
@@ -1611,6 +1673,18 @@ class CredentialIsolationTests(unittest.TestCase):
                 text = ' '.join((PROMPT_DIR / f'{name}.md').read_text().split())
                 self.assertIn('Run tests in the foreground and use their exit code.', text)
                 self.assertIn('Do not start them in the background', text)
+
+    def test_write_prompts_forbid_background_work(self):
+        # Issue #219: an implementer split its work among background sub-agents and gave its
+        # final answer before they ended; the headless turn does not wait for them.
+        from devloop.dispatcher import PROMPT_DIR
+        for name in ('implement', 'fix'):
+            with self.subTest(prompt=name):
+                text = ' '.join((PROMPT_DIR / f'{name}.md').read_text().split())
+                self.assertIn('Complete all the work within this turn, yourself and in the '
+                              'foreground: do not start sub-agents or any other background '
+                              'activity.', text)
+                self.assertIn('Give the final answer only when the work is finished', text)
 
     def test_agents_find_no_github_app_key(self):
         # AGENTS.md tells interactive agents to publish with scripts/agent-token.py; agents that
