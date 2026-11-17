@@ -31,6 +31,10 @@ not a boolean, a `restart_max_wait_minutes` that is not a whole number of at lea
 unknown key, stops devloop at startup. `[run]` (`alert_issue`, unset by
 default) names the issue of the alert of the [continuous loop](guide.md#continuous-loop); a value that
 is not an issue number (an integer of at least 1), or an unknown key, stops devloop at startup.
+`[report]` (`issue`, unset by default; `interval`, default 15) sets the
+[daily summary](guide.md#daily-summary): the dedicated issue it is published on and the minutes
+between two automatic publications of `devloop run`; an `issue` that is not an issue number, an
+`interval` that is not a whole number of at least 1, or an unknown key, stops devloop at startup.
 `[docs] map` sets the
 [documentation map](#documentation-map). Operator overrides go into the
 [local overlay](guide.md#local-config-as-an-overlay), not into this file. A running

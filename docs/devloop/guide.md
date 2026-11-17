@@ -581,6 +581,7 @@ python3 -m devloop cleanup          # remove worktrees left by failed steps
 python3 -m devloop follow issue-52  # follow live the implementer of issue #52 (pr-<N>: reviewer or fixer)
 python3 -m devloop watch --timeout 3600  # wait for the next change on GitHub, for the supervising agent
 python3 -m devloop pin origin/main  # pin a commit of origin, after its smoke test (see Run from a pinned installation)
+python3 -m devloop report --day 2026-11-16  # print the summary of a UTC day from devloop's records (default: today; --publish: on [report] issue, see Daily summary)
 python3 -m devloop fallback reset agy  # forget the models agy remembers unavailable (see Memory of unavailable models)
 ```
 
@@ -929,6 +930,51 @@ end before the loop exits; so does the failed tick that stops the loop, before t
 `outcome of <action> #<N>: …` line when it ends. With `max_parallel_actions = 1`, `devloop run`
 runs ticks with the barrier, one action at a time, as before.
 
+### Daily summary
+
+`devloop report` (#256) prints the summary of a day, by default today, in UTC, generated from
+devloop's own records: the ledger and the markers the dispatcher reads, the same as
+`devloop status`, never a local log of a session ([records](protocol.md#daily-summary)).
+`--day YYYY-MM-DD` chooses another day. It reads GitHub with the identity of the ticks' reads,
+and writes nothing without `--publish`. The summary lists:
+
+- the actions, one per line: each agent turn (implement, fix, sync, review, readiness check) with
+  its UTC time, the issue or PR (`#N`, a link once published), kind, agent, outcome and duration,
+  marked `(fallback)` when it ran with a fallback model, and each sync without an agent;
+- the merges: devloop's with their mode and level, a person's as such;
+- the escalations, with their class and whether they went to the operator or the supervisor;
+- the CI blocks (a failed CI round) and the re-runs of failed jobs;
+- the totals: PRs opened and merged that day, review rounds opened that day (each round once,
+  on the day of its first review record) and turns run with a fallback model.
+
+A turn belongs to the day it started, with its whole duration; any other record to the day it
+was written. A PR counts only with the marker of the implementer that opened it.
+
+**Publication.** With `[report] issue = <number>` in the
+[local overlay](#local-config-as-an-overlay), an issue **dedicated** to the summary (not the
+supervisor's diary), `--publish` publishes it as the dispatcher. The body of that issue is the
+dispatcher's, and devloop rewrites it: on top the summary of today, below the index of the past
+days, newest first, each a link to its archive. When the day changes, the next publication
+generates the summary of the closed day again from the records and archives it in a comment of
+its own, one per day; the days in between with activity are archived too (at most the last 31),
+the empty ones are not. An archive already written is edited if the records changed, never
+written again: more runs on the same day, or a run repeated after a failure, leave one comment
+per day. A day archived while one of its turns was still open (a turn started just before
+midnight, say) is generated again at every publication, and its archive edited when the records
+change, until none of its turns is open: the outcome and the duration of that turn reach the
+archive of the day it started. `--publish --day <past day>` writes or updates only the archive of that day and the
+index, and keeps today's summary as it is; a future day is refused. Without `[report] issue`,
+`--publish` stops with an error that says so, and nothing is read or written. Any error of a
+`devloop report` exits with a non-zero code and its message.
+
+**In `devloop run`.** With `[report] issue`, the [continuous loop](#continuous-loop) publishes
+the summary at the end of a tick, at most every `[report] interval` minutes (default 15): the
+first time at once, then no sooner than the interval since the last attempt, restarts included
+(the time is kept in `state_dir/report-state.json`). A publication that fails is logged and
+tried again at the next interval; it does not count as a failed tick. Without `[report] issue`
+the loop publishes nothing. A manual `--publish` always publishes, even while the loop runs:
+the two never publish at once (`state_dir/report.lock`).
+
 ### Stalled agents
 
 An agent can wait without progress until a Bash command's maximum timeout or until
@@ -1127,6 +1173,9 @@ sudo -u devloop -H tail -f /home/devloop/ssdlc/.ssdlc/devloop/run.log   # follow
   `alert_issue` in the overlay the dispatcher also comments on that issue; without it the alert
   is only a line in the log. The background process does not start again by itself: remove the
   cause, then start it again.
+- **`[report] issue`.** With it in the overlay the loop keeps the
+  [daily summary](#daily-summary) on that issue, at most every `[report] interval` minutes;
+  without it the loop publishes no summary.
 - **Limits.** A new `max_open_prs`, `max_parked_prs` or `max_review_rounds` in the overlay takes
   effect at the next tick, without a stop; any other key needs a restart
   ([Changes while the loop runs](#changes-while-the-loop-runs)).

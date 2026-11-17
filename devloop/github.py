@@ -180,6 +180,31 @@ class GitHub:
                                 '--jq', '.[] | {id, login: .user.login, body, '
                                         'number: (.issue_url | split("/") | last | tonumber)}')
 
+    def dated_comments(self, since=None, number=None):
+        """Conversation comments with their creation time (#256), oldest first, as ``{id,
+        login, number, body, created_at, url}``: of issue or PR ``number``, or of every issue
+        and PR without it; with ``since`` (ISO 8601, UTC) only those created or edited at that
+        time or later. Read with REST, so an app's login is ``<slug>[bot]``."""
+        path = (f'repos/{self.repo}/issues/{int(number)}/comments' if number is not None
+                else f'repos/{self.repo}/issues/comments')
+        query = '?per_page=100' + (f'&since={since}' if since else '')
+        return self._json_lines('api', '--paginate', path + query,
+                                '--jq', '.[] | {id, login: .user.login, body, created_at, '
+                                        'url: .html_url, '
+                                        'number: (.issue_url | split("/") | last | tonumber)}')
+
+    def search_prs(self, query):
+        """The PRs, in any state, that the GitHub search ``query`` finds (#256), as ``{number,
+        body, author, createdAt, mergedAt}``, with the author as ``author_login`` reads it."""
+        prs = self._json('pr', 'list', '-R', self.repo, '--state', 'all', '--search', query,
+                         '--limit', '500', '--json', 'number,body,author,createdAt,mergedAt')
+        return [dict(raw, author={'login': author_login(raw.get('author'))}) for raw in prs]
+
+    def edit_issue_body(self, number, body):
+        """Replace the body of issue ``number`` (#256: the report issue)."""
+        self._gh('api', '-X', 'PATCH', f'repos/{self.repo}/issues/{int(number)}',
+                 '-F', 'body=@-', stdin=body)
+
     def issue_history(self, number):
         """Title, body and who changed them, read in one query so that the text and its history
         match: ``{title, body, author, last_edited_at, editor, labeled, renamed}``. ``labeled`` is
