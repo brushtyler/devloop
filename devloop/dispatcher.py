@@ -133,7 +133,7 @@ from .localtests import failed_modules, module_command, select_modules
 from .markdown import (RESUME, carries_record, dispatcher_header, publishable, read_marker,
                        render_escalation, render_fix, render_native_review, render_preflight,
                        render_review, render_supervision)
-from .pin import PinError, Repinned
+from .pin import PinError, Repinned, SmokeError
 from .policy import describe as describe_receipt
 from .policy import (BINDING, MAX_LISTED_PATHS, ZERO_LEVEL, agent_profile, changes_requested,
                      check_outcome, check_states, differences, distinct, evaluate, independent,
@@ -2291,7 +2291,11 @@ class Dispatcher:
         """With ``[pin] auto = true`` and a pin requested by a merge (#174), pin
         ``origin/<base_branch>`` before planning. A failed pin stops the tick with ``PinError``
         and leaves the pointer and the request as they were; a new copy raises ``Repinned``, so
-        that the process starts again from it."""
+        that the process starts again from it.
+
+        A copy refused by the smoke test (``SmokeError``, #260) is not a failed tick: the request
+        is dropped, ``current`` stays, planning goes on from the running copy, and an alert goes
+        to ``[run].alert_issue`` once per refused commit."""
         if self.pinner is None or not self.cfg.pin.auto:
             return
         request = self.pinner.pending()
@@ -2305,11 +2309,45 @@ class Dispatcher:
         self.log(f'auto-pin of {ref} after {why}')
         try:
             copy = self.pinner.pin(ref)
+        except SmokeError as exc:
+            self.pinner.cancel()
+            self.log(f'auto-pin of {ref} refused, the pinned copy is unchanged and the request '
+                     f'is dropped: {exc}')
+            self._alert_refused_pin(ref, exc)
+            return
         except (PinError, ConfigError, OSError) as exc:
             raise PinError(f'auto-pin of {ref} failed, the pinned copy is unchanged: {exc}') \
                 from exc
         if Path(copy).resolve() != INSTALL_ROOT.resolve():
             raise Repinned(copy)
+
+    def _alert_refused_pin(self, ref, exc):
+        """The alert of a copy refused by the smoke test of an auto-pin (#260), on
+        ``[run].alert_issue``, once per commit: its commit and failed step, never the error's
+        text (it stays in the local log). One attempt; a failure is logged."""
+        issue = self.cfg.run.alert_issue
+        if not issue:
+            self.log('  no [run].alert_issue is configured: no alert for the refused pin')
+            return
+        if self.pinner.alerted(exc.sha):
+            self.log(f'  the refusal of {exc.sha[:12]} was already reported on #{issue}')
+            return
+        body = publishable(
+            dispatcher_header()
+            + '\n## Pin automatico rifiutato dallo smoke test\n\n'
+            + f'La copia di `{ref}` al commit `{exc.sha[:12]}` non ha superato lo smoke test '
+              f'al passo `{exc.step}`. `current` resta sulla copia precedente, la richiesta di '
+              'pin è annullata e il ciclo continua.\n\n'
+            + 'Il dettaglio è nel log locale; la copia rifiutata resta in '
+              f'`rejected-{exc.sha[:12]}` nella directory di stato, per l\'analisi.')
+        try:
+            self.gh.comment(issue, body)
+        except Exception as exc_:  # one attempt only: its class, never its output
+            self.log(f'  the alert of the refused pin on #{issue} could not be published '
+                     f'({type(exc_).__name__})')
+            return
+        self.pinner.mark_alerted(exc.sha)
+        self.log(f'  alert of the refused pin published on #{issue}')
 
     def _run_action(self, action, prs):
         """Run one action; a failure of an agent, ``gh``, git or trust escalates its issue or

@@ -137,8 +137,9 @@ def run_fallback(args):
 
 
 def run_pin(args):
-    """``devloop pin <ref>`` (#174). The overlay is ``--local-config``, or
-    ``<state_dir>/config.local.toml`` when it exists."""
+    """``devloop pin [--no-smoke] <ref>`` (#174). The overlay is ``--local-config``, or
+    ``<state_dir>/config.local.toml`` when it exists. ``--no-smoke`` skips the smoke test of a
+    new copy (#260), and the log says so."""
     try:
         cfg = load_config(args.config, args.local_config)
     except ConfigError as exc:
@@ -147,7 +148,7 @@ def run_pin(args):
     state = root / cfg.state_dir
     local = args.local_config or state / pin.LOCAL_CONFIG
     try:
-        pin.pin(root, state, args.ref, local, log=log)
+        pin.pin(root, state, args.ref, local, log=log, smoke=not args.no_smoke)
     except (pin.PinError, ConfigError, OSError) as exc:
         sys.exit(f'devloop: pin failed, the pinned copy is unchanged: {exc}')
 
@@ -278,6 +279,9 @@ def main(argv=None):
                                          '<state_dir>/current')
     pin_cmd.add_argument('ref', help='a branch or tag of origin, or a commit reachable from '
                                      'them or of a copy already pinned (rollback)')
+    pin_cmd.add_argument('--no-smoke', action='store_true',
+                         help='skip the smoke test of a new copy (tick --dry-run and a round of '
+                              'watch from the copy); for exceptional cases, logged')
     fallback_cmd = sub.add_parser('fallback', help='the memory of the models found unavailable')
     fallback_sub = fallback_cmd.add_subparsers(dest='fallback_command', required=True)
     reset_cmd = fallback_sub.add_parser('reset', help='forget the models an agent remembers '
@@ -357,6 +361,11 @@ def main(argv=None):
             log(line)
         for action in plan(snap, cfg):
             log(f'next: {action.kind} #{action.number}')
+        return
+    if args.command == 'tick' and args.dry_run:
+        # It plans and writes nothing, as `status`: no dispatcher lock, so that the smoke test
+        # of a pin (#260) runs it while a dispatcher runs.
+        dispatcher.tick(dry_run=True)
         return
     with single_instance(state / 'dispatcher.lock') as lock:
         if args.command == 'cleanup':
