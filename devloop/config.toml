@@ -16,6 +16,11 @@ test_cmd = "python3 scripts/run-tests.py"
 # without "full" a review needs the CI passed, and a head without CI gets test_cmd locally
 # before its review.
 local_tests = "changed"
+# A first CI failure on a head whose failed test modules (the `FAILED MODULE` lines of
+# scripts/run-tests.py) are not pertinent to the PR's diff, with the same correspondence as
+# local_tests = "changed", is re-run once instead of becoming a round (issue #200). It needs
+# `actions: write` on the dispatcher's app; without it the failure is a round, as before.
+ci_rerun_unrelated = true
 # Language of the text that agents write for GitHub.
 language = "Italian"
 

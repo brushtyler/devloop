@@ -214,10 +214,21 @@ def _valid_supervision(s):
                     and isinstance(d.get('proposed_default'), str) for d in defaults))
 
 
+def _valid_rerun(r):
+    """A re-run of the failed CI jobs of a head (#200): the head, the GitHub Actions runs
+    re-run, the failed test modules (none pertinent to the PR), and in ``checks`` the links of
+    the failed checks at the time, which tell when the re-run has replaced them."""
+    return (isinstance(r.get('head'), str)
+            and all(isinstance(r.get(k), list) for k in ('runs', 'modules', 'checks'))
+            and all(_is_int(run, 1) for run in r['runs'])
+            and all(isinstance(v, str) for k in ('modules', 'checks') for v in r[k]))
+
+
 _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy': _valid_policy,
           'finding': _valid_finding, 'sync': _valid_sync, 'preflight': _valid_preflight,
           'notice': _valid_notice, 'ledger': _valid_ledger, 'merged': _valid_merged,
-          'hold': _valid_hold, 'supervision': _valid_supervision, 'closed': _valid_closed}
+          'hold': _valid_hold, 'supervision': _valid_supervision, 'rerun': _valid_rerun,
+          'closed': _valid_closed}
 
 
 def read_marker(text, kind):
