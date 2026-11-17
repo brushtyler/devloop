@@ -3,11 +3,12 @@
 import dataclasses
 import unittest
 
+import test_devloop_supervision as supervision_tests
 from devloop import markdown
 from devloop.dispatcher import (Action, Dispatcher, counted_rounds, fix_command,
                                 format_previous_rounds, plan)
 from test_devloop import (CFG, IMPL, IMPL_NAME, REV_NAME, SHA1, SHA2, FakeRunner, FakeWS,
-                          SnapshotGH, finding, fixed, norm, raw_review)
+                          SnapshotGH, finding, fixed, norm, pr, raw_review)
 from test_devloop_merge import SUPERVISOR, SUPERVISOR_LOGIN, Identities
 
 SUPERVISED = dataclasses.replace(CFG, supervisor=SUPERVISOR)
@@ -232,6 +233,36 @@ class SameHeadTests(Case):
              'requests': [{'comment': 99999, 'by': 'brushtyler', 'request': 'x'}]}, 'h', 0)
         self.gh.say('stranger', forged)
         self.assertEqual([a.kind for a in self.planned(d)], ['fix'])
+
+
+class SupervisorRetryTests(supervision_tests.Case):
+    def test_a_failed_fix_asked_in_review_is_retried_from_review(self):
+        # The agent crashes on a `/devloop fix` asked in agent:review: in auto the escalation
+        # goes to the supervisor, and its retry resumes the PR in agent:review, where the
+        # command is still to apply, not in agent:changes, which has no findings to fix.
+        d = self.make(supervision_tests.AUTO, supervision_tests.crash(),
+                      dict(fixed(), responses=[]))
+        self.gh.say(100, 'brushtyler', f'/devloop fix\n{REQUEST}')
+        self.assertEqual(self.tick(d), [('fix', 100)])
+        self.assertEqual(self.gh.labels[100], {supervision_tests.SUPER})
+        (record,) = self.escalations(100)
+        self.assertEqual((record['class'], record['step'], record['resume']),
+                         ('tool_failure', 'fix', supervision_tests.REVIEW))
+        self.gh.command(100, '/devloop retry')
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertEqual(self.gh.labels[100], {supervision_tests.REVIEW})
+        self.assertEqual(self.tick(d), [('fix', 100)])
+        (fix,) = self.gh.records(100, 'fix')
+        self.assertEqual(fix['requests'][0]['request'], REQUEST)
+        self.assertEqual(self.gh.labels[100], {supervision_tests.REVIEW})
+
+    def test_a_fix_that_failed_in_changes_still_resumes_in_changes(self):
+        d = self.make(supervision_tests.AUTO)
+        for labels, resume in ((('agent:changes',), 'agent:changes'),
+                               (('agent:review',), 'agent:review')):
+            with self.subTest(labels=labels):
+                route, _ = d._supervised(100, 'tool_failure', 'fix', pr(labels=labels))
+                self.assertEqual(route['resume'], resume)
 
 
 if __name__ == '__main__':

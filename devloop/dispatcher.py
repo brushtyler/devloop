@@ -1177,8 +1177,12 @@ class Dispatcher:
                 key = {'step': step, 'head': pr.head_sha}
                 if reviewer:
                     key['reviewer'] = reviewer
-                return {'step': step, 'key': key,
-                        'resume': getattr(lb, RESUME_STEP.get(step, 'review'))}, ''
+                resume = getattr(lb, RESUME_STEP.get(step, 'review'))
+                if step == 'fix' and lb.review in pr.labels and lb.changes not in pr.labels:
+                    # A `/devloop fix` asked in agent:review (#195) resumes there: agent:changes
+                    # would answer findings already fixed, or have none to fix.
+                    resume = lb.review
+                return {'step': step, 'key': key, 'resume': resume}, ''
             if key is None and cls == PREFLIGHT_DEFAULT:
                 # A failed check reused, not run again: no retry uses its key, and
                 # accept-defaults checks the hash of the check's own record.

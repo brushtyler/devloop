@@ -682,7 +682,8 @@ command before it, and among the commands that wait the latest wins.
 
 - `/devloop retry` runs the failed step again, for `tool_failure` and `sync_failed`. A PR goes
   back to the label of its step (`agent:review` for a review or a sync, `agent:changes` for a
-  fix) and the next tick runs it; an issue's readiness check or implementation runs at once, and
+  fix, `agent:review` for a [requested fix](#fix-requested-by-the-operator-or-the-supervisor)
+  that started there) and the next tick runs it; an issue's readiness check or implementation runs at once, and
   takes a free PR slot as it would. A failed attempt writes no review record, so a retry
   **counts no round**. After the initial failure the supervisor may authorise **two** retries
   for the same key; the third command is not run and the item goes to `agent:needs-human`
