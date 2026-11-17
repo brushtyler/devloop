@@ -230,5 +230,26 @@ class OperatorTextTests(unittest.TestCase):
                 self.assertIsNone(supervisor_command(header + '\nTesto.'))
 
 
+class DocumentationTests(unittest.TestCase):
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def test_agents_md_holds_only_the_directive_with_a_link_to_the_format(self):
+        text = (self.ROOT / 'AGENTS.md').read_text(encoding='utf-8')
+        self.assertIn('Nei turni di devloop gli agent non aggiungono nessuna intestazione', text)
+        self.assertIn('(docs/devloop.md#attribution)', text)
+        # The format of devloop's header is documented in docs/devloop.md, not in AGENTS.md.
+        for absent in ('**Bot:**', '**Version:**', 'Testi pubblicati da devloop'):
+            self.assertNotIn(absent, text)
+
+    def test_the_devloop_document_describes_the_format(self):
+        text = (self.ROOT / 'docs' / 'devloop.md').read_text(encoding='utf-8')
+        section = text[text.index('\n## Attribution\n'):]
+        section = section[:section.index('\n## ', 1)]
+        for line in ('> **Bot:** devloop dispatcher', '> **Version:** 0123456789ab',
+                     '> **Bot:** devloop codex-agent', '> **Agent:** devloop dispatcher',
+                     '`pin.json`', '`operator_comments`'):
+            self.assertIn(line, section)
+
+
 if __name__ == '__main__':
     unittest.main()
