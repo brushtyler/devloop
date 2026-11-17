@@ -37,10 +37,12 @@ lines are printed or delivered, so a line is never repeated but an interruption 
 loses it.
 
 Three consecutive failed rounds give one ``ERROR_LINE``, which counts as news; the state of the
-latest successful round stays, and a successful round resets the count.
+latest successful round stays, and a successful round resets the count. Each failed round is
+reported on stderr with the class of its error (``failure_class``), never with ``gh``'s output.
 """
 
 import json
+import re
 import os
 import shlex
 import subprocess
@@ -73,6 +75,35 @@ MAX_COMMENT_IDS = 2000
 MAX_CLOSED = 500
 TITLE_LEN = 70
 TEXT_LEN = 110
+# The class of a failed read, from the message of its GitHubError (``gh``'s stderr, or the HTTP
+# error of the app token), first match wins. Only the class is printed: no token, path or text.
+FAILURE_CLASSES = (
+    ('rate limit', re.compile(r'rate limit|HTTP 429', re.I)),
+    ('authentication', re.compile(r'HTTP 401|bad credentials|requires authentication|'
+                                  r'gh auth login|not logged in|authentication|'
+                                  r'could not sign the app JWT', re.I)),
+    ('permission', re.compile(r'HTTP 403|not accessible by integration', re.I)),
+    ('not found', re.compile(r'HTTP 404|HTTP 410|could not resolve to an? ', re.I)),
+    ('server error', re.compile(r'HTTP 5\d\d', re.I)),
+    ('network', re.compile(r'timed out|error connecting|could not resolve host|no such host|'
+                           r'connection (?:refused|reset)|dial tcp|tls handshake|'
+                           r'urlopen error', re.I)),
+    ('gh unavailable', re.compile(r'gh could not start', re.I)),
+)
+
+
+def failure_class(exc):
+    """What kind of failure ``exc`` is, for the ``round failed`` line: ``rate limit``,
+    ``authentication``, ``permission``, ``not found``, ``server error``, ``network`` or
+    ``gh unavailable`` for a GitHub error it recognises, else the name of its type."""
+    if isinstance(exc, GitHubNotFound):
+        return 'not found'
+    if isinstance(exc, GitHubError):
+        text = str(exc)
+        for name, pattern in FAILURE_CLASSES:
+            if pattern.search(text):
+                return name
+    return type(exc).__name__
 
 
 class Trust:
@@ -337,7 +368,7 @@ class Watcher:
         except (GitHubError, OSError, ValueError, KeyError, TypeError) as exc:
             if self._expired():
                 return EXPIRED
-            self._err(f'devloop watch: round failed ({type(exc).__name__})')
+            self._err(f'devloop watch: round failed ({failure_class(exc)})')
             return None
         self.state = state
         if summary:

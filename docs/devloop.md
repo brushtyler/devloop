@@ -1062,7 +1062,8 @@ Two modes:
 - **`--until-change`** (default): the command ends at the first round with news, exit code 0,
   with its lines on stdout. With `--timeout <seconds>` it exits with code 3 once that many
   seconds passed since it started without news, failed reads included (monotonic clock): each
-  `gh` call gets at most the time left, and a round that ends after the timeout is dropped
+  `gh` call gets at most the time left, and so does each step (signature, HTTP request) of
+  the mint of the dispatcher app's token; a round that ends after the timeout is dropped
   without saving, so what it read is reported by the next run. Without `--timeout` it waits
   forever. It suits any agent that is woken when a command ends.
   For Claude Code, run it as a background Bash command: Claude Code is woken when it exits, reads
@@ -1092,14 +1093,21 @@ lines are printed or delivered: a restarted watcher does not repeat lines, and t
 new baseline. Run one watcher per state file.
 
 A failed read of GitHub (a transient `gh` error) does not end the watcher: the round is retried
-after the interval and the state of the latest successful round is kept. After three consecutive
+after the interval and the state of the latest successful round is kept. Each failed round
+writes `devloop watch: round failed (<class>)` on stderr, with the class of the error and never
+`gh`'s output, tokens or paths: `authentication` (no `gh` login, bad credentials, an app token
+that could not be minted), `permission`, `not found`, `rate limit`, `server error`, `network`,
+`gh unavailable`, or the name of the error's type when none applies. After three consecutive
 failed rounds it emits one line, `watch error: 3 consecutive rounds could not read GitHub, the
 last valid state is kept`, without `gh`'s output; it counts as news (`--until-change` exits with
 0, `--exec` delivers it). A successful round resets the count. This includes the read of an issue
 or PR that left the open listings: only GitHub's answer that it does not exist (deleted or
 transferred) gives `no longer open`.
 
-The watcher reads with the local `gh` login and needs no app key. Each round reads the open PRs
+The watcher reads with the same identity as the ticks' reads (#197): the dispatcher's app,
+when `[apps]` configures one, with its installation token in `GH_TOKEN`, so it works without
+any `gh` login (as the `devloop` user does); the keys of the `[apps]` are needed, as for `tick`. Without a
+dispatcher app it reads with the local `gh` login. Each round reads the open PRs
 and issues (`gh pr list`, up to 200, and `gh issue list`, up to 300), the comments since the
 previous round, for each trusted open PR its checks and native reviews, and the labeled events
 of an external issue whose labels changed or, outside the open listings, with a new trusted

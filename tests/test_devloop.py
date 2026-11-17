@@ -1448,7 +1448,7 @@ class FakeHTTP:
         self.calls = []
         self.minted = 0
 
-    def __call__(self, method, path, auth, body=None):
+    def __call__(self, method, path, auth, body=None, timeout=None):
         self.calls.append((method, path, auth, body))
         if path.endswith('/installation'):
             return {'id': 77, 'app_id': self.app_id}
@@ -1466,7 +1466,7 @@ class AppAuthTests(unittest.TestCase):
     def make(self, http, now=1_800_000_000):
         self.now = now
         return apps.AppAuth(11, 'x-agent', '/keys/x.pem', 'o/r', http=http,
-                            sign=lambda key, data: b'sig:' + data[:4], clock=lambda: self.now)
+                            sign=lambda key, data, timeout=None: b'sig:' + data[:4], clock=lambda: self.now)
 
     def test_jwt_is_short_lived_and_names_the_app(self):
         app = self.make(FakeHTTP())
@@ -1506,7 +1506,7 @@ class AppAuthTests(unittest.TestCase):
     def test_describe_checks_the_slug(self):
         info = self.make(FakeHTTP()).describe()
         self.assertEqual((info['login'], info['installation']), ('x-agent[bot]', 77))
-        app = apps.AppAuth(11, 'other', '/k', 'o/r', http=FakeHTTP(), sign=lambda k, d: b's')
+        app = apps.AppAuth(11, 'other', '/k', 'o/r', http=FakeHTTP(), sign=lambda k, d, timeout=None: b's')
         with self.assertRaises(GitHubError):
             app.describe()
 
