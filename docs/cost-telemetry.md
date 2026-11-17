@@ -58,7 +58,9 @@ whole call, never a partial sum.
 
 New ledger rows carry `telemetry_schema_version: 1` and, when the row records an
 engine call, its `telemetry` record. `cost_usd`, `tokens_in` and `tokens_out`
-stay for compatibility; budgets and frozen limits are unchanged in this part.
+stay for compatibility. The caps read the classified measures (see
+[Separate caps and route admission](#separate-caps-and-route-admission)); frozen
+limits profiles are unchanged.
 
 - The Evidence Pack shows the measure of each row (`charge`, `estimate (API-equivalent)`,
   `unknown`) and a table **Cost Telemetry by Provider and Measure Type**: calls
@@ -88,3 +90,63 @@ Rows written before this schema are never rewritten or reinterpreted. When read,
 they get a conservative annotation (`legacy_unversioned`): their `cost_usd` is an
 unclassified legacy figure, neither a charge nor an estimate, and every measure
 is `unknown`. Frozen limits profiles, journals and authorizations are unchanged.
+
+## Separate caps and route admission
+
+[Issue #165](https://github.com/brushtyler/ssdlc/issues/165), part B1 of
+[#14](https://github.com/brushtyler/ssdlc/issues/14), with the defaults the
+operator approved on 2026-11-16. Spend and estimates have separate, named caps,
+and an estimate never consumes the spend cap.
+
+| Variable | Default | Bounds |
+| --- | --- | --- |
+| `SSDLC_BUDGET_CAP_USD` | S $3, M $6, L $20 | Measured spend: charges reported in USD by a measured route. Gate `BUDGET_CAP_GATE` |
+| `SSDLC_ESTIMATE_CAP_USD` | S $3, M $6, L $20 | API-equivalent estimates (Claude CLI). Gate `ESTIMATE_CAP_GATE` |
+| `SSDLC_DEV_BUDGET_USD` | S $1, M $2.5, L $8 | Each Claude developer call, as `--max-budget-usd` |
+
+The three are independent and all stay active with their tier defaults; only an
+explicit `0` disables one of the two ticket caps. The limits on attempts, calls,
+rounds and elapsed time are unchanged, so a monetary estimate is never the only
+bound of a loop. No token limit is introduced: token telemetry is kept and
+reported as before.
+
+How the ledger feeds the caps (each invocation once):
+
+- a charge in USD counts as spend;
+- an estimate counts as an estimate;
+- the `cost_usd` of a legacy row, of a row without telemetry, or of a call with
+  neither a charge nor an estimate (an incomplete call, for example) cannot be
+  classified. It keeps counting as spend, as it always did, and is never
+  reinterpreted as an estimate;
+- a completed call on a measured route that reported no charge in USD makes the
+  spend unknown: with the spend cap in force the run stops with
+  `BUDGET_CAP_GATE` instead of counting it as zero.
+
+### Measures required per route
+
+Before the call is reserved or launched, the effective route of the call is
+derived from its own configuration and admitted only if the caps in force can
+bound it:
+
+| Route | When | Measure required |
+| --- | --- | --- |
+| `openrouter_api` | OpenRouter HTTP adapter; Claude or Codex with `use_openrouter` and `OPENROUTER_API_KEY` | spend. Only the HTTP adapter reports it: Claude or Codex on this route are refused while the spend cap is in force, because an estimate is not a charge |
+| `claude_cli` | Claude CLI with no base URL of its own | estimate (`total_cost_usd`) |
+| `codex_cli`, `agy_cli` | the CLI subscription | a `live_unknown_usage` declaration of the frozen profile for the engine (`unmetered_quota` or `reserve_per_invocation`, [#43](https://github.com/brushtyler/ssdlc/issues/43)) |
+| `unknown` | OpenRouter requested for Claude but the role container would not receive its base URL, or the Claude CLI would receive another base URL | none can be determined: refused while either cap is in force |
+
+A refusal is `LIMIT_REACHED` with "refused before launch": no reservation, no
+supervisor intent, no process. With a frozen limits profile both of its dollar
+caps are mandatory, so the environment cannot disable this admission; the profile
+declaration applies to the CLI subscription route only, never to the OpenRouter
+route of the same engine. The capacity check of
+[#128](https://github.com/brushtyler/ssdlc/issues/128) and the atomic check at
+reservation follow unchanged.
+
+Without a frozen profile there is nothing to declare: `codex` and `agy` on their
+subscription route are admitted as before and stay outside the dollar caps,
+bounded by attempts, calls and time. Declared exclusions and transitions of
+existing profiles, and caps in credits, are part B2
+([#214](https://github.com/brushtyler/ssdlc/issues/214)). A frozen profile keeps
+its own separate `metered_usd` and `cli_estimate_usd` caps and the frozen combined
+authority of its corrective transactions.

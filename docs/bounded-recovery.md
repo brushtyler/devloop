@@ -98,6 +98,14 @@ consumes a development attempt or starts the task. A refused call therefore
 leaves no intent, no consumed attempt and no task in `RUNNING`. The atomic check
 at reservation stays at the dispatch boundary.
 
+Before that reservation, the dispatch admits the effective **route** of the call
+([issue #165](https://github.com/brushtyler/ssdlc/issues/165)): a route that
+cannot be determined, or a measured route (OpenRouter) whose adapter cannot
+report the charge, is refused with `LIMIT_REACHED` before launch. A
+`live_unknown_usage` declaration covers the engine's subscription CLI route, not
+its OpenRouter route. See
+[Cost telemetry](cost-telemetry.md#measures-required-per-route).
+
 Token counts reported by the adapter are stored on the row as `reported_tokens`,
 independently of any dollar cost: `claude` and OpenRouter report them with their
 cost, `codex` through the `turn.completed` events of `codex exec --json`

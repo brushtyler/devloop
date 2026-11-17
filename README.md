@@ -166,7 +166,8 @@ The settings used most often:
 | `SSDLC_ENABLE_TASK_BREAKDOWN` | Ignored | Obsolete; all new runs use the task plan, scheduler and structured gates |
 | `SSDLC_DEFAULT_TIER` | `auto` | Risk tier when `--tier` is not given |
 | `SSDLC_<ROLE>_ENGINE` / `_MODEL` | `auto` | Per-role routing override |
-| `SSDLC_BUDGET_CAP_USD` | S $3, M $6, L $20 | Reported-spend circuit breaker |
+| `SSDLC_BUDGET_CAP_USD` | S $3, M $6, L $20 | Measured-spend circuit breaker: charges only, never CLI estimates |
+| `SSDLC_ESTIMATE_CAP_USD` | S $3, M $6, L $20 | Separate circuit breaker on API-equivalent estimates (Claude CLI) |
 | `SSDLC_SYNC_REMOTE` | `auto` | GitHub/GitLab synchronization of branches, issues and draft PRs |
 | `GITHUB_TOKEN` / `GH_TOKEN` | — | Needed to create issues and PRs (`export GITHUB_TOKEN="$(gh auth token)"`) |
 
