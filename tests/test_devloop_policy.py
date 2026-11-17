@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 
 from devloop import config, markdown, policy
-from devloop.dispatcher import Action, Dispatcher, Snapshot, plan
+from devloop.dispatcher import Action, Dispatcher, Snapshot, counted_rounds, plan
 from devloop.workspace import Workspace
 from helpers.devloop_fakes import FakeGH, SnapshotGH
 from test_devloop import (BASE, CFG, SHA1, FakeRunner, FakeWS, finding, fixed, norm, pr,
@@ -354,12 +354,14 @@ class StickyLevelTests(unittest.TestCase):
         self.assertEqual(d.tick(), [Action('apply_review', 100, 'approval already recorded')])
         self.assertEqual(self.gh.labels[100], {'agent:review'})
         self.assertTrue(d.snapshot().prs[0].stale_receipt)
-        self.assertEqual(d.tick(), [Action('review', 100, 'the approval has no matching policy '
-                                                          'receipt')])
+        # The base touched the PR's files: the review of the same head is free (#252).
+        self.assertEqual(d.tick(), [Action('review', 100, 'the approval was revoked because '
+                                                          'the base touched the PR')])
         self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
         reviews = d.snapshot().prs[0].reviews
         self.assertEqual([r['round'] for r in reviews], [1, 2])
         self.assertEqual(reviews[-1]['receipt']['base'], 'e' * 40)
+        self.assertEqual(counted_rounds(reviews), 1)
 
 
 class ReviewDiffTests(unittest.TestCase):

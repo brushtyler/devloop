@@ -39,6 +39,9 @@ Resync after approval (#235): when the latest round approved a head and the PR's
 from it only by merges of the base branch that git concludes without conflicts
 (``Workspace.clean_resync``), the review of the new head records ``resync`` and does not count
 either. A sync whose conflicts an agent resolved changes the PR's content: its review counts.
+Nor does the new review of an approved head whose approval a dispatcher ``stale`` policy record
+revoked because the base touched the PR (#252, ``base_revocation``): it records ``resync`` with
+the reason ``base_changed``.
 
 Level 0 (#107) needs no review: when a trusted user's label allows it and the whole diff is in
 the operator's allowlist, the head goes to ready-to-merge once every expected check run
@@ -160,6 +163,9 @@ MERGING = ('strict', 'auto')
 # Why a review round does not count (#235): the round before approved a head that the new one
 # differs from only by clean merges of the base branch.
 RESYNC_AFTER_APPROVAL = 'resync_after_approval'
+# And (#252): the round before approved the very head the new one reviews again, after the
+# dispatcher revoked that approval because the base branch touched the PR's files.
+BASE_CHANGED = 'base_changed'
 # Actions that take a slot of ``max_actions_per_tick``.
 EXPENSIVE = ('review', 'fix', 'implement', 'sync', 'preflight', 'merge', 'supervise')
 # Actions that write to the base branch or to the whole repository (the merge of #172, the pin
@@ -236,6 +242,8 @@ class PullRequest:
     # the latest review found that the approval's receipt no longer matches.
     policy: list = field(default_factory=list)
     stale_receipt: bool = False
+    # The latest of those records found stale after the latest review (#252), None if none.
+    revoked: dict = None
     # The head a level-0 promotion made ready (#107), when it is the latest record of the PR.
     zero_head: str = None
     # Why that promotion no longer holds, as the snapshot found re-checking it (``''``: it holds).
@@ -267,8 +275,9 @@ class PullRequest:
     # ``{comment, by, request}``: one fix of the current head answers all of them.
     fix_requests: list = field(default_factory=list)
     # In agent:review, when the latest round approved an earlier head and the head differs from
-    # it only by clean merges of the base branch (#235): ``{reason, round, from}``, what the
-    # next review records as ``resync``. None otherwise.
+    # it only by clean merges of the base branch (#235), or approved this very head and the
+    # dispatcher then revoked the approval because the base touched the PR (#252):
+    # ``{reason, round, from}``, what the next review records as ``resync``. None otherwise.
     resync: dict = None
     # Re-runs of failed CI jobs the dispatcher recorded (``rerun`` markers, #200), and whether
     # the CI still shows the very failed checks a re-run of the head replaces: the re-run has
@@ -723,8 +732,9 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0):
             # Nor is an approval reused when the acceptance map does not hold (#134): a new
             # review adds the finding, as a new round within the usual limit.
             unmapped = replay and verdict == 'approve' and bool(pr.acceptance)
-            # A review needed only because a clean sync moved the approved head (#235) is not
-            # a new round against the limit; a CI failure or a rereview still is.
+            # A review needed only because a clean sync moved the approved head (#235), or
+            # because the base touched the PR after its approval (#252), is not a new round
+            # against the limit; a CI failure or a rereview still is.
             resync = pr.resync is not None and not pr.rereview and pr.checks != 'fail'
             if replay and verdict != 'approve':
                 actions.append(Action('apply_review', pr.number, 'verdict already recorded'))
@@ -749,6 +759,8 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0):
                 actions.append(Action('ci_failed', pr.number))
             else:
                 reason = ('new review requested by a trusted user' if pr.rereview
+                          else 'the approval was revoked because the base touched the PR'
+                          if resync and pr.resync['reason'] == BASE_CHANGED
                           else 'the approved head was synced with the base' if resync
                           else 'the approval has no matching policy receipt' if unbound
                           else 'the acceptance map does not hold' if unmapped
@@ -893,7 +905,8 @@ def waived_rounds(reviews):
     that a later round replaced only because the base branch advanced, as the later round's
     records say (``restarts``, #160); and each round that reviewed a head differing only by
     clean merges of the base from the head the round just before approved (``resync``,
-    #235)."""
+    #235), or that reviewed again the head the round just before approved, after the dispatcher
+    revoked that approval because the base touched the PR (``resync``, #252)."""
     waived = set()
     for record in reviews:
         restart = record.get('restarts')
@@ -907,19 +920,38 @@ def waived_rounds(reviews):
 
 
 def _resynced(reviews, record):
-    """Whether ``record`` reviewed a resync after approval (#235): its ``resync`` names the
-    round just before its own, a complete agent round that approved the head ``from``."""
+    """Whether ``record`` reviewed a resync after approval (#235) or the same head after a
+    revocation for the base (#252): its ``resync`` names the round just before its own, a
+    complete agent round that approved the head ``from``; the record reviews another head after
+    a resync, that same head after a revocation."""
     resync = record.get('resync')
-    if not isinstance(resync, dict) or resync.get('reason') != RESYNC_AFTER_APPROVAL:
+    if not isinstance(resync, dict) or resync.get('reason') not in (RESYNC_AFTER_APPROVAL,
+                                                                    BASE_CHANGED):
         return False
     number = resync.get('round')
     if isinstance(number, bool) or number != record['round'] - 1:
         return False
     approved = _round_records(reviews, number)
+    same = record.get('head_sha') == resync.get('from')
     return (bool(approved) and approved[0]['source'] == 'agent'
             and not pending_reviewers(approved) and round_verdict(approved) == 'approve'
             and all(r.get('head_sha') == resync.get('from') for r in approved)
-            and record.get('head_sha') != resync.get('from'))
+            and same == (resync['reason'] == BASE_CHANGED))
+
+
+def base_revocation(record, head):
+    """Whether the policy record ``record`` revoked the approval of ``head`` because the base
+    branch advanced (#252): a ``stale`` event on that head whose base checks (``bases``, #160)
+    show a base that touched the PR, conflicted with it, or could not be verified. A revocation
+    for anything else (level, reviewers, policy, a missing approval) writes no such check, or
+    only ``disjoint`` ones."""
+    if not isinstance(record, dict) or record.get('event') != 'stale':
+        return False
+    receipt, bases = record.get('receipt'), record.get('bases')
+    return (isinstance(receipt, dict) and receipt.get('head') == head
+            and isinstance(bases, list) and bool(bases)
+            and all(isinstance(c, dict) for c in bases)
+            and any(c.get('outcome') != 'disjoint' for c in bases))
 
 
 def synced_from(syncs, head, reviewed, limit=10):
@@ -1601,8 +1633,8 @@ class Dispatcher:
                              head_sha=fresh.get('headRefOid') or target.head_sha, reviews=[],
                              fixes=[], syncs=[], closures=[], commands=[], finding_problems=[],
                              policy=[], zero_head=None, zero_problem='', stale_receipt=False,
-                             operator_comments=[], rereview=False, round_comments=[],
-                             acceptance=[], hold=None)
+                             revoked=None, operator_comments=[], rereview=False,
+                             round_comments=[], acceptance=[], hold=None)
             if target.meta:
                 self._read_thread(target, comments)
         route, why = self._supervised(number, cls, step, target if is_pr else None,
@@ -1764,8 +1796,10 @@ class Dispatcher:
         if entries:
             last = max(position for position, _ in entries)
             # A receipt found stale after the latest review voids its approval.
-            pr.stale_receipt = any(position > last and record['event'] == 'stale'
-                                   for position, record in policy)
+            stale = [record for position, record in policy
+                     if position > last and record['event'] == 'stale']
+            pr.stale_receipt = bool(stale)
+            pr.revoked = stale[-1] if stale else None
             # Only what trusted users wrote after the latest verdict can void it.
             since = comments[last + 1:]
             pr.operator_comments = operator_comments(since, self.cfg.trusted_users)
@@ -1828,14 +1862,22 @@ class Dispatcher:
         """``PullRequest.resync`` (#235): when the latest round is a complete agent round that
         approved an earlier head, and the PR's head differs from it only by merges of the base
         branch that git concludes without conflicts, ``{reason, round, from}``; otherwise None.
-        A sync whose conflicts an agent resolved, a fix or any other commit gives None."""
+        A sync whose conflicts an agent resolved, a fix or any other commit gives None.
+
+        When that round approved the PR's head itself (#252), the reason is ``BASE_CHANGED`` if
+        the latest policy record after it, which only the dispatcher writes, revoked the
+        approval of this head because the base branch touched the PR (``base_revocation``)."""
         latest = current_round(pr.reviews)
         if (not latest or latest[0]['source'] != 'agent' or pending_reviewers(latest)
                 or round_verdict(latest) != 'approve'):
             return None
         approved = latest[0]['head_sha']
-        if approved == pr.head_sha or any(r['head_sha'] != approved for r in latest):
+        if any(r['head_sha'] != approved for r in latest):
             return None
+        if approved == pr.head_sha:
+            if not base_revocation(pr.revoked, approved):
+                return None
+            return {'reason': BASE_CHANGED, 'round': latest[0]['round'], 'from': approved}
         try:
             if not self.ws.clean_resync(pr.head_ref, pr.head_sha, approved):
                 return None
@@ -3022,12 +3064,20 @@ class Dispatcher:
                     else 'manca l\'approvazione di ' + ', '.join(f'`{k}`' for k in missing))
             detail = (f'\n\nCommit di `{branch}` fra la base dell\'approvazione e quella '
                       'corrente:\n\n' + _describe_bases(bases, branch)) if bases else ''
+            payload = {'event': 'stale', 'receipt': current, 'bases': bases or []}
+            # The new review of this same head does not count against the limit when only
+            # the base revoked the approval (#252); any other revocation opens a round as usual.
+            rounds = ('La nuova review dello stesso commit apre un nuovo round, che non conta '
+                      'per il limite dei round; i finding aperti restano invariati.'
+                      if records and base_revocation(payload, records[0]['head_sha'])
+                      else 'La nuova review apre un nuovo round; i finding aperti restano '
+                      'invariati.')
             self._policy_comment(
                 pr, f'Approvazione non valida per {"il" if step == "merge" else "la"} {step}',
                 f'La ricevuta di policy ricalcolata prima {"del" if step == "merge" else "della"} '
                 f'{step} non coincide con '
                 f'quella dell\'approvazione ({what}). La PR resta in review: serve una nuova '
-                'review, anche dello stesso commit. Round e finding aperti restano invariati.'
+                'review, anche dello stesso commit. ' + rounds
                 + detail, current, 'stale', bases)
             self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.changes, lb.ready_to_merge])
             return None
@@ -3272,7 +3322,7 @@ class Dispatcher:
         # with the same identity checks as the snapshot: never the snapshot's older view.
         pr = replace(pr, labels=labels, reviews=[], fixes=[], syncs=[], closures=[],
                      commands=[], finding_problems=[], policy=[], zero_head=None,
-                     zero_problem='', stale_receipt=False, operator_comments=[],
+                     zero_problem='', stale_receipt=False, revoked=None, operator_comments=[],
                      rereview=False, round_comments=[], acceptance=[], hold=None)
         self._read_thread(pr, self.gh.pr_comments(pr.number))
         if pr.hold:
@@ -3683,7 +3733,8 @@ class Dispatcher:
         replaces (``restarts``): that round does not count against ``max_review_rounds``.
 
         A new round on a head that a clean sync moved from the approved one (#235,
-        ``PullRequest.resync``) records ``resync`` and does not count either."""
+        ``PullRequest.resync``), or on the approved head after the base touching the PR revoked
+        its approval (#252), records ``resync`` and does not count either."""
         cfg = self.cfg
         receipt, paths = self._current_receipt(pr)
         if receipt is None:
@@ -3713,11 +3764,13 @@ class Dispatcher:
                 counted -= 1
                 self.log(f'  round {latest[0]["round"]} restarts: the base touched the PR')
             elif pr.resync and not pr.rereview:
-                # Only a clean sync moved the approved head (#235): this round does not count.
+                # Only a clean sync moved the approved head (#235), or only the base touching
+                # the PR revoked its approval (#252): this round does not count.
                 resync = pr.resync
                 counted -= 1
-                self.log(f'  the head approved in round {resync["round"]} was synced with the '
-                         'base: this round does not count')
+                why = ('approval was revoked because the base touched the PR'
+                       if resync['reason'] == BASE_CHANGED else 'head was synced with the base')
+                self.log(f'  the {why} after round {resync["round"]}: this round does not count')
         if counted > cfg.max_review_rounds:
             return self._do_round_limit(pr)
         max_rounds = cfg.max_review_rounds + round_no - counted

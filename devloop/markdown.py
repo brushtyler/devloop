@@ -301,11 +301,16 @@ def render_review(review, head):
                       'base è avanzata toccando file della PR, o senza che la non interferenza '
                       'fosse dimostrabile: quel round non conta per il limite dei round.']
     # #235: the approved head was synced with the base, without conflicts.
+    # #252: the same head again, after the base touching the PR revoked its approval.
     if review.get('resync'):
+        why = ('il dispatcher ha revocato quell\'approvazione perché la base è avanzata toccando '
+               'file della PR, o senza che la non interferenza fosse dimostrabile, e questo '
+               'round rivede lo stesso commit'
+               if review['resync'].get('reason') == 'base_changed'
+               else 'il nuovo head ne differisce solo per il merge della base senza conflitti')
         parts += ['', f'> Il round {review["resync"]["round"]} aveva approvato '
-                      f'`{review["resync"]["from"][:12]}`; il nuovo head ne differisce solo per '
-                      'il merge della base senza conflitti: questo round non conta per il limite '
-                      'dei round.']
+                      f'`{review["resync"]["from"][:12]}`; {why}: questo round non conta per il '
+                      'limite dei round.']
     parts +=['', review['summary'].strip()]
     if review['verdict'] == 'needs_human' and review['human_reason']:
         parts += ['', '### Decisione richiesta', '', review['human_reason'].strip()]
