@@ -6,6 +6,7 @@ import fcntl
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -364,9 +365,13 @@ def main(argv=None):
                 + (f': {action.reason}' if action.reason else ''))
         return
     if args.command == 'tick' and args.dry_run:
-        # It plans and writes nothing, as `status`: no dispatcher lock, so that the smoke test
-        # of a pin (#260) runs it while a dispatcher runs.
-        dispatcher.tick(dry_run=True)
+        # It plans and writes nothing: no dispatcher lock, so that the smoke test of a pin (#260)
+        # runs it while a dispatcher runs. Its git commands do not fetch and write nothing to the
+        # repository: the objects of merge-tree go to a temporary directory.
+        with tempfile.TemporaryDirectory(prefix='devloop-dry-run-') as objects:
+            dispatcher.ws.read_only(objects)
+            log('[dry-run] read-only repository: the remote branches are those last fetched')
+            dispatcher.tick(dry_run=True)
         return
     with single_instance(state / 'dispatcher.lock') as lock:
         if args.command == 'cleanup':

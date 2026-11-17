@@ -463,8 +463,11 @@ python3 -m devloop fallback reset agy  # forget the models agy remembers unavail
 
 Run it from any checkout of this repository. Worktrees, agent prompts and logs, and the lock that
 prevents two dispatchers from running at once live under `state_dir` (default `.ssdlc/devloop`)
-in the main checkout. `tick --dry-run`, like `status`, writes nothing and does not take that
-lock, so the [smoke test of a pin](#pin) runs it while `run` is active. In daily use run it from the pinned copy, through
+in the main checkout. `tick --dry-run` writes nothing and does not take that lock, so the
+[smoke test of a pin](#pin) runs it while `run` is active. Not even its git commands write to
+the repository: it does not fetch, so it plans from the remote branches as last fetched (a
+branch never fetched leaves its merge mode not computable), and the objects that `git
+merge-tree` writes go to a temporary directory. In daily use run it from the pinned copy, through
 `scripts/devloop-pinned` ([Run from a pinned installation](#run-from-a-pinned-installation)).
 `--local-config <file>`, before the command, applies a local overlay to the configuration
 ([Local config as an overlay](#local-config-as-an-overlay)).
@@ -825,7 +828,7 @@ binary leaves, for a few seconds, nothing to start (#218; the start is retried o
    reads `sensitive_path_lists` from the copy;
 5. runs the **smoke test** of a new copy: from the copy (only the copy on the module path), in
    the main checkout and with the same overlay, `python3 -m devloop tick --dry-run` (it plans,
-   without agents and without writes) and one round of `python3 -m devloop watch`, on a state
+   without agents and without writes, not even to the repository) and one round of `python3 -m devloop watch`, on a state
    file of its own, at most 30 seconds. Step 4 has already loaded the configuration with the
    overlay;
 6. points `.ssdlc/devloop/current` at the copy, with an atomic rename of a symlink.

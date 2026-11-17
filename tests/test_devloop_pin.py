@@ -21,6 +21,7 @@ import devloop.__main__ as cli
 from devloop import config, markdown, pin, runloop
 from devloop.config import ConfigError, MergePolicy, PinPolicy
 from devloop.dispatcher import Dispatcher, Snapshot
+from devloop.workspace import Workspace, WorkspaceError
 from test_devloop import (CFG, REV_NAME, SHA1, FakeRunner, FakeWS, norm, raw_review, receipt)
 from test_devloop_merge import Identities, MergeGH, header, records
 from test_devloop_zero import changes
@@ -952,16 +953,18 @@ class RestartTests(unittest.TestCase):
 
     def test_a_dry_run_tick_runs_while_a_dispatcher_holds_the_lock(self):
         # The smoke test of a pin (#260) runs `tick --dry-run` while `run` holds the lock.
-        dispatcher = SimpleNamespace(tick=mock.Mock(return_value=[]))
+        dispatcher = SimpleNamespace(tick=mock.Mock(return_value=[]), ws=mock.Mock())
         patcher = mock.patch.dict(os.environ)
         patcher.start()
         self.addCleanup(patcher.stop)
         os.environ.pop(cli.LOCK_FD, None)  # no lock passed on by a restart
         with open(self.lock, 'w') as held:
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            with mock.patch.object(cli, 'build', return_value=(None, self.tmp, dispatcher)):
+            with mock.patch.object(cli, 'build', return_value=(None, self.tmp, dispatcher)), \
+                    mock.patch.object(cli, 'log'):
                 cli.main(['tick', '--dry-run'])
                 dispatcher.tick.assert_called_once_with(dry_run=True)
+                dispatcher.ws.read_only.assert_called_once()
                 with self.assertRaisesRegex(SystemExit, 'another dispatcher'):
                     cli.main(['tick'])
 
@@ -1012,6 +1015,88 @@ class RestartTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {'PYTHONPATH': '/pinned'}):
             env = cli.agent_environment(config.load_config(), self.tmp)
         self.assertNotIn('PYTHONPATH', env)
+
+
+class DryRunTests(GitCase):
+    """``tick --dry-run`` runs without the lock (#260): with a real Workspace and a PR ready to
+    merge, it writes nothing to the repository of the dispatcher that holds the lock."""
+
+    BRANCH = 'agent/issue-7'
+    TRACKING = f'refs/remotes/origin/{BRANCH}'
+
+    def setUp(self):
+        super().setUp()
+        git(self.root, 'checkout', '--quiet', '-b', self.BRANCH)
+        (self.root / 'x.py').write_text('x\n')
+        self.head = self.commit('pr')
+        git(self.root, 'push', '--quiet', 'origin', self.BRANCH)
+        git(self.root, 'checkout', '--quiet', 'main')
+        self.state.mkdir(parents=True)
+
+    def dispatcher(self):
+        """PR #100, ready to merge in mode strict at ``self.head``, approved at level 1."""
+        rp = dataclasses.replace(CFG.review_policy, sensitive_paths=())
+        cfg = dataclasses.replace(CFG, merge=MergePolicy(mode='strict'), review_policy=rp)
+        record = norm(raw_review(), head=self.head, bound=False)
+        record['receipt'] = receipt(head=self.head, base=self.first, files=('x.py',), cfg=cfg)
+        gh = MergeGH()
+        gh.head = self.head
+        gh.thread = []
+        gh.say('brushtyler', markdown.render_review(record, header(REV_NAME)))
+        ws = Workspace(self.root, cfg.state_dir, cfg.base_branch)
+        return Dispatcher(cfg, gh, ws, FakeRunner(), log=self.logs.append,
+                          identities=Identities(gh))
+
+    def files(self):
+        """Every file of the repository's git directory, with its content."""
+        git_dir = self.root / '.git'
+        return {str(p.relative_to(git_dir)): p.read_bytes()
+                for p in sorted(git_dir.rglob('*')) if p.is_file()}
+
+    def dry_run(self):
+        dispatcher = self.dispatcher()
+        before = self.files()
+        with mock.patch.dict(os.environ), \
+                open(self.state / 'dispatcher.lock', 'w') as held, \
+                mock.patch.object(cli, 'build', return_value=(None, self.state, dispatcher)), \
+                mock.patch.object(cli, 'log'):
+            os.environ.pop(cli.LOCK_FD, None)
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            cli.main(['tick', '--dry-run'])
+        self.assertEqual(self.files(), before)
+        return dispatcher
+
+    def test_a_ready_pr_is_planned_from_the_refs_last_fetched_without_writes(self):
+        self.dry_run()
+        self.assertIn('[dry-run] merge #100: merge mode strict', self.logs)
+
+    def test_a_branch_never_fetched_is_not_fetched(self):
+        git(self.root, 'update-ref', '-d', self.TRACKING)
+        self.dry_run()
+        self.assertTrue(any('merge mode of #100 not computable' in line for line in self.logs))
+        self.assertNotIn('[dry-run] merge #100: merge mode strict', self.logs)
+        self.assertEqual(subprocess.run(['git', 'rev-parse', '--verify', '-q', self.TRACKING],
+                                        cwd=self.root, capture_output=True).returncode, 1)
+
+    def test_merge_tree_writes_out_of_the_repository_and_writing_commands_are_refused(self):
+        ws = Workspace(self.root, '.ssdlc/devloop', 'main')
+        (self.root / 'NOTES.md').write_text('main moved on\n')
+        base = self.commit('main')  # the merged tree is new: git has to write it
+        before = self.files()
+        with tempfile.TemporaryDirectory() as objects:
+            ws.read_only(objects)
+            tree, clean, conflicts = ws._merge_tree(base, self.head)
+            self.assertEqual((clean, conflicts), (True, []))
+            self.assertTrue(any(Path(objects).rglob('*')))
+            self.assertEqual(ws._git('cat-file', '-t', tree).strip(), 'tree')
+            # The fetch is skipped: the base is the one last fetched.
+            self.assertEqual(ws.base_head(), self.first)
+            for write in (lambda: ws.base_copy('copy'), lambda: ws.new_branch('w', 'b'),
+                          lambda: ws.remove('copy')):
+                with self.assertRaisesRegex(WorkspaceError, 'read-only'):
+                    write()
+        self.assertEqual(self.files(), before)
+        self.assertFalse(ws.root.exists())
 
 
 class DocsTests(unittest.TestCase):
