@@ -22,6 +22,10 @@ DEFAULT_RULES = ['command(python3 scripts/run-tests.py)', 'command(python3 -m un
                  'command(git show)']
 
 
+# agy without fallback models: a second denial escalates at once (#180, #319).
+NO_FALLBACK = config.parse_config(with_agent('agy', fallback_models=None))
+
+
 def settings(argv):
     return json.loads(argv[argv.index('--settings') + 1])
 
@@ -263,7 +267,7 @@ class NoOutputTests(unittest.TestCase):
         cli = FakeCLI(gemini_4_argon_high=(0, '', JETSKI))
         gh = FakeGH()
         with tempfile.TemporaryDirectory() as tmp:
-            d = Dispatcher(CFG, gh, FakeWS(), agents.AgentRunner(tmp, 10, run=cli),
+            d = Dispatcher(NO_FALLBACK, gh, FakeWS(), agents.AgentRunner(tmp, 10, run=cli),
                            log=lambda _: None)
             p = pr()
             p.meta['reviewer'] = 'agy'
@@ -319,7 +323,7 @@ class DeniedActionsTests(unittest.TestCase):
         cli = FakeCLI(gemini_4_argon_high=(0, DENIED_ENVELOPE, JETSKI))
         gh = FakeGH()
         with tempfile.TemporaryDirectory() as tmp:
-            d = Dispatcher(CFG, gh, FakeWS(), agents.AgentRunner(tmp, 10, run=cli),
+            d = Dispatcher(NO_FALLBACK, gh, FakeWS(), agents.AgentRunner(tmp, 10, run=cli),
                            log=lambda _: None)
             p = pr()
             p.meta['reviewer'] = 'agy'
@@ -362,10 +366,10 @@ class PermissionRetryTests(unittest.TestCase):
     """A turn agy ends on a denied permission, with no output, is a failure of the tool: the same
     model runs it once more before the escalation (#180)."""
 
-    def tick(self, cli):
+    def tick(self, cli, cfg=CFG):
         self.gh, self.logs = FakeGH(), []
         with tempfile.TemporaryDirectory() as tmp:
-            d = Dispatcher(CFG, self.gh, FakeWS(), agents.AgentRunner(tmp, 10, run=cli),
+            d = Dispatcher(cfg, self.gh, FakeWS(), agents.AgentRunner(tmp, 10, run=cli),
                            log=self.logs.append)
             p = pr()
             p.meta['reviewer'] = 'agy'
@@ -397,7 +401,13 @@ class PermissionRetryTests(unittest.TestCase):
         cli = SequenceCLI(gemini_4_argon_high=[(0, '', READ_JETSKI)])
         log = self.tick(cli)
         self.assertEqual(cli.models(), [ARGON, ARGON])
-        self.assertEqual(cli.calls[0][1], cli.calls[1][1])  # the same prompt
+        # The same prompt, with what was denied before the command block (#319).
+        first, again = cli.calls[0][1], cli.calls[1][1]
+        base = first[:first.index('\n\n## Shell commands\n')]
+        self.assertTrue(again.startswith(base + '\n\n## Denied in the previous attempt\n'))
+        self.assertTrue(again.endswith(first[len(base):]))
+        self.assertIn('denied the `read_file` permission (target non riportato da agy)', again)
+        self.assertNotIn('Denied in the previous attempt', first)
         self.assertNotIn('Previous attempt on another model', cli.calls[1][1])
         self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
         body = self.gh.comments[0][1]
@@ -411,13 +421,14 @@ class PermissionRetryTests(unittest.TestCase):
 
     def test_a_second_denial_escalates_citing_the_permission(self):
         cli = FakeCLI(gemini_4_argon_high=(0, READ_ENVELOPE, READ_JETSKI))
-        log = self.tick(cli)
+        log = self.tick(cli, NO_FALLBACK)
         self.assertEqual(cli.models(), [ARGON, ARGON])  # once more, then no fallback
         self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         body = self.gh.comments[-1][1]
         self.assertIn(f'Il passo `review` è fallito: agy stopped without output: {READ_JETSKI}',
                       body)
-        self.assertIn('permission `read_file` denied again after one retry', body)
+        self.assertIn('permission `read_file` denied again after one retry; model '
+                      f'`{ARGON}`; target {READ_TARGET}', body)
         self.assertNotIn(HYDROGEN, body)
         self.assertIn(f'denied the "read_file" permission ({READ_TARGET}); retrying once', log)
         self.assertIn(f'denied the "read_file" permission again ({READ_TARGET})', log)
@@ -483,7 +494,11 @@ class PreflightPermissionRetryTests(unittest.TestCase):
     def test_a_denied_check_is_retried_once_in_the_same_checkout(self):
         log = self.tick(self.denied(), checked(True))
         self.assertEqual([c[:3] for c in self.runner.calls], [('agy', 'review', 'preflight')] * 2)
-        self.assertEqual(self.runner.calls[0][3], self.runner.calls[1][3])  # the same prompt
+        # The same prompt, told what was denied and which commands are allowed (#319).
+        first, again = self.runner.calls[0][3], self.runner.calls[1][3]
+        self.assertEqual(again, first + agents.denied_retry_note(CFG.agent('agy'), 'review',
+                                                                 self.denied()))
+        self.assertIn(f'denied the `read_file` permission (target {READ_TARGET})', again)
         self.assertEqual(self.runner.workdirs, [self.runner.workdirs[0]] * 2)
         self.assertEqual(self.labels, ['issue-7-preflight', 'issue-7-preflight-retry'])
         self.assertIn(f'agy: model {CFG.agent("agy").model} denied the "read_file" permission '
