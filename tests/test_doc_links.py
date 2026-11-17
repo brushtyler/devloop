@@ -17,6 +17,7 @@ import re
 import tempfile
 import unicodedata
 import unittest
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -44,8 +45,6 @@ _HEADING = re.compile(r'^ {0,3}#{1,6}(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$')
 _CODE_SPAN = re.compile(r'(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)')
 _REFERENCE = re.compile(r'^ {0,3}\[[^\]]+\]:\s*(<[^>]*>|\S+)')
 _LINK_TITLE = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|\((?:\\.|[^()\\])*\)')
-_HTML_TAG = re.compile(r'<[A-Za-z][A-Za-z0-9-]*(\s[^<>]*)>')
-_HTML_ANCHOR = re.compile(r'(?<![\w-])(?:id|name)\s*=\s*(?:"([^"]+)"|\'([^\']+)\')')
 _EMPHASIS = re.compile(r'(?<![\w\\])([*_]{1,3})(?=\S)(.+?)(?<=[^\s\\])\1(?!\w)')
 _SCHEME = re.compile(r'^[A-Za-z][A-Za-z0-9+.-]*:')
 _ROOT_PY = re.compile(r'[\w.-]+\.py')
@@ -123,33 +122,48 @@ def slug(heading):
 
     Formatting is removed first, as GitHub derives the anchor from the rendered text:
     emphasis delimiters go, while intraword, escaped and inline-code underscores stay.
+    Inline code is swapped for a placeholder character while formatting is removed, so
+    emphasis that wraps code is recognised and the code's own content is left untouched.
     """
-    def plain(part):
-        part = re.sub(r'!?\[([^\]]*)\]\([^)]*\)', r'\1', part)
-        part = re.sub(r'<[^>]+>', '', part)
-        previous = None
-        while previous != part:
-            previous, part = part, _EMPHASIS.sub(r'\2', part)
-        return part
+    codes = []
+    heading = re.sub('[\U000F0000-\U000FFFFD]', '', heading)  # never in real headings
 
-    parts, position = [], 0
-    for code in _CODE_SPAN.finditer(heading):
+    def placeholder(code):
         content = code.group(2)
         if content.startswith(' ') and content.endswith(' ') and content.strip():
             content = content[1:-1]
-        parts += [plain(heading[position:code.start()]), content]
-        position = code.end()
-    text = ''.join(parts + [plain(heading[position:])]).lower()
+        codes.append(content)
+        return chr(0xF0000 + len(codes) - 1)  # private-use character: not a word character
+
+    text = _CODE_SPAN.sub(placeholder, heading)
+    text = re.sub(r'!?\[([^\]]*)\]\([^)]*\)', r'\1', text)
+    text = re.sub(r'<[^>]+>', '', text)
+    previous = None
+    while previous != text:
+        previous, text = text, _EMPHASIS.sub(r'\2', text)
+    text = re.sub('[\U000F0000-\U000FFFFD]', lambda char: codes[ord(char.group()) - 0xF0000], text).lower()
     kept = ''.join(ch for ch in text
                    if ch in ' -' or unicodedata.category(ch)[0] in 'LNM' or unicodedata.category(ch) == 'Pc')
     return kept.replace(' ', '-')
 
 
+class _AnchorParser(HTMLParser):
+    """Collects the values of the real ``id`` and ``name`` attributes of HTML start tags."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.found = set()
+
+    def handle_starttag(self, tag, attrs):
+        self.found.update(value for name, value in attrs if name in ('id', 'name') and value)
+
+
 def _html_anchors(line):
     """``id``/``name`` attributes of the HTML tags in a line, outside inline code."""
-    return {first or second
-            for tag in _HTML_TAG.finditer(_CODE_SPAN.sub('', line))
-            for first, second in _HTML_ANCHOR.findall(tag.group(1))}
+    parser = _AnchorParser()
+    parser.feed(_CODE_SPAN.sub('', line))
+    parser.close()
+    return parser.found
 
 
 def anchors(text):
@@ -323,14 +337,23 @@ class DocLinkCheckTests(unittest.TestCase):
             'README.md': '# _Usage_\n[ok](#usage) [bad](#_usage_)\n',
         }), [('README.md', '#_usage_', 'no heading with this anchor')])
 
+    def test_emphasis_around_inline_code_is_removed_but_code_underscores_stay(self):
+        text = '# _Usage `now`_\n## **Run `__init__` and `_x_`**\n## _a `b` c_ and `d_e`\n'
+        self.assertEqual(anchors(text), {'usage-now', 'run-__init__-and-_x_', 'a-b-c-and-d_e'})
+        self.assertEqual(self.broken({
+            'README.md': '# _Usage `now`_\n[ok](#usage-now) [bad](#_usage-now_)\n',
+        }), [('README.md', '#_usage-now_', 'no heading with this anchor')])
+
     def test_html_anchors_come_only_from_real_tags(self):
         self.assertEqual(self.broken({
-            'README.md': ('[bad](#missing) [ok](#custom) [ok](#named) [bad](#data)\n'
+            'README.md': ('[bad](#missing) [ok](#custom) [ok](#named) [bad](#data) [bad](#titled)\n'
                           'Write `id="missing"` or `<a id="missing">` to add one.\n'
-                          '<a id="custom"></a> <span name=\'named\'></span> <div data-id="data"></div>\n'),
+                          '<a id="custom"></a> <span name=\'named\'></span> <div data-id="data"></div>\n'
+                          '<div title="id=\'missing\'">example</div> <p title=\'name="titled"\'>x</p>\n'),
         }), [
             ('README.md', '#missing', 'no heading with this anchor'),
             ('README.md', '#data', 'no heading with this anchor'),
+            ('README.md', '#titled', 'no heading with this anchor'),
         ])
 
     def test_external_links_code_blocks_and_ignored_lines_are_not_checked(self):
