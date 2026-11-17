@@ -101,7 +101,7 @@ from pathlib import Path
 
 from .acceptance import (acceptance_criteria, acceptance_findings, format_criteria, format_map,
                          latest_map, render_map)
-from .agents import (TAIL_LINES, AgentError, ModelsUnavailable, ModelUnavailable,
+from .agents import (TAIL_LINES, AgentError, ModelsUnavailable, ModelUnavailable, NoOutput,
                      PermissionDenied, background_unfinished)
 from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, MERGER, PR_COMMENT, REVIEW
 from .config import INSTALL_ROOT, ConfigError
@@ -2294,6 +2294,11 @@ class Dispatcher:
         directory, with ``-retry`` in its label. A second denial on the same model fails as any
         other error, naming the permission.
 
+        An agy turn that ended with no result and no error (``NoOutput``, #222) leaves
+        ``models`` as an unavailable model does, without being remembered: the next model runs.
+        On the last model of the chain the same model runs once more, with ``-retry`` in its
+        label; a second empty run fails as any other error.
+
         ``where``, ``(number, kind)``, is the issue or PR whose ledger records each CLI
         invocation as a turn (#133): written before the CLI starts, closed when it ends.
 
@@ -2305,6 +2310,7 @@ class Dispatcher:
         model that answers is forgotten."""
         failed = None
         retried = set()  # the models already denied a permission in this call
+        emptied = set()  # the last models of the chain already rerun after no output (#222)
         while models.left:
             candidate = models.left.pop(0)
             remembered = self._remembered(models, candidate)
@@ -2324,8 +2330,8 @@ class Dispatcher:
                 continue
             text = prompt + FALLBACK_NOTE[mode] if failed else prompt
             suffix = f'-{candidate.model}' if candidate.fallback_for else ''
-            if candidate.model in retried:
-                suffix += '-retry'  # its own log: the first attempt's stays as it was
+            # Its own log: the first attempt's stays as it was.
+            suffix += '-retry' * ((candidate.model in retried) + (candidate.model in emptied))
             entry = self._open_turn(where, candidate, mode, label + suffix)
             try:
                 output = self.runner.run(candidate, mode, text, schema, path, label + suffix)
@@ -2336,6 +2342,29 @@ class Dispatcher:
                          + self._remember(models.agent, candidate, exc))
                 failed = exc
                 continue
+            except NoOutput as exc:
+                self._close_turn(entry, 'failure', exc)
+                if models.left:
+                    # Not usable for this turn, maybe only for a moment: the next model runs,
+                    # and nothing is remembered (#222).
+                    models.tried.append((candidate.model, str(exc)))
+                    self.log(f'  {candidate.key}: model {candidate.model} returned no output; '
+                             f'trying {models.left[0].model}')
+                    failed = exc
+                    continue
+                if candidate.model not in emptied:  # the last model of the chain: once more
+                    emptied.add(candidate.model)
+                    models.left.insert(0, candidate)
+                    self.log(f'  {candidate.key}: model {candidate.model} returned no output; '
+                             f'trying {candidate.model} again')
+                    continue
+                self.log(f'  {candidate.key}: model {candidate.model} returned no output again')
+                error = AgentError(f'{exc}; no output again after one retry', exc.log)
+                if not models.tried:
+                    raise error from exc
+                models.tried.append((candidate.model, str(error)))
+                raise ModelsUnavailable(models.agent.key, models.tried, exc.log,
+                                        last_failed=True) from exc
             except PermissionDenied as exc:
                 self._close_turn(entry, 'failure', exc)
                 error = self._permission_denied(candidate, exc,
