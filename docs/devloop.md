@@ -994,7 +994,9 @@ needs a dedicated system user or a container.
 The `strict` and `auto` [merge modes](#merge-modes) merge with an app of their own, `merger`
 (#201), so that devloop needs neither a `gh` login nor the operator's broader permissions. It is
 the only app with `contents=write`, and it does nothing else: comments, labels and pushes stay
-with the dispatcher's and the agents' apps, its comments and labels count for no role, and
+with the dispatcher's and the agents' apps, its comments and labels count for no role (the
+dispatcher accepts reviews only from configured agents, so a review naming `merger` as
+reviewer is ignored even when its app wrote it), and
 `scripts/agent-token.py` refuses it, as it refuses the dispatcher's app. Without `[apps.merger]`
 the merges use the local `gh` login, as before.
 

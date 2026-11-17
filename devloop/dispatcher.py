@@ -1017,7 +1017,8 @@ class Dispatcher:
     def _markers(self, pr, comments, kind):
         """Records of ``kind`` from the identities allowed to write them, at most one per
         comment: fixes from the PR's implementer, CI verdicts and policy records from the
-        dispatcher, reviews from the agent named in the record, never the implementer."""
+        dispatcher, reviews from the configured agent named in the record, never the
+        implementer nor the merger."""
         return [record for _, record in self._marker_entries(pr, comments, kind)]
 
     def _marker_entries(self, pr, comments, kind, problems=None):
@@ -1045,7 +1046,9 @@ class Dispatcher:
                     problems.append(f'la review del round {record["round"]} non registra il '
                                     'reviewer')
                 continue
-            elif record['reviewer'] in (implementer, CI):
+            elif record['reviewer'] in (implementer, CI) or record['reviewer'] not in self.cfg.agents:
+                # Only a configured agent reviews: never the implementer, nor one of devloop's
+                # own apps, such as the merger, whose app only merges (#201).
                 continue
             else:
                 actor = record['reviewer']

@@ -630,6 +630,28 @@ class MergerAppTests(unittest.TestCase):
         without = {k: v for k, v in DATA['apps'].items() if k != 'merger'}
         self.assertNotIn('merger', config.parse_config(dict(DATA, apps=without)).apps)
 
+    def test_the_merger_app_has_no_say_on_reviews_or_records(self):
+        """The merger only merges: a review naming it as reviewer, or a policy record, written
+        with its app changes neither the reviews, nor the plan, nor the state of the PR."""
+        blocking = review.normalize_review(
+            raw_review('request_changes', blocking=[finding()]), previous_open=[], round_no=2,
+            max_rounds=3, head_sha=SHA1, ci='pass', reviewer=apps.MERGER)
+        stale = markdown.publishable(markdown.dispatcher_header() + '\n## Ricevuta non valida',
+                                     'policy', {'event': 'stale', 'receipt': receipt()})
+        for name, body in (('review', markdown.render_review(blocking, header('merger'))),
+                           ('policy', stale)):
+            with self.subTest(record=name):
+                gh = MergeGH()
+                gh.say(MERGER_LOGIN, body)
+                d = Dispatcher(STRICT, gh, FakeWS(), FakeRunner(), log=lambda m: None,
+                               identities=MergerIdentities(gh))
+                p = d.snapshot().prs[0]
+                self.assertEqual([r['round'] for r in p.reviews], [1])
+                self.assertNotIn('2/merger/R2-1', review.finding_state(p.reviews, []).known)
+                self.assertEqual(d.tick(), [MERGE])
+                self.assertEqual(gh.merged, [(100, SHA1)])
+                self.assertEqual(records(gh, 'policy'), [])
+
     def test_a_merged_record_with_a_bad_signature_is_not_a_record(self):
         good = {'head': SHA1, 'level': 1, 'mode': 'strict', 'receipt': receipt()}
         text = lambda payload: markdown.publishable('x', 'merged', payload)
