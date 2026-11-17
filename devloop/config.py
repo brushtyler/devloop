@@ -146,8 +146,14 @@ class AgentConfig:
     fallback_models: tuple = ()
     unavailable_patterns: tuple = DEFAULT_UNAVAILABLE_PATTERNS
     unavailable_exit_codes: tuple = ()
+    # How long a model found unavailable is skipped when the error does not say when it is
+    # back (``Resets in <duration>``), with fallback models only (issue #151).
+    fallback_memory_seconds: int = 3600
     # Set on the configurations ``chain`` derives for fallback models: the configured model.
     fallback_for: str = ''
+    # Set on the configuration a turn ran with (``Dispatcher._turn``, #151): the models of the
+    # chain skipped because remembered unavailable, ``(model, reason, until)`` each.
+    skipped: tuple = ()
     # agy only (issue #122): the command prefixes its write and review turns may run, passed
     # each turn as ``permissions.allow`` rules with ``--settings``.
     write_commands: tuple = ()
@@ -289,6 +295,16 @@ def _fallback_models(table, where, kind, model, effort):
         seen.add(name)
         models.append(FallbackModel(model=name, model_label=label, effort=level))
     return tuple(models)
+
+
+def _memory_seconds(table, where):
+    """``fallback_memory_seconds`` of an agent (#151): a positive number of seconds."""
+    if 'fallback_memory_seconds' not in table:
+        return AgentConfig.fallback_memory_seconds
+    value = _require(table, 'fallback_memory_seconds', int, where)
+    if value < 1:
+        raise ConfigError(f'{where}.fallback_memory_seconds: out of range')
+    return value
 
 
 def _unavailable(table, where):
@@ -572,6 +588,7 @@ def parse_config(data, root=INSTALL_ROOT):
             commit_trailer=table.get('commit_trailer', ''),
             fallback_models=_fallback_models(table, where, kind, model, effort),
             unavailable_patterns=patterns, unavailable_exit_codes=codes,
+            fallback_memory_seconds=_memory_seconds(table, where),
             write_commands=write_commands, review_commands=review_commands)
     roles = data.get('roles') or {}
     implementer = _require(roles, 'implementer', str, 'roles')
@@ -668,6 +685,7 @@ def sensitive_lists(data):
 _AGENT_KEYS = dict.fromkeys(('kind', 'display_name', 'model', 'model_label', 'effort',
                              'version_cmd', 'write_args', 'review_args', 'commit_trailer',
                              'fallback_models', 'unavailable_patterns', 'unavailable_exit_codes',
+                             'fallback_memory_seconds',
                              'write_commands', 'review_commands'))
 OVERLAY_KEYS = {
     **dict.fromkeys(('repo', 'base_branch', 'branch_prefix', 'state_dir', 'test_cmd',

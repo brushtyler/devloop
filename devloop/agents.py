@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .markdown import header, parse_version
 from .schema import load_schema, schema_path, validate, SchemaError
+from .unavailability import reset_seconds
 from .workspace import git_config_env, run_in_group
 
 MODES = ('write', 'review')
@@ -56,11 +57,14 @@ class EnvelopeError(AgentError):
 
 class ModelUnavailable(AgentError):
     """A failed turn whose output says that the model is unavailable (issue #121). The message
-    is the one the plain failure would have; ``reason`` says what matched."""
+    is the one the plain failure would have; ``reason`` says what matched. ``resets_at``: the
+    epoch the error announces the model back at (``Resets in <duration>`` after the failure
+    was detected, #151), or None when it announces none."""
 
-    def __init__(self, message, log=None, reason=''):
+    def __init__(self, message, log=None, reason='', resets_at=None):
         super().__init__(message, log)
         self.reason = reason
+        self.resets_at = resets_at
 
 
 class PermissionDenied(AgentError):
@@ -362,10 +366,13 @@ class AgentRunner:
     ``last_report`` is the ``telemetry`` of the latest turn, ``(fields, models)``, set whether
     the turn succeeded or failed; None when the CLI did not complete (timeout, stall, failed
     start), so that nothing is attested. It belongs to the calling thread: parallel actions
-    (#176) each read the report of their own turn."""
+    (#176) each read the report of their own turn. ``clock`` dates the failures that announce
+    when the model is back (#151)."""
 
-    def __init__(self, log_dir, timeout, run=subprocess.run, env=None, on_turn=None, stall=None):
+    def __init__(self, log_dir, timeout, run=subprocess.run, env=None, on_turn=None, stall=None,
+                 clock=time.time):
         self.log_dir = Path(log_dir)
+        self._clock = clock
         self.timeout = timeout
         self._run = run
         self._env = env
@@ -381,6 +388,11 @@ class AgentRunner:
     @last_report.setter
     def last_report(self, report):
         self._local.report = report
+
+    def _resets_at(self, text):
+        """The epoch the error in ``text`` announces the model back at, or None (#151)."""
+        seconds = reset_seconds(text)
+        return None if seconds is None else self._clock() + seconds
 
     def version(self, agent):
         """The CLI version, cached once known; a failed lookup is retried on the next call."""
@@ -453,7 +465,7 @@ class AgentRunner:
             if left_no_output(agent.kind, done.stdout, out_file):
                 reason = unavailable_reason(agent, done.returncode, text)
                 if reason:
-                    raise ModelUnavailable(message, log, reason)
+                    raise ModelUnavailable(message, log, reason, self._resets_at(text))
             # A result or a parse error: the turn failed, but not for lack of a model (#121).
             raise AgentError(message, log)
         try:
@@ -462,7 +474,7 @@ class AgentRunner:
         except EnvelopeError as exc:
             reason = unavailable_reason(agent, None, text)
             if reason:
-                raise ModelUnavailable(str(exc), log, reason) from exc
+                raise ModelUnavailable(str(exc), log, reason, self._resets_at(text)) from exc
             if denied:
                 raise EnvelopeError(f'{exc}{denied}', log) from exc
             exc.log = log

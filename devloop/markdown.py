@@ -320,6 +320,8 @@ def render_fix(fix, head, round_no):
         payload['profile'] = fix['profile']  # who wrote the fix (#111)
     if 'local_tests' in fix:
         payload['local_tests'] = fix['local_tests']  # informative only (#169)
+    if fix.get('skipped_models'):
+        payload['skipped_models'] = fix['skipped_models']  # informative only (#151)
     return publishable(head + '\n' + '\n'.join(parts), 'fix', payload)
 
 

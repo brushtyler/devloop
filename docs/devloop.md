@@ -982,6 +982,7 @@ python3 -m devloop cleanup          # remove worktrees left by failed steps
 python3 -m devloop follow issue-52  # follow live the implementer of issue #52 (pr-<N>: reviewer or fixer)
 python3 -m devloop watch --timeout 3600  # wait for the next change on GitHub, for the supervising agent
 python3 -m devloop pin origin/main  # pin a commit of origin (see Run from a pinned installation)
+python3 -m devloop fallback reset agy  # forget the models agy remembers unavailable (see Memory of unavailable models)
 ```
 
 Run it from any checkout of this repository. Worktrees, agent prompts and logs, and the lock that
@@ -1600,6 +1601,41 @@ fallback_models = [
   reservation atomically: a fallback must also be distinct from the profiles the other running
   reviewers reserved, otherwise it is skipped and the next model is tried. When no model is
   left, that reviewer fails and the round waits for it, without voiding the other verdict.
+
+#### Memory of unavailable models
+
+A model found unavailable stays unavailable for a while: a quota announces when it resets,
+sometimes days later. So that each turn does not try it again first, devloop remembers it (#151):
+
+- **What.** When a turn of an agent with `fallback_models` fails because its model is
+  unavailable, devloop records the pair (agent key, model) in
+  `<state_dir>/model-unavailability.json` of the main checkout, with the time, the reason and
+  the time the model is expected back. The record is per agent: two agents with the same model
+  have records of their own. It survives a restart of the dispatcher.
+- **Until when.** If the text of the error contains `Resets in <duration>`, the duration being
+  whole hours, minutes and seconds, in this order, each optional and at least one present
+  (`152h4m35s`, `4m`, `30s`), the model is skipped until the time the error was detected plus
+  that duration. Any other format counts as no indication: the model is skipped for
+  `fallback_memory_seconds` of the agent (default 3600, at least 1).
+- **During.** A turn of that agent skips a remembered model without running it and starts from
+  the first model of the chain that is not remembered, configured model or fallback alike. The
+  tick log says so (`<agent>: model <model> skipped: unavailable until <time> (<reason>)`), the
+  `pr`, `review`, `fix` or `sync` marker of the turn lists it in `skipped_models` with the
+  reason and the time (informative only: no receipt, independence check or approval reads
+  it), the comment of a failure lists it among the models tried, and `devloop status` shows
+  each remembered model with its time and reason. When every model left in the chain is
+  remembered, the turn tries them in order as it would without memory.
+- **After.** Once that time has passed, the model is tried again. A new failure records it
+  again, with a new time; a turn that succeeds on it forgets it.
+- **Reset.** `devloop fallback reset <agent>` forgets every model remembered for that agent,
+  and only those: its next turn starts from the configured model.
+- **Without fallback models** nothing is recorded and nothing is skipped: the agent behaves as
+  before.
+
+```toml
+[agents.agy]
+fallback_memory_seconds = 3600  # when the error does not say when the model is back
+```
 
 ## Limits
 
