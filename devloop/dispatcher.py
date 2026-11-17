@@ -387,13 +387,15 @@ def pr_counts_line(snapshot, cfg):
             f'{held}/{cfg.max_parked_prs} parked (max_parked_prs)')
 
 
-def pr_status_line(pr, cfg):
+def pr_status_line(pr, cfg, reviews=None):
     """A PR as ``status`` shows it (#289): its labels, the rounds counted against
     ``max_review_rounds`` (``rounds=3/3``, with the rounds that did not count, if any), CI and
-    the merge state."""
+    the merge state. ``reviews`` are the PR's review records when the snapshot did not read
+    them (``Dispatcher.status_reviews``); by default ``pr.reviews``."""
+    reviews = pr.reviews if reviews is None else reviews
     labels = ', '.join(sorted(l for l in pr.labels if l.startswith('agent:')))
-    waived = len(waived_rounds(pr.reviews))
-    rounds = (f'rounds={counted_rounds(pr.reviews)}/{cfg.max_review_rounds}'
+    waived = len(waived_rounds(reviews))
+    rounds = (f'rounds={counted_rounds(reviews)}/{cfg.max_review_rounds}'
               + (f' (+{waived} not counted)' if waived else ''))
     conflict = ' CONFLICT with ' + cfg.base_branch if pr.merge_state == 'conflict' else ''
     return (f'PR #{pr.number} (issue #{pr.issue}) [{labels}] {rounds} ci={pr.checks} '
@@ -789,6 +791,17 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
                            labels=label_names(raw['labels']), meta=meta or {},
                            merge_state=self.gh.merge_state(raw),
                            mergeable=raw.get('mergeable'), merge_status=raw.get('mergeStateStatus'))
+
+    def status_reviews(self, pr):
+        """The review records of ``pr`` for ``status`` (#289). The snapshot reads the thread
+        only of the PRs devloop works on; a PR escalated to agent:needs-operator (as after
+        ``round_limit``) or agent:needs-supervisor keeps its rounds in the thread, read here
+        without changing what the snapshot plans on."""
+        lb = self.cfg.labels
+        if not pr.meta or pr.labels & {lb.review, lb.changes, lb.ready_to_merge}:
+            return pr.reviews
+        comments = self.gh.pr_comments(pr.number)
+        return [record for _, record in self._marker_entries(pr, comments, 'review')]
 
     def snapshot(self):
         lb = self.cfg.labels

@@ -159,7 +159,9 @@ a CI failure, a review after a fix, a review after a sync whose conflicts the im
 resolved, a new review of the same head or of a new one), then the rounds that do not count with
 theirs, and recalls that the operator can grant more rounds by raising `max_review_rounds` (#289).
 `devloop status` shows the counted rounds of each PR on the limit, as `rounds=<counted>/<max>`,
-followed by `(+<n> not counted)` when some rounds did not count.
+followed by `(+<n> not counted)` when some rounds did not count. It reads them from the thread
+also for a PR stopped in `agent:needs-operator` (as after `round_limit`) or
+`agent:needs-supervisor`, whose thread the tick does not read.
 
 ### Approval and CI
 

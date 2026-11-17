@@ -421,7 +421,7 @@ def main(argv=None):
             log(f'labels: {both_labels_warning(cfg.labels)}')
         snap = dispatcher.snapshot()
         for pr in snap.prs:
-            log(pr_status_line(pr, cfg))
+            log(pr_status_line(pr, cfg, dispatcher.status_reviews(pr)))
         log(pr_counts_line(snap, cfg))
         for line in queue_lines(snap):
             log(line)

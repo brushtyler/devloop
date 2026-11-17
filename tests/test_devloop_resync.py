@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from devloop import markdown
 from devloop.dispatcher import (RESYNC_AFTER_APPROVAL, Action, counted_rounds, pr_status_line,
@@ -115,6 +116,38 @@ class ResyncTests(Quorum):
         self.assertIn('Round contati sul limite (1 di 1, `max_review_rounds`):\n\n'
                       '- round 1: prima review', body)
         self.assertIn('alzando `max_review_rounds`', body)
+
+    def status(self):
+        """The PR lines ``devloop status`` logs, on the real snapshot of the dispatcher."""
+        import devloop.__main__ as cli
+        lines = []
+        with mock.patch.object(cli, 'build', return_value=(self.d.cfg, Path('/state'), self.d)), \
+                mock.patch.object(cli, 'log', lines.append):
+            cli.main(['status'])
+        return [line for line in lines if line.startswith('PR #100 ')]
+
+    def test_status_shows_the_rounds_of_a_pr_stopped_at_the_round_limit(self):
+        # #289: escalated to agent:needs-operator the snapshot does not read the thread, yet
+        # ``status`` still shows the rounds that reached the limit.
+        self.approved_then_synced(SYNCED, conflicts=('x.py',))
+        self.d.tick()
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
+        self.assertEqual(self.d.snapshot().prs[0].reviews, [])  # tick still skips the thread
+        (line,) = self.status()
+        self.assertIn('[agent:needs-operator] rounds=1/1 ci=', line)
+
+    def test_status_shows_the_rounds_not_counted_of_an_escalated_pr(self):
+        cfg = dataclasses.replace(CFG, max_review_rounds=2)
+        changes = raw_review('request_changes', [finding()])
+        self.approved_then_synced(changes, fixed(), changes, cfg=cfg)
+        self.d.tick()
+        self.ws.resynced = False
+        self.d.tick()
+        self.gh.head = self.ws._head
+        self.d.tick()
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
+        (line,) = self.status()
+        self.assertIn('[agent:needs-operator] rounds=2/2 (+1 not counted) ci=', line)
 
     def test_a_sync_whose_conflicts_an_agent_resolved_spends_a_round(self):
         # With rounds left the review runs, and counts, without ``resync``.
