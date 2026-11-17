@@ -281,6 +281,29 @@ class PinTests(GitCase):
         self.pin('main')
         self.assertIsNone(pin.pending(self.state))
 
+    def test_the_fetch_of_an_auto_pin_holds_the_lock_of_the_workspace(self):
+        # #301: the pin may run while actions run; its fetch waits for theirs, and theirs for it.
+        held = []
+
+        class Lock:
+            def __enter__(_):
+                held.append('enter')
+
+            def __exit__(_, *exc):
+                held.append('exit')
+        real = pin._git
+
+        def git_(root, *args, **kw):
+            if args[0] == 'fetch':
+                held.append('fetch')
+            return real(root, *args, **kw)
+        auto = pin.AutoPin(self.root, self.state, log=self.logs.append, smoke=self.passing_smoke,
+                           fetch_lock=Lock())
+        with mock.patch.object(pin, '_git', git_):
+            copy = auto.pin('main')
+        self.assertEqual(held, ['enter', 'fetch', 'exit'])
+        self.assertEqual(auto.current(), copy.resolve())
+
     def test_the_command_line(self):
         with mock.patch.object(cli, 'main_checkout', return_value=self.root), \
                 mock.patch.object(cli, 'log', self.logs.append), \
@@ -762,12 +785,22 @@ class PinConfigTests(unittest.TestCase):
     def test_the_distributed_config_is_off(self):
         cfg = config.load_config()
         self.assertEqual(cfg.pin, PinPolicy(auto=False, paths=('devloop/', LIST)))
-        self.assertEqual(DATA['pin'], {'auto': False})
+        self.assertEqual(DATA['pin'], {'auto': False, 'restart_max_wait_minutes': 30})
+        self.assertEqual(cfg.pin.restart_max_wait_minutes, 30)
         self.assertEqual(config.parse_config({k: v for k, v in DATA.items() if k != 'pin'}).pin,
                          PinPolicy())
 
+    def test_the_restart_wait_limit(self):
+        # #301: whole minutes, 0 included (the drain at once).
+        for value in (0, 5, 120):
+            with self.subTest(value=value):
+                cfg = config.parse_config(dict(DATA, pin={'restart_max_wait_minutes': value}))
+                self.assertEqual(cfg.pin.restart_max_wait_minutes, value)
+
     def test_invalid_pin_tables_stop_devloop(self):
-        for table in ({'auto': 'yes'}, {'auto': 1}, {'every': True}, 'on'):
+        for table in ({'auto': 'yes'}, {'auto': 1}, {'every': True}, 'on',
+                      {'restart_max_wait_minutes': -1}, {'restart_max_wait_minutes': 1.5},
+                      {'restart_max_wait_minutes': True}, {'restart_max_wait_minutes': '30'}):
             with self.subTest(table=table):
                 with self.assertRaises(ConfigError):
                     config.parse_config(dict(DATA, pin=table))

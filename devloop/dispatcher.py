@@ -161,7 +161,8 @@ from .markdown import (RESUME, carries_record, dispatcher_header, publishable, r
                        render_cycle, render_escalation, render_fix, render_native_review,
                        render_operator_merge,
                        render_preflight, render_review, render_supervision)
-from .pin import PinError, Repinned, SmokeError
+from .activity import iso, restart_line
+from .pin import PREFIX, PinError, Repinned, SmokeError
 from .planning import (BASE_CHANGED, EXPENSIVE, FIX_COMMAND, GLOBAL_ACTIONS, MERGE_LANE,
                        MERGING, PRIORITY_LABELS, PRIORITY_RANK, RECHECK_COMMAND,
                        RESYNC_AFTER_APPROVAL, Action, PullRequest, Snapshot, _lanes,
@@ -721,10 +722,9 @@ class Dispatcher:
         # Continuous mode (#227): set by ``devloop run`` with parallel actions, a tick starts
         # its actions in these ``Workers`` and does not wait for them.
         self.workers = None
-        # Held by a merge while it requests the pin (#174), and by a continuous tick while it
-        # checks for that request and starts its actions (#264): a request made during the
-        # tick either stops it or comes after its actions started.
-        self._pin_lock = threading.Lock()
+        # Continuous mode (#301): ``(sha12, since)`` of the new pinned copy whose restart waits
+        # for the running actions, or None.
+        self._restart = None
         # Whether a tick of this process already checked the rename of agent:needs-operator
         # (#248, ``_transition_labels``).
         self.labels_checked = False
@@ -2040,20 +2040,29 @@ class Dispatcher:
         start in ``self.workers`` those that fit the free slots (``admit``), without waiting for
         them. Returns the actions started.
 
-        The pin after a merge needs every action ended, since a new copy restarts the process:
-        while one is pending and something runs, nothing starts. A merge runs alongside the
-        others (#264) and may request the pin while this tick reads GitHub: the request is
-        checked again, under ``_pin_lock``, right before the actions start."""
+        The pin after a merge runs at once, also while actions run (#301): a new copy only
+        moves ``current``, and the restart from it waits for the first tick at which nothing
+        runs, while this one plans and starts actions with the code it loaded, as without
+        ``[pin] auto``. After ``[pin] restart_max_wait_minutes`` of a pending restart nothing
+        starts until the running actions end and the restart happens. A merge that requests a
+        pin while this tick reads GitHub (#264) is pinned by the next tick."""
         workers = self.workers
         # An action that ends from here on wakes the loop again: its result is not in this plan.
         workers.clear()
         running = workers.running()
+        self._auto_pin(False, defer=bool(running))
         if not running:
-            self._auto_pin(False)
-        elif self._pin_pending():
-            self.log(f'auto-pin pending: no action starts until the {len(running)} running '
-                     'ones end')
-            return []
+            self._restart_if_pending()
+        elif self._restart is not None:
+            sha, since = self._restart
+            line = restart_line(sha, iso(since), len(running))
+            waited = self.clock() - since
+            if waited >= self.cfg.pin.restart_max_wait_minutes * 60:
+                self.log(f'{line}: over [pin] restart_max_wait_minutes '
+                         f'({self.cfg.pin.restart_max_wait_minutes}), no action starts until '
+                         'the restart')
+                return []
+            self.log(line)
         self._transition_labels(False)
         snap = self.snapshot()
         prs = {pr.number: pr for pr in snap.prs}
@@ -2072,21 +2081,37 @@ class Dispatcher:
         started = admit(actions, issue_of, running, workers.free())
         self.log(f'{pr_counts_line(snap, self.cfg)}; running: '
                  + (', '.join(f'{a.kind} #{a.number}' for a, _ in running) or 'none'))
-        with self._pin_lock:
-            if started and self._pin_pending():
-                # Requested by a merge that ended while this tick read GitHub: drain, and pin
-                # once the running actions end.
-                self.log('auto-pin requested during the tick: no action starts until the '
-                         'running ones end')
-                return []
-            for action in started:
-                workers.start(action, numbers_of(action.number, issue_of),
-                              lambda action=action: self._run_started(action, prs))
+        for action in started:
+            workers.start(action, numbers_of(action.number, issue_of),
+                          lambda action=action: self._run_started(action, prs))
         return started
 
-    def _pin_pending(self):
-        """Whether an automatic pin after a merge (#174) waits for its turn."""
-        return bool(self.pinner is not None and self.cfg.pin.auto and self.pinner.pending())
+    def _set_restart(self, copy):
+        """Record that a restart from the new pinned ``copy`` waits for the running actions
+        (#301); None when none waits. The first moment of the wait stays while later pins
+        replace the copy, so that a merge after another does not reset the limit."""
+        if copy is None:
+            self._restart = None
+        else:
+            sha = Path(copy).name.removeprefix(PREFIX)
+            since = self._restart[1] if self._restart is not None else self.clock()
+            self._restart = (sha, since)
+        if self.activity:
+            self.activity.restart(*(self._restart or (None, None)))
+
+    def _restart_if_pending(self):
+        """With nothing running and a restart pending (#301), start again from the copy
+        ``current`` points at now (``Repinned``): the one of the pin, unless the operator
+        pinned another by hand meanwhile. None runs when that is the running copy."""
+        if self._restart is None:
+            return
+        copy = self.pinner.current()
+        self._set_restart(None)
+        if copy is None or Path(copy).resolve() == INSTALL_ROOT.resolve():
+            self.log('no restart: current no longer points at a new copy')
+            return
+        self.log(f'nothing runs: restart from {Path(copy).name}')
+        raise Repinned(copy)
 
     def _run_started(self, action, prs):
         """Run an action of the continuous mode in its worker thread, as a lane of one, and log
@@ -2123,11 +2148,12 @@ class Dispatcher:
             self.log(f'labels: {note}')
         self.labels_checked = True
 
-    def _auto_pin(self, dry_run):
+    def _auto_pin(self, dry_run, defer=False):
         """With ``[pin] auto = true`` and a pin requested by a merge (#174), pin
         ``origin/<base_branch>`` before planning. A failed pin stops the tick with ``PinError``
         and leaves the pointer and the request as they were; a new copy raises ``Repinned``, so
-        that the process starts again from it.
+        that the process starts again from it. With ``defer`` (actions run, #301) a new copy
+        only records the restart, which waits for them (``_set_restart``).
 
         A copy refused by the smoke test (``SmokeError``, #260) is not a failed tick: the request
         is dropped, ``current`` stays, planning goes on from the running copy, and an alert goes
@@ -2154,7 +2180,16 @@ class Dispatcher:
         except (PinError, ConfigError, OSError) as exc:
             raise PinError(f'auto-pin of {ref} failed, the pinned copy is unchanged: {exc}') \
                 from exc
-        if Path(copy).resolve() != INSTALL_ROOT.resolve():
+        if Path(copy).resolve() == INSTALL_ROOT.resolve():
+            if self._restart is not None:
+                self._set_restart(None)  # the new pin is the running copy: nothing to restart
+        elif defer:
+            self._set_restart(copy)
+            self.log(f'restart from {Path(copy).name} deferred: the running actions go on with '
+                     'the code loaded, and the restart happens when none runs')
+        else:
+            if self._restart is not None:
+                self._set_restart(None)  # this restart is the one that waited
             raise Repinned(copy)
 
     def _alert_refused_pin(self, ref, exc):
@@ -3253,8 +3288,7 @@ class Dispatcher:
         if self.pinner is not None and cfg.pin.auto and cfg.pin.touches(paths):
             # The next tick pins the base with this merge, before planning (#174).
             try:
-                with self._pin_lock:
-                    self.pinner.request(pr.number, head)
+                self.pinner.request(pr.number, head)
                 self.log(f'  auto-pin of origin/{cfg.base_branch} requested for the next tick')
             except OSError as exc:
                 self.log(f'  auto-pin NOT requested, pin by hand: {exc}')

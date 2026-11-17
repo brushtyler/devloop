@@ -5,6 +5,7 @@ clock advances only when the loop sleeps, and an agent's turn ends once the cloc
 duration."""
 
 import dataclasses
+import json
 import shutil
 import tempfile
 import threading
@@ -15,10 +16,11 @@ from types import SimpleNamespace
 from unittest import mock
 
 import devloop.__main__ as cli
-from devloop import config, runloop
+from devloop import activity, config, runloop
 from devloop.config import INSTALL_ROOT
 from devloop.dispatcher import Action, Dispatcher, Snapshot, Workers, admit, plan
 from devloop.github import GitHub, GitHubError
+from devloop.pin import Repinned, SmokeError
 from devloop.watch import NOTHING_NEW
 from helpers.devloop_fakes import FakeGH
 from test_devloop import CFG, FakeRunner, FakeWS, norm, pr, raw_review, ready
@@ -87,16 +89,20 @@ class World:
         self.prs = {}
         self.issues = {}  # number: time it becomes ready
         self.ci_green_at = {}  # PR number: time its CI passes
+        self.prs_at = {}  # PR number: time it shows up (moved to agent:changes, say)
         self.announced = set()
 
     def events(self):
-        return sorted(set(self.ci_green_at.values()) | set(self.issues.values()))
+        return sorted(set(self.ci_green_at.values()) | set(self.issues.values())
+                      | set(self.prs_at.values()))
 
     def snapshot(self):
         now = self.clock()
         with self.lock:
             prs = []
             for p in self.prs.values():
+                if now < self.prs_at.get(p.number, 0):
+                    continue
                 p = dataclasses.replace(p, labels=set(p.labels), reviews=list(p.reviews))
                 if p.number in self.ci_green_at:
                     p.checks = 'pass' if now >= self.ci_green_at[p.number] else 'pending'
@@ -225,18 +231,29 @@ class ContinuousLoopCase(unittest.TestCase):
                 return NOTHING_NEW
             sleep(min(MINUTE, timeout - (self.clock() - start)))
 
-    def run_loop(self, d):
+    def run_loop(self, d, ends=0):
+        """Run the loop of ``d`` until it ends with ``ends``: its exit code, or the exception
+        it raises."""
         d.workers = Workers(d.cfg.max_parallel_actions)
         loop = runloop.Loop(d.tick, self.watch, self.stop, log=self.logs.append,
                             idle_timeout=900, clock=self.clock, sleep=self.clock.sleep,
                             workers=d.workers)
         done = []
-        thread = threading.Thread(target=lambda: done.append(loop.run()))
+
+        def run():
+            try:
+                done.append(loop.run())
+            except Exception as exc:  # Repinned, for the restart of #301
+                done.append(exc)
+        thread = threading.Thread(target=run)
         with mock.patch('signal.signal'):  # signal handlers only in the main thread
             thread.start()
             thread.join(timeout=60)
         self.assertFalse(thread.is_alive(), 'the loop did not end')
-        self.assertEqual(done, [0])
+        if isinstance(ends, type):
+            self.assertIsInstance(done[0], ends, done)
+        else:
+            self.assertEqual(done, [ends])
         self.assertEqual(d.violations, [])
         return d
 
@@ -334,46 +351,141 @@ class ExclusionTests(ContinuousLoopCase):
         self.assertLess(implement[0], 6 * MINUTE)
         self.assertEqual(self.world.prs, {})
 
-    def test_the_auto_pin_after_a_merge_waits_for_the_running_actions_and_starts_nothing(self):
-        # The merge of #100 (1 minute) requests a pin while #9 is implemented for 30 minutes;
-        # #10 becomes ready after 5. The pin runs once #9 has ended, and #10 starts after it.
+
+
+class SimPinner:
+    """The pin after a merge (#174) on the simulated clock: each pin records its moment and
+    the actions running then, and points ``current`` at a new copy; ``refuse`` makes the smoke
+    test of #260 refuse every copy."""
+
+    def __init__(self, clock, tmp, refuse=False):
+        self.clock, self.tmp, self.refuse = clock, Path(tmp), refuse
+        self.requests, self.pins, self.cancelled = [], [], 0
+        self.dispatcher = None
+        self.pointer = INSTALL_ROOT
+
+    def pending(self):
+        return self.requests[-1] if self.requests else None
+
+    def request(self, number, head):
+        self.requests.append({'pr': number, 'head': head})
+
+    def cancel(self):
+        self.cancelled += 1
+        self.requests.clear()
+
+    def pin(self, ref):
+        self.pins.append((self.clock(), ref,
+                          [a for a, _ in self.dispatcher.workers.running()]))
+        if self.refuse:
+            raise SmokeError('smoke test of 0123456789ab failed at tick --dry-run: '
+                             'ImportError: broken', '0123456789ab' * 3 + '0123', 'tick --dry-run')
+        self.requests.clear()
+        self.pointer = self.tmp / f'pinned-{len(self.pins):012x}'
+        return self.pointer
+
+    def current(self):
+        return self.pointer
+
+
+class PinRestartTests(ContinuousLoopCase):
+    """#301: the pin after a merge runs at once, the planning goes on with the loaded code, and
+    the restart from the new copy happens when nothing runs, or drains after the limit."""
+
+    def setUp(self):
+        super().setUp()
+        # #100 is ready and its merge (1 minute) requests the pin while #9 is implemented.
         p = pr(100, issue=7, labels=[READY], reviews=[norm(raw_review())])
         p.mergeable, p.merge_status, p.merge_mode = 'MERGEABLE', 'CLEAN', 'strict'
         self.world.prs[100] = p
         self.world.issues[9] = 0
-        self.world.issues[10] = 5 * MINUTE
-        pins, requests = [], []
+        # The CI of #101 passes after 5 minutes; #102 goes to agent:changes after 10.
+        self.world.prs[101] = pr(101, issue=8, labels=['agent:review'], checks='pending')
+        self.world.ci_green_at[101] = 5 * MINUTE
+        self.world.prs[102] = pr(102, issue=11, labels=['agent:changes'])
+        self.world.prs_at[102] = 10 * MINUTE
 
-        class Pinner:
-            def pending(_):
-                return requests[-1] if requests else None
-
-            def request(_, number, head):
-                requests.append({'pr': number, 'head': head})
-
-            def pin(_, ref):
-                pins.append((self.clock(), ref, d.workers.running()))
-                requests.clear()
-                return INSTALL_ROOT
-
+    def sim(self, durations, refuse=False, wait=30, **kw):
+        pinner = SimPinner(self.clock, self.tmp, refuse=refuse)
         cfg = dataclasses.replace(STRICT, max_parallel_actions=3, max_open_prs=5,
-                                  pin=dataclasses.replace(STRICT.pin, auto=True))
-        d = Sim(cfg, self.world, self.clock, {'implement': 30 * MINUTE, 'merge': MINUTE},
-                stop_after=('implement', 10), stop_file=self.stop, pinner=Pinner())
+                                  pin=dataclasses.replace(STRICT.pin, auto=True,
+                                                          restart_max_wait_minutes=wait))
+        d = Sim(cfg, self.world, self.clock, {'merge': MINUTE, 'review': 5 * MINUTE,
+                                              'fix': 5 * MINUTE, **durations},
+                pinner=pinner, **kw)
+        d.clock = self.clock
+        d.mergeable = (100,)
+        pinner.dispatcher = d
+        restarts = []
+        real = d._restart_if_pending
+
+        def restart_if_pending():
+            try:
+                real()
+            except Repinned:
+                restarts.append((self.clock(), d.workers.running()))
+                raise
+        d._restart_if_pending = restart_if_pending
+        return d, pinner, restarts
+
+    def test_the_pin_runs_at_once_and_review_and_fix_start_until_nothing_runs(self):
+        d, pinner, restarts = self.sim({'implement': 45 * MINUTE})
+        self.run_loop(d, ends=Repinned)
+        merge, implement = d.spans[('merge', 100)], d.spans[('implement', 9)]
+        review, fix = d.spans[('review', 101)], d.spans[('fix', 102)]
+        # The pin ran right after the merge, while #9 was still being implemented ...
+        self.assertEqual(len(pinner.pins), 1)
+        moment, ref, running = pinner.pins[0]
+        self.assertEqual((ref, running), ('origin/main', [Action('implement', 9)]))
+        self.assertGreaterEqual(moment, merge[1])
+        self.assertLess(moment, merge[1] + 2 * MINUTE)
+        # ... the review and the fix started after it, with the restart pending ...
+        self.assertGreater(review[0], moment)
+        self.assertLess(review[0], 8 * MINUTE)
+        self.assertGreater(fix[0], moment)
+        self.assertLess(fix[0], 13 * MINUTE)
+        self.assertLess(fix[1], implement[1])
+        self.assertTrue(any(line.startswith('restart to 000000000001 pending since ')
+                            and line.endswith('(1 running)') for line in d.logs), d.logs)
+        # ... and the restart came at the first tick with nothing running, from the new copy.
+        (when, still), = restarts
+        self.assertEqual(still, [])
+        self.assertGreaterEqual(when, implement[1])
+        self.assertLess(when, implement[1] + 2 * MINUTE)
+        self.assertIn('nothing runs: restart from pinned-000000000001', d.logs)
+        self.assertIsNone(d._restart)
+
+    def test_over_the_limit_no_action_starts_until_the_restart(self):
+        # The limit is 3 minutes: the review of #101 (CI green after 5) and the fix of #102
+        # (after 10) do not start while #9 is implemented for 45 minutes.
+        d, pinner, restarts = self.sim({'implement': 45 * MINUTE}, wait=3)
+        self.run_loop(d, ends=Repinned)
+        self.assertEqual(set(d.spans), {('merge', 100), ('implement', 9)})
+        (when, still), = restarts
+        self.assertEqual(still, [])
+        self.assertGreaterEqual(when, d.spans[('implement', 9)][1])
+        self.assertTrue(any('over [pin] restart_max_wait_minutes (3), no action starts until '
+                            'the restart' in line for line in d.logs), d.logs)
+        self.assertEqual(len(pinner.pins), 1)
+
+    def test_a_copy_refused_by_the_smoke_test_leaves_everything_as_before(self):
+        # #260: the request is dropped, current stays, no restart waits, and the planning goes
+        # on with the running copy: the review and the fix start, the loop ends at the STOP.
+        d, pinner, restarts = self.sim({'implement': 45 * MINUTE}, refuse=True,
+                                       stop_after=('implement', 9), stop_file=self.stop)
         self.run_loop(d)
-        merge, first = d.spans[('merge', 100)], d.spans[('implement', 9)]
-        second = d.spans[('implement', 10)]
-        # The merge ran alongside #9 ...
-        self.assertTrue(overlap(merge, first))
-        # ... the pin waited for #9, with nothing running, ...
-        self.assertEqual(len(pins), 1)
-        moment, ref, running = pins[0]
-        self.assertEqual((ref, running), ('origin/main', []))
-        self.assertGreaterEqual(moment, first[1])
-        # ... and #10, ready meanwhile, started only after the pin.
-        self.assertGreaterEqual(second[0], moment)
-        self.assertTrue(any(line.startswith('auto-pin pending: no action starts')
+        self.assertEqual(len(pinner.pins), 1)
+        self.assertEqual(pinner.cancelled, 1)
+        self.assertIsNone(pinner.pending())
+        self.assertEqual(pinner.current(), INSTALL_ROOT)
+        self.assertIsNone(d._restart)
+        self.assertEqual(restarts, [])
+        self.assertIn(('review', 101), d.spans)
+        self.assertIn(('fix', 102), d.spans)
+        self.assertTrue(any(line.startswith('auto-pin of origin/main refused, the pinned copy '
+                                            'is unchanged and the request is dropped')
                             for line in d.logs), d.logs)
+        self.assertFalse(any(line.startswith('restart to ') for line in d.logs), d.logs)
 
 
 class StopAndFailureTests(ContinuousLoopCase):
@@ -638,26 +750,71 @@ class ContinuousTickTests(unittest.TestCase):
         ledger.settle.assert_called_once_with(10)
         self.release.set()
 
-    def test_a_pending_auto_pin_starts_nothing_while_actions_run(self):
+    def test_a_pending_auto_pin_pins_at_once_and_the_tick_still_plans(self):
+        # #301: the pin runs while #9 runs, the restart waits, #10 starts; `status` shows it.
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
         pinner = mock.Mock()
         pinner.pending.return_value = None
         d = self.make(pinner=pinner)
+        d.activity = activity.Activity(tmp, pid=4242)
+        d.clock = lambda: 1_000_000
         d.cfg = dataclasses.replace(PCFG, pin=dataclasses.replace(PCFG.pin, auto=True))
-        d.snapshot = lambda: Snapshot([], [ready(9), ready(10)], [])
-        self.assertEqual(d.tick(), [Action('implement', 9), Action('implement', 10)])
+        d.snapshot = lambda: Snapshot([], [ready(9)], [])
+        self.assertEqual(d.tick(), [Action('implement', 9)])
         pinner.pending.return_value = {'pr': 100}
-        d.snapshot = mock.Mock()
-        self.assertEqual(d.tick(), [])
-        d.snapshot.assert_not_called()
-        pinner.pin.assert_not_called()
+        pinner.pin.return_value = tmp / 'pinned-0123456789ab'
+        d.snapshot = lambda: Snapshot([], [ready(9), ready(10)], [])
+        logs = []
+        d.log.sink = logs.append
+        self.assertEqual(d.tick(), [Action('implement', 10)])
+        pinner.pin.assert_called_once_with('origin/main')
+        self.assertEqual(d._restart, ('0123456789ab', 1_000_000))
+        line = 'restart to 0123456789ab pending since 1970-01-12T13:46:40Z'
+        self.assertIn(f'{line} (1 running)', logs)
+        # `devloop status` reads it while this dispatcher runs; nothing once it is gone.
+        deadline = time.monotonic() + 10
+        while self.ran != [9, 10] and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(len(json.loads((tmp / activity.FILE).read_text())['actions']), 2)
+        self.assertEqual(activity.describe_restart(tmp, alive=lambda pid: pid == 4242,
+                                                   held=lambda path: True),
+                         f'{line} (2 running)')
+        self.assertIsNone(activity.describe_restart(tmp, alive=lambda pid: False,
+                                                    held=lambda path: True))
+        self.release.set()
+        deadline = time.monotonic() + 10
+        while d.workers.running() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        # Nothing runs: the restart, from the copy current points at now.
+        pinner.pending.return_value = None
+        pinner.current.return_value = tmp / 'pinned-0123456789ab'
+        with self.assertRaises(Repinned) as raised:
+            d.tick()
+        self.assertEqual(raised.exception.copy, tmp / 'pinned-0123456789ab')
+        self.assertIsNone(d._restart)
+        self.assertFalse((tmp / activity.RESTART).exists())
+
+    def test_a_restart_to_the_running_copy_is_dropped(self):
+        # The operator pinned the running copy again by hand while the restart waited.
+        pinner = mock.Mock()
+        pinner.pending.return_value = None
+        pinner.current.return_value = INSTALL_ROOT
+        d = self.make(pinner=pinner)
+        d.cfg = dataclasses.replace(PCFG, pin=dataclasses.replace(PCFG.pin, auto=True))
+        d._restart = ('0123456789ab', 0)
+        d.snapshot = lambda: Snapshot([], [ready(9)], [])
+        self.assertEqual(d.tick(), [Action('implement', 9)])
+        self.assertIsNone(d._restart)
         self.release.set()
 
-    def test_a_pin_requested_during_the_snapshot_starts_nothing(self):
+    def test_a_pin_requested_during_the_snapshot_runs_at_the_next_tick(self):
         # #264: a merge running alongside may end and request the pin while the tick reads
-        # GitHub; the tick, which saw no request before reading, starts nothing after it.
+        # GitHub; the tick starts its actions all the same, and the next one pins.
         requests = []
         pinner = mock.Mock()
         pinner.pending.side_effect = lambda: requests[-1] if requests else None
+        pinner.pin.return_value = Path('/state/pinned-0123456789ab')
         d = self.make(pinner=pinner)
         d.cfg = dataclasses.replace(PCFG, pin=dataclasses.replace(PCFG.pin, auto=True))
         d.snapshot = lambda: Snapshot([], [ready(9)], [])
@@ -667,15 +824,12 @@ class ContinuousTickTests(unittest.TestCase):
             requests.append({'pr': 100})  # the merge of #100 ends now
             return Snapshot([], [ready(9), ready(10)], [])
         d.snapshot = snapshot
-        logs = []
-        d.log.sink = logs.append
-        self.assertEqual(d.tick(), [])
-        self.assertEqual([action for action, _ in d.workers.running()],
-                         [Action('implement', 9)])
-        self.assertEqual(self.ran, [9])
+        self.assertEqual(d.tick(), [Action('implement', 10)])
         pinner.pin.assert_not_called()
-        self.assertIn('auto-pin requested during the tick: no action starts until the running '
-                      'ones end', logs)
+        d.snapshot = lambda: Snapshot([], [], [])
+        self.assertEqual(d.tick(), [])
+        pinner.pin.assert_called_once_with('origin/main')
+        self.assertEqual(d._restart[0], '0123456789ab')
         self.release.set()
 
     def test_a_manual_tick_keeps_the_barrier(self):
@@ -742,7 +896,8 @@ class DocumentationTests(unittest.TestCase):
         start = text.index('#### The merge lane')
         section = text[start:text.index('\n### ', start)]
         for needle in ('one merge\nat a time', 'holds back no\nother action', 'pin after a merge',
-                       'stays global', 'no action is exclusive with a merge', '`devloop tick`'):
+                       'is not a global action either', 'restart_max_wait_minutes',
+                       'no action is exclusive with a merge', '`devloop tick`'):
             self.assertIn(needle, section)
         protocol = (REPO / 'docs' / 'devloop' / 'protocol.md').read_text(encoding='utf-8')
         self.assertIn('[merge lane](guide.md#the-merge-lane)', protocol)

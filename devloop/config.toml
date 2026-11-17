@@ -140,9 +140,12 @@ operator_only_paths = ["docs/adr/", "AGENTS.md", "CLAUDE.md"]
 # devloop whose diff touches devloop/ or a file of review_policy.sensitive_path_lists, the next
 # tick runs `pin origin/<base_branch>` before planning, and `run` and `tick` start again from the
 # new copy; a failed pin stops the tick and leaves the pinned copy as it was. Enabling it is the
-# operator's decision.
+# operator's decision. With parallel actions (`devloop run`, issue #301) the pin runs at once and
+# the loop keeps planning with the code it loaded; it restarts as soon as no action runs. After
+# restart_max_wait_minutes of a pending restart no new action starts until the restart.
 [pin]
 auto = false
+restart_max_wait_minutes = 30
 
 # `devloop run` (issue #177): after three consecutive failed ticks the loop stops and the
 # dispatcher posts an alert on this issue; without it the alert goes only to the local log, and
