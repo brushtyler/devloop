@@ -8,7 +8,8 @@ from unittest import mock
 
 from devloop.dispatcher import Dispatcher, ensure_labels, issue_priority, plan
 from devloop.github import GitHub
-from test_devloop import CFG, FakeGH, FakeRunner, FakeWS
+from helpers.devloop_fakes import FakeGH
+from test_devloop import CFG, FakeRunner, FakeWS
 
 READY = 'agent:ready'
 HIGH, NORMAL, LOW = 'priority:high', 'priority:normal', 'priority:low'

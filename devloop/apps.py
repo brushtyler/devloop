@@ -21,6 +21,7 @@ import urllib.request
 from pathlib import Path
 
 from .github import GitHub, GitHubError
+from .ports import Backend
 
 API = 'https://api.github.com'
 DISPATCHER = 'dispatcher'
@@ -173,7 +174,8 @@ class Identities:
                 for actor, app in cfg.apps.items()}
         return cls(cfg.repo, apps, run=run)
 
-    def github(self, actor, permissions=None):
+    def github(self, actor, permissions=None) -> Backend:
+        """The client ``actor`` acts with: the ports, on GitHub, holding only ``permissions``."""
         app = self.apps.get(actor)
         if app is None:
             return self._ambient

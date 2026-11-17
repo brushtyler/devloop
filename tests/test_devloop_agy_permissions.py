@@ -10,7 +10,8 @@ from unittest import mock
 
 from devloop import agents, config, markdown, policy, schema
 from devloop.dispatcher import Action, Dispatcher, Snapshot, plan
-from test_devloop import CFG, FakeGH, FakeRunner, FakeWS, norm, pr, raw_review
+from helpers.devloop_fakes import FakeGH
+from test_devloop import CFG, FakeRunner, FakeWS, norm, pr, raw_review
 from test_devloop_fallback import ARGON, DATA, HYDROGEN, QUOTA, FakeCLI, with_agent
 from test_devloop_preflight import IssueGH, checked
 

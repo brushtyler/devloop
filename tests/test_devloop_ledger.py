@@ -14,8 +14,9 @@ from devloop.github import GitHub, GitHubError, normalize_checks
 from devloop.ledger import Ledger
 from devloop.localtests import module_command
 from devloop.workspace import Workspace
-from test_devloop import (CFG, IMPL, META, REV, SHA1, SHA2, FakeGH, FakeRunner, FakeWS,
-                          finding, implemented, pr, raw_review)
+from helpers.devloop_fakes import FakeGH
+from test_devloop import (CFG, IMPL, META, REV, SHA1, SHA2, FakeRunner, FakeWS, finding,
+                          implemented, pr, raw_review)
 from test_devloop_preflight import PCFG, READY, NEEDS_HUMAN, IssueGH, checked, gap
 
 NULLS = dict.fromkeys(agents.TELEMETRY_FIELDS)

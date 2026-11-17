@@ -13,7 +13,8 @@ from unittest import mock
 
 from devloop import activity, agents, config, follow, stall
 from devloop.dispatcher import Action, Dispatcher, Snapshot
-from test_devloop import CFG, IMPL, FakeGH, FakeWS, implemented, ready
+from helpers.devloop_fakes import FakeGH
+from test_devloop import CFG, IMPL, FakeWS, implemented, ready
 
 HAS_PROC = Path('/proc/self/stat').exists()
 

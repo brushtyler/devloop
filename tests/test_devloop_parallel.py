@@ -16,7 +16,8 @@ from devloop.agents import AgentError
 from devloop.dispatcher import Action, Dispatcher, Snapshot, TickLog, schedule
 from devloop.ledger import Ledger
 from devloop.workspace import Workspace
-from test_devloop import CFG, FakeGH, FakeRunner, FakeWS, pr, raw_review
+from helpers.devloop_fakes import FakeGH
+from test_devloop import CFG, FakeRunner, FakeWS, pr, raw_review
 from test_devloop_fallback import unavailable
 from test_devloop_quorum import CORE, FIRST, SECOND, Quorum
 
