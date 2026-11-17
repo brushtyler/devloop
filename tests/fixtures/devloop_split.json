@@ -1,5 +1,5 @@
 {
-  "source": {"path": "docs/devloop.md", "revision": "f8fd9bbed45f62e41f4e7f25347599496e174483"},
+  "source": {"path": "docs/devloop.md", "revision": "82d19919df83504b5fbe340a9f86bc37cf918658"},
   "pages": {
     "index": "docs/devloop.md",
     "guide": "docs/devloop/guide.md",
@@ -120,11 +120,11 @@
     ["guide", "8e008a5868ec5e36", "Merge modes > Escalations to the supervisor"],
     ["guide", "3eea92c7e7f445a2", "Merge modes > Escalations to the supervisor"],
     ["guide", "59f51191964656c4", "Merge modes > Escalations to the supervisor"],
-    ["guide", "95f099eddb9c710d", "Merge modes > Escalations to the supervisor"],
+    ["guide", "9ee20d5decb34598", "Merge modes > Escalations to the supervisor"],
     ["guide", "0b900c4c889ce352", "Merge modes > Escalations to the supervisor"],
-    ["guide", "9a05c82dbc471a8a", "Merge modes > Escalations to the supervisor"],
-    ["guide", "db78190ff8e17d28", "Merge modes > Escalations to the supervisor"],
-    ["protocol", "de6d69ef9027ed05", "Merge modes > Escalations to the supervisor"],
+    ["guide", "2b966929f2e2a893", "Merge modes > Escalations to the supervisor"],
+    ["guide", "932c8e164c8076a8", "Merge modes > Escalations to the supervisor"],
+    ["protocol", "3b116300ac53833d", "Merge modes > Escalations to the supervisor"],
     ["protocol", "5063aa31ea105dd5", "Structured review"],
     ["protocol", "dff29ba4701ad1ce", "Structured review"],
     ["protocol", "657e89b0bc90a4cf", "Structured review"],

@@ -32,7 +32,8 @@ change to a path reserved to the operator (`operator_only_paths` in `[merge]`: b
 `default_available` gaps on the operator's behalf, so classify conservatively.
 
 A choice the repository or the issue already prescribes is not a gap, and neither is a proposed
-default that a comment below has accepted. In `code_refs` list the files (`path` or `path:line`)
+default that a comment below has accepted, nor a gap that a decision of the supervisor recorded
+by devloop below settles. In `code_refs` list the files (`path` or `path:line`)
 that show the gap, or none. Use `proposed_default: ""` when there is no default to propose.
 
 ## Final answer

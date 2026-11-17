@@ -100,8 +100,8 @@ Escalation classes (#182, ``supervision``): every escalation records its class. 
 non-critical one (``tool_failure``, ``preflight_default``, ``sync_failed``) goes to
 agent:needs-supervisor, unless something makes it critical (``_supervised``), and the
 supervisor's identity or a trusted user decides it with ``/devloop retry``, ``/devloop
-accept-defaults`` or ``/devloop escalate <reason>`` (``_do_supervise``). Critical and unknown
-classes always go to agent:needs-human.
+accept-defaults``, ``/devloop decide <text>`` or ``/devloop escalate <reason>``
+(``_do_supervise``). Critical and unknown classes always go to agent:needs-human.
 
 Requested fixes (#195): ``/devloop fix`` from a trusted user or the supervisor's identity, on a
 PR in agent:review or agent:changes, runs a fix of the current head with the rest of the comment
@@ -142,9 +142,9 @@ from .ports import Backend, Tracker, summarize_checks
 from .review import (CI, FINDING_COMMAND, OPERATOR, ci_failure_review, current_round,
                      finding_commands, finding_key, finding_state, last_round, normalize_review,
                      open_findings, owner_of, round_verdict)
-from .supervision import (ACCEPT_DEFAULTS, DESIGN_LABEL, ESCALATE, ISSUE_STEPS, MAX_RETRIES,
-                          MERGED_ISSUE, PREFLIGHT_DEFAULT, RETRY, RETRY_STEPS, SYNC_FAILED,
-                          TOOL_FAILURE, critical, preflight_class, retries_done,
+from .supervision import (ACCEPT_DEFAULTS, DECIDE, DESIGN_LABEL, ESCALATE, ISSUE_STEPS,
+                          MAX_RETRIES, MERGED_ISSUE, PREFLIGHT_DEFAULT, RETRY, RETRY_STEPS,
+                          SYNC_FAILED, TOOL_FAILURE, critical, preflight_class, retries_done,
                           supervisor_command)
 from .workspace import WorkspaceError
 
@@ -1349,11 +1349,13 @@ class Dispatcher:
 
     # Supervision (#182) --------------------------------------------------------
     def _accepted(self, comment):
-        """Whether ``comment`` is the dispatcher's record of defaults the supervisor accepted:
-        it counts as a trusted comment of the issue."""
+        """Whether ``comment`` is the dispatcher's record of defaults the supervisor accepted,
+        or of its decision on the gaps of a readiness check (#258): it counts as a trusted
+        comment of the issue. The supervisor's own comment never does."""
         record = read_marker(comment.get('body', ''), 'supervision')
-        return (record is not None and record['command'] == ACCEPT_DEFAULTS
-                and record['outcome'] == 'accepted'
+        return (record is not None
+                and (record['command'], record['outcome']) in ((ACCEPT_DEFAULTS, 'accepted'),
+                                                              (DECIDE, 'decided'))
                 and self._signed((comment.get('author') or {}).get('login')))
 
     def _request_hash(self, history, comments):
@@ -1504,7 +1506,7 @@ class Dispatcher:
                    if self.cfg.merge.mode != 'auto'
                    else 'the author is neither the supervisor nor a trusted user'
                    if not self._may_hold(login)
-                   else f'malformed, expected `/devloop {ESCALATE} <reason>`' if reason is None
+                   else f'malformed, expected `/devloop {command} <text>`' if reason is None
                    else None)
             if why:
                 self.log(f'  #{number}: ignored `/devloop {command}` by {login}: {why}')
@@ -1529,6 +1531,8 @@ class Dispatcher:
 
         - ``escalate``: the item goes to ``agent:needs-human`` with the reason.
         - ``accept-defaults``: only for a ``preflight_default`` escalation (``_accept_defaults``).
+        - ``decide``: only for a ``preflight_default`` escalation, with the supervisor's text
+          (``_decide``, #258).
         - ``retry``: only for ``tool_failure`` and ``sync_failed``, and only while the input of
           the step is the one that failed (the key of the escalation). A PR goes back to the
           label of its step, and the next tick runs it; an issue's step runs now. Retries
@@ -1584,11 +1588,13 @@ class Dispatcher:
             return self._to_operator(number, f'Il supervisore `{by}` passa all\'operatore '
                                      f'l\'escalation di classe `{cls}`: {reason}',
                                      'supervisor_escalated', human_remove)
-        if name == ACCEPT_DEFAULTS:
+        if name in (ACCEPT_DEFAULTS, DECIDE):
             if is_pr or cls != PREFLIGHT_DEFAULT:
                 return trace('refused', 'rifiutato: vale solo per un\'escalation `preflight_default` '
                              'del controllo di prontezza. Il comando è speso; l\'escalation '
                              'resta al supervisore.')
+            if name == DECIDE:
+                return self._decide(number, labels, comments, trace, command['reason'])
             return self._accept_defaults(number, labels, comments, trace)
         if cls not in (TOOL_FAILURE, SYNC_FAILED):
             return trace('refused', 'rifiutato: vale solo per le escalation `tool_failure` e '
@@ -1683,10 +1689,57 @@ class Dispatcher:
         decide sends the issue to ``agent:needs-human``, a superseded check leaves it to the
         supervisor."""
         lb = self.cfg.labels
+        record = self._decidable_check(number, labels, comments, trace,
+                                       'I default del controllo di prontezza non possono essere '
+                                       'accettati dal supervisore', 'i default si riferiscono')
+        if record is None:
+            return
+        defaults = [{'description': g['description'], 'proposed_default': g['proposed_default']}
+                    for g in record['gaps']]
+        listed = '\n'.join(f'- {d["description"].strip()}\n  *Default accettato:* '
+                           f'{d["proposed_default"].strip()}' for d in defaults)
+        trace('accepted', 'default del controllo di prontezza accettati. Questo record conta come '
+              'un commento fidato: l\'issue torna in coda e il controllo si ripete con questi '
+              f'default.\n\n{listed}', defaults=defaults, hash=record['hash'])
+        self.gh.edit_labels(number, remove=[lb.needs_supervisor])
+
+    def _decide(self, number, labels, comments, trace, text):
+        """Record the supervisor's decision ``text`` on the gaps of the latest readiness check
+        of issue ``number`` (#258), under the conditions of ``_accept_defaults``: the supervisor
+        may accept some defaults and replace others. The dispatcher's record carries the text
+        and the gaps it answers, and counts as a trusted comment: ``agent:needs-supervisor``
+        goes, and the readiness check runs again with the decision as context. The supervisor's
+        own comment never reaches a prompt: only this record does."""
+        lb = self.cfg.labels
+        record = self._decidable_check(number, labels, comments, trace,
+                                       'Le lacune del controllo di prontezza non possono essere '
+                                       'decise dal supervisore', 'la decisione si riferisce')
+        if record is None:
+            return
+        gaps = [{'description': g['description'], 'proposed_default': g['proposed_default']}
+                for g in record['gaps']]
+        listed = '\n'.join(f'- {g["description"].strip()}\n  *Default proposto:* '
+                           f'{g["proposed_default"].strip()}' for g in gaps)
+        quoted = '\n'.join(f'> {line}'.rstrip() for line in text.strip().splitlines())
+        trace('decided', 'decisione sulle lacune del controllo di prontezza registrata. Questo '
+              'record conta come un commento fidato: l\'issue torna in coda e il controllo si '
+              f'ripete con questa decisione.\n\nLacune:\n\n{listed}\n\n**Decisione:**\n\n{quoted}',
+              gaps=gaps, hash=record['hash'])
+        self.gh.edit_labels(number, remove=[lb.needs_supervisor])
+
+    def _decidable_check(self, number, labels, comments, trace, refusal, what):
+        """The latest readiness check of issue ``number`` when the supervisor may decide its
+        gaps (``accept-defaults`` or ``decide``), else None after the refusal is traced: every
+        gap ``default_available`` and no split, no ``phase:design`` label, an issue opened by a
+        trusted user or a devloop app whose text is still approved, and a check of the current
+        text. A gap the operator must decide sends the issue to ``agent:needs-human`` with
+        ``refusal``; a superseded check leaves it to the supervisor. ``what``: what the command
+        decides and its verb (``'i default si riferiscono'``), for the refusal of a superseded
+        check."""
         history = self.gh.issue_history(number)
         records = self._preflight_records(comments)
         record = records[-1][1] if records else None
-        problem = ('nessun controllo di prontezza fallito da accettare'
+        problem = ('nessun controllo di prontezza fallito da decidere'
                    if record is None or record['ready']
                    else 'non tutte le lacune sono `default_available`, o serve una suddivisione: '
                         'decide l\'operatore' if preflight_class(record) != PREFLIGHT_DEFAULT
@@ -1696,21 +1749,14 @@ class Dispatcher:
                    else self._untrusted_change(history))
         if problem:
             trace('refused', f'rifiutato: {problem}.')
-            return self._to_operator(number, 'I default del controllo di prontezza non possono '
-                                     f'essere accettati dal supervisore: {problem}.',
-                                     'operator_decision')
+            self._to_operator(number, f'{refusal}: {problem}.', 'operator_decision')
+            return None
         if record['hash'] != self._request_hash(history, comments):
-            return trace('refused', 'rifiutato: il testo dell\'issue è cambiato dopo il controllo '
-                         'di prontezza, quindi i default si riferiscono a un input superato. Il '
-                         'comando è speso; l\'escalation resta al supervisore.')
-        defaults = [{'description': g['description'], 'proposed_default': g['proposed_default']}
-                    for g in record['gaps']]
-        listed = '\n'.join(f'- {d["description"].strip()}\n  *Default accettato:* '
-                           f'{d["proposed_default"].strip()}' for d in defaults)
-        trace('accepted', 'default del controllo di prontezza accettati. Questo record conta come '
-              'un commento fidato: l\'issue torna in coda e il controllo si ripete con questi '
-              f'default.\n\n{listed}', defaults=defaults, hash=record['hash'])
-        self.gh.edit_labels(number, remove=[lb.needs_supervisor])
+            trace('refused', 'rifiutato: il testo dell\'issue è cambiato dopo il controllo di '
+                  f'prontezza, quindi {what} a un input superato. Il comando è speso; '
+                  'l\'escalation resta al supervisore.')
+            return None
+        return record
 
     def _hold_command(self, pr, comments):
         """The hold or release command still to apply (#172), ``{event, by, reason, comment}``
@@ -2135,7 +2181,8 @@ class Dispatcher:
             self.gh.comment(number, render_escalation(
                 'Il controllo di prontezza ha trovato solo lacune con un default proposto '
                 '(`default_available`): il supervisore può accettarli con '
-                f'`/devloop {ACCEPT_DEFAULTS}`.', cls=cls, supervised=supervised))
+                f'`/devloop {ACCEPT_DEFAULTS}`, o decidere diversamente con `/devloop {DECIDE} '
+                '<decisioni>`.', cls=cls, supervised=supervised))
             self.gh.edit_labels(number, add=[lb.needs_supervisor])
             self.log(f'  not ready: {len(record["gaps"])} gap(s), to the supervisor')
             return
@@ -4270,7 +4317,8 @@ def _trusted_comments(comments, trusted_users):
 
 def _render_issue_comments(comments, trusted_users, accepted=()):
     """The comments of trusted users as model input, or ''. ``accepted``: the dispatcher's
-    records of defaults the supervisor accepted (#182), which count as trusted comments."""
+    records of defaults the supervisor accepted (#182) or of its decisions on the gaps of a
+    readiness check (#258), which count as trusted comments."""
     parts = [f'### Comment by {c["author"]["login"]}\n\n{c["body"]}'
              for c in _trusted_comments(comments, trusted_users)]
     parts += [_render_acceptance(record) for record in accepted]
@@ -4279,7 +4327,16 @@ def _render_issue_comments(comments, trusted_users, accepted=()):
 
 
 def _render_acceptance(record):
-    """A record of accepted defaults (#182) as model input."""
+    """A record of accepted defaults (#182), or of a decision on the gaps of a readiness check
+    (#258), as model input."""
+    if record['command'] == DECIDE:
+        listed = '\n'.join(f'- {g["description"].strip()}\n  Proposed default: '
+                           f'{g["proposed_default"].strip()}' for g in record.get('gaps') or [])
+        return (f'### Decision of the supervisor ({record["by"]}) on the gaps of the readiness '
+                'check, recorded by devloop\n\n'
+                f'The gaps the readiness check found:\n\n{listed}\n\n'
+                'The supervisor decided them as follows: follow this decision, which may accept '
+                f'some proposed defaults and replace others.\n\n{record["reason"].strip()}')
     listed = '\n'.join(f'- {d["description"].strip()}\n  Accepted default: '
                        f'{d["proposed_default"].strip()}' for d in record.get('defaults') or [])
     return (f'### Defaults accepted by the supervisor ({record["by"]}), recorded by devloop\n\n'
