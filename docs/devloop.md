@@ -923,6 +923,27 @@ environment are kept. This prevents accidental use of the operator's credentials
 deliberate access: code running as the same system user can still read files. Real isolation
 needs a dedicated system user or a container.
 
+## Ports and adapters
+
+The dispatcher reaches GitHub through three ports, declared in `devloop/ports.py` as step 1 of
+[ADR 0001](adr/0001-prodotto-unico-fasi-su-tracker.md):
+
+| Port | Methods |
+|---|---|
+| `Tracker` | issues and their history, comments of issues and PRs, labels: `issues_with_label`, `issue`, `issue_history`, `issue_comments`, `pr_comments`, `labelers`, `label_events`, `labeled_events`, `edit_labels`, `comment`, `edit_comment`, `ensure_label` |
+| `CodeReview` | PRs and reviews: `open_prs`, `merge_state` (`clean`, `conflict` or `unknown`), `pr_head`, `pr_state`, `merge_pr`, `pr_reviews`, `create_pr`, `submit_review` |
+| `CI` | checks of a commit: `checks` (summarized by `summarize_checks`), `check_details`, `check_runs`, `failed_log` |
+
+The ports hold only the methods the dispatcher calls, with their current names and signatures,
+and return normalized data. `GitHub` (`devloop/github.py`) implements all three, and `Identities`
+(`devloop/apps.py`) hands one out for each actor: they are the concrete adapters. The
+dispatcher, its ledger and `setup` depend on the ports only. There is no other backend yet; the
+module docstring records where a method that could fit more than one port went.
+
+In the tests, `FakeGH` (`tests/helpers/devloop_fakes.py`) implements the ports in memory. It
+proves neither persistence nor atomicity. `tests/test_devloop_ports.py` checks that the adapter
+and every fake expose each port method with the same signature.
+
 ## Usage
 
 ```bash

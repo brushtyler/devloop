@@ -4,8 +4,9 @@ import unittest
 
 from devloop import acceptance, markdown, review, schema
 from devloop.dispatcher import PROMPT_DIR, Action, Dispatcher, Snapshot, plan
-from test_devloop import (CFG, META, REV, SHA1, FakeGH, FakeRunner, FakeWS, SnapshotGH, finding,
-                          fixed, implemented, norm, pr, raw_review)
+from helpers.devloop_fakes import FakeGH, SnapshotGH
+from test_devloop import (CFG, META, REV, SHA1, FakeRunner, FakeWS, finding, fixed, implemented,
+                          norm, pr, raw_review)
 
 ISSUE = """Motivation.
 
