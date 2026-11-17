@@ -17,6 +17,9 @@ Read `AGENTS.md` before changing anything.
 - Run tests in the foreground and use their exit code. Do not start them in the background and then
   wait with a loop that searches their output for some text: if that text never appears, the loop
   holds your turn until the command time limit.
+- Complete all the work within this turn, yourself and in the foreground: do not start sub-agents
+  or any other background activity. Give the final answer only when the work is finished: the
+  turn ends with it, without waiting for anything still running.
 - Do not commit, push or comment on GitHub. The dispatcher publishes your changes after you finish.
 - If a finding requires a product decision or contradicts the issue, return `status: "blocked"`.
 
