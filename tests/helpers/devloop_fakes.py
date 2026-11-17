@@ -62,6 +62,10 @@ class FakeGH:
     def issue_comments(self, number):
         return self.pr_comments(number)
 
+    # Native dependencies (#277): none by default.
+    def issue_dependencies(self, number):
+        return {'author': 'brushtyler', 'blocked_by': [], 'added': []}
+
     # Logins of the `labeled` events of a label on a PR, oldest first.
     level_labelers = ()
 

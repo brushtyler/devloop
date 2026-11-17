@@ -158,6 +158,10 @@ New issues start in this order (#146):
    sends the issue to the back of its priority;
 3. then the issue number.
 
+Between 1 and 2 comes the work the queue waits for (#277): with the same priority, an issue that
+blocks other ready issues starts before one that blocks none, whatever the time of their
+`agent:ready` ([Dependencies between issues](#dependencies-between-issues)).
+
 A priority label counts only if the latest `labeled` event of that label on the issue comes from
 a user in `trusted_users`, as for `agent:ready` (or from the supervisor, see
 [Labels from the supervisor](#labels-from-the-supervisor)). Only the labels the issue has now count: a
@@ -172,6 +176,41 @@ position, priority, time of `agent:ready` and who added it, for example
 list covers every issue labelled `agent:ready`; the planned actions that follow it say which ones
 start on this tick (free PR slots, `blocked_labels`, `agent:needs-human` and an untrusted
 `agent:ready` still apply).
+
+An issue with [dependencies](#dependencies-between-issues) (#277) shows them before its title:
+`, blocked by #<n>` (the open issues that block it, so it does not start), `, blocks #<n>` (the
+ready issues it blocks) and `, dependency cycle #<n>, #<m>`, for example
+`ready 2. #124 priority=normal agent:ready=… labelled by brushtyler, blocked by #122: …`.
+
+### Dependencies between issues
+
+devloop reads GitHub's native issue dependencies ("blocked by" / "blocking", #277) and applies
+them to the [start order](#start-order-of-ready-issues), so a prerequisite no longer has to be
+written in the text and the issues that wait for it queued by hand once it is merged:
+
+- **An issue blocked by an open issue does not start.** It is neither checked by the
+  [readiness check](#readiness-check-before-implementation) nor implemented, and takes no slot
+  of `max_open_prs`. When the last block closes it becomes eligible by itself, in the usual
+  [start order](#start-order-of-ready-issues), without anyone queuing it again. A closed block
+  blocks nothing.
+- **Only trusted blocks count.** A block counts only if the latest timeline event that added it
+  to the blocked issue comes from a user in `trusted_users`, or from the supervisor's app on an
+  issue it may queue ([Labels from the supervisor](#labels-from-the-supervisor)): the same rule
+  as the priority labels. A block added by anyone else is ignored, and the tick log says so
+  (`issue #<n>: ignored the block by #<m>, added by <login>`).
+- **Prerequisites first.** With the same priority, an issue that blocks other ready issues
+  starts before the issues that block none, whatever the time of their `agent:ready`.
+- **Cycles.** devloop follows the open blocks of the repository from the queue, also through
+  issues without `agent:ready` (up to 50 of them per tick); a blocking issue of another
+  repository counts as open or closed, without reading its own blocks. An issue of the queue on
+  a cycle (A blocked by B, B blocked by A) does not start: the tick log and `devloop status`
+  show the cycle, and the dispatcher reports it once on the issue with a comment (a `cycle`
+  record, see [Protocol](protocol.md#dependency-cycles)), which `devloop watch` shows to the
+  supervisor. No label is added: once a block of the cycle is removed, the issues start as
+  usual.
+
+The dependencies are read once per tick, for each ready issue that may start, with one GraphQL
+query (`Tracker.issue_dependencies`, see [Ports and adapters](../architecture.md#ports-and-adapters)).
 
 ### Labels from the supervisor
 

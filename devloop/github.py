@@ -27,6 +27,15 @@ _ISSUE_HISTORY = (
     'timelineItems(itemTypes:[LABELED_EVENT,RENAMED_TITLE_EVENT],last:100){nodes{__typename '
     '... on LabeledEvent{createdAt actor{__typename login} label{name}} '
     '... on RenamedTitleEvent{createdAt actor{__typename login}}}}}}}')
+# Native dependencies of an issue (#277): the issues that block it, with their state, and who
+# added each "blocked by" (the timeline events), in one query.
+_ISSUE_DEPENDENCIES = (
+    'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){'
+    'issue(number:$number){author{__typename login} '
+    'blockedBy(first:50){nodes{number state repository{nameWithOwner}}} '
+    'timelineItems(itemTypes:[BLOCKED_BY_ADDED_EVENT],last:100){nodes{__typename '
+    '... on BlockedByAddedEvent{createdAt actor{__typename login} '
+    'blockingIssue{number repository{nameWithOwner}}}}}}}}')
 _FAILED_CONCLUSIONS = {'failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure',
                        'stale'}
 _FAILED_STATUSES = {'failure', 'error'}
@@ -188,6 +197,35 @@ class GitHub:
             'renamed': [(graphql_login(n['actor']), n['createdAt'])
                         for n in nodes if n['__typename'] == 'RenamedTitleEvent'],
         }
+
+    def issue_dependencies(self, number):
+        """The native "blocked by" dependencies of issue ``number`` (#277), read in one query:
+        ``{author, blocked_by, added}``. ``blocked_by`` lists the issues that block it now as
+        ``{repo, number, state}`` (``state`` OPEN or CLOSED, ``repo`` as ``owner/name``);
+        ``added`` the events that added a blocker, oldest first, as ``{repo, number, by, at}``.
+        Logins are in REST form (``graphql_login``)."""
+        owner, name = self.repo.split('/', 1)
+        data = self._json('api', 'graphql', '-f', f'query={_ISSUE_DEPENDENCIES}',
+                          '-f', f'owner={owner}', '-f', f'name={name}',
+                          '-F', f'number={int(number)}')
+        issue = data['data']['repository']['issue']
+
+        def where(node):
+            return (node.get('repository') or {}).get('nameWithOwner'), node.get('number')
+
+        blocked_by = []
+        for node in issue['blockedBy']['nodes']:
+            repo, blocker = where(node)
+            blocked_by.append({'repo': repo, 'number': blocker, 'state': node.get('state')})
+        added = []
+        for node in issue['timelineItems']['nodes']:
+            if node.get('__typename') != 'BlockedByAddedEvent' or not node.get('blockingIssue'):
+                continue
+            repo, blocker = where(node['blockingIssue'])
+            added.append({'repo': repo, 'number': blocker, 'by': graphql_login(node.get('actor')),
+                          'at': node.get('createdAt')})
+        return {'author': graphql_login(issue['author']), 'blocked_by': blocked_by,
+                'added': added}
 
     def labelers(self, number, label):
         """Logins of every ``labeled`` event of ``label`` on issue or PR ``number``, oldest

@@ -261,6 +261,16 @@ attempt for a retry, the defaults for an acceptance and, for a decision, its tex
 and the gaps it answers. The record is written before the labels change, so a
 lost label change never runs a retry twice.
 
+## Dependency cycles
+
+When ready issues are on a cycle of [native dependencies](guide.md#dependencies-between-issues)
+(#277), the `dependency_cycle` action reports it on each issue of the queue on the cycle: a
+dispatcher comment ("Ciclo di dipendenze") ending with a `cycle` marker that lists the issues of
+the cycle (`#N`, sorted). The action reads the dependencies again first and writes nothing if
+the cycle is gone. A `cycle` record counts only from the dispatcher's identity, and the same
+cycle is reported once on each issue; another cycle on the same issue is reported again. The
+record adds no label and blocks nothing by itself: the open blocks do.
+
 ## Structured review
 
 The reviewer returns JSON validated against [`devloop/schemas/review.json`](../../devloop/schemas/review.json):
