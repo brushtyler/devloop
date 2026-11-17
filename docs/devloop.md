@@ -935,7 +935,8 @@ Two modes:
 - **`--until-change`** (default): the command ends at the first round with news, exit code 0,
   with its lines on stdout. With `--timeout <seconds>` it exits with code 3 once that many
   seconds passed since it started without news, failed reads included (monotonic clock): each
-  `gh` call gets at most the time left, and a round that ends after the timeout is dropped
+  `gh` call gets at most the time left, and so does each step (signature, HTTP request) of
+  the mint of the dispatcher app's token; a round that ends after the timeout is dropped
   without saving, so what it read is reported by the next run. Without `--timeout` it waits
   forever. It suits any agent that is woken when a command ends.
   For Claude Code, run it as a background Bash command: Claude Code is woken when it exits, reads

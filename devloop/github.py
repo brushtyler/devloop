@@ -81,14 +81,13 @@ class GitHub:
 
     def _gh(self, *args, stdin=None, check=True):
         kwargs = {}
+        self._time_left(args)  # no token is minted once the time is spent
         if self._token is not None:
             env = {k: v for k, v in os.environ.items() if k not in ('GITHUB_TOKEN', 'GH_TOKEN')}
             kwargs['env'] = dict(env, GH_TOKEN=self._token())
         timeout = self.timeout
-        left = self.time_left() if self.time_left is not None else None
+        left = self._time_left(args)  # what the mint of the token left
         if left is not None:
-            if left <= 0:
-                raise GitHubError(f'gh {" ".join(args[:3])}: no time left')
             timeout = min(timeout, left)
         try:
             done = self._run(['gh', *args], input=stdin, capture_output=True, text=True,
@@ -101,6 +100,12 @@ class GitHub:
             error = GitHubNotFound if _NOT_FOUND.search(done.stderr or '') else GitHubError
             raise error(f'gh {" ".join(args[:3])}: {done.stderr.strip()[:500]}')
         return done
+
+    def _time_left(self, args):
+        left = self.time_left() if self.time_left is not None else None
+        if left is not None and left <= 0:
+            raise GitHubError(f'gh {" ".join(args[:3])}: no time left')
+        return left
 
     def _json(self, *args):
         return json.loads(self._gh(*args).stdout or 'null')

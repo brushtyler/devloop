@@ -15,7 +15,7 @@ from unittest import mock
 
 from devloop import watch
 from devloop.__main__ import main
-from devloop.apps import DISPATCHER, Identities
+from devloop.apps import DISPATCHER, STEP_TIMEOUT, AppAuth, Identities
 from devloop.config import load_config
 from devloop.github import GitHub, GitHubError, GitHubNotFound
 from devloop.markdown import marker
@@ -916,12 +916,13 @@ class CommandLineTest(unittest.TestCase):
     def test_watch_reads_with_the_dispatcher_app_token(self):
         calls, asked = [], []
 
-        def token(permissions=None):
+        def token(permissions=None, time_left=None):
             asked.append(permissions)
             return 'ghs_dispatcher'
 
         app = SimpleNamespace(token=token, login=DISPATCH)
-        agent = SimpleNamespace(token=lambda permissions=None: 'ghs_agent', login=CLAUDE)
+        agent = SimpleNamespace(token=lambda permissions=None, time_left=None: 'ghs_agent',
+                                login=CLAUDE)
         ids = Identities('o/r', {DISPATCHER: app, 'claude': agent},
                          run=self._recording_run(calls))
         self._watch_round(ids)
@@ -934,7 +935,8 @@ class CommandLineTest(unittest.TestCase):
 
     def test_watch_without_a_dispatcher_app_uses_the_ambient_login(self):
         calls = []
-        agent = SimpleNamespace(token=lambda permissions=None: 'ghs_agent', login=CLAUDE)
+        agent = SimpleNamespace(token=lambda permissions=None, time_left=None: 'ghs_agent',
+                                login=CLAUDE)
         ids = Identities('o/r', {'claude': agent}, run=self._recording_run(calls))
         self._watch_round(ids)
         self.assertTrue(calls)
@@ -959,6 +961,71 @@ class CommandLineTest(unittest.TestCase):
         self.assertFalse(trust.wrote('brushtyler', 'codex'))
         no_apps = watch.Trust({'op'}, {}, 'agent:ready')
         self.assertTrue(no_apps.wrote('op', 'codex'))
+
+
+class TokenTimeoutTest(unittest.TestCase):
+    """``--timeout`` bounds the mint of the dispatcher's token too (#197): the JWT signature and
+    each HTTP request get at most the time left, and none starts once it is spent."""
+
+    def _slow_app(self, clock, costs, steps):
+        """A real ``AppAuth`` whose signature and HTTP requests take ``costs`` seconds of
+        ``clock`` (``inf``: hang until their timeout, then fail as a timeout would)."""
+
+        def step(kind, timeout):
+            steps.append((kind, timeout))
+            cost = costs[kind]
+            clock.t += min(cost, timeout)
+            if cost > timeout:
+                raise GitHubError(f'{kind}: timed out after {timeout}s')
+
+        def sign(key, data, timeout):
+            step('sign', timeout)
+            return b'sig'
+
+        def http(method, path, auth, body=None, timeout=None):
+            step('http', timeout)
+            return {'id': 77, 'app_id': 11}
+
+        return AppAuth(11, 'dl-dispatcher', '/keys/k.pem', 'o/r', http=http, sign=sign,
+                       clock=lambda: 1_800_000_000)
+
+    def _run(self, costs, timeout=1):
+        clock, steps, gh_calls = Clock(), [], []
+        app = self._slow_app(clock, costs, steps)
+        ids = Identities('o/r', {DISPATCHER: app},
+                         run=lambda argv, **kwargs: gh_calls.append(argv))
+        gh = ids.github(DISPATCHER)
+        harness = Harness(self, gh=gh)
+        watcher = harness.watcher(clock, timeout=timeout)
+        gh.time_left = watcher.time_left  # as run_watch does
+        return watcher.run(), clock, steps, gh_calls, harness
+
+    def test_a_hanging_token_request_ends_at_the_timeout(self):
+        code, clock, steps, gh_calls, harness = self._run({'sign': 0.4, 'http': float('inf')})
+        self.assertEqual(code, watch.NOTHING_NEW)
+        self.assertLessEqual(clock.t, 1)  # not the 30 seconds of the request's own timeout
+        self.assertEqual([kind for kind, _ in steps], ['sign', 'http'])
+        self.assertEqual(steps[0][1], 1)
+        self.assertAlmostEqual(steps[1][1], 0.6)
+        self.assertEqual(gh_calls, [])  # no gh call without a token
+        self.assertEqual(harness.out, [])
+
+    def test_no_step_starts_once_the_time_is_spent(self):
+        code, clock, steps, gh_calls, _ = self._run({'sign': 1, 'http': 0})
+        self.assertEqual(code, watch.NOTHING_NEW)
+        self.assertEqual(clock.t, 1)
+        self.assertEqual(steps, [('sign', 1)])  # the request never started
+        self.assertEqual(gh_calls, [])
+
+    def test_without_a_limit_each_step_keeps_its_own_timeout(self):
+        clock, steps = Clock(), []
+        app = self._slow_app(clock, {'sign': 0, 'http': 0}, steps)
+        app._http = lambda method, path, auth, body=None, timeout=None: (
+            steps.append(('http', timeout)) or
+            ({'token': 't', 'expires_at': '2030-01-01T00:00:00Z'} if body else
+             {'id': 77, 'app_id': 11}))
+        self.assertEqual(app.token(), 't')
+        self.assertEqual({timeout for _, timeout in steps}, {STEP_TIMEOUT})
 
 
 class DocsTest(unittest.TestCase):
