@@ -211,8 +211,9 @@ class PullRequest:
     # would add. Empty when it holds or there is no such approval.
     acceptance: list = field(default_factory=list)
     # Merge (#172): GitHub's ``mergeable`` and ``mergeStateStatus`` as read, the hold or release
-    # command still to apply (``{event, by, reason}``), and the merge mode of a PR that may be
-    # merged now (None when it may not, or merging is off).
+    # command still to apply (``{event, by, reason}``), and the merge mode of a PR in
+    # agent:ready-to-merge (None when it is not, the mode is not computable or merging is off;
+    # whether it may be merged now is ``merge_ready``).
     mergeable: str = None
     merge_status: str = None
     hold: dict = None
@@ -394,6 +395,34 @@ def merge_ready(pr, cfg):
             and not open_findings(pr.reviews, pr.closures))
 
 
+def parked(pr, cfg):
+    """Whether ``pr`` waits for a person (#199): ``agent:needs-human``, or
+    ``agent:ready-to-merge`` when devloop does not merge it, because ``[merge]`` is off or the
+    PR's mode is (level override, operator-only path). A ready PR whose mode is not known counts
+    as one devloop works on."""
+    lb = cfg.labels
+    if lb.needs_human in pr.labels:
+        return True
+    if lb.ready_to_merge not in pr.labels:
+        return False
+    return (not cfg.merge.enabled()
+            or pr.merge_mode is not None and pr.merge_mode not in MERGING)
+
+
+def pr_counts(snapshot, cfg):
+    """``(working, parked)``: how many open devloop PRs count against ``max_open_prs`` and how
+    many against ``max_parked_prs`` (#199)."""
+    held = sum(1 for pr in snapshot.prs if parked(pr, cfg))
+    return len(snapshot.prs) - held, held
+
+
+def pr_counts_line(snapshot, cfg):
+    """The two counters, as the tick log and ``status`` show them."""
+    working, held = pr_counts(snapshot, cfg)
+    return (f'open PRs: {working}/{cfg.max_open_prs} in progress (max_open_prs), '
+            f'{held}/{cfg.max_parked_prs} parked (max_parked_prs)')
+
+
 def plan(snapshot, cfg):
     """Pure planning: the actions one tick should take, in order."""
     lb = cfg.labels
@@ -512,7 +541,10 @@ def plan(snapshot, cfg):
                           else 'every finding of the request for changes is closed' if settled
                           else '')
                 actions.append(Action('review', pr.number, reason))
-    free = cfg.max_open_prs - len(snapshot.prs)
+    # Only the PRs devloop works on take the slots of max_open_prs; those waiting for a person
+    # have their own limit, and once it is reached no new issue starts (#199).
+    working, held = pr_counts(snapshot, cfg)
+    free = 0 if held >= cfg.max_parked_prs else cfg.max_open_prs - working
     if cfg.preflight:
         actions += _plan_preflight(snapshot, cfg, pr_issues, free)
     elif free > 0:
@@ -1082,7 +1114,10 @@ class Dispatcher:
                 pr.zero_problem = self._zero_problem(pr)
             if pr.meta and pr.labels & {lb.review, lb.ready_to_merge} and pr.zero_head is None:
                 pr.acceptance = self._acceptance_problems(pr)
-            if self.cfg.merge.enabled() and pr.meta and merge_ready(pr, self.cfg):
+            # Also for a ready PR that may not be merged now: its mode tells whether it waits
+            # for a person, outside max_open_prs (#199). ``plan`` merges only with merge_ready.
+            if (self.cfg.merge.enabled() and pr.meta and lb.ready_to_merge in pr.labels
+                    and lb.needs_human not in pr.labels):
                 pr.merge_mode = self._merge_mode(pr)
             prs.append(pr)
         ready = []
@@ -1291,6 +1326,7 @@ class Dispatcher:
         self._flag_incomplete(snap, dry_run)
         actions = plan(snap, self.cfg)
         prs = {pr.number: pr for pr in snap.prs}
+        self.log(f'{"[dry-run] " if dry_run else ""}{pr_counts_line(snap, self.cfg)}')
         if dry_run:
             for line in queue_lines(snap):
                 self.log(f'[dry-run] {line}')

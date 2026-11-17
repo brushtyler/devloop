@@ -179,6 +179,9 @@ class Config:
     # The agent of the readiness check before implement (#114), or '' when it is disabled.
     preflight: str = ''
     max_open_prs: int = 2
+    # Open devloop PRs waiting for a person (``dispatcher.parked``, #199): they do not take the
+    # slots of max_open_prs, and once this many are open no new issue starts.
+    max_parked_prs: int = 3
     max_review_rounds: int = 3
     max_actions_per_tick: int = 3
     # Actions of one tick on different issues and PRs that may run at once (#176); 1 runs them
@@ -531,7 +534,7 @@ def parse_config(data, root=INSTALL_ROOT):
     if len({app.app_id for app in apps.values()}) != len(apps):
         raise ConfigError('apps: each actor needs its own app')
     ints = {}
-    for key in ('max_open_prs', 'max_review_rounds', 'max_actions_per_tick',
+    for key in ('max_open_prs', 'max_parked_prs', 'max_review_rounds', 'max_actions_per_tick',
                 'max_parallel_actions', 'implement_test_retries', 'agent_timeout_seconds', 'test_timeout_seconds',
                 'agent_command_timeout_seconds', 'agent_stall_seconds'):
         if key in data:
@@ -591,8 +594,9 @@ _AGENT_KEYS = dict.fromkeys(('kind', 'display_name', 'model', 'model_label', 'ef
 OVERLAY_KEYS = {
     **dict.fromkeys(('repo', 'base_branch', 'branch_prefix', 'state_dir', 'test_cmd',
                      'local_tests', 'language', 'trusted_users', 'preflight', 'max_open_prs',
-                     'max_review_rounds', 'max_actions_per_tick', 'max_parallel_actions',
-                     'implement_test_retries', 'agent_timeout_seconds', 'test_timeout_seconds',
+                     'max_parked_prs', 'max_review_rounds', 'max_actions_per_tick',
+                     'max_parallel_actions', 'implement_test_retries', 'agent_timeout_seconds',
+                     'test_timeout_seconds',
                      'agent_command_timeout_seconds', 'agent_stall_seconds',
                      'agent_stall_action', 'blocked_labels', 'priority_labels',
                      'protected_paths')),

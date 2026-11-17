@@ -110,13 +110,30 @@ with the operator's login.
 A devloop PR is recognised by its branch, `agent/issue-<n>`, opened by a trusted user. Its body
 ends with a hidden marker that records the issue, implementer and reviewer: text may be edited
 above it, but the marker must stay the last line. A PR whose marker is missing stays in the flow
-(it still counts against `max_open_prs` and its issue does not restart) and goes to
+(it still counts as an open PR and its issue does not restart) and goes to
 `agent:needs-human`. A PR left without a state label, for example after a crash right after it
 was opened, is put back into `agent:review`, and its issue loses `agent:working`.
 
-Open devloop PRs are capped by `max_open_prs`, including PRs waiting for merge or for a human,
-so unattended work cannot outrun review capacity. Issues with a `blocked_labels` label are
-skipped.
+### Open PR limits
+
+Open devloop PRs are capped by two limits (#199), so unattended work cannot outrun review
+capacity:
+
+- `max_open_prs` counts the PRs devloop is working on: `agent:review`, `agent:changes`, a sync,
+  CI running, a PR without a state label or without its marker, and any other state not listed
+  below.
+- `max_parked_prs` (default 3) counts the **parked** PRs, those waiting for a person:
+  `agent:needs-human`, and `agent:ready-to-merge` when devloop does not merge it: `[merge]`
+  `mode = "off"`, a `[merge.levels]` override `"off"` for its review level, or a diff that
+  touches `operator_only_paths` ([merge modes](#merge-modes)). A ready PR that devloop merges
+  itself (`strict` or `auto` for its level) is not parked, nor is one whose merge mode cannot
+  be computed in that tick.
+
+A new issue starts only while both limits leave room: fewer PRs in progress than `max_open_prs`,
+and fewer parked PRs than `max_parked_prs`, since many open PRs make conflicts more likely.
+`devloop status` and every tick log show the two counters, as `open PRs: <n>/<max_open_prs> in
+progress (max_open_prs), <n>/<max_parked_prs> parked (max_parked_prs)`. Issues with a
+`blocked_labels` label are skipped.
 
 ### Start order of ready issues
 
@@ -197,7 +214,7 @@ carry one. Any other trusted comment counts, even one that starts with the heade
 GitHub Apps devloop and the operator share a login, and the header alone would hide a
 requirement the check never saw. The outcome is reused while the hash stays the same:
 
-- **ready**: the issue starts on a later tick, in the usual order and within `max_open_prs`.
+- **ready**: the issue starts on a later tick, in the usual order and within `max_open_prs` and `max_parked_prs`.
   The implementer starts only if the hash read just before still matches;
 - **not ready**: the issue goes to `agent:needs-human` (it keeps `agent:ready`), and the comment
   lists the gaps with the proposed defaults and the split. If `agent:needs-human` is removed
@@ -1200,6 +1217,8 @@ than the implementer. Among the limits, `agent_stall_seconds` (an integer of at 
 and `agent_stall_action` (`"warn"`, the default, or `"abort"`) control the
 [stall check](#stalled-agents); other values stop devloop at startup. `max_parallel_actions`
 (default 1) sets how many actions of a tick run at once ([Parallel actions](#parallel-actions)).
+`max_open_prs` (default 2) and `max_parked_prs` (default 3), integers of at least 1, cap the
+open PRs in progress and those waiting for a person ([Open PR limits](#open-pr-limits)).
 `[merge]` (`mode`, `levels`, `operator_only_paths`) and `roles.supervisor` set the
 [merge modes](#merge-modes); an unknown mode, level or key stops devloop at startup.
 `[pin]` (`auto`, default `false`) sets the [pin after a merge](#pin-after-a-merge); a value that is

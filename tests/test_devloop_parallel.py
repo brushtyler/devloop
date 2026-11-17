@@ -251,7 +251,7 @@ class ParallelTickTests(unittest.TestCase):
         self.assertEqual(len([line for line in lines if line.startswith('#')]),
                          3 * (1 + 2 * 25))
         for line in lines:
-            if line.startswith('outcome of '):
+            if line.startswith(('outcome of ', 'open PRs: ')):
                 continue
             match = re.fullmatch(r'#(\d+) (fix #(\d+)|  step \d+ of (\d+)|  detail of (\d+))',
                                  line)
@@ -264,7 +264,8 @@ class ParallelTickTests(unittest.TestCase):
         run_plan(d, [Action('fix', 100), Action('fix', 101)])
         self.assertLessEqual(d.spans[('fix', 100)][1], d.spans[('fix', 101)][0])
         self.assertEqual({t for t in d.threads.values()}, {threading.current_thread()})
-        self.assertEqual(d.logs, ['fix #100', 'fix #101'])
+        self.assertEqual(d.logs[1:], ['fix #100', 'fix #101'])
+        self.assertTrue(d.logs[0].startswith('open PRs: '))
         # An unexpected exception still stops the tick, as before #176.
         d = Timed(CFG, FakeGH(), fail={('fix', 100): KeyError('boom')})
         with self.assertRaises(KeyError):
