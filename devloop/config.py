@@ -1,6 +1,7 @@
 """Dispatcher configuration (TOML)."""
 
 import dataclasses
+import hashlib
 import json
 import re
 import tomllib
@@ -847,3 +848,74 @@ def load_config(path=None, local=None):
     """The configuration of ``path`` (default: config.toml of this installation) with the local
     overlay ``local`` (#174) applied, when given."""
     return parse_config(load_data(path, local))
+
+
+# The keys ``devloop run`` reads again before each tick (#278): the operating limits. Any other
+# key, merge modes, pin, roles, trust, identities and ``state_dir`` included, needs a restart.
+LIVE_KEYS = ('max_open_prs', 'max_parked_prs', 'max_review_rounds')
+
+
+class Reloader:
+    """``devloop run`` (#278): before each tick, ``refresh()`` reads ``path`` (default:
+    config.toml of this installation) and the overlay ``local`` again and, when the content of
+    one of them changed (its hash: an mtime may not change for a quick rewrite), returns the
+    configuration of the tick: ``cfg`` with the ``LIVE_KEYS`` of the files. A change of any other
+    key is logged and waits for a restart; a configuration that does not load is logged and the
+    previous one stays. Either way the files are loaded again only after their next change.
+    The first ``refresh()`` loads them in any case: they may have changed between the load of
+    ``cfg`` and the creation of the reloader, and a fingerprint taken here would hide that."""
+
+    def __init__(self, cfg, path=None, local=None, *, log):
+        self.cfg = cfg
+        self.log = log
+        self.paths = (Path(path) if path else DEFAULT_CONFIG,) + ((Path(local),) if local else ())
+        self._seen = None  # no content compared with ``cfg`` yet
+
+    @staticmethod
+    def _read(path):
+        """``(sha256, content)`` of ``path``, or None when it cannot be read."""
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            return None
+        return hashlib.sha256(raw).hexdigest(), raw
+
+    def _load(self, now):
+        """The configuration of the contents just read (the ones hashed), as ``load_config``."""
+        data = None
+        for path in self.paths:
+            what = 'config' if data is None else 'local config'
+            if now[path] is None:
+                raise ConfigError(f'{what} {path}: cannot be read')
+            try:
+                table = tomllib.loads(now[path][1].decode())
+            except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+                raise ConfigError(f'{what} {path}: {exc}') from exc
+            data = table if data is None else apply_overlay(data, table)
+        return parse_config(data)
+
+    def refresh(self):
+        """The configuration of the next tick."""
+        now = {p: self._read(p) for p in self.paths}
+        changed = now != self._seen
+        self._seen = now
+        if not changed:
+            return self.cfg
+        try:
+            new = self._load(now)
+        except Exception as exc:  # the loop goes on with the configuration it has
+            self.log(f'config: changed but not valid, the previous configuration stays in use: '
+                     f'{type(exc).__name__}: {exc}')
+            return self.cfg
+        restart = [f.name for f in dataclasses.fields(Config) if f.name not in LIVE_KEYS
+                   and getattr(new, f.name) != getattr(self.cfg, f.name)]
+        if restart:
+            self.log(f'config: {", ".join(restart)} changed: the change applies only after a '
+                     'restart, the running values stay in use')
+        live = {key: getattr(new, key) for key in LIVE_KEYS
+                if getattr(new, key) != getattr(self.cfg, key)}
+        for key, value in live.items():
+            self.log(f'config: {key} {getattr(self.cfg, key)} -> {value} from this tick')
+        if live:
+            self.cfg = dataclasses.replace(self.cfg, **live)
+        return self.cfg

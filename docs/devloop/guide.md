@@ -1092,6 +1092,9 @@ sudo -u devloop -H tail -f /home/devloop/ssdlc/.ssdlc/devloop/run.log   # follow
   `alert_issue` in the overlay the dispatcher also comments on that issue; without it the alert
   is only a line in the log. The background process does not start again by itself: remove the
   cause, then start it again.
+- **Limits.** A new `max_open_prs`, `max_parked_prs` or `max_review_rounds` in the overlay takes
+  effect at the next tick, without a stop; any other key needs a restart
+  ([Changes while the loop runs](#changes-while-the-loop-runs)).
 
 A systemd unit does the same with restarts on a crash: see [Continuous loop](#continuous-loop).
 
@@ -1186,6 +1189,35 @@ the one of the copy. A new pin therefore needs no realignment of the config by h
 `config.toml` cannot have (`bogus = 1`, `[merge] method = "squash"`) stops devloop, and so does
 any value the copy's config would refuse. An overlay cannot remove a key of the copy, only
 replace it.
+
+#### Changes while the loop runs
+
+A running `devloop run` reads `devloop/config.toml` of its copy and the overlay again before
+each tick (#278), and loads them at the first tick and then when their content changed (the hash
+of each file), so a change made while the loop was starting is not missed. Only three
+keys take effect without a restart:
+
+- `max_open_prs`, `max_parked_prs` and `max_review_rounds`: the new values apply from the next
+  tick, with a line `config: <key> <old> -> <new> from this tick` in the log. The actions already
+  running go on and are not interrupted: a higher `max_open_prs` lets the next tick start an
+  issue alongside them.
+
+**Every other key needs a restart**, including the merge modes (`[merge]`), `[pin]`, the roles,
+`trusted_users`, the agents, the identities (`[apps]`), `state_dir`, `max_parallel_actions` and
+the other limits. When one of them changes, the log says
+`config: <keys> changed: the change applies only after a restart, the running values stay in use`,
+and the loop keeps the value it started with until it is
+[stopped and started again](#starting-and-stopping-the-loop) (a
+[pin after a merge](#pin-after-a-merge) restarts it too). No rule of trust or merge changes while
+the loop runs.
+
+A configuration that does not load (a TOML error, an unknown key, a value out of range, an
+overlay removed or unreadable) does not stop the loop: the log says
+`config: changed but not valid, the previous configuration stays in use: <error>`, the tick goes
+on with the previous configuration, and the files are loaded again at their next change. The
+overlay must exist when the loop starts: the [launcher](#launcher) passes `--local-config` only
+for an overlay it finds, so an overlay created later needs a restart. `devloop tick` reads the
+configuration at each run, as before.
 
 #### Rollback
 
