@@ -45,10 +45,11 @@ def load_launcher():
 
 
 def copy_package(dest):
-    """The devloop package and the list file of this checkout into ``dest``: its configuration
-    has a ``[docs] map``, but none of the documents it maps (#210)."""
-    shutil.copytree(REPO / 'devloop', dest / 'devloop',
-                    ignore=shutil.ignore_patterns('__pycache__'))
+    """The devloop and core packages and the list file of this checkout into ``dest``: its
+    configuration has a ``[docs] map``, but none of the documents it maps (#210)."""
+    for package in ('devloop', 'core'):  # devloop imports core since #365
+        shutil.copytree(REPO / package, dest / package,
+                        ignore=shutil.ignore_patterns('__pycache__'))
     (dest / LIST).parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(REPO / LIST, dest / LIST)
 
@@ -124,11 +125,14 @@ class PinTests(GitCase):
         self.assertEqual(self.pointed(), copy.resolve())
         self.assertTrue((self.state / 'current').is_symlink())
         self.assertEqual(os.readlink(self.state / 'current'), copy.name)
-        self.assertEqual(sorted(p.name for p in copy.iterdir()), ['devloop', 'pin.json', 'schemas'])
+        # ``core/`` too, which devloop imports since #365.
+        self.assertEqual(sorted(p.name for p in copy.iterdir()),
+                         ['core', 'devloop', 'pin.json', 'schemas'])
         self.assertEqual(json.loads((copy / 'pin.json').read_text()),
                          {'commit': self.first, 'files': [LIST]})
         self.assertEqual((copy / LIST).read_bytes(), (REPO / LIST).read_bytes())
         self.assertTrue((copy / 'devloop' / 'dispatcher.py').is_file())
+        self.assertTrue((copy / 'core' / 'budget.py').is_file())
         for path in [copy, *copy.rglob('*')]:
             self.assertFalse(path.stat().st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH),
                              path)
@@ -174,7 +178,8 @@ class PinTests(GitCase):
         second = self.push('a mapped document', 'docs/devloop/guide.md', 'devloop\n')
         copy = self.pin('main')
         self.assertEqual(copy, self.state / f'pinned-{second[:12]}')
-        self.assertEqual(sorted(p.name for p in copy.iterdir()), ['devloop', 'pin.json', 'schemas'])
+        self.assertEqual(sorted(p.name for p in copy.iterdir()),
+                         ['core', 'devloop', 'pin.json', 'schemas'])
         self.assertEqual(json.loads((copy / 'pin.json').read_text())['files'], [LIST])
 
     def test_a_malformed_docs_map_still_fails_the_pin(self):
@@ -785,7 +790,8 @@ class MergeRequestTests(unittest.TestCase):
 class PinConfigTests(unittest.TestCase):
     def test_the_distributed_config_is_off(self):
         cfg = config.load_config()
-        self.assertEqual(cfg.pin, PinPolicy(auto=False, paths=('devloop/', LIST)))
+        # ``core/`` too: devloop imports it since #365.
+        self.assertEqual(cfg.pin, PinPolicy(auto=False, paths=('devloop/', 'core/', LIST)))
         self.assertEqual(DATA['pin'], {'auto': False, 'restart_max_wait_minutes': 30})
         self.assertEqual(cfg.pin.restart_max_wait_minutes, 30)
         self.assertEqual(config.parse_config({k: v for k, v in DATA.items() if k != 'pin'}).pin,
@@ -811,6 +817,8 @@ class PinConfigTests(unittest.TestCase):
         self.assertTrue(policy.touches(['docs/x.md', 'devloop/pin.py']))
         self.assertTrue(policy.touches([LIST]))
         self.assertFalse(policy.touches(['devloopx/a.py', 'schemas/other.json', 'README.md']))
+        # #365: devloop imports core, and the distributed policy watches it.
+        self.assertTrue(config.load_config().pin.touches(['core/budget.py']))
 
 
 class OverlayTests(unittest.TestCase):

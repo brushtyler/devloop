@@ -177,7 +177,8 @@ operator_only_paths = ["docs/adr/", "AGENTS.md", "CLAUDE.md"]
 # "2" = "off"
 
 # Pinned installation (issue #174, see docs/devloop/guide.md). With auto = true, after a merge by
-# devloop whose diff touches devloop/ or a file of review_policy.sensitive_path_lists, the next
+# devloop whose diff touches devloop/, core/ (issue #365) or a file of
+# review_policy.sensitive_path_lists, the next
 # tick runs `pin origin/<base_branch>` before planning, and `run` and `tick` start again from the
 # new copy; a failed pin stops the tick and leaves the pinned copy as it was. Enabling it is the
 # operator's decision. With parallel actions (`devloop run`, issue #301) the pin runs at once and
@@ -227,6 +228,43 @@ interval = 15
 grace_minutes = 5
 required_timeout_minutes = 30
 
+# The budget envelope of each story (issue #365, ADR 0004, P2-5a). With enabled = true each turn
+# of an agent is booked, before its CLI starts, in the envelope of its story (it needs
+# story_identity = true), and a turn the envelope does not cover is refused with an escalation
+# (class budget). Consumption is cumulative across child issues, attempts, fallback models,
+# retries and restarts, recorded in the journal of state_dir; nothing refunds a booking. The
+# readiness check (preflight) is outside the envelope. With enabled = true every value is
+# required, with no default: turns of the story, wall_seconds from its start, the dollar caps
+# metered_usd (measured spend) and cli_estimate_usd (estimates, today claude's), both above 0 (a
+# cap is exhausted at equality: 0 would refuse every turn), role_turns for
+# implement, fix, review and sync (conclave and advisory too when configured), phase_turns for
+# implementation, and in [budget.usage.<agent>] a rule for each agent whose CLI reports no cost
+# (codex, agy): model = "unmetered_quota" (no reserve in USD, only the turn caps, D2) and a
+# reason; "reserve_per_invocation" (with metered_usd and cli_estimate_usd) only for claude. The
+# limits a story gets at its first booking stay its own: a later change applies to new stories.
+# Token caps are refused: not supported yet. Off here: the values and turning it on are the operator's decisions
+# (ADR 0004, D2 and D8).
+# The shape, with no value: the values are not decided yet (D2).
+[budget]
+enabled = false
+# turns = <turns>
+# wall_seconds = <seconds>
+# metered_usd = <dollars>
+# cli_estimate_usd = <dollars>
+# [budget.role_turns]
+# implement = <turns>
+# fix = <turns>
+# review = <turns>
+# sync = <turns>
+# [budget.phase_turns]
+# implementation = <turns>
+# [budget.usage.codex]
+# model = "unmetered_quota"
+# reason = "codex reports no cost: the turn caps bound it"
+# [budget.usage.agy]
+# model = "unmetered_quota"
+# reason = "agy reports no cost: the turn caps bound it"
+
 # Documentation map (issue #203): code paths and the documents that describe them. A key is a
 # directory prefix ending in "/" or a file, relative to the root, with no pattern characters;
 # each value lists one or more documents of the repository (a pin does not extract them, #210).
@@ -239,6 +277,7 @@ required_timeout_minutes = 30
 "devloop/" = ["docs/devloop/guide.md"]
 "devloop/config.py" = ["docs/devloop/reference.md"]
 "devloop/config.toml" = ["docs/devloop/reference.md"]
+"devloop/budget.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
 "devloop/agents.py" = ["docs/devloop/reference.md"]
 "devloop/unavailability.py" = ["docs/devloop/reference.md"]
 "devloop/localtests.py" = ["docs/devloop/reference.md"]

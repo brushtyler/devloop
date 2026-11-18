@@ -2,15 +2,16 @@
 
 devloop runs from a read-only copy of one commit of ``origin``, never from the checkout it
 changes. ``pin`` resolves ``<ref>`` to a commit reachable from the refs of ``origin`` (or to a
-copy already verified, reused without a fetch: the rollback), extracts ``devloop/`` and the files
-of ``review_policy.sensitive_path_lists`` of that commit into ``<state_dir>/pinned-<sha12>``
+copy already verified, reused without a fetch: the rollback), extracts ``devloop/``, ``core/``
+when the commit has it (#365), and the files of ``review_policy.sensitive_path_lists`` of that
+commit into ``<state_dir>/pinned-<sha12>``
 (not the documents of ``[docs] map``: they belong to the repository, #210), makes it read-only, checks that it imports and that its configuration, with the local overlay,
 loads, runs the smoke test of a new copy (``Smoke``, #260: ``tick --dry-run`` and one round of
 ``watch`` from the copy), and only then points ``<state_dir>/current`` at it with an atomic
 rename. A failure leaves ``current`` as it was. Earlier copies stay for the rollback; a copy that
 fails the smoke test stays as ``rejected-<sha12>``, for the analysis.
 
-With ``[pin] auto = true`` a merge by devloop that touches ``devloop/`` or a list file records a
+With ``[pin] auto = true`` a merge by devloop that touches ``devloop/``, ``core/`` or a list file records a
 request (``pin-pending.json``), and the next tick pins ``origin/<base_branch>`` before planning
 (``AutoPin``): ``run`` and ``tick`` then start again from the new copy (``Repinned``). In the
 continuous mode of ``run`` the pin runs at once, and the restart waits until no action runs (#301).
@@ -45,6 +46,9 @@ TIMES = 'pin-times.json'
 PREFIX = 'pinned-'
 STAMP = 'pin.json'
 LOCAL_CONFIG = 'config.local.toml'
+# The packages besides ``devloop/`` a copy holds when its commit has them: ``core`` (ADR 0004,
+# section 3.4), which devloop imports for the budget envelope (#365).
+CODE_PACKAGES = ('core',)
 PENDING = 'pin-pending.json'
 LOCK = 'pin.lock'
 # A copy refused by the smoke test (#260), kept for the analysis; never a pinned copy.
@@ -371,9 +375,17 @@ class Smoke:
             raise StepFailed(f'no round ended in {self.watch_seconds} s', transient=True)
 
 
+def _has_tree(root, sha, name):
+    """Whether ``name`` is a directory of commit ``sha``."""
+    entry = _git(root, 'ls-tree', '--full-tree', sha, '--', name).split('\t', 1)[0].split()
+    return len(entry) > 1 and entry[1] == 'tree'
+
+
 def _extract(root, sha, files, dest):
-    """``devloop/`` and ``files`` of ``sha`` into a new temporary directory next to ``dest``."""
-    data = _git(root, 'archive', '--format=tar', sha, '--', 'devloop', *files, binary=True)
+    """``devloop/``, ``core/`` when the commit has it (devloop imports it since #365), and
+    ``files`` of ``sha`` into a new temporary directory next to ``dest``."""
+    packages = ['devloop'] + [name for name in CODE_PACKAGES if _has_tree(root, sha, name)]
+    data = _git(root, 'archive', '--format=tar', sha, '--', *packages, *files, binary=True)
     tmp = Path(tempfile.mkdtemp(prefix=f'.{dest.name}-', dir=dest.parent))
     try:
         with tarfile.open(fileobj=io.BytesIO(data)) as tar:

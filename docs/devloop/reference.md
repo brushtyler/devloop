@@ -47,6 +47,9 @@ in the turn journal before it is sent, an uncertain outcome is reconciled on the
 the same author before any new POST and sent again only on an absence that is conclusive, and
 each tick resumes what a restart left half published. Off, devloop publishes as
 before; another value stops devloop at startup. It applies at the next start.
+`[budget]` (`enabled`, default `false`) sets the [budget envelope](#budget-envelope) of each
+story (#365); on, it needs `story_identity = true` and every value of the envelope, and a missing
+or invalid value, an unknown key or a token cap stops devloop at startup.
 `[merge]` (`mode`, `levels`, `operator_only_paths`) and `roles.supervisor` set the
 [merge modes](guide.md#merge-modes); an unknown mode, level or key stops devloop at startup.
 `[pin]` (`auto`, default `false`; `restart_max_wait_minutes`, default 30) sets the
@@ -359,6 +362,102 @@ whole map left without documents is omitted too. It is not an error.
 A file that no key covers asks for nothing, and a diff without mapped files adds no section to
 the fix and review prompts. The map adds no turn and changes no budget or round. It grows with
 later issues.
+
+### Budget envelope
+
+`[budget]` (#365, ADR 0004, section 3.3 and P2-5a) books each turn of an agent, before its CLI
+starts, in the envelope of its [story](protocol.md#story-identity), with the calculations of the
+`core` package (`core/budget.py`), and refuses a turn the envelope does not cover. It is **off by
+default** (`enabled = false`, ADR 0004, D8): then devloop books nothing, the
+[turn journal](protocol.md#turn-journal) has the same events as before, and the other keys of the
+table, when present, are only checked for shape. Its values are the operator's decision (D2):
+devloop proposes none, and the distributed `config.toml` shows the table without values.
+
+```toml
+story_identity = true
+[budget]
+enabled = true
+turns = <turns>                 # turns of the story, in total
+wall_seconds = <seconds>        # from the start of the story
+metered_usd = <dollars>         # measured spend
+cli_estimate_usd = <dollars>    # estimates (claude's total_cost_usd)
+[budget.role_turns]             # per role: the kind of the turn
+implement = <turns>
+fix = <turns>
+review = <turns>
+sync = <turns>
+[budget.phase_turns]
+implementation = <turns>
+[budget.usage.codex]
+model = "unmetered_quota"
+reason = "<why>"
+[budget.usage.agy]
+model = "unmetered_quota"
+reason = "<why>"
+```
+
+With `enabled = true` every value is required, with no default, and devloop stops at startup
+when one is missing or invalid:
+
+| Key | Value |
+|---|---|
+| `turns`, `wall_seconds` | Whole numbers of at least 1: the turns of the story in total, and the seconds from its start (when the journal assigned it) after which no turn starts |
+| `metered_usd`, `cli_estimate_usd` | Dollar caps above 0, kept apart as in the engine: measured spend and estimates. A cap is exhausted at equality, so 0 would refuse every turn. No CLI of devloop reports a measured spend; claude reports an estimate |
+| `role_turns` | A whole number of at least 0 for each role: `implement`, `fix`, `review`, `sync`, and `conclave` and `advisory` when the [conclave](guide.md#conclave-on-a-block) or the [advisory review](guide.md#advisory-review-for-the-operator) is configured. The role of a turn is its kind |
+| `phase_turns` | A whole number of at least 0 for each kind of phase: `implementation`, the only one of the current flow |
+| `usage.<agent>` | The rule for unknown usage of an agent whose CLI reports no cost (codex, agy), required for each: `model = "unmetered_quota"` (no reserve in USD: only the turn caps bound it, D2), the only rule they accept, and a `reason`. claude may have one too: `unmetered_quota`, or `"reserve_per_invocation"` with `metered_usd` and `cli_estimate_usd` above 0 (a reserve booked before each turn); without one its estimate is charged |
+
+Also on: a story is the unit of the envelope, so `enabled = true` needs `story_identity = true`.
+A token cap (any key with `token` in its name, in the table, in `role_turns` or in a rule) stops
+devloop at startup, on or off, with `token caps are not supported yet`: the envelope holds turns,
+time and attested dollars only, and the semantics of token caps are decided apart. An unknown
+key, or a rule for an agent that is not configured, stops it too. The key needs a restart.
+
+**The booking.** Before each turn, retries and fallback models included, the dispatcher checks
+the envelope of the story of the turn's issue (the root, or a child the dispatcher associated
+with it) and writes the booking in the turn's intent in the journal (`budget`), in the same step
+and under the same lock: two parallel turns of a story never both take its last place. The rule
+of an agent covers every model of its chain: a fallback runs on the same CLI. A turn is refused,
+before its intent, its ledger record and its CLI, when:
+
+- the story has used its turns in total, of the turn's role or of its phase, or its time
+  (`LIMIT_REACHED`);
+- a dollar cap is exhausted, or the reserve of the turn would pass it (`LIMIT_REACHED`);
+- a turn of the story returned without a dollar figure and its agent has no rule: unknown is not
+  counted as zero (`LIMIT_REACHED`). This applies to a claude turn that ended without a cost;
+  a rule for claude covers it;
+- a turn of the story has no confirmed outcome: one without outcome that does not run in this
+  process, or `uncertain` and not reconciled (`OUTCOME_UNCERTAIN`). A turn running in a parallel
+  action of the same story counts, and does not refuse;
+- its issue belongs to no story, for example one taken over before `story_identity` was on
+  (`SCOPE_REQUIRED`).
+
+**The envelope of a story is frozen** at its first booking: every booking records the limits of
+its story (`envelope`: the turn caps, the dollar caps, `wall_seconds` and the deadline), and the
+later turns are checked against them, across restarts. A changed `[budget]` applies to new
+stories only: it neither extends nor shrinks one already booked, and the refusal says so when the
+configuration differs. Extending a story is an operator's decision, case by case, not available
+yet. The rule of an agent for unknown usage is read from the configuration at each booking, which
+records it.
+
+The step then escalates to the operator (class `budget`, critical, with the `category` of the
+refusal), with the limit and what the story used: turns in total, of the role and of the phase,
+the dollars charged and the deadline. A conclave call or an advisory review refused this way
+escalates as for the block on uncertain turns: the check runs before the conclave records the call
+as started, and before the checkout of the advisory review. An advisory review whose refusal a
+`budget` escalation of the PR already names, with the same category, is not planned again, and
+escalates no more, until the story covers the turn again.
+
+**Consumption** is cumulative: every turn booked for a story counts, whatever its issue, attempt,
+model, outcome or process, and nothing refunds a booking. A failed turn, one not dispatched and
+an uncertain one stay counted; a reconciled turn counts with its reconciled outcome. The outcome
+of a turn records the dollars its CLI reported (`usage`), which can only raise a charge: with a
+reserve, the charge is the larger of the reserve and the observation (ADR 0004, D7).
+
+**Outside the envelope:** the [readiness check](guide.md#readiness-check-before-implementation)
+comes before the takeover. It is neither booked nor charged to the story, as before; its outcome
+records its `usage` like the others. How to charge it is decided before the budget is turned on.
+The state of the budget in `devloop status` and in the PR receipt comes with a later issue.
 
 ### agy permissions
 

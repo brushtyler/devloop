@@ -57,6 +57,12 @@ phase, recommendation (i) of section 3.2 with one active attempt per phase:
   merged, or closed without merge) or ``abandoned`` (``abandon``, an internal primitive no flow
   calls yet). Only after it may the phase open a new attempt.
 
+With the budget on (#365, ADR 0004, P2-5a, ``devloop.budget``), the intent of a turn charged to
+a story carries its booking (``budget``: story, role, phase, engine and the declared rule for
+unknown usage with its reserve), written in the same event, and the outcome of every turn the
+dollars its CLI reported (``usage``). Nothing else changes: with the budget off the events are
+those above.
+
 Reads verify the whole chain. An incomplete or unreadable last line (a write cut short) is set
 aside in ``turn-journal-tail-<sha256>.bin`` and removed, and the valid records before it stay; a
 hash that does not match, or an unreadable line before the last, is an explicit error. Next to
@@ -413,6 +419,8 @@ class TurnJournal:
                 turns[d['turn']] = dict(d, outcome=None, reconciled=None)
             elif kind == 'outcome' and d['turn'] in turns:
                 turns[d['turn']]['outcome'] = d['outcome']
+                if 'usage' in d:  # what the CLI reported, with the budget on (#365)
+                    turns[d['turn']]['usage'] = d['usage']
                 if d['outcome'] == UNCERTAIN:
                     # Its records on GitHub are still to check: the number stays traced until a
                     # tick has checked them (``settle``).
@@ -447,6 +455,15 @@ class TurnJournal:
             turns, trace = self._state()
             found = [t['number'] for t in turns.values() if t['outcome'] is None]
             return list(dict.fromkeys(found + list(trace)))
+
+    def live(self):
+        """The turns of this process still running (#365): booked, and not uncertain."""
+        with self._lock:
+            return set(self._live)
+
+    def seconds(self):
+        """The journal's clock, in seconds since the epoch (#365)."""
+        return self._clock()
 
     def waiting(self):
         """The uncertain turns not reconciled yet, oldest first."""
@@ -487,11 +504,17 @@ class TurnJournal:
         return found
 
     # Writes ----------------------------------------------------------------
-    def intent(self, number, *, issue, repo, kind, agent, model, label, attempt=None):
+    def intent(self, number, *, issue, repo, kind, agent, model, label, attempt=None,
+               reserve=None):
         """Record a turn about to start on ``number``, of the work of issue ``issue``, durable
         before it returns; its id. ``attempt``: the id of the attempt the turn belongs to
         (#384), recorded only when there is one. Raises ``JournalError`` if it cannot: the turn
-        must not start, nor from a ``read_only`` journal."""
+        must not start, nor from a ``read_only`` journal.
+
+        ``reserve`` (#365, the budget on): called with the journal, under its lock, before the
+        intent is written; it returns the booking of the turn in the envelope of its story,
+        recorded in the intent as ``budget``, or raises and nothing is written. Check and
+        booking are one step: two parallel turns of a story never both take its last place."""
         if self.read_only:
             raise JournalError(f'{self.path}: read-only journal: no turn starts from it')
         with self._lock:
@@ -501,13 +524,17 @@ class TurnJournal:
                     'agent': agent, 'model': model, 'label': label}
             if attempt is not None:
                 data['attempt'] = attempt
+            if reserve is not None:
+                data['budget'] = reserve(self)
             self._append('intent', data)
             self._live.add(turn)
             return turn
 
-    def outcome(self, turn, outcome, error=None):
+    def outcome(self, turn, outcome, error=None, usage=None):
         """Record how ``turn`` ended; one outcome per turn. Whether or not it can be written,
-        the turn no longer runs (``_live``): without a durable outcome it blocks its work."""
+        the turn no longer runs (``_live``): without a durable outcome it blocks its work.
+        ``usage`` (#365, the budget on): the dollars the CLI reported, ``metered_usd`` and
+        ``cli_estimate_usd``, None where it reported none, recorded with the outcome."""
         if outcome not in OUTCOMES:
             raise ValueError(f'unknown outcome {outcome!r}')
         with self._lock:
@@ -521,6 +548,8 @@ class TurnJournal:
                 data = {'turn': turn, 'outcome': outcome}
                 if error:
                     data['error'] = str(error)[:300]
+                if usage is not None:
+                    data['usage'] = dict(usage)
                 self._append('outcome', data)
             finally:
                 self._live.discard(turn)

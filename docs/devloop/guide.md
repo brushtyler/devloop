@@ -683,6 +683,7 @@ check, and the `policy` marker of a level that cannot be reviewed or promoted. A
 | `conclave_veto` | A trusted user annulled the latest decision of a [conclave](#conclave-on-a-block) with `/devloop veto` | Yes |
 | `uncertain_turn` | With `block_uncertain_turns` on, a turn refused because its work has [uncertain turns](protocol.md#turn-journal) a trusted user has not reconciled with `/devloop reconcile` | Yes |
 | `attempt` | With `attempt_identity` on, a PR whose [attempt](protocol.md#attempt-identity) the journal does not confirm, or concluded already (a PR reopened after it was merged or closed) | Yes |
+| `budget` | With `[budget] enabled` on, a turn the [budget envelope](reference.md#budget-envelope) of its story does not cover, refused before it starts | Yes |
 
 Any other class, or none (escalations written before #182), is critical.
 
@@ -859,6 +860,17 @@ one. A PR reopened after its attempt concluded, or whose marker lost the attempt
 to it, is escalated (`attempt`). PRs opened before, without an attempt in their marker, are
 handled as before.
 
+With `[budget] enabled = true` (#365, off by default; it needs `story_identity = true`) each turn
+of an agent is booked, before its CLI starts, in the [budget envelope](reference.md#budget-envelope)
+of its story: turns in total, per role and per phase, time, and dollars where a CLI attests them.
+A turn the envelope does not cover is refused before it starts, with an escalation of class
+`budget` that says which limit and how much the story has used; so is a turn of an issue with no
+story. Consumption is cumulative across child issues, attempts, fallback models, retries and
+restarts, and nothing refunds a booking. A story keeps the limits of its first booking, recorded
+in the journal: a later change of `[budget]` applies to new stories only. agy and codex accept
+only `unmetered_quota`, with the turn caps. The readiness check stays outside the envelope. With it
+off, devloop books nothing and behaves as before.
+
 With `publication_outbox = true` (#385, off by default), every comment, native review and pull
 request devloop writes is saved in the same journal before it is sent, through the
 [publication outbox](protocol.md#publication-outbox). A write whose outcome is uncertain (a
@@ -933,7 +945,9 @@ issue and the PR description without attribution headers and markers (see
   block on [uncertain turns](protocol.md#turn-journal) (`block_uncertain_turns`): it
   escalates as `uncertain_turn`, with the turns to reconcile, once for those turns (taking
   `agent:ready-to-merge` away, as every escalation does), and the PR gets no other advisory
-  action until they are reconciled.
+  action until they are reconciled. So does a turn the [budget envelope](reference.md#budget-envelope)
+  refuses: it escalates as `budget` once for that refusal, and the PR gets no other advisory
+  action while the story does not cover the turn.
 - **Cost.** One turn per head, recorded in the [ledger](protocol.md#evidence-and-telemetry) as a
   `turn` of kind `advisory`, and counted in the totals of the receipt.
 
@@ -1604,7 +1618,7 @@ sudo -u devloop -H tail -f /home/devloop/ssdlc/.ssdlc/devloop/run.log   # follow
   ```
 
 - **`[pin] auto`.** With `auto = true` in the overlay, a merge by devloop that touches
-  `devloop/` or a file of `sensitive_path_lists` pins `origin/main`, and the loop restarts by
+  `devloop/`, `core/` or a file of `sensitive_path_lists` pins `origin/main`, and the loop restarts by
   itself from the new copy, in the same process and log ([Pin after a merge](#pin-after-a-merge)). Otherwise, after a pin by hand, stop the loop and
   start it again: a running loop keeps the code it started with.
 - **`[run] alert_issue`.** Three failed ticks in a row stop the loop with exit code 4. With
@@ -1635,8 +1649,10 @@ A systemd unit does the same with restarts on a crash: see [Continuous loop](#co
    of `review_policy.sensitive_path_lists`: each must be a relative path inside the root and a
    regular file of the commit. The documents of the [documentation map](reference.md#documentation-map) are
    not taken: they belong to the repository, not to the installation;
-3. extracts `devloop/` and those files into `.ssdlc/devloop/pinned-<sha12>`, with a `pin.json`
-   naming the commit, and makes the copy read-only;
+3. extracts `devloop/`, `core/` when the commit has it (devloop imports it for the
+   [budget envelope](reference.md#budget-envelope), #365), and those files into
+   `.ssdlc/devloop/pinned-<sha12>`, with a `pin.json` naming the commit, and makes the copy
+   read-only;
 4. checks the copy: in a Python with only the copy on its module path, the package imports, and
    its configuration, with the overlay, loads (a `[docs] map` of the wrong shape fails here) and
    reads `sensitive_path_lists` from the copy;
@@ -1767,7 +1783,8 @@ pin](#pin-after-a-merge) pins `origin/main` again: to stay on the earlier copy, 
 #### Pin after a merge
 
 With `[pin] auto = true` (default `false`: the operator's decision), after a merge done by
-devloop ([merge modes](#merge-modes)) whose diff touches `devloop/` or a file of
+devloop ([merge modes](#merge-modes)) whose diff touches `devloop/`, `core/` (which devloop
+imports since #365) or a file of
 `sensitive_path_lists` (those of the running configuration), devloop records the request in
 `.ssdlc/devloop/pin-pending.json`. The next tick, before planning, runs `pin origin/main` (the
 `base_branch` of `origin`). If the pin succeeds, `run` and `tick` start again from the new copy
