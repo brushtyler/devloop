@@ -809,6 +809,40 @@ item stays in `agent:needs-operator`. A command from outside `trusted_users` and
 identity is only logged. The trace is the one of the supervisor's commands, under the title
 "Comando su un'escalation all'operatore".
 
+### Advisory review for the operator
+
+With `[review_policy] advisory_reviewer` set (#369; empty, and so off, by default: the local
+overlay turns it on, for example `advisory_reviewer = "claude"`), a devloop PR in
+`agent:needs-operator` gets one more review for the person who decides on it: after an
+escalation to the operator, or when its merge is the operator's
+([Ready PRs whose merge is the operator's](#ready-prs-whose-merge-is-the-operators): `[merge]`
+off, a level `off`, an `operator_only_paths` path). A PR also in `agent:needs-supervisor` waits
+for the supervisor. The agent may be the PR's implementer: each turn is a new CLI process, so it
+does not have the implementer's context, and having the same model it could never count for the
+quorum anyway.
+
+- **One per head.** An `advisory` action, which takes a slot of `max_actions_per_tick`, runs one
+  read-only turn of that agent in a disposable checkout of the head (`pr-<n>-advisory`), with
+  the issue, the PR, its changed files and the reviews of the quorum, and the schema
+  [`devloop/schemas/advisory.json`](../../devloop/schemas/advisory.json): a summary of the PR,
+  the residual risks, what the operator should look at, points the reviewers of the quorum may
+  have missed, and a non-binding opinion (`ok`, `dubbi`, `contrario`). A head that already has
+  one never gets another, even when its turn failed; a new head gets its own while the PR is
+  still in `agent:needs-operator`. When the labels or the head change before the turn ends,
+  nothing is published.
+- **Where.** A native GitHub review of type `COMMENT` on the head, never `APPROVE` nor
+  `REQUEST_CHANGES` (GitHub accepts a `COMMENT` from the PR's author too), with the agent's
+  identity and the title "Review consultiva: non conta per il quorum". The dispatcher then writes
+  its summary for the operator ("Review consultiva per l'operatore"), with the agent and the
+  opinion only, and adds the opinion to the current [receipt](protocol.md#pr-receipt) of the same
+  head, if any. A failed turn gets only the summary, which says so.
+- **No effect.** It opens no round and does not count against `max_review_rounds`, creates no
+  finding, changes no label and no promotion; devloop reads it only to know whether a head
+  already has one and to show its opinion, never to decide. A failed action is never escalated:
+  the PR is already the operator's.
+- **Cost.** One turn per head, recorded in the [ledger](protocol.md#evidence-and-telemetry) as a
+  `turn` of kind `advisory`, and counted in the totals of the receipt.
+
 ## Who does what
 
 Roles (operator, coordinator, supervisor, dispatcher, preflight, implementer, reviewer), what

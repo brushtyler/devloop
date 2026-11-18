@@ -28,7 +28,7 @@ RESYNC_AFTER_APPROVAL = 'resync_after_approval'
 BASE_CHANGED = 'base_changed'
 # Actions that take a slot of ``max_actions_per_tick``.
 EXPENSIVE = ('review', 'fix', 'implement', 'sync', 'preflight', 'merge', 'supervise',
-             'conclave')
+             'conclave', 'advisory')
 # Actions that write to the whole repository or to devloop itself (the pin of #174): with
 # ``max_parallel_actions`` above 1 each runs alone, after the actions planned before it and
 # before those planned after it (#176), and in continuous mode only when nothing runs (#227).
@@ -183,6 +183,9 @@ class Snapshot:
     # needs its conclave: dicts ``{number, calls, reason}``, ``calls`` being the calls left
     # (``conclave.calls_left``), one action each.
     conclaves: list = field(default_factory=list)
+    # With ``review_policy.advisory_reviewer`` (#369), the devloop PRs in agent:needs-operator
+    # whose head has no advisory review yet: dicts ``{number, head}``, one action each.
+    advisories: list = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -393,7 +396,9 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
                         if not numbers_of(s['number'], issue_of) & busy],
             # A conclave still running takes no second PR slot (#142).
             conclaves=[c for c in snapshot.conclaves
-                       if not numbers_of(c['number'], issue_of) & busy])
+                       if not numbers_of(c['number'], issue_of) & busy],
+            advisories=[a for a in snapshot.advisories
+                        if not numbers_of(a['number'], issue_of) & busy])
     pr_issues = {pr.issue for pr in snapshot.prs}
     # Only the PRs devloop works on take the slots of max_open_prs; those waiting for a person
     # have their own limit, and once it is reached no new issue starts (#199), except a
@@ -612,6 +617,11 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
                 continue
             free -= 1
         actions += [Action('conclave', item['number'], item['reason'], opens)] * item['calls']
+    # The advisory review of a PR in agent:needs-operator (#369): one action per head, which
+    # takes a slot of max_actions_per_tick and no PR slot.
+    for item in snapshot.advisories:
+        actions.append(Action('advisory', item['number'],
+                              f'advisory review of {item["head"][:12]} for the operator'))
     # A ready issue that a merged devloop PR already resolved is never checked nor implemented
     # again (#228): it is escalated, once, and waits for whoever decides it.
     held_back = set()
