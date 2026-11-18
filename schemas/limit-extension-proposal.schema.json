@@ -1,0 +1,348 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Versioned proposal of a manual limit extension (operator-limit-extension-v1). It grants nothing: only an exact operator authorization bound to its hash, then an atomic activation, apply it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "contract",
+    "operation",
+    "run",
+    "parent",
+    "consumption",
+    "changes",
+    "new_profile",
+    "cause",
+    "evidence",
+    "actor",
+    "applicability",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "contract": {
+      "const": "operator-limit-extension-v1"
+    },
+    "operation": {
+      "enum": [
+        "extend_global_limit",
+        "extend_deadline"
+      ]
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ticket",
+        "source",
+        "generation",
+        "task_id"
+      ],
+      "properties": {
+        "ticket": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+        },
+        "source": {
+          "enum": [
+            "native",
+            "reconciled"
+          ]
+        },
+        "generation": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{32}$"
+            }
+          ]
+        },
+        "task_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80
+            }
+          ]
+        }
+      }
+    },
+    "parent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "envelope_sha256",
+        "profile_sha256",
+        "counters_sha256",
+        "limits_journal",
+        "scheduler_journal",
+        "selector_sha256",
+        "state_status"
+      ],
+      "properties": {
+        "envelope_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "profile_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "counters_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "limits_journal": {
+          "$ref": "#/$defs/head"
+        },
+        "scheduler_journal": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/head"
+            }
+          ]
+        },
+        "selector_sha256": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/sha256"
+            }
+          ]
+        },
+        "state_status": {
+          "type": "string"
+        }
+      }
+    },
+    "consumption": {
+      "type": "object",
+      "description": "Counters, observed costs, unknown usage, reserves and attempts at proposal time. Unknown values stay null."
+    },
+    "changes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "dimension",
+          "old",
+          "new"
+        ],
+        "properties": {
+          "dimension": {
+            "type": "string"
+          },
+          "old": {
+            "type": "number"
+          },
+          "new": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    "deadline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "started_at",
+        "old_deadline_at",
+        "new_deadline_at",
+        "old_wall_seconds",
+        "new_wall_seconds",
+        "expired_at_proposal"
+      ],
+      "properties": {
+        "started_at": {
+          "type": "number"
+        },
+        "old_deadline_at": {
+          "type": "number"
+        },
+        "new_deadline_at": {
+          "type": "number"
+        },
+        "old_wall_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "new_wall_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expired_at_proposal": {
+          "type": "boolean"
+        }
+      }
+    },
+    "new_profile": {
+      "type": "object",
+      "description": "The exact resulting recovery-limits profile: the parent profile with only the named dimensions changed."
+    },
+    "cause": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1600,
+      "pattern": "\\S"
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "description"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 600,
+            "pattern": "\\S"
+          },
+          "sha256": {
+            "$ref": "#/$defs/sha256"
+          }
+        }
+      }
+    },
+    "actor": {
+      "$ref": "#/$defs/actor"
+    },
+    "applicability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_statuses",
+        "resolved_invocations",
+        "no_feedback_ledger",
+        "quiescent_writers",
+        "operator_authorization"
+      ],
+      "properties": {
+        "source_statuses": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "resolved_invocations": {
+          "const": true
+        },
+        "no_feedback_ledger": {
+          "const": true
+        },
+        "quiescent_writers": {
+          "const": true
+        },
+        "operator_authorization": {
+          "const": "exact-proposal-sha256-with-expiry"
+        }
+      }
+    },
+    "created_at": {
+      "type": "number"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "extend_global_limit"
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "required": [
+            "deadline"
+          ]
+        },
+        "properties": {
+          "changes": {
+            "items": {
+              "properties": {
+                "dimension": {
+                  "pattern": "^(metered_usd|cli_estimate_usd|invocations|development_attempts|role_invocations\\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}|phase_invocations\\.[A-Za-z0-9][A-Za-z0-9_-]{0,63})$"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "extend_deadline"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "deadline"
+        ],
+        "properties": {
+          "changes": {
+            "maxItems": 1,
+            "items": {
+              "properties": {
+                "dimension": {
+                  "const": "deadline_at"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "head": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "sha256"
+      ],
+      "properties": {
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "actor": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "\\S"
+    }
+  }
+}

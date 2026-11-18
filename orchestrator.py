@@ -6868,6 +6868,9 @@ def main(argv=None) -> int:
     if words and words[0].startswith('feedback-profile-'):
         from ssdlc_feedback_admission import main as admission_main
         return admission_main(words)
+    if words and words[0] == 'limits':
+        from ssdlc_limit_extensions import main as limits_main
+        return limits_main(words)
     if words and words[0].startswith('usage-profile-'):
         from ssdlc_usage_admission import main as usage_admission_main
         return usage_admission_main(words)
