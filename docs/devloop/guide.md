@@ -57,8 +57,10 @@ the reviewers, from the PR's marker.
 A head just pushed, without CI yet, is reviewed as if its CI were pending: with `local_tests`
 other than `full` no full suite runs locally in place of the CI for `[ci] grace_minutes`, and as
 long as `main` requires checks up to `[ci] required_timeout_minutes` (see
-[CI of a new head](reference.md#ci-of-a-new-head)). The ruleset of `main` still requires its
-checks for any merge on GitHub.
+[CI of a new head](reference.md#ci-of-a-new-head)). A head in conflict with `main` gets no CI
+from GitHub, so it is never waited for (#392): the fix of a PR in `agent:changes` starts at once
+and aligns the branch with `main`. The ruleset of `main` still requires its checks for any merge
+on GitHub.
 
 Readiness belongs to the approved commit. Every tick re-checks ready PRs:
 
@@ -574,7 +576,8 @@ because GitHub closed it or a person merged, is left alone. A failure to close i
 dispatcher log and leaves the merge as it is.
 
 **Safety net in the planner.** An open issue in `agent:ready` with a merged devloop PR (a PR from
-its branch, `<branch_prefix><issue>`, by a trusted user or a devloop app, merged by anyone) is
+its branch, `<branch_prefix><issue>`, or with `attempt_identity` the branch of one of its later
+[attempts](protocol.md#attempt-identity), by a trusted user or a devloop app, merged by anyone) is
 never checked nor implemented again. It becomes a `merged_issue` escalation, non-critical: in
 `"auto"` it goes to `agent:needs-supervisor` and keeps `agent:ready`, otherwise to
 `agent:needs-operator` without `agent:ready`. `/devloop retry` is refused for it: closing the issue,
@@ -679,6 +682,7 @@ check, and the `policy` marker of a level that cannot be reviewed or promoted. A
 | `retry_limit`, `supervisor_escalated`, `supervisor_refused` | The supervisor's retries are spent, it handed the escalation over, or it gave a command the escalation does not admit | Yes |
 | `conclave_veto` | A trusted user annulled the latest decision of a [conclave](#conclave-on-a-block) with `/devloop veto` | Yes |
 | `uncertain_turn` | With `block_uncertain_turns` on, a turn refused because its work has [uncertain turns](protocol.md#turn-journal) a trusted user has not reconciled with `/devloop reconcile` | Yes |
+| `attempt` | With `attempt_identity` on, a PR whose [attempt](protocol.md#attempt-identity) the journal does not confirm, or concluded already (a PR reopened after it was merged or closed) | Yes |
 
 Any other class, or none (escalations written before #182), is critical.
 
@@ -845,6 +849,35 @@ the issue, or adds the hash of the new request to the one it has, and the commen
 only through that marker of the dispatcher, never through what its text, an agent or a user
 writes. With it off, and for issues taken over before, nothing changes.
 
+With `attempt_identity = true` too (#384, off by default) the implementation of a story's root
+runs in an [attempt](protocol.md#attempt-identity), opened in the journal before its first turn:
+its PR marker and its turn records carry it. Retries before the PR resume the same attempt; a new
+one starts only once the PR of the previous one is merged or closed, and is refused while that PR
+is open. Each attempt has its own branch and PR: the first keeps `agent/issue-<n>`, the next ones
+use `agent/issue-<n>-attempt-<k>`, so a new attempt never overwrites the branch of the previous
+one. A PR reopened after its attempt concluded, or whose marker lost the attempt the journal ties
+to it, is escalated (`attempt`). PRs opened before, without an attempt in their marker, are
+handled as before.
+
+With `publication_outbox = true` (#385, off by default), every comment, native review and pull
+request devloop writes is saved in the same journal before it is sent, through the
+[publication outbox](protocol.md#publication-outbox). A write whose outcome is uncertain (a
+timeout, a 5xx answer) is looked for on GitHub before anything else is sent: found, it is not
+sent again; not found once it can no longer take effect (30 seconds after the attempt, waited
+for in the step), it is sent once more. After a restart, the first tick finishes what was left
+half published, without duplicates: a write cut short is sent again only when it is still absent
+30 seconds after the restart (counted from when the new dispatcher first read the journal, never
+from when the write was recorded). The `gh` of each write holds the dispatcher lock while it
+runs: if the dispatcher is killed while one of them runs, the next dispatcher does not start
+(`another dispatcher is running (lock held)`) until that `gh` has ended, so that it never sends
+again a write the `gh` may still publish. A `gh` left stopped keeps devloop from starting until
+it is ended (`pgrep -a gh` lists it).
+A native review whose outcome stays uncertain is not retried by the review step: the outbox
+settles it. A line `publication <id> ... not settled` in
+the log is a write that could not be checked on GitHub yet, or not conclusively: the next tick
+tries again, and nothing new is sent on that issue or PR until it is settled. If the journal
+cannot take an outcome, nothing is sent until it does.
+
 ### Advisory review for the operator
 
 With `[review_policy] advisory_reviewer` set (#369; empty, and so off, by default: the local
@@ -937,6 +970,7 @@ prevents two dispatchers from running at once live under `state_dir` (default `.
 in the main checkout. `tick --dry-run` writes nothing and does not take that lock, so the
 [smoke test of a pin](#pin) runs it while `run` is active. Like `status`, it reads the
 [turn journal](protocol.md#turn-journal) without writing it: the running dispatcher alone does.
+For the same reason they never use the [publication outbox](protocol.md#publication-outbox).
 Not even its git commands write to the repository: it does not fetch, so it plans from the remote branches as last fetched (a
 branch never fetched leaves its merge mode not computable), and the objects that `git
 merge-tree` writes go to a temporary directory. In daily use run it from the pinned copy, through
@@ -1204,7 +1238,8 @@ The log keeps the full message of each failed tick.
 **Lock.** The loop holds the dispatcher lock (`state_dir/dispatcher.lock`) for as long as it
 runs, waits included: a manual `devloop tick` (or `cleanup`) exits with `another dispatcher is
 running (lock held)`, and a loop does not start while a manual tick runs. To run a tick by hand,
-stop the loop first. A [pin after a merge](#pin-after-a-merge) restarts the loop from the new
+stop the loop first. The `gh` of each GitHub write holds the lock too while it runs (#385): one
+that outlived a dispatcher killed meanwhile keeps the next one from starting until it ends. A [pin after a merge](#pin-after-a-merge) restarts the loop from the new
 copy with the same arguments and the lock still held, unless a stop was requested meanwhile.
 
 **Activation is the operator's.** The loop runs unsupervised and spends the agents' quotas, so

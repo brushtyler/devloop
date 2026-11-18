@@ -18,6 +18,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import weakref
 from pathlib import Path
 
 from .github import GitHub, GitHubError
@@ -215,6 +216,10 @@ class Identities:
         self.apps = dict(apps)
         self._run = run
         self._ambient = GitHub(repo, run=run)
+        self._lock_fd = None
+        # The app clients already handed out (``build`` creates the dispatcher's and the
+        # merger's before the lock is taken): ``hold`` gives them the lock too (#385, R4-1).
+        self._clients = weakref.WeakSet()
 
     @classmethod
     def from_config(cls, cfg, run=subprocess.run):
@@ -223,14 +228,39 @@ class Identities:
                 for actor, app in cfg.apps.items()}
         return cls(cfg.repo, apps, run=run)
 
+    # The outbox of the publications (#385, ``outbox.Outbox``), set by devloop when
+    # ``publication_outbox`` is on: the clients write their comments, native reviews and pull
+    # requests through it.
+    outbox = None
+
+    def hold(self, lock_fd):
+        """The dispatcher lock is held on ``lock_fd``: the `gh` of each write of the clients
+        keeps it open while it runs (``GitHub.lock_fd``, #385), the clients created before
+        this call included."""
+        self._lock_fd = lock_fd
+        self._ambient.lock_fd = lock_fd
+        for client in list(self._clients):
+            client.lock_fd = lock_fd
+
     def github(self, actor, permissions=None) -> Backend:
-        """The client ``actor`` acts with: the ports, on GitHub, holding only ``permissions``."""
+        """The client ``actor`` acts with: the ports, on GitHub, holding only ``permissions``;
+        with an outbox, its ``comment``, ``edit_comment``, ``submit_review`` and ``create_pr``
+        pass through it (#385)."""
+        client = self.direct(actor, permissions)
+        if self.outbox is None:
+            return client
+        return self.outbox.client(client, actor, permissions)
+
+    def direct(self, actor, permissions=None) -> Backend:
+        """The client of ``actor`` as ``github`` returns it, without the outbox."""
         app = self.apps.get(actor)
         if app is None:
             return self._ambient
         # The client's ``time_left`` (set by ``devloop watch``) bounds the mint of its token too.
         client = GitHub(self.repo, run=self._run,
                         token=lambda: app.token(permissions, time_left=client.time_left))
+        client.lock_fd = self._lock_fd
+        self._clients.add(client)
         return client
 
     def login(self, actor):

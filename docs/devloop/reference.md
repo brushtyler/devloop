@@ -35,7 +35,18 @@ user reconciles it with `/devloop reconcile`. Off, the journal records the turns
 another value stops devloop at startup. `story_identity` (a boolean, default `false`) turns on the
 [story identity](protocol.md#story-identity) (#363): at the takeover of an issue the journal
 records its story and the `request` record carries the dispatcher's `story` marker. Off, devloop
-records no story; another value stops devloop at startup.
+records no story; another value stops devloop at startup. `attempt_identity` (a boolean, default
+`false`) turns on the [attempt identity](protocol.md#attempt-identity) (#384): one active attempt
+per phase, in the journal, in the PR marker and in the turn records, with one branch per attempt
+(`<branch_prefix><issue>` for the first, `<branch_prefix><issue>-attempt-<k>` after). It needs
+`story_identity = true`; without it, or with another value, devloop stops at startup. Off,
+devloop records no attempt. `publication_outbox` (a boolean, default
+`false`) turns on the [publication outbox](protocol.md#publication-outbox) (#385): every comment,
+comment edit, native review and pull request of the dispatcher's and the agents' clients is saved
+in the turn journal before it is sent, an uncertain outcome is reconciled on the exact comment of
+the same author before any new POST and sent again only on an absence that is conclusive, and
+each tick resumes what a restart left half published. Off, devloop publishes as
+before; another value stops devloop at startup. It applies at the next start.
 `[merge]` (`mode`, `levels`, `operator_only_paths`) and `roles.supervisor` set the
 [merge modes](guide.md#merge-modes); an unknown mode, level or key stops devloop at startup.
 `[pin]` (`auto`, default `false`; `restart_max_wait_minutes`, default 30) sets the
@@ -230,6 +241,13 @@ joins the same fix (see [Approval and CI](protocol.md#approval-and-ci)).
   window: with `grace_minutes = 60` and `required_timeout_minutes = 30` the PR is escalated 30
   minutes after the push. If the required checks cannot be read, the
   dispatcher writes a line to the tick log and counts them as none.
+- **Head in conflict.** GitHub runs no `pull_request` workflow on a PR that conflicts with
+  `base_branch`, so the CI of such a head never comes (#392). It is neither waited for nor
+  escalated as `ci_missing`: in `agent:review` the PR is synced as usual, and in `agent:changes`
+  the fix starts at once, aligns the branch with the base, and the CI runs on its new head. The
+  fix still gets the open findings of the review; its prompt says that there is no CI summary of
+  the head because of the conflict. The tick log says `PR #388: no CI expected on 9ac03f72ed71:
+  it conflicts with main, and GitHub runs no pull_request workflow on it`.
 
 The tick log says why the head waits for its CI, for example `PR #257: waiting for CI on
 9ef3336dfbe6: pushed 12 s ago, within [ci] grace_minutes = 5`, and an approval not promoted yet
@@ -300,7 +318,8 @@ a **CI of the head** section that the dispatcher reads with its own identity (#3
   checks that cannot be read at all leave the section saying the summary is not available. The
   review and the fix never wait for, nor fail on, the summary.
 
-The fix prompt shows the CI of the head the reviewer saw, the PR's head before the fix. The
+The fix prompt shows the CI of the head the reviewer saw, the PR's head before the fix. A head
+without checks that conflicts with the base has no CI to show (#392): the section says so. The
 same values go to the `ci_round` event of the [ledger](protocol.md#evidence-and-telemetry).
 
 ### Documentation map
@@ -796,7 +815,16 @@ disables credential helpers, askpass programs and preconfigured authentication h
 header is keyed on the exact push URL, so that no `http.<url>.extraHeader` in a config file is
 more specific, and `git -c` settings inherited through `GIT_CONFIG_PARAMETERS` are dropped. An actor
 without an app uses the ambient `gh` login and its records must come from `trusted_users`, as
-before. An app that is configured but whose key is missing stops devloop at startup instead of
+before. With `publication_outbox` on (#385), `Identities.github` hands out each client with its
+`comment`, `edit_comment`, `submit_review` and `create_pr` through the
+[publication outbox](protocol.md#publication-outbox),
+which reconciles an uncertain write on the app's login, or on `trusted_users` for the ambient
+login; `Identities.direct` gives the client without it. Under the dispatcher lock,
+`Identities.hold` gives its descriptor to every client (`GitHub.lock_fd`), those created before
+it included, such as the dispatcher's and the merger's that devloop builds before taking the
+lock: the `gh` of each
+write keeps the lock open while it runs, so no next dispatcher starts while it may still publish.
+An app that is configured but whose key is missing stops devloop at startup instead of
 silently falling back to the operator's login: remove it from `[apps]` (or use `--config`) to run
 that actor without it. `python3 -m devloop apps` checks each app, its installation and its
 permissions.

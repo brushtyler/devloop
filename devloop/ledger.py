@@ -80,6 +80,37 @@ def story_marker(story, number):
     return mark
 
 
+def attempt_marker(attempt):
+    """The ``attempt`` of a PR marker (#384) for ``attempt`` (``TurnJournal.attempts``): its id,
+    the phase ``(story, phase, revision)``, its number in the phase and the key ``(design,
+    task)``."""
+    return {k: attempt[k] for k in ('attempt', 'story', 'phase', 'revision', 'n', 'design',
+                                    'task')}
+
+
+# The branch of an attempt after the first (#384, ADR 0004 §3.2, recommendation (i)): the
+# branch of today followed by its number in the phase.
+_ATTEMPT_SUFFIX = re.compile(r'([0-9]+)(?:-attempt-([1-9][0-9]*))?')
+
+
+def attempt_branch(prefix, issue, n):
+    """The branch of attempt number ``n`` of issue ``issue`` (#384): one branch per attempt,
+    with its identity in the name. The first keeps the branch of today, ``<prefix><issue>``;
+    the next ones are ``<prefix><issue>-attempt-<n>``, so that a new attempt never overwrites
+    the branch of the previous one."""
+    return f'{prefix}{issue}' if n == 1 else f'{prefix}{issue}-attempt-{n}'
+
+
+def parse_branch(prefix, ref):
+    """``(issue, n)`` of a devloop branch ``ref`` (``attempt_branch``), ``n`` None for the
+    branch of today; None for any other branch."""
+    suffix = ref[len(prefix):] if ref.startswith(prefix) else ''
+    found = _ATTEMPT_SUFFIX.fullmatch(suffix) if suffix.isascii() else None
+    if found is None or (found[2] is not None and int(found[2]) < 2):
+        return None
+    return int(found[1]), int(found[2]) if found[2] is not None else None
+
+
 def comment_ref(comment):
     """A comment's id: the numeric id of its URL (``gh issue view``), else its ``id``, else
     None."""
@@ -336,7 +367,7 @@ class Ledger:
                      register=FIX if register is not None else round_no)
 
     def open_turn(self, number, *, kind, agent, identity, mode, model, effort, fallback_for,
-                  label, round_no=None, register=None, issue=None, repo=None):
+                  label, round_no=None, register=None, issue=None, repo=None, attempt=None):
         """Write the record of a turn about to start; raises ``GitHubError`` if it cannot, and
         then the turn must not start. Its intent is made durable in the journal first, with
         ``issue``, the issue of its work, and ``repo`` (#362), so that a crash right after
@@ -344,14 +375,18 @@ class Ledger:
         and the turn does not start either. If the record cannot be written, the journal says
         the turn was ``not_dispatched``. With ``round_no`` (a review turn, #325) the record is
         a section of that round's register; with ``register`` (a fix turn, #355), of that fix
-        register."""
+        register. ``attempt``: the id of the attempt the turn belongs to (#384), in the intent
+        and in the record; without one, neither has the field, as before."""
         turn = self.journal.intent(number, issue=number if issue is None else issue, repo=repo,
-                                   kind=kind, agent=agent, model=model, label=label)
+                                   kind=kind, agent=agent, model=model, label=label,
+                                   attempt=attempt)
         record = {
             'type': 'turn', 'state': 'open', 'kind': kind, 'agent': agent, 'identity': identity,
             'mode': mode, 'model': model, 'effort': effort, 'fallback_for': fallback_for or None,
             'model_real': None, 'label': label, 'started_at': self._now(), 'ended_at': None,
             'duration_ms': None, 'outcome': None, 'error': None, 'telemetry': None}
+        if attempt is not None:
+            record['attempt'] = attempt
         try:
             if round_no is None and register is None:
                 entry = self._post(number, record)
@@ -502,6 +537,8 @@ def _render_turn(r, title=None):
     rows = [('Modello configurato', r.get('model')), ('Effort configurato', r.get('effort'))]
     if r.get('fallback_for'):
         rows.append(('Modello di fallback per', r['fallback_for']))
+    if r.get('attempt'):
+        rows.append(('Tentativo', r['attempt']))
     rows += [('Modello reale (attestato dalla CLI)', r.get('model_real')),
              ('Inizio', r.get('started_at')), ('Fine', r.get('ended_at')),
              ('Durata (ms)', r.get('duration_ms')), ('Esito', r.get('outcome'))]

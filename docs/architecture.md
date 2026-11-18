@@ -76,7 +76,7 @@ The dispatcher reaches GitHub through three ports, declared in `devloop/ports.py
 | Port | Methods |
 |---|---|
 | `Tracker` | issues and their history, comments of issues and PRs, labels: `issues_with_label`, `issue`, `issue_history`, `issue_comments`, `pr_comments`, `labelers`, `label_events`, `labeled_events`, `edit_labels`, `comment`, `close_issue`, `edit_comment`, `ensure_label`, `repo_labels`, `rename_label` |
-| `CodeReview` | PRs and reviews: `open_prs`, `merged_prs`, `find_pr` (#362), `merge_state` (`clean`, `conflict` or `unknown`), `pr_head`, `pr_state`, `merge_pr`, `pr_reviews`, `create_pr`, `submit_review` |
+| `CodeReview` | PRs and reviews: `open_prs`, `merged_prs`, `find_pr` (#362), `branch_prs` (#384), `merge_state` (`clean`, `conflict` or `unknown`), `pr_head`, `pr_state`, `merge_pr`, `pr_reviews`, `create_pr`, `submit_review` |
 | `CI` | checks of a commit: `checks` (summarized by `summarize_checks`), `check_details`, `check_runs`, `failed_log`, `job_log` (#300), `rerun_failed_jobs` (#200) |
 
 `Tracker` also has `issue_dependencies` (#277): the native "blocked by" dependencies of an
@@ -89,22 +89,41 @@ dispatcher uses it for a legacy turn imported from `ledger-open-turns.json` whos
 the open ones, to link the turn to the issue of its work
 ([Turn journal](devloop/protocol.md#turn-journal)).
 
+`CodeReview.branch_prs` (#384) reads the PRs of a head branch in any state, newest first, with
+`state` and `createdAt`: with `attempt_identity` on, before resuming an attempt that has no PR
+recorded, the dispatcher looks on the attempt's branch for a PR already published for it, so as
+not to open a second PR of the same attempt
+([Attempt identity](devloop/protocol.md#attempt-identity)).
+
 `CI` also has `commit_date` and `required_checks` (#263): the commit date of a head and the
 checks the base branch requires, for the wait for the
 [CI of a new head](devloop/reference.md#ci-of-a-new-head).
 
-`Tracker.comment` and `Tracker.edit_comment` tell three outcomes apart (#364): success, a
+`Tracker.comment` and `Tracker.edit_comment` tell three outcomes apart (#364), and so do
+`CodeReview.submit_review` and `CodeReview.create_pr` (#385): success, a
 failure (`GitHubError`: nothing was written) and an **uncertain** outcome (`GitHubUncertain`):
 a timeout, a connection lost after sending, a 5xx answer, so the write may have taken effect.
 The adapter treats a 4xx answer and a failure before the connection opened (`dial tcp`, `error
-connecting to`, a failed TLS handshake) as certain, and any other failure of these two writes
+connecting to`, a failed TLS handshake) as certain, and any other failure of these four writes
 as uncertain. `GitHubUncertain` is a `GitHubError`: the dispatcher still handles it as a failed
 write. `ports.reconcile_comment` tells whether an uncertain write took effect: it reads the
 comments of the issue or PR back and returns the one written by the same login whose body is
 exactly the one written, or that contains a given marker (for an edit, only the edited
-comment), or None when the write was not published. Nothing calls it yet: the outbox of
-[ADR 0004](adr/0004-passo-2-budget-stato-durevole.md) will. The other writes and the reads
-report every failure as a `GitHubError`, as before.
+comment), or None when the write was not published. The login may also be a set of logins (the
+ambient `gh` login is known only as one of `trusted_users`), and `exclude` skips comments already
+known as the publication of another write. The
+[publication outbox](devloop/protocol.md#publication-outbox) of
+[ADR 0004](adr/0004-passo-2-budget-stato-durevole.md) (#385, `devloop/outbox.py`) calls it
+before any new POST when `publication_outbox` is on (for a review or a pull request it reads
+the PR's native reviews or the open pull requests), and sends a write again only on an absence
+read when the uncertain attempt could no longer take effect, counted from a time the attempt is
+known to have ended, never from the time recorded before the send (after a stop, from the start
+of the next dispatcher, only for an attempt whose `gh` held the dispatcher lock:
+`GitHub.lock_fd`, passed to the `gh` of each write); it wraps the `comment`,
+`edit_comment`, `submit_review` and `create_pr` of the clients of `Identities.github` and is
+itself a `Backend`. Without it the dispatcher still handles an
+uncertain outcome as a failed write. The other writes and the reads report every failure as a
+`GitHubError`, as before.
 
 The ports hold only the methods the dispatcher calls, with their current names and signatures,
 and return normalized data. `GitHub` (`devloop/github.py`) implements all three, and `Identities`

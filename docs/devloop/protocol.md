@@ -217,6 +217,11 @@ same head decides what the approval is worth:
 - **No CI after the window.** With `local_tests` other than `full` the full suite runs locally
   before the promotion; if it fails, the PR goes to `agent:needs-operator`.
 
+A request for changes waits for the CI of its head in `agent:changes`, unless the head conflicts
+with the base (#392): GitHub runs no CI on it, so the fix starts at once, with the review's
+findings and no CI summary of that head, and the CI runs on the head the fix produces. Such a
+head is never escalated as `ci_missing`.
+
 A round that asks for changes while the CI is pending, or within the window, sends the PR to
 `agent:changes`, and the fix waits for the CI of the same head. If that CI fails (after the
 re-run of its failed jobs, when there is one), **one head, one round** (#352): the failure does
@@ -240,9 +245,12 @@ A CI already failed before the review is a CI round, as before: no review runs o
 
 ## PR marker
 
-A devloop PR is recognised by its branch, `agent/issue-<n>`, opened by a trusted user. Its body
+A devloop PR is recognised by its branch, `agent/issue-<n>` (or, with `attempt_identity`, the
+branch of a later [attempt](#attempt-identity), `agent/issue-<n>-attempt-<k>`), opened by a
+trusted user. Its body
 ends with a hidden marker that records the issue, implementer and reviewer: text may be edited
-above it, but the marker must stay the last line.
+above it, but the marker must stay the last line. With `attempt_identity` on (#384) it also
+records the [attempt](#attempt-identity) of the PR, which the journal must confirm.
 
 ## Readiness check records
 
@@ -505,6 +513,9 @@ Since #325 each review is **one element** of the PR's timeline:
   reviews again, and a review with the same body already published by that app (an answer lost
   after GitHub accepted it) ends the retries. After the third failure the step escalates like
   any failed write (`failure`); the verdicts of other reviewers already published stay recorded.
+  With the [publication outbox](#publication-outbox) an uncertain outcome the outbox could not
+  settle ends the retries at once, and the step escalates the same way: only the outbox may send
+  that review again (#385).
 - **An agent without an app** publishes with the operator's `gh` login, which may also be the
   PR's author: it keeps the review comment, as before, and submits no native review.
 
@@ -779,7 +790,7 @@ readiness check, on the PR for review, fix, sync and CI. The turns of a review r
 | Record | When | Content |
 |---|---|---|
 | `request` | The issue goes from `agent:ready` to `agent:working` | SHA-256 of title and body, author and time of the trusted `labeled` event of `agent:ready`, ids of the trusted comments given to the implementer, time of the takeover. It is a snapshot **at the takeover**, not at the time of the label |
-| `turn` | Every invocation of an agent CLI, retries, fallback models and failures included: implement, fix, sync with an agent, review, readiness check, conclave call, [advisory review](guide.md#advisory-review-for-the-operator) (`advisory`, on the PR, in a comment of its own) | Kind, agent, GitHub identity (none: the operator's `gh` login), configured model and effort (for a fallback, the fallback model and the model it replaces), real model, start, end, duration, outcome (`success`, `failure`, `unavailable`), the error if any, telemetry, and the last command the turn ran or started when the CLI exposes it (`last_command`: only codex, from the `command_execution` items of `--json`; cleaned like the tail of a timeout, on one line, at most 200 characters; absent otherwise), also for a turn that timed out |
+| `turn` | Every invocation of an agent CLI, retries, fallback models and failures included: implement, fix, sync with an agent, review, readiness check, conclave call, [advisory review](guide.md#advisory-review-for-the-operator) (`advisory`, on the PR, in a comment of its own) | Kind, agent, GitHub identity (none: the operator's `gh` login), configured model and effort (for a fallback, the fallback model and the model it replaces), real model, start, end, duration, outcome (`success`, `failure`, `unavailable`), the error if any, telemetry, and the last command the turn ran or started when the CLI exposes it (`last_command`: only codex, from the `command_execution` items of `--json`; cleaned like the tail of a timeout, on one line, at most 200 characters; absent otherwise), also for a turn that timed out. With `attempt_identity` on, the id of the [attempt](#attempt-identity) the turn belongs to (`attempt`; absent for a turn of no attempt) |
 | `verification` | Every test command the dispatcher runs after a writing turn (none when the [local tests](reference.md#local-tests) select nothing), and the full suite it runs before a review of a head without CI, or before the promotion of an approval given while no CI was known | Command, outcome, duration, the tree hash before and after the test, and the commit (none before a review) |
 | `event` | The CI of a head (`ci_round`): a failed CI round, the checks a review round saw whatever its verdict (`approve`, `request_changes` or `needs_operator`), or the passing checks read again just before the PR is promoted to `agent:ready-to-merge` (also at level 0); a sync without an agent, or the merge of `main` before a fix (`sync`) | For the CI, the head, the state (`fail`, `pass`, or `none` without checks), the review round (none at level 0) and each check with its outcome, the id of its GitHub Actions run (none for a commit status or a check outside Actions) and its duration in seconds (`duration_s`: none while it runs and for a commit status, #300). Every CI round also records `tests`, the [summary of the suite](reference.md#summary-of-the-ci-in-the-prompts) that the dispatcher reads for the review and fix prompts (read again from the job logs when a promotion records the round, for instance after a review that saw the CI pending): for each job whose log holds the final lines of `scripts/run-tests.py`, its name with `ran` and `slowest`, and for a job whose log could not be read, its name with `log: unavailable`; absent when no job has either. The same checks read again for the same head and round are not recorded twice, a new run is. A failure that joined a round that had approved its head carries `voided_approval: true` (#359). For a sync, the merged base commit and the old and new heads |
 
@@ -920,7 +931,9 @@ their format does not change. The journal is append-only, one JSON event per lin
 - `reconciled` and `refused`: see below. `unsettled` and `settled`: a record on GitHub left open
   after a failed edit, and the tick that checked it. `linked`: the issue of the work of a legacy
   turn (see the migration). `story`, `request` and `child`: the stories, with `story_identity`
-  on (see [Story identity](#story-identity)).
+  on (see [Story identity](#story-identity)). `attempt`, `attempt_pr` and `concluded`: the
+  attempts, with `attempt_identity` on (see [Attempt identity](#attempt-identity)), and an
+  intent of a turn of an attempt carries its id.
 
 **Integrity.** Every read verifies the whole chain. An incomplete last line (a write cut short),
 or a last line that is not JSON, is set aside in `turn-journal-tail-<sha256>.bin` and cut off: the
@@ -1029,8 +1042,150 @@ behaves as before.
   and until then no issue gets the marker of a child.
 
 Issues taken over before, or with the identity off, have no marker and are handled as before.
-The identity of the attempt and the rule of one active attempt per phase are the second part of
-P2-3.
+
+### Attempt identity
+
+Since #384 (ADR 0004, P2-3b, recommendation (i) of section 3.2) the journal can hold the
+**attempts** of each phase, with **one active attempt per phase**. It is off by default
+(`attempt_identity = false`, ADR 0004, D8) and needs `story_identity = true`: with it off devloop
+records no attempt and behaves as before.
+
+- **Phase.** The triple (story, kind, approved upstream revision). The current flow has only the
+  `implementation` phase of the root of a story, with a null revision: the phase stays the same
+  across later requests and advances of the base branch. A child issue has no attempt of its own
+  until step 3.
+- **Identity.** An `attempt` event: the id the dispatcher assigns (`attempt-<n>-<8 hex digits>`),
+  the phase, its number in the phase (`n`, from 1), the repository and issue it works on, and the
+  key `(design, task)` of a unit generated by a plan (sha of the approved design, task id),
+  foreseen in the format and null until the phases of step 3.
+- **Opening.** The implementation opens its attempt after the `request` record and before its
+  first turn. Retries, fallbacks, fixes, syncs and reviews are turns of the active attempt, not
+  new attempts. An attempt whose PR was not opened yet (a failure before the PR) stays active, and
+  the retry of the implementation resumes it.
+- **One active attempt.** A new attempt of a phase is opened only once the previous one is
+  concluded with a recorded outcome, and it consumes the same story budget. While the PR of the
+  active attempt is open, a new one is refused (`AttemptActive`) before any turn, label or PR, and
+  the step escalates. A merged issue is still never implemented again (#228), whichever attempt's
+  branch the merged PR came from.
+- **A PR not recorded.** An active attempt without a recorded PR is no proof that it has none:
+  the write that records the PR may fail after the PR was opened. Before resuming it, the
+  takeover looks on the attempt's branch, in any state, for the devloop PR whose marker names it:
+  found, it is recorded, and concluded if no longer open, before a new attempt is opened. A PR of
+  that branch opened since the attempt whose marker does not name it may be its PR with the field
+  removed: the attempt is not resumed and the step escalates, so that no attempt gets two PRs.
+- **Outcome.** A `concluded` event, once per attempt: `merged` or `closed` (its PR merged, or
+  closed without merge), recorded by the tick that finds the PR no longer open (`find_pr`), or by
+  the takeover that needs a new attempt; `abandoned`, with its reason, from an internal primitive
+  (`TurnJournal.abandon`) that **no command and no flow calls yet**.
+- **PR.** The PR of the attempt is recorded with an `attempt_pr` event, one per attempt, and its
+  [marker](#pr-marker) carries `attempt`: `{attempt, story, phase, revision, n, design, task}`.
+  Every field is required, the null ones included: a marker without one does not hold, and the
+  PR is one whose marker was lost. The journal is the authority (D7): on each snapshot an attempt
+  of a PR marker that the journal does not hold, of another issue, phase, number or key, of
+  another PR, or already concluded (a PR reopened after it was merged or closed) does not hold.
+  Nor does a marker without `attempt` on a PR the journal ties to an attempt: the attempt that
+  has it as its PR, or an active attempt of its issue without a recorded PR (the field may have
+  been removed). Such a PR gets no work, merge, conclave or advisory review, and is escalated
+  (`attempt`); a turn on it is refused too.
+- **Turns.** The intent of each turn of an attempt in the journal and its `turn` record on GitHub
+  carry `attempt`, its id, with a "Tentativo" row in the text. A readiness check belongs to no
+  attempt.
+
+**One branch and one PR per attempt**, with the identity of the attempt in the branch name: the
+first attempt keeps the branch of today (`branch_prefix` and the issue number, `agent/issue-<n>`),
+attempt number `k` from the second on has `agent/issue-<n>-attempt-<k>`. A new attempt never
+overwrites the branch of the previous one, and a closed PR is never reused. A PR of an attempt
+branch is a devloop PR of issue `<n>` only with the marker of attempt `k`; the branch of today
+holds the first attempt or a PR of none. Otherwise its marker does not hold, as when it is lost.
+PRs opened before, or with the identity off, have no attempt in their marker: they are handled as
+before, and their turns belong to no attempt.
+
+### Publication outbox
+
+Since #385 (ADR 0004, P2-4), with `publication_outbox = true` (off by default: ADR 0004, D8),
+every comment, comment edit, native review and pull request devloop writes on GitHub passes
+through an outbox (`devloop/outbox.py`): ledger records, agents' outputs (the implementer's pull
+request, the native review of a reviewer with an app, the review comment of one without),
+receipts and every other comment written with the dispatcher's or an agent's client. Without it
+devloop publishes as before. The outbox keeps its events in the [turn journal](#turn-journal), in
+the same hash chain; the turns ignore them:
+
+- `publication`: a write about to be sent, its first attempt, with its id (`pub-<16 hex
+  digits>`), `op` (`comment`, `edit`, `review` or `pr`), its arguments (the issue or PR, the
+  comment of an edit, the commit and event of a review, the base, head and title of a pull
+  request), the actor and permissions of its client, the **whole body**, the time and `held`
+  (whether its `gh` holds the dispatcher lock, see below). It is
+  durable before anything is sent, and nothing else is written before the send: if it cannot be
+  written, nothing is sent, nothing is left for a restart to send, and the write fails like any
+  `gh` failure.
+- `publication_sending`: a later attempt about to be sent, with its time and `held`. From
+  `publication` or
+  here until an answer is recorded, the outcome is unknown.
+- `publication_sent`, with the id of what was published (the comment's, the review's when known,
+  the pull request's number) and how it was known (`response` or `reconciliation`);
+  `publication_failed`, a failure reported to the caller, with its time, certain (final: GitHub
+  wrote nothing) or `uncertain`; `publication_dropped`, never to be published, with why.
+
+**No POST repeated on an uncertain outcome.** A write whose outcome is uncertain (a timeout, a
+connection lost after sending, a 5xx answer: `GitHubUncertain`, #364; for a native review and a
+pull request too, since #385) is reconciled: a comment
+with `ports.reconcile_comment`, the comment of the same author (the app's login; for the ambient
+`gh` login, one of `trusted_users`) with exactly that body, skipping the comments the outbox
+already knows as another write's publication; an edit on the edited comment only; a review among
+the PR's native reviews of the same author; a pull request among the open ones, from its head
+branch, title and body. Found, the write is published. **Absence alone is no proof** while the
+attempt may still take effect: a read counts as conclusive only when it starts 30 seconds after
+a time the attempt is known to have ended (GitHub ends the requests it takes more than 10
+seconds to serve). The time recorded before the send never counts: a pause of the process may
+come between it and the send. In the process that sent it, that time is the end of the call,
+measured once the call returned (its `gh` ended, killed at its timeout). For an attempt whose
+end is unknown because the process stopped, it is when the restarted dispatcher first read the
+journal, under the dispatcher lock, provided the attempt is `held`: devloop passes the lock to
+the `gh` of each write, which keeps it open while it runs, so the lock is free only once that
+`gh` has ended, also one that outlived the dispatcher that started it. The timeout of a `gh`
+call proves nothing after a stop: the parent that applied it is gone, and the `gh` may run on
+(stopped and resumed, for instance) with no limit. A `gh` still running after its dispatcher
+stopped therefore keeps the next one from starting (`another dispatcher is running (lock
+held)`) until it ends. An attempt not `held` has no proof of its end: it is never sent again,
+only reconciled, and dropped if it is still absent 300 seconds (the timeout of a `gh` call)
+plus 30 after the restart. The write that got the
+uncertain answer waits for that moment and reads again; only a conclusive absence sends it once
+more, at most two sends in all. Otherwise, or when GitHub cannot be read, the caller gets the
+uncertain failure, as before the outbox; so does an error of the client that is not a `gh`
+failure (an answer it cannot read), and the write is then only reconciled. A native review
+whose outcome stays uncertain is not submitted again by the review's own retries: the outbox
+settles it before any later write on the PR.
+
+**Before every new write** on an issue or PR (on a comment for an edit, on a head branch for a
+pull request), the writes about the same one still pending, and not running in another action,
+are settled first; if one cannot be (GitHub not readable, or its absence not conclusive yet), the
+new write is not sent and fails like any `gh` failure.
+
+**What the caller was told holds.** A write whose caller was told it failed is never sent again:
+at most a reconciliation finds it, published by an attempt already made. Its failure, like the
+`publication_sent` of a write published, is an outcome devloop already acted on: if the journal
+cannot take it, it is kept in memory and written before any later event of the journal, of the
+outbox or of the turns (a turn's `not_dispatched` included), and no write is sent before it is.
+A published comment whose confirmation is not durable yet keeps its id and issue in memory, so
+that its edit waits for it too. If the process stops before the journal takes it, nothing
+written after it is durable either, and the restart handles the write as cut short.
+
+**Restart.** Each tick starts by writing what the journal could not take, then by settling every
+pending write, before it reads GitHub. A write cut short by the stop, its caller gone with the
+process, is reconciled: found, it is recorded as published; conclusively absent (30 seconds
+after the restart read the journal, whatever time the write was recorded at), it is sent once
+more if its `gh` held the dispatcher lock, dropped otherwise; until then it blocks the new
+writes on the same issue, PR, comment or branch.
+A write whose caller was already told it failed with an uncertain outcome is only
+reconciled: found, it is recorded as published; conclusively absent, it is dropped, because its
+step already handled it as not published. A pending edit followed by a later write on the same
+comment is dropped: the later one was built from GitHub as it was. What cannot be settled is
+logged (`publication <id> (... on #<n>) not settled`) and waits for the next tick.
+
+A reconciliation is as precise as the body: devloop's comments, reviews and pull requests carry
+times, heads and digests, so two writes with the same body by the same author are not expected. The key applies at the next
+start of devloop, like the other keys outside the reloaded ones; `devloop status` and `tick
+--dry-run` never use the outbox.
 
 ## PR receipt
 

@@ -65,11 +65,12 @@ class GitHubNotFound(GitHubError):
 
 
 class GitHubUncertain(GitHubError):
-    """A ``comment`` or ``edit_comment`` whose outcome is unknown (#364, ADR 0001 "Porta del
-    tracker"): a timeout, a connection lost after sending, a 5xx answer. Unlike any other
-    ``GitHubError``, the write may have taken effect: ``ports.reconcile_comment`` tells whether
-    it did. Being a ``GitHubError``, it is handled as a failed write wherever nothing reconciles
-    it."""
+    """A ``comment``, ``edit_comment``, ``submit_review`` or ``create_pr`` whose outcome is
+    unknown (#364, ADR 0001 "Porta del tracker"; the last two since #385): a timeout, a
+    connection lost after sending, a 5xx answer. Unlike any other ``GitHubError``, the write may
+    have taken effect: ``ports.reconcile_comment`` tells whether a comment did, the outbox of
+    the publications (``outbox.Outbox``) whether any of them did. Being a ``GitHubError``, it is
+    handled as a failed write wherever nothing reconciles it."""
 
 
 def _uncertain(stderr):
@@ -121,6 +122,12 @@ class GitHub:
         self._token = token
         self._local = threading.local()
         self.time_left = time_left
+        # The descriptor of the dispatcher lock, set by devloop once it holds it
+        # (``apps.Identities.hold``, #385). The `gh` of each write gets it open: no other
+        # dispatcher takes the lock while a `gh` of this one runs, even one that outlived it, so
+        # the outbox of the publications (``outbox.Outbox``) knows that the attempts a stop cut
+        # short had ended when the next dispatcher started.
+        self.lock_fd = None
 
     @property
     def time_left(self):
@@ -131,13 +138,17 @@ class GitHub:
         self._local.time_left = value
 
     def _gh(self, *args, stdin=None, check=True, write=False):
-        """Run `gh` with ``args``. ``write``: the call is a ``comment`` or ``edit_comment``,
-        whose timeout or uncertain failure raises ``GitHubUncertain`` (#364)."""
+        """Run `gh` with ``args``. ``write``: the call is a ``comment``, ``edit_comment``,
+        ``submit_review`` or ``create_pr``, whose timeout or uncertain failure raises
+        ``GitHubUncertain`` (#364, #385), and whose `gh` holds the dispatcher lock open
+        (``lock_fd``)."""
         kwargs = {}
         self._time_left(args)  # no token is minted once the time is spent
         if self._token is not None:
             env = {k: v for k, v in os.environ.items() if k not in ('GITHUB_TOKEN', 'GH_TOKEN')}
             kwargs['env'] = dict(env, GH_TOKEN=self._token())
+        if write and self.lock_fd is not None:
+            kwargs['pass_fds'] = (self.lock_fd,)
         timeout = self.timeout
         left = self._time_left(args)  # what the mint of the token left
         if left is not None:
@@ -353,6 +364,15 @@ class GitHub:
                                                     'mergeCommit')
         return [dict(raw, author={'login': author_login(raw.get('author'))}) for raw in prs]
 
+    def branch_prs(self, branch):
+        """The PRs whose head branch is ``branch``, in any state, newest first, with the fields
+        of :meth:`open_prs` (the mergeability ones aside), ``state`` and ``createdAt`` (#384)."""
+        prs = self._json('pr', 'list', '-R', self.repo, '--state', 'all', '--head', branch,
+                         '--limit', '20', '--json', 'number,title,body,labels,headRefName,'
+                                                    'headRefOid,author,isCrossRepository,'
+                                                    'state,createdAt')
+        return [dict(raw, author={'login': author_login(raw.get('author'))}) for raw in prs]
+
     def find_pr(self, number):
         """PR ``number`` in any state, with the fields of :meth:`open_prs` (the mergeability
         ones aside) and ``state``, or None when ``number`` is an issue (#362). Read with REST
@@ -512,16 +532,22 @@ class GitHub:
                  '-F', 'body=@-', stdin=body, write=True)
 
     def create_pr(self, *, base, head, title, body):
-        """``(number, url)`` of the new PR. Labels are the dispatcher's job, not the author's."""
+        """``(number, url)`` of the new PR. Labels are the dispatcher's job, not the author's.
+        Raises ``GitHubUncertain`` when the outcome is unknown (#385), any other
+        ``GitHubError`` when the PR was certainly not opened."""
         created = json.loads(self._gh(
             'api', '-X', 'POST', f'repos/{self.repo}/pulls', '-f', f'title={title}',
-            '-f', f'head={head}', '-f', f'base={base}', '-F', 'body=@-', stdin=body).stdout)
+            '-f', f'head={head}', '-f', f'base={base}', '-F', 'body=@-', stdin=body,
+            write=True).stdout)
         return created['number'], created['html_url']
 
     def submit_review(self, number, *, commit, event, body):
-        """A native PR review (APPROVE, REQUEST_CHANGES or COMMENT) on ``commit``."""
+        """A native PR review (APPROVE, REQUEST_CHANGES or COMMENT) on ``commit``. Raises
+        ``GitHubUncertain`` when the outcome is unknown (#385), any other ``GitHubError`` when
+        the review was certainly not submitted."""
         self._gh('api', '-X', 'POST', f'repos/{self.repo}/pulls/{number}/reviews',
-                 '-f', f'commit_id={commit}', '-f', f'event={event}', '-F', 'body=@-', stdin=body)
+                 '-f', f'commit_id={commit}', '-f', f'event={event}', '-F', 'body=@-', stdin=body,
+                 write=True)
 
     def merge_pr(self, number, head):
         """Merge PR ``number`` with a merge commit, only if its head is still ``head``. The

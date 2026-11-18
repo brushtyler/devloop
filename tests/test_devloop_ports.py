@@ -41,7 +41,7 @@ EXPECTED = {
                     'pr_comments', 'issue_dependencies', 'labelers', 'label_events', 'labeled_events', 'edit_labels',
                     'comment', 'close_issue', 'edit_comment', 'ensure_label', 'repo_labels',
                     'rename_label'],
-    ports.CodeReview: ['open_prs', 'merged_prs', 'find_pr', 'merge_state', 'pr_head', 'pr_state', 'merge_pr',
+    ports.CodeReview: ['open_prs', 'merged_prs', 'find_pr', 'branch_prs', 'merge_state', 'pr_head', 'pr_state', 'merge_pr',
                        'pr_reviews', 'create_pr', 'submit_review'],
     ports.CI: ['checks', 'check_details', 'check_runs', 'failed_log', 'job_log', 'rerun_failed_jobs',
                'commit_date', 'required_checks'],
@@ -286,9 +286,29 @@ class UncertainOutcomeTests(unittest.TestCase):
                     write()
                 self.assertNotIsInstance(raised.exception, GitHubUncertain)
 
+    def test_reviews_and_pull_requests_tell_uncertain_writes_apart(self):
+        # #385: a native review and a pull request, whose outbox reconciles them, have an
+        # uncertain outcome like a comment.
+        for stderr, uncertain in [*((s, True) for s in UNCERTAIN),
+                                  *((s, False) for s in CERTAIN)]:
+            def run(cmd, timeout=None, stderr=stderr, **kwargs):
+                if stderr == 'timeout':
+                    raise subprocess.TimeoutExpired(cmd, timeout)
+                return SimpleNamespace(returncode=1, stdout='', stderr=stderr)
+            gh = GitHub('o/r', run=run)
+            for name, write in (
+                    ('submit_review', lambda: gh.submit_review(7, commit='a', event='COMMENT',
+                                                               body='b')),
+                    ('create_pr', lambda: gh.create_pr(base='main', head='h', title='t',
+                                                       body='b'))):
+                with self.subTest(stderr=stderr, write=name):
+                    with self.assertRaises(GitHubError) as raised:
+                        write()
+                    self.assertIs(isinstance(raised.exception, GitHubUncertain), uncertain)
+
     def test_other_calls_keep_their_errors(self):
-        # Only comment and edit_comment have an uncertain outcome (#364): the other writes and
-        # the reads report every failure as before.
+        # Only comment, edit_comment (#364), submit_review and create_pr (#385) have an
+        # uncertain outcome: the other writes and the reads report every failure as before.
         def timed_out(cmd, timeout=None, **kwargs):
             raise subprocess.TimeoutExpired(cmd, timeout)
 
@@ -298,7 +318,7 @@ class UncertainOutcomeTests(unittest.TestCase):
             gh = GitHub('o/r', run=run)
             for call in (lambda: gh.pr_comments(7), lambda: gh.edit_labels(7, add=['x']),
                          lambda: gh.close_issue(7),
-                         lambda: gh.submit_review(7, commit='a', event='COMMENT', body='b')):
+                         lambda: gh.merge_pr(7, 'a')):
                 with self.subTest(run=run.__name__), self.assertRaises(GitHubError) as raised:
                     call()
                 self.assertNotIsInstance(raised.exception, GitHubUncertain)
@@ -401,6 +421,20 @@ class ReconciliationTests(unittest.TestCase):
             ports.reconcile_comment(gh, 7, 'brushtyler', 'v3', comment_id=first)['id'], first)
         with self.assertRaises(GitHubNotFound):
             gh.edit_comment(FIRST_COMMENT_ID + 5, 'v4')
+
+    def test_several_authors_and_excluded_comments(self):
+        gh = FakeGH()
+        gh.with_ids = True
+        first, second = gh.comment(7, 'record'), gh.comment(7, 'record')
+        # One of several logins counts (#385: the ambient login, one of the trusted users).
+        self.assertEqual(
+            ports.reconcile_comment(gh, 7, ['someone', 'brushtyler'], 'record')['id'], first)
+        self.assertIsNone(ports.reconcile_comment(gh, 7, ['someone'], 'record'))
+        # A comment known as another write's publication is skipped.
+        self.assertEqual(
+            ports.reconcile_comment(gh, 7, 'brushtyler', 'record', exclude={first})['id'], second)
+        self.assertIsNone(
+            ports.reconcile_comment(gh, 7, 'brushtyler', 'record', exclude={first, second}))
 
     def test_an_actor_client_reports_the_uncertain_outcome(self):
         fake = FakeGH()
