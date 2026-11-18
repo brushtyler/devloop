@@ -217,6 +217,11 @@ same head decides what the approval is worth:
 - **No CI after the window.** With `local_tests` other than `full` the full suite runs locally
   before the promotion; if it fails, the PR goes to `agent:needs-operator`.
 
+A request for changes waits for the CI of its head in `agent:changes`, unless the head conflicts
+with the base (#392): GitHub runs no CI on it, so the fix starts at once, with the review's
+findings and no CI summary of that head, and the CI runs on the head the fix produces. Such a
+head is never escalated as `ci_missing`.
+
 A round that asks for changes while the CI is pending, or within the window, sends the PR to
 `agent:changes`, and the fix waits for the CI of the same head. If that CI fails (after the
 re-run of its failed jobs, when there is one), **one head, one round** (#352): the failure does
