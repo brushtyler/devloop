@@ -1615,10 +1615,11 @@ issue once per refused commit (its commit and failed step; the error stays in th
 recorded in `.ssdlc/devloop/pin-alerted.json`; a comment that cannot be published is only
 logged. The next merge that requests a pin tries again, on the new `origin/main`.
 
-devloop imports only the Python standard library and itself, and a test enforces this
-(`tests/test_devloop_boundary.py`). [ADR 0001](../adr/0001-prodotto-unico-fasi-su-tracker.md) keeps
-devloop and ssdlc in one repository and allows reuse of ssdlc code only through a declared `core`
-package, added to that test's allowlist; there is no such package yet.
+devloop may import only the Python standard library, itself and the `core` package, and a test
+enforces this (`tests/test_devloop_boundary.py`). [ADR 0001](../adr/0001-prodotto-unico-fasi-su-tracker.md) keeps
+devloop and ssdlc in one repository and allows reuse of ssdlc code only through `core`, pure
+functions that import no engine module ([Architecture](../architecture.md#future-core-package)).
+devloop does not import `core` yet, so the pinned copy does not need it.
 
 ## Limits
 
