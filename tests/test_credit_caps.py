@@ -157,6 +157,29 @@ class CreditAdmissionTests(unittest.TestCase):
         # Another engine is not bound by the agy credits.
         store.finish(store.reserve('03-dev', '03-dev', 'codex'), 'returned')
 
+    def test_fractional_credits_are_summed_as_exact_decimals(self):
+        def store_with(cap, per_invocation):
+            root = Path(tempfile.mkdtemp()); self.addCleanup(__import__('shutil').rmtree, root)
+            store = LimitsStore(root, lambda: 100)
+            store.authorize(policy(credit_caps={'agy': credit_cap(cap=cap, per_invocation=per_invocation)}),
+                            {'ticket': 'T1'})
+            return store
+        # Three bookings of 0.1 fill a cap of 0.3 exactly (as floats they sum above it).
+        store = store_with(0.3, 0.1)
+        for _ in range(3):
+            store.finish(store.reserve('03-dev', '03-dev', 'agy'), 'returned')
+        # The cap is then reached: no further call of any engine is dispatched.
+        with self.assertRaisesRegex(RecoveryStop, 'Frozen credit cap exhausted for agy'):
+            store.reserve('03-dev', '03-dev', 'codex')
+        # Three bookings of 0.3 reach a cap of 0.9 exactly (as floats they sum below it).
+        store = store_with(0.9, 0.3)
+        for _ in range(3):
+            store.finish(store.reserve('03-dev', '03-dev', 'agy'), 'returned')
+        with self.assertRaisesRegex(RecoveryStop, 'Frozen credit cap exhausted for agy'):
+            store.reserve('03-dev', '03-dev', 'codex')
+        with self.assertRaisesRegex(RecoveryStop, 'Frozen credit cap exhausted for agy'):
+            store.reserve('03-dev', '03-dev', 'agy')
+
 
 class TransitionTests(unittest.TestCase):
     """The explicit transition keeps journal and authorizations and leaves a trace."""

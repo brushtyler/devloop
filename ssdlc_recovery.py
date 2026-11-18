@@ -310,13 +310,16 @@ class LimitsStore:
     def _check_credits(policy, rows, *, reserving=False):
         """Each credit cap bounds the credits booked by the calls of its engine, in its own unit
         only: credits are never converted to or from dollars (#214). Like the dollar caps,
-        existing bookings exhaust a cap at equality and a new booking may only fill it."""
+        existing bookings exhaust a cap at equality and a new booking may only fill it.
+        Bookings and cap are summed and compared as the exact decimal their JSON numbers
+        write, never as binary floats, so ten bookings of 0.1 fill a cap of 1 exactly."""
         exceeded = (lambda total, cap: total > cap) if reserving else (lambda total, cap: total >= cap)
+        exact = ssdlc_task_budget.exact
         for engine, cap in sorted(policy.get('credit_caps', {}).items()):
-            booked = sum(row['credit_reserve']['amount'] for row in rows
-                         if row.get('engine') == engine and isinstance(row.get('credit_reserve'), dict)
-                         and row['credit_reserve'].get('unit') == cap['unit'])
-            if exceeded(booked, cap['cap']):
+            booked = sum((exact(row['credit_reserve']['amount']) for row in rows
+                          if row.get('engine') == engine and isinstance(row.get('credit_reserve'), dict)
+                          and row['credit_reserve'].get('unit') == cap['unit']), exact(0))
+            if exceeded(booked, exact(cap['cap'])):
                 raise RecoveryStop('LIMIT_REACHED', ('Credit reserve would exceed the frozen credit cap of '
                                                      if reserving else 'Frozen credit cap exhausted for ') + engine)
 

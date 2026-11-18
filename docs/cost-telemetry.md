@@ -188,7 +188,9 @@ measure (`credit_caps` in `schemas/recovery-limits.schema.json`):
   or from dollars.
 - Before each call of the engine, `per_invocation` credits are booked against
   `cap` and stay charged. A booking that would exceed the cap is refused before
-  launch, and a cap already reached stops the run with `LIMIT_REACHED`. No
+  launch, and a cap already reached stops the run with `LIMIT_REACHED`. Bookings
+  and cap are summed and compared as the exact decimal their JSON numbers write,
+  never as binary floats: three bookings of `0.1` fill a cap of `0.3` exactly. No
   adapter reports a charge in credits per call today (Codex and agy expose only
   account-wide balances), so the booking is the measure.
 - Without a frozen profile there are no credit caps.
