@@ -328,6 +328,81 @@ class EnvelopeTests(unittest.TestCase):
         stories = {t['budget']['story'] for t in again.turns().values()}
         self.assertEqual(stories, {self.story})
 
+    def test_the_state_of_the_budget_per_dimension(self):
+        # #393: consumed, reserved and available per dimension, from the journal.
+        cfg = cfg_with(envelope(wall_seconds=3600))
+        # A story with no turn has consumed nothing: 0 is attested there.
+        text = budget.describe(budget.of_issue(cfg.budget, self.journal, REPO, 7))
+        self.assertIn('turni 0 di 10 (consumati 0, prenotati 0, disponibili 10)', text)
+        self.assertIn('`metered_usd` consumati 0.00 USD, prenotati 0.00 USD, disponibili '
+                      '1.00 USD di 1.00 USD', text)
+        claude = self.book(cfg, kind='implement', agent='claude')
+        self.journal.outcome(claude, 'returned', usage=budget.observed(report(1.5)[0]))
+        codex = self.book(cfg, agent='codex')
+        self.journal.outcome(codex, 'returned', usage=budget.observed(report()[0]))
+        fix = self.book(cfg, kind='fix', agent='codex')
+        self.journal.outcome(fix, 'not_dispatched')
+        self.book(cfg, agent='agy')  # no outcome yet: reserved, running or not
+        self.now = START + 600
+        found = budget.of_issue(cfg.budget, self.open(), REPO, 7)
+        self.assertEqual((found['story'], found['issue'], found['at']),
+                         (self.story, 7, '2027-01-15T08:10:00Z'))
+        self.assertEqual(found['turns'],
+                         {'consumed': 3, 'reserved': 1, 'cap': 10, 'available': 6})
+        self.assertEqual(found['roles'], {
+            'implement': {'consumed': 1, 'reserved': 0, 'cap': 3, 'available': 2},
+            'fix': {'consumed': 1, 'reserved': 0, 'cap': 3, 'available': 2},
+            'review': {'consumed': 1, 'reserved': 1, 'cap': 3, 'available': 1},
+            'sync': {'consumed': 0, 'reserved': 0, 'cap': 3, 'available': 3}})
+        self.assertEqual(found['phases'], {
+            'implementation': {'consumed': 3, 'reserved': 1, 'cap': 10, 'available': 6}})
+        # The estimate claude reported is known; codex and agy report none: a lower bound,
+        # and nothing available that can be stated. No CLI reports a measured spend.
+        self.assertEqual(found['usd'], {
+            'cli_estimate_usd': {'consumed': 1.5, 'unattested': 2, 'uncovered': 2,
+                                 'reserved': 0.0, 'cap': 5, 'available': None},
+            'metered_usd': {'consumed': None, 'unattested': 3, 'uncovered': 3,
+                            'reserved': 0.0, 'cap': 1, 'available': None}})
+        self.assertEqual(found['time'], {
+            'started_at': '2027-01-15T08:00:00Z', 'deadline_at': '2027-01-15T09:00:00Z',
+            'cap': 3600, 'consumed': 600, 'available': 3000})
+        text = budget.describe(found)
+        self.assertIn('turni 4 di 10 (consumati 3, prenotati 1, disponibili 6)', text)
+        self.assertIn('turni `review` 2 di 3 (consumati 1, prenotati 1, disponibili 1)', text)
+        self.assertIn('`cli_estimate_usd` consumati almeno 1.50 USD (turni senza valore '
+                      'attestato: 2), prenotati 0.00 USD, disponibili non attestato di 5.00 USD',
+                      text)
+        self.assertIn('`metered_usd` consumati non attestato (turni senza valore attestato: 3), '
+                      'prenotati 0.00 USD, disponibili non attestato di 1.00 USD', text)
+        self.assertNotIn('consumati 0.00 USD', text)
+        self.assertIn('tempo trascorso 600 s di 3600 s, disponibili 3000 s, scadenza '
+                      '2027-01-15T09:00:00Z', text)
+        # An issue of no story has no envelope.
+        self.assertIsNone(budget.of_issue(cfg.budget, self.journal, REPO, 9))
+
+    def test_a_value_not_attested_is_shown_as_such_never_as_0(self):
+        # A reserve bounds what the turn did not report: the envelope states what is left, but
+        # what was consumed stays not attested.
+        reserve = {'model': 'reserve_per_invocation', 'reason': 'r', 'metered_usd': 1,
+                   'cli_estimate_usd': 2}
+        cfg = cfg_with(envelope(cli_estimate_usd=5, metered_usd=10,
+                                usage=dict(ENVELOPE['usage'], claude=reserve)))
+        turn = self.book(cfg, agent='claude')
+        self.journal.outcome(turn, 'returned', usage={'metered_usd': None,
+                                                      'cli_estimate_usd': 0.5})
+        found = budget.of_issue(cfg.budget, self.journal, REPO, 7)
+        self.assertEqual(found['usd'], {
+            'cli_estimate_usd': {'consumed': 0.5, 'unattested': 0, 'uncovered': 0,
+                                 'reserved': 1.5, 'cap': 5, 'available': 3.0},
+            'metered_usd': {'consumed': None, 'unattested': 1, 'uncovered': 0,
+                            'reserved': 1.0, 'cap': 10, 'available': 9.0}})
+        text = budget.describe(found)
+        self.assertIn('`cli_estimate_usd` consumati 0.50 USD, prenotati 1.50 USD, disponibili '
+                      '3.00 USD di 5.00 USD', text)
+        self.assertIn('`metered_usd` consumati non attestato (turni senza valore attestato: 1), '
+                      'prenotati 1.00 USD, disponibili 9.00 USD di 10.00 USD', text)
+        self.assertNotIn('consumati 0.00', text)
+
     def test_a_turn_running_in_parallel_counts_and_does_not_refuse(self):
         cfg = cfg_with(envelope(role_turns=dict(ENVELOPE['role_turns'], review=2)))
         self.book(cfg, agent='codex')
@@ -469,6 +544,10 @@ class DispatcherBudgetTests(unittest.TestCase):
         self.assertIn('LIMIT_REACHED', body)
         self.assertIn(turn['budget']['story'], body)
         self.assertIn('turni 1 di 1', body)
+        # The state of the budget at the refusal (#393), the dollars not reported as such.
+        self.assertIn('Stato del budget della storia al rifiuto: turni 1 di 1 (consumati 1, '
+                      'prenotati 0, disponibili 0)', body)
+        self.assertIn('`metered_usd` consumati non attestato', body)
         self.assertIn('agent:needs-operator', self.gh.labels[100])
 
     def test_every_fallback_model_is_booked_and_a_restart_keeps_the_count(self):
@@ -563,6 +642,44 @@ class DispatcherBudgetTests(unittest.TestCase):
                          ('budget', 'LIMIT_REACHED'))
         self.assertIn('turni `conclave` 0 di 0', self.gh.thread[100][-1]['body'])
         self.assertIn('agent:needs-operator', self.gh.labels[100])
+
+    def test_status_shows_the_budget_of_a_story_and_nothing_with_the_budget_off(self):
+        import devloop.__main__ as cli
+        from unittest import mock
+        from devloop.planning import Snapshot
+        shown = {}
+        for on, cfg in ((False, cfg_with()), (False, cfg_with(envelope(enabled=False))),
+                        (True, cfg_with(envelope()))):
+            with self.subTest(on=on, budget=cfg.budget):
+                self.tmp.cleanup()
+                self.state.mkdir()
+                d = self.make(cfg, implemented(), reports=[report(0.4)], number=100)
+                p = self.implement(d, cfg)
+                # Issue 7 in progress and the issue of its PR, issue 9 of no story.
+                snap = Snapshot(prs=[p], ready_issues=[], working_issues=[7, 9])
+                lines = []
+                with mock.patch.object(cli, 'build', return_value=(cfg, self.state, d)), \
+                        mock.patch.object(cli, 'log', lines.append), \
+                        mock.patch.object(d, 'snapshot', return_value=snap):
+                    cli.main(['status'])
+                self.assertTrue(any(line.startswith('PR #100 ') for line in lines), lines)
+                found = [line for line in lines if line.startswith('budget')]
+                shown[on] = found
+                if not on:
+                    self.assertEqual(found, [])
+                    self.assertFalse([line for line in lines if 'attestato' in line])
+        (story,) = self.journal().stories()
+        (line, none) = shown[True]  # the story once, for the issue and for its PR
+        self.assertTrue(line.startswith(f'budget {story} (radice #7, al '), line)
+        self.assertIn('turni 1 di 10 (consumati 1, prenotati 0, disponibili 9)', line)
+        self.assertIn('turni `implement` 1 di 3 (consumati 1, prenotati 0, disponibili 2)',
+                      line)
+        self.assertIn('`cli_estimate_usd` consumati 0.40 USD, prenotati 0.00 USD, '
+                      'disponibili 4.60 USD di 5.00 USD', line)
+        self.assertIn('`metered_usd` consumati non attestato (turni senza valore attestato: 1)',
+                      line)
+        self.assertIn('tempo trascorso ', line)
+        self.assertEqual(none, 'budget #9: nessuna storia nel journal, nessun envelope')
 
     def test_the_readiness_check_is_outside_the_envelope(self):
         cfg = cfg_with(envelope(turns=1))

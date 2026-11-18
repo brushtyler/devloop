@@ -1237,6 +1237,20 @@ renders.
 | Findings | Every blocking finding ever opened (`round/reviewer/ID`) and who closed it: its owner in a later round, `ci` or `operator` with the author (`finding` records). One closed under the rules [before #110](#markers-written-before-110) has no recorded closer |
 | Policy | The policy receipt recomputed for the promotion: level, version, base, head, reasons, required reviewers |
 | Acceptance criteria | The latest map: for each entry, the criterion as the issue text states it now (not quoted when someone outside `trusted_users` changed the text), the status, the tests it declares (`file` and `name`) and its reason |
+| Story budget | Only with the [budget envelope](reference.md#budget-envelope) on (#393): the state of the budget of the issue's story as the dispatcher's journal records it when the receipt is built, per dimension (see after the table) |
+
+**Story budget** ("Budget della storia"): with `[budget] enabled` the content has a `budget` key
+and the receipt a section of its own, a table with what is consumed, reserved and available
+against the cap of each dimension: the turns in total, per role and per kind of phase, the
+dollars of each kind (`metered_usd`, `cli_estimate_usd`) and the time (seconds from the story's
+start, with its deadline). Consumed: the turns with a confirmed outcome and the dollars the CLIs
+reported; reserved: the turns without a confirmed outcome (running, uncertain or without outcome)
+and the part of the reserves no reported cost covers. A dollar value no turn reports is
+`non attestato`, never 0: consumed is `non attestato` when no turn reports one, `almeno` the
+known sum when some do, with the number of turns that report none; available is `non attestato`
+while one of them has no reserve either. An issue that belongs to no story says so. With the
+budget off the content has no `budget` key and no section: content and digest are the ones
+before #393.
 
 **Totals:** the number of rounds (and of those that count against `max_review_rounds`) and of
 turns, the summed duration of the turns, the known tokens (input, output, cache read, cache

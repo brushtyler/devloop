@@ -185,7 +185,9 @@ from .agents import (TAIL_LINES, AgentError, ModelsUnavailable, ModelUnavailable
                      PermissionDenied, background_unfinished, denied_retry_note)
 from .apps import DISPATCHER, ISSUE_COMMENT, PR_COMMENT
 from .budget import BUDGET, OUTSIDE, BudgetRefused
+from .budget import of_issue as budget_of_issue
 from .budget import reserve as budget_reserve
+from .budget import status_lines as budget_status_lines
 from .config import INSTALL_ROOT, LEGACY_NEEDS_OPERATOR, ConfigError
 from .context import (LABEL_STYLE, _describe_bases, _failure_text, _open_findings_reason,
                       _render_issue_comments, both_labels_warning, label_transition,
@@ -1774,6 +1776,22 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             self.log(f'  turn {kind} refused on #{number}: not covered by the budget envelope '
                      f'({exc.category})')
             raise
+
+    def budget_status(self, issues):
+        """``devloop status`` (#393): the lines of the state of the budget of the stories of
+        ``issues``, from the journal. Without a ledger, or with the budget off, none."""
+        if self.ledger is None:
+            return []
+        return budget_status_lines(self.cfg.budget, self.ledger.journal, self.cfg.repo, issues)
+
+    def _budget_view(self, issue):
+        """With the budget on (#393), the state of the budget of the story of issue ``issue``
+        for the PR receipt (``budget.view``), ``{'story': None}`` when the issue belongs to no
+        story; None with the budget off or without a ledger."""
+        if self.ledger is None or not self.cfg.budget.enabled:
+            return None
+        return (budget_of_issue(self.cfg.budget, self.ledger.journal, self.cfg.repo, issue)
+                or {'story': None})
 
     # Attempts (#384)---------------------------------------------------------
     def _turn_attempt(self, number, issue, kind):

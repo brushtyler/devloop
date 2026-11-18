@@ -441,8 +441,8 @@ yet. The rule of an agent for unknown usage is read from the configuration at ea
 records it.
 
 The step then escalates to the operator (class `budget`, critical, with the `category` of the
-refusal), with the limit and what the story used: turns in total, of the role and of the phase,
-the dollars charged and the deadline. A conclave call or an advisory review refused this way
+refusal), with the limit and the [state of the budget](#state-of-the-budget) of the story at the
+refusal. A conclave call or an advisory review refused this way
 escalates as for the block on uncertain turns: the check runs before the conclave records the call
 as started, and before the checkout of the advisory review. An advisory review whose refusal a
 `budget` escalation of the PR already names, with the same category, is not planned again, and
@@ -457,7 +457,34 @@ reserve, the charge is the larger of the reserve and the observation (ADR 0004, 
 **Outside the envelope:** the [readiness check](guide.md#readiness-check-before-implementation)
 comes before the takeover. It is neither booked nor charged to the story, as before; its outcome
 records its `usage` like the others. How to charge it is decided before the budget is turned on.
-The state of the budget in `devloop status` and in the PR receipt comes with a later issue.
+
+#### State of the budget
+
+With the budget on (#393), the state of the budget of a story, read from the journal, shows per
+dimension what is **consumed**, **reserved** and **available** against its cap: the turns in
+total, per role and per kind of phase, the dollars of each kind and the time.
+
+- **Turns**: consumed are those with a confirmed outcome (returned, failed, not dispatched, or
+  reconciled), reserved those booked without one (running, uncertain, or left without outcome);
+  both are charged, so available is the cap minus both.
+- **Dollars**: consumed is the sum of what the CLIs reported; reserved the part of the reserves
+  (`reserve_per_invocation`) no reported cost covers. A value no turn reports is shown as
+  `non attestato`, never as 0: consumed is `non attestato` when no turn reports one, and `almeno`
+  the known sum when some do, with the number of turns that report none; available is
+  `non attestato` while one of those turns has no reserve either. A turn not dispatched spent
+  nothing. With agy and codex (`unmetered_quota`) and with claude's `metered_usd`, which no CLI
+  reports, the dollars are `non attestato`: the turn caps are what bounds them.
+- **Time**: the seconds elapsed since the story's start and those left before its deadline.
+
+It appears in three places, and nowhere with the budget off:
+
+- `devloop status`: one line per story of the issues in progress and of the open PRs, each story
+  once, as `budget <story> (radice #<root>, al <time>): turni 2 di 10 (consumati 1, prenotati 1,
+  disponibili 8); …`; an issue that belongs to no story gets `budget #<n>: nessuna storia nel
+  journal, nessun envelope`. `status` reads the journal without the lock: a turn running in the
+  dispatcher counts as reserved;
+- the [PR receipt](protocol.md#pr-receipt), in its section "Budget della storia", as a table;
+- the escalation of a turn the envelope refuses, as the state at the refusal.
 
 ### agy permissions
 

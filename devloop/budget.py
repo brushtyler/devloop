@@ -36,6 +36,11 @@ behaves as before.
 - **Outside the envelope**: the readiness check (``preflight``) comes before the takeover; it is
   neither booked nor charged to the story, and its outcome records its ``usage`` like the others
   (how to charge it is decided before the budget is turned on).
+- **The state of the budget** (#393, ``view``): per dimension what is consumed (turns with a
+  confirmed outcome, dollars observed), reserved (turns without a confirmed outcome, reserves
+  no observation covers) and available. A dollar value no turn attests is ``non attestato``,
+  never 0. ``devloop status`` shows it for the stories in progress, the PR receipt in a section
+  of its own, a refused turn in its escalation; with the budget off, nowhere.
 """
 
 import calendar
@@ -55,6 +60,9 @@ STATUS = {RETURNED: 'returned', FAILED: 'terminated', NOT_DISPATCHED: 'not_dispa
 # A booked turn still running in this process: charged, and no unconfirmed outcome.
 RUNNING = 'running'
 NO_USAGE = {'metered_usd': None, 'cli_estimate_usd': None}
+# The statuses of a booked turn with a confirmed outcome: consumed. The others are reserved.
+CONFIRMED = ('returned', 'terminated', 'not_dispatched')
+NOT_ATTESTED = 'non attestato'  # a value no turn attests: never 0
 
 
 class BudgetRefused(TurnBlocked):
@@ -149,21 +157,130 @@ def state(story, turns, live, wall_seconds):
     return {'started_at': start, 'deadline_at': start + wall_seconds, 'invocations': rows}
 
 
-def summary(budget, current, role=None):
-    """The consumption of a story's ``state`` against its envelope, in Italian."""
+def _count(rows, cap):
+    """A turn dimension of ``view``: ``consumed`` the turns with a confirmed outcome,
+    ``reserved`` those booked without one (running, uncertain or without outcome), both
+    charged; ``available`` what is left of ``cap``, None without a cap."""
+    reserved = sum(r['status'] not in CONFIRMED for r in rows)
+    return {'consumed': len(rows) - reserved, 'reserved': reserved, 'cap': cap,
+            'available': None if cap is None else max(cap - len(rows), 0)}
+
+
+def _dollars(rows, kind, cap):
+    """A dollar dimension of ``view``. ``unattested``: the turns that report no value of
+    ``kind`` (a turn not dispatched spent nothing); ``uncovered``: those of them without a
+    reserve of ``kind`` either. ``consumed``: the sum of the observed values; None when some
+    turn reports none and no turn reports one, never 0 for nothing; with ``unattested``, a lower
+    bound. ``reserved``: the part of the reserves no observation covers. ``available``: what the
+    envelope leaves of ``cap``; None while a turn is ``uncovered``: it is not known."""
+    def seen(row):
+        return row['usage'].get(kind)
+
+    unattested = [r for r in rows if seen(r) is None and r['status'] != STATUS[NOT_DISPATCHED]]
+    uncovered = sum(kind not in r.get('conservative_usage', {}) for r in unattested)
+    known = [seen(r) for r in rows if seen(r) is not None]
+    charged = sum(core.kind_charge(r, kind) for r in rows)
+    return {'consumed': float(sum(known)) if known or not unattested else None,
+            'unattested': len(unattested), 'uncovered': uncovered,
+            'reserved': float(sum(core.kind_charge(r, kind) - (seen(r) or 0) for r in rows)),
+            'cap': cap, 'available': None if uncovered else float(max(cap - charged, 0))}
+
+
+def view(budget, story, current, now, role=None):
+    """The state of the budget of ``story`` (#393): its ``current`` state (``state``) against
+    its envelope ``budget`` (``frozen``) at ``now``, per dimension: the turns in total, per
+    role and per kind of phase, the dollars of each kind and the time. ``role``: a role shown
+    even without a cap of its own (the one of a refused turn). A value that is not attested is
+    None, never 0. The data of ``describe``, of ``devloop status`` and of the PR receipt."""
     rows = list(current['invocations'].values())
-    caps = dict(budget.role_turns)
-    parts = [f'turni {len(rows)} di {budget.turns}']
-    if role is not None:
-        parts.append(f'turni `{role}` {sum(r["role"] == role for r in rows)} di '
-                     f'{caps.get(role, "nessun tetto")}')
-    for phase, cap in budget.phase_turns:
-        parts.append(f'fase `{phase}` {sum(r["phase"] == phase for r in rows)} di {cap}')
-    for kind in core.COST_KINDS:
-        charged = sum(core.kind_charge(r, kind) for r in rows)
-        parts.append(f'`{kind}` {charged:.2f} di {getattr(budget, kind):.2f} USD')
-    parts.append(f'scadenza {_iso(current["deadline_at"])}')
+    roles = list(budget.role_turns)
+    if role is not None and role not in dict(roles):
+        roles.append((role, None))
+    now = int(now)
+    start, deadline = current['started_at'], current['deadline_at']
+    return {
+        'story': story['story'], 'issue': story['issue'], 'at': _iso(now),
+        'turns': _count(rows, budget.turns),
+        'roles': {name: _count([r for r in rows if r['role'] == name], cap)
+                  for name, cap in roles},
+        'phases': {name: _count([r for r in rows if r['phase'] == name], cap)
+                   for name, cap in budget.phase_turns},
+        'usd': {kind: _dollars(rows, kind, getattr(budget, kind)) for kind in core.COST_KINDS},
+        'time': {'started_at': _iso(start), 'deadline_at': _iso(deadline),
+                 'cap': budget.wall_seconds,
+                 'consumed': min(max(now - start, 0), budget.wall_seconds),
+                 'available': max(deadline - now, 0)}}
+
+
+def _count_text(label, count):
+    cap = 'nessun tetto' if count['cap'] is None else count['cap']
+    available = ('' if count['available'] is None
+                 else f', disponibili {count["available"]}')
+    return (f'{label} {count["consumed"] + count["reserved"]} di {cap} (consumati '
+            f'{count["consumed"]}, prenotati {count["reserved"]}{available})')
+
+
+def usd(value):
+    """A dollar value as the budget shows it: ``non attestato`` when it is None, never 0."""
+    return NOT_ATTESTED if value is None else f'{value:.2f} USD'
+
+
+def consumed_usd(dollars):
+    """The dollars consumed in one kind (``view``) as the budget shows them: ``non attestato``,
+    a lower bound (``almeno``) while some turn attests no value, or the sum."""
+    if dollars['consumed'] is not None and dollars['unattested']:
+        return f'almeno {usd(dollars["consumed"])}'
+    return usd(dollars['consumed'])
+
+
+def describe(found):
+    """The state of the budget of a story (``view``) on one line, in Italian, as the refusal
+    of a turn and ``devloop status`` show it."""
+    parts = [_count_text('turni', found['turns'])]
+    parts += [_count_text(f'turni `{name}`', c) for name, c in found['roles'].items()]
+    parts += [_count_text(f'fase `{name}`', c) for name, c in found['phases'].items()]
+    for kind, d in found['usd'].items():
+        gap = (f' (turni senza valore attestato: {d["unattested"]})' if d['unattested']
+               else '')
+        parts.append(f'`{kind}` consumati {consumed_usd(d)}{gap}, prenotati '
+                     f'{usd(d["reserved"])}, disponibili {usd(d["available"])} di '
+                     f'{usd(d["cap"])}')
+    t = found['time']
+    parts.append(f'tempo trascorso {t["consumed"]} s di {t["cap"]} s, disponibili '
+                 f'{t["available"]} s, scadenza {t["deadline_at"]}')
     return '; '.join(parts)
+
+
+def of_issue(budget, journal, repo, issue):
+    """The state of the budget (``view``) of the story of issue ``issue`` of ``repo`` as the
+    journal records it now, or None when the issue belongs to no story. It only reads the
+    journal: a booked turn without outcome counts as reserved, running or not."""
+    found = journal.story_of(repo, issue)
+    if found is None:
+        return None
+    story = found[0]
+    turns = journal.turns()
+    envelope = frozen(budget, story, turns)
+    current = state(story, turns, set(), envelope.wall_seconds)
+    return view(envelope, story, current, journal.seconds())
+
+
+def status_lines(budget, journal, repo, issues):
+    """``devloop status`` (#393): with the budget on, one line per story of ``issues`` (the
+    numbers of the issues in progress and of those of the open PRs), each story once; nothing
+    with the budget off."""
+    if not budget.enabled:
+        return []
+    lines, seen = [], set()
+    for issue in dict.fromkeys(i for i in issues if i is not None):
+        found = of_issue(budget, journal, repo, issue)
+        if found is None:
+            lines.append(f'budget #{issue}: nessuna storia nel journal, nessun envelope')
+        elif found['story'] not in seen:
+            seen.add(found['story'])
+            lines.append(f'budget {found["story"]} (radice #{found["issue"]}, al '
+                         f'{found["at"]}): {describe(found)}')
+    return lines
 
 
 def reserve(budget, journal, *, repo, issue, kind, agent):
@@ -194,8 +311,10 @@ def reserve(budget, journal, *, repo, issue, kind, agent):
                 'nuove: questa storia conserva quelli fissati alla sua prima prenotazione.')
         raise BudgetRefused(
             f'{where} non è coperto dall\'envelope di budget della storia `{story["story"]}` '
-            f'(radice #{story["issue"]}): `{exc.category}`, {exc.message}. Consumo della '
-            f'storia: {summary(envelope, current, kind)}.{kept} Nessun turno parte, e nessuna '
+            f'(radice #{story["issue"]}): `{exc.category}`, {exc.message}. Stato del budget '
+            f'della storia al rifiuto: '
+            f'{describe(view(envelope, story, current, journal.seconds(), kind))}.{kept} '
+            'Nessun turno parte, e nessuna '
             'prenotazione viene rimborsata: un turno fallito, non avviato o incerto resta '
             'addebitato. Un turno incerto si riconcilia con `/devloop reconcile`; i valori '
             'dell\'envelope e le sue estensioni sono decisioni dell\'operatore (ADR 0004, D2)',
