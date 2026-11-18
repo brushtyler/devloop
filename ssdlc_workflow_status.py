@@ -73,7 +73,9 @@ def _open_file(ticket, relative):
     """A read-only descriptor of ``<ticket>/<relative>`` and its ``fstat``; ``(None, None)`` if absent.
 
     No path component may be a symlink: ``O_NOFOLLOW`` on each one, from the
-    ticket root down. Anything that is not a regular file is refused.
+    ticket root down. Anything that is not a regular file is refused. The last
+    component is opened with ``O_NONBLOCK``, so a FIFO without a writer or a
+    device is refused by ``fstat`` instead of blocking the open.
     """
     parts = Path(relative).parts
     if (not parts or Path(relative).is_absolute() or '..' in parts
@@ -88,7 +90,8 @@ def _open_file(ticket, relative):
         for index, part in enumerate(parts):
             last = index == len(parts) - 1
             try:
-                child = os.open(part, flags | (0 if last else os.O_DIRECTORY), dir_fd=fd)
+                final = os.O_NONBLOCK | getattr(os, 'O_NOCTTY', 0)
+                child = os.open(part, flags | (final if last else os.O_DIRECTORY), dir_fd=fd)
             except FileNotFoundError:
                 os.close(fd)
                 return None, None

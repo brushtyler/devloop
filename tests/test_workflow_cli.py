@@ -8,6 +8,7 @@ import selectors
 import signal
 import subprocess
 import sys
+import threading
 import time
 import unittest
 from unittest import mock
@@ -345,6 +346,27 @@ class LastLogTest(CliCase):
         log = self.log()
         self.assertEqual(log['ref'], '03-dev/tasks/A/check-0.log')  # the unsafe one is skipped
         self.assertIn('1 task journal log references are not plain relative paths', log['reason'])
+
+    @unittest.skipUnless(hasattr(os, 'mkfifo'), 'needs FIFOs')
+    def test_a_fifo_without_writer_is_refused_without_blocking(self):
+        (self.ticket / '03-dev/tasks/A').mkdir(parents=True)
+        fifo = self.ticket / '03-dev/tasks/A/check-0.log'
+        os.mkfifo(fifo)
+        self.writer.append(with_log(tasks_state(a='COMPLETED', attempts=1), 'A', 'A/check-0.log'))
+        result = {}
+        worker = threading.Thread(target=lambda: result.update(log=self.log()), daemon=True)
+        worker.start()
+        worker.join(10)
+        if worker.is_alive():
+            # Release the blocked open before failing, so the thread does not outlive the test.
+            os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+            worker.join(10)
+            self.fail('reading a FIFO log without a writer blocked the snapshot')
+        log = result['log']
+        self.assertEqual(log['ref'], '03-dev/tasks/A/check-0.log')
+        self.assertIsNone(log['text'])
+        self.assertIn('not readable', log['reason'])
+        self.assertIn('not a regular file', log['reason'])
 
     def test_without_journal_references_the_latest_registered_log_by_recorded_at_then_path(self):
         paths = {name: self.write(name, name.encode()) for name in ('05-qa/a.log', '05-qa/b.log', '00-recon/old.log')}
