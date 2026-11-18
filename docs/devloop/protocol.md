@@ -1113,11 +1113,13 @@ the same hash chain; the turns ignore them:
 - `publication`: a write about to be sent, its first attempt, with its id (`pub-<16 hex
   digits>`), `op` (`comment`, `edit`, `review` or `pr`), its arguments (the issue or PR, the
   comment of an edit, the commit and event of a review, the base, head and title of a pull
-  request), the actor and permissions of its client, the **whole body** and the time. It is
+  request), the actor and permissions of its client, the **whole body**, the time and `held`
+  (whether its `gh` holds the dispatcher lock, see below). It is
   durable before anything is sent, and nothing else is written before the send: if it cannot be
   written, nothing is sent, nothing is left for a restart to send, and the write fails like any
   `gh` failure.
-- `publication_sending`: a later attempt about to be sent, with its time. From `publication` or
+- `publication_sending`: a later attempt about to be sent, with its time and `held`. From
+  `publication` or
   here until an answer is recorded, the outcome is unknown.
 - `publication_sent`, with the id of what was published (the comment's, the review's when known,
   the pull request's number) and how it was known (`response` or `reconciliation`);
@@ -1137,9 +1139,16 @@ a time the attempt is known to have ended (GitHub ends the requests it takes mor
 seconds to serve). The time recorded before the send never counts: a pause of the process may
 come between it and the send. In the process that sent it, that time is the end of the call,
 measured once the call returned (its `gh` ended, killed at its timeout). For an attempt whose
-end is unknown because the process stopped, it is the timeout of a `gh` call (300 seconds)
-after the restarted dispatcher first read the journal, under the dispatcher lock: the stopped
-process had ended by then, so its attempt could not start later. The write that got the
+end is unknown because the process stopped, it is when the restarted dispatcher first read the
+journal, under the dispatcher lock, provided the attempt is `held`: devloop passes the lock to
+the `gh` of each write, which keeps it open while it runs, so the lock is free only once that
+`gh` has ended, also one that outlived the dispatcher that started it. The timeout of a `gh`
+call proves nothing after a stop: the parent that applied it is gone, and the `gh` may run on
+(stopped and resumed, for instance) with no limit. A `gh` still running after its dispatcher
+stopped therefore keeps the next one from starting (`another dispatcher is running (lock
+held)`) until it ends. An attempt not `held` has no proof of its end: it is never sent again,
+only reconciled, and dropped if it is still absent 300 seconds (the timeout of a `gh` call)
+plus 30 after the restart. The write that got the
 uncertain answer waits for that moment and reads again; only a conclusive absence sends it once
 more, at most two sends in all. Otherwise, or when GitHub cannot be read, the caller gets the
 uncertain failure, as before the outbox; so does an error of the client that is not a `gh`
@@ -1163,9 +1172,10 @@ written after it is durable either, and the restart handles the write as cut sho
 
 **Restart.** Each tick starts by writing what the journal could not take, then by settling every
 pending write, before it reads GitHub. A write cut short by the stop, its caller gone with the
-process, is reconciled: found, it is recorded as published; conclusively absent (five and a
-half minutes after the restart read the journal, whatever time the write was recorded at), it
-is sent once more; until then it blocks the new writes on the same issue, PR, comment or branch.
+process, is reconciled: found, it is recorded as published; conclusively absent (30 seconds
+after the restart read the journal, whatever time the write was recorded at), it is sent once
+more if its `gh` held the dispatcher lock, dropped otherwise; until then it blocks the new
+writes on the same issue, PR, comment or branch.
 A write whose caller was already told it failed with an uncertain outcome is only
 reconciled: found, it is recorded as published; conclusively absent, it is dropped, because its
 step already handled it as not published. A pending edit followed by a later write on the same

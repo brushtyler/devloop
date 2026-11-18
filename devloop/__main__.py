@@ -469,6 +469,11 @@ def main(argv=None):
             dispatcher.tick(dry_run=True)
         return
     with single_instance(state / 'dispatcher.lock') as lock:
+        # The `gh` of each write holds the lock too: no next dispatcher starts while one of them
+        # may still publish, even after this process stopped (#385).
+        identities = getattr(dispatcher, 'identities', None)
+        if identities is not None:
+            identities.hold(lock.fileno())
         if args.command == 'cleanup':
             for name in dispatcher.ws.names():
                 dispatcher.ws.remove(name)

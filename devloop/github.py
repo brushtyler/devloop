@@ -122,6 +122,12 @@ class GitHub:
         self._token = token
         self._local = threading.local()
         self.time_left = time_left
+        # The descriptor of the dispatcher lock, set by devloop once it holds it
+        # (``apps.Identities.hold``, #385). The `gh` of each write gets it open: no other
+        # dispatcher takes the lock while a `gh` of this one runs, even one that outlived it, so
+        # the outbox of the publications (``outbox.Outbox``) knows that the attempts a stop cut
+        # short had ended when the next dispatcher started.
+        self.lock_fd = None
 
     @property
     def time_left(self):
@@ -134,12 +140,15 @@ class GitHub:
     def _gh(self, *args, stdin=None, check=True, write=False):
         """Run `gh` with ``args``. ``write``: the call is a ``comment``, ``edit_comment``,
         ``submit_review`` or ``create_pr``, whose timeout or uncertain failure raises
-        ``GitHubUncertain`` (#364, #385)."""
+        ``GitHubUncertain`` (#364, #385), and whose `gh` holds the dispatcher lock open
+        (``lock_fd``)."""
         kwargs = {}
         self._time_left(args)  # no token is minted once the time is spent
         if self._token is not None:
             env = {k: v for k, v in os.environ.items() if k not in ('GITHUB_TOKEN', 'GH_TOKEN')}
             kwargs['env'] = dict(env, GH_TOKEN=self._token())
+        if write and self.lock_fd is not None:
+            kwargs['pass_fds'] = (self.lock_fd,)
         timeout = self.timeout
         left = self._time_left(args)  # what the mint of the token left
         if left is not None:

@@ -215,6 +215,7 @@ class Identities:
         self.apps = dict(apps)
         self._run = run
         self._ambient = GitHub(repo, run=run)
+        self._lock_fd = None
 
     @classmethod
     def from_config(cls, cfg, run=subprocess.run):
@@ -227,6 +228,12 @@ class Identities:
     # ``publication_outbox`` is on: the clients write their comments, native reviews and pull
     # requests through it.
     outbox = None
+
+    def hold(self, lock_fd):
+        """The dispatcher lock is held on ``lock_fd``: the `gh` of each write of the clients
+        keeps it open while it runs (``GitHub.lock_fd``, #385)."""
+        self._lock_fd = lock_fd
+        self._ambient.lock_fd = lock_fd
 
     def github(self, actor, permissions=None) -> Backend:
         """The client ``actor`` acts with: the ports, on GitHub, holding only ``permissions``;
@@ -245,6 +252,7 @@ class Identities:
         # The client's ``time_left`` (set by ``devloop watch``) bounds the mint of its token too.
         client = GitHub(self.repo, run=self._run,
                         token=lambda: app.token(permissions, time_left=client.time_left))
+        client.lock_fd = self._lock_fd
         return client
 
     def login(self, actor):

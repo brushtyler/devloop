@@ -117,7 +117,9 @@ known as the publication of another write. The
 before any new POST when `publication_outbox` is on (for a review or a pull request it reads
 the PR's native reviews or the open pull requests), and sends a write again only on an absence
 read when the uncertain attempt could no longer take effect, counted from a time the attempt is
-known to have ended, never from the time recorded before the send; it wraps the `comment`,
+known to have ended, never from the time recorded before the send (after a stop, from the start
+of the next dispatcher, only for an attempt whose `gh` held the dispatcher lock:
+`GitHub.lock_fd`, passed to the `gh` of each write); it wraps the `comment`,
 `edit_comment`, `submit_review` and `create_pr` of the clients of `Identities.github` and is
 itself a `Backend`. Without it the dispatcher still handles an
 uncertain outcome as a failed write. The other writes and the reads report every failure as a

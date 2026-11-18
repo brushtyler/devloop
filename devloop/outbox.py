@@ -12,11 +12,13 @@ it says so, the ``time`` of the clock it happened at:
   ``review`` or ``pr``), its arguments (``number`` of the issue or PR, None for an edit whose
   comment the outbox has not seen; ``comment_id`` of an edit; ``commit`` and ``event`` of a
   review; ``base``, ``head`` and ``title`` of a pull request), ``actor`` and ``permissions`` of
-  the client that writes, the whole ``body`` and ``time``. It is durable **before** anything is
-  sent, and nothing is written between it and the send: if it cannot be written, nothing is
+  the client that writes, the whole ``body``, ``time`` and ``held``: whether the `gh` that
+  sends it holds the dispatcher lock open (``GitHub.lock_fd``). It is durable **before**
+  anything is sent, and nothing is written between it and the send: if it cannot be written, nothing is
   sent, nothing is left to send at a restart, and the write fails as a failed write
   (``journal.JournalError`` is a ``GitHubError``);
-- ``publication_sending``: a later attempt about to be sent, with its number and ``time``. From
+- ``publication_sending``: a later attempt about to be sent, with its number, ``time`` and
+  ``held``. From
   ``publication`` or here until an answer is recorded, the outcome is unknown;
 - ``publication_sent``: published, with ``id`` (the comment's, the review's when known, the
   pull request's number; None when GitHub did not report it) and ``via``: ``response`` or
@@ -38,12 +40,16 @@ The rules, on the model of ``ProjectionOutbox`` (ssdlc_feedback_delivery.py):
   attempt is known to have ended, never counted from the time recorded before the send (a
   pause of the process may come between the two). In the process that sent it, that time is the
   end of the call, measured once the call returned (its ``gh`` ended, killed at its timeout).
-  For an attempt cut short by a stop, whose end is unknown, it is ``ATTEMPT_SECONDS`` (the
-  longest a ``gh`` call lasts) after this process first read the journal, under the dispatcher
-  lock: the process that made the attempt had ended by then. The write that got the uncertain
-  answer waits for that time and reads again; only a conclusive absence lets it be sent once
-  more, at most ``MAX_SENDS`` sends in all. A failed read leaves it uncertain, and so does an
-  exception of the client that is not a ``GitHubError``.
+  For an attempt cut short by a stop, the time this process first read the journal, under the
+  dispatcher lock, but only when the attempt is ``held``: its ``gh`` held that lock open, and
+  the lock is free only once every such ``gh`` has ended, also one that outlived its dispatcher
+  (R3-1). The timeout of a ``gh`` call proves nothing then: the parent that applied it is gone.
+  An attempt not ``held`` has no proof of its end: it is never sent again, only reconciled
+  (found, it is published; still absent ``ATTEMPT_SECONDS`` after the restart, it is dropped).
+  The write that got the uncertain answer waits for that time and reads again; only a
+  conclusive absence lets it be sent once more, at most ``MAX_SENDS`` sends in all. A failed
+  read leaves it uncertain, and so does an exception of the client that is not a
+  ``GitHubError``.
 - **Before every new write** on an issue or PR (on a comment, a head branch), the writes of the
   same one left pending (not running in this process) are settled first (``settle``): reconciled,
   and sent or dropped on a conclusive absence. If one cannot be settled (unreadable, or not
@@ -56,9 +62,9 @@ The rules, on the model of ``ProjectionOutbox`` (ssdlc_feedback_delivery.py):
   is published, its comment and issue are kept in memory, and no later write, an edit of that
   comment included, is sent before it is durable.
 - **A restart resumes** (``resume``, at the start of each tick): a write cut short, its caller
-  stopped with the process, is reconciled, and sent once more only on a conclusive absence,
-  read ``ATTEMPT_SECONDS`` plus ``IN_FLIGHT_SECONDS`` after the restart read the journal;
-  until then it blocks the writes about the same issue, PR, comment or branch. A
+  stopped with the process, is reconciled, and sent once more only when it is ``held`` and
+  conclusively absent, read ``IN_FLIGHT_SECONDS`` after the restart read the journal; until
+  then it blocks the writes about the same issue, PR, comment or branch. A
   write whose caller was told it failed with an uncertain outcome is only reconciled: found, it
   is recorded as published; conclusively absent, it is dropped. A pending edit superseded by a
   later write on the same comment is dropped: the later one was built from GitHub as it was.
@@ -87,11 +93,19 @@ MAX_SENDS = 2  # sends of one write: the first and, after a conclusive absence, 
 # How long GitHub may still apply an attempt after it ended: it ends the requests it takes more
 # than 10 seconds to serve; the rest is margin, for the reads that follow a write.
 IN_FLIGHT_SECONDS = 30
-# The longest an attempt lasts: the timeout of each `gh` call. After a crash its end is unknown.
+# The longest an attempt lasts in a running dispatcher: the timeout of each `gh` call. An
+# attempt cut short that did not hold the dispatcher lock is reconciled this much later, then
+# dropped if absent: its `gh` may have outlived the dispatcher, with no timeout left.
 ATTEMPT_SECONDS = GitHub.timeout
 SENDING_EVENT, SENT_EVENT, FAILED_EVENT, DROPPED_EVENT = (
     f'{PUBLICATION}_sending', f'{PUBLICATION}_sent', f'{PUBLICATION}_failed',
     f'{PUBLICATION}_dropped')
+
+
+def _held(tracker):
+    """Whether the `gh` of a write of ``tracker`` holds the dispatcher lock open while it runs
+    (``GitHub.lock_fd``): then no later dispatcher starts before it has ended (R3-1)."""
+    return getattr(tracker, 'lock_fd', None) is not None
 
 
 def _iso(seconds):
@@ -119,7 +133,8 @@ class Outbox:
         self._numbers = {}  # comment id -> issue or PR, from the writes and the reads
         self._live = set()  # the writes this process is sending or settling
         # When this process first read the journal (``_load``), under the dispatcher lock: any
-        # previous dispatcher had ended, and none of its attempts could start later (R2-2).
+        # previous dispatcher had ended, and none of its attempts could start later (R2-2); so
+        # had the `gh` of each of its ``held`` attempts, which kept that lock open (R3-1).
         self._since = None
 
     def client(self, tracker, actor, permissions=None):
@@ -148,7 +163,7 @@ class Outbox:
             return
         if kind == SENDING_EVENT:
             entry.update(status=SENDING, sends=entry['sends'] + 1, started=data.get('time'),
-                         ended=None)
+                         ended=None, held=data.get('held', False))
         elif kind == SENT_EVENT:
             entry.update(status=SENT, sent_id=data.get('id'))
             if (entry['op'] == COMMENT and data.get('id') is not None
@@ -227,7 +242,7 @@ class Outbox:
         with self._lock:
             self._record(PUBLICATION, {
                 'pub': pub, 'op': op, **fields, 'actor': actor, 'permissions': permissions,
-                'body': body, 'time': self._clock()})
+                'body': body, 'time': self._clock(), 'held': _held(tracker)})
             self._live.add(pub)
             entry = self._entries[pub]
         try:
@@ -272,8 +287,7 @@ class Outbox:
                 self._log(f'  {pub}: uncertain {entry["op"]} {self._where(entry)} not found on '
                           'GitHub once it could no longer take effect: sent once more')
                 try:
-                    self._record(SENDING_EVENT, {'pub': pub, 'attempt': entry['sends'] + 1,
-                                                 'time': self._clock()})
+                    self._sending(entry, tracker)
                 except JournalError as error:
                     # Not sent again, and none of its sends took effect: failed for certain.
                     self._failed(entry, error, uncertain=False)
@@ -298,14 +312,23 @@ class Outbox:
         the process may separate from the send by any amount (R2-2).
 
         In this process that time is the end of the call, measured once it returned, or the
-        ``time`` of its ``publication_failed``. An attempt cut short by a stop has no known
-        end: its process was gone when this one first read the journal (``_since``, under the
-        dispatcher lock), so it cannot have started after that, and ``ATTEMPT_SECONDS``, the
-        longest a `gh` call lasts, covers a `gh` it left running."""
+        ``time`` of its ``publication_failed``. For an attempt cut short by a stop, it is when
+        this process first read the journal (``_since``), under the dispatcher lock, if the
+        attempt is ``held``: its `gh` kept that lock open, so it had ended, even one that
+        outlived its dispatcher (R3-1). The timeout of a `gh` call is no proof after a stop:
+        ``subprocess.run`` applies it in the parent, which is gone. An attempt not ``held`` has
+        no known end: ``ATTEMPT_SECONDS`` more only delay its reconciliation, and its absence
+        then drops it, never sends it again (``_settle``)."""
         if entry['ended'] is not None:
             return entry['ended'] + IN_FLIGHT_SECONDS
         since = self._since if self._since is not None else self._clock()
-        return max(entry['started'] or 0, since) + ATTEMPT_SECONDS + IN_FLIGHT_SECONDS
+        quiet = max(entry['started'] or 0, since) + IN_FLIGHT_SECONDS
+        return quiet if entry.get('held') else quiet + ATTEMPT_SECONDS
+
+    def _sending(self, entry, tracker):
+        """Record a later attempt of ``entry``, about to be sent with ``tracker``."""
+        self._record(SENDING_EVENT, {'pub': entry['pub'], 'attempt': entry['sends'] + 1,
+                                     'time': self._clock(), 'held': _held(tracker)})
 
     def _look(self, entry, tracker, wait=False):
         """``(found, conclusive)``: what carries ``entry`` on GitHub, or None, and whether that
@@ -484,12 +507,16 @@ class Outbox:
                 'sent on it before')
         if entry['status'] == UNCERTAIN:
             self._drop(entry, 'not found on GitHub, and its caller was told it failed')
+        elif not entry.get('held'):
+            # Its `gh` did not hold the dispatcher lock: it may have outlived the dispatcher
+            # that started it and still publish it. Not sent again, so never twice (R3-1).
+            self._drop(entry, 'not found on GitHub, and its gh, which did not hold the '
+                              'dispatcher lock, may still publish it')
         elif entry['sends'] >= MAX_SENDS:
             self._drop(entry, f'not found on GitHub after {MAX_SENDS} sends')
         else:
-            # Cut short by a restart, its caller gone: sent once more.
-            self._record(SENDING_EVENT, {'pub': entry['pub'], 'attempt': entry['sends'] + 1,
-                                         'time': self._clock()})
+            # Cut short by a restart, its caller gone, its `gh` ended: sent once more.
+            self._sending(entry, tracker)
             self._attempt(entry, tracker)
 
 

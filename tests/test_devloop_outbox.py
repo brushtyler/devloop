@@ -1,12 +1,17 @@
 """devloop: the outbox of the publications (#385, ADR 0004, P2-4)."""
 
+import fcntl
 import inspect
 import json
+import os
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from devloop import outbox as outbox_mod
 from devloop import ports
@@ -22,8 +27,12 @@ from helpers.devloop_fakes import FIRST_COMMENT_ID, SHA1, ActingAs, FakeGH, Fake
 
 REPO = 'brushtyler/ssdlc'
 START = 1_800_000_000.0
-# After a crash the end of the attempt is unknown: absence is conclusive only this much later.
-AFTER_A_CRASH = outbox_mod.ATTEMPT_SECONDS + IN_FLIGHT_SECONDS
+# After a crash, the `gh` of an attempt that held the dispatcher lock had ended when the next
+# dispatcher started: absence is conclusive this much after the restart (R3-1).
+AFTER_A_CRASH = IN_FLIGHT_SECONDS
+# An attempt whose `gh` did not hold the lock has no known end: reconciled only this much later.
+UNHELD_AFTER_A_CRASH = outbox_mod.ATTEMPT_SECONDS + IN_FLIGHT_SECONDS
+ROOT = Path(__file__).resolve().parent.parent
 
 
 class Crash(BaseException):
@@ -50,8 +59,10 @@ class OutboxGH(FakeGH):
     ``'lost'`` or ``'late'``: GitHub applies it 10 seconds later) and whose reads may fail
     (``read_fails``). An uncertain ``comment``, ``submit_review`` or ``create_pr``
     (``uncertain_writes``) may be ``'applied'``, ``'lost'`` or ``'late'`` too. ``pause``: the
-    process stalls that many seconds right before the next POST. It records each body sent;
-    the pull requests it opens are open."""
+    process stalls that many seconds right before the next POST; ``delay``: how long after it a
+    ``'late'`` write lands. It records each body sent; the pull requests it opens are open.
+    ``lock_fd``: its writes hold the dispatcher lock (``GitHub.lock_fd``), so they end before
+    another dispatcher starts; None, a write may outlive the process that sent it."""
 
     def __init__(self):
         super().__init__()
@@ -59,6 +70,8 @@ class OutboxGH(FakeGH):
         self.clock = Clock()
         self.crash = None
         self.pause = 0
+        self.delay = 10
+        self.lock_fd = 3
         self.read_fails = 0
         self.sent = []
         self.in_flight = []  # (time it takes effect, how): writes GitHub still serves
@@ -72,7 +85,7 @@ class OutboxGH(FakeGH):
             if outcome == 'applied':
                 apply()
             elif outcome == 'late':
-                self.in_flight.append((self.clock() + 10, apply))
+                self.in_flight.append((self.clock() + self.delay, apply))
             raise GitHubUncertain(f'write: outcome unknown ({outcome})')
         how, self.crash = self.crash, None
         if how is None:
@@ -80,7 +93,7 @@ class OutboxGH(FakeGH):
         if how == 'applied':
             apply()
         elif how == 'late':
-            self.in_flight.append((self.clock() + 10, apply))
+            self.in_flight.append((self.clock() + self.delay, apply))
         raise Crash()
 
     def _land(self):
@@ -701,6 +714,8 @@ class RestartTests(unittest.TestCase):
             with self.assertRaises(Crash):
                 client.comment(7, 'record')
             box = self.restart(gh, state)
+            [entry] = box.entries().values()
+            self.assertTrue(entry['held'])  # its `gh` ended before this process started
             # Right after the restart, the cut attempt may still land: nothing is sent.
             [line] = box.resume()
             self.assertIn('not settled', line)
@@ -731,6 +746,31 @@ class RestartTests(unittest.TestCase):
             self.assertEqual(gh.bodies(7), ['record', 'next'])
             self.assertEqual(gh.sent, ['record', 'next'])
             self.assertEqual(statuses(box), [SENT, SENT])
+
+    def test_a_post_cut_short_whose_gh_did_not_hold_the_lock_is_never_sent_again(self):
+        # R3-1: without the lock, the `gh` of the cut attempt may outlive the dispatcher, past
+        # any timeout: no wait proves it ended. Found, it is published; absent, it is dropped.
+        for how, comments in (('applied', ['record']), ('lost', []), ('late', ['record'])):
+            with self.subTest(how=how), tempfile.TemporaryDirectory() as state:
+                gh = OutboxGH()
+                gh.lock_fd = None
+                gh.delay = 10 * UNHELD_AFTER_A_CRASH  # resumed long after the restart
+                _, client = make(gh, state)
+                gh.crash = how
+                with self.assertRaises(Crash):
+                    client.comment(7, 'record')
+                box = self.restart(gh, state)
+                [entry] = box.entries().values()
+                self.assertFalse(entry['held'])
+                if how != 'applied':
+                    gh.clock.now += AFTER_A_CRASH
+                    self.assertEqual(len(box.resume()), 1)  # still unknown: blocks #7
+                    gh.clock.now += UNHELD_AFTER_A_CRASH - AFTER_A_CRASH
+                self.assertEqual(box.resume(), [])
+                self.assertEqual(statuses(box), [SENT if how == 'applied' else DROPPED])
+                gh.clock.now += gh.delay
+                gh.issue_comments(7)  # the orphan `gh` publishes it at last
+                self.assertEqual((gh.sent, gh.bodies(7)), (['record'], comments))
 
     def test_a_pause_between_the_record_and_the_post_does_not_shorten_the_wait(self):
         # R2-2: recorded at START, the process stalls 400 seconds, then sends the POST, which
@@ -901,7 +941,156 @@ class RestartTests(unittest.TestCase):
             self.assertEqual(gh.sent, ['v1', 'v3'])
 
 
+FAKE_GH = '''#!{python}
+"""`gh` on a GitHub made of files in $GH_FAKE_DIR: a POST of a comment says it started, waits
+for `go` while `hold` exists, then publishes; a read lists the comments."""
+import json, os, pathlib, sys, time
+root = pathlib.Path(os.environ['GH_FAKE_DIR'])
+comments = root / 'comments.jsonl'
+args = sys.argv[1:]
+if args[:3] == ['api', '-X', 'POST']:
+    (root / 'started').write_text(str(os.getpid()))
+    deadline = time.monotonic() + 60
+    while (root / 'hold').exists() and not (root / 'go').exists():
+        if time.monotonic() > deadline:
+            sys.exit(1)
+        time.sleep(0.02)
+    lines = comments.read_text().splitlines() if comments.exists() else []
+    new = {{'id': 5000 + len(lines), 'author': {{'login': 'brushtyler'}},
+            'body': sys.stdin.read(), 'created_at': '2026-11-18T15:30:00Z'}}
+    with comments.open('a') as fh:
+        fh.write(json.dumps(new) + '\\n')
+    with (root / 'posts').open('a') as fh:
+        fh.write('post\\n')
+    try:
+        print(json.dumps({{'id': new['id']}}), flush=True)
+    except BrokenPipeError:
+        pass  # its dispatcher is gone
+elif args[:2] == ['api', '--paginate']:
+    print(comments.read_text() if comments.exists() else '', end='')
+else:
+    sys.exit(f'unexpected gh call: {{args}}')
+'''
+
+DISPATCHER = '''
+import pathlib, sys
+sys.path.insert(0, {root!r})
+from devloop.__main__ import single_instance
+from devloop.apps import Identities
+from devloop.journal import TurnJournal
+from devloop.outbox import for_identities
+state = pathlib.Path(sys.argv[1])
+with single_instance(state / 'dispatcher.lock') as lock:
+    identities = Identities('o/r', {{}})
+    identities.outbox = for_identities(identities, TurnJournal(state), ['brushtyler'])
+    identities.hold(lock.fileno())
+    identities.github('dispatcher').comment(7, 'record')
+'''
+
+
+class OrphanGhTests(unittest.TestCase):
+    """R3-1, with real processes: the dispatcher is killed while the `gh` of its POST runs (here
+    held back, as a stopped `gh` would be). The `gh` outlives it, with no timeout left; the next
+    dispatcher cannot start until it has ended, and then finds its comment: one comment."""
+
+    def wait_for(self, condition, what):
+        deadline = time.monotonic() + 30
+        while not condition():
+            if time.monotonic() > deadline:
+                self.fail(f'timed out waiting for {what}')
+            time.sleep(0.02)
+
+    @staticmethod
+    def lock_free(path):
+        with open(path, 'w') as fh:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False
+            fcntl.flock(fh, fcntl.LOCK_UN)
+            return True
+
+    def test_a_gh_that_outlived_its_dispatcher_holds_the_lock_and_is_not_duplicated(self):
+        import devloop.__main__ as devloop_main
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            state, fake, bindir = tmp / 'state', tmp / 'github', tmp / 'bin'
+            for d in (state, fake, bindir):
+                d.mkdir()
+            gh_path = bindir / 'gh'
+            gh_path.write_text(FAKE_GH.format(python=sys.executable))
+            gh_path.chmod(0o755)
+            (fake / 'hold').touch()
+            env = dict(os.environ, PATH=f'{bindir}{os.pathsep}{os.environ.get("PATH", "")}',
+                       GH_FAKE_DIR=str(fake))
+            env.pop(devloop_main.LOCK_FD, None)
+            dispatcher = subprocess.Popen(
+                [sys.executable, '-c', DISPATCHER.format(root=str(ROOT)), str(state)], env=env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                box = self.kill_and_restart(dispatcher, state, fake, env)
+            finally:
+                (fake / 'go').touch()  # never leave the `gh` waiting
+                if dispatcher.poll() is None:
+                    dispatcher.kill()
+                    dispatcher.wait()
+            bodies = [json.loads(line)['body']
+                      for line in (fake / 'comments.jsonl').read_text().splitlines()]
+            self.assertEqual(bodies, ['record', 'next'])
+            self.assertEqual(len((fake / 'posts').read_text().splitlines()), 2)
+            self.assertEqual(statuses(box), [SENT, SENT])
+
+    def kill_and_restart(self, dispatcher, state, fake, env):
+        """Kill the dispatcher while its `gh` runs, then start the next one: the outbox of the
+        new dispatcher, which has resumed and written once more on #7."""
+        import devloop.__main__ as devloop_main
+        self.wait_for(lambda: (fake / 'started').exists(), 'the POST')
+        dispatcher.kill()
+        dispatcher.wait()
+        lock = state / 'dispatcher.lock'
+        # The `gh` runs on, its parent gone: the next dispatcher does not start.
+        self.assertFalse(self.lock_free(lock))
+        with mock.patch.dict(os.environ, env), \
+                self.assertRaisesRegex(SystemExit, 'another dispatcher is running'):
+            with devloop_main.single_instance(lock):
+                pass
+        (fake / 'go').touch()  # the `gh` publishes, then ends
+        self.wait_for(lambda: self.lock_free(lock), 'the end of the orphan gh')
+        with mock.patch.dict(os.environ, env), devloop_main.single_instance(lock) as held:
+            identities = Identities('o/r', {})
+            box = for_identities(identities, TurnJournal(state), ['brushtyler'])
+            identities.outbox = box
+            identities.hold(held.fileno())
+            [entry] = box.entries().values()
+            self.assertTrue(entry['held'])
+            # Found at once: no wait, no second POST of the record.
+            self.assertEqual(box.resume(), [])
+            identities.github('dispatcher').comment(7, 'next')
+        return box
+
+
 class WiringTests(unittest.TestCase):
+    def test_the_gh_of_each_write_holds_the_dispatcher_lock(self):
+        calls = []
+
+        def run(cmd, **kwargs):
+            calls.append((cmd[1:4], kwargs.get('pass_fds')))
+            return SimpleNamespace(returncode=0, stdout='{"id": 1}', stderr='')
+        app = SimpleNamespace(token=lambda permissions, time_left=None: 'tok')
+        identities = Identities('o/r', {'claude': app}, run=run)
+        self.assertIsNone(identities.direct('claude').lock_fd)
+        identities.hold(9)
+        for actor in ('dispatcher', 'claude'):
+            with self.subTest(actor=actor):
+                calls.clear()
+                client = identities.direct(actor)
+                self.assertEqual(client.lock_fd, 9)
+                client.comment(7, 'x')
+                client.issue_comments(7)
+                self.assertEqual(calls, [(['api', '-X', 'POST'], (9,)),
+                                         (['api', '--paginate', 'repos/o/r/issues/7/comments'],
+                                          None)])
+
     def test_off_by_default(self):
         self.assertFalse(load_data()['publication_outbox'])
         self.assertFalse(parse_config(load_data()).publication_outbox)
