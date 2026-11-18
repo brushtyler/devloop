@@ -13,7 +13,11 @@ and, for each agent, the
 model, reasoning effort and extra CLI arguments for writing and reviewing turns. Pass another file
 with `--config`. `preflight` (absent by default) names the agent of the
 [readiness check](guide.md#readiness-check-before-implementation); it must be a configured agent other
-than the implementer. Among the limits, `agent_stall_seconds` (an integer of at least 1, default 900)
+than the implementer. `conclave` (absent by default) lists the three agents of the
+[conclave on a block](guide.md#conclave-on-a-block) (#141): exactly three configured agents,
+different from each other and with different `(kind, model, effort)`; anything else stops devloop
+at startup. Their fallback models are checked when each call runs: one whose tuple coincides with
+another member's is not used. Among the limits, `agent_stall_seconds` (an integer of at least 1, default 900)
 and `agent_stall_action` (`"warn"`, the default, or `"abort"`) control the
 [stall check](guide.md#stalled-agents); other values stop devloop at startup. `max_parallel_actions`
 (default 1) sets how many actions of a tick run at once ([Parallel actions](#parallel-actions)).
@@ -737,7 +741,7 @@ Each agent and the dispatcher can act on GitHub with its own GitHub App (#65), c
 
 | Actor | Does |
 |---|---|
-| dispatcher | every read, labels, escalations, CI rounds, re-runs of failed CI jobs not pertinent to the PR (needs `actions: write`, see [CI failures not pertinent to the PR](#ci-failures-not-pertinent-to-the-pr)), finding closures, a PR's readiness for merge, the labels of the readiness check and its escalation to the supervisor |
+| dispatcher | every read, labels, escalations, CI rounds, re-runs of failed CI jobs not pertinent to the PR (needs `actions: write`, see [CI failures not pertinent to the PR](#ci-failures-not-pertinent-to-the-pr)), finding closures, a PR's readiness for merge, the labels of the readiness check and its escalation to the supervisor, the record of a [conclave](guide.md#conclave-on-a-block) |
 | readiness checker (`preflight`) | the outcome of the [readiness check](guide.md#readiness-check-before-implementation) on the issue, with its `preflight` record, also when a fallback model ran it |
 | implementer | commits (author and committer are its bot), push, opens the PR, fix and blocked comments |
 | reviewer | the review comment and a native GitHub review (`APPROVE`, `REQUEST_CHANGES` or `COMMENT`) on the reviewed commit |

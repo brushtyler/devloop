@@ -34,6 +34,14 @@ trusted_users = ["brushtyler"]
 # slot of max_actions_per_tick. Disabled here: enabling it is the operator's decision.
 # preflight = "codex"
 
+# Conclave on a block (issue #141): when the implementer or a fixer stops as blocked, or a
+# reviewer asks for the operator, these three agents (distinct by GitHub identity and by
+# kind, model and effort, the one that stopped among them) vote on one written resolution. The
+# outcome (UNANIMOUS, BLOCKED or RESERVED) is recorded on the issue or PR, which stays in
+# agent:needs-operator. Each call takes a slot of max_actions_per_tick. Disabled here: enabling
+# it is the operator's decision.
+# conclave = ["claude", "codex", "agy"]
+
 max_open_prs = 2            # devloop PRs in progress at once; new issues wait
 # PRs waiting for a person (issue #199): agent:needs-operator, and agent:ready-to-merge when
 # devloop does not merge them ([merge] mode "off", a level override "off", operator_only_paths;
@@ -203,6 +211,8 @@ required_timeout_minutes = 30
 "devloop/dispatch_preflight.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
 "devloop/dispatch_merge.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
 "devloop/dispatch_actions.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
+"devloop/dispatch_conclave.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
+"devloop/conclave.py" = ["docs/devloop/protocol.md"]
 "devloop/ports.py" = ["docs/architecture.md"]
 "devloop/github.py" = ["docs/architecture.md"]
 "scripts/devloop-pinned" = ["docs/devloop/guide.md"]
@@ -215,6 +225,7 @@ required_timeout_minutes = 30
 "ssdlc_role_fencing.py" = ["docs/writer-fencing.md"]
 "ssdlc_container_holder.py" = ["docs/writer-fencing.md"]
 "ssdlc_telemetry.py" = ["docs/cost-telemetry.md", "docs/bounded-recovery.md"]
+"ssdlc_quota.py" = ["docs/cost-telemetry.md"]
 "ssdlc_recovery.py" = ["docs/cost-telemetry.md", "docs/bounded-recovery.md"]
 "ssdlc_feedback.py" = ["docs/developer-feedback.md"]
 "ssdlc_feedback_admission.py" = ["docs/developer-feedback.md"]

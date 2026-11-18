@@ -109,6 +109,7 @@ How the base effort is adjusted:
 | `SSDLC_ESTIMATE_CAP_USD` | Tier S $3, M $6, L $20 | Separate circuit breaker on **API-equivalent estimates** (Claude CLI `total_cost_usd`) for the whole ticket (`ESTIMATE_CAP_GATE`). `0` disables it |
 | `SSDLC_DEV_BUDGET_USD` | Tier S $1, M $2.5, L $8 | Per-invocation budget passed to the Claude developer as `--max-budget-usd`, independent of both caps |
 | `SSDLC_UNMETERED_QUOTA` | none | Without a frozen limits profile, the subscription CLIs (`codex`, `agy`, comma-separated) the operator declares outside the dollar caps. While either cap is in force, an undeclared `codex` or `agy` call is refused before launch ([Cost telemetry](cost-telemetry.md#measures-required-per-route)) |
+| `SSDLC_QUOTA_CONTROLS` | none | Subscription quota controls, enabled explicitly per route and bucket: a JSON list of `{"route", "bucket", "min_reserve_percent", "max_age_seconds"}`, every field mandatory. A reserve reached or a snapshot that cannot be verified refuses the call before launch; nothing switches to overage, credits or a paid route ([Cost telemetry](cost-telemetry.md#subscription-quota-snapshots-and-controls)) |
 | `SSDLC_MAX_DEV_RETRIES` | `3` | Development attempts per task |
 | `SSDLC_MAX_DESIGN_ROUNDS` | `5` | Initial limit for a new design session |
 | `SSDLC_DEV_TIMEOUT` | `2400` | Developer invocation timeout in seconds |

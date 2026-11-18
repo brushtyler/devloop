@@ -351,12 +351,19 @@ def _valid_report(r):
             and isinstance(r.get('open', False), bool))
 
 
+def _valid_conclave(c):
+    """The conclave on a block (#141): its structure is checked by ``conclave.valid_record``,
+    imported here because that module builds its comments with this one."""
+    from .conclave import valid_record
+    return valid_record(c)
+
+
 _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy': _valid_policy,
           'finding': _valid_finding, 'sync': _valid_sync, 'preflight': _valid_preflight,
           'notice': _valid_notice, 'ledger': _valid_ledger, 'merged': _valid_merged,
           'hold': _valid_hold, 'supervision': _valid_supervision, 'rerun': _valid_rerun,
           'closed': _valid_closed, 'cycle': _valid_cycle, 'report': _valid_report,
-          'receipt': _valid_pr_receipt}
+          'receipt': _valid_pr_receipt, 'conclave': _valid_conclave}
 
 
 def read_marker(text, kind):
