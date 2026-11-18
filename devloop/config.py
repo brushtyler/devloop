@@ -180,6 +180,9 @@ class AgentConfig:
     # How long a model found unavailable is skipped when the error does not say when it is
     # back (``Resets in <duration>``), with fallback models only (issue #151).
     fallback_memory_seconds: int = 3600
+    # How long a model denied a permission twice in one turn is skipped, when the turn moved on
+    # to the next model of the chain (agy, issue #319).
+    denied_cooldown_hours: int = 6
     # Set on the configurations ``chain`` derives for fallback models: the configured model.
     fallback_for: str = ''
     # Set on the configuration a turn ran with (``Dispatcher._turn``, #151): the models of the
@@ -358,6 +361,16 @@ def _memory_seconds(table, where):
     value = _require(table, 'fallback_memory_seconds', int, where)
     if value < 1:
         raise ConfigError(f'{where}.fallback_memory_seconds: out of range')
+    return value
+
+
+def _denied_cooldown(table, where):
+    """``denied_cooldown_hours`` of an agent (#319): a positive number of hours."""
+    if 'denied_cooldown_hours' not in table:
+        return AgentConfig.denied_cooldown_hours
+    value = _require(table, 'denied_cooldown_hours', int, where)
+    if value < 1:
+        raise ConfigError(f'{where}.denied_cooldown_hours: out of range')
     return value
 
 
@@ -701,6 +714,7 @@ def parse_config(data, root=INSTALL_ROOT):
             fallback_models=_fallback_models(table, where, kind, model, effort),
             unavailable_patterns=patterns, unavailable_exit_codes=codes,
             fallback_memory_seconds=_memory_seconds(table, where),
+            denied_cooldown_hours=_denied_cooldown(table, where),
             write_commands=write_commands, review_commands=review_commands)
     roles = data.get('roles') or {}
     implementer = _require(roles, 'implementer', str, 'roles')
@@ -802,7 +816,7 @@ def sensitive_lists(data):
 _AGENT_KEYS = dict.fromkeys(('kind', 'display_name', 'model', 'model_label', 'effort',
                              'version_cmd', 'write_args', 'review_args', 'commit_trailer',
                              'fallback_models', 'unavailable_patterns', 'unavailable_exit_codes',
-                             'fallback_memory_seconds',
+                             'fallback_memory_seconds', 'denied_cooldown_hours',
                              'write_commands', 'review_commands'))
 OVERLAY_KEYS = {
     **dict.fromkeys(('repo', 'base_branch', 'branch_prefix', 'state_dir', 'test_cmd',

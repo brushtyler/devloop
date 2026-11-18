@@ -9,7 +9,7 @@ recording of its outcome (``_publish_preflight``) and the check itself (``_do_pr
 from here, not re-exported by ``devloop/dispatcher.py``.
 """
 
-from .agents import AgentError, ModelUnavailable, PermissionDenied
+from .agents import AgentError, ModelUnavailable, PermissionDenied, denied_retry_note
 from .apps import DISPATCHER, ISSUE_COMMENT
 from .context import _render_issue_comments, _template
 from .dispatch_actions import ready_approval
@@ -248,15 +248,18 @@ class PreflightMixin:
             # checkout and the hash of the request its prompt gets.
             base = self.ws.head(path)
             key = self._issue_key('preflight', base, digest)
-            # A denied permission is retried once, in the same checkout (#180), as in ``_turn``.
+            # A denied permission is retried once, in the same checkout (#180), as in ``_turn``,
+            # told what was denied and which commands it may run (#319).
+            text = prompt
             for label in (name, f'{name}-retry'):
                 entry = self._open_turn((number, 'preflight'), agent, 'review', label)
                 try:
-                    raw = self.runner.run(agent, 'review', prompt, 'preflight', path, label)
+                    raw = self.runner.run(agent, 'review', text, 'preflight', path, label)
                 except PermissionDenied as exc:
                     self._close_turn(entry, 'failure', exc)
                     error = self._permission_denied(agent, exc, retry=label == name)
                     if error is None:
+                        text = prompt + denied_retry_note(agent, 'review', exc)
                         continue
                     error.key = key
                     raise error from exc
