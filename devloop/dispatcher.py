@@ -2024,11 +2024,25 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             return None
         return bases
 
+    def _ci_closes(self, pr, head, findings):
+        """Whether the CI of ``head`` may still close ``findings`` (#334): all of them are CI
+        findings and that CI, read now, is still running, has not appeared yet within the wait
+        of a just pushed head (#263), or has passed since the snapshot, while the review ran:
+        the next tick records its closures. A CI already concluded without passing closes
+        nothing, and neither does any other owner's finding."""
+        if not findings or any(f['owner'] != CI for f in findings):
+            return False
+        state = self._read_ci(head)[0]
+        return state in ('pending', 'pass') or (state == 'none' and bool(pr.ci_wait))
+
     def _apply_round(self, pr, records, announce, reviews, tested=False):
         """Apply a complete round, ``records`` (one per reviewer). ``reviews``: every review of
         the PR up to the round included. Every finding still open counts here, whoever owns
-        it: an approval does not close another owner's finding. ``tested``: the full suite
-        passed locally on the head after a review that did not know its CI (#271)."""
+        it: an approval does not close another owner's finding. Only CI findings, with the CI
+        of the approved head still running or passed since the snapshot, wait for that CI
+        instead (#334). ``tested``: the
+        full suite passed locally on the head after a review that did not know its CI
+        (#271)."""
         lb = self.cfg.labels
         transient = [lb.review, lb.changes, lb.ready_to_merge]
         verdict = round_verdict(records)
@@ -2038,7 +2052,14 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                                          f'commit `{records[0]["head_sha"][:12]}`')
         if verdict == 'approve':
             left = open_findings(reviews, pr.closures)
-            if left:
+            if left and self._ci_closes(pr, records[0]['head_sha'], left):
+                # Only CI findings, and the CI of the approved head still running or passed
+                # during the review (#334): the approval stays recorded and waits in review.
+                # Passed, the CI closes them and the approval is applied without a new review;
+                # failed, a new CI round opens.
+                self.log(f'  not promoted: CI findings wait for the CI of '
+                         f'{records[0]["head_sha"][:12]}')
+            elif left:
                 # Owners outside the round (CI, an earlier reviewer): no agent closes them.
                 self._escalate(pr.number, _open_findings_reason(left), remove=transient,
                                cls='open_findings')
