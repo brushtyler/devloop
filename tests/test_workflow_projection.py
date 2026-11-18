@@ -142,16 +142,20 @@ class CompleteDataTest(ProjectionCase):
 
 class PartialDataTest(ProjectionCase):
     def test_components_without_data_are_null_and_the_projection_partial(self):
-        # The only call of task A is a legacy row: no measure, and no call to price a gate.
-        self.run_with([row('03-dev-A-a1')])
+        # Task A's only calls are legacy rows, one with an unclassified figure and one without any
+        # cost: neither is a measure, so neither development nor a gate call can be priced.
+        no_cost = row('03-dev-A-a2')
+        del no_cost['cost_usd']
+        self.run_with([row('03-dev-A-a1'), no_cost])
         projection = self.snap()['projection']
         self.assert_parts(projection)
-        self.assertEqual(projection['coverage'], wp.PARTIAL)
+        self.assertEqual(projection['coverage'], wp.NONE)
         for name, measure in projection['measures'].items():
-            self.assertEqual(measure['development']['coverage'], wp.PARTIAL, name)
-            self.assertIn('unclassified', measure['development']['reason'])
+            self.assertEqual((measure['development']['value'], measure['development']['coverage']),
+                             (None, wp.NONE), name)
+            self.assertIn('no completed task has a development call with a known', measure['development']['reason'])
             self.assertEqual((measure['gates']['value'], measure['gates']['coverage']), (None, wp.NONE), name)
-            self.assertIn('no call in the ledger', measure['gates']['reason'])
+            self.assertIn('none of the 2 calls', measure['gates']['reason'])
             self.assertEqual(measure['central']['coverage'], wp.PARTIAL, name)
             self.assertIsNotNone(measure['central']['value'])
             self.assertIsNone(measure['budget'])
@@ -160,8 +164,52 @@ class PartialDataTest(ProjectionCase):
         self.run_with([row('03-dev-A-a1', claude(None)), row('03-dev-A-a2', openrouter(0.6))])
         measures = self.snap()['projection']['measures']
         self.assertEqual(measures['spend_usd']['development']['coverage'], wp.COMPLETE)
-        self.assertEqual(measures['estimate_usd']['development']['coverage'], wp.PARTIAL)
-        self.assertIn('reported no estimate', measures['estimate_usd']['development']['reason'])
+        estimate = measures['estimate_usd']
+        self.assertEqual(estimate['development']['coverage'], wp.PARTIAL)
+        self.assertIn('without a known estimate (A)', estimate['development']['reason'])
+        # The OpenRouter charge has no estimate of its own: a known zero, the Claude call an unknown.
+        self.assertEqual((estimate['gates']['per_call'], estimate['gates']['calls_unknown']), (0, 1))
+        self.assertEqual(estimate['gates']['coverage'], wp.PARTIAL)
+
+    def test_a_claude_call_without_estimate_is_unknown_not_zero(self):
+        self.run_with([row('03-dev-A-a1', claude(None))])
+        measures = self.snap()['projection']['measures']
+        estimate, spend = measures['estimate_usd'], measures['spend_usd']
+        for part in ('development', 'gates'):
+            self.assertEqual((estimate[part]['value'], estimate[part]['coverage']), (None, wp.NONE), part)
+        self.assertIn('known estimate', estimate['development']['reason'])
+        self.assertIn('none of the 1 calls in the sample has a known estimate', estimate['gates']['reason'])
+        # The Claude CLI charges no USD: its spend is a known zero, not a gap.
+        self.assertEqual((spend['development']['value'], spend['development']['coverage']), (0, wp.COMPLETE))
+        self.assertEqual((spend['gates']['value'], spend['gates']['coverage']), (0, wp.COMPLETE))
+
+    def test_a_codex_call_without_measures_is_unknown_in_both(self):
+        codex = telemetry.record('codex', route=telemetry.provenance('codex_cli', 'explicit_config'))
+        self.run_with([row('03-dev-A-a1', codex)])
+        projection = self.snap()['projection']
+        self.assert_parts(projection)
+        self.assertEqual(projection['coverage'], wp.NONE)
+        for name, measure in projection['measures'].items():
+            for part in ('development', 'gates'):
+                self.assertEqual((measure[part]['value'], measure[part]['coverage']), (None, wp.NONE), (name, part))
+
+    def test_a_completed_task_without_observations_does_not_lower_the_average(self):
+        # A and B completed, only A has a call in the ledger, C remains.
+        self.run_with([row('03-dev-A-a1', claude(0.30))])
+        self.writer.append({'schema_version': '1.0', 'tasks': {
+            'A': {'status': 'COMPLETED', 'attempts': 1}, 'B': {'status': 'COMPLETED', 'attempts': 1},
+            'C': {'status': 'PENDING', 'attempts': 0}}}, 'TASK_COMPLETED')
+        projection = self.snap()['projection']
+        self.assert_parts(projection)
+        development = projection['measures']['estimate_usd']['development']
+        self.assertEqual((development['tasks_completed'], development['tasks_observed'],
+                          development['tasks_remaining']), (2, 1, 1))
+        self.assertEqual((development['per_task'], development['value'], development['coverage']),
+                         (0.3, 0.3, wp.PARTIAL))
+        self.assertIn('1 of 2 completed tasks have no development call with a known estimate (B)',
+                      development['reason'])
+        self.assertEqual(projection['coverage'], wp.PARTIAL)
+        self.assertEqual(projection['measures']['estimate_usd']['central']['coverage'], wp.PARTIAL)
 
     def test_without_completed_task_plan_or_known_phase_the_components_are_null(self):
         self.make_run(self.ticket, ledger=LEDGER)
@@ -209,6 +257,21 @@ class PartialDataTest(ProjectionCase):
         self.assertEqual((result['read']['status'], result['read']['attempts']), (ws.COHERENT, 2))
         self.assertEqual(result['projection']['limits']['invocations']['used'], 3)
 
+    def test_a_null_reserve_makes_the_limits_unavailable(self):
+        # A chain that verifies, with a reserve LimitsStore could not add to a charge.
+        store = self.run_with(LEDGER, policy())
+        state = store.journal.load()
+        next(iter(state['invocations'].values()))['conservative_usage'] = {'metered_usd': None}
+        store.journal.append('TEST_MALFORMED_RESERVE', state)
+        before = tree(self.repo)
+        result = self.snap()
+        self.assertEqual(result['read']['status'], ws.COHERENT)
+        limits = result['projection']['limits']
+        self.assertEqual((limits['status'], limits['invocations']), ('unavailable', None))
+        self.assertIn('malformed invocations', limits['reason'])
+        self.assertIsNone(result['projection']['measures']['spend_usd']['budget'])
+        self.assertEqual(tree(self.repo), before)
+
 
 class WarningsTest(ProjectionCase):
     def test_imminent_exhaustion_warns_without_effects_on_the_run(self):
@@ -222,7 +285,8 @@ class WarningsTest(ProjectionCase):
         self.assertEqual(codes, {('BUDGET_NEARLY_EXHAUSTED', 'spend_usd'), ('FORECAST_OVER_CAP', 'spend_usd'),
                                  ('INVOCATIONS_NEARLY_EXHAUSTED', 'invocations')})
         nearly = next(w for w in projection['warnings'] if w['code'] == 'BUDGET_NEARLY_EXHAUSTED')
-        self.assertEqual((nearly['remaining'], nearly['one_call']), (0.2, 0.3))
+        self.assertEqual((nearly['remaining'], nearly['one_call'], nearly['one_call_basis']),
+                         (0.2, 0.3, 'observed_calls'))
         self.assertTrue(all(w['effect'] == 'none' for w in projection['warnings']))
         self.assertTrue(projection['measures']['spend_usd']['budget']['over_cap'])
         # No effect: no file written, the frozen budget and the run's status are unchanged, and
@@ -232,6 +296,33 @@ class WarningsTest(ProjectionCase):
         self.assertEqual(result['run']['status'], 'IN_PROGRESS')
         self.assertEqual(json.loads((self.ticket / 'state.json').read_text())['status'], 'IN_PROGRESS')
         self.assertIsNotNone(store.require_capacity('03-dev', '03-dev', 'claude'))
+
+    def test_the_budget_warning_holds_after_the_gates(self):
+        # Every task done and every gate passed: one call still costs more than what remains.
+        store = self.run_with(LEDGER, policy(metered_usd=0.8), current_phase='06-ops')
+        self.writer.append({'schema_version': '1.0', 'tasks': {
+            t: {'status': 'COMPLETED', 'attempts': 1} for t in 'ABC'}}, 'TASK_COMPLETED')
+        before = tree(self.repo)
+        projection = self.snap()['projection']
+        self.assertEqual(projection['gates_remaining'], [])
+        self.assertIsNone(projection['measures']['spend_usd']['gates']['per_call'])
+        nearly = [w for w in projection['warnings'] if w['code'] == 'BUDGET_NEARLY_EXHAUSTED']
+        self.assertEqual([(w['measure'], w['remaining'], w['one_call'], w['effect']) for w in nearly],
+                         [('spend_usd', 0.2, 0.3, 'none')])
+        self.assertEqual(tree(self.repo), before)
+        self.assertIsNotNone(store.require_capacity('03-dev', '03-dev', 'claude'))
+
+    def test_without_observed_calls_one_call_is_the_frozen_reserve(self):
+        run = {'status': 'AWAITING_SUPERVISOR_SIGNOFF', 'current_phase': '07-docs'}
+        spent = {m: ws.metric(0, ws.COMPLETE, 'ledger', 'USD') for m in ('spend_usd', 'estimate_usd')}
+        reserve = {'model': 'reserve_per_invocation', 'metered_usd': 0.5, 'cli_estimate_usd': 0.5, 'reason': 'r'}
+        limits = {'status': 'active', 'reason': None,
+                  'policy': policy(metered_usd=0.4, live_unknown_usage={'codex': reserve}),
+                  'state': {'invocations': {}}}
+        warnings = wp.project(run, [], None, limits, spent)['warnings']
+        nearly = next(w for w in warnings if w['measure'] == 'spend_usd')
+        self.assertEqual((nearly['code'], nearly['one_call'], nearly['one_call_basis'], nearly['effect']),
+                         ('BUDGET_NEARLY_EXHAUSTED', 0.5, 'frozen_limits', 'none'))
 
     def test_a_projection_is_pure(self):
         run = {'status': 'IN_PROGRESS', 'current_phase': '03-dev'}

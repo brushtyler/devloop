@@ -115,8 +115,8 @@ For each measure:
 | Field | Content |
 | --- | --- |
 | `spent` | The measure so far, the same value as the metric |
-| `development` | Average per completed task (the measure of the `03-dev-<task>-a<n>` calls of completed tasks, divided by the completed tasks), times the remaining tasks. `per_task`, `tasks_completed`, `tasks_remaining`. `0` when no task remains |
-| `gates` | One call for each remaining mandatory global gate (`04-review`, `05-qa`, `05b-appsec`), at the average measure of one gate call (`basis: gate_calls`) or, before any gate ran, of one call of the run (`basis: all_calls`). `per_call`, `gates_remaining` |
+| `development` | Average per completed task (the known measure of the `03-dev-<task>-a<n>` calls of each completed task, averaged over the completed tasks with at least one known call), times the remaining tasks. `per_task`, `tasks_completed`, `tasks_observed`, `tasks_remaining`. `0` when no task remains |
+| `gates` | One call for each remaining mandatory global gate (`04-review`, `05-qa`, `05b-appsec`), at the average known measure of one gate call (`basis: gate_calls`) or, before any gate ran, of one call of the run (`basis: all_calls`). `per_call`, `calls_observed`, `calls_unknown`, `gates_remaining` |
 | `central` | `spent` + `development` + `gates`: the sum of the known components |
 | `budget` | With active frozen limits: `cap`, `accounted` (as `LimitsStore` charges it: observed usage plus frozen reserves), `remaining`, `projected` (`accounted` + development + gates), `over_cap` |
 | `scenario` | With active frozen limits: `accounted` plus each remaining invocation (`invocations` cap minus those used) at the largest frozen reserve per invocation or observed charge of one invocation. `guaranteed_maximum: false`: it is a scenario, not a financial maximum |
@@ -126,22 +126,29 @@ run is `AWAITING_SUPERVISOR_SIGNOFF` or `APPROVED_AND_MERGED`.
 
 **Coverage.** Each component is `{value, unit, coverage, source, reason}`, like a metric. A
 component without data is `value: null`, coverage `none`, with the reason: no task plan, no
-completed task, no development call of a completed task in the ledger, no call to price a gate,
-an unknown phase, no reserve or charge to price an invocation. Calls that reported no charge or
-no estimate, and unclassified legacy figures, make a component `partial`. `central` is
+completed task, no completed task with a known call of the measure, no call with a known measure
+to price a gate, an unknown phase, no reserve or charge to price an invocation.
+
+Only observations enter the averages; a zero reported by a call is an observation. The measure a
+call's route does not report (the spend of a Claude CLI call, the estimate of an OpenRouter
+charge) is a known zero. Everything else is unknown, never zero: a legacy row with or without a
+`cost_usd` (an unclassified figure belongs to no measure), a call on a declared or unknown route
+that reported nothing (Codex, Antigravity), the measure a route requires and the call did not
+report (a Claude call without an estimate). Unknown calls, and completed tasks without a known
+call (named in the reason), are left out of the average and make the component `partial`. `central` is
 `partial` as soon as one of its components is not complete, and `projection.coverage` is
 `complete`, `partial` or `none` over the development and gate components of both measures.
 
 **Limits.** `projection.limits` is `absent` without a frozen profile, `active`, or `unavailable`
 with the reason (a pending limit extension activation, a policy that does not validate, a journal
-that does not match it). The chain of limit extensions is not replayed: dispatch still does.
+that does not match it or that records a malformed invocation, such as a null frozen reserve). The chain of limit extensions is not replayed: dispatch still does.
 Without active limits, `budget` and `scenario` are `null`.
 
 **Warnings.** `projection.warnings` lists, each with `effect: "none"`:
 
 | `code` | When |
 | --- | --- |
-| `BUDGET_NEARLY_EXHAUSTED` | The remaining cap of a measure is zero or less, or at most the cost of one call (`one_call`, the `per_call` of the gates) |
+| `BUDGET_NEARLY_EXHAUSTED` | The remaining cap of a measure is zero or less, or at most the cost of one call (`one_call`): the average known measure of one call of the run (`one_call_basis: observed_calls`) or, without observations, the largest frozen reserve or charge of one invocation (`frozen_limits`). It does not depend on the gates left, so it holds in `06-ops` and `07-docs` too |
 | `FORECAST_OVER_CAP` | `budget.projected` exceeds the cap |
 | `INVOCATIONS_NEARLY_EXHAUSTED` | At most one invocation of the frozen `invocations` cap remains |
 

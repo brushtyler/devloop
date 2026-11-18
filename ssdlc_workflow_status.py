@@ -285,10 +285,14 @@ def _feedback(reader):
     return dict(status='active', projection=projection, reason=None)
 
 
-def _amounts(values):
-    """A map of dollar amounts as ``LimitsStore`` writes them: finite, non-negative or None."""
+def _amounts(values, nullable=True):
+    """A map of dollar amounts as ``LimitsStore`` writes them: finite and non-negative.
+
+    An observed ``usage`` may be None (unknown); a ``conservative_usage`` reserve never is,
+    since ``LimitsStore`` adds it to the charge of its kind."""
     return isinstance(values, dict) and all(
-        v is None or (type(v) in (int, float) and math.isfinite(v) and v >= 0) for v in values.values())
+        (v is None and nullable) or (type(v) in (int, float) and math.isfinite(v) and v >= 0)
+        for v in values.values())
 
 
 def _limits(reader, prefix):
@@ -322,7 +326,7 @@ def _limits(reader, prefix):
         rows = state.get('invocations')
         if not isinstance(rows, dict) or not all(
                 isinstance(row, dict) and _amounts(row.get('usage', {}))
-                and _amounts(row.get('conservative_usage', {})) for row in rows.values()):
+                and _amounts(row.get('conservative_usage', {}), nullable=False) for row in rows.values()):
             return result('unavailable', 'the limits journal has malformed invocations')
     except (TaskError, ValueError, KeyError, TypeError, AttributeError) as exc:
         return result('unavailable', f'frozen limits do not verify: {type(exc).__name__}')

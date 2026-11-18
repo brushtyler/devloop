@@ -17,11 +17,17 @@ accounted charge of the frozen limits plus, for each remaining invocation, the
 largest frozen reserve or observed charge of one invocation: it is not a
 guaranteed financial maximum. A component without data is ``null`` and makes the
 projection partial.
+
+Only observations count: a call whose measure is unknown (a legacy row, a call that
+reported nothing on a declared route, a Claude call without an estimate) and a completed
+task without a known call are left out of the averages, never counted as zeros, and make
+the component partial; with no observation at all the component is ``null``.
 """
 import re
 
 COMPLETE, PARTIAL, NONE = 'complete', 'partial', 'none'
 MEASURES = (('spend_usd', 'metered_usd'), ('estimate_usd', 'cli_estimate_usd'))
+NAMES = tuple(measure for measure, _ in MEASURES)
 # The mandatory global gates, in the order the pipeline runs them (orchestrator.run_pipeline).
 GATES = ('04-review', '05-qa', '05b-appsec')
 PHASE_ORDER = ('00-recon', '01-po', '02-design', '03-dev', '04-review', '05-qa', '05b-appsec',
@@ -42,52 +48,95 @@ def component(value, coverage, source, reason=None, **extra):
                 source=source, reason=reason, **extra)
 
 
-def _calls(rows):
-    """``(sums, calls, gaps)`` of ledger rows: each invocation once, as the caps read them."""
-    from ssdlc_telemetry import classify, ledger_measures
-    seen = set()
+def _label(measure):
+    return measure.replace('_usd', '')
+
+
+def _observe(rows):
+    """The calls of ledger ``rows``, each invocation once: per call, the amount of each measure, or None if unknown.
+
+    A zero is an observation. A measure the call's route does not report (the spend of a Claude
+    CLI call, the estimate of an OpenRouter charge) is a known zero once the call has a measure
+    of its own, reported or required by its route. Everything else is unknown, never a zero: a
+    legacy row or an unclassified figure (whose ``cost_usd`` belongs to no measure), a call on a
+    declared or unknown route that reported nothing (Codex, Antigravity), the measure a route
+    requires and the call did not report.
+    """
+    from ssdlc_telemetry import ROUTE_MEASURES, _amount, classify
+    calls, seen = [], set()
     for row in rows:
-        kind, telemetry = classify(row)
-        if kind == 'invocation':
-            seen.add(telemetry['invocation_id'])
-    measures = ledger_measures(rows)
-    gaps = {'spend_usd': len(measures['unmeasured_spend']), 'estimate_usd': len(measures['unmeasured_estimate'])}
-    return measures, len(seen), gaps
+        kind, t = classify(row)
+        if kind != 'invocation':
+            # A row of this schema without telemetry and without a figure is no engine call.
+            if kind == 'legacy' or row.get('telemetry') is not None or _amount(row.get('cost_usd')):
+                calls.append(dict.fromkeys(NAMES))
+            continue
+        if t['invocation_id'] in seen:
+            continue
+        seen.add(t['invocation_id'])
+        values = {'spend_usd': t['spend']['amount'] if t['spend']['availability'] == 'reported'
+                  and t['spend']['unit'] == 'USD' else None,
+                  'estimate_usd': t['estimate']['amount'] if t['estimate']['availability'] == 'estimated' else None}
+        # A Claude CLI call records no route of its own: its route needs an estimate (as ledger_measures).
+        route = t['route']['value']
+        required = {'spend': 'spend_usd', 'estimate': 'estimate_usd'}.get(
+            ROUTE_MEASURES.get(route) if route else ('estimate' if t['provider'] == 'claude' else None))
+        own = required or next((m for m in NAMES if values[m] is not None), None)
+        if own is not None:
+            values = {m: 0 if m != own and v is None else v for m, v in values.items()}
+        calls.append(values)
+    return calls
 
 
-def _gap_reason(measure, gaps, measures):
-    reasons = []
-    if gaps[measure]:
-        reasons.append(f'{gaps[measure]} completed calls reported no {measure.replace("_usd", "")}')
-    if measures['unclassified_usd']:
-        reasons.append(f'{round(measures["unclassified_usd"], 6)} USD of unclassified figures belong to no measure')
-    return '; '.join(reasons) or None
+def _known(calls, measure):
+    return [c[measure] for c in calls if c[measure] is not None]
 
 
 def _development(ledger, dag):
-    """Per measure: the average per completed task times the remaining tasks."""
+    """Per measure: the average per completed task with observations, times the remaining tasks."""
     if dag is None:
         return {m: component(None, NONE, 'plan and task journal', 'no task plan in this run') for m, _ in MEASURES}
     completed = [n['task_id'] for n in dag['nodes'] if n['status'] == 'COMPLETED']
     remaining = len(dag['nodes']) - len(completed)
     extra = dict(tasks_completed=len(completed), tasks_remaining=remaining)
     if not remaining:
-        return {m: component(0, COMPLETE, 'plan and task journal', per_task=None, **extra) for m, _ in MEASURES}
-    if not completed:
-        return {m: component(None, NONE, SOURCE, 'no completed task to average', per_task=None, **extra)
+        return {m: component(0, COMPLETE, 'plan and task journal', per_task=None, tasks_observed=None, **extra)
                 for m, _ in MEASURES}
-    done = set(completed)
-    rows = [r for r in ledger if (match := DEV_ROW.fullmatch(str(r.get('phase', '')))) and match.group(1) in done]
-    if not rows:
-        return {m: component(None, NONE, SOURCE, 'no development call of a completed task is in the ledger',
-                             per_task=None, **extra) for m, _ in MEASURES}
-    measures, _, gaps = _calls(rows)
+    if not completed:
+        return {m: component(None, NONE, SOURCE, 'no completed task to average', per_task=None,
+                             tasks_observed=0, **extra) for m, _ in MEASURES}
+    rows = {task: [] for task in completed}
+    for r in ledger:
+        if (match := DEV_ROW.fullmatch(str(r.get('phase', '')))) and match.group(1) in rows:
+            rows[match.group(1)].append(r)
+    calls = {task: _observe(task_rows) for task, task_rows in rows.items()}
     out = {}
     for measure, _ in MEASURES:
-        per_task = measures[measure] / len(completed)
-        reason = _gap_reason(measure, gaps, measures)
-        out[measure] = component(per_task * remaining, PARTIAL if reason else COMPLETE, SOURCE, reason,
-                                 per_task=round(per_task, 6), **extra)
+        label = _label(measure)
+        observed, missing, incomplete = {}, [], []
+        for task in completed:
+            known = _known(calls[task], measure)
+            if not known:  # Its cost is unknown: it does not count as a zero in the average.
+                missing.append(task)
+                continue
+            observed[task] = sum(known)
+            if len(known) < len(calls[task]):
+                incomplete.append(task)
+        if not observed:
+            out[measure] = component(None, NONE, SOURCE, f'no completed task has a development call with a known '
+                                     f'{label} in the ledger', per_task=None, tasks_observed=0, **extra)
+            continue
+        reasons = []
+        if missing:
+            reasons.append(f'{len(missing)} of {len(completed)} completed tasks have no development call with a '
+                           f'known {label} ({", ".join(missing)}): the average is of the others')
+        if incomplete:
+            reasons.append(f'{len(incomplete)} completed tasks have development calls without a known {label} '
+                           f'({", ".join(incomplete)}): only their known part is counted')
+        per_task = sum(observed.values()) / len(observed)
+        out[measure] = component(per_task * remaining, PARTIAL if reasons else COMPLETE, SOURCE,
+                                 '; '.join(reasons) or None, per_task=round(per_task, 6),
+                                 tasks_observed=len(observed), **extra)
     return out
 
 
@@ -114,24 +163,40 @@ def _gates(ledger, run):
     if not gates:
         return {m: component(0, COMPLETE, 'state.json', gates_remaining=[], per_call=None, basis=None)
                 for m, _ in MEASURES}, gates
-    rows = [r for r in ledger if GATE_ROW.fullmatch(str(r.get('phase', '')))]
     basis = 'gate_calls'
-    measures, calls, gaps = _calls(rows)
+    calls = _observe([r for r in ledger if GATE_ROW.fullmatch(str(r.get('phase', '')))])
     if not calls:  # No gate has run yet: one call of the run, on average, is the best estimate.
         basis = 'all_calls'
-        measures, calls, gaps = _calls(ledger)
+        calls = _observe(ledger)
     out = {}
     for measure, _ in MEASURES:
-        extra = dict(gates_remaining=list(gates), basis=basis if calls else None)
-        if not calls:
-            out[measure] = component(None, NONE, SOURCE, 'no call in the ledger to estimate one gate call',
-                                     per_call=None, **extra)
+        known = _known(calls, measure)
+        extra = dict(gates_remaining=list(gates), basis=basis if calls else None, calls_observed=len(known),
+                     calls_unknown=len(calls) - len(known))
+        if not known:
+            reason = (f'none of the {len(calls)} calls in the sample has a known {_label(measure)}' if calls
+                      else 'no call in the ledger to estimate one gate call')
+            out[measure] = component(None, NONE, SOURCE, reason, per_call=None, **extra)
             continue
-        per_call = measures[measure] / calls
-        reason = _gap_reason(measure, gaps, measures)
+        per_call = sum(known) / len(known)
+        reason = (f'{len(calls) - len(known)} of {len(calls)} calls in the sample have no known {_label(measure)}: '
+                  'the average is of the others') if len(known) < len(calls) else None
         out[measure] = component(per_call * len(gates), PARTIAL if reason else COMPLETE, SOURCE, reason,
                                  per_call=round(per_call, 6), **extra)
     return out, gates
+
+
+def _one_call(calls, view, measure, kind):
+    """``(amount, basis)`` of one call, the threshold of an imminent exhaustion, whatever phase the run is in.
+
+    The average known amount of one call of the run; without observations, the largest frozen
+    reserve or charge of one invocation; else ``(None, None)``."""
+    known = _known(calls, measure)
+    if known:
+        return round(sum(known) / len(known), 6), 'observed_calls'
+    if view['kinds'][kind]['per_invocation'] is not None:
+        return view['kinds'][kind]['per_invocation'], 'frozen_limits'
+    return None, None
 
 
 def _limits_view(limits):
@@ -186,6 +251,7 @@ def project(run, ledger, dag, limits, spent):
     development = _development(ledger, dag)
     gates, gates_left = _gates(ledger, run)
     view = _limits_view(limits) if limits['status'] == 'active' else None
+    calls = _observe(ledger) if view is not None else []
     measures, warnings = {}, []
     for measure, kind in MEASURES:
         spent_part = component(spent[measure]['value'], spent[measure]['coverage'], spent[measure]['source'],
@@ -202,10 +268,10 @@ def project(run, ledger, dag, limits, spent):
                                    projected=projected, projected_coverage=future['coverage'],
                                    over_cap=None if projected is None else projected > limit['cap'])
             entry['scenario'] = _scenario(view, kind)
-            one_call = gates[measure].get('per_call')
+            one_call, basis = _one_call(calls, view, measure, kind)
             if remaining <= 0 or (one_call is not None and remaining <= one_call):
                 warnings.append(dict(code='BUDGET_NEARLY_EXHAUSTED', measure=measure, cap_kind=kind,
-                                     remaining=remaining, one_call=one_call))
+                                     remaining=remaining, one_call=one_call, one_call_basis=basis))
             if entry['budget']['over_cap']:
                 warnings.append(dict(code='FORECAST_OVER_CAP', measure=measure, cap_kind=kind,
                                      cap=limit['cap'], projected=projected))
