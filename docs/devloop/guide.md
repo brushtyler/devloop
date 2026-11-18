@@ -48,6 +48,12 @@ job with its outcome and duration and, for a job that runs `scripts/run-tests.py
 measures instead of asking the supervisor for them; a job log that cannot be read only leaves
 its summary out (see [Summary of the CI in the prompts](reference.md#summary-of-the-ci-in-the-prompts)).
 
+The review prompt does not say who wrote the change (#389): no implementer key or model, no
+attribution header or marker in the issue, the PR description and the comments it carries, and
+an explicit statement that the reviewer is not the author (see
+[What the reviewers read](protocol.md#attribution)). devloop still keeps the implementer out of
+the reviewers, from the PR's marker.
+
 A head just pushed, without CI yet, is reviewed as if its CI were pending: with `local_tests`
 other than `full` no full suite runs locally in place of the CI for `[ci] grace_minutes`, and as
 long as `main` requires checks up to `[ci] required_timeout_minutes` (see
@@ -849,7 +855,10 @@ escalation to the operator, or when its merge is the operator's
 off, a level `off`, an `operator_only_paths` path). A PR also in `agent:needs-supervisor` waits
 for the supervisor. The agent may be the PR's implementer: each turn is a new CLI process, so it
 does not have the implementer's context, and having the same model it could never count for the
-quorum anyway.
+quorum anyway. Like the review prompt, the advisory one is blind to the author (#389): it names
+neither the implementer nor its model, tells the agent it is not the author, and passes on the
+issue and the PR description without attribution headers and markers (see
+[What the reviewers read](protocol.md#attribution)).
 
 - **One per head.** An `advisory` action, which takes a slot of `max_actions_per_tick`, runs one
   read-only turn of that agent in a disposable checkout of the head (`pr-<n>-advisory`), with

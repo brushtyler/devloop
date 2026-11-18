@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .agents import AgentError, StartFailure
 from .config import LEGACY_NEEDS_OPERATOR
+from .markdown import without_attribution
 from .planning import FIX_COMMAND
 from .ports import Tracker
 from .review import CI, FINDING_COMMAND, finding_key, owner_of
@@ -60,8 +61,9 @@ def format_operator_comments(comments):
         return ''
     intro = ('A trusted user asked for a new review of this commit after the previous verdict. '
              if any(requests_rereview(c.get('body')) for c in comments) else '')
-    rendered = '\n\n'.join(f'### Comment by {c["author"]["login"]}\n\n{c["body"]}'
-                           for c in comments)
+    # Without attribution headers (#389): the reviewer does not learn who wrote the change.
+    rendered = '\n\n'.join(f'### Comment by {c["author"]["login"]}\n\n'
+                           f'{without_attribution(c["body"])}' for c in comments)
     return ('## Comments from trusted users since the previous verdict\n\n' + intro
             + 'The operator wrote them after the previous round, for example to settle a point '
               'that round left to a human.\n\n' + rendered)
@@ -218,7 +220,8 @@ def format_previous_rounds(reviews, fixes, closures=()):
                 parts.append(_format_requested(fix))
             if fix['round'] == review['round'] and (fix['responses'] or not fix.get('requests')):
                 parts.append('Implementer responses:\n' + '\n'.join(
-                    f'- {r["finding_id"]}: {r["action"]}: {r["note"]}' for r in fix['responses']))
+                    f'- {r["finding_id"]}: {r["action"]}: {without_attribution(r["note"])}'
+                    for r in fix['responses']))
     if closures:
         parts.append('### Findings closed by CI or by the operator\n\n' + '\n'.join(
             f'- {c["key"]}: {c["status"]} by '

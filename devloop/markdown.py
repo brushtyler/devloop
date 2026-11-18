@@ -173,6 +173,44 @@ def split_markers(text):
     return '\n'.join(lines[:end]).rstrip(), [line.strip() for line in lines[end:]]
 
 
+_ATTRIBUTION_LINE = re.compile(r'>\s*(?:\*\*(?:Bot|Version|Agent|Model|Reasoning Level):\*\*.*)?')
+_FENCE = re.compile(r'\s{0,3}(`{3,}|~{3,})')
+
+
+def without_attribution(text):
+    """``text`` as the reviewers read it (#389): without the attribution blocks of AGENTS.md
+    (a ``> [!NOTE]`` followed only by Bot, Version, Agent, Model and Reasoning Level lines),
+    wherever they are outside a fenced code block, and without the block of markers that ends
+    it, which records who wrote the change. Every other line stays as it is, technical text that
+    names an agent or a model included: the reviewer must not learn who the author is from the
+    metadata, nothing more. The original on GitHub does not change."""
+    lines = split_markers(text)[0].splitlines()
+    kept, fence, i = [], None, 0
+    while i < len(lines):
+        line = lines[i]
+        if fence is None and line.strip() == '> [!NOTE]':
+            end = i + 1
+            while end < len(lines) and lines[end].lstrip().startswith('>'):
+                end += 1
+            block = [item.strip() for item in lines[i + 1:end]]
+            if (any(item != '>' for item in block)
+                    and all(_ATTRIBUTION_LINE.fullmatch(item) for item in block)):
+                i = end
+                if not kept or not kept[-1].strip():
+                    while i < len(lines) and not lines[i].strip():
+                        i += 1  # no blank lines left where the block was
+                continue
+        opening = _FENCE.match(line)
+        if fence is None and opening:
+            fence = opening.group(1)
+        elif fence is not None and opening and line.strip().rstrip(fence[0]) == '' \
+                and len(line.strip()) >= len(fence):
+            fence = None
+        kept.append(line)
+        i += 1
+    return '\n'.join(kept).strip()
+
+
 def with_record(body, kind, payload, text=None):
     """``body``, a published comment, with its record of ``kind`` set to ``payload``: the marker
     of that kind replaced where it is, or added after the others, which stay as they are.
