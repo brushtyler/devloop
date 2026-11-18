@@ -1,6 +1,6 @@
 # ADR 0005: deleghe al supervisore, implementer generico e pool dei reviewer
 
-- **Stato:** approvato dall'operatore con il merge di PR #373 (2026-11-18), accettando le raccomandazioni della sezione 4. Le decisioni riservate sono state prese il 2026-11-18 (vedi la [sezione 4](#4-decisioni-riservate-alloperatore)); quelle rimaste aperte sono indicate lì. Il resto del documento è il registro della proposta: le alternative e l'analisi restano come scritte prima dell'approvazione. Fanno eccezione le due integrazioni chieste dall'operatore il 2026-11-18 alle 15:20, prima del merge: l'analisi delle cause per ogni estensione di limiti e le chiavi degli agent in configurazione. Sono scritte nelle sezioni 3.1, 3.2, 3.3, 4 e 5. Lo stesso vale per le correzioni chieste dall'operatore il 2026-11-18 dalle 16:40 alle 16:55, sempre prima del merge: la policy di fiducia in un file riservato all'operatore e le chiavi con agent e ruolo per esteso, che sostituiscono lo schema con il suffisso `-impl`. Sono scritte nelle sezioni 1, 2, 3.1, 3.2, 3.3, 4 e 5.
+- **Stato:** approvato dall'operatore con il merge di PR #373 (2026-11-18), accettando le raccomandazioni della sezione 4. Le decisioni riservate sono state prese il 2026-11-18 (vedi la [sezione 4](#4-decisioni-riservate-alloperatore)); quelle rimaste aperte sono indicate lì. Il resto del documento è il registro della proposta: le alternative e l'analisi restano come scritte prima dell'approvazione. Fanno eccezione le due integrazioni chieste dall'operatore il 2026-11-18 alle 15:20, prima del merge: l'analisi delle cause per ogni estensione di limiti e le chiavi degli agent in configurazione. Sono scritte nelle sezioni 3.1, 3.2, 3.3, 4 e 5. Lo stesso vale per le correzioni chieste dall'operatore il 2026-11-18 dalle 16:40 alle 16:55, sempre prima del merge: la policy di fiducia in un file riservato all'operatore e le chiavi con agent e ruolo per esteso, che sostituiscono lo schema con il suffisso `-impl`. Sono scritte nelle sezioni 1, 2, 3.1, 3.2, 3.3, 4 e 5. La decisione dell'operatore del 2026-11-18 alle 21:50, anch'essa prima del merge, **sostituisce** quella sulla policy di fiducia delle 16:40: niente file riservato né misura temporanea sull'overlay, ma una regola per i reviewer, e i tetti delle deleghe come costanti del codice. È scritta nelle sezioni 1, 2, 3.1, 4 e 5.
 - **Fase:** design (#370).
 - **Data:** 2026-11-18.
 - **Base verificata:** il commit 7b336c9 di `main`.
@@ -54,6 +54,9 @@ Questo ADR segue il [ciclo degli ADR](README.md#ciclo-di-un-adr) di `docs/adr/RE
 | Da dove viene la policy | Dal dispatcher in esecuzione, mai dal branch della PR. Un merge che tocca `devloop/` entra in vigore con il pin successivo, automatico con `[pin] auto` | devloop/config.toml:84-86, :147-155 |
 | Overlay locale | `<state_dir>/config.local.toml` può impostare le stesse chiavi di `config.toml`, `trusted_users` e `operator_only_paths` compresi. Un elenco dell'overlay sostituisce quello sotto | devloop/__main__.py:152; devloop/pin.py:39; devloop/config.py:839-868, :886-899 |
 | Tetti delle deleghe | Le deleghe non esistono ancora. L'unico tetto di oggi è la costante `MAX_RETRIES` | devloop/supervision.py:61 |
+| Review e policy di fiducia | Il verdetto `needs_operator` esiste già per "a product or authority decision", ma il prompt della review non nomina la policy di fiducia | devloop/schemas/review.json:7; devloop/prompts/review.md:58-59 |
+| Review consultiva (#369) | Gira solo sulle PR già in `agent:needs-operator` e non ha un verdetto: scrive rischi, `operator_checks` e un'opinione non vincolante | devloop/prompts/advisory.md:5-8, :20-25 e devloop/schemas/advisory.json:4-12, al commit 92e3e07 |
+| Conclave | Su un `needs_operator` può sbloccare il lavoro con una decisione unanime, salvo che un membro segnali il perimetro riservato all'operatore (`RESERVED`). Oggi è spento | devloop/conclave.py:3-20; devloop/config.toml:43 |
 
 ### Round, retry e comandi del supervisore
 
@@ -125,7 +128,7 @@ Questo ADR segue il [ciclo degli ADR](README.md#ciclo-di-un-adr) di `docs/adr/RE
 | G4 | Il pool ha due reviewer, entrambi necessari al livello 2, senza riserva | Il 2026-11-18 agy era senza quota su Argon e Hydrogen ha restituito un 404 |
 | G5 | Un fallback può passare a un modello dello stesso fornitore dell'implementer senza che devloop se ne accorga: agy offre anche modelli Claude | Nessuna, finora |
 | G6 | Le decisioni arrivano all'operatore una per una, in qualsiasi momento | Sette interruzioni |
-| G7 | La policy di fiducia (`trusted_users`, `operator_only_paths`, regole di review e di merge) sta in `devloop/config.toml`, che non è un percorso riservato. Una PR di livello 2 mergiata in `auto` potrebbe togliere un percorso riservato o aggiungere un utente fidato senza che l'operatore la veda | Nessuna, finora. Dal 2026-11-18 l'overlay locale rende riservato `devloop/config.toml` (D4) |
+| G7 | La policy di fiducia (`trusted_users`, `operator_only_paths`, regole di review e di merge) sta in `devloop/config.toml`, che non è un percorso riservato. Una PR di livello 2 mergiata in `auto` potrebbe togliere un percorso riservato o aggiungere un utente fidato senza che l'operatore la veda | Nessuna, finora. La decisione del 2026-11-18 alle 21:50 la affida ai reviewer (regola 2 della sezione 3.1) |
 
 ## 3. Proposte
 
@@ -135,7 +138,7 @@ Ogni area ha alternative e una raccomandazione. Le raccomandazioni sono proposte
 
 #### Revisione limitata della decisione 5 dell'ADR 0001
 
-La decisione 5 dell'ADR 0001 si rivede **solo** per le deleghe elencate in questa sezione, entro i tetti della policy riservata all'operatore (regola 2). Fuori da questi casi resta com'è. Rivedono di conseguenza, nella stessa misura:
+La decisione 5 dell'ADR 0001 si rivede **solo** per le deleghe elencate in questa sezione, entro i tetti scritti nel codice (regola 2). Fuori da questi casi resta com'è. Rivedono di conseguenza, nella stessa misura:
 
 - il principio 3 dell'ADR 0002 ("budget e round");
 - il principio 4 dell'ADR 0002, solo per i retry dei fallimenti tecnici;
@@ -152,14 +155,24 @@ La decisione 5 dell'ADR 0001 si rivede **solo** per le deleghe elencate in quest
 
 #### Regole comuni a tutte le deleghe
 
-1. **Solo con un comando.** La delega si esercita con un comando del supervisore sul tracker, come quelli di oggi (devloop/supervision.py:120-140). devloop lo accetta solo entro i tetti della policy riservata (regola 2), verificati dal dispatcher al momento del comando. Il supervisore **non modifica mai a mano** la configurazione né l'overlay locale.
-2. **Policy di fiducia in un file riservato all'operatore** (decisione dell'operatore del 2026-11-18, opzione B). Proteggere solo i tetti non basta: oggi `trusted_users`, `operator_only_paths` e le regole di review e di merge stanno in `devloop/config.toml`, che non è riservato (G7). Un file nuovo in `devloop/`, per esempio `operator_policy.toml`, contiene tutta la policy di fiducia:
-   - `operator_only_paths`, che **include il file stesso**, così che si protegga da solo. Una PR che lo cambia, anche per togliersi dall'elenco, la mergia l'operatore, perché la policy che decide è quella del dispatcher in esecuzione e non quella del branch (devloop/config.toml:84-85);
-   - `trusted_users`;
-   - i **tetti massimi delle deleghe**: +2 round per PR, 3 concessioni al giorno, 24 ore per un limite temporaneo, tolleranza di budget del 25%, tetti di capacità per chiave (D3 e D4);
-   - le regole di merge e dei livelli di review, che decidono chi può mergiare.
-
-   La configurazione e l'overlay locale possono solo **abbassare** i tetti o spegnere le deleghe: il dispatcher rifiuta all'avvio un overlay che li alzi. Alzare un tetto è quindi una modifica del file riservato, che mergia solo l'operatore. La migrazione è l'issue P5-0, da mergiare per prima. Fino al suo merge vale la misura temporanea di D4: `devloop/config.toml` è in `operator_only_paths` attraverso l'overlay locale.
+1. **Solo con un comando.** La delega si esercita con un comando del supervisore sul tracker, come quelli di oggi (devloop/supervision.py:120-140). devloop lo accetta solo entro i tetti scritti nel codice (regola 2), verificati dal dispatcher al momento del comando. Il supervisore **non modifica mai a mano** la configurazione né l'overlay locale.
+2. **Tetti nel codice e policy di fiducia riconosciuta dai reviewer** (decisione dell'operatore del 2026-11-18 alle 21:50, che sostituisce quella delle 16:40 sul file riservato). Oggi `trusted_users`, `operator_only_paths` e le regole di review e di merge stanno in `devloop/config.toml`, che non è riservato (G7). Il rischio reale non è un attacco ma una regressione accidentale, o un agent che si sblocca allentando un controllo. Le PR su `devloop/` passano già da due reviewer indipendenti di fornitori diversi (livello 2, devloop/config.toml:93) e dalla CI.
+   - **Tetti nel codice.** I tetti massimi delle deleghe sono **costanti del codice**, come `MAX_RETRIES` (devloop/supervision.py:61): +2 round per PR, 3 concessioni al giorno, 24 ore per un limite temporaneo, tolleranza di budget del 25%, tetti di capacità per chiave (D3 e D4). La configurazione e l'overlay locale possono solo **abbassarli** o spegnere le deleghe: il dispatcher rifiuta all'avvio un valore che li alzi.
+   - **Regola per i reviewer.** Il prompt della review chiede esplicitamente di riconoscere le modifiche alla **policy di fiducia** e di dare in quel caso il verdetto `needs_operator`, con il motivo in `human_reason`. Il verdetto esiste già (devloop/schemas/review.json:7), ma oggi il prompt non nomina la policy (devloop/prompts/review.md:58-59). Solo queste PR arrivano all'operatore. La policy comprende:
+     - `trusted_users`;
+     - `operator_only_paths`;
+     - modalità e regole di merge;
+     - livelli di review e pool dei reviewer;
+     - limiti dei round;
+     - tetti delle deleghe;
+     - permessi degli agent (`write_args`, `review_args`, sandbox);
+     - app e identità;
+     - **il codice che la applica**.
+   - **Review consultiva.** Anche il suo prompt chiede di riconoscere le modifiche alla policy di fiducia. Non ha un verdetto e gira solo su PR già all'operatore (sezione 1): le segnala in modo esplicito fra gli `operator_checks`, con il motivo.
+   - **Conclave.** Se l'operatore lo attiva, una modifica alla policy di fiducia rientra nel perimetro riservato all'operatore (`RESERVED`): il conclave non può sbloccare un `needs_operator` dato per questo motivo (devloop/conclave.py:3-16).
+   - Alzare un tetto è una modifica del codice che applica la policy, quindi ricade nella regola. Lo stesso vale per una PR che cambia la regola stessa.
+   - **Nessun file riservato.** Il file `operator_policy.toml`, i test di invarianti e CODEOWNERS non si fanno: per questo rischio sarebbero un'impalcatura sproporzionata. `devloop/config.toml` non è in `operator_only_paths`, nemmeno attraverso l'overlay: rendere riservata tutta la configurazione mandava all'operatore quasi ogni PR.
+   - **Rischi residui accettati** (D4 e sezione 4): la regola dipende dall'attenzione dei reviewer, che sono due e di fornitori diversi ma possono non accorgersene; una modifica deliberatamente mascherata non è coperta; l'overlay locale dell'operatore può indebolire la policy.
 3. **Tetto giornaliero.** Un numero massimo di concessioni del supervisore per giorno UTC, tutte le deleghe insieme, retry esclusi (hanno già il loro limite). Il valore lo sceglie l'operatore (D4); la proposta è 3.
 4. **Traccia.** Ogni uso lascia il record `supervision` di oggi (devloop/dispatch_supervision.py:388-395) e un record `event` del ledger con delega, tetto, valore concesso e residuo. Il riepilogo di #316 elenca le concessioni del giorno; il riepilogo attuale non legge i record `supervision` (devloop/report.py:225-227) e va esteso.
 5. **Verifica.** Le concessioni le verifica il **coordinatore**, che secondo l'ADR 0002 verifica il lavoro del supervisore (docs/adr/0002-ruoli-e-responsabilita.md:30). Oggi il coordinatore è l'operatore (sezione 1): legge le concessioni nel riepilogo di #316 e, se una non lo convince, revoca la delega (regola 6) o riporta la PR a sé. Se un giorno il ruolo passasse a un agent, avrebbe un'**identità propria, distinta da quella del supervisore**, perché ne verifica il lavoro: assegnarlo e crearne l'app sono decisioni dell'operatore (docs/adr/0002-ruoli-e-responsabilita.md:93).
@@ -181,7 +194,7 @@ Oggi `round_limit` è critica e porta la PR all'operatore (devloop/dispatcher.py
 
 - quando la PR raggiunge il limite, il dispatcher valuta se la concessione è delegabile. Se lo è, l'escalation ha una nuova classe non critica, per esempio `round_grantable`, e va in `agent:needs-supervisor`. Altrimenti resta `round_limit` e va all'operatore;
 - il supervisore risponde con `/devloop grant-round <motivo>`, dove il motivo riporta o cita l'analisi delle cause (regola 9). Il dispatcher rilegge le condizioni, concede **un** round a quella PR e registra la concessione. Il limite della PR diventa `max_review_rounds` + round esentati + round concessi: è il calcolo di oggi (devloop/dispatch_actions.py:353-356) con un termine in più. `max_review_rounds` non cambia;
-- il tetto è +2 round per PR, nella policy riservata (regola 2). Un terzo round torna all'operatore come `round_limit`.
+- il tetto è +2 round per PR, una costante del codice (regola 2). Un terzo round torna all'operatore come `round_limit`.
 
 Condizioni di delegabilità, tutte verificate dal dispatcher:
 
@@ -213,7 +226,7 @@ Condizioni di delegabilità, tutte verificate dal dispatcher:
 | **25%** | Su un envelope tipico vale uno o due turni: abbastanza per chiudere un round o un fix | — |
 | 50% | Sblocca quasi sempre | Una storia può costare una volta e mezza il previsto senza che l'operatore lo veda prima |
 
-**Raccomandazione: 25%.** Il valore lo sceglie l'operatore (D3), e va scritto come tetto nella policy riservata (regola 2).
+**Raccomandazione: 25%.** Il valore lo sceglie l'operatore (D3), e va scritto come tetto, una costante del codice (regola 2).
 
 #### Fallimenti tecnici sulle PR dello stesso agent
 
@@ -228,7 +241,7 @@ Oggi il controllo di devloop/dispatch_supervision.py:106-107 manda all'operatore
 #### Capacità
 
 - Comando `/devloop capacity <chiave> <valore> <durata> <motivo>` per `max_open_prs`, `max_parked_prs` e `max_parallel_actions`, sulla issue del riepilogo (`[report] issue`, devloop/config.toml:164-170), l'unica che il dispatcher già tiene come propria. Il motivo riporta l'analisi delle cause (regola 9).
-- Il valore deve stare entro un tetto per ciascuna chiave, che l'operatore fissa nella policy riservata (regola 2); lì sta anche la durata massima, 24 ore (D4). Alla scadenza torna il valore della configurazione.
+- Il valore deve stare entro un tetto per ciascuna chiave, che l'operatore fissa e che sta nel codice come costante (regola 2), come la durata massima di 24 ore (D4). Alla scadenza torna il valore della configurazione.
 - `max_parallel_actions` oggi richiede un riavvio (devloop/config.py:925-927): la delega vale solo per le chiavi che si applicano a caldo, oppure l'implementazione la estende.
 
 **Alternative:** (a) il comando sul tracker, come sopra; (b) un overlay separato che il supervisore può scrivere. **Raccomandazione: (a).** (b) contraddice la regola "mai modificando a mano l'overlay", e un file locale non lascia traccia firmata sul tracker (principio 2 dell'ADR 0002).
@@ -381,24 +394,34 @@ Non serve codice: è una prassi del supervisore, che l'operatore conferma o camb
 
 ## 4. Decisioni riservate all'operatore
 
-Decise dall'operatore il 2026-11-18, accettando le raccomandazioni di questa sezione, con il commento sulla PR #373 e il merge. Includono le integrazioni delle 15:20 e le correzioni della revisione dalle 16:40 alle 16:55:
+Decise dall'operatore il 2026-11-18, accettando le raccomandazioni di questa sezione, con il commento sulla PR #373 e il merge. Includono le integrazioni delle 15:20, le correzioni della revisione dalle 16:40 alle 16:55 e la decisione delle 21:50, che sostituisce quella delle 16:40 sulla policy di fiducia:
 
 - **D1.** ADR approvato.
 - **D2.** La decisione 5 dell'ADR 0001, i principi 3 e 4 dell'ADR 0002, la sezione 3.3 e la D2 dell'ADR 0004 sono rivisti in modo limitato, **solo** per le deleghe della [sezione 3.1](#31-deleghe-al-supervisore). Le deleghe sono tutte approvate, e ciascuna resta spenta finché l'operatore non la attiva (D10). Integrazione del 2026-11-18 alle 15:20:
   - ogni estensione di limiti (round concessi, tolleranza di budget, capacità) richiede un'analisi scritta delle cause, nel comando o nel diario #76. Se la causa è correggibile, il supervisore apre l'issue che la corregge (regola 9 della [sezione 3.1](#regole-comuni-a-tutte-le-deleghe));
   - un problema che si ripete su più PR non si risolve con estensioni caso per caso: il supervisore propone all'operatore un aumento del limite in configurazione oppure la revisione o la riscrittura delle issue (regola 10).
-- **D3.** Tolleranza di budget del **25%**, scritta come tetto nella policy riservata all'operatore (regola 2 della [sezione 3.1](#regole-comuni-a-tutte-le-deleghe)).
+- **D3.** Tolleranza di budget del **25%**, scritta come tetto, una costante del codice (regola 2 della [sezione 3.1](#regole-comuni-a-tutte-le-deleghe)).
 - **D4.**
   - **+2 round per PR**;
   - **3 concessioni al giorno**;
   - durata massima di un limite temporaneo di capacità: **24 ore**;
-  - questi tetti, la tolleranza di D3 e i tetti di capacità per chiave stanno nella policy riservata, non nel codice né in `devloop/config.toml`. La configurazione e l'overlay possono solo abbassarli o spegnere le deleghe, e il dispatcher rifiuta all'avvio un overlay che li alzi;
+  - questi tetti, la tolleranza di D3 e i tetti di capacità per chiave sono **costanti del codice**, come `MAX_RETRIES` (devloop/supervision.py:61), non chiavi di `devloop/config.toml` (decisione delle 21:50). La configurazione e l'overlay possono solo abbassarli o spegnere le deleghe, e il dispatcher rifiuta all'avvio un valore che li alzi. Una modifica dei tetti ricade nella regola per i reviewer;
   - le concessioni si esercitano con il comando sul tracker, opzione (a) della sezione [Capacità](#capacità), mai modificando a mano l'overlay;
   - nessuna concessione senza l'analisi delle cause (D2). Il valore dei limiti in configurazione resta dell'operatore, anche quando il supervisore ne propone l'aumento per un problema ricorrente.
-- **Policy di fiducia in un file riservato all'operatore** (revisione dalle 16:40 alle 16:55, opzione B; regola 2 della [sezione 3.1](#regole-comuni-a-tutte-le-deleghe)):
-  - un file nuovo in `devloop/`, per esempio `operator_policy.toml`, contiene `operator_only_paths`, che include il file stesso, `trusted_users`, i tetti massimi delle deleghe (D3 e D4) e le regole di merge e dei livelli di review che decidono chi può mergiare;
-  - la migrazione è un'issue dedicata, P5-0, da mergiare per prima;
-  - **misura temporanea, attiva dal 2026-11-18 (opzione A):** `devloop/config.toml` è in `operator_only_paths` attraverso l'overlay locale, fino al merge di P5-0. Dopo, l'overlay torna all'elenco del file.
+- **Policy di fiducia riconosciuta dai reviewer** (decisione del 2026-11-18 alle 21:50, che **sostituisce** quella delle 16:40 sul file riservato, opzione B, e sulla misura temporanea, opzione A; regola 2 della [sezione 3.1](#regole-comuni-a-tutte-le-deleghe)):
+  - il prompt della review chiede di riconoscere le modifiche alla policy di fiducia e di dare in quel caso il verdetto `needs_operator`, con il motivo. Il prompt della review consultiva chiede di riconoscerle e di segnalarle all'operatore. Solo quelle PR arrivano all'operatore;
+  - la policy comprende `trusted_users`, `operator_only_paths`, modalità e regole di merge, livelli di review e pool dei reviewer, limiti dei round, tetti delle deleghe, permessi degli agent (`write_args`, `review_args`, sandbox), app e identità, e **il codice che la applica**;
+  - non si fanno il file `operator_policy.toml`, i test di invarianti né CODEOWNERS;
+  - l'opzione A è tolta: `devloop/config.toml` non è più in `operator_only_paths`, nemmeno attraverso l'overlay locale;
+  - la regola è l'issue P5-0, da mergiare per prima;
+  - **rischi residui accettati:**
+    - la regola dipende dall'attenzione dei reviewer: sono due, di fornitori diversi, ma possono non accorgersene;
+    - una modifica deliberatamente mascherata non è coperta;
+    - l'overlay locale dell'operatore può indebolire la policy;
+  - CODEOWNERS, con la code owner review del ruleset, resta una possibile aggiunta futura, solo se emergesse un bisogno reale;
+  - **raccomandazioni non bloccanti** all'operatore, sulle impostazioni di GitHub:
+    - nel ruleset di `main`, la riapprovazione dopo un push (`dismiss_stale_reviews_on_push` o `require_last_push_approval`);
+    - per la sessione del supervisore, un token non admin: oggi usa il login dell'operatore, che ha il bypass del ruleset.
 - **D5.** Campo `security` per finding, opzione (a), con la regola che fallisce chiuso.
 - **Retry sulle PR dello stesso agent del supervisore.** Solo `tool_failure`, opzione (a) della sezione [Fallimenti tecnici sulle PR dello stesso agent](#fallimenti-tecnici-sulle-pr-dello-stesso-agent), con il limite esistente di 2 retry, condiviso con l'operatore.
 - **D6.**
@@ -419,8 +442,7 @@ Decise dall'operatore il 2026-11-18, accettando le raccomandazioni di questa sez
 
 Restano **aperti**, e chi li incontra li tratta come decisioni dell'operatore ancora da prendere:
 
-- i tetti per chiave di `max_open_prs`, `max_parked_prs` e `max_parallel_actions`, che l'operatore fissa nella policy riservata all'attivazione (D4);
-- quali chiavi della policy riservata l'overlay locale possa ancora impostare, oltre ad abbassare i tetti e spegnere le deleghe (P5-0);
+- i tetti per chiave di `max_open_prs`, `max_parked_prs` e `max_parallel_actions`, che l'operatore fissa e che P5-8 scrive come costanti del codice (D4);
 - la creazione delle due app e i loro permessi, che sono credenziali dell'operatore (D6);
 - l'eventuale scrittura delle finestre in `AGENTS.md` (D9).
 
@@ -461,15 +483,16 @@ Questo ADR le elenca, con le alternative e le raccomandazioni, ma **non le prend
 Ogni issue si apre dopo l'approvazione di questo ADR, una per area. Le issue nascono dopo il merge della PR #373 e citano la sezione di questo ADR su `main` che attuano, come chiede il [ciclo degli ADR](README.md#ciclo-di-un-adr).
 
 - Tutte toccano `devloop/` e richiedono il livello 2 di review: `devloop/` è in `sensitive_paths` (devloop/config.toml:93).
-- Quelle che toccano `AGENTS.md` o `CLAUDE.md` le mergia l'operatore (`operator_only_paths`, devloop/config.toml:141). Lo stesso vale, fino al merge di P5-0, per quelle che toccano `devloop/config.toml` (misura temporanea di D4) e, dopo, per quelle che toccano il file della policy riservata.
+- Quelle che toccano `AGENTS.md` o `CLAUDE.md` le mergia l'operatore (`operator_only_paths`, devloop/config.toml:141). `devloop/config.toml` non è riservato.
+- Dopo P5-0, una PR che cambia la policy di fiducia, compreso il codice che la applica, va all'operatore con il verdetto `needs_operator` dei reviewer (regola 2 della [sezione 3.1](#regole-comuni-a-tutte-le-deleghe)). Ne fanno parte quasi tutte le issue di questo piano: tetti delle deleghe, app e identità, pool dei reviewer.
 - Ogni issue aggiorna i documenti che la mappa `[docs.map]` lega ai file che cambia.
 - Nessuna issue modifica i file fissati dalla baseline del replay gate né il comportamento del motore locale.
 - Le nuove funzioni restano spente finché l'operatore non le attiva (D10).
 
 | Issue | Titolo proposto | Perimetro | Dipendenze | Review |
 |---|---|---|---|---|
-| P5-0 | feat(devloop): policy di fiducia in un file riservato all'operatore | Il file nuovo in `devloop/`, per esempio `operator_policy.toml`, con `operator_only_paths` che include il file stesso, `trusted_users`, le regole di merge e dei livelli di review, e i tetti massimi delle deleghe di D3 e D4, che le issue successive leggono da qui. `devloop/config.toml` non contiene più queste chiavi. La configurazione e l'overlay possono solo abbassare i tetti o spegnere le deleghe: il dispatcher rifiuta all'avvio un overlay che li alzi. I valori di oggi non cambiano: si spostano. Al merge, l'operatore toglie dall'overlay la misura temporanea di D4 | Approvazione dell'ADR | Livello 2, merge dell'operatore |
-| P5-1 | feat(devloop): comando di concessione dei round con tetti e registro | `/devloop grant-round <motivo>`; classe non critica `round_grantable` quando le condizioni della [sezione 3.1](#round-di-review) sono verificate; limite per PR = `max_review_rounds` + esentati + concessi; tetto +2 per PR nella policy riservata; tetto giornaliero comune; record `supervision` ed `event` del ledger; chiave di revoca; comando di estensione rifiutato senza il motivo che porta l'analisi delle cause (regola 9). Campo `security` dei finding nello schema e nel prompt della review, secondo D5. Le regole comuni delle deleghe nascono qui e le riusano P5-2, P5-7 e P5-8 | P5-0, approvazione dell'ADR, D2, D4 e D5 | Livello 2 |
+| P5-0 | feat(devloop): i reviewer riconoscono le modifiche alla policy di fiducia | Il prompt della review (devloop/prompts/review.md) chiede di riconoscere le modifiche alla policy di fiducia, con l'elenco della regola 2 della [sezione 3.1](#regole-comuni-a-tutte-le-deleghe) compreso il codice che la applica, e di dare in quel caso il verdetto `needs_operator` con il motivo. Il prompt della review consultiva (devloop/prompts/advisory.md) chiede di riconoscerle e di segnalarle negli `operator_checks`. Il prompt della proposta del conclave le tratta come perimetro riservato (`RESERVED`). I tetti delle deleghe non nascono qui: sono costanti del codice nelle issue che introducono ciascuna delega | Approvazione dell'ADR | Livello 2. Cambia la regola stessa, quindi va all'operatore |
+| P5-1 | feat(devloop): comando di concessione dei round con tetti e registro | `/devloop grant-round <motivo>`; classe non critica `round_grantable` quando le condizioni della [sezione 3.1](#round-di-review) sono verificate; limite per PR = `max_review_rounds` + esentati + concessi; tetto +2 per PR e tetto giornaliero comune come costanti del codice, che configurazione e overlay possono solo abbassare; record `supervision` ed `event` del ledger; chiave di revoca; comando di estensione rifiutato senza il motivo che porta l'analisi delle cause (regola 9). Campo `security` dei finding nello schema e nel prompt della review, secondo D5. Le regole comuni delle deleghe nascono qui e le riusano P5-2, P5-7 e P5-8 | P5-0, approvazione dell'ADR, D2, D4 e D5 | Livello 2 |
 | P5-2 | feat(devloop): retry dei fallimenti tecnici sulle PR dello stesso agent del supervisore | Il controllo di devloop/dispatch_supervision.py:106-107 non vale più per `tool_failure`; resta per le altre classi. Limite di 2 retry invariato e condiviso con l'operatore. Chiave di revoca | P5-0, approvazione dell'ADR e D2 | Livello 2 |
 | P5-3 | feat(devloop): app implementer, chiavi per ruolo e selezione dell'agent | Attore riservato `implementer` con la sua app per commit, push, PR e record dei fix; scripts/agent-token.py non lo espone; `identity` del profilo uguale all'app implementer. Chiavi con agent e ruolo per esteso (`claude-implementer`, `codex-reviewer`, …) e app dichiarata dall'agent (`app = "implementer"` per gli implementer), con i vincoli della sezione [Chiavi degli agent e app dichiarata](#chiavi-degli-agent-e-app-dichiarata); controlli di conflitto per agent effettivo e fornitore, mai per chiave. Migrazione con la coda vuota: arresto all'avvio con PR aperte i cui marker citano chiavi assenti o con un ruolo diverso, lettura dei record storici con le vecchie chiavi `claude`, `codex` e `agy` senza riscriverli, migrazione della memoria dei modelli non disponibili, `advisory_reviewer` di #369 a `claude-reviewer`. Default `roles.implementer = "claude-implementer"`. Selezione dell'agent secondo D7, registrata nel record `request` e nel marker della PR; controllo del preflight per issue; esclusione del pool per PR. `AGENTS.md`, tabella delle identità, aggiornato: la mergia l'operatore | P5-0, approvazione dell'ADR, D6 (app implementer creata dall'operatore) e D7 | Livello 2, merge dell'operatore |
 | P5-4 | feat(devloop): app del supervisore | Attore riservato `supervisor` con la sua app di ruolo `[apps.supervisor]` per comandi, label, issue e diario, che nessun agent dichiara: `_may_hold`, gli ammessi alle label e i comandi sulle escalation la riconoscono al posto dell'app dell'agent `roles.supervisor` (devloop/dispatcher.py:679-693). `[roles.supervisor]` descrive l'attore `claude-supervisor`, fuori da `[agents]`, con `kind`, `provider` e modello, per il controllo sulle PR dello stesso agent. scripts/agent-token.py non la espone; percorso dedicato con cui il supervisore ottiene il token. Parte della migrazione delle chiavi che riguarda il supervisore, con lo stesso requisito minimo di P5-3. `AGENTS.md`, tabella delle identità, aggiornato: la mergia l'operatore | P5-0, approvazione dell'ADR e D6 (app del supervisore creata dall'operatore). Indipendente da P5-3 | Livello 2, merge dell'operatore |
@@ -480,7 +503,7 @@ Ogni issue si apre dopo l'approvazione di questo ADR, una per area. Le issue nas
 
 **Ordine.**
 
-- P5-0 si mergia per prima: tutte le altre la aspettano, direttamente o attraverso le loro dipendenze. Con il suo merge finisce la misura temporanea di D4.
+- P5-0 si mergia per prima: tutte le altre la aspettano, direttamente o attraverso le loro dipendenze, perché cambiano il codice che applica la policy di fiducia e la regola per i reviewer le deve già coprire.
 - P5-1 e P5-2 sono indipendenti fra loro e partono dopo P5-0. P5-2 è la più piccola e toglie da sola il caso di #357.
 - P5-3 e P5-4 partono dopo P5-0, quando l'operatore ha creato la rispettiva app (D6), e sono indipendenti fra loro. P5-5 le aspetta tutte e due: finché `claude-agent` firma il codice dell'implementer o i comandi del supervisore, claude non può entrare nel pool dei reviewer. P5-5 aspetta anche la migrazione delle chiavi di P5-3: `claude-reviewer` entra nel pool solo dopo che l'implementer è passato a `claude-implementer`. P5-6 segue P5-5.
 - Le regole 9 e 10 della sezione 3.1 non hanno un'issue a parte: P5-1 rifiuta i comandi senza motivo, e il resto è una prassi del supervisore che verifica il coordinatore.
@@ -492,7 +515,8 @@ Ogni issue si apre dopo l'approvazione di questo ADR, una per area. Le issue nas
 
 - approvazioni da parte del supervisore, in qualsiasi forma;
 - estensioni in USD o in token, e seconde estensioni dello stesso envelope;
-- ogni cambio alle direttive di merge, ai livelli di review o a `operator_only_paths`, salvo il loro spostamento nella policy riservata di P5-0, che conserva i valori di oggi e aggiunge il file stesso ai percorsi riservati;
+- ogni cambio alle direttive di merge, ai livelli di review o a `operator_only_paths`;
+- un file riservato per la policy di fiducia, i test di invarianti e CODEOWNERS (decisione del 2026-11-18 alle 21:50);
 - più implementer sulla stessa PR.
 
 ## Precedenti
