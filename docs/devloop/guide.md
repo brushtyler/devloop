@@ -839,14 +839,17 @@ the issue, or adds the hash of the new request to the one it has, and the commen
 only through that marker of the dispatcher, never through what its text, an agent or a user
 writes. With it off, and for issues taken over before, nothing changes.
 
-With `publication_outbox = true` (#385, off by default), every comment devloop writes is saved in
-the same journal before it is sent, through the
-[publication outbox](protocol.md#publication-outbox). A comment whose outcome is uncertain (a
+With `publication_outbox = true` (#385, off by default), every comment, native review and pull
+request devloop writes is saved in the same journal before it is sent, through the
+[publication outbox](protocol.md#publication-outbox). A write whose outcome is uncertain (a
 timeout, a 5xx answer) is looked for on GitHub before anything else is sent: found, it is not
-sent again; not found, it is sent once more. After a restart, the first tick finishes what was
-left half published, without duplicates. A line `publication <id> ... not settled` in the log is
-a write that could not be checked on GitHub yet: the next tick tries again, and no new comment is
-sent on that issue or PR until it is settled.
+sent again; not found once it can no longer take effect (30 seconds after the attempt, waited
+for in the step), it is sent once more. After a restart, the first tick finishes what was left
+half published, without duplicates: a write cut short is sent again only when it is still absent
+five and a half minutes after its attempt started (the timeout of a `gh` call plus 30 seconds). A line `publication <id> ... not settled` in
+the log is a write that could not be checked on GitHub yet, or not conclusively: the next tick
+tries again, and nothing new is sent on that issue or PR until it is settled. If the journal
+cannot take an outcome, nothing is sent until it does.
 
 ### Advisory review for the operator
 

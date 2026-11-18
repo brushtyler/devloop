@@ -107,8 +107,10 @@ ambient `gh` login is known only as one of `trusted_users`), and `exclude` skips
 known as the publication of another write. The
 [publication outbox](devloop/protocol.md#publication-outbox) of
 [ADR 0004](adr/0004-passo-2-budget-stato-durevole.md) (#385, `devloop/outbox.py`) calls it
-before any new POST when `publication_outbox` is on; it wraps the clients of
-`Identities.github` and is itself a `Backend`. Without it the dispatcher still handles an
+before any new POST when `publication_outbox` is on, and sends a write again only on an
+absence read when the uncertain attempt could no longer take effect; it wraps the `comment`,
+`edit_comment`, `submit_review` and `create_pr` of the clients of `Identities.github` and is
+itself a `Backend`. Without it the dispatcher still handles an
 uncertain outcome as a failed write. The other writes and the reads report every failure as a
 `GitHubError`, as before.
 

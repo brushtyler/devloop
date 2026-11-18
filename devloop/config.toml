@@ -34,10 +34,11 @@ block_uncertain_turns = false
 # story of another only from that marker, never from text. Off here: turning it on is the
 # operator's decision (ADR 0004, D8).
 story_identity = false
-# The outbox of the publications (issue #385): every comment and comment edit devloop writes
-# (ledger records, agent outputs, receipts, escalations) is saved in the journal of the turns
-# before it is sent. An uncertain outcome (timeout, 5xx) is reconciled on the exact comment of
-# the same author before any new POST, and a restart resumes what was left half published.
+# The outbox of the publications (issue #385): every comment, comment edit, native review and
+# pull request devloop writes (ledger records, agent outputs, receipts, escalations) is saved in
+# the journal of the turns before it is sent. An uncertain outcome (timeout, 5xx) is reconciled
+# on the exact comment of the same author before any new POST, never sent again on absence
+# alone, and a restart resumes what was left half published.
 # Off here: turning it on is the operator's decision (ADR 0004, D8).
 publication_outbox = false
 # Language of the text that agents write for GitHub.

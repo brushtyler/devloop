@@ -119,8 +119,9 @@ def build(args):
     command = getattr(args, 'command', None)
     read_only = command == 'status' or (command == 'tick' and getattr(args, 'dry_run', False))
     ledger = Ledger(None, state_dir=state, read_only=read_only)
-    # With publication_outbox (#385), every client's comments are in that journal before they
-    # are sent; never from status or a dry run, which do not write it.
+    # With publication_outbox (#385), every client's comments, native reviews and pull requests
+    # are in that journal before they are sent; never from status or a dry run, which do not
+    # write it.
     if cfg.publication_outbox and not read_only:
         identities.outbox = for_identities(identities, ledger.journal, cfg.trusted_users,
                                            log=tick_log)

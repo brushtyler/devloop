@@ -36,10 +36,11 @@ another value stops devloop at startup. `story_identity` (a boolean, default `fa
 [story identity](protocol.md#story-identity) (#363): at the takeover of an issue the journal
 records its story and the `request` record carries the dispatcher's `story` marker. Off, devloop
 records no story; another value stops devloop at startup. `publication_outbox` (a boolean, default
-`false`) turns on the [publication outbox](protocol.md#publication-outbox) (#385): every comment
-and comment edit of the dispatcher's and the agents' clients is saved in the turn journal before
-it is sent, an uncertain outcome is reconciled on the exact comment of the same author before any
-new POST, and each tick resumes what a restart left half published. Off, devloop publishes as
+`false`) turns on the [publication outbox](protocol.md#publication-outbox) (#385): every comment,
+comment edit, native review and pull request of the dispatcher's and the agents' clients is saved
+in the turn journal before it is sent, an uncertain outcome is reconciled on the exact comment of
+the same author before any new POST and sent again only on an absence that is conclusive, and
+each tick resumes what a restart left half published. Off, devloop publishes as
 before; another value stops devloop at startup. It applies at the next start.
 `[merge]` (`mode`, `levels`, `operator_only_paths`) and `roles.supervisor` set the
 [merge modes](guide.md#merge-modes); an unknown mode, level or key stops devloop at startup.
@@ -802,7 +803,8 @@ header is keyed on the exact push URL, so that no `http.<url>.extraHeader` in a 
 more specific, and `git -c` settings inherited through `GIT_CONFIG_PARAMETERS` are dropped. An actor
 without an app uses the ambient `gh` login and its records must come from `trusted_users`, as
 before. With `publication_outbox` on (#385), `Identities.github` hands out each client with its
-`comment` and `edit_comment` through the [publication outbox](protocol.md#publication-outbox),
+`comment`, `edit_comment`, `submit_review` and `create_pr` through the
+[publication outbox](protocol.md#publication-outbox),
 which reconciles an uncertain write on the app's login, or on `trusted_users` for the ambient
 login; `Identities.direct` gives the client without it. An app that is configured but whose key is missing stops devloop at startup instead of
 silently falling back to the operator's login: remove it from `[apps]` (or use `--config`) to run

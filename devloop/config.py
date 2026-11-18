@@ -303,9 +303,10 @@ class Config:
     # its story, and the comment of its ``request`` record carries the dispatcher's ``story``
     # marker. Off by default (ADR 0004, D8): devloop behaves as before.
     story_identity: bool = False
-    # The outbox of the publications (#385, ``outbox.Outbox``): every comment and edit is in
-    # the journal of the turns before it is sent, and an uncertain one is reconciled before any
-    # new POST. Off by default (ADR 0004, D8): devloop publishes as before.
+    # The outbox of the publications (#385, ``outbox.Outbox``): every comment, edit, native
+    # review and pull request is in the journal of the turns before it is sent, and an uncertain
+    # one is reconciled before any new POST. Off by default (ADR 0004, D8): devloop publishes as
+    # before.
     publication_outbox: bool = False
     agent_timeout_seconds: int = 3600
     test_timeout_seconds: int = 3600

@@ -26,8 +26,10 @@ before it (``previous``) and its own (``sha256``), like the journal of the local
   the turn blocks the whole work also after a restart. Until it is linked, a legacy turn may
   be on a PR of any work, and with the block it blocks every new turn;
 - ``publication`` and the other events whose kind starts with it: the outbox of the
-  publications (``outbox.Outbox``, #385), with ``publication_outbox`` on. Each comment and edit
-  devloop writes on GitHub is here, body included, before it is sent. The turns ignore them.
+  publications (``outbox.Outbox``, #385), with ``publication_outbox`` on. Each comment, edit,
+  native review and pull request devloop writes on GitHub is here, body included, before it is
+  sent. The turns ignore them. An outcome the outbox already acted on and the journal could not
+  take is written before any later event (``publication``, ``defer``).
 
 With ``story_identity`` on (#363, ADR 0004, P2-3a) it also holds the stories, the unit of the
 budget:
@@ -177,6 +179,9 @@ class TurnJournal:
         self._loaded = False
         self._events = []
         self._live = set()  # the turns of this process whose outcome was not attempted yet
+        # Events of the outbox (#385) not written when they happened: each is written before
+        # any later event, of the outbox or of the turns (``publication``, ``defer``).
+        self._deferred = []
 
     # Files -----------------------------------------------------------------
     @property
@@ -311,6 +316,17 @@ class TurnJournal:
             pass  # imported already: ignored from now on
 
     def _append(self, kind, data):
+        """Append an event, after the deferred ones (``publication``): a deferred event that
+        still cannot be written fails this one too, which is not written either."""
+        self._flush()
+        return self._write(kind, data)
+
+    def _flush(self):
+        while self._deferred:
+            self._write(*self._deferred[0])
+            self._deferred.pop(0)
+
+    def _write(self, kind, data):
         last = self._events[-1] if self._events else None
         event = {'sequence': (last['sequence'] if last else 0) + 1,
                  'previous': last['sha256'] if last else '', 'event': kind,
@@ -647,17 +663,39 @@ class TurnJournal:
             return self._stories()[story]
 
     # Publications (#385) -----------------------------------------------------
-    def publication(self, kind, data):
+    def publication(self, kind, data, *, defer=False):
         """Append an event of the outbox of the publications (``outbox.Outbox``), durable
         before it returns: its kind starts with ``publication``, and the turns ignore it.
-        Raises ``JournalError`` if it cannot be written, and from a ``read_only`` journal."""
+        Raises ``JournalError`` if it cannot be written, and from a ``read_only`` journal.
+
+        With ``defer`` (an outcome the outbox already acted on: its caller is told it), an
+        event that cannot be written is kept, and written before any later event of the
+        journal: no later event, a turn's ``not_dispatched`` included, is ever durable without
+        it. It raises ``JournalError`` all the same."""
         if not kind.startswith(PUBLICATION):
             raise ValueError(f'not an event of the outbox: {kind!r}')
         if self.read_only:
             raise JournalError(f'{self.path}: read-only journal: nothing is published from it')
         with self._lock:
             self._load()
-            return self._append(kind, data)
+            try:
+                return self._append(kind, data)
+            except JournalError:
+                if defer:
+                    self._deferred.append((kind, data))
+                raise
+
+    def flush(self):
+        """Write the deferred events of the outbox; raises ``JournalError`` if one still
+        cannot be written."""
+        with self._lock:
+            self._load()
+            self._flush()
+
+    def deferred(self):
+        """The events of the outbox still to write, as ``(kind, data)``, oldest first."""
+        with self._lock:
+            return list(self._deferred)
 
     def publications(self):
         """The events of the outbox of the publications, oldest first."""
