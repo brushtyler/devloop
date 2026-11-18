@@ -21,6 +21,39 @@ class FeedbackError(TaskError):
     pass
 
 
+RECORDING_EXPIRED = 'FEEDBACK_RECORDING_EXPIRED'
+# Operations that need a live recording authority. Everything else (status,
+# capture of an already reserved role response, native resume, limit
+# extensions) does not depend on it and is not blocked by its expiry.
+RECORDING_DEPENDENT = ('request', 'proposal', 'review', 'consultation', 'prerequisite',
+                       'delegated-transition', 'owner-revalidation')
+
+
+class RecordingExpired(FeedbackError):
+    """The frozen recording authority expired. It is never renewed implicitly:
+    neither a run deadline extension nor a repeated bootstrap renews it, and
+    the ledger is never recreated. Renewal needs a separate contract."""
+    def __init__(self, expires_at):
+        self.expires_at = expires_at
+        super().__init__('Feedback recording expired at %s (%s): operations that depend on it are blocked; '
+                         'a run deadline extension does not renew it and renewal requires a separate contract'
+                         % (expires_at, RECORDING_EXPIRED))
+
+
+def recording_status(policy, now):
+    """Expiry of the recording authority, as shown in status and evidence."""
+    expired = now >= policy['expires_at']
+    return dict(status='EXPIRED' if expired else 'ACTIVE', expires_at=policy['expires_at'],
+                reason=RECORDING_EXPIRED if expired else None,
+                blocked_operations=list(RECORDING_DEPENDENT) if expired else [],
+                renewal='SEPARATE_CONTRACT_REQUIRED')
+
+
+def require_recording(policy, now):
+    if now >= policy['expires_at']:
+        raise RecordingExpired(policy['expires_at'])
+
+
 ROUTES = {'AMENDMENT', 'IN_SCOPE_REPAIR', 'PREREQUISITE', 'ADVISORY', 'REJECTED', 'INCONCLUSIVE'}
 CAUSES = {'MISSING_TARGET', 'MISSING_PREREQUISITE', 'IMPROVEMENT',
           'REQUIREMENT_CONFLICT', 'INCONCLUSIVE'}
@@ -313,8 +346,8 @@ class FeedbackStore:
         validate_recording_authority(policy, authorization)
         if policy['ticket'] != self.ticket.name:
             raise FeedbackError('Feedback policy belongs to another ticket')
-        if self.clock() >= policy['expires_at']:
-            raise FeedbackError('Feedback policy expired')
+        # An expired authority is neither renewed nor recreated, even with the same policy.
+        require_recording(policy, self.clock())
         self._paths()
         with ticket_lock(self.root / 'feedback.lock'):
             path = self.root / 'authority.json'
@@ -348,9 +381,15 @@ class FeedbackStore:
         authority, state = self._read()
         if authority['status'] != 'ACTIVE' or state is None:
             raise FeedbackError('Feedback authorization is incomplete')
-        if self.clock() >= authority['policy']['expires_at']:
-            raise FeedbackError('Feedback policy expired')
+        require_recording(authority['policy'], self.clock())
         return authority['policy'], copy.deepcopy(state)
+
+    def recording(self):
+        """Read-only expiry of the frozen recording authority; never renews it."""
+        authority, state = self._read()
+        if authority['status'] != 'ACTIVE' or state is None:
+            raise FeedbackError('Feedback authorization is incomplete')
+        return recording_status(authority['policy'], self.clock())
 
     def submit(self, source, request, developer, *, failed_tests=None, impact=None):
         actor(developer); validate_request(source, request)
@@ -663,7 +702,8 @@ class FeedbackStore:
                     operator_owner_recoveries=sum('operator_recovery' in r for r in state.get('owner_amendments', [])),
                     operator_verification_repairs=sum('verification_repair' in r for r in state.get('owner_amendments', [])),
                     repair_returns=len(state.get('repair_returns', [])),
-                    operator_repair_returns=sum(r['operator'] for r in state.get('repair_returns', [])))
+                    operator_repair_returns=sum(r['operator'] for r in state.get('repair_returns', [])),
+                    recording=self.recording())
 
 
 def exact_authorization(value, expected):

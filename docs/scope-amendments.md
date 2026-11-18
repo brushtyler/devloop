@@ -159,7 +159,10 @@ those of the original run. Scope-amendment refusals keep their own
 single failed task with a durable, quiescent candidate and an observed verifier
 timeout (`ENVIRONMENT_DIAGNOSIS`, check exit 124). Other failed checks must have
 exit 0 or 124. It is not an automatic retry and does not reinterpret a timeout
-as a successful test run.
+as a successful test run. To verify the same candidate again, without a repair
+attempt or a scope change, use
+[`reverify_after_timeout`](limit-extensions.md#reverification-after-a-verifier-timeout)
+instead.
 
 The proposal may add at most four literal Python test paths to that task, grant
 exactly one next attempt when the current attempt allowance is exhausted, and

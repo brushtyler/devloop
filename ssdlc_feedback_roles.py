@@ -10,7 +10,7 @@ import json
 import math
 
 from ssdlc_controller import execution_contract
-from ssdlc_feedback import FeedbackError, ROLES
+from ssdlc_feedback import FeedbackError, ROLES, require_recording
 from ssdlc_recovery import NotDispatched, QuiescentTimeout
 from ssdlc_tasks import TaskJournal, digest, ticket_lock
 from ssdlc_transitions import _regular
@@ -38,7 +38,7 @@ class FundedFeedbackRoles:
     def __init__(self, feedback, limits, *, guard):
         self.feedback, self.limits, self.guard = feedback, limits, guard
 
-    def _authority(self):
+    def _authority(self, *, consultation=True):
         self.guard()
         projection = None
         if (self.feedback.ticket / 'execution/active.json').exists():
@@ -51,8 +51,14 @@ class FundedFeedbackRoles:
         if not raw.endswith(b'\n'):
             raise FeedbackError('Incomplete native accounting requires reconciliation before consultation')
         authority, feedback_state = self.feedback._read()
-        envelope, counters = self.limits._load(repair=False)
         p = authority['policy']
+        # A new consultation depends on the recording: its expiry blocks it
+        # before any admission or reservation, even after a run deadline
+        # extension. Reconciling an already captured return calls no provider
+        # and keeps every other integrity check, so it proceeds after expiry.
+        if consultation:
+            require_recording(p, self.feedback.clock())
+        envelope, counters = self.limits._load(repair=False)
         from ssdlc_feedback_delegation import admitted as admitted_generation
         # resolve_execution validates the sealed transition and reconciliation.
         # Its exact admission binds the envelope (including the controller),
@@ -166,7 +172,7 @@ class FundedFeedbackRoles:
     def resume_response(self, operation):
         """Reconcile a captured return; it cannot call a provider."""
         with ticket_lock(self.feedback.root / 'consultation.lock'):
-            envelope, counters = self._authority()
+            envelope, counters = self._authority(consultation=False)
             state = self.feedback.inspect()
             call = next((row for row in state['role_calls'] if row['operation_id'] == operation), None)
             if call is None or call['status'] != 'RETURNED' or 'native' not in call:

@@ -15,7 +15,7 @@ Never edit journals, attempts, limits or selectors by hand to continue a run: th
 | `LIMIT_REACHED` because a live call has no `live_unknown_usage` rule: a `codex` or `agy` call refused before launch, or a call that reported no cost | `usage-profile-prepare` and `usage-profile-activate` (`live-usage-profile-admission-v1`) | [Bounded recovery](bounded-recovery.md#live-calls-without-a-reported-cost-issue-43), [Cost telemetry](cost-telemetry.md#separate-caps-and-route-admission) |
 | `DESIGN_STALLED` | One named diagnosis at most, then an operator decision | [Bounded recovery](bounded-recovery.md#design-convergence) |
 | `GIT_LOCK_UNOWNED` | Operator decision; no automatic cleanup without ownership proof | [Bounded recovery](bounded-recovery.md#stop-inventory-and-ci-authority) |
-| `ENVIRONMENT_DIAGNOSIS` | Evidence is retained and no model repair loop runs; inspect the environment. A verifier timeout (exit 124) on a failed task can use `operator-verification-repair-v1` | [Bounded recovery](bounded-recovery.md#stop-inventory-and-ci-authority), [Scope amendments](scope-amendments.md#operator-repair-after-a-verification-timeout) |
+| `ENVIRONMENT_DIAGNOSIS` | Evidence is retained and no model repair loop runs; inspect the environment. A verifier timeout (exit 124) on a failed task can use `operator-verification-repair-v1`, or `reverify_after_timeout` to verify the same captured candidate again with longer timeouts for the timed-out checks only, without a developer call | [Bounded recovery](bounded-recovery.md#stop-inventory-and-ci-authority), [Scope amendments](scope-amendments.md#operator-repair-after-a-verification-timeout), [Manual limit extensions](limit-extensions.md#reverification-after-a-verifier-timeout) |
 | Stopped task run with no completed checkpoint, under an older controller | `continuation-inspect`, `-preview`, `-prepare`, `-activate`, `-verify` (`pre-checkpoint-import-v1`, I1) | [Continuations](continuations.md) |
 | Stopped I1 generation that needs native development | `continuation-limits-inspect`, `-prepare`, `-activate` (`i1-cumulative-limits-v1`) | [Historical reconciliation](historical-reconciliation.md) |
 | `SCOPE_REQUIRED` after a checkpoint, or a `CHECK_FAILURE` localized entirely outside the task manifest | `continuation-scope-inspect`, `-preview`, `-prepare`, `-activate` (reviewed scope amendment) | [Scope amendments](scope-amendments.md) |
@@ -47,7 +47,7 @@ A transition never refunds attempts or charged calls, and never raises a limit u
 | --- | --- |
 | [Candidate capture](candidate-capture.md) | How developer output is captured and verified in disposable workspaces |
 | [Bounded recovery](bounded-recovery.md) | Frozen limits, timeout capture, semantic design progress, stop inventory, A5 replay gate |
-| [Manual limit extensions](limit-extensions.md) | Operator-authorized extension of named global limits or of the deadline of a stopped run |
+| [Manual limit extensions](limit-extensions.md) | Operator-authorized extension of named global limits or of the deadline of a stopped run, and reverification of the same candidate after a verifier timeout |
 | [Continuations](continuations.md) | Importing a stopped pre-checkpoint run for fresh verification |
 | [Historical reconciliation](historical-reconciliation.md) | Admitting a stopped I1 generation to native development with cumulative limits |
 | [Scope amendments](scope-amendments.md) | Recovering a task stopped on `SCOPE_REQUIRED` after a checkpoint; verification-timeout repair |

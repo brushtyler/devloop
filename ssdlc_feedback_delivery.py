@@ -70,6 +70,8 @@ def metrics(store):
                 operator_verification_repairs=sum('verification_repair' in r for r in state.get('owner_amendments', [])),
                 repair_returns=len(state.get('repair_returns', [])),
                 operator_repair_returns=sum(r['operator'] for r in state.get('repair_returns', [])),
+                # An expired recording stays visible with its deadline and reason.
+                recording=store.recording(),
                 source='host timestamps and captured usage; unknown values remain null',
                 operator_decisions_required=sum(r['disposition'] in {'OPERATOR_DECISION','OWNER_REVALIDATION_REQUIRED'} for r in requests))
 

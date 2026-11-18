@@ -28,7 +28,8 @@
     "operation": {
       "enum": [
         "extend_global_limit",
-        "extend_deadline"
+        "extend_deadline",
+        "reverify_after_timeout"
       ]
     },
     "run": {
@@ -269,6 +270,103 @@
         }
       }
     },
+    "reverification": {
+      "type": "object",
+      "description": "The captured verifier timeout a reverify_after_timeout proposal is bound to: the same candidate, each timed-out check with its applied timeout and measured duration, and the verifications the attempt already used.",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "attempt",
+        "failure_sha256",
+        "capture_sha256",
+        "candidate_tree",
+        "verifications_used",
+        "verification_limit",
+        "invocation_timeout_seconds",
+        "timed_out_checks"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "failure_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "capture_sha256": {
+          "type": "string",
+          "minLength": 1
+        },
+        "candidate_tree": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40,64}$"
+        },
+        "verifications_used": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "verification_limit": {
+          "const": 3
+        },
+        "invocation_timeout_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "timed_out_checks": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "check_id",
+              "exit_code",
+              "timeout_sec",
+              "applied_timeout_sec",
+              "elapsed_seconds",
+              "log_ref",
+              "log_sha256"
+            ],
+            "properties": {
+              "check_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "exit_code": {
+                "const": 124
+              },
+              "timeout_sec": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The configured timeout of the check, which the reverification leaves unchanged."
+              },
+              "applied_timeout_sec": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The timeout the failed verification actually ran the check with: longer than timeout_sec after a previous reverification."
+              },
+              "elapsed_seconds": {
+                "type": "number",
+                "minimum": 0
+              },
+              "log_ref": {
+                "type": "string",
+                "minLength": 1
+              },
+              "log_sha256": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          }
+        }
+      }
+    },
     "new_profile": {
       "type": "object",
       "description": "The exact resulting recovery-limits profile: the parent profile with only the named dimensions changed."
@@ -352,8 +450,17 @@
       },
       "then": {
         "not": {
-          "required": [
-            "deadline"
+          "anyOf": [
+            {
+              "required": [
+                "deadline"
+              ]
+            },
+            {
+              "required": [
+                "reverification"
+              ]
+            }
           ]
         },
         "properties": {
@@ -381,6 +488,11 @@
         "required": [
           "deadline"
         ],
+        "not": {
+          "required": [
+            "reverification"
+          ]
+        },
         "properties": {
           "changes": {
             "maxItems": 1,
@@ -388,6 +500,49 @@
               "properties": {
                 "dimension": {
                   "const": "deadline_at"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "reverify_after_timeout"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "reverification"
+        ],
+        "not": {
+          "required": [
+            "deadline"
+          ]
+        },
+        "properties": {
+          "run": {
+            "properties": {
+              "task_id": {
+                "type": "string"
+              }
+            }
+          },
+          "changes": {
+            "items": {
+              "properties": {
+                "dimension": {
+                  "pattern": "^check_timeout\\..+$"
+                },
+                "old": {
+                  "type": "integer"
+                },
+                "new": {
+                  "type": "integer"
                 }
               }
             }

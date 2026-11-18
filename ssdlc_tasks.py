@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable
@@ -27,6 +28,9 @@ from ssdlc_catalogues import CatalogueError, heading_anchors, requirement_catalo
 
 SCHEMA_DIR = Path(__file__).resolve().parent / 'schemas'
 PROTECTED = {'.git', '.ssdlc', '.agents', '.codex', '.aws'}
+# Verifications of one captured candidate per attempt, an operator timeout
+# reverification included.
+VERIFICATIONS_PER_ATTEMPT = 3
 
 CORRECTIVE_PROTECTED_NAMES = {'ssdlc_controller.py', 'ssdlc_gate_reports.py', 'ssdlc_quality.py',
                               'quality-contract.json', 'orchestrator.py', 'ssdlc_gate_protocol.py',
@@ -1176,12 +1180,17 @@ class TaskScheduler:
         self._assert_evidence_dir(path)
 
     def _verify(self, task: dict, record: dict, attempt_dir: Path, event='CHECK_FINISHED',
-                before_check=None, after_check=None, exclusive=False, reuse=None, mutation_watch=None) -> list[dict]:
+                before_check=None, after_check=None, exclusive=False, reuse=None, mutation_watch=None,
+                timeouts=None) -> list[dict]:
         checks = self._check_plan(task)
         results = []
         for index, check in enumerate(checks):
             self.budget()
             self.guard()
+            if timeouts and check['check_id'] in timeouts:
+                # Only an authorized timeout reverification passes overrides; the
+                # check definition and every other check stay unchanged.
+                check = dict(check, timeout_sec=timeouts[check['check_id']])
             cwd = confined(self.wt, check['cwd'])
             if before_check is not None:
                 before_check(index, check['check_id'])
@@ -1197,6 +1206,7 @@ class TaskScheduler:
                     after_check(index, observed)
                 self.guard(); self.budget()
                 continue
+            started = time.monotonic()
             try:
                 if self.isolate_candidates:
                     out, err, rc = self._isolated_check(check, cwd)
@@ -1245,6 +1255,12 @@ class TaskScheduler:
                 bootstrap_checkpoint=self.state.get('bootstrap', {}).get('status') == 'CHECKPOINT_STARTED')
             results.append({'check_id': check['check_id'], 'exit_code': rc, 'empty_suite': empty,
                             'log_ref': str(log.relative_to(self.directory)), 'sha256': file_hash(log)})
+            if rc == 124:
+                # The measured duration of a timed-out check and the timeout it
+                # actually ran with (longer only in an authorized reverification):
+                # an operator reverification cites both, exit 124 alone justifies nothing.
+                results[-1].update(elapsed_seconds=round(time.monotonic() - started, 3),
+                                   applied_timeout_sec=check['timeout_sec'])
             record['checks'] = results
             if reuse is not None:
                 reuse[digest(check)] = copy.deepcopy(results[-1])
@@ -1620,13 +1636,15 @@ class TaskScheduler:
                     and digest(failures[-1]) == authority['failure_sha256']
                     and digest(self.plan) == authority['plan_sha256'])
 
-    def _restore_candidate(self, task: dict, record: dict, *, protocol_recovery=False) -> None:
+    def _restore_candidate(self, task: dict, record: dict, *, protocol_recovery=False,
+                           timeout_reverification=False) -> None:
         failures = record.get('failed_attempts', [])[record.get('failed_floor', 0):]
         if not failures:
             return
         candidate = failures[-1]
         if (candidate['category'] != 'CHECK_FAILURE' and not self._scope_reconciled(record)
-                and not (protocol_recovery and candidate['category'] == 'DEVELOPER_PROTOCOL')):
+                and not (protocol_recovery and candidate['category'] == 'DEVELOPER_PROTOCOL')
+                and not (timeout_reverification and candidate['category'] == 'ENVIRONMENT_DIAGNOSIS')):
             raise DevelopmentBlocked(candidate['category'], 'Previous attempt needs explicit reconciliation')
         self._assert_clean()
         path = confined(self.directory, candidate['diff_ref'], protect=False)
@@ -1695,6 +1713,123 @@ class TaskScheduler:
         self._save('PROTOCOL_RECOVERY_FAILED')
         self._rollback_attempt(record, changed)
         self._log_failed_checks(results)
+
+    def _timeout_reverification(self, task, record):
+        """The operator-authorized reverification of the current captured timeout, or None.
+
+        ``limits activate`` records it (operation ``reverify_after_timeout`` of
+        operator-limit-extension-v1) bound to the exact failure and capture. The
+        grant is also checked against its stored proposal, authorization and
+        receipt and against the frozen policy: the task journal alone is no authority.
+        """
+        grants = record.get('timeout_reverifications', [])
+        if not grants or grants[-1].get('status') != 'AUTHORIZED':
+            return None
+        grant = grants[-1]
+        failures = record.get('failed_attempts', [])[record.get('failed_floor', 0):]
+        checks = {c['check_id']: c for c in self._check_plan(task)}
+        timed_out = ({c['check_id']: c for c in failures[-1]['checks'] if c['exit_code'] == 124}
+                     if failures else {})
+        timeouts, bound = grant.get('timeouts'), grant.get('invocation_timeout_seconds')
+        if (record['status'] != 'FAILED' or not failures or not self.isolate_candidates
+                or failures[-1]['category'] != 'ENVIRONMENT_DIAGNOSIS'
+                or digest(failures[-1]) != grant.get('failure_sha256')
+                or failures[-1]['attempt'] != record['attempts'] or grant.get('attempt') != record['attempts']
+                or not record.get('capture_sha256') or failures[-1].get('capture_sha256') != record['capture_sha256']
+                or grant.get('capture_sha256') != record['capture_sha256']
+                or type(bound) is not int or not isinstance(timeouts, dict) or not timeouts
+                or any(cid not in timed_out or not isinstance(change, dict)
+                       or checks.get(cid, {}).get('timeout_sec') != change.get('old')
+                       or type(change.get('new')) is not int or not change['old'] < change['new'] <= bound
+                       # Longer than the timeout the check actually timed out with.
+                       or not timed_out[cid].get('applied_timeout_sec', change['old']) < change['new']
+                       for cid, change in timeouts.items())):
+            raise DevelopmentBlocked('INTEGRITY', 'Timeout reverification differs from its captured failure')
+        from ssdlc_limit_extensions import admitted_reverification
+        try:
+            admitted_reverification(self.directory.parents[1], grant)
+        except (TaskError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise DevelopmentBlocked('INTEGRITY', 'Timeout reverification differs from its operator '
+                                                  f'authorization: {exc}'[:300]) from None
+        return grant
+
+    def _reverify_after_timeout(self, task, record, grant):
+        """Verify the same captured candidate again; no developer call, no new attempt.
+
+        Only the authorized timed-out checks run with their longer timeout, and
+        only in this verification. It counts toward the verifications of the
+        attempt: a fourth is refused.
+        """
+        from ssdlc_candidates import CandidateStore, CandidateError
+        candidate = record['failed_attempts'][-1]
+        attempt = candidate['attempt']
+        attempt_dir = self.directory / task['task_id'] / f'attempt-{attempt}'
+        try:
+            CandidateStore(attempt_dir).load(self._capture_binding(task, record), record['capture_sha256'])
+        except (CandidateError, OSError, ValueError, KeyError, TypeError):
+            raise DevelopmentBlocked('INTEGRITY', 'Captured candidate changed; no reverification') from None
+        runs = record.setdefault('capture_verifications', [])
+        used = [r for r in runs if r['attempt'] == attempt]
+        if len(used) >= VERIFICATIONS_PER_ATTEMPT:
+            raise DevelopmentBlocked('ENVIRONMENT_BLOCKED', 'Captured candidate verification allowance exhausted')
+        directory = attempt_dir / f'verification-{len(used) + 1}'
+        reference = str(directory.relative_to(self.directory))
+        runs.append({'attempt': attempt, 'dir': reference})
+        grant.update(status='RUNNING', dir=reference)
+        record.update(status='VERIFYING', checks=[], changed_files=candidate['changed_files'])
+        self._save('TIMEOUT_REVERIFICATION_STARTED')
+        directory.mkdir(exist_ok=False)
+        self._restore_candidate(task, record, timeout_reverification=True)
+        protected, changed = self._protected(), self._changed()
+        signature = self._source_signature(changed)
+        if protected != record['protected_snapshot']:
+            raise TaskError('Protected worktree paths changed before reverification')
+        _print_redacted(f"[task-dev] Reverifying captured {task['task_id']} attempt {attempt} after a timeout; "
+                        'no developer invocation.')
+        results = self._verify(task, record, directory,
+                               timeouts={cid: change['new'] for cid, change in grant['timeouts'].items()})
+        self._assert_tree()
+        if (self._protected() != protected or self._changed() != changed or self._source_signature(changed) != signature
+                or self._ignored() != self.state['ignored_paths'] or git(self.wt, 'write-tree') != candidate['tree']):
+            raise TaskError('Verification changed the reverified candidate or metadata')
+        blocker = None
+        if all(r['exit_code'] == 0 and not r['empty_suite'] for r in results):
+            from ssdlc_owner_revalidation import stamp, verify as verify_owners
+            if not verify_owners(self, task, record, directory, changed):
+                blocker = 'OWNER_REVALIDATION_FAILED'
+            stamp(record, candidate['tree'])
+            if blocker is None:
+                grant['status'] = 'PASSED'
+                record.update(status='COMMIT_INTENT', candidate_tree=candidate['tree'], changed_files=changed,
+                              commit_message=f'feat({self.plan["ticket_id"]}/{task["task_id"]}): {task["title"]}'
+                                             f'\n\nSSDLC-Attempt: {attempt}')
+                self._save('COMMIT_INTENT')
+                self._complete_intent(task, record)
+                return
+        environment = any(r['exit_code'] in (124, 125, 126, 127) or r['empty_suite'] for r in results)
+        category = blocker or ('ENVIRONMENT_DIAGNOSIS' if self.recover_timeouts and environment else 'CHECK_FAILURE')
+        grant['status'] = 'FAILED'
+        record['failed_attempts'].append({**copy.deepcopy(candidate), 'category': category,
+                                          'checks': copy.deepcopy(results), 'origin': 'timeout_reverification',
+                                          'proposal_sha256': grant['proposal_sha256']})
+        record['status'] = 'FAILED'
+        self._save('TIMEOUT_REVERIFICATION_FAILED')
+        self._rollback_attempt(record, changed)
+        self._log_failed_checks(results)
+        raise DevelopmentBlocked(category, f'Task {task["task_id"]} timeout reverification failed; evidence: {directory}')
+
+    def _interrupted_reverification(self, record):
+        """A reverification cut short is never repeated: its verification stays counted."""
+        self._assert_tree()
+        changed = self._changed()
+        if not set(changed) <= set(record['failed_attempts'][-1]['changed_files']):
+            raise TaskError('Interrupted reverification left unexpected changes')
+        record['timeout_reverifications'][-1]['status'] = 'INTERRUPTED'
+        record['status'] = 'FAILED'
+        self._save('TIMEOUT_REVERIFICATION_INTERRUPTED')
+        self._rollback_attempt(record, changed)
+        raise DevelopmentBlocked('ENVIRONMENT_DIAGNOSIS',
+                                 'Timeout reverification was interrupted; a new operator authorization is required')
 
     def _restore_attempt_paths(self, record: dict, changed: list[str]) -> None:
         for path in changed:
@@ -2071,7 +2206,7 @@ class TaskScheduler:
         if self.isolate_candidates and not blocker:
             runs = record.setdefault('capture_verifications', [])
             current_runs = [r for r in runs if r['attempt'] == attempt]
-            if len(current_runs) >= 3:
+            if len(current_runs) >= VERIFICATIONS_PER_ATTEMPT:
                 raise DevelopmentBlocked('ENVIRONMENT_BLOCKED', 'Captured candidate verification allowance exhausted')
             verification_dir = attempt_dir / f'verification-{len(current_runs) + 1}'
             runs.append({'attempt': attempt, 'dir': str(verification_dir.relative_to(self.directory))})
@@ -2203,6 +2338,9 @@ class TaskScheduler:
                 raise TaskError('Protected worktree paths changed; reconciliation required')
             if record['status'] == 'COMMIT_INTENT':
                 self._complete_intent(task, record)
+            elif (record['status'] == 'VERIFYING'
+                    and (record.get('timeout_reverifications') or [{}])[-1].get('status') == 'RUNNING'):
+                self._interrupted_reverification(record)
             elif self.isolate_candidates and record['status'] == 'DISPATCH_RESERVED':
                 if verify_captured_only:
                     raise DevelopmentBlocked('ENVIRONMENT_BLOCKED', 'Verification-only continuation cannot dispatch a reserved developer')
@@ -2232,10 +2370,12 @@ class TaskScheduler:
             if record.get('reconciliation_required'):
                 raise DevelopmentBlocked(record['reconciliation_required'][-1], 'Historical attempt needs explicit reconciliation')
             recovering = task['task_id'] == recover_protocol_task
+            # An authorized reverification consumes no development attempt.
+            reverifying = self._timeout_reverification(task, record) is not None
             if (record.get('failed_attempts') and record['failed_attempts'][-1]['category'] != 'CHECK_FAILURE'
-                    and not recovering and not self._scope_reconciled(record)):
+                    and not recovering and not reverifying and not self._scope_reconciled(record)):
                 raise DevelopmentBlocked(record['failed_attempts'][-1]['category'], 'Previous attempt needs explicit reconciliation')
-            if record['attempts'] >= self.max_attempts and not recovering:
+            if record['attempts'] >= self.max_attempts and not recovering and not reverifying:
                 raise TaskError(f'Task {task["task_id"]} exhausted its persistent attempt limit')
         if pending:
             if state.get('bootstrap', {}).get('status') == 'PENDING':
@@ -2248,6 +2388,13 @@ class TaskScheduler:
             if not all(state['tasks'][dep]['status'] == 'COMPLETED' for dep in task['depends_on']):
                 raise TaskError('Protocol recovery dependency has not completed')
             self._recover_protocol_candidate(task, state['tasks'][recover_protocol_task])
+        for task in pending:
+            record = state['tasks'][task['task_id']]
+            grant = self._timeout_reverification(task, record)
+            if grant is not None:
+                if not all(state['tasks'][dep]['status'] == 'COMPLETED' for dep in task['depends_on']):
+                    raise TaskError('Dependency has not completed')
+                self._reverify_after_timeout(task, record, grant)
         for task in ordered:
             record = state['tasks'][task['task_id']]
             if record['status'] == 'COMPLETED':
