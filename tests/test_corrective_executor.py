@@ -25,6 +25,7 @@ class ExecutorFixture(gate_fixtures.GateFixture):
         # The engine guards the unchanged controller checkout and probes the
         # unchanged container image about a hundred times per test.
         reuse_host_observations(self)
+        # GateFixture runs the host commands directly (helpers.host_commands).
         super().setUp()
         self.orch._ensure_controller_contract()
         self.directory = self.orch.dir_dev / 'tasks'

@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import ssdlc_gate_reports as gates
 from orchestrator import SSDLCOrchestrator, CostAndTelemetryEntry
+from helpers.host_commands import direct_host_commands
 from ssdlc_tasks import TaskError
 import test_full_checkpoint_review as checkpoints
 from test_full_checkpoint_review import framed
@@ -74,6 +75,9 @@ class GateFixture(RepositoryTests):
 
     def setUp(self):
         super().setUp()
+        # Writer fencing is verified by test_host_command_fencing: here the host
+        # commands of the run go to Git directly, without the run_host() supervisor.
+        direct_host_commands(self)
         self.orch, self.diff = self.seed()
         self.panel = patch('orchestrator.SquadDispatcher.resolve_review_models', return_value=(['mock:reviewer'], 'low'))
         self.panel.start()

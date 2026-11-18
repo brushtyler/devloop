@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import threading
 from types import SimpleNamespace
@@ -15,7 +16,9 @@ import test_scope_amendments as fixtures
 from test_feedback_delegation import grant
 import ssdlc_feedback_delegation as delegated
 import ssdlc_feedback_workflow as flow
+import ssdlc_fencing_proof as fp
 import orchestrator as orch_module
+import ssdlc_role_fencing as rf
 import ssdlc_supervisor as sup
 from ssdlc_feedback import FeedbackStore, FeedbackError
 from ssdlc_feedback_roles import FundedFeedbackRoles
@@ -23,6 +26,7 @@ from ssdlc_recovery import LimitsStore
 from ssdlc_scope_amendments import inspect
 from ssdlc_tasks import TaskError, digest, ticket_lock
 from ssdlc_transitions import runtime_root
+import ssdlc_writer_gate as wg
 
 
 def config():
@@ -255,6 +259,83 @@ class FeedbackWorkflowTests(unittest.TestCase):
             invocation=limits._load(repair=False)[1]['invocations'][call['native']['invocation_id']]
             self.assertEqual(invocation['status'],'returned')
             self.assertEqual(invocation['usage']['cli_estimate_usd'],0.05)
+
+    def adopting_orchestrator(self):
+        orch = orch_module.SSDLCOrchestrator.__new__(orch_module.SSDLCOrchestrator)
+        orch.repo_root, orch.ticket_id, orch.project_id = self.case.repo, self.case.ticket.name, 'offline'
+        orch.ticket_lock_path = self.case.ticket / 'ticket.lock'
+        orch.ssdlc_root = self.source['root']; orch._registry_lock = threading.RLock()
+        orch.dir_recon, orch.dir_design, orch.dir_dev = (orch.ssdlc_root / n for n in ('00-recon','02-design','03-dev'))
+        orch.worktree_dir, orch.state_file = orch.ssdlc_root / 'worktree', orch.ssdlc_root / 'state.json'
+        orch.state = json.loads(orch.state_file.read_text())
+        orch._ensure_task_plan = lambda: json.loads((orch.dir_design / 'plan.json').read_text())
+        orch._ensure_controller_contract = lambda: flow.execution_contract(self.snapshot)
+        orch._ensure_worktree = lambda: orch.worktree_dir
+        orch._verification_environment = lambda *args: self.identity['environment']
+        orch._task_mode = lambda: True
+        return orch
+
+    @contextlib.contextmanager
+    def offline_development(self, orch):
+        def cli(cmd, **kwargs):
+            Path(kwargs['cwd'], 'helper.py').write_text('value = 1\n')
+            return subprocess.CompletedProcess(cmd, 0, 'TASK_DEV_STATUS: COMPLETE', '')
+        previous = getattr(orch_module._dispatch_local, 'limits', None)
+        orch_module._dispatch_local.limits = LimitsStore(self.source['root'])
+        try:
+            with (self.host(), ticket_lock(orch.ticket_lock_path),
+                  patch.object(flow, 'ReadOnlyRoleRunner', side_effect=self.runner),
+                  patch.object(orch_module.EngineRunner, '_should_spawn_role_container', return_value=True),
+                  patch.object(orch_module.EngineRunner, '_wrap_in_role_container', side_effect=lambda cmd, **kw: cmd),
+                  patch.object(orch_module.EngineRunner, '_run_role_command', side_effect=cli),
+                  patch.object(orch_module.EngineRunner, 'run_sandboxed_cmd', return_value=('Ran 1 test\nOK','',0)),
+                  patch.object(orch_module.SquadDispatcher, 'dispatch_role', return_value=('codex','offline','low','fixture'))):
+                yield
+        finally:
+            orch_module._dispatch_local.limits = previous
+
+    @unittest.skipUnless(sys.platform.startswith('linux') and wg.host_tree_support() is None,
+                         'host trees need Linux child subreapers')
+    def test_native_feedback_of_an_admitted_run_keeps_automatic_fencing(self):
+        """#345: the host Git commands of the activation run under run_host() while it is pending."""
+        orch = self.adopting_orchestrator()
+        orch.state[rf.MARKER_KEY] = rf.MARKER
+        orch._save_state()
+        source_state = orch.state_file
+        pending = []
+        run_fenced = rf.run_fenced
+
+        def fenced(*args, **kwargs):
+            pending.append((self.case.ticket / 'execution/pending.json').exists())
+            return run_fenced(*args, **kwargs)
+        containers = fp.ticket_containers
+
+        def docker(argv, **kwargs):  # no container of the ticket; Docker itself never runs
+            return subprocess.CompletedProcess(argv, 0, '' if argv[1] == 'ps' else '[]', '')
+        with self.offline_development(orch), \
+                patch.object(fp, 'ticket_containers', side_effect=lambda root, run: containers(root, run=docker)), \
+                patch.object(wg, 'run_host', wraps=wg.run_host) as run_host, \
+                patch.object(rf, 'run_fenced', side_effect=fenced), \
+                orch_module._writer_fencing_scope(orch):
+            orch._run_task_development()
+        self.assertNotEqual(orch.ssdlc_root, self.source['root'])
+        self.assertEqual(orch.ssdlc_root, runtime_root(self.case.ticket))
+        self.assertEqual(orch.state['tasks_status']['T2']['status'], 'COMPLETED')
+        # Host commands ran under run_host() while the amendment was pending, and none
+        # fell back to the manual path.
+        self.assertIn(True, pending)
+        self.assertEqual(run_host.call_count, len(pending))
+        self.assertNotIn(rf.REFUSAL_KEY, json.loads(source_state.read_text()))
+        self.assertNotIn(rf.REFUSAL_KEY, orch.state)
+        self.assertTrue(rf.admitted(orch.state))
+        # The delegated activation took the automatic proof of the admitted source.
+        intent = json.loads((self.case.ticket / 'execution' / orch.ssdlc_root.name / 'intent.json').read_text())
+        self.assertEqual(fp.validate_proof(intent[fp.INTENT_KEY])['generation'],
+                         self.source['root'].relative_to(self.case.ticket).as_posix())
+        registry = self.case.ticket / wg.REGISTRY_NAME
+        trees = sorted(p.name[2:] for p in registry.glob('t-*.json'))
+        self.assertTrue(trees)
+        self.assertEqual(trees, sorted(p.name[2:] for p in registry.glob('c-*.json')))
 
     def test_orchestrator_adopts_generation_then_runs_next_normal_attempt(self):
         orch = orch_module.SSDLCOrchestrator.__new__(orch_module.SSDLCOrchestrator)
