@@ -480,14 +480,19 @@ def unmetered_declarations(env):
     return {name: {'model': 'unmetered_quota', 'reason': 'SSDLC_UNMETERED_QUOTA'} for name in engines}
 
 
-def admit(provider, route, *, spend_cap, estimate_cap_active, declarations=None):
+def admit(provider, route, *, spend_cap, estimate_cap_active, declarations=None, credit_caps=None):
     """The measure that bounds an imminent call on its effective ``route`` (``None``: unknown).
 
     A route that cannot be determined, or a measured route whose adapter reports no charge,
     is refused when a cap it would escape is in force: an estimate never stands for a charge.
     A CLI subscription route reports no dollar measure: it leaves the dollar caps only with
     an explicit declaration for its engine (``declarations``), and is refused without one
-    while either cap is in force (see docs/cost-telemetry.md)."""
+    while either cap is in force (see docs/cost-telemetry.md).
+
+    ``credit_caps`` (#214): the credit caps of the frozen profile. A credit cap is not a
+    measure comparable with USD: it replaces the USD obligation of the engine's subscription
+    route only when an operator-authorized transition set ``replaces_usd``; otherwise it adds
+    to the USD caps and the route stays refused. It never covers the OpenRouter route."""
     if route is None:
         if spend_cap or estimate_cap_active:
             raise AdmissionRefused('The route of the call cannot be determined, so the configured cost caps '
@@ -506,6 +511,14 @@ def admit(provider, route, *, spend_cap, estimate_cap_active, declarations=None)
     rule = (declarations or {}).get(provider)
     if rule:
         return {'route': route, 'measure': rule['model']}
+    credit = (credit_caps or {}).get(provider)
+    if credit and credit.get('replaces_usd') is True:
+        return {'route': route, 'measure': 'credit_cap'}
+    if credit and (spend_cap or estimate_cap_active):
+        raise AdmissionRefused(f'Route {route} charges in credits ({credit.get("unit")}) and has no measure '
+                               'comparable with the USD caps: the credit cap adds to them and does not replace '
+                               'their obligation without an operator-authorized transition (substitute_credit_cap); '
+                               'dispatch refused before launch')
     if spend_cap or estimate_cap_active:
         raise AdmissionRefused(f'Route {route} reports no dollar measure and no unmetered_quota declaration '
                                f'applies to {provider}, so the configured cost caps cannot be applied; '

@@ -141,7 +141,7 @@ the one admitted, before the supervisor intent.
 | --- | --- | --- |
 | `openrouter_api` | OpenRouter HTTP adapter; Claude or Codex with `use_openrouter` and `OPENROUTER_API_KEY` | spend. Only the HTTP adapter reports it: Claude or Codex on this route are refused while the spend cap is in force, because an estimate is not a charge |
 | `claude_cli` | Claude CLI with no base URL of its own | estimate (`total_cost_usd`) |
-| `codex_cli`, `agy_cli` | the CLI subscription | an explicit `unmetered_quota` declaration for the engine: the `live_unknown_usage` of the frozen profile (`unmetered_quota` or `reserve_per_invocation`, [#43](https://github.com/brushtyler/ssdlc/issues/43)) or, without a profile, `SSDLC_UNMETERED_QUOTA`. Without one it is refused while either cap is in force |
+| `codex_cli`, `agy_cli` | the CLI subscription | an explicit `unmetered_quota` declaration for the engine: the `live_unknown_usage` of the frozen profile (`unmetered_quota` or `reserve_per_invocation`, [#43](https://github.com/brushtyler/ssdlc/issues/43)) or, without a profile, `SSDLC_UNMETERED_QUOTA`; or a credit cap of the frozen profile that replaces the USD obligation after the operator's transition ([Caps in credits](#caps-in-credits-and-existing-profiles)). Without one it is refused while either cap is in force |
 | `unknown` | OpenRouter requested for Claude but the role container would not receive its base URL, or the Claude CLI would receive another base URL | none can be determined: refused while either cap is in force |
 
 A refusal is `LIMIT_REACHED` with "refused before launch": no reservation, no
@@ -160,11 +160,57 @@ Without a frozen profile the operator declares the subscription routes that stay
 outside the dollar caps with `SSDLC_UNMETERED_QUOTA`, a comma-separated list of
 `codex` and `agy` (for example `SSDLC_UNMETERED_QUOTA=codex,agy`); any other name
 refuses the call. A declared route is bounded by attempts, calls and time. The
-declaration never covers the OpenRouter route of the same engine. Transitions of
-existing profiles and caps in credits are part B2
-([#214](https://github.com/brushtyler/ssdlc/issues/214)). A frozen profile keeps
-its own separate `metered_usd` and `cli_estimate_usd` caps and the frozen combined
-authority of its corrective transactions.
+declaration never covers the OpenRouter route of the same engine. A frozen profile
+keeps its own separate `metered_usd` and `cli_estimate_usd` caps and the frozen
+combined authority of its corrective transactions.
+
+### Caps in credits and existing profiles
+
+[Issue #214](https://github.com/brushtyler/ssdlc/issues/214), part B2 of
+[#14](https://github.com/brushtyler/ssdlc/issues/14), with the operator's
+decision D6 of [ADR 0004](adr/0004-passo-2-budget-stato-durevole.md#5-decisioni-riservate-alloperatore).
+
+**Existing profiles.** A frozen profile is never reinterpreted. Profiles in USD
+stay as they are: there is no global migration, and their caps keep the meaning
+described above. Only a profile with caps in credits can need a transition, and
+only to let those credits replace the USD obligation of a route.
+
+**Caps in credits.** A frozen limits profile may configure a cap in credits for
+the subscription route of `codex` or `agy`, the engines that report no dollar
+measure (`credit_caps` in `schemas/recovery-limits.schema.json`):
+
+```json
+"credit_caps": {"agy": {"unit": "agy_credits", "cap": 300, "per_invocation": 10,
+                        "reason": "The agy plan charges AI credits, not USD"}}
+```
+
+- `unit` names the credits; it is never USD, and credits are never converted to
+  or from dollars.
+- Before each call of the engine, `per_invocation` credits are booked against
+  `cap` and stay charged. A booking that would exceed the cap is refused before
+  launch, and a cap already reached stops the run with `LIMIT_REACHED`. No
+  adapter reports a charge in credits per call today (Codex and agy expose only
+  account-wide balances), so the booking is the measure.
+- Without a frozen profile there are no credit caps.
+
+**Credits add, they do not replace.** A credit cap is not a measure comparable
+with the USD caps. While a USD cap is in force, a route without a USD measure or
+rule of its own (no `live_unknown_usage` declaration for its engine) stays
+refused before launch, even with a credit cap: the refusal names
+`substitute_credit_cap`. With a USD rule, the credit cap is an extra bound on
+top of it. A new profile cannot declare the substitution itself.
+
+**Explicit transition.** Only the operator can let a configured credit cap
+replace the USD obligation of the route, for that profile, with the
+[`substitute_credit_cap`](limit-extensions.md#caps-in-credits) operation of
+`operator-limit-extension-v1`. It sets `credit_caps.<engine>.replaces_usd` and
+changes nothing else: the limits journal, its counters and the original
+authorization are kept, and the bound chain, the `CREDIT_CAP_SUBSTITUTED` event
+and the receipt are its trace. After it, the calls of that engine are admitted
+with `usage_model: credit_cap`, bounded by the credit cap and by the invocation,
+attempt and time limits. They are outside the dollar caps, as the coverage of the
+Evidence Pack shows. The substitution never covers the OpenRouter route of the
+engine.
 
 ## Subscription quota snapshots and controls
 
