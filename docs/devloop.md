@@ -10,7 +10,8 @@ split into three pages:
 - [Reference](devloop/reference.md): configuration, local tests, documentation map, agents and
   fallback models, review levels and policy, GitHub identities and apps.
 - [Protocol](devloop/protocol.md): sync mechanics, rounds, markers and records (receipts, merge
-  directives, structured review and findings, attribution, evidence and telemetry).
+  directives, structured review and findings, attribution, evidence and telemetry, and the
+  receipt of a PR promoted to `agent:ready-to-merge`).
 
 Ports and adapters are in [Pipeline and architecture](architecture.md#ports-and-adapters); roles
 and merge modes in [ADR 0002](adr/0002-ruoli-e-responsabilita.md).
