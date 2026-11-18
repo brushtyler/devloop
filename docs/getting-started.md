@@ -173,7 +173,7 @@ The full reference covers routing tables, reasoning effort, budgets, container l
 | `python3 orchestrator.py start` / `status` / `cancel` / `resume` / `monitor` | Detached supervision ([docs](supervision.md)) |
 | `python3 orchestrator.py bounce-preview …` | Read-only targeted-bounce preview ([docs](bounce-preview.md)) |
 | `python3 orchestrator.py continuation-*` | Explicit recovery transitions for stopped runs ([docs](recovery.md)) |
-| `./ssdlc limits inspect` / `propose` / `approve` / `activate` / `status` | Manual, operator-authorized extension of the limits or deadline of a stopped run, or reverification of the same candidate after a verifier timeout ([docs](limit-extensions.md)) |
+| `./ssdlc limits inspect` / `propose` / `approve` / `activate` / `status` | Manual, operator-authorized extension of the limits or deadline of a stopped run, reverification of the same candidate after a verifier timeout, or allocation and transfer of per-task budget ([docs](limit-extensions.md)) |
 | `python3 orchestrator.py usage-profile-*` | Add engine usage rules to the limits profile of a stopped generation ([docs](bounded-recovery.md#live-calls-without-a-reported-cost-issue-43)) |
 | `python3 orchestrator.py feedback-*` | Developer-feedback diagnosis and delegation ([docs](developer-feedback.md)) |
 
