@@ -19,7 +19,7 @@ from orchestrator import SSDLCOrchestrator
 import ssdlc_fencing_proof as fp
 import ssdlc_role_fencing as rf
 from ssdlc_fencing_proof import FencingRefused
-from ssdlc_tasks import digest, git
+from ssdlc_tasks import digest, git, ticket_lock
 from ssdlc_transitions import TransitionStore, source_binding
 import ssdlc_writer_gate as wg
 from replay.repository_fixtures import RepositoryTests
@@ -197,6 +197,24 @@ class AdmittedRunTests(HostCommandTestCase):
         with self.assertRaises(wg.HostCommandNotRun) as caught:
             rf.run_fenced(self.ticket, self.repo, ['true'])
         self.assertEqual(caught.exception.code, 'generation_invalid')
+
+    def test_a_pending_transition_fences_host_commands_only_outside_the_ticket_lock(self):
+        orch = self.orchestrator()
+        (self.ticket / 'execution').mkdir()
+        (self.ticket / 'execution/pending.json').write_text('{}')
+        # Dispatch and verification stay fenced, and so does anyone without the ticket lock.
+        with self.assertRaises(wg.HostCommandNotRun) as caught:
+            rf.run_fenced(self.ticket, self.ticket, ['true'])
+        self.assertEqual(caught.exception.code, 'generation_invalid')
+        # The controller preparing and activating the transition holds it: the selected generation.
+        with ticket_lock(orch.ticket_lock_path):
+            self.assertEqual(rf.host_generation(self.ticket), '.')
+            self.assertEqual(rf.run_fenced(self.ticket, self.ticket, ['true']).returncode, 0)
+            with self.assertRaises(wg.HostCommandNotRun) as caught:
+                rf.run_fenced(self.ticket, self.ticket / 'execution-runtimes' / ('a' * 32), ['true'])
+            self.assertEqual(caught.exception.code, 'stale_generation')
+        self.assertEqual(self.registry('t'), self.registry('c'))
+        self.assertEqual(len(self.registry('t')), 1)
 
     def test_outside_an_entrypoint_host_commands_run_plainly(self):
         orch = self.orchestrator()

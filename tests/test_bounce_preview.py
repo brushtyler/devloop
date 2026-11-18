@@ -59,6 +59,19 @@ class PreviewTests(GateFixture):
         if code:
             self.assertEqual(value['blockers'], [{'code': code}])
 
+    def test_snapshot_ignores_the_writer_gate_coordination_files(self):
+        """#345: host Git under run_host() records trees in the ticket while the preview runs."""
+        import ssdlc_writer_gate as wg
+        root = self.orch.ssdlc_root
+        before = bounce.preview_snapshot(root, self.orch.state)
+        (root / wg.GATE_NAME).write_text('gate\n')
+        (root / wg.ANCHOR_NAME).write_text('anchor\n')
+        (root / wg.REGISTRY_NAME).mkdir()
+        (root / wg.REGISTRY_NAME / 't-tree.json').write_text('{}')
+        self.assertEqual(before, bounce.preview_snapshot(root, self.orch.state))
+        (root / 'writer-gate.d.evidence').write_text('not coordination\n')
+        self.assertNotEqual(before, bounce.preview_snapshot(root, self.orch.state))
+
     def test_api_restart_m1_no_writes_and_snapshots(self):
         self.gate()
         state = copy.deepcopy(self.orch.state)

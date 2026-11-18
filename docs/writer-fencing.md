@@ -271,6 +271,16 @@ reads of `ssdlc_impact.py` and `ssdlc_bounce.py`, and the scratch repository of
   selected one), the command runs under `run_host()` and its subreaper, and the lease is
   closed when the whole tree has ended. Its tree record and conclusion stay in the
   registry, so a later transition of that generation proves the tree finished.
+- **While a native transition is pending** (`execution/pending.json` or
+  `continuations/pending.json`), `runtime_root` fences dispatch and verification, but
+  the controller that prepares and activates the transition still runs Git on the host
+  (`ssdlc_role_fencing.host_generation()`). While its thread holds `ticket.lock`, the
+  lease checks the generation the published selectors name
+  (`ssdlc_fencing_proof.selected_generation`, the same one a transition proves) and
+  that its `state.json` belongs to the ticket; the transition's own locks and authority
+  checks are unchanged. Without `ticket.lock` a pending transition remains a refusal.
+  So a native feedback amendment of an admitted run activates with the automatic proof,
+  and no host command of its activation leaves automatic fencing.
 - **A refusal before the command runs** (`HostCommandNotRun`: unsupported platform or
   filesystem, a gate refusal, a moved generation, a lease not obtained in time, a
   supervisor that did not start, a registry entry that could not be published) is
@@ -286,6 +296,11 @@ reads of `ssdlc_impact.py` and `ssdlc_bounce.py`, and the scratch repository of
 
 A tree run without the subreaper, or not concluded, keeps refusing automatic fencing for
 its generation (`HOST_TREE_UNVERIFIABLE`), as above.
+
+The gate files (`writer.gate`, `writer-gate.anchor` and the `writer-gate.d/` registry)
+live in the canonical ticket, beside its evidence. They are coordination, not evidence:
+like `ticket.lock`, the bounce preview's snapshot of the ticket leaves them out, since
+the Git commands of the preview write tree records while it runs.
 
 ## Containers: the PID 1 holder
 
