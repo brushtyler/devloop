@@ -1,5 +1,6 @@
 """devloop: findings with an owner, closed only by their owner, CI or the operator (#110)."""
 
+import dataclasses
 import unittest
 
 from devloop import markdown, review
@@ -117,17 +118,18 @@ class FindingStateTests(unittest.TestCase):
 class Flow:
     """A PR #100 at SHA1 driven through snapshot, plan and tick."""
 
-    def make(self, comments, labels=('agent:review',), ci='pass', runner=None):
+    def make(self, comments, labels=('agent:review',), ci='pass', runner=None, cfg=CFG):
         self.gh = SnapshotGH(comments)
         self.gh.labels[100] = set(labels)
         self.gh.ci = ci
         self.logs = []
         self.runner = runner or FakeRunner()
-        self.d = Dispatcher(CFG, self.gh, FakeWS(), self.runner, log=self.logs.append)
+        self.cfg = cfg
+        self.d = Dispatcher(cfg, self.gh, FakeWS(), self.runner, log=self.logs.append)
         return self.d
 
     def planned(self):
-        return plan(self.d.snapshot(), CFG)
+        return plan(self.d.snapshot(), self.cfg)
 
     def published(self, kind):
         return [r for r in (markdown.read_marker(body, kind) for _, body in self.gh.comments) if r]
@@ -211,6 +213,71 @@ class CiClosureTests(Flow, unittest.TestCase):
         self.d.tick()
         self.assertEqual(self.gh.labels[100], {'agent:review'})
         self.assertEqual([a.kind for a in self.planned()], ['review'])
+
+    def approved_with_ci_running(self, cfg=CFG):
+        """#334: a CI round failed on round 1, the fix answered it, and the review of round 2
+        approves while the CI of the head is still running."""
+        self.make([review_comment(ci_round()), fix_comment(1)], ci='pending',
+                  runner=FakeRunner(raw_review('approve')), cfg=cfg)
+        self.assertEqual([a.kind for a in self.planned()], ['review'])
+        self.d.tick()
+        (approval,) = self.published('review')
+        self.assertEqual((approval['round'], approval['verdict']), (2, 'approve'))
+        # No escalation: the approval stays recorded and the PR waits in review for the CI.
+        self.assertEqual(self.gh.labels[100], {'agent:review'})
+        self.assertNotIn('open_findings', '\n'.join(body for _, body in self.gh.comments))
+        self.assertEqual(keys(review.open_findings(self.d.snapshot().prs[0].reviews)),
+                         ['1/ci/R1-1'])
+        self.assertEqual(self.planned(), [])
+
+    def test_an_approval_with_a_ci_finding_waits_for_the_running_ci_then_is_ready(self):
+        self.approved_with_ci_running()
+        self.gh.ci = 'pass'
+        self.assertEqual(self.planned(), [Action('findings', 100, 'CI passed on the head')])
+        self.d.tick()
+        (closed,) = self.published('finding')
+        self.assertEqual([(c['key'], c['by']) for c in closed['closed']], [('1/ci/R1-1', 'ci')])
+        # The recorded approval is applied without a new review.
+        self.assertEqual([a.kind for a in self.planned()], ['apply_review'])
+        self.d.tick()
+        self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
+        self.assertEqual(len(self.runner.calls), 1)
+
+    def test_an_approval_with_a_ci_finding_opens_a_ci_round_when_the_ci_fails(self):
+        # A round limit with room for the new CI round, which the limit would escalate otherwise.
+        self.approved_with_ci_running(dataclasses.replace(CFG, max_review_rounds=4))
+        self.gh.ci = 'fail'
+        self.assertEqual([a.kind for a in self.planned()], ['ci_failed'])
+        self.d.tick()
+        self.assertEqual(self.gh.labels[100], {'agent:changes'})
+        latest = review.current_round(self.d.snapshot().prs[0].reviews)
+        self.assertEqual([(r['round'], r['reviewer']) for r in latest], [(3, 'ci')])
+        self.assertNotIn('open_findings', '\n'.join(body for _, body in self.gh.comments))
+        self.assertEqual(len(self.runner.calls), 1)
+
+    def test_an_approval_with_a_ci_finding_and_the_ci_concluded_red_escalates(self):
+        # The CI of the head already failed: it cannot close the finding, a person decides.
+        self.make([review_comment(ci_round()), fix_comment(1)], ci='pending',
+                  runner=FakeRunner(raw_review('approve')))
+        p = self.d.snapshot().prs[0]
+        approval = reviewed_by(REV, raw_review('approve'), review.open_findings(p.reviews),
+                               round_no=2)
+        self.gh.ci = 'fail'
+        self.d._apply_round(p, [approval], announce=True, reviews=p.reviews + [approval])
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
+        escalation = self.gh.comments[-1][1]
+        self.assertIn('1/ci/R1-1', escalation)
+        self.assertIn('open_findings', escalation)
+
+    def test_an_approval_with_a_reviewers_open_finding_still_escalates_with_the_ci_running(self):
+        first = reviewed_by(OTHER, raw_review('request_changes', [finding()]))
+        self.make([review_comment(first), fix_comment(1)], ci='pending',
+                  runner=FakeRunner(raw_review('approve')))
+        self.d.tick()
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
+        escalation = self.gh.comments[-1][1]
+        self.assertIn(f'1/{OTHER}/R1-1', escalation)
+        self.assertIn('open_findings', escalation)
 
     def test_a_ci_finding_closes_on_a_fixed_head_and_others_stay_open(self):
         first = reviewed_by(REV, raw_review('request_changes', [finding()]))
