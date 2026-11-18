@@ -14,6 +14,11 @@ With ``[pin] auto = true`` a merge by devloop that touches ``devloop/`` or a lis
 request (``pin-pending.json``), and the next tick pins ``origin/<base_branch>`` before planning
 (``AutoPin``): ``run`` and ``tick`` then start again from the new copy (``Repinned``). In the
 continuous mode of ``run`` the pin runs at once, and the restart waits until no action runs (#301).
+
+Each successful pin, of a new copy or a reused one, records its time in ``pin-times.json``. With
+``keep`` (``[gc] keep_pins``, #380) the pin then keeps ``current`` and the ``keep`` other copies
+pinned most recently (``prune``), and removes the others, except a copy a process still uses: that
+one stays, and a later cleanup tries again.
 """
 
 import fcntl
@@ -31,9 +36,12 @@ import tomllib
 from contextlib import contextmanager, nullcontext
 from pathlib import Path, PurePosixPath
 
-from .config import DEFAULT_SENSITIVE_LISTS, ConfigError, apply_overlay, read_toml
+from .config import (DEFAULT_SENSITIVE_LISTS, INSTALL_ROOT, ConfigError, apply_overlay,
+                     read_toml)
 
 POINTER = 'current'
+# The time of the last successful pin of each copy (#380): the order of ``prune``.
+TIMES = 'pin-times.json'
 PREFIX = 'pinned-'
 STAMP = 'pin.json'
 LOCAL_CONFIG = 'config.local.toml'
@@ -419,7 +427,8 @@ def _reject(state, sha, tmp):
     return kept
 
 
-def pin(root, state, ref, local=None, log=print, fetch=True, smoke=True, fetch_lock=None):
+def pin(root, state, ref, local=None, log=print, fetch=True, smoke=True, fetch_lock=None,
+        keep=None, in_use=None):
     """Pin ``ref``: the verified copy of its commit, which ``state/current`` now points at.
     ``local`` is the overlay (used when the file exists). On any failure ``current`` is left as
     it was.
@@ -428,7 +437,11 @@ def pin(root, state, ref, local=None, log=print, fetch=True, smoke=True, fetch_l
     ``Smoke``, a callable ``smoke(copy, local)`` raising ``StepFailed``, or False to skip it
     (``--no-smoke``, logged). A copy that fails it stays as ``rejected-<sha12>`` and the pin
     raises ``SmokeError``. A copy already pinned (the rollback) is not tested again.
-    ``fetch_lock`` is held during the fetch (``resolve``)."""
+    ``fetch_lock`` is held during the fetch (``resolve``).
+
+    The pin records its time (``TIMES``). With ``keep`` (an integer, ``[gc] keep_pins``, #380)
+    it then removes the copies beyond ``current`` and the ``keep`` pinned most recently
+    (``prune``, with ``in_use``); a failure there is logged and the pin stands."""
     state = Path(state)
     state.mkdir(parents=True, exist_ok=True)
     with _locked(state):
@@ -467,8 +480,137 @@ def pin(root, state, ref, local=None, log=print, fetch=True, smoke=True, fetch_l
                                     'the copy could not be kept'), sha, step, kept)
         point(state, dest)
         clear_pending(state)
-    log(f'pinned {ref} at {sha[:12]}: {dest}' + (' (copy reused)' if reused else ''))
+        log(f'pinned {ref} at {sha[:12]}: {dest}' + (' (copy reused)' if reused else ''))
+        try:
+            _record_time(state, dest)
+            if keep is not None:
+                prune(state, keep, log=log, in_use=in_use)
+        except OSError as exc:
+            log(f'gc: the cleanup of the pinned copies failed, the pin stands: {exc}')
     return dest
+
+
+def _times(state):
+    """``{copy name: time of its last successful pin}`` (``TIMES``); {} when unreadable."""
+    try:
+        data = json.loads((Path(state) / TIMES).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, (int, float))
+            and not isinstance(v, bool)}
+
+
+def _record_time(state, copy=None, clock=time.time):
+    """Record now as the time of the last successful pin of ``copy`` (#380), when given, and
+    forget the copies no longer in ``state``."""
+    state = Path(state)
+    times = {name: at for name, at in _times(state).items() if (state / name).is_dir()}
+    if copy is not None:
+        times[Path(copy).name] = clock()
+    tmp = state / f'.{TIMES}-{os.getpid()}'
+    tmp.write_text(json.dumps(times, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+    os.replace(tmp, state / TIMES)
+
+
+def copies_in_use(copies, proc=Path('/proc')):
+    """The names of ``copies`` that a process uses (#380): one whose ``PYTHONPATH``, working
+    directory or command line names the copy or a path inside it, as the launcher, a restart
+    and the checks of a pin do. Only the processes whose ``/proc`` entries can be read count
+    (those of the same user). None when ``proc`` is not there: it cannot be told."""
+    proc = Path(proc)
+    if not proc.is_dir():
+        return None
+    roots = {os.path.realpath(c): Path(c).name for c in copies}
+
+    def names(path):
+        path = os.path.realpath(path) if path else ''
+        return {name for root, name in roots.items()
+                if path == root or path.startswith(root + os.sep)}
+
+    used = set()
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            environ = (entry / 'environ').read_bytes().split(b'\0')
+            cmdline = (entry / 'cmdline').read_bytes().split(b'\0')
+        except OSError:
+            continue  # gone, or a process of another user
+        for var in environ:
+            if var.startswith(b'PYTHONPATH='):
+                for part in os.fsdecode(var[len(b'PYTHONPATH='):]).split(os.pathsep):
+                    used |= names(part)
+        for arg in cmdline:
+            if arg.startswith(b'/'):
+                used |= names(os.fsdecode(arg))
+        try:
+            used |= names(os.readlink(entry / 'cwd'))
+        except OSError:
+            pass
+    return used
+
+
+def prune(state, keep, log=print, in_use=None):
+    """Remove the pinned copies of ``state`` beyond ``current`` and the ``keep`` others pinned
+    most recently (#380): ordered by the time of their last successful pin (``TIMES``), else by
+    the time the directory was last modified. Never ``current``, nor the copy this process runs
+    from, nor one a process uses (``in_use(copies)``, default ``copies_in_use``: a set of names,
+    or None when it cannot be told, and then nothing is removed); such a copy stays and a later
+    cleanup tries again. Only verified copies count (``pinned-<sha12>`` with its stamp); a
+    rejected copy is never touched. Each removal is logged. Returns the names removed.
+    The caller holds the lock of the pins."""
+    state = Path(state)
+    pointed = current(state)
+    running = INSTALL_ROOT.resolve()
+    times = _times(state)
+
+    def when(copy):
+        if copy.name in times:
+            return times[copy.name]
+        try:
+            return copy.stat().st_mtime
+        except OSError:
+            return 0
+
+    others = sorted((copy for copy in _verified_copies(state).values()
+                     if not copy.is_symlink() and copy.resolve() != pointed),
+                    key=lambda copy: (when(copy), copy.name), reverse=True)
+    extra = [copy for copy in others[keep:] if copy.resolve() != running]
+    if not extra:
+        return []
+    used = (in_use or copies_in_use)(extra)
+    if used is None:
+        log(f'gc: {len(extra)} pinned copies beyond the last {keep} not removed: the processes '
+            'that use them cannot be read')
+        return []
+    removed = []
+    for copy in extra:
+        if copy.name in used:
+            log(f'gc: {copy.name} is still in use, kept for a later cleanup')
+            continue
+        try:
+            _remove(copy)
+        except OSError as exc:
+            log(f'gc: the pinned copy {copy.name} could not be removed: {exc}')
+            continue
+        removed.append(copy.name)
+        log(f'gc: removed the pinned copy {copy.name}')
+    if removed and (state / TIMES).exists():
+        _record_time(state)
+    return removed
+
+
+def prune_now(state, keep, log=print, in_use=None):
+    """``prune`` under the lock of the pins, for a cleanup outside a pin; a pin running now
+    leaves the copies for a later cleanup. Returns the names removed."""
+    try:
+        with _locked(state):
+            return prune(state, keep, log=log, in_use=in_use)
+    except PinError as exc:
+        log(f'gc: pinned copies not cleaned up: {exc}')
+        return []
 
 
 def request(state, pr, head):
@@ -501,11 +643,13 @@ def clear_pending(state):
 class AutoPin:
     """The pin after a merge (#174), as the dispatcher uses it. ``fetch_lock`` is the lock of
     the workspace's shared git commands, held during the fetch of a pin that runs while actions
-    run (#301)."""
+    run (#301). ``keep`` (``[gc] keep_pins`` with ``[gc] pins``, else None) is how many copies
+    besides ``current`` a successful pin keeps (#380)."""
 
-    def __init__(self, root, state, local=None, log=print, smoke=True, fetch_lock=None):
+    def __init__(self, root, state, local=None, log=print, smoke=True, fetch_lock=None,
+                 keep=None):
         self.root, self.state, self.local, self.log = Path(root), Path(state), local, log
-        self.smoke, self.fetch_lock = smoke, fetch_lock
+        self.smoke, self.fetch_lock, self.keep = smoke, fetch_lock, keep
 
     def request(self, pr, head):
         request(self.state, pr, head)
@@ -519,7 +663,7 @@ class AutoPin:
 
     def pin(self, ref):
         return pin(self.root, self.state, ref, self.local, log=self.log, smoke=self.smoke,
-                   fetch_lock=self.fetch_lock)
+                   fetch_lock=self.fetch_lock, keep=self.keep)
 
     def current(self):
         """The copy ``current`` points at now, or None: the operator may pin another one by

@@ -130,6 +130,26 @@ class PinPolicy:
 
 
 @dataclass(frozen=True)
+class GCPolicy:
+    """``[gc]`` (#380): the cleanup of ``state_dir``. ``pins``: after a successful pin and at
+    each cleanup, keep ``current`` and the ``keep_pins`` copies pinned most recently, and remove
+    the other ``pinned-*`` copies no process uses. ``worktrees``: remove the worktrees of closed
+    issues and of closed or merged PRs. ``logs``: remove the files of ``logs/`` not modified for
+    ``log_days`` days, except the evidence of an open escalation and the files of a turn still
+    open in the ledger. The cleanup runs at a tick with nothing running, at most every
+    ``interval_minutes`` (0: at every such tick), and with ``devloop gc``."""
+    pins: bool = True
+    keep_pins: int = 5
+    worktrees: bool = True
+    logs: bool = False
+    log_days: int = 14
+    interval_minutes: int = 60
+
+    def enabled(self):
+        return self.pins or self.worktrees or self.logs
+
+
+@dataclass(frozen=True)
 class DocsMap:
     """``[docs] map`` (#203): code paths and the documents that describe them. A key is a
     directory prefix ending in ``/`` or a file, relative to the root; ``entries`` holds
@@ -297,6 +317,8 @@ class Config:
     report: ReportPolicy = field(default_factory=ReportPolicy)
     # The wait for the CI of a new head (#263).
     ci: CIPolicy = field(default_factory=CIPolicy)
+    # The cleanup of state_dir (#380).
+    gc: GCPolicy = field(default_factory=GCPolicy)
     # Code paths and their documents, listed in the implement, fix and review prompts (#203).
     docs: DocsMap = field(default_factory=DocsMap)
 
@@ -624,6 +646,31 @@ def parse_ci(table):
     return CIPolicy(**values)
 
 
+def parse_gc(table):
+    """``[gc]`` (#380): ``pins``, ``worktrees`` and ``logs``, booleans (default true, true and
+    false); ``keep_pins`` (default 5) and ``interval_minutes`` (default 60), whole numbers of at
+    least 0; ``log_days`` (default 14), a whole number of days of at least 1."""
+    if not isinstance(table, dict):
+        raise ConfigError('gc: expected a table')
+    unknown = set(table) - {f.name for f in dataclasses.fields(GCPolicy)}
+    if unknown:
+        raise ConfigError(f'gc: unknown keys {sorted(unknown)}')
+    values = {}
+    for key in ('pins', 'worktrees', 'logs'):
+        if key in table:
+            if not isinstance(table[key], bool):
+                raise ConfigError(f'gc.{key}: expected true or false')
+            values[key] = table[key]
+    for key, low, what in (('keep_pins', 0, 'copies'), ('interval_minutes', 0, 'minutes'),
+                           ('log_days', 1, 'days')):
+        if key in table:
+            value = table[key]
+            if not isinstance(value, int) or isinstance(value, bool) or value < low:
+                raise ConfigError(f'gc.{key}: expected a whole number of {what}, at least {low}')
+            values[key] = value
+    return GCPolicy(**values)
+
+
 def _docs_path(value, where, document):
     """``value`` as a path of ``[docs] map``: a non-empty path relative to the root, without
     surrounding spaces, ``.``, ``..`` or empty segments, backslashes or pattern characters. A key
@@ -825,6 +872,7 @@ def parse_config(data, root=INSTALL_ROOT):
         run=parse_run(data.get('run', {})),
         report=parse_report(data.get('report', {})),
         ci=parse_ci(data.get('ci', {})),
+        gc=parse_gc(data.get('gc', {})),
         docs=parse_docs(data),
         review_policy=parse_review_policy(
             data.get('review_policy', {}), root,
@@ -871,6 +919,8 @@ OVERLAY_KEYS = {
     'run': {'alert_issue': None},
     'report': dict.fromkeys(('issue', 'interval')),
     'ci': dict.fromkeys(('grace_minutes', 'required_timeout_minutes')),
+    'gc': dict.fromkeys(('pins', 'keep_pins', 'worktrees', 'logs', 'log_days',
+                         'interval_minutes')),
     'docs': {'map': {'*': None}},
 }
 
