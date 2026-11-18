@@ -864,7 +864,10 @@ quorum anyway.
   unexpected error of the dispatcher, a git or GitHub failure) is recorded for its head in
   `<state_dir>/advisory-failures.json`, so that the limit holds across a restart: the head is
   not planned again for 60 seconds, then gets **one** more turn, and after a second failure no
-  turn again (`no new turn on this head` in the tick log). A new head starts over. The turn of
+  turn again (`no new turn on this head` in the tick log). A new head starts over. When the
+  failure cannot be written to that file, the limit could not hold across a restart: the head
+  gets no new turn until devloop restarts (`no new turn on this head until a restart` in the
+  tick log). The turn of
   a failed action is always closed in the ledger, with outcome `failure`, never left `open`;
   each attempt writes its own turn record and nothing else. A result already kept, or a native
   review already published, is still published by the next ticks, without a turn.

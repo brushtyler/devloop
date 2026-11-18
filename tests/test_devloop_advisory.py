@@ -659,14 +659,30 @@ class FailureTests(FailureBase):
 
     def test_a_failure_that_cannot_be_recorded_does_not_hide_the_error(self):
         with tempfile.TemporaryDirectory() as state:
-            self.make(state, KeyError('advisory'))
+            self.make(state, KeyError('advisory'), KeyError('advisory'), answer())
 
-            def broken(*args):
+            def broken(data):
                 raise OSError('disk full')
-            self.d.advisory_failures.record = broken
+            self.d.advisory_failures._store = broken
             _, outcomes = self.tick()
             self.assertEqual(outcomes, ["unexpected error: KeyError: 'advisory'"])
-            self.assertIn('#100   advisory failure of #100 not recorded: disk full', self.logs)
+            self.assertIn('#100   advisory failure of #100 not recorded: disk full: no new turn '
+                          'on this head until a restart', self.logs)
+            comments = len(self.gh.thread[100])
+            # The failure not written still holds the head: no new turn, at the same instant
+            # nor later, and nothing written again.
+            for step in (0, 0, 0, RETRY_SECONDS, 3600):
+                self.clock.now += step
+                snap, outcomes = self.tick()
+                self.assertEqual((snap.advisories, outcomes), ([], []))
+            self.d._do_advisory(snap.prs[0])  # an action planned earlier does nothing either
+            self.assertEqual(len(self.runner.calls), 1)
+            self.assertEqual(len(ledger_turns(self.gh)), 1)
+            self.assertEqual(len(self.gh.thread[100]), comments)
+            # A new head starts over.
+            self.gh.head = SHA2
+            self.assertEqual(self.tick()[1], ["unexpected error: KeyError: 'advisory'"])
+            self.assertEqual(len(self.runner.calls), 2)
 
     def test_the_failures_of_a_head_survive_a_restart(self):
         with tempfile.TemporaryDirectory() as state:

@@ -26,7 +26,8 @@ read again: open, on the same head, in ``agent:needs-operator`` and not with the
 An action that fails before the result of its turn is kept (an error of the dispatcher, of git
 or of GitHub, #381) is recorded for its head in ``state_dir`` (``AdvisoryFailures``): the head
 gets one retry, not before ``RETRY_SECONDS``, and after ``MAX_ATTEMPTS`` failed actions no turn
-again. A new head starts over.
+again. A new head starts over. A failure that cannot be written holds the head in the process,
+with no new turn until a restart.
 """
 
 import json
@@ -216,10 +217,16 @@ class AdvisoryFailures(_StateFile):
 
     FILE = 'advisory-failures.json'
 
+    def __init__(self, state_dir=None):
+        super().__init__(state_dir)
+        # The failures that could not be written, by PR number: they hold in this process,
+        # and before the file, so that a failed write never lifts the limit nor the pause.
+        self._unsaved = {}
+
     def get(self, number, head):
         """The failures recorded for ``head`` of PR ``number``, or None."""
         with self._lock:
-            entry = self._load().get(str(number))
+            entry = self._unsaved.get(str(number)) or self._load().get(str(number))
         if (not isinstance(entry, dict) or entry.get('head') != head
                 or not isinstance(entry.get('failures'), int)
                 or not isinstance(entry.get('retry_at'), (int, float))):
@@ -228,17 +235,31 @@ class AdvisoryFailures(_StateFile):
 
     def record(self, number, head, now):
         """One more failure of ``head`` of PR ``number``: the entry written, which replaces the
-        one of an earlier head. ``OSError`` when the file cannot be written."""
+        one of an earlier head. ``OSError`` when the file cannot be written: the budget of the
+        head can no longer be kept across a restart, so the failure is kept in this process as
+        ``MAX_ATTEMPTS`` failures, and the head gets no new turn until a restart."""
         with self._lock:
             data = self._load()
-            entry = data.get(str(number))
+            entry = self._unsaved.get(str(number)) or data.get(str(number))
             failures = (entry['failures'] if isinstance(entry, dict)
                         and entry.get('head') == head
                         and isinstance(entry.get('failures'), int) else 0)
             entry = {'head': head, 'failures': failures + 1, 'retry_at': now + RETRY_SECONDS}
             data[str(number)] = entry
-            self._store(data)
+            try:
+                self._store(data)
+            except OSError:
+                self._unsaved[str(number)] = {**entry,
+                                              'failures': max(entry['failures'], MAX_ATTEMPTS)}
+                raise
+            self._unsaved.pop(str(number), None)
         return entry
+
+    def drop(self, number):
+        """Forget the failures of PR ``number``, also those not written."""
+        with self._lock:
+            self._unsaved.pop(str(number), None)
+        super().drop(number)
 
 
 class AdvisoryMixin:
@@ -377,7 +398,8 @@ class AdvisoryMixin:
             try:
                 failed = self.advisory_failures.record(pr.number, pr.head_sha, self.clock())
             except OSError as exc:
-                self.log(f'  advisory failure of #{pr.number} not recorded: {exc}')
+                self.log(f'  advisory failure of #{pr.number} not recorded: {exc}: no new turn '
+                         'on this head until a restart')
                 failed = None
             if failed is None:
                 raise  # the action's own error
