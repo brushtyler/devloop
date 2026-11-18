@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from orchestrator import EngineRunner, SSDLCOrchestrator
 from helpers.environment_cache import reuse_host_observations
+from helpers.host_commands import direct_host_commands
 from replay.repository_fixtures import RepositoryTests
 from ssdlc_tasks import (
     PlanError, TaskError, DevelopmentBlocked, TaskJournal, TaskPlanValidator, TaskScheduler,
@@ -800,6 +801,9 @@ class OrchestratorBootstrapTests(RepositoryTests):
     def setUp(self):
         # The engine guards the unchanged controller checkout at every boundary.
         reuse_host_observations(self)
+        # Writer fencing is verified by test_host_command_fencing: here the host
+        # commands of the run go to Git directly, without the run_host() supervisor.
+        direct_host_commands(self)
         super().setUp()
         environment = patch.object(SSDLCOrchestrator, '_verification_environment', return_value={
             'mode': 'role_container', 'platform': 'fixture',

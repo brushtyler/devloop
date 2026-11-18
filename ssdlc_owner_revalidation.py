@@ -13,6 +13,7 @@ import re
 import subprocess
 import tempfile
 
+from ssdlc_role_fencing import host_command
 from ssdlc_tasks import TaskError, digest, file_hash, git, confined
 
 
@@ -135,11 +136,11 @@ def validate_patches(value, coverage, worktree):
             if old is not None:
                 target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(old)
             command = ['git','--literal-pathspecs','-c','core.hooksPath=/dev/null','-c','core.fsmonitor=false']
-            initialized = subprocess.run(command+['init','--quiet','--template='],cwd=root,
+            initialized = host_command(command+['init','--quiet','--template='],cwd=root,
                 env=git_environment(),capture_output=True)
             if initialized.returncode:
                 raise TaskError('Cannot validate reviewed test patch in a disposable repository')
-            applied = subprocess.run(command+['apply','--whitespace=nowarn','-'],input=change['patch'],
+            applied = host_command(command+['apply','--whitespace=nowarn','-'],input=change['patch'],
                 text=True,cwd=root,env=git_environment(),capture_output=True)
             actual = hashlib.sha256(target.read_bytes()).hexdigest() if target.is_file() else None
             if applied.returncode or actual!=change['new_sha256']:
