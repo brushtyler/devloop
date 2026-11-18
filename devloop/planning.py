@@ -469,6 +469,11 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
                 actions.append(Action('sync', pr.number, 'conflicts with the base branch'))
             elif pr.checks == 'fail' and pr.rerun_waiting:
                 pass  # the failed jobs were re-run (#200): not merged, nor a round, yet
+            elif pr.checks == 'fail' and ci_joins_round(pr):
+                # One head, one round (#359): the failure joins the round that approved this
+                # head, voids its approval and takes no round of the limit.
+                actions.append(Action('ci_failed', pr.number,
+                                      'CI failed after approval: it joins its round'))
             elif pr.checks == 'fail':
                 actions.append(Action('ci_failed', pr.number, 'CI failed after approval')
                                if rounds_left else Action('round_limit', pr.number))
@@ -564,9 +569,15 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
                     # is applied without a new review; failed, it goes to ci_failed below.
                     continue
                 actions.append(Action('apply_review', pr.number, 'approval already recorded'))
+            elif replay and pr.checks == 'fail' and ci_joins_round(pr):
+                # One head, one round (#359): the CI of the approved head failed, the approval
+                # waiting for it or not. The failure joins that round and voids the approval.
+                actions.append(Action('ci_failed', pr.number,
+                                      'CI failed after the approval: it joins its round'))
             elif partial and pr.checks == 'fail' and ci_joins_round(pr):
-                # A reviewer of the round in progress asked for changes (#352): the failure
-                # joins the round, which still waits for its other reviewers.
+                # The round in progress has a request for changes (#352), or only approvals so
+                # far (#359): the failure joins it, and the round still waits for its other
+                # reviewers.
                 actions.append(Action('ci_failed', pr.number,
                                       'CI failed during the review: it joins its round'))
             elif partial and (pr.checks != 'fail' or ci_in_round(latest)):
@@ -816,21 +827,36 @@ def ci_in_round(records):
 
 
 def ci_joins_round(pr):
-    """The records of the round that a CI failure of ``pr``'s head joins (#352), or ``[]``
-    when the failure opens a CI round of its own. One head, one round: the latest round is an
-    agent round of this very head, not answered by a fix nor voided by a rereview request, that
-    holds no CI failure yet and in which a reviewer asked for changes, the round complete or
-    still waiting for other reviewers. Its failed checks become a ``ci`` finding of that round,
-    and one fix answers everything. A round that only approved does not take it: the approval
-    no longer holds, and the failure is a round of its own, as before."""
+    """The records of the round that a CI failure of ``pr``'s head joins, or ``[]`` when the
+    failure opens a CI round of its own. One head, one round: the latest round is an agent
+    round of this very head, not answered by a fix nor voided by a rereview request, that holds
+    no CI failure yet and in which a reviewer asked for changes (#352) or every reviewer so far
+    approved (#359), the round complete or still waiting for other reviewers. Its failed checks
+    become a ``ci`` finding of that round, its verdict becomes ``request_changes`` (an approval
+    no longer holds: ``voided_approval``), and one fix answers everything. A round where a
+    reviewer asked for the operator, and none for changes, does not take it: its escalation
+    goes on as before. Nor does an approval already void without a policy receipt, or whose
+    receipt was found stale after it (the base revoked it, #252): the failure is a round of
+    its own, as before."""
     latest = current_round(pr.reviews)
     if (not latest or latest[0]['source'] != 'agent' or latest[0]['head_sha'] != pr.head_sha
             or pr.rereview or ci_in_round(latest)
             or any(f['round'] == latest[0]['round'] for f in pr.fixes)):
         return []
-    if not any(current_verdict(r['verdict']) == 'request_changes' for r in latest):
-        return []
-    return latest
+    verdicts = {current_verdict(r['verdict']) for r in latest}
+    if 'request_changes' in verdicts:
+        return latest
+    if (verdicts == {'approve'} and not pr.stale_receipt
+            and all(receipt_of(r) is not None for r in latest)):
+        return latest
+    return []
+
+
+def voided_approval(records):
+    """Whether the CI failure in the round ``records`` voided its approval (#359): every
+    reviewer of the round, the ``ci`` record aside, approved."""
+    reviewers = [r for r in records if owner_of(r) != CI]
+    return bool(reviewers) and all(current_verdict(r['verdict']) == 'approve' for r in reviewers)
 
 
 def changes_before_ci(pr):
@@ -889,8 +915,11 @@ def round_reasons(reviews, fixes=(), syncs=()):
                 why = 'nuova review dello stesso head'
             else:
                 why = 'review di un nuovo head'
-            if first['source'] == 'agent' and ci_in_round(_round_records(reviews, number)):
+            records = _round_records(reviews, number)
+            if first['source'] == 'agent' and ci_in_round(records):
                 why += ', con la CI fallita dello stesso head'  # one head, one round (#352)
+                if voided_approval(records):
+                    why += ', che ne ha fatto decadere l\'approvazione'  # #359
             reasons.append((number, why, True))
         previous = first
     return reasons

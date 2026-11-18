@@ -270,15 +270,16 @@ class CiClosureTests(Flow, unittest.TestCase):
         self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
         self.assertEqual(len(self.runner.calls), 1)
 
-    def test_an_approval_with_a_ci_finding_opens_a_ci_round_when_the_ci_fails(self):
-        # A round limit with room for the new CI round, which the limit would escalate otherwise.
-        self.approved_with_ci_running(dataclasses.replace(CFG, max_review_rounds=4))
+    def test_an_approval_with_a_ci_finding_joins_its_round_when_the_ci_fails(self):
+        # One head, one round (#359): the failure joins the approving round 2, no round 3,
+        # so the limit leaves room for it as it is.
+        self.approved_with_ci_running()
         self.gh.ci = 'fail'
         self.assertEqual([a.kind for a in self.planned()], ['ci_failed'])
         self.d.tick()
         self.assertEqual(self.gh.labels[100], {'agent:changes'})
         latest = review.current_round(self.d.snapshot().prs[0].reviews)
-        self.assertEqual([(r['round'], r['reviewer']) for r in latest], [(3, 'ci')])
+        self.assertEqual([(r['round'], r['reviewer']) for r in latest], [(2, REV), (2, 'ci')])
         self.assertNotIn('open_findings', '\n'.join(body for _, body in self.gh.comments))
         self.assertEqual(len(self.runner.calls), 1)
 

@@ -267,15 +267,50 @@ class ReviewDuringCITests(unittest.TestCase):
         self.assertEqual((len(self.runner.calls), self.ws.commands), (1, []))
         records = [m for _, body in self.gh.comments
                    if (m := markdown.read_marker(body, 'review')) is not None]
-        # The CI failure is a round of its own after the review's, as today: the approval no
-        # longer holds, and the fix answers a new round (#352).
+        # One head, one round (#359): the CI failure is a ci finding of the approving round,
+        # whose effective verdict becomes request_changes; the approval decays.
         self.assertEqual([(r['source'], r['round'], r['verdict']) for r in records],
-                         [('agent', 1, 'approve'), ('ci', 2, 'request_changes')])
-        self.assertNotIn('entra nel suo round', records[1]['note'])
+                         [('agent', 1, 'approve'), ('ci', 1, 'request_changes')])
+        self.assertEqual(records[1]['blocking_findings'][0]['key'], '1/ci/R1-1')
+        self.assertIn("fa decadere l'approvazione", records[1]['note'])
+        self.assertIn('  CI failure joins round 1, voiding its approval', self.lines)
         snap = d.snapshot()
-        self.assertEqual(counted_rounds(snap.prs[0].reviews), 2)
-        self.assertEqual(round_reasons(snap.prs[0].reviews),
-                         [(1, 'prima review', True), (2, 'CI fallita', True)])
+        reviews = snap.prs[0].reviews
+        self.assertEqual(review.round_verdict(review.current_round(reviews)), 'request_changes')
+        self.assertEqual(counted_rounds(reviews), 1)
+        self.assertEqual(round_reasons(reviews), [(1, 'prima review, con la CI fallita dello '
+                                                   "stesso head, che ne ha fatto decadere "
+                                                   "l'approvazione", True)])
+        self.assertEqual([f['key'] for f in open_findings(reviews)], ['1/ci/R1-1'])
+        # The fix follows without a new round: it answers round 1.
+        self.assertEqual([a.kind for a in plan(snap, cfg)], ['fix'])
+        self.runner.outputs = [fixed()]
+        d._do_fix(snap.prs[0])
+        self.assertIn('CI fallita', self.prompt())
+        (fix,) = [m for _, body in self.gh.comments
+                  if (m := markdown.read_marker(body, 'fix')) is not None]
+        self.assertEqual(fix['round'], 1)
+        self.assertEqual(getattr(self.gh, 'merged', []), [])
+
+    def test_an_approved_ready_pr_whose_ci_then_fails_joins_its_round_and_is_not_merged(self):
+        # Promoted after its CI passed; the CI of the same head then fails (a re-run, say).
+        cfg = dataclasses.replace(CFG, merge=config.MergePolicy(mode='strict'))
+        d = self.make(ci='pending', cfg=cfg)
+        self.assertEqual(self.step(d), ['review'])
+        self.gh.ci = 'pass'
+        self.assertEqual(self.step(d), ['apply_review'])
+        self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
+        self.gh.ci = 'fail'
+        self.assertEqual(plan(d.snapshot(), cfg), [Action(
+            'ci_failed', 100, 'CI failed after approval: it joins its round')])
+        self.assertEqual(self.step(d), ['ci_failed'])
+        self.assertEqual(self.gh.labels[100], {'agent:changes'})
+        self.assertEqual(getattr(self.gh, 'merged', []), [])
+        records = [m for _, body in self.gh.comments
+                   if (m := markdown.read_marker(body, 'review')) is not None]
+        self.assertEqual([(r['source'], r['round']) for r in records], [('agent', 1), ('ci', 1)])
+        snap = d.snapshot()
+        self.assertEqual(counted_rounds(snap.prs[0].reviews), 1)
         self.assertEqual([a.kind for a in plan(snap, cfg)], ['fix'])
 
     def changes(self, ci='pending', committed=NOW - 6 * 60):
@@ -412,8 +447,8 @@ class PlanTests(unittest.TestCase):
 
     def test_one_head_one_round(self):
         """#352: a CI failure on the head of a round that asked for changes joins that round,
-        and takes no round of the limit; after an approval, or before any review, it is a
-        round of its own, as before."""
+        and takes no round of the limit; before any review of the head it is a round of its
+        own, as before."""
         last = dataclasses.replace(CFG, max_review_rounds=1)
         changes = dict(norm(raw_review('request_changes', [finding()])), ci='pending')
         joins = Action('ci_failed', 100, 'CI failed after the review: it joins its round')
@@ -436,15 +471,87 @@ class PlanTests(unittest.TestCase):
         for other in (answered, dataclasses.replace(failed, rereview=True),
                       pr(checks='fail', reviews=[changes], head=SHA2)):
             self.assertEqual(ci_joins_round(other), [])
-        # After an approval of the same head the failure is a round of its own, as before.
-        approval = dict(norm(raw_review()), ci='pending')
-        approved = pr(checks='fail', reviews=[approval])
-        self.assertEqual(ci_joins_round(approved), [])
-        self.assertEqual(self.plan_of(approved), [Action('ci_failed', 100)])
-        self.assertEqual(self.plan_of(approved, last), [Action('round_limit', 100)])
-        # Before any review, the same.
+        # Before any review of the head the failure is a round of its own, as before.
         self.assertEqual(ci_joins_round(pr(checks='fail')), [])
         self.assertEqual(self.plan_of(pr(checks='fail')), [Action('ci_failed', 100)])
+        self.assertEqual(self.plan_of(pr(checks='fail'), last), [Action('ci_failed', 100)])
+        spent = dataclasses.replace(CFG, max_review_rounds=0)
+        self.assertEqual(self.plan_of(pr(checks='fail'), spent), [Action('round_limit', 100)])
+        # On a head the latest round did not review, the same.
+        other = pr(checks='fail', reviews=[dict(norm(raw_review()), head_sha=SHA2)])
+        self.assertEqual(ci_joins_round(other), [])
+        self.assertEqual(self.plan_of(other), [Action('ci_failed', 100)])
+        self.assertEqual(self.plan_of(other, last), [Action('round_limit', 100)])
+
+    def test_one_head_one_round_after_an_approval(self):
+        """#359: a CI failure on the head a round approved joins that round, waiting for the CI
+        or already ready to merge, and takes no round of the limit."""
+        last = dataclasses.replace(CFG, max_review_rounds=1)
+        approval = dict(norm(raw_review()), ci='pending')
+        approved = pr(checks='fail', reviews=[approval])
+        self.assertEqual(ci_joins_round(approved), [approval])
+        ready = dataclasses.replace(approved, labels={'agent:ready-to-merge'},
+                                    merge_mode='strict')
+        for cfg in (CFG, last):
+            with self.subTest(max_review_rounds=cfg.max_review_rounds):
+                self.assertEqual(self.plan_of(approved, cfg), [Action(
+                    'ci_failed', 100, 'CI failed after the approval: it joins its round')])
+                self.assertEqual(self.plan_of(ready, cfg), [Action(
+                    'ci_failed', 100, 'CI failed after approval: it joins its round')])
+        # The #351 case: round 3 of 4 approved, its CI failed. The failure no longer spends
+        # round 4 before any fix: it joins round 3, which counts once.
+        four = dataclasses.replace(CFG, max_review_rounds=4)
+        earlier = [dict(norm(raw_review(), round_no=n), head_sha=SHA2) for n in (1, 2)]
+        third = dict(norm(raw_review(), round_no=3), ci='pending')
+        p351 = pr(checks='fail', reviews=earlier + [third])
+        self.assertEqual(ci_joins_round(p351), [third])
+        self.assertEqual([a.kind for a in self.plan_of(p351, four)], ['ci_failed'])
+        ci = review.ci_failure_review(failed_checks=['Unit Tests'], log_tail='boom',
+                                      previous_open=[], round_no=3, max_rounds=4,
+                                      head_sha=SHA1)
+        joined = dataclasses.replace(p351, reviews=earlier + [third, ci],
+                                     labels={'agent:changes'})
+        self.assertEqual(counted_rounds(joined.reviews), 3)
+        self.assertEqual(review.round_verdict(review.current_round(joined.reviews)),
+                         'request_changes')
+        self.assertEqual(round_reasons(joined.reviews)[-1],
+                         (3, 'review di un nuovo head, con la CI fallita dello stesso head, '
+                             "che ne ha fatto decadere l'approvazione", True))
+        self.assertEqual(self.plan_of(joined, four), [Action('fix', 100)])
+        # The merge never starts with the CI failed, the round holding an approval or not.
+        ci1 = review.ci_failure_review(failed_checks=['Unit Tests'], log_tail='boom',
+                                       previous_open=[], round_no=1, max_rounds=3,
+                                       head_sha=SHA1)
+        for labels in ({'agent:review'}, {'agent:ready-to-merge'}):
+            for reviews in ([approval], [approval, ci1]):
+                p = dataclasses.replace(approved, labels=labels, reviews=reviews,
+                                        merge_mode='strict', mergeable='MERGEABLE',
+                                        merge_status='CLEAN')
+                with self.subTest(labels=labels, records=len(reviews)):
+                    kinds = [a.kind for a in self.plan_of(p)]
+                    self.assertNotIn('merge', kinds)
+                    self.assertNotIn('operator_merge', kinds)
+        # An approval the base revoked (stale receipt, #252), or without a receipt, is
+        # already void: the failure is a round of its own, as before.
+        for void in (dataclasses.replace(approved, stale_receipt=True),
+                     pr(checks='fail', reviews=[dict(approval, receipt=None)])):
+            self.assertEqual(ci_joins_round(void), [])
+            self.assertEqual(self.plan_of(void), [Action('ci_failed', 100)])
+            self.assertEqual(self.plan_of(void, last), [Action('round_limit', 100)])
+
+    def test_a_needs_operator_round_keeps_its_escalation_after_a_ci_failure(self):
+        """#359: a needs_operator verdict keeps precedence: a CI failure on its head joins
+        nothing, and the recorded verdict sends the PR to the operator."""
+        needs = norm(raw_review('needs_operator', human='decisione di prodotto'))
+        for checks in ('fail', 'pass'):
+            with self.subTest(checks=checks):
+                p = pr(checks=checks, reviews=[needs])
+                self.assertEqual(ci_joins_round(p), [])
+                self.assertEqual(self.plan_of(p), [Action('apply_review', 100,
+                                                          'verdict already recorded')])
+        # Also with an approval of another reviewer in the round.
+        mixed = pr(checks='fail', reviews=[norm(raw_review()), dict(needs, reviewer='other')])
+        self.assertEqual(ci_joins_round(mixed), [])
 
 
 class ConfigTests(unittest.TestCase):

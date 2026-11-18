@@ -155,10 +155,17 @@ conflicts moved, nor the new review of an approved head whose approval the base 
 (`round/reviewer/ID`), so the round shown as the limit (`round 4 of at most 4`, `round 4/4`) is
 `max_review_rounds` plus the rounds that did not count.
 
+**One head, one round** (#352, #359): a CI failure on a head that already has a review round,
+not yet answered by a fix, does not open a round of its own when that round asked for changes or
+approved; it joins that round as a `ci` finding (see [Approval and CI](#approval-and-ci)). A
+round where a reviewer asked for the operator keeps its escalation. A CI failure before any
+review of the head is a round of its own.
+
 A `round_limit` escalation lists the rounds that count, each with its reason (the first review,
 a CI failure, a review after a fix, a review after a sync whose conflicts the implementer
-resolved, a new review of the same head or of a new one), then the rounds that do not count with
-theirs, and recalls that the operator can grant more rounds by raising `max_review_rounds` (#289).
+resolved, a new review of the same head or of a new one; a round the CI failure of its head
+joined adds `con la CI fallita dello stesso head`, and `che ne ha fatto decadere l'approvazione`
+when the round had approved), then the rounds that do not count with theirs, and recalls that the operator can grant more rounds by raising `max_review_rounds` (#289).
 `devloop status` shows the counted rounds of each PR on the limit, as `rounds=<counted>/<max>`,
 followed by `(+<n> not counted)` when some rounds did not count. It reads them from the thread
 also for a PR stopped in `agent:needs-operator` (as after `round_limit`) or
@@ -174,10 +181,18 @@ same head decides what the approval is worth:
 - **CI passed.** The recorded approval is applied without a new review, as a replay: no new
   round, and the PR goes to `agent:ready-to-merge` if the other conditions of the promotion hold.
 - **CI failed.** The approval does not count for the merge: the PR is never promoted and never
-  merged on it. The failure becomes a CI round after the review's, counted against
-  `max_review_rounds` as any CI round, and the PR goes to `agent:changes` with every finding
-  still open (or its failed jobs are re-run once, see
+  merged on it (or its failed jobs are re-run once first, see
   [CI failures not pertinent to the PR](reference.md#ci-failures-not-pertinent-to-the-pr)).
+  **One head, one round** (#359): the failure does not open a round of its own. The dispatcher
+  adds a `ci` record to the round that approved, with the failed checks as its `ci` finding;
+  the round's verdict becomes `request_changes`, the approval decays, and the PR goes to
+  `agent:changes` for the fix, without a new round. The round still counts once against
+  `max_review_rounds`. The trace stays: the `ci` record's note says that the CI failure voided
+  the approval of its round, the `ci_round` event in the round's register carries
+  `voided_approval: true`, and the round's reason in a `round_limit` escalation says so. The
+  same holds when the CI of an approved head fails later, with the PR already in
+  `agent:ready-to-merge`: the promotion's receipt is superseded, as for any round that does not
+  approve.
 - **No CI after the window.** With `local_tests` other than `full` the full suite runs locally
   before the promotion; if it fails, the PR goes to `agent:needs-operator`.
 
@@ -187,13 +202,18 @@ re-run of its failed jobs, when there is one), **one head, one round** (#352): t
 not open a round of its own. The dispatcher adds a `ci` record to the round that asked for
 changes, with the failed checks as its `ci` finding; the round's register gets the `ci_round`
 event, the round still counts once against `max_review_rounds`, and the one fix that follows
-answers the reviewer's findings and the CI failure together. The same holds for a round still
-waiting for other reviewers when one of them already asked for changes: the failure joins it,
-and the round waits for the others as before. A round that has only approved so far does not
-take the failure: it becomes a CI round of its own, as above. If it passes, or the
-window ends without CI, the fix starts with the reviewer's findings; checks the base branch
-requires and that never appeared are not escalated then: the fix pushes a new head, which gets
-its own CI.
+answers the reviewer's findings and the CI failure together. If that CI passes, or the window
+ends without CI, the fix starts with the reviewer's findings; checks the base branch requires
+and that never appeared are not escalated then: the fix pushes a new head, which gets its own
+CI.
+
+The same holds for a round still waiting for other reviewers when one of them already asked for
+changes, or when every reviewer so far approved (#359): the failure joins it, and the round
+waits for the others as before. A round where a reviewer asked for the operator, and none for
+changes, does not take the failure: its `needs_operator` verdict keeps precedence and the PR
+waits for the operator. Nor does an approval already void, without a receipt or with a receipt
+found stale after it (see [Resync after approval](#resync-after-approval)): the failure is a CI
+round of its own, as before.
 
 A CI already failed before the review is a CI round, as before: no review runs on that head.
 
@@ -556,7 +576,8 @@ The exception is a PR whose open findings are all `ci` findings while the CI of 
 is still running, has not appeared yet within the wait of a just pushed head, or has passed while
 the review ran (#334): the CI can still close them, so the approval stays recorded and the PR
 waits in `agent:review`. When the CI passes, the next tick closes its findings and the approval is applied without a new review; when it
-fails, a new CI round opens as usual. A `ci` finding whose head CI has already concluded without
+fails, the failure joins the round that approved as a `ci` finding, without a round of its own,
+and voids its approval (one head, one round, #359, see [Approval and CI](#approval-and-ci)). A `ci` finding whose head CI has already concluded without
 passing goes to the operator. When a reviewer
 of the round asks for changes, the fix receives every open finding, whoever owns it.
 Once the operator has closed them, putting the PR back into `agent:review` applies the recorded
@@ -708,7 +729,7 @@ readiness check, on the PR for review, fix, sync and CI. The turns of a review r
 | `request` | The issue goes from `agent:ready` to `agent:working` | SHA-256 of title and body, author and time of the trusted `labeled` event of `agent:ready`, ids of the trusted comments given to the implementer, time of the takeover. It is a snapshot **at the takeover**, not at the time of the label |
 | `turn` | Every invocation of an agent CLI, retries, fallback models and failures included: implement, fix, sync with an agent, review, readiness check, conclave call | Kind, agent, GitHub identity (none: the operator's `gh` login), configured model and effort (for a fallback, the fallback model and the model it replaces), real model, start, end, duration, outcome (`success`, `failure`, `unavailable`), the error if any, telemetry, and the last command the turn ran or started when the CLI exposes it (`last_command`: only codex, from the `command_execution` items of `--json`; cleaned like the tail of a timeout, on one line, at most 200 characters; absent otherwise), also for a turn that timed out |
 | `verification` | Every test command the dispatcher runs after a writing turn (none when the [local tests](reference.md#local-tests) select nothing), and the full suite it runs before a review of a head without CI, or before the promotion of an approval given while no CI was known | Command, outcome, duration, the tree hash before and after the test, and the commit (none before a review) |
-| `event` | The CI of a head (`ci_round`): a failed CI round, the checks a review round saw whatever its verdict (`approve`, `request_changes` or `needs_operator`), or the passing checks read again just before the PR is promoted to `agent:ready-to-merge` (also at level 0); a sync without an agent, or the merge of `main` before a fix (`sync`) | For the CI, the head, the state (`fail`, `pass`, or `none` without checks), the review round (none at level 0) and each check with its outcome, the id of its GitHub Actions run (none for a commit status or a check outside Actions) and its duration in seconds (`duration_s`: none while it runs and for a commit status, #300). Every CI round also records `tests`, the [summary of the suite](reference.md#summary-of-the-ci-in-the-prompts) that the dispatcher reads for the review and fix prompts (read again from the job logs when a promotion records the round, for instance after a review that saw the CI pending): for each job whose log holds the final lines of `scripts/run-tests.py`, its name with `ran` and `slowest`, and for a job whose log could not be read, its name with `log: unavailable`; absent when no job has either. The same checks read again for the same head and round are not recorded twice, a new run is. For a sync, the merged base commit and the old and new heads |
+| `event` | The CI of a head (`ci_round`): a failed CI round, the checks a review round saw whatever its verdict (`approve`, `request_changes` or `needs_operator`), or the passing checks read again just before the PR is promoted to `agent:ready-to-merge` (also at level 0); a sync without an agent, or the merge of `main` before a fix (`sync`) | For the CI, the head, the state (`fail`, `pass`, or `none` without checks), the review round (none at level 0) and each check with its outcome, the id of its GitHub Actions run (none for a commit status or a check outside Actions) and its duration in seconds (`duration_s`: none while it runs and for a commit status, #300). Every CI round also records `tests`, the [summary of the suite](reference.md#summary-of-the-ci-in-the-prompts) that the dispatcher reads for the review and fix prompts (read again from the job logs when a promotion records the round, for instance after a review that saw the CI pending): for each job whose log holds the final lines of `scripts/run-tests.py`, its name with `ran` and `slowest`, and for a job whose log could not be read, its name with `log: unavailable`; absent when no job has either. The same checks read again for the same head and round are not recorded twice, a new run is. A failure that joined a round that had approved its head carries `voided_approval: true` (#359). For a sync, the merged base commit and the old and new heads |
 
 **Telemetry** is what the CLI attests, not authenticated:
 

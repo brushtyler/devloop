@@ -241,9 +241,9 @@ the suite fails only in modules not pertinent to the PR and another job fails wi
   `agent:review` as for any CI running again on the approved commit.
 - **Second failure.** One re-run per head: if the re-run fails too, the failure is a normal
   `ci_failed`, which counts as a round, and its comment cites the re-run (runs and modules). On a
-  head whose review round asked for changes the failure joins that round instead, without a round
-  of its own ([one head, one round](protocol.md#approval-and-ci), #352). A new head starts again
-  from its first failure.
+  head whose review round asked for changes (#352) or approved (#359) the failure joins that
+  round instead, without a round of its own ([one head, one round](protocol.md#approval-and-ci)).
+  A new head starts again from its first failure.
 
 The rerun needs **`actions: write`** on the dispatcher's app. Its token is minted with only that
 permission. Without it (GitHub answers 403, or refuses to mint the token; also when the
@@ -253,7 +253,8 @@ as before. `ci_rerun_unrelated = false` turns the re-run off; the default is `tr
 the `rerun` kind counts only when the dispatcher's identity wrote it.
 
 Only a `ci_failed` is re-run this way: a CI failure on a PR that has no round left goes to
-`agent:needs-operator` (`round_limit`), as before.
+`agent:needs-operator` (`round_limit`), as before, unless it joins the review round of its head,
+which takes no round of the limit.
 
 ### Summary of the CI in the prompts
 
