@@ -23,7 +23,7 @@ plans the next steps and runs them. A crashed tick is resumed by the next one.
 | Review | CI pending, passed or absent, not failed (absent CI with `local_tests` other than `full`: the full suite first runs locally, except within the [window of a new head](reference.md#ci-of-a-new-head), see [Local tests](reference.md#local-tests)) | The dispatcher computes the PR's [review level](reference.md#review-level-and-policy-receipt); at level 1 a **different** agent posts a structured verdict (see [Structured review](protocol.md#structured-review)), at level 2 two [independent reviewers](reference.md#level-2-two-independent-reviewers) do, one per action, and their verdicts are applied together |
 | Fix | `agent:changes`, or a [`/devloop fix`](#fix-requested-by-the-operator-or-the-supervisor) command on a PR in `agent:review` or `agent:changes` | The implementer fixes or disputes every open finding of the round, and applies the requests of the command, then back to `agent:review` |
 | Sync | A PR in `agent:review` or `agent:ready-to-merge` conflicts with `main` | The implementer resolves the conflicts of a merge of `origin/main`; the dispatcher pushes the merge commit, back to `agent:review` (see [Conflicts with `main`](protocol.md#conflicts-with-main)) |
-| Approve | Verdict `approve` from every reviewer the level requires | `agent:ready-to-merge`, only if no [finding](protocol.md#findings-and-who-closes-them) is still open, the PR head is still the reviewed commit, CI passed and the policy receipt recomputed just before promotion matches the one of every approval (an earlier base is admitted only if `main` left the PR's files alone since, see [When `main` advances](reference.md#when-main-advances-during-a-round)), and the [receipt of the PR](protocol.md#pr-receipt) does not contradict the markers; the dispatcher then writes that receipt |
+| Approve | Verdict `approve` from every reviewer the level requires | `agent:ready-to-merge`, only if no [finding](protocol.md#findings-and-who-closes-them) is still open, the PR head is still the reviewed commit, CI passed and the policy receipt recomputed just before promotion matches the one of every approval (an earlier base is admitted only if `main` left the PR's files alone since, see [When `main` advances](reference.md#when-main-advances-during-a-round)), and the [receipt of the PR](protocol.md#pr-receipt) does not contradict the markers; the dispatcher then writes that receipt in the comment of the promotion, where a merge by devloop adds its record too |
 | Level 0 | A trusted user's `reviews:0`, the whole diff in the operator's allowlist, every expected check `success` | `agent:ready-to-merge` without a review (see [Level 0](reference.md#level-0-no-review)); off by default |
 | Merge | `agent:ready-to-merge` | **A human merges**, unless the [merge mode](#merge-modes) of the PR lets devloop merge |
 
@@ -1194,8 +1194,10 @@ and writes nothing without `--publish`. The summary lists:
   of the agents with an app are not among the comments the summary reads) and turns run with a
   fallback model.
 
-A turn belongs to the day it started, with its whole duration; any other record to the day it
-was written. A PR counts only with the marker of the implementer that opened it.
+A turn belongs to the day it started, with its whole duration; a merge of devloop to the day
+GitHub reports for it, since its record goes in the comment of the promotion (#338); any other
+record to the day it was written. A PR counts only with the marker of the implementer that
+opened it.
 
 **Publication.** With `[report] issue = <number>` in the
 [local overlay](#local-config-as-an-overlay), an issue **dedicated** to the summary (not the

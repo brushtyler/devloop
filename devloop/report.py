@@ -5,7 +5,9 @@ The sources are the records the dispatcher reads, never a local log: the ``ledge
 records of the configured reviewers, and the ``pr`` marker of the PRs opened by an implementer.
 Days are UTC days:
 
-- a turn belongs to the day of its ``started_at``, with its whole duration; any other record to
+- a turn belongs to the day of its ``started_at``, with its whole duration; a ``merged`` record
+  to the day GitHub reports for the merge of its PR (#338): without it, the day of its own
+  comment only when that comment is not the promotion's, written earlier; any other record to
   the day of its own time (``at``) or, without one, of the creation of its comment;
 - the totals count the PRs opened that day, the PRs merged that day (by devloop or by a person),
   the review rounds opened that day (the first review record of the round) and the turns run
@@ -122,7 +124,12 @@ class Records:
         span = (f'{(first - datetime.timedelta(days=1)).isoformat()}..'
                 f'{(last + datetime.timedelta(days=1)).isoformat()}')
         self.created = self._devloop_prs(gh.search_prs(f'created:{span}'))
-        self.merged = self._devloop_prs(gh.search_prs(f'merged:{span}'))
+        merged = gh.search_prs(f'merged:{span}')
+        self.merged = self._devloop_prs(merged)
+        # When each PR merged in the span merged, whoever opened it: a ``merged`` record belongs
+        # to the day of its merge. A PR missing here merged outside the days read.
+        self._merged_at = {pr['number']: pr['mergedAt'] for pr in merged
+                           if isinstance(pr.get('mergedAt'), str)}
         self._threads = {}
 
     def _devloop_prs(self, prs):
@@ -200,8 +207,17 @@ class Records:
                     self._ledger(out, day, number, record, created)
                 continue
             merged = read_marker(body, 'merged')
-            if merged is not None and _day_of(created) == day:
-                out.merges.append((_hour(created), number, merged['mode'], merged['level']))
+            if merged is not None:
+                # A ``merged`` record belongs to the day of the merge. Since #338 it is added to
+                # the comment of the promotion, written when the PR was promoted, maybe days
+                # before: that comment's time is never the merge's, and without the merge's own
+                # time from the search the merge fell outside the days read. A comment of its
+                # own, as before #338, was written at the merge.
+                at = self._merged_at.get(number)
+                if at is None and read_marker(body, 'policy') is None:
+                    at = created
+                if at is not None and _day_of(at) == day:
+                    out.merges.append((_hour(at), number, merged['mode'], merged['level']))
                 continue
             notice = read_marker(body, 'notice')
             if (notice is not None and notice.get('event') == 'escalation'

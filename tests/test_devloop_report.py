@@ -225,6 +225,31 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(s.actions, [('23:30', 7, 'implement', 'claude', 'success', 3600000)])
         self.assertEqual(s.rounds, 1)  # round 2 of #13
 
+    def test_a_merge_added_to_the_comment_of_the_promotion_belongs_to_the_day_of_the_merge(self):
+        # #338: #15 was promoted on an earlier day, the day before or three days before, and
+        # devloop merged it on 2026-11-16, adding its merged record to the comment of the
+        # promotion. Each day is read on its own, as ``devloop report --day`` reads it: the
+        # merge of three days later is outside the PRs merged around the day of the promotion,
+        # and still is not counted on that day.
+        merged = {'head': 'a' * 40, 'level': 1, 'mode': 'strict', 'receipt': RECEIPT}
+        on_the_day = [('13:00', 12, 'auto', 1), ('17:00', 15, 'strict', 1)]
+        for promoted in ('2026-11-15', '2026-11-13'):
+            gh = ReportGH()
+            simulated_day(gh)
+            ident = gh.add(15, DISPATCHER, publishable(
+                '## Pronta per il merge\n\n## Mergiata da devloop', 'policy',
+                {'event': 'promoted', 'receipt': RECEIPT}, records=[('merged', merged)]),
+                f'{promoted}T20:00:00Z')
+            next(c for c in gh.comments if c['id'] == ident)['updated_at'] = \
+                '2026-11-16T17:00:01Z'
+            for stamp, merges, numbers in ((promoted, [], []),
+                                           ('2026-11-16', on_the_day, [12, 15])):
+                with self.subTest(promoted=promoted, day=stamp):
+                    day = report.parse_day(stamp)
+                    s = report.Records(gh, TRUST, day, day, CFG.agents).summary(day)
+                    self.assertEqual(s.merges, merges)
+                    self.assertEqual(s.merged, numbers)
+
     def test_a_round_register_gives_its_turns_its_ci_and_its_round(self):
         # #325: the reviews are native reviews, outside the comments the summary reads; the
         # register of the round holds its turns and its CI, and counts the round.
