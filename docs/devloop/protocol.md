@@ -909,6 +909,14 @@ is an explicit error, never ignored: the journal is not used and no turn starts.
 journal, or a journal shorter than it or off it (cut, replaced, rolled back) is refused (ADR 0001,
 constraint 3). The chain is not keyed: it gives integrity, not provenance.
 
+**Who writes it.** Only the dispatcher that holds `dispatcher.lock` writes the journal: it keeps
+the chain in memory and appends to it. `devloop status` and `devloop tick --dry-run`, which run
+beside it without the lock, read it without any effect on the files: they neither set aside a
+tail nor import or remove `ledger-open-turns.json`, and what their planning would record (a
+legacy turn linked to its work, a turn made uncertain) stays in their memory. Their ids of the
+legacy turns not imported yet are their own. A record they appended would break the chain of the
+running dispatcher at its next write, and with it the journal.
+
 **Migration.** The journal replaces `<state_dir>/ledger-open-turns.json`. An existing file is
 imported once, at the first read, as one legacy turn per issue or PR (`legacy-<n>-<8 hex
 digits>`), explicitly `uncertain`, with its number and count and no outcome made up; then the

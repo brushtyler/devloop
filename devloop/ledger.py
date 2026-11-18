@@ -133,11 +133,11 @@ class Ledger:
     edited. The dispatcher sets it to its own check; without it every author counts."""
 
     def __init__(self, gh: Tracker, clock=time.time, monotonic=time.monotonic, state_dir=None,
-                 signed=None):
+                 signed=None, read_only=False):
         self.gh = gh
         self._clock = clock
         self._monotonic = monotonic
-        self.journal = TurnJournal(state_dir, clock=clock)
+        self.journal = TurnJournal(state_dir, clock=clock, read_only=read_only)
         self.signed = signed
         # Reviewers in parallel write the same register (#325): one write at a time, each on
         # the register as GitHub has it right before.

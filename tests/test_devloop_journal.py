@@ -102,6 +102,26 @@ class JournalChainTests(unittest.TestCase):
                 second = intent(again, number=8, issue=8)
                 self.assertIn(second, TurnJournal(folder).turns())
 
+    def test_a_read_only_journal_changes_no_file(self):
+        j = TurnJournal(self.dir)
+        first = intent(j)
+        (self.dir / LEGACY).write_text(json.dumps({'100': 1}))
+        tail = b'{"sequence": 2, "prev'
+        self.path.write_bytes(self.path.read_bytes() + tail)  # a write in flight
+        files = {p.name: p.read_bytes() for p in self.dir.iterdir()}
+        reader = TurnJournal(self.dir, read_only=True)
+        # It reads what the dispatcher would, the old trace imported in memory...
+        self.assertIsNone(reader.turns()[first]['outcome'])
+        self.assertEqual(reader.unlinked(), [100])
+        # ... and what its planning records stays in memory.
+        reader.link({100: 7}, CFG.repo)
+        reader.uncertain(7)
+        self.assertEqual(reader.unlinked(), [])
+        self.assertEqual(reader.turns()[first]['outcome'], 'uncertain')
+        with self.assertRaisesRegex(JournalError, 'read-only'):
+            intent(reader, number=8, issue=8)
+        self.assertEqual({p.name: p.read_bytes() for p in self.dir.iterdir()}, files)
+
     def test_a_snapshot_without_its_journal_is_refused(self):
         j = TurnJournal(self.dir)
         intent(j)
@@ -614,6 +634,56 @@ class DispatcherJournalTests(unittest.TestCase):
         self.assertEqual(errors, [None])
         self.assertEqual(len(runner.calls), 1)
         self.assertEqual(len(self.escalations(100)), 2)
+
+    def test_status_and_a_dry_run_beside_the_dispatcher_write_nothing_in_the_journal(self):
+        from test_devloop_advisory import ON, AdvisoryWS, OperatorGH, answer
+        from helpers.devloop_fakes import FakeIdentities
+        from test_devloop import FakeRunner
+        # A legacy turn on PR #100 still to link, the advisory review planned on it: the
+        # planning checks the turns of its work, and links them.
+        (self.state / LEGACY).write_text(json.dumps({'100': 1}))
+        cfg = dataclasses.replace(ON, block_uncertain_turns=True)
+        self.gh = OperatorGH()
+        self.gh.labels[100] = {'agent:needs-operator'}
+
+        def dispatcher(read_only):
+            return Dispatcher(cfg, self.gh, AdvisoryWS(), FakeRunner(answer()), log=lambda m: None,
+                              identities=FakeIdentities(self.gh),
+                              ledger=Ledger(self.gh, state_dir=self.state, read_only=read_only))
+        # The running dispatcher, with the lock, has read its journal and keeps it in memory.
+        active = dispatcher(read_only=False)
+        self.assertEqual(active.ledger.journal.unlinked(), [100])
+        files = {p.name: p.read_bytes() for p in self.state.iterdir()}
+        # Beside it, without the lock: `devloop status` and `devloop tick --dry-run`.
+        for run in (lambda d: d.snapshot(), lambda d: d.tick(dry_run=True)):
+            beside = dispatcher(read_only=True)
+            run(beside)
+            self.assertEqual(beside.ledger.journal.unlinked(), [])  # linked, in memory alone
+            self.assertEqual({p.name: p.read_bytes() for p in self.state.iterdir()}, files)
+        # The running dispatcher writes next, at its own tick: the chain stays valid, read again
+        # from the file.
+        active.snapshot()
+        (legacy,) = TurnJournal(self.state).turns().values()
+        self.assertEqual((legacy['issue'], legacy['repo']), (7, CFG.repo))
+        self.assertEqual([json.loads(line)['event'] for line in lines(self.state / JOURNAL)],
+                         ['migrated', 'linked'])
+
+    def test_only_the_commands_with_the_lock_write_the_journal(self):
+        import devloop.__main__ as devloop_main
+        from devloop import apps
+        from types import SimpleNamespace
+        for command, dry_run, read_only in (('status', False, True), ('tick', True, True),
+                                            ('tick', False, False), ('run', False, False)):
+            with self.subTest(command=command, dry_run=dry_run), \
+                    tempfile.TemporaryDirectory() as tmp:
+                args = SimpleNamespace(config=None, local_config=None, command=command,
+                                       dry_run=dry_run)
+                with mock.patch.object(devloop_main, 'load_config', return_value=CFG), \
+                        mock.patch.object(devloop_main, 'main_checkout', return_value=Path(tmp)), \
+                        mock.patch.object(devloop_main.Identities, 'from_config',
+                                          return_value=apps.Identities(CFG.repo, {})):
+                    _, _, d = devloop_main.build(args)
+                self.assertIs(d.ledger.journal.read_only, read_only)
 
     def test_without_the_block_legacy_turns_are_checked_as_before(self):
         (self.state / LEGACY).write_text(json.dumps({'100': 1}))

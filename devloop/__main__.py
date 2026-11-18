@@ -113,8 +113,13 @@ def build(args):
     gh = identities.github(DISPATCHER)
     # Merges (#172) run with the merger's app (#201), the only one that gets contents=write,
     # or without it with the local gh login devloop runs with.
+    # Without the dispatcher lock, status and a dry run read the journal of the turns and never
+    # write it (#362): the running dispatcher keeps its chain in memory.
+    command = getattr(args, 'command', None)
+    read_only = command == 'status' or (command == 'tick' and getattr(args, 'dry_run', False))
     dispatcher = Dispatcher(cfg, gh, ws, runner, log=tick_log, identities=identities,
-                            activity=current, ledger=Ledger(gh, state_dir=state),
+                            activity=current,
+                            ledger=Ledger(gh, state_dir=state, read_only=read_only),
                             merger=identities.merger(),
                             pinner=pin.AutoPin(root, state, args.local_config, log=tick_log,
                                                fetch_lock=ws.shared_lock),

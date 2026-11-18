@@ -32,6 +32,13 @@ hash that does not match, or an unreadable line before the last, is an explicit 
 the journal a snapshot (``turn-journal-state.json``) keeps the sequence and hash of its latest
 event: a snapshot without its journal, or a journal shorter than it or diverging from it, is
 refused (ADR 0001, constraint 3). The chain is not keyed: it gives integrity, not provenance.
+
+Only the dispatcher that holds ``dispatcher.lock`` writes the journal. ``devloop status`` and
+``devloop tick --dry-run`` run beside it without the lock: they read it ``read_only``, with no
+effect on the files. They neither set aside a tail nor import or remove the old trace, and what
+their planning records (a link, an uncertain turn) stays in their memory. A record they appended
+to the file would break the chain the running dispatcher keeps in memory, and with it the
+journal.
 """
 
 import hashlib
@@ -137,10 +144,16 @@ class TurnJournal:
 
     It also knows, in memory, the turns of this process still running (``_live``): from their
     intent until their outcome is recorded or attempted. A turn without outcome that is not
-    running ended without a durable one, or a previous process left it."""
+    running ended without a durable one, or a previous process left it.
 
-    def __init__(self, state_dir=None, clock=time.time):
+    ``read_only``: for a process without the dispatcher lock (``status``, ``tick --dry-run``).
+    It reads and verifies the journal and changes no file: an incomplete last line is ignored,
+    not set aside; the old trace is imported in memory, under ids of its own, and stays on
+    disk; every other record stays in memory. No turn starts from it (``intent``)."""
+
+    def __init__(self, state_dir=None, clock=time.time, read_only=False):
         self.dir = Path(state_dir) if state_dir is not None else None
+        self.read_only = read_only
         self._clock = clock
         self._lock = threading.RLock()
         self._loaded = False
@@ -176,7 +189,7 @@ class TurnJournal:
                 json.loads(complete[-1])
             except ValueError:
                 tail = complete.pop() + b'\n'
-        if tail:
+        if tail and not self.read_only:
             self._set_aside(data, tail)
         events, previous = [], ''
         for n, line in enumerate(complete, 1):
@@ -208,15 +221,21 @@ class TurnJournal:
         except OSError as exc:
             raise JournalError(f'{self.path}: incomplete last record not set aside: {exc}') from exc
 
-    def _check_snapshot(self, events):
-        """Refuse a snapshot without its journal, or a journal behind or off it."""
+    def _read_snapshot(self):
+        """``(sequence, sha256)`` of the snapshot, or None without one."""
         if not self.snapshot.exists():
-            return
+            return None
         try:
             head = json.loads(self.snapshot.read_text(encoding='utf-8'))
-            sequence, sha = head['sequence'], head['sha256']
+            return head['sequence'], head['sha256']
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise JournalError(f'{self.snapshot}: not readable: {exc}') from exc
+
+    def _check_snapshot(self, events, head):
+        """Refuse a snapshot without its journal, or a journal behind or off it."""
+        if head is None:
+            return
+        sequence, sha = head
         if not events:
             raise JournalError(f'{self.snapshot} exists but the journal {self.path.name} is '
                                'missing or empty: the state is refused without its journal')
@@ -239,8 +258,11 @@ class TurnJournal:
         if self._loaded:
             return
         if self.dir is not None:
+            # The snapshot first: the dispatcher writes it after the journal, so a process that
+            # reads beside it (``read_only``) never finds the journal behind it.
+            head = self._read_snapshot()
             events = self._read()
-            self._check_snapshot(events)
+            self._check_snapshot(events, head)
             self._events = events
         self._migrate()
         self._loaded = True
@@ -263,6 +285,8 @@ class TurnJournal:
                       if str(k).isdigit() and int(k) > 0
                       and isinstance(v, int) and not isinstance(v, bool) and v > 0}
             self._append('migrated', {'source': LEGACY, 'counts': counts})
+        if self.read_only:
+            return  # imported in memory alone: the dispatcher imports it
         try:
             legacy.unlink()
         except OSError:
@@ -274,7 +298,7 @@ class TurnJournal:
                  'previous': last['sha256'] if last else '', 'event': kind,
                  'data': dict(data, at=self._now())}
         event['sha256'] = digest(event)
-        if self.dir is not None:
+        if self.dir is not None and not self.read_only:
             line = (json.dumps(event, sort_keys=True, ensure_ascii=False) + '\n').encode('utf-8')
             size = None
             try:
@@ -300,7 +324,7 @@ class TurnJournal:
                         pass  # left as an incomplete tail, set aside at the next read
                 raise JournalError(f'{self.path}: {kind} not written: {exc}') from exc
         self._events.append(event)
-        if self.dir is not None:
+        if self.dir is not None and not self.read_only:
             self._write_snapshot()
         return event
 
@@ -402,7 +426,9 @@ class TurnJournal:
     def intent(self, number, *, issue, repo, kind, agent, model, label):
         """Record a turn about to start on ``number``, of the work of issue ``issue``, durable
         before it returns; its id. Raises ``JournalError`` if it cannot: the turn must not
-        start."""
+        start, nor from a ``read_only`` journal."""
+        if self.read_only:
+            raise JournalError(f'{self.path}: read-only journal: no turn starts from it')
         with self._lock:
             self._load()
             turn = f'turn-{len(self._events) + 1}-{secrets.token_hex(4)}'

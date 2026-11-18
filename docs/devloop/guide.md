@@ -906,8 +906,9 @@ python3 -m devloop fallback reset agy  # forget the models agy remembers unavail
 Run it from any checkout of this repository. Worktrees, agent prompts and logs, and the lock that
 prevents two dispatchers from running at once live under `state_dir` (default `.ssdlc/devloop`)
 in the main checkout. `tick --dry-run` writes nothing and does not take that lock, so the
-[smoke test of a pin](#pin) runs it while `run` is active. Not even its git commands write to
-the repository: it does not fetch, so it plans from the remote branches as last fetched (a
+[smoke test of a pin](#pin) runs it while `run` is active. Like `status`, it reads the
+[turn journal](protocol.md#turn-journal) without writing it: the running dispatcher alone does.
+Not even its git commands write to the repository: it does not fetch, so it plans from the remote branches as last fetched (a
 branch never fetched leaves its merge mode not computable), and the objects that `git
 merge-tree` writes go to a temporary directory. In daily use run it from the pinned copy, through
 `scripts/devloop-pinned` ([Run from a pinned installation](#run-from-a-pinned-installation)).
