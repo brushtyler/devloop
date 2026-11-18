@@ -215,6 +215,12 @@ FALLBACK_NOTE = {
                'another model, stopped because that model was unavailable. The working directory '
                'may contain files that attempt left: they are not part of the pull request, '
                'which is what `git diff` against the base shows.\n'),
+    # The readiness check (#148): a review-mode turn on a checkout of the base branch, no PR.
+    'preflight': ('\n\n## Previous attempt on another model\n\nAn earlier attempt at this '
+                  'readiness check, on another model, stopped because that model was '
+                  'unavailable. The checkout may contain files that attempt left: they are not '
+                  'part of the base branch, which is what `git status` and `git diff` show '
+                  'against it.\n'),
 }
 
 
@@ -1600,13 +1606,16 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
         except OSError as error:
             self.log(f'  {candidate.key}: model {candidate.model} not forgotten: {error}')
 
-    def _turn(self, models, mode, prompt, schema, path, label, allowed=None, where=None):
+    def _turn(self, models, mode, prompt, schema, path, label, allowed=None, where=None,
+              note=None):
         """Run one agent turn on the first of ``models`` (``Models``) that is available, and
         return its output and the agent configuration it ran with.
 
         A model whose turn fails as unavailable (``ModelUnavailable``) leaves ``models``, so the
         action never tries it again, and the next one runs with the same prompt and worktree,
-        plus a note about the partial work. Every other failure ends the turn as before, listing
+        plus a note about the partial work: ``FALLBACK_NOTE[note]``, ``note`` being ``mode`` by
+        default (``preflight`` for the readiness check, #148). Every
+        other failure ends the turn as before, listing
         the models tried or left out if any (``ModelsUnavailable`` with ``last_failed``). A model
         that ``allowed`` refuses leaves ``models`` without running. When none is left, an agent
         without fallback models fails as before #121; one with them fails listing the models
@@ -1654,7 +1663,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
                                                       'or of the other reviewers of the round'))
                 self.log(f'  {candidate.key}: model {candidate.model} skipped: not independent')
                 continue
-            text = prompt + FALLBACK_NOTE[mode] if failed else prompt
+            text = prompt + FALLBACK_NOTE[note or mode] if failed else prompt
             if candidate.model in retried:  # what was denied, and what is allowed (#319)
                 text += denied_retry_note(candidate, mode, retried[candidate.model])
             suffix = f'-{candidate.model}' if candidate.fallback_for else ''

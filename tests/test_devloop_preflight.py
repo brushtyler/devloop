@@ -1,6 +1,7 @@
 """devloop: readiness check before implement (#114, part 1)."""
 
 import dataclasses
+import json
 import tempfile
 import tomllib
 import unittest
@@ -8,11 +9,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from devloop import agents, config, markdown, schema
-from devloop.dispatcher import Dispatcher, preflight_hash
+from devloop.dispatcher import FALLBACK_NOTE, Dispatcher, preflight_hash
 from devloop.planning import Snapshot, plan
 from devloop.workspace import Workspace
 from helpers.devloop_fakes import FakeGH
 from test_devloop import CFG, IMPL, REV, FakeRunner, FakeWS, implemented, pr
+from test_devloop_fallback import ARGON, HYDROGEN, FakeCLI
+from test_devloop_fallback_memory import FIXTURE, FIXTURE_STDERR
 
 # The checker is any agent other than the implementer; the distributed config leaves it off.
 PCFG = dataclasses.replace(CFG, preflight=REV)
@@ -380,6 +383,62 @@ class PreflightTests(unittest.TestCase):
             with self.subTest(broken=broken):
                 self.assertIsNone(markdown.read_marker(markdown.marker('preflight', broken),
                                                        'preflight'))
+
+
+class PreflightFallbackTests(unittest.TestCase):
+    """The readiness check runs on the checker's chain of models (#148): with ``preflight =
+    "agy"`` and Argon out of quota (the real fixture of agy 1.5.9), Hydrogen runs the check."""
+
+    def tick(self, cli):
+        cfg = dataclasses.replace(CFG, preflight='agy')
+        self.assertNotEqual(cfg.implementer, 'agy')
+        self.gh, self.ws, self.logs = IssueGH(), FakeWS(), []
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Dispatcher(cfg, self.gh, self.ws, agents.AgentRunner(tmp, 10, run=cli),
+                           log=self.logs.append)
+            self.assertEqual([a.kind for a in d.tick()], ['preflight'])
+        return '\n'.join(self.logs)
+
+    def test_an_unavailable_primary_runs_the_check_on_the_fallback(self):
+        passed = json.dumps({'status': 'SUCCESS', 'structured_output': checked(True)})
+        cli = FakeCLI(gemini_4_argon_high=FIXTURE, gemini_4_hydrogen_high=(0, passed, ''))
+        log = self.tick(cli)
+        self.assertEqual(cli.models(), [ARGON, HYDROGEN])
+        # The same prompt, then the note fit for a readiness check: no pull request there.
+        first, again = cli.calls[0][1], cli.calls[1][1]
+        self.assertNotIn('Previous attempt on another model', first)
+        self.assertIn(FALLBACK_NOTE['preflight'].strip(), again)
+        self.assertIn('readiness check', FALLBACK_NOTE['preflight'])
+        self.assertNotIn('pull request', FALLBACK_NOTE['preflight'])
+        self.assertIn('Do the thing.', again)
+        line = FIXTURE_STDERR.splitlines()[1]
+        self.assertIn(f'agy: model {ARGON} unavailable: `RESOURCE_EXHAUSTED` in "{line[:200]}"',
+                      log)
+        self.assertIn(f'agy ran on fallback model {HYDROGEN}', log)
+        self.assertIn('issue-7-preflight', self.ws.removed)
+        # The outcome is published as usual, by the configured checker, on the model that ran.
+        self.assertEqual(self.gh.labels[7], {READY})
+        body = self.gh.thread[-1]['body']
+        self.assertIn('Controllo di prontezza superato', body)
+        self.assertIn('> **Model:** Gemini 4 Hydrogen\n', body)
+        record = markdown.read_marker(body, 'preflight')
+        self.assertEqual((record['agent'], record['ready']), ('agy', True))
+
+    def test_every_model_unavailable_goes_to_the_operator_listing_them(self):
+        cli = FakeCLI(gemini_4_argon_high=FIXTURE,
+                      gemini_4_hydrogen_high=(1, '', 'HTTP 429: rate limit, giving up'))
+        self.tick(cli)
+        self.assertEqual(cli.models(), [ARGON, HYDROGEN])
+        self.assertIn(NEEDS_OPERATOR, self.gh.labels[7])
+        body = self.gh.thread[-1]['body']
+        self.assertIn('no model of `agy` was available', body)
+        self.assertIn(f'- `{ARGON}`: agy exited with 3 (`RESOURCE_EXHAUSTED`', body)
+        self.assertIn(f'- `{HYDROGEN}`: agy exited with 1', body)
+        self.assertEqual(self.records_of_checks(), [])
+        self.assertEqual(self.gh.created, [])
+
+    def records_of_checks(self):
+        return [r for c in self.gh.thread if (r := markdown.read_marker(c['body'], 'preflight'))]
 
 
 if __name__ == '__main__':

@@ -542,7 +542,14 @@ them.
 Records are bound to identities. A PR counts as a devloop PR with its marker only if it was opened
 by the app of the implementer the marker names; a review counts only if its comment was written by
 the app of the reviewer named in it, and never by the PR's implementer; a CI round and a finding
-closure only from the dispatcher's app; a fix only from the implementer's app. `trusted_users` stays for people: it
+closure only from the dispatcher's app; a fix only from the implementer's app. A readiness check
+(`preflight`) counts only if written by the app of the configured agent it names, the checker:
+the dispatcher sets the labels it implies, never the record. A `notice` counts only from the
+dispatcher's app: the escalations and the operator-merge notices are its own; the `notice` of an
+agent that stopped (`Lavoro bloccato`) is published with that agent's app and is never read as
+a record, it only stays out of the hash of the
+[readiness check](#readiness-check-records) like any text devloop published. `trusted_users`
+stays for people: it
 decides who can start work with `agent:ready`, and it cannot contain bots. The only app whose
 labels count is the supervisor's, on the issues described in
 [Labels from the supervisor](guide.md#labels-from-the-supervisor).

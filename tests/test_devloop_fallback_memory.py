@@ -149,6 +149,33 @@ class MemoryTests(unittest.TestCase):
         self.assertFalse((self.state / unavailability.FILE).exists())
         self.assertEqual(unavailability.describe(self.state, now=self.clock.now), [])
 
+    def test_the_real_quota_error_falls_back_to_hydrogen_citing_its_line(self):
+        # #148: the first real exhaustion of Argon's quota, exit 3 and the stderr above.
+        agy = CFG.agent('agy')
+        line = FIXTURE_STDERR.splitlines()[1]
+        self.assertTrue(line.startswith('AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED'))
+        reason = f'`RESOURCE_EXHAUSTED` in "{line[:200]}"'
+        self.assertEqual(agents.unavailable_reason(agy, 3, f'\n{FIXTURE_STDERR}'), reason)
+        self.assertNotIn(3, agy.unavailable_exit_codes)  # the pattern decides, not the code
+        # The control: another error with the same exit code is no unavailability.
+        self.assertIsNone(agents.unavailable_reason(
+            agy, 3, '\nerror: failed to read the workspace settings\n'))
+        # A fake agy exiting 3 with that stderr: the turn reruns on Hydrogen.
+        cli = FakeCLI(gemini_4_argon_high=FIXTURE)
+        self.review(cli)
+        self.assertEqual(cli.models(), [ARGON, HYDROGEN])
+        self.assertIn('Previous attempt on another model', cli.calls[1][1])
+        self.assertIn(f'agy: model {ARGON} unavailable: {reason}', self.logs[0])
+        self.assertIn(f'agy ran on fallback model {HYDROGEN}', '\n'.join(self.logs))
+        self.assertEqual(self.memory().active('agy', ARGON)['reason'], reason)
+        # The next turn skips Argon and its marker records the same reason.
+        self.clock.now = T0 + 60
+        record = self.review(FakeCLI(gemini_4_argon_high=FIXTURE))
+        self.assertEqual(record['profile']['model'], HYDROGEN)
+        self.assertEqual(record['skipped_models'],
+                         [{'model': ARGON, 'reason': reason,
+                           'until': unavailability.iso(T0 + FIXTURE_RESET)}])
+
     def test_without_a_reset_the_memory_lasts_fallback_memory_seconds(self):
         cfg = config.parse_config(with_agent('agy', fallback_memory_seconds=600))
         cli = FakeCLI(gemini_4_argon_high=(1, '', QUOTA))
