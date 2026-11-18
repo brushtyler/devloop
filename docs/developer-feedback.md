@@ -178,6 +178,18 @@ The original recording authority is preserved. An admission for another
 generation, a mismatched receipt or an unselected runtime cannot authorize a
 controller substitution. Role and global allowances remain cumulative.
 
+The only exception to the exact envelope/profile match is an operator limit
+extension (`operator-limit-extension-v1`, see
+[Manual limit extensions](limit-extensions.md#runs-with-a-feedback-ledger)).
+The admitted or frozen envelope and profile still authorize the run after one or
+more extensions only when each extension is recorded in the feedback ledger
+(`FEEDBACK_LIMITS_EXTENDED`), produced the previous envelope/profile pair, and
+is bound with the same proposal and authorization in the current envelope's own
+validated chain. The controller and projection must still match exactly. The
+extension preserves the recording authority, its feedback allowances and the
+scope authorizations: it grants no new authority, and raising a
+`role_invocations.feedback-*` cap raises only the native cap.
+
 ```bash
 python3 orchestrator.py feedback-repair-prepare \
   --repo /path/to/project --ticket TICKET \
@@ -338,7 +350,11 @@ existing native discard protocol, retaining their history and reserved quota.
 
 A later failed task source can use the recording policy only through a natively
 published, reconciled descendant with the exact admitted profile/envelope and
-projection. Ticket/task amendment counts, file additions, role receipts and
+projection, or with that envelope extended by operator limit extensions recorded
+in the feedback ledger and bound in its chain (see above and
+[Manual limit extensions](limit-extensions.md#runs-with-a-feedback-ledger)).
+The recording authority, feedback allowances and scope authorizations are
+preserved, not extended. Ticket/task amendment counts, file additions, role receipts and
 request ceilings stay canonical across generations; no automatic refunds or
 counter resets occur. Returned costs remain observed usage or null. An accepted
 amendment consumes no developer attempt; a subsequent implementation consumes
