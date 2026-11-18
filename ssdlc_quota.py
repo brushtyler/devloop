@@ -158,6 +158,11 @@ def unavailable(provider, reason, observed_at=None, source=None):
     return _snapshot(provider, 'unavailable', reason=reason, observed_at=observed_at, source=source)
 
 
+def _window(value):
+    """A window name, or None when it is missing, not a string, empty or only blanks."""
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def _bucket(bucket_id, *, group, name, window, remaining, reset_time, enabled=True):
     remaining = _percent(remaining)
     return {'id': bucket_id, 'group': group, 'name': name, 'window': window, 'enabled': bool(enabled),
@@ -194,7 +199,7 @@ def from_agy_usage(envelope, *, observed_at=None, account=None):
             valid = type(fraction) in (int, float) and math.isfinite(fraction) and 0 <= fraction <= 1
             buckets.append(_bucket(bucket_id, group=group.get('name') if isinstance(group.get('name'), str) else None,
                                    name=raw.get('name') if isinstance(raw.get('name'), str) else None,
-                                   window=raw.get('window') if isinstance(raw.get('window'), str) else None,
+                                   window=_window(raw.get('window')),
                                    remaining=fraction * 100 if valid else None,
                                    reset_time=_parse_time(raw.get('reset_time')),
                                    # agy 1.5.9 reports no such flag; an explicit one is honoured.
@@ -443,7 +448,8 @@ def check(controls, snapshot, *, now=None):
 
     Returns the evidence of each control when all pass. Raises ``QuotaBlocked`` when the
     snapshot cannot be verified for a control (not collected, too old, from the future, bucket
-    missing, disabled or null, window or reset missing or malformed, reset already passed) or
+    missing, disabled or null, window missing, empty or malformed, reset missing or malformed,
+    reset already passed) or
     when its reserve is reached. Nothing is ever offset by credits, overage or another route."""
     now = now or utc_now()
     evidence, blocked = [], []
@@ -465,7 +471,7 @@ def check(controls, snapshot, *, now=None):
                 reason = 'bucket disabled'
             elif bucket['remaining_percent'] is None:
                 reason = 'bucket value null'
-            elif bucket['window'] is None:
+            elif _window(bucket['window']) is None:
                 reason = 'bucket window not verifiable'
             elif bucket['reset_time'] is None:
                 reason = 'bucket reset not verifiable'

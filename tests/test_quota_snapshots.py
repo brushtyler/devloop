@@ -381,10 +381,21 @@ class ControlTests(unittest.TestCase):
             'reset without timezone': {'gemini-weekly': {'reset_time': '2026-11-20T22:51:37'}},
             'window null': {'gemini-weekly': {'window': None}},
             'window not a string': {'gemini-weekly': {'window': 7}},
+            'window empty': {'gemini-weekly': {'window': ''}},
+            'window only blanks': {'gemini-weekly': {'window': ' \t\n'}},
         }
         for name, extra in agy_cases.items():
             with self.subTest(name=name), self.assertRaisesRegex(q.QuotaBlocked, 'not verifiable'):
                 self.check([('agy_cli', 'gemini-weekly', 10, 300)], agy_snapshot(extra=extra))
+        # The parser keeps no blank window, and the check refuses one even if a snapshot carried it.
+        self.assertIsNone({b['id']: b for b in agy_snapshot(extra={'gemini-weekly': {'window': '  '}})['buckets']}
+                          ['gemini-weekly']['window'])
+        for blank in ('', '   '):
+            snapshot = agy_snapshot()
+            snapshot['buckets'][0]['window'] = blank
+            with self.subTest(blank_window_in_snapshot=blank), \
+                    self.assertRaisesRegex(q.QuotaBlocked, 'window not verifiable'):
+                self.check([('agy_cli', 'gemini-weekly', 10, 300)], snapshot)
         for field in ('reset_time', 'window'):
             envelope = copy.deepcopy(AGY_USAGE)
             del envelope['command']['data']['groups'][0]['buckets'][0][field]
@@ -638,7 +649,13 @@ class OrchestratorQuotaTests(unittest.TestCase):
 
     def test_an_unverifiable_snapshot_refuses_the_call(self):
         os.environ['SSDLC_QUOTA_CONTROLS'] = controls(('agy_cli', 'gemini-weekly', 10, 300))
-        for usage in ({'status': 'ERROR'}, dict(AGY_USAGE, num_turns=1)):
+        unverifiable_buckets = []
+        for field, value in (('window', ''), ('window', '  '), ('window', None), ('reset_time', 'invalid')):
+            envelope = copy.deepcopy(AGY_USAGE)
+            envelope['command']['data']['groups'][0]['buckets'][0][field] = value
+            unverifiable_buckets.append(envelope)
+        for usage in ({'status': 'ERROR'}, dict(AGY_USAGE, num_turns=1), *unverifiable_buckets):
+            # Only the /usage read runs: the model command is never launched.
             with self.subTest(usage=usage), self.fake(usage):
                 q.clear_cache()
                 with self.assertRaisesRegex(RecoveryStop, 'not verifiable'):

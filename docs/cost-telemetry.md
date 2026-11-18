@@ -243,7 +243,8 @@ Before the reservation and the launch, the call is refused with `LIMIT_REACHED`
 
 - a control's snapshot cannot be verified: the read failed, timed out or ran a
   model, the snapshot is too old or from the future, its bucket is missing,
-  disabled or `null`, its window or reset is missing or malformed, or its reset
+  disabled or `null`, its window is missing, empty, only blanks or malformed,
+  its reset is missing or malformed, or its reset
   has already passed. A `claude_cli` control
   always blocks, because the Claude quota is `unknown`;
 - a control's reserve is reached;
