@@ -12,6 +12,9 @@ adds it to the current receipt of the same head (#135), if any.
 It produces no effect: no round, no finding, no label, no promotion. devloop reads it only to
 know whether a head already has one (``_advisory_done``) and to show its opinion in a receipt:
 never to decide. An action that fails is never escalated: the PR is already the operator's.
+Except a turn refused by the block on uncertain turns (``TurnBlocked``, #362): it escalates as
+``uncertain_turn`` once for the turns that block the work, and the PR gets no advisory action
+while those turns, already escalated, still block it (``_advisory_held``).
 
 One turn per head, even when it failed or its publication did. The result of the turn is kept
 in ``state_dir`` (``AdvisoryResults``) until the summary is written, and a native advisory review
@@ -31,10 +34,12 @@ from .agents import AgentError
 from .apps import REVIEW
 from .context import _template, format_previous_rounds
 from .dispatch_actions import Models
+from .journal import JournalError, TurnBlocked
 from .markdown import (ADVISORY_OPINIONS, MAX_BODY, dispatcher_header, fitted, publishable,
                        read_marker)
 from .planning import label_names, operator_blocked
 from .policy import ZERO_LEVEL
+from .supervision import UNCERTAIN_TURN
 from . import receipt as pr_receipt
 from .review import current_round
 
@@ -201,10 +206,40 @@ class AdvisoryMixin:
         if not key:
             return []
         lb = self.cfg.labels
-        return [{'number': pr.number, 'head': pr.head_sha} for pr in prs
-                if pr.meta and lb.needs_supervisor not in pr.labels
-                and operator_blocked(pr.labels, lb)
-                and not self._advisory_done(pr.number, pr.head_sha)]
+        found = []
+        for pr in prs:
+            if (not pr.meta or lb.needs_supervisor in pr.labels
+                    or not operator_blocked(pr.labels, lb)):
+                continue
+            comments = self.gh.pr_comments(pr.number)
+            if self._advisory_record(comments, pr.head_sha) is not None:
+                continue
+            try:
+                if self._advisory_held(pr.number, comments):
+                    continue
+            except JournalError as exc:  # TurnBlocked included: the action escalates it
+                self.log(f'  PR #{pr.number}: advisory review planned, its turns: {exc}')
+            found.append({'number': pr.number, 'head': pr.head_sha})
+        return found
+
+    def _advisory_held(self, number, comments):
+        """With ``block_uncertain_turns`` (#362), whether the work of PR ``number`` has turns
+        that block it (``_check_turns``) all already named by an ``uncertain_turn`` escalation
+        of the dispatcher in ``comments`` (its ``turns``): the advisory review waits for their
+        reconciliation, without a new action nor a new escalation. Blocking turns not escalated
+        yet raise ``TurnBlocked``, which the action escalates. False when nothing blocks."""
+        try:
+            self._check_turns(number)
+        except TurnBlocked as exc:
+            named = {turn for _, record in self._dispatcher_records(comments, 'notice',
+                                                                     'escalation')
+                     if record.get('class') == UNCERTAIN_TURN
+                     and isinstance(record.get('turns'), list)
+                     for turn in record['turns']}
+            if {t['turn'] for t in exc.turns} <= named:
+                return True
+            raise
+        return False
 
     def _advisory_record(self, comments, head):
         """The latest ``advisory`` record of ``head`` the dispatcher signed in ``comments``,
@@ -292,6 +327,13 @@ class AdvisoryMixin:
         if kept is not None:
             self.log(f'  advisory review of {key} already run on this head: no new turn')
         else:
+            # With the block on uncertain turns (#362), before the issue is read and the
+            # checkout made: blocking turns not escalated yet raise ``TurnBlocked``, which
+            # escalates; those already escalated hold the review back until reconciled.
+            if self._advisory_held(pr.number, self.gh.pr_comments(pr.number)):
+                self.log('  advisory review held: its work has uncertain turns already '
+                         'escalated')
+                return
             kept = self._advisory_turn(view, key)
             if self._advisory_open(pr.number, head, 'during the advisory review') is None:
                 return

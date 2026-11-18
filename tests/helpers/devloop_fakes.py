@@ -148,6 +148,14 @@ class FakeGH:
     def merged_prs(self, branch):
         return [dict(raw) for raw in self.merged_raw if raw.get('headRefName') == branch]
 
+    # The PRs in any state a test sets, by number, as `find_pr` returns them (#362): every
+    # other number is an issue.
+    any_prs = {}
+
+    def find_pr(self, number):
+        raw = self.any_prs.get(number)
+        return dict(raw) if raw is not None else None
+
     def merge_state(self, pr):
         return merge_state(pr.get('mergeable'), pr.get('mergeStateStatus'))
 

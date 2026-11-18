@@ -10,9 +10,10 @@ on the PR (review, fix, sync, CI):
   time of the label;
 - ``turn``: one invocation of an agent CLI, retries and failures included. It is written before
   the CLI starts (if that write fails the CLI does not start) and edited when it ends; a turn
-  never closed stays ``open`` until the next tick marks it ``incomplete``. Where turns may be
-  left open is also kept in ``state_dir`` (``PENDING``), whatever labels the issue or PR has
-  later, so that the next tick finds them;
+  never closed stays ``open`` until the next tick marks it ``incomplete``. Its intent and
+  outcome are first in the durable journal of ``state_dir`` (``journal.TurnJournal``, #362),
+  the authority of which this record is the projection: the journal also says where turns may
+  be left open, whatever labels the issue or PR has later, so that the next tick finds them;
 - ``verification``: a test command the dispatcher ran, bound to the commit created right after
   only when the tree before the test, after it and in the commit is the same;
 - ``event``: what happens without a CLI, such as a CI round or a sync without conflicts.
@@ -37,20 +38,22 @@ missing.
 
 import hashlib
 import json
-import os
 import re
 import threading
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from .agents import TELEMETRY_FIELDS
 from .github import GitHubError
+from .journal import FAILED, LEGACY, NOT_DISPATCHED, RETURNED, JournalError, TurnJournal
 from .markdown import dispatcher_header, publishable, read_marker
 from .ports import Tracker
 
 NOT_REPORTED = 'non riportato'
-PENDING = 'ledger-open-turns.json'  # in state_dir: issues and PRs with turns not closed
+# The trace of the turns left open before #362, in state_dir: imported once by the journal.
+PENDING = LEGACY
+# The journal's outcome of a turn closed as ``close_turn`` says.
+JOURNAL_OUTCOME = {'success': RETURNED, 'failure': FAILED, 'unavailable': FAILED}
 TURN_KINDS = ('implement', 'fix', 'sync', 'review', 'preflight', 'conclave', 'advisory')
 REGISTERS = ('round', 'fix')  # the records whose ``records`` hold sections (#325, #355)
 FIX = 'fix'  # the ``register`` of the sections of a fix register, as reads expand them
@@ -87,6 +90,7 @@ class Entry:
     started: float = field(default=None, repr=False)  # monotonic time a turn started
     section: int = None
     register: object = None
+    turn: str = field(default=None, repr=False)  # a turn's id in the journal (#362)
 
 
 @dataclass
@@ -109,85 +113,44 @@ def _register_name(register):
     return 'fix register' if register == FIX else f'register of round {register}'
 
 
-class LedgerError(GitHubError):
-    """The local trace of the turns left open cannot be read or written."""
+# The journal of the turns cannot be read or written (#362); before it, the local trace.
+LedgerError = JournalError
 
 
 class Ledger:
     """Writes ledger records with ``gh``, the dispatcher's ``ports.Tracker`` (``comment``
     returns the new comment's id, ``edit_comment`` replaces a body).
 
-    ``state_dir`` keeps, in ``PENDING``, the issues and PRs where a turn was opened and not
-    closed yet, with how many: a number is counted before the turn's record is written and
-    uncounted when the turn is closed; a tick that has marked its turns incomplete forgets it.
-    The trace does not depend on labels, which change once a step ends (``agent:working``
-    removed, ``agent:needs-operator`` added). Without ``state_dir`` it lasts as long as the
-    process.
+    ``state_dir`` holds the journal of the turns (``journal.TurnJournal``, #362): each turn's
+    intent, made durable before its record is written, and its outcome, recorded before its
+    record is closed. The journal also says where a turn may be left open: a turn without
+    outcome, or a record whose closing edit failed, until a tick checks that issue or PR
+    (``settle``). It does not depend on labels, which change once a step ends
+    (``agent:working`` removed, ``agent:needs-operator`` added). Without ``state_dir`` it
+    lasts as long as the process.
 
     ``signed`` tells whether a login signs as the dispatcher: only a register it signed is
     edited. The dispatcher sets it to its own check; without it every author counts."""
 
     def __init__(self, gh: Tracker, clock=time.time, monotonic=time.monotonic, state_dir=None,
-                 signed=None):
+                 signed=None, read_only=False):
         self.gh = gh
         self._clock = clock
         self._monotonic = monotonic
-        self._path = Path(state_dir) / PENDING if state_dir is not None else None
-        self._memory = {}
+        self.journal = TurnJournal(state_dir, clock=clock, read_only=read_only)
         self.signed = signed
-        # Parallel actions (#176) update the trace from several threads.
-        self._lock = threading.Lock()
         # Reviewers in parallel write the same register (#325): one write at a time, each on
         # the register as GitHub has it right before.
         self._registers = threading.Lock()
 
     # Turns left open -------------------------------------------------------
-    def _load(self):
-        if self._path is None:
-            return dict(self._memory)
-        try:
-            data = json.loads(self._path.read_text(encoding='utf-8'))
-        except FileNotFoundError:
-            return {}
-        except (OSError, ValueError) as exc:
-            raise LedgerError(f'{self._path}: not readable: {exc}') from exc
-        if not isinstance(data, dict):
-            raise LedgerError(f'{self._path}: not a JSON object')
-        return {str(k): v for k, v in data.items()
-                if isinstance(v, int) and not isinstance(v, bool) and v > 0}
-
-    def _store(self, data):
-        if self._path is None:
-            self._memory = dict(data)
-            return
-        try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._path.with_name(f'.{self._path.name}.{os.getpid()}.tmp')
-            tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + '\n', encoding='utf-8')
-            os.replace(tmp, self._path)
-        except OSError as exc:
-            raise LedgerError(f'{self._path}: not written: {exc}') from exc
-
-    def _count(self, number, delta):
-        with self._lock:
-            data = self._load()
-            left = data.get(str(number), 0) + delta
-            if left > 0:
-                data[str(number)] = left
-            else:
-                data.pop(str(number), None)
-            self._store(data)
-
     def pending(self):
         """The issues and PRs where a turn may have been left open."""
-        return [int(k) for k in self._load()]
+        return self.journal.pending()
 
     def settle(self, number):
         """Forget ``number``: a tick found no turn left open there, or marked them incomplete."""
-        with self._lock:
-            data = self._load()
-            if data.pop(str(number), None) is not None:
-                self._store(data)
+        self.journal.settle(number)
 
     def _now(self):
         return timestamp(self._clock)
@@ -302,41 +265,62 @@ class Ledger:
                      register=FIX if register is not None else round_no)
 
     def open_turn(self, number, *, kind, agent, identity, mode, model, effort, fallback_for,
-                  label, round_no=None, register=None):
+                  label, round_no=None, register=None, issue=None, repo=None):
         """Write the record of a turn about to start; raises ``GitHubError`` if it cannot, and
-        then the turn must not start. ``number`` is traced first (``PENDING``), so that a crash
-        right after the record is written still leaves the trace; if the trace cannot be
-        written, ``LedgerError`` (a ``GitHubError``) and the turn does not start either. With
-        ``round_no`` (a review turn, #325) the record is a section of that round's register;
-        with ``register`` (a fix turn, #355), of that fix register."""
-        self._count(number, +1)
+        then the turn must not start. Its intent is made durable in the journal first, with
+        ``issue``, the issue of its work, and ``repo`` (#362), so that a crash right after
+        still leaves it; if the intent cannot be written, ``JournalError`` (a ``GitHubError``)
+        and the turn does not start either. If the record cannot be written, the journal says
+        the turn was ``not_dispatched``. With ``round_no`` (a review turn, #325) the record is
+        a section of that round's register; with ``register`` (a fix turn, #355), of that fix
+        register."""
+        turn = self.journal.intent(number, issue=number if issue is None else issue, repo=repo,
+                                   kind=kind, agent=agent, model=model, label=label)
         record = {
             'type': 'turn', 'state': 'open', 'kind': kind, 'agent': agent, 'identity': identity,
             'mode': mode, 'model': model, 'effort': effort, 'fallback_for': fallback_for or None,
             'model_real': None, 'label': label, 'started_at': self._now(), 'ended_at': None,
             'duration_ms': None, 'outcome': None, 'error': None, 'telemetry': None}
-        if round_no is None and register is None:
-            entry = self._post(number, record)
-        else:
-            entry = self._section(number, record, round_no, register)
+        try:
+            if round_no is None and register is None:
+                entry = self._post(number, record)
+            else:
+                entry = self._section(number, record, round_no, register)
+        except GitHubError as exc:
+            try:
+                self.journal.outcome(turn, NOT_DISPATCHED, exc)
+            except JournalError:
+                pass  # left without outcome: the next tick makes it uncertain
+            raise
         entry.started = self._monotonic()
+        entry.turn = turn
         return entry
 
     def close_turn(self, entry, outcome, report=None, error=None, last_command=None):
         """Close a turn: ``outcome`` is ``success``, ``failure`` or ``unavailable``; ``report``
         the CLI's ``(fields, models)`` (``agents.telemetry``), None when the CLI did not
         complete; ``last_command`` the last command its output exposes, already cleaned
-        (``agents.public_command``), None when it exposes none (#215)."""
+        (``agents.public_command``), None when it exposes none (#215).
+
+        The journal records the outcome first (``returned`` for ``success``, ``failed``
+        otherwise); if it cannot, the record stays open and the turn becomes ``uncertain`` at
+        the next tick. If the edit of the record fails, the journal keeps the issue or PR for
+        the next tick to check (``Ledger.pending``)."""
         fields, models = report or (dict.fromkeys(TELEMETRY_FIELDS), None)
         duration = (int((self._monotonic() - entry.started) * 1000)
                     if entry.started is not None else None)
         changes = {'last_command': last_command} if last_command else {}
-        self._edit(entry, state='closed', ended_at=self._now(), duration_ms=duration,
-                   outcome=outcome, error=(str(error)[:300] if error else None),
-                   telemetry={k: fields.get(k) for k in TELEMETRY_FIELDS},
-                   model_real=list(models) if models else None, **changes)
-        # Only a closed turn leaves the trace: a failed edit above keeps it for the next tick.
-        self._count(entry.number, -1)
+        if entry.turn is not None:
+            self.journal.outcome(entry.turn, JOURNAL_OUTCOME[outcome], error)
+        try:
+            self._edit(entry, state='closed', ended_at=self._now(), duration_ms=duration,
+                       outcome=outcome, error=(str(error)[:300] if error else None),
+                       telemetry={k: fields.get(k) for k in TELEMETRY_FIELDS},
+                       model_real=list(models) if models else None, **changes)
+        except GitHubError:
+            if entry.turn is not None:
+                self.journal.unsettled(entry.number)
+            raise
 
     def verification(self, number, *, kind, attempt, command, passed, duration_ms, tree_before,
                      tree_after, register=None):

@@ -801,11 +801,12 @@ record is edited with end, duration, outcome and telemetry. A turn left without 
 write, because the dispatcher crashed or the edit failed, stays without end, outcome and
 telemetry: the next tick logs `incomplete turn on #<n>` and marks the record `incomplete` (only
 logs it with `--dry-run`). Where to look does not depend on labels, which change once a step
-ends: before writing a turn's record the dispatcher notes the issue or PR in
-`<state_dir>/ledger-open-turns.json`, and removes it when the turn is closed. If that note cannot
-be written, the turn does not start either. The next tick checks every issue or PR still noted,
-for example an issue whose PR is already open or a PR escalated to `agent:needs-operator`, and then
-forgets it. In case the note is lost, it also looks at open devloop PRs not in
+ends: before writing a turn's record the dispatcher records its intent in the
+[turn journal](#turn-journal) of `state_dir`, which keeps the issue or PR until the turn has an
+outcome and its record is closed. If the intent cannot be written, the turn does not start
+either. The next tick checks every issue or PR the journal still holds, for example an issue
+whose PR is already open or a PR escalated to `agent:needs-operator`, and then forgets it. In
+case that trace is lost, it also looks at open devloop PRs not in
 `agent:needs-operator` (or in it only for an [operator merge](guide.md#ready-prs-whose-merge-is-the-operators)),
 issues in `agent:working` and issues waiting for a readiness check.
 
@@ -874,6 +875,99 @@ that section `incomplete`. Each fix has its own register: it never joins the reg
 round it answers, nor that of an earlier fix. Reads expand it into its records like a round's
 register. The records of a fix written before #355, one comment per turn, verification and
 `sync` event, stay valid and are read as before.
+
+### Turn journal
+
+Since #362 (ADR 0004, P2-2) the authority on the turns is a local journal,
+`<state_dir>/turn-journal.jsonl`; the `turn` records on GitHub are its published projection, and
+their format does not change. The journal is append-only, one JSON event per line, each with its
+`sequence`, the hash of the event before it (`previous`) and its own (`sha256`):
+
+- `intent`: a turn about to start, with its id (`turn-<n>-<8 hex digits>`), the issue or PR, the
+  issue of its work, the repository, kind, agent, model and label. It is written and made durable
+  (`fsync`) before the turn's record on GitHub, so before the CLI starts. If it cannot be written,
+  the turn does not start and the step escalates like any `gh` failure.
+- `outcome`, one per turn: `returned` (the CLI returned), `failed` (it failed, or its model was
+  unavailable), `not_dispatched` (its record on GitHub could not be written: the CLI never
+  started) or `uncertain`. The outcome is recorded before the record on GitHub is closed; if that
+  edit fails, the journal keeps the issue or PR for the next tick.
+- `uncertain`: a turn left without an outcome, because the dispatcher stopped while it ran or the
+  outcome could not be written. The next tick, with no action running on that issue or PR, records
+  it so and logs `uncertain turn <id> on #<n>` (only logs it with `--dry-run`). The issue or PR
+  stays in the journal's trace until a tick has checked its records on GitHub: a read that fails
+  is tried again on the next tick. An uncertain turn is **never** run again automatically, and
+  stays counted: nothing refunds it.
+- `reconciled` and `refused`: see below. `unsettled` and `settled`: a record on GitHub left open
+  after a failed edit, and the tick that checked it. `linked`: the issue of the work of a legacy
+  turn (see the migration).
+
+**Integrity.** Every read verifies the whole chain. An incomplete last line (a write cut short),
+or a last line that is not JSON, is set aside in `turn-journal-tail-<sha256>.bin` and cut off: the
+valid records before it stay. A hash that does not match, or an unreadable line before the last,
+is an explicit error, never ignored: the journal is not used and no turn starts. Next to it,
+`turn-journal-state.json` keeps the sequence and hash of the latest event; a snapshot without its
+journal, or a journal shorter than it or off it (cut, replaced, rolled back) is refused (ADR 0001,
+constraint 3). The chain is not keyed: it gives integrity, not provenance.
+
+**Who writes it.** Only the dispatcher that holds `dispatcher.lock` writes the journal: it keeps
+the chain in memory and appends to it. `devloop status` and `devloop tick --dry-run`, which run
+beside it without the lock, read it without any effect on the files: they neither set aside a
+tail nor import or remove `ledger-open-turns.json`, and what their planning would record (a
+legacy turn linked to its work, a turn made uncertain) stays in their memory. Their ids of the
+legacy turns not imported yet are their own. A record they appended would break the chain of the
+running dispatcher at its next write, and with it the journal.
+
+**Migration.** The journal replaces `<state_dir>/ledger-open-turns.json`. An existing file is
+imported once, at the first read, as one legacy turn per issue or PR (`legacy-<n>-<8 hex
+digits>`), explicitly `uncertain`, with its number and count and no outcome made up; then the
+file is removed, and one that comes back is not imported again. The next tick checks those issues
+and PRs on GitHub as before. Each legacy turn is then linked to the issue of its work (a `linked`
+event), so that it stays part of that work after a restart: a number among the open PRs through
+the dispatcher's map; with the block on, any other number by reading it on GitHub in any state
+(`find_pr`), so also a PR closed while devloop was stopped. A devloop PR, recognised by its branch
+and trusted author as in the snapshot, belongs to the work of its issue; an issue, or a PR devloop
+does not recognise, to its own number only.
+
+**Block on uncertain turns.** With `block_uncertain_turns = true` (off by default: ADR 0004, D8),
+a turn whose work has uncertain turns not reconciled is refused before its intent, with an
+escalation of class `uncertain_turn` that lists them and how to reconcile them. The work is the
+repository and the issue: the issue and its devloop PRs, which the dispatcher recognises by
+branch and marker. Every new turn of it is refused, whatever its kind, agent, model, reviewer or
+round. A legacy turn blocks the issue or PR of its number and, when that number is a PR of a
+work, its issue and the other PRs of the same issue, open or closed. Before a turn is admitted the
+legacy turns not linked yet are linked; one whose number cannot be read on GitHub may be a PR of
+any work, so it blocks every new turn, and the escalation says so, until a later read links it. A
+turn that ended without a durable outcome (its write
+failed), or that a tick could not record as `uncertain`, blocks the work in the same way: a retry
+or a fallback of the same step is refused, and the turn becomes `uncertain`, to reconcile, at the
+next tick. Turns still running in parallel actions never block. A conclave call refused this way
+is not recorded as started: the conclave of that block ends with the `uncertain_turn` escalation
+and the item stays with the operator. An [advisory review](guide.md#advisory-review-for-the-operator)
+refused this way, before its checkout, escalates too, although its other failures never do: the
+escalation's marker records the ids of the turns it lists (`turns`), and while every turn that
+blocks the work is among those already escalated on the PR, the PR gets no advisory action; a
+new blocking turn gets its own escalation, and after the reconciliation the review runs. With
+the block off devloop behaves as before: the journal records the turns all the same.
+
+**Reconciliation.** Only the operator decides the outcome of an uncertain turn. A user in
+`trusted_users`, never the supervisor nor an agent, writes on the issue or PR of the turn, on the
+issue of its work or on one of its open PRs, a comment whose first line, after the attribution
+header, is the command alone:
+
+```text
+/devloop reconcile <turn id> <returned|failed|not_dispatched>
+<the reason, mandatory, on the lines below>
+```
+
+The next tick records the outcome in the journal once, with author, comment, note and time,
+whether or not the block is on. A second command for the same turn with the same outcome has no
+effect; with a different outcome it is refused, like `INVOCATION_RECONCILED` in the local engine.
+A command without the note, with another outcome, for an unknown turn or for one that is not
+uncertain is refused too: the journal records the refusal and the dispatcher answers it once on
+that thread. A command from outside `trusted_users` is only logged. Commands are read while their
+turn waits for reconciliation, on each tick. No automatic evidence is accepted in its place: the
+proof of termination comes with step 4 of ADR 0001. After the reconciliation the step resumes as
+any escalation to the operator does.
 
 ## PR receipt
 
