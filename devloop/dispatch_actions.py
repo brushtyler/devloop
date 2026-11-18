@@ -890,5 +890,9 @@ class ActionsMixin:
             # A ready PR whose merge is the operator's (#248) loses the dispatcher's label too.
             self.gh.edit_labels(pr.number, add=[lb.review],
                                 remove=[lb.ready_to_merge, lb.changes, *self._released(pr)])
+            if lb.ready_to_merge in pr.labels:
+                # The new head voids the receipt of the promotion (#135).
+                self._supersede_receipts(pr, f'la sincronizzazione ha portato il head a '
+                                             f'`{head[:12]}`')
         self.ws.remove(name)
         self.log(f'  merged {base} into {pr.head_ref}: {head[:12]}')

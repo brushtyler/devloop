@@ -705,7 +705,8 @@ At level 0 the dispatcher runs no reviewer. Before promoting it re-reads the hea
   approves; a comment does not withdraw it. It sends the PR to `agent:needs-operator`.
 
 The promotion is a dispatcher comment with a `policy` marker that records the receipt (level 0,
-the label, who added it and when, the allowlist outcome) and the state of each expected check.
+the label, who added it and when, the allowlist outcome) and the state of each expected check,
+followed, as for any promotion, by the [receipt of the PR](protocol.md#pr-receipt).
 The merge stays the operator's, unless a [merge mode](guide.md#merge-modes) other than `"off"` applies to
 level 0, and then these same checks are repeated just before the merge. While the PR is ready, every tick
 checks that the head is still the promoted one, that `reviews:0` is still on the PR and

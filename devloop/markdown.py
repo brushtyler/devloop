@@ -322,6 +322,23 @@ def _valid_cycle(c):
             and all(isinstance(item, str) and item for item in cycle))
 
 
+RECEIPT_STATES = ('current', 'superseded')
+
+
+def _valid_pr_receipt(r):
+    """The receipt of a PR promoted to ``agent:ready-to-merge`` (#135, ``receipt.record``): its
+    identity (PR, issue, approved head, base, policy version, level, number of the promotion,
+    digest of the content), its totals, the data it declares missing, and whether it is still
+    ``current`` or ``superseded`` by a revocation or a later promotion."""
+    return (_is_int(r.get('pr'), 1) and _is_int(r.get('issue'), 1)
+            and all(isinstance(r.get(k), str) and r[k] for k in ('head', 'base', 'policy',
+                                                                  'digest'))
+            and _is_int(r.get('level')) and _is_int(r.get('promotion'), 1)
+            and isinstance(r.get('totals'), dict) and isinstance(r.get('missing'), list)
+            and all(isinstance(m, str) for m in r['missing'])
+            and r.get('state') in RECEIPT_STATES)
+
+
 _DAY = re.compile(r'\d{4}-\d{2}-\d{2}')
 
 
@@ -338,7 +355,8 @@ _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy':
           'finding': _valid_finding, 'sync': _valid_sync, 'preflight': _valid_preflight,
           'notice': _valid_notice, 'ledger': _valid_ledger, 'merged': _valid_merged,
           'hold': _valid_hold, 'supervision': _valid_supervision, 'rerun': _valid_rerun,
-          'closed': _valid_closed, 'cycle': _valid_cycle, 'report': _valid_report}
+          'closed': _valid_closed, 'cycle': _valid_cycle, 'report': _valid_report,
+          'receipt': _valid_pr_receipt}
 
 
 def read_marker(text, kind):

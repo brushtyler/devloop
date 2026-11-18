@@ -1891,6 +1891,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
                 + detail, current, 'stale', bases)
             self.gh.edit_labels(pr.number, add=[lb.review],
                                 remove=[lb.changes, lb.ready_to_merge, *self._released(pr)])
+            # A receipt of an earlier promotion no longer holds (#135).
+            self._supersede_receipts(pr, 'la ricevuta di policy ricalcolata non coincide più '
+                                         'con quella dell\'approvazione')
             return None
         return bases
 
@@ -1902,6 +1905,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
         lb = self.cfg.labels
         transient = [lb.review, lb.changes, lb.ready_to_merge]
         verdict = round_verdict(records)
+        if verdict != 'approve' and lb.ready_to_merge in pr.labels:
+            # A CI round on a ready PR (#248) voids the receipt of its promotion (#135).
+            self._supersede_receipts(pr, f'il round {records[0]["round"]} non approva il '
+                                         f'commit `{records[0]["head_sha"][:12]}`')
         if verdict == 'approve':
             left = open_findings(reviews, pr.closures)
             if left:
@@ -1910,7 +1917,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
                                cls='open_findings')
             elif self._approval_current(pr, records[0],
                                         blind=not tested and ci_unknown(records)):
-                self._promote(pr, records)
+                self._promote(pr, records, reviews)
         elif verdict == 'needs_operator':
             if announce:
                 # The reviewer's record asks for the decision; this one classifies it (#182).

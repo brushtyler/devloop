@@ -41,6 +41,7 @@ CRITICAL = {
     'unattributable': 'finding senza proprietario ricostruibile',
     'lost_meta': 'marker della PR perso',
     'inconsistent': 'stato della PR incoerente',
+    'receipt_conflict': 'ricevuta della PR in contraddizione con i marker',
     'configuration': 'configurazione da decidere',
     'failure': 'errore di `gh`, di git o del dispatcher',
     'retry_limit': 'tentativi del supervisore esauriti',
