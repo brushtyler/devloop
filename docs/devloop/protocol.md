@@ -144,7 +144,10 @@ the base changed the same lines, the worktree stays as created, and the prompt c
 as text (at most 100,000 characters) with its files. Either way the prompt says that the
 previous turn timed out, that its changes must be examined before going on, and to run the
 targeted tests before any long suite. The patch is taken once: the file is renamed
-`timeout-<label>.diff.used-<time>` and stays as evidence. A turn that fails otherwise, that was
+`timeout-<label>.diff.used-<time>` and stays as evidence. The retention of the logs (`[gc] logs`,
+off by default) never removes it while its issue or PR is in `agent:needs-operator` or
+`agent:needs-supervisor` ([Cleanup of the state directory](guide.md#cleanup-of-the-state-directory)).
+A turn that fails otherwise, that was
 stopped as stalled, or a sync (whose worktree holds a merge in progress) keeps nothing, and a
 timeout without uncommitted work escalates as before.
 
@@ -724,6 +727,18 @@ an identity that may not write devloop records is no record. `operator_comments`
 with any of these headers, and the `/devloop` commands are read on the first line after any of
 them.
 
+**What the reviewers read** (#389). The review prompt and the
+[advisory](guide.md#advisory-review-for-the-operator) one are blind to the author: they name
+neither the implementer's key nor its model, and tell the reviewer that it is not the author of
+the change, which a separate session wrote, and that a `git log` or a commit trailer naming an
+agent or a model does not change that. The texts they pass on, the issue body, the PR
+description, the trusted users' comments and the implementer's responses to the findings, lose
+every attribution block (a `> [!NOTE]` followed only by `Bot`, `Version`, `Agent`, `Model` and
+`Reasoning Level` lines, outside fenced code) and the markers that end them
+(`markdown.without_attribution`). Everything else stays, technical text that names an agent or a
+model included. The originals on GitHub, the PR's marker, the ledger and the commit trailers do
+not change: devloop still reads the implementer from the marker to keep it out of the reviewers.
+
 ## Records bound to identities
 
 Records are bound to identities. A PR counts as a devloop PR with its marker only if it was opened
@@ -738,7 +753,8 @@ hash of the [readiness check](#readiness-check-records) like any text devloop pu
 the [conclave](#conclave-records) reads it, and only when written by the app of the agent it
 names. A `conclave` record counts only from the dispatcher's app. An `advisory` record (#369)
 counts in a native review only from the identity of the agent of `advisory_reviewer`, and in a
-comment only from the dispatcher's app. `trusted_users`
+comment only from the dispatcher's app. A `story` record (#363) counts only from the dispatcher's
+app, and only when the [turn journal](#story-identity) confirms it. `trusted_users`
 stays for people: it
 decides who can start work with `agent:ready`, and it cannot contain bots. The only app whose
 labels count is the supervisor's, on the issues described in
@@ -797,17 +813,22 @@ turn fail.
 
 **Turn persistence.** A turn's record is written before the CLI starts, as `open`; if that write
 fails the turn does not start and the step escalates like any `gh` failure. When the CLI ends the
-record is edited with end, duration, outcome and telemetry. A turn left without that closing
-write, because the dispatcher crashed or the edit failed, stays without end, outcome and
+record is edited with end, duration, outcome and telemetry. An unexpected error of the
+dispatcher while the turn runs (not an agent's failure, #381) closes it too, with outcome
+`failure` and the exception as its error, before the error goes on. A turn left without that
+closing write, because the dispatcher crashed or the edit failed, stays without end, outcome and
 telemetry: the next tick logs `incomplete turn on #<n>` and marks the record `incomplete` (only
 logs it with `--dry-run`). Where to look does not depend on labels, which change once a step
-ends: before writing a turn's record the dispatcher notes the issue or PR in
-`<state_dir>/ledger-open-turns.json`, and removes it when the turn is closed. If that note cannot
-be written, the turn does not start either. The next tick checks every issue or PR still noted,
-for example an issue whose PR is already open or a PR escalated to `agent:needs-operator`, and then
-forgets it. In case the note is lost, it also looks at open devloop PRs not in
+ends: before writing a turn's record the dispatcher records its intent in the
+[turn journal](#turn-journal) of `state_dir`, which keeps the issue or PR until the turn has an
+outcome and its record is closed. If the intent cannot be written, the turn does not start
+either. The next tick checks every issue or PR the journal still holds, for example an issue
+whose PR is already open or a PR escalated to `agent:needs-operator`, and then forgets it. In
+case that trace is lost, it also looks at open devloop PRs not in
 `agent:needs-operator` (or in it only for an [operator merge](guide.md#ready-prs-whose-merge-is-the-operators)),
-issues in `agent:working` and issues waiting for a readiness check.
+issues in `agent:working` and issues waiting for a readiness check. While an issue or PR is
+noted there, the [cleanup of the state directory](guide.md#cleanup-of-the-state-directory)
+removes neither its worktrees nor its files in the logs.
 
 **Tests and commits.** A passing test is bound to the commit created right after it only if the
 tree is the same at three points: before the test, after the test and in the commit. The tree is
@@ -874,6 +895,142 @@ that section `incomplete`. Each fix has its own register: it never joins the reg
 round it answers, nor that of an earlier fix. Reads expand it into its records like a round's
 register. The records of a fix written before #355, one comment per turn, verification and
 `sync` event, stay valid and are read as before.
+
+### Turn journal
+
+Since #362 (ADR 0004, P2-2) the authority on the turns is a local journal,
+`<state_dir>/turn-journal.jsonl`; the `turn` records on GitHub are its published projection, and
+their format does not change. The journal is append-only, one JSON event per line, each with its
+`sequence`, the hash of the event before it (`previous`) and its own (`sha256`):
+
+- `intent`: a turn about to start, with its id (`turn-<n>-<8 hex digits>`), the issue or PR, the
+  issue of its work, the repository, kind, agent, model and label. It is written and made durable
+  (`fsync`) before the turn's record on GitHub, so before the CLI starts. If it cannot be written,
+  the turn does not start and the step escalates like any `gh` failure.
+- `outcome`, one per turn: `returned` (the CLI returned), `failed` (it failed, or its model was
+  unavailable), `not_dispatched` (its record on GitHub could not be written: the CLI never
+  started) or `uncertain`. The outcome is recorded before the record on GitHub is closed; if that
+  edit fails, the journal keeps the issue or PR for the next tick.
+- `uncertain`: a turn left without an outcome, because the dispatcher stopped while it ran or the
+  outcome could not be written. The next tick, with no action running on that issue or PR, records
+  it so and logs `uncertain turn <id> on #<n>` (only logs it with `--dry-run`). The issue or PR
+  stays in the journal's trace until a tick has checked its records on GitHub: a read that fails
+  is tried again on the next tick. An uncertain turn is **never** run again automatically, and
+  stays counted: nothing refunds it.
+- `reconciled` and `refused`: see below. `unsettled` and `settled`: a record on GitHub left open
+  after a failed edit, and the tick that checked it. `linked`: the issue of the work of a legacy
+  turn (see the migration). `story`, `request` and `child`: the stories, with `story_identity`
+  on (see [Story identity](#story-identity)).
+
+**Integrity.** Every read verifies the whole chain. An incomplete last line (a write cut short),
+or a last line that is not JSON, is set aside in `turn-journal-tail-<sha256>.bin` and cut off: the
+valid records before it stay. A hash that does not match, or an unreadable line before the last,
+is an explicit error, never ignored: the journal is not used and no turn starts. Next to it,
+`turn-journal-state.json` keeps the sequence and hash of the latest event; a snapshot without its
+journal, or a journal shorter than it or off it (cut, replaced, rolled back) is refused (ADR 0001,
+constraint 3). The chain is not keyed: it gives integrity, not provenance.
+
+**Who writes it.** Only the dispatcher that holds `dispatcher.lock` writes the journal: it keeps
+the chain in memory and appends to it. `devloop status` and `devloop tick --dry-run`, which run
+beside it without the lock, read it without any effect on the files: they neither set aside a
+tail nor import or remove `ledger-open-turns.json`, and what their planning would record (a
+legacy turn linked to its work, a turn made uncertain) stays in their memory. Their ids of the
+legacy turns not imported yet are their own. A record they appended would break the chain of the
+running dispatcher at its next write, and with it the journal.
+
+**Migration.** The journal replaces `<state_dir>/ledger-open-turns.json`. An existing file is
+imported once, at the first read, as one legacy turn per issue or PR (`legacy-<n>-<8 hex
+digits>`), explicitly `uncertain`, with its number and count and no outcome made up; then the
+file is removed, and one that comes back is not imported again. The next tick checks those issues
+and PRs on GitHub as before. Each legacy turn is then linked to the issue of its work (a `linked`
+event), so that it stays part of that work after a restart: a number among the open PRs through
+the dispatcher's map; with the block on, any other number by reading it on GitHub in any state
+(`find_pr`), so also a PR closed while devloop was stopped. A devloop PR, recognised by its branch
+and trusted author as in the snapshot, belongs to the work of its issue; an issue, or a PR devloop
+does not recognise, to its own number only.
+
+**Block on uncertain turns.** With `block_uncertain_turns = true` (off by default: ADR 0004, D8),
+a turn whose work has uncertain turns not reconciled is refused before its intent, with an
+escalation of class `uncertain_turn` that lists them and how to reconcile them. The work is the
+repository and the issue: the issue and its devloop PRs, which the dispatcher recognises by
+branch and marker. Every new turn of it is refused, whatever its kind, agent, model, reviewer or
+round. A legacy turn blocks the issue or PR of its number and, when that number is a PR of a
+work, its issue and the other PRs of the same issue, open or closed. Before a turn is admitted the
+legacy turns not linked yet are linked; one whose number cannot be read on GitHub may be a PR of
+any work, so it blocks every new turn, and the escalation says so, until a later read links it. A
+turn that ended without a durable outcome (its write
+failed), or that a tick could not record as `uncertain`, blocks the work in the same way: a retry
+or a fallback of the same step is refused, and the turn becomes `uncertain`, to reconcile, at the
+next tick. Turns still running in parallel actions never block. A conclave call refused this way
+is not recorded as started: the conclave of that block ends with the `uncertain_turn` escalation
+and the item stays with the operator. An [advisory review](guide.md#advisory-review-for-the-operator)
+refused this way, before its checkout, escalates too, although its other failures never do: the
+escalation's marker records the ids of the turns it lists (`turns`), and while every turn that
+blocks the work is among those already escalated on the PR, the PR gets no advisory action; a
+new blocking turn gets its own escalation, and after the reconciliation the review runs. With
+the block off devloop behaves as before: the journal records the turns all the same.
+
+**Reconciliation.** Only the operator decides the outcome of an uncertain turn. A user in
+`trusted_users`, never the supervisor nor an agent, writes on the issue or PR of the turn, on the
+issue of its work or on one of its open PRs, a comment whose first line, after the attribution
+header, is the command alone:
+
+```text
+/devloop reconcile <turn id> <returned|failed|not_dispatched>
+<the reason, mandatory, on the lines below>
+```
+
+The next tick records the outcome in the journal once, with author, comment, note and time,
+whether or not the block is on. A second command for the same turn with the same outcome has no
+effect; with a different outcome it is refused, like `INVOCATION_RECONCILED` in the local engine.
+A command without the note, with another outcome, for an unknown turn or for one that is not
+uncertain is refused too: the journal records the refusal and the dispatcher answers it once on
+that thread. A command from outside `trusted_users` is only logged. Commands are read while their
+turn waits for reconciliation, on each tick. No automatic evidence is accepted in its place: the
+proof of termination comes with step 4 of ADR 0001. After the reconciliation the step resumes as
+any escalation to the operator does.
+
+### Story identity
+
+Since #363 (ADR 0004, P2-3a, recommendation (b) of section 3.2) the journal can hold the
+**stories**, the unit of the budget of step 2: an issue and, from step 3, its child issues. It is
+off by default (`story_identity = false`, ADR 0004, D8): with it off devloop records no story and
+behaves as before.
+
+- **Identity.** At the takeover of an issue (`agent:ready` to `agent:working`) the journal
+  records a `story` event: the id the dispatcher assigns (`story-<n>-<8 hex digits>`), the
+  repository and number of the issue, its root, and the `hash` of the [`request`](#evidence-and-telemetry)
+  record of that takeover, the snapshot of the text the readiness check judged ready and
+  devloop runs. It is written before the record on GitHub: if it cannot be, no record is
+  written and the step escalates like any `gh` failure.
+- **Later requests.** A new takeover of the root writes a new `request` record, as before. When
+  its hash differs from the story's last one (a trusted user changed the issue), the journal
+  adds it with a `request` event: the story keeps its id, repository and root, and its earlier
+  hashes. The same text adds nothing. A change by an untrusted author still stops devloop.
+- **Root marker.** The comment of the `request` record of the root ends with the `ledger` marker
+  followed by a `story` marker, `{story, repo, root, issue, hashes}`, with every hash recorded so
+  far, oldest first, and a "Storia" section in its text. A marker missing because a write failed
+  is written again at the next takeover, from the journal. The journal must confirm the root's
+  latest marker too: its `hashes` must be a prefix of the story's. A marker behind the journal
+  (a write that failed after the journal recorded the hash) is valid; one that diverges from it,
+  or goes beyond it (a journal restored from before), contradicts it: an integrity error, and the
+  step escalates without recording the new hash.
+- **Children.** A child issue inherits the story **only** from a `story` marker the dispatcher
+  wrote on it, `{story, repo, root, issue}` without hashes (D7). A story declared in the text of
+  the issue, by an agent or by a user, the operator included, or in a marker written by any
+  other identity, is not inherited: at its takeover that issue becomes the root of a story of its
+  own. The marker is read only from the dispatcher's identity, and the journal must confirm it: a
+  dispatcher's marker for another issue, of a story the journal does not hold, or of an issue
+  that is neither the root nor a child of that story is an integrity error, and the step
+  escalates. A child is taken over without a story of its own and is never made a root.
+- **Writing the marker of a child.** The dispatcher has the function (`Ledger.mark_child`): it
+  records a `child` event in the journal, then writes the marker on the issue. **No flow calls
+  it yet**: which act authorizes the association of a child is decided with step 3 of ADR 0001,
+  and until then no issue gets the marker of a child.
+
+Issues taken over before, or with the identity off, have no marker and are handled as before.
+The identity of the attempt and the rule of one active attempt per phase are the second part of
+P2-3.
 
 ## PR receipt
 

@@ -28,7 +28,14 @@ and `agent_stall_action` (`"warn"`, the default, or `"abort"`) control the
 open PRs in progress and those waiting for a person ([Open PR limits](guide.md#open-pr-limits)).
 `ci_rerun_unrelated` (a boolean, default `true`) re-runs once a CI failure in test modules not
 pertinent to the PR ([CI failures not pertinent to the PR](#ci-failures-not-pertinent-to-the-pr));
-another value stops devloop at startup.
+another value stops devloop at startup. `block_uncertain_turns` (a boolean, default `false`)
+turns on the block on uncertain turns of the [turn journal](protocol.md#turn-journal) (#362): a
+turn left without outcome refuses every new turn of its work, with an escalation, until a trusted
+user reconciles it with `/devloop reconcile`. Off, the journal records the turns all the same;
+another value stops devloop at startup. `story_identity` (a boolean, default `false`) turns on the
+[story identity](protocol.md#story-identity) (#363): at the takeover of an issue the journal
+records its story and the `request` record carries the dispatcher's `story` marker. Off, devloop
+records no story; another value stops devloop at startup.
 `[merge]` (`mode`, `levels`, `operator_only_paths`) and `roles.supervisor` set the
 [merge modes](guide.md#merge-modes); an unknown mode, level or key stops devloop at startup.
 `[pin]` (`auto`, default `false`; `restart_max_wait_minutes`, default 30) sets the
@@ -43,6 +50,13 @@ is not an issue number (an integer of at least 1), or an unknown key, stops devl
 [daily summary](guide.md#daily-summary): the dedicated issue it is published on and the minutes
 between two automatic publications of `devloop run`; an `issue` that is not an issue number, an
 `interval` that is not a whole number of at least 1, or an unknown key, stops devloop at startup.
+`[gc]` sets the [cleanup of the state directory](guide.md#cleanup-of-the-state-directory)
+(#380): `pins` (default `true`) with `keep_pins` (default 5, the pinned copies kept besides
+`current`), `worktrees` (default `true`), `logs` (default `false`) with `log_days` (default 14),
+and `interval_minutes` (default 60, the minimum time between two cleanups of the ticks; 0: at
+every tick with nothing running); a `pins`, `worktrees` or `logs` that is not a boolean, a
+`keep_pins` or `interval_minutes` that is not a whole number of at least 0, a `log_days` that is
+not a whole number of at least 1, or an unknown key, stops devloop at startup.
 `[docs] map` sets the
 [documentation map](#documentation-map). Operator overrides go into the
 [local overlay](guide.md#local-config-as-an-overlay), not into this file. A running
@@ -135,6 +149,11 @@ This repository sets 3: implement, fix, sync and review of different issues and 
   unexpected exception escalates its issue or PR too, with `errore inatteso del dispatcher` and
   the exception, instead of stopping the tick. At the end the tick logs one
   `outcome of <action> #<N>: done|failed: …|unexpected error: …` line per action.
+- **Traceback.** The traceback of an unexpected exception of an action (#381) is written in the
+  local logs, `<state_dir>/logs/<time>-<action>-<N>-traceback.txt`, never on GitHub, and the
+  `unexpected error: …` line of the tick log ends with `(traceback in <file>)`, or with
+  `(traceback not written: …)` when the file could not be written. With
+  `max_parallel_actions = 1` the tick still stops on such an exception, after the same line.
 - **Tick log.** Each line of an action starts with `#<N>`, its issue or PR, and is written
   whole: the lines of parallel actions never mix.
 - **Shared state.** Worktrees, agent logs, markers and GitHub writes are already per number.

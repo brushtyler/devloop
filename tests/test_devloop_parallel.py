@@ -51,7 +51,7 @@ class SleepingRunner:
             self.calls.append((agent.key, mode, schema_name, prompt))
             queue = self.outputs.get(agent.key)
             out = queue.pop(0) if queue else raw_review()
-        if isinstance(out, Exception):
+        if isinstance(out, BaseException):
             raise out
         return out
 
@@ -235,7 +235,9 @@ class ParallelTickTests(unittest.TestCase):
             'outcome of fix #101: done',
             'outcome of sync #102: failed: agent died',
             'outcome of sync #100: done'])
-        self.assertIn("#100   unexpected error: KeyError: 'boom'", d.logs)
+        # With where its traceback is, or why it is not (#381): this workspace keeps no logs.
+        self.assertIn("#100   unexpected error: KeyError: 'boom' (traceback not written: "
+                      'AttributeError)', d.logs)
 
     def test_log_lines_of_parallel_actions_do_not_mix(self):
         written = []
@@ -406,18 +408,23 @@ class SharedStateTests(unittest.TestCase):
         self.assertEqual(runner.last_report, ('main', None))
 
     def test_the_ledger_trace_counts_turns_of_parallel_threads(self):
+        # The trace is the journal of the turns since #362: every intent of every thread is
+        # kept, on one valid chain.
         with tempfile.TemporaryDirectory() as tmp:
             ledger = Ledger(FakeGH(), state_dir=tmp)
 
             def count():
                 for _ in range(50):
-                    ledger._count(100, +1)
+                    ledger.journal.intent(100, issue=7, repo='o/r', kind='review', agent='a',
+                                          model='m', label='l')
             threads = [threading.Thread(target=count) for _ in range(4)]
             for t in threads:
                 t.start()
             for t in threads:
                 t.join()
-            self.assertEqual(ledger._load(), {'100': 200})
+            turns = Ledger(FakeGH(), state_dir=tmp).journal.turns()
+            self.assertEqual(len(turns), 200)
+            self.assertEqual(ledger.pending(), [100])
 
     def test_parallel_test_runs_get_a_temporary_directory_of_their_own(self):
         seen = []

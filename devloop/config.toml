@@ -22,6 +22,18 @@ local_tests = "changed"
 # local_tests = "changed", is re-run once instead of becoming a round (issue #200). It needs
 # `actions: write` on the dispatcher's app; without it the failure is a round, as before.
 ci_rerun_unrelated = true
+# The journal of the turns in state_dir (issue #362) records each turn's intent before its CLI
+# starts, and its outcome. A turn left without outcome becomes `uncertain` and is never re-run
+# automatically. With this key on, it also refuses every new turn of the same work (the issue
+# and its PRs), with an escalation, until a trusted user reconciles it with
+# `/devloop reconcile`. Off here: turning it on is the operator's decision (ADR 0004, D8).
+block_uncertain_turns = false
+# The story identity (issue #363, ADR 0004, P2-3a): at the takeover of an issue the journal of
+# state_dir assigns it a story, or adds the new request hash to the story it already has, and the
+# comment of its `request` record carries the dispatcher's `story` marker. An issue inherits the
+# story of another only from that marker, never from text. Off here: turning it on is the
+# operator's decision (ADR 0004, D8).
+story_identity = false
 # Language of the text that agents write for GitHub.
 language = "Italian"
 
@@ -161,6 +173,21 @@ operator_only_paths = ["docs/adr/", "AGENTS.md", "CLAUDE.md"]
 [pin]
 auto = false
 restart_max_wait_minutes = 30
+
+# The cleanup of state_dir (issue #380, see docs/devloop/guide.md). It runs at a tick with
+# nothing running, at most every interval_minutes (0: at every such tick), and with `devloop gc`;
+# each removal goes to the log. pins: after a successful pin, keep `current` and the keep_pins
+# copies pinned most recently, and remove the other pinned-* copies that no process uses.
+# worktrees: remove the worktrees of closed issues and of closed or merged PRs. logs (off by
+# default, turned on in the local overlay): remove the files of logs/ not modified for log_days
+# days, never the evidence of an open escalation nor the files of a turn still open in the ledger.
+[gc]
+pins = true
+keep_pins = 5
+worktrees = true
+logs = false
+log_days = 14
+interval_minutes = 60
 
 # `devloop run` (issue #177): after three consecutive failed ticks the loop stops and the
 # dispatcher posts an alert on this issue; without it the alert goes only to the local log, and

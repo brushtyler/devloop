@@ -10,7 +10,7 @@ import datetime
 import functools
 
 from devloop import config, markdown
-from devloop.github import merge_state
+from devloop.github import GitHubNotFound, GitHubUncertain, merge_state
 from devloop.ports import PORTS, port_methods
 
 _CFG = config.load_config()
@@ -18,6 +18,7 @@ SHA1 = 'a' * 40  # the head FakeGH reports by default
 # The marker of PR #100 for issue 7, with whatever roles config.toml assigns.
 META = {'issue': 7, 'implementer': _CFG.implementer, 'reviewer': _CFG.reviewer}
 PORT_METHODS = frozenset(name for port in PORTS for name in port_methods(port))
+FIRST_COMMENT_ID = 1000  # the id of FakeGH's first comment, with ``with_ids``
 _EPOCH = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
 
 
@@ -63,9 +64,20 @@ class FakeGH:
 
     # Comments: whatever devloop published, as written by the operator's login, each at the time
     # of its place among all the comments (``at``), so that native reviews fall among them.
+    # Without ``with_ids`` they carry no id, ``comment`` returns None and ``edit_comment`` only
+    # records the edit; with it (#364), comment ``i`` has id ``FIRST_COMMENT_ID + i``,
+    # ``comment`` returns it and ``edit_comment`` replaces its body.
+    with_ids = False
+
     def pr_comments(self, number):
-        return [{'author': {'login': 'brushtyler'}, 'body': body, 'created_at': at(2 * i)}
-                for i, (n, body) in enumerate(self.comments) if n == number]
+        found = []
+        for i, (n, body) in enumerate(self.comments):
+            if n == number:
+                found.append({'author': {'login': 'brushtyler'}, 'body': body,
+                              'created_at': at(2 * i)})
+                if self.with_ids:
+                    found[-1]['id'] = FIRST_COMMENT_ID + i
+        return found
 
     def issue_comments(self, number):
         return self.pr_comments(number)
@@ -107,14 +119,42 @@ class FakeGH:
                 log.setdefault((number, label), []).append(self.labeler)
         current.update(add)
 
+    # Writes with an uncertain outcome (#364): each ``comment`` and ``edit_comment`` takes the
+    # first entry left, ``'applied'`` (the write takes effect) or ``'lost'`` (it does not), and
+    # then raises GitHubUncertain, as the adapter does on a timeout or a 5xx answer. Empty:
+    # every write succeeds.
+    uncertain_writes = ()
+
+    def _uncertain_outcome(self):
+        if not self.uncertain_writes:
+            return None
+        outcome, *self.uncertain_writes = self.uncertain_writes
+        if outcome not in ('applied', 'lost'):
+            raise ValueError(f'uncertain outcome {outcome!r}: applied or lost')
+        return outcome
+
     def comment(self, number, body):
-        self.comments.append((number, body))
+        outcome = self._uncertain_outcome()
+        if outcome != 'lost':
+            self.comments.append((number, body))
+        if outcome is not None:
+            raise GitHubUncertain(f'comment on #{number}: outcome unknown ({outcome})')
+        return FIRST_COMMENT_ID + len(self.comments) - 1 if self.with_ids else None
 
     def close_issue(self, number):
         self.closed = getattr(self, 'closed', []) + [number]
 
     def edit_comment(self, comment_id, body):
-        self.comment_edits.append((comment_id, body))
+        index = comment_id - FIRST_COMMENT_ID if self.with_ids else None
+        if index is not None and not 0 <= index < len(self.comments):
+            raise GitHubNotFound(f'comment {comment_id}: (HTTP 404)')
+        outcome = self._uncertain_outcome()
+        if outcome != 'lost':
+            self.comment_edits.append((comment_id, body))
+            if index is not None:
+                self.comments[index] = (self.comments[index][0], body)
+        if outcome is not None:
+            raise GitHubUncertain(f'edit of comment {comment_id}: outcome unknown ({outcome})')
 
     def ensure_label(self, name, color, description):
         self.label_styles[name] = (color, description)
@@ -147,6 +187,14 @@ class FakeGH:
 
     def merged_prs(self, branch):
         return [dict(raw) for raw in self.merged_raw if raw.get('headRefName') == branch]
+
+    # The PRs in any state a test sets, by number, as `find_pr` returns them (#362): every
+    # other number is an issue.
+    any_prs = {}
+
+    def find_pr(self, number):
+        raw = self.any_prs.get(number)
+        return dict(raw) if raw is not None else None
 
     def merge_state(self, pr):
         return merge_state(pr.get('mergeable'), pr.get('mergeStateStatus'))

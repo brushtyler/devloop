@@ -21,6 +21,7 @@ from pathlib import Path
 from .acceptance import render_map
 from .config import INSTALL_ROOT
 from .github import GitHubError
+from .journal import STORY_ID
 from .policy import EVENTS, valid_receipt
 from .review import LEGACY_VERDICT, current_verdict
 from .supervision import COMMANDS, MAX_RETRIES, OUTCOMES, critical, describe
@@ -170,6 +171,44 @@ def split_markers(text):
     while end and _MARKER.fullmatch(lines[end - 1].strip()):
         end -= 1
     return '\n'.join(lines[:end]).rstrip(), [line.strip() for line in lines[end:]]
+
+
+_ATTRIBUTION_LINE = re.compile(r'>\s*(?:\*\*(?:Bot|Version|Agent|Model|Reasoning Level):\*\*.*)?')
+_FENCE = re.compile(r'\s{0,3}(`{3,}|~{3,})')
+
+
+def without_attribution(text):
+    """``text`` as the reviewers read it (#389): without the attribution blocks of AGENTS.md
+    (a ``> [!NOTE]`` followed only by Bot, Version, Agent, Model and Reasoning Level lines),
+    wherever they are outside a fenced code block, and without the block of markers that ends
+    it, which records who wrote the change. Every other line stays as it is, technical text that
+    names an agent or a model included: the reviewer must not learn who the author is from the
+    metadata, nothing more. The original on GitHub does not change."""
+    lines = split_markers(text)[0].splitlines()
+    kept, fence, i = [], None, 0
+    while i < len(lines):
+        line = lines[i]
+        if fence is None and line.strip() == '> [!NOTE]':
+            end = i + 1
+            while end < len(lines) and lines[end].lstrip().startswith('>'):
+                end += 1
+            block = [item.strip() for item in lines[i + 1:end]]
+            if (any(item != '>' for item in block)
+                    and all(_ATTRIBUTION_LINE.fullmatch(item) for item in block)):
+                i = end
+                if not kept or not kept[-1].strip():
+                    while i < len(lines) and not lines[i].strip():
+                        i += 1  # no blank lines left where the block was
+                continue
+        opening = _FENCE.match(line)
+        if fence is None and opening:
+            fence = opening.group(1)
+        elif fence is not None and opening and line.strip().rstrip(fence[0]) == '' \
+                and len(line.strip()) >= len(fence):
+            fence = None
+        kept.append(line)
+        i += 1
+    return '\n'.join(kept).strip()
 
 
 def with_record(body, kind, payload, text=None):
@@ -433,13 +472,27 @@ def _valid_advisory(a):
                  or a.get('outcome') == 'failed' and a.get('opinion') is None))
 
 
+def _valid_story(s):
+    """The story of an issue (#363, ADR 0004, P2-3a): its id, the repository and number of its
+    root, and the issue that carries it. On the root, in the comment of its ``request``
+    record, also the hashes of the root's ``request`` records, oldest first; a child issue has
+    none of its own."""
+    root = s.get('issue') == s.get('root')
+    hashes = s.get('hashes')
+    return (isinstance(s.get('story'), str) and STORY_ID.fullmatch(s['story']) is not None
+            and isinstance(s.get('repo'), str) and bool(s['repo'])
+            and _is_int(s.get('root'), 1) and _is_int(s.get('issue'), 1)
+            and (isinstance(hashes, list) and bool(hashes)
+                 and all(isinstance(h, str) for h in hashes) if root else hashes is None))
+
+
 _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy': _valid_policy,
           'finding': _valid_finding, 'sync': _valid_sync, 'preflight': _valid_preflight,
           'notice': _valid_notice, 'ledger': _valid_ledger, 'merged': _valid_merged,
           'hold': _valid_hold, 'supervision': _valid_supervision, 'rerun': _valid_rerun,
           'closed': _valid_closed, 'cycle': _valid_cycle, 'report': _valid_report,
           'receipt': _valid_pr_receipt, 'conclave': _valid_conclave,
-          'advisory': _valid_advisory}
+          'advisory': _valid_advisory, 'story': _valid_story}
 
 
 def read_marker(text, kind):

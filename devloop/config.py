@@ -130,6 +130,26 @@ class PinPolicy:
 
 
 @dataclass(frozen=True)
+class GCPolicy:
+    """``[gc]`` (#380): the cleanup of ``state_dir``. ``pins``: after a successful pin and at
+    each cleanup, keep ``current`` and the ``keep_pins`` copies pinned most recently, and remove
+    the other ``pinned-*`` copies no process uses. ``worktrees``: remove the worktrees of closed
+    issues and of closed or merged PRs. ``logs``: remove the files of ``logs/`` not modified for
+    ``log_days`` days, except the evidence of an open escalation and the files of a turn still
+    open in the ledger. The cleanup runs at a tick with nothing running, at most every
+    ``interval_minutes`` (0: at every such tick), and with ``devloop gc``."""
+    pins: bool = True
+    keep_pins: int = 5
+    worktrees: bool = True
+    logs: bool = False
+    log_days: int = 14
+    interval_minutes: int = 60
+
+    def enabled(self):
+        return self.pins or self.worktrees or self.logs
+
+
+@dataclass(frozen=True)
 class DocsMap:
     """``[docs] map`` (#203): code paths and the documents that describe them. A key is a
     directory prefix ending in ``/`` or a file, relative to the root; ``entries`` holds
@@ -275,6 +295,14 @@ class Config:
     # Re-run once, without a round, a CI failure whose test modules are not pertinent to the PR
     # (#200, ``Dispatcher._rerun_unrelated``).
     ci_rerun_unrelated: bool = True
+    # The block on uncertain turns (#362): a turn of the journal left without outcome refuses
+    # every new turn of its work until a trusted user reconciles it. Off by default (ADR 0004,
+    # D8): the journal records the turns all the same.
+    block_uncertain_turns: bool = False
+    # The story identity (#363, ADR 0004, P2-3a): at the takeover of an issue the journal records
+    # its story, and the comment of its ``request`` record carries the dispatcher's ``story``
+    # marker. Off by default (ADR 0004, D8): devloop behaves as before.
+    story_identity: bool = False
     agent_timeout_seconds: int = 3600
     test_timeout_seconds: int = 3600
     agent_command_timeout_seconds: int = 600
@@ -297,6 +325,8 @@ class Config:
     report: ReportPolicy = field(default_factory=ReportPolicy)
     # The wait for the CI of a new head (#263).
     ci: CIPolicy = field(default_factory=CIPolicy)
+    # The cleanup of state_dir (#380).
+    gc: GCPolicy = field(default_factory=GCPolicy)
     # Code paths and their documents, listed in the implement, fix and review prompts (#203).
     docs: DocsMap = field(default_factory=DocsMap)
 
@@ -624,6 +654,31 @@ def parse_ci(table):
     return CIPolicy(**values)
 
 
+def parse_gc(table):
+    """``[gc]`` (#380): ``pins``, ``worktrees`` and ``logs``, booleans (default true, true and
+    false); ``keep_pins`` (default 5) and ``interval_minutes`` (default 60), whole numbers of at
+    least 0; ``log_days`` (default 14), a whole number of days of at least 1."""
+    if not isinstance(table, dict):
+        raise ConfigError('gc: expected a table')
+    unknown = set(table) - {f.name for f in dataclasses.fields(GCPolicy)}
+    if unknown:
+        raise ConfigError(f'gc: unknown keys {sorted(unknown)}')
+    values = {}
+    for key in ('pins', 'worktrees', 'logs'):
+        if key in table:
+            if not isinstance(table[key], bool):
+                raise ConfigError(f'gc.{key}: expected true or false')
+            values[key] = table[key]
+    for key, low, what in (('keep_pins', 0, 'copies'), ('interval_minutes', 0, 'minutes'),
+                           ('log_days', 1, 'days')):
+        if key in table:
+            value = table[key]
+            if not isinstance(value, int) or isinstance(value, bool) or value < low:
+                raise ConfigError(f'gc.{key}: expected a whole number of {what}, at least {low}')
+            values[key] = value
+    return GCPolicy(**values)
+
+
 def _docs_path(value, where, document):
     """``value`` as a path of ``[docs] map``: a non-empty path relative to the root, without
     surrounding spaces, ``.``, ``..`` or empty segments, backslashes or pattern characters. A key
@@ -805,6 +860,10 @@ def parse_config(data, root=INSTALL_ROOT):
         raise ConfigError(f'local_tests: must be one of {LOCAL_TESTS_MODES}')
     ci_rerun = (_require(data, 'ci_rerun_unrelated', bool, 'config')
                 if 'ci_rerun_unrelated' in data else Config.ci_rerun_unrelated)
+    block_uncertain = (_require(data, 'block_uncertain_turns', bool, 'config')
+                       if 'block_uncertain_turns' in data else Config.block_uncertain_turns)
+    story_identity = (_require(data, 'story_identity', bool, 'config')
+                      if 'story_identity' in data else Config.story_identity)
     return Config(
         repo=_require(data, 'repo', str, 'config'),
         base_branch=data.get('base_branch', 'main'),
@@ -820,11 +879,13 @@ def parse_config(data, root=INSTALL_ROOT):
         protected_paths=_str_list(data, 'protected_paths', 'config', ('.github/',)),
         apps=apps, app_key_dir=key_dir, agent_stall_action=stall_action,
         local_tests=local_tests, ci_rerun_unrelated=ci_rerun,
+        block_uncertain_turns=block_uncertain, story_identity=story_identity,
         merge=parse_merge(data.get('merge', {}), supervisor), supervisor=supervisor,
         pin=parse_pin(data.get('pin', {}), sensitive_lists(data)),
         run=parse_run(data.get('run', {})),
         report=parse_report(data.get('report', {})),
         ci=parse_ci(data.get('ci', {})),
+        gc=parse_gc(data.get('gc', {})),
         docs=parse_docs(data),
         review_policy=parse_review_policy(
             data.get('review_policy', {}), root,
@@ -852,7 +913,8 @@ _AGENT_KEYS = dict.fromkeys(('kind', 'display_name', 'model', 'model_label', 'ef
                              'write_commands', 'review_commands'))
 OVERLAY_KEYS = {
     **dict.fromkeys(('repo', 'base_branch', 'branch_prefix', 'state_dir', 'test_cmd',
-                     'local_tests', 'ci_rerun_unrelated', 'language', 'trusted_users', 'preflight',
+                     'local_tests', 'ci_rerun_unrelated', 'block_uncertain_turns', 'story_identity',
+                     'language', 'trusted_users', 'preflight',
                      'conclave', 'max_open_prs',
                      'max_parked_prs', 'max_review_rounds', 'max_actions_per_tick',
                      'max_parallel_actions', 'implement_test_retries', 'agent_timeout_seconds',
@@ -871,6 +933,8 @@ OVERLAY_KEYS = {
     'run': {'alert_issue': None},
     'report': dict.fromkeys(('issue', 'interval')),
     'ci': dict.fromkeys(('grace_minutes', 'required_timeout_minutes')),
+    'gc': dict.fromkeys(('pins', 'keep_pins', 'worktrees', 'logs', 'log_days',
+                         'interval_minutes')),
     'docs': {'map': {'*': None}},
 }
 

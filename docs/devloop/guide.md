@@ -48,6 +48,12 @@ job with its outcome and duration and, for a job that runs `scripts/run-tests.py
 measures instead of asking the supervisor for them; a job log that cannot be read only leaves
 its summary out (see [Summary of the CI in the prompts](reference.md#summary-of-the-ci-in-the-prompts)).
 
+The review prompt does not say who wrote the change (#389): no implementer key or model, no
+attribution header or marker in the issue, the PR description and the comments it carries, and
+an explicit statement that the reviewer is not the author (see
+[What the reviewers read](protocol.md#attribution)). devloop still keeps the implementer out of
+the reviewers, from the PR's marker.
+
 A head just pushed, without CI yet, is reviewed as if its CI were pending: with `local_tests`
 other than `full` no full suite runs locally in place of the CI for `[ci] grace_minutes`, and as
 long as `main` requires checks up to `[ci] required_timeout_minutes` (see
@@ -672,6 +678,7 @@ check, and the `policy` marker of a level that cannot be reviewed or promoted. A
 | `receipt_conflict` | The [receipt of the PR](protocol.md#pr-receipt) contradicts the markers at its promotion | Yes |
 | `retry_limit`, `supervisor_escalated`, `supervisor_refused` | The supervisor's retries are spent, it handed the escalation over, or it gave a command the escalation does not admit | Yes |
 | `conclave_veto` | A trusted user annulled the latest decision of a [conclave](#conclave-on-a-block) with `/devloop veto` | Yes |
+| `uncertain_turn` | With `block_uncertain_turns` on, a turn refused because its work has [uncertain turns](protocol.md#turn-journal) a trusted user has not reconciled with `/devloop reconcile` | Yes |
 
 Any other class, or none (escalations written before #182), is critical.
 
@@ -816,6 +823,28 @@ item stays in `agent:needs-operator`. A command from outside `trusted_users` and
 identity is only logged. The trace is the one of the supervisor's commands, under the title
 "Comando su un'escalation all'operatore".
 
+A turn left without an outcome, because devloop stopped while it ran, becomes `uncertain` in the
+[turn journal](protocol.md#turn-journal) and is never run again automatically. With
+`block_uncertain_turns = true` (off by default) it also refuses every new turn of the same issue
+and its PRs, with an escalation of class `uncertain_turn` that lists the turns; so does a turn
+whose outcome could not be written, from the next turn of the same step (a retry, a fallback)
+onwards, and a legacy turn imported from `ledger-open-turns.json` on the issue or on one of its
+PRs, open or closed (read on GitHub to find its issue; until it can be read, it blocks every
+work). A conclave call refused this way ends that conclave with the escalation; an advisory
+review refused this way escalates once for those turns and waits for their reconciliation.
+Only a trusted
+user reconciles them, with a comment whose first line is
+`/devloop reconcile <turn id> <returned|failed|not_dispatched>` and whose next lines give the
+reason, mandatory. The outcome is recorded once, also with the block off; then the step resumes
+as from any escalation to the operator.
+
+With `story_identity = true` (#363, off by default) the takeover of an issue also records its
+[story](protocol.md#story-identity), the unit of the future budget: the journal assigns one to
+the issue, or adds the hash of the new request to the one it has, and the comment of the
+`request` record carries the dispatcher's `story` marker. An issue belongs to another's story
+only through that marker of the dispatcher, never through what its text, an agent or a user
+writes. With it off, and for issues taken over before, nothing changes.
+
 ### Advisory review for the operator
 
 With `[review_policy] advisory_reviewer` set (#369; empty, and so off, by default: the local
@@ -826,7 +855,10 @@ escalation to the operator, or when its merge is the operator's
 off, a level `off`, an `operator_only_paths` path). A PR also in `agent:needs-supervisor` waits
 for the supervisor. The agent may be the PR's implementer: each turn is a new CLI process, so it
 does not have the implementer's context, and having the same model it could never count for the
-quorum anyway.
+quorum anyway. Like the review prompt, the advisory one is blind to the author (#389): it names
+neither the implementer nor its model, tells the agent it is not the author, and passes on the
+issue and the PR description without attribution headers and markers (see
+[What the reviewers read](protocol.md#attribution)).
 
 - **One per head.** An `advisory` action, which takes a slot of `max_actions_per_tick`, runs one
   read-only turn of that agent in a disposable checkout of the head (`pr-<n>-advisory`), with
@@ -834,7 +866,8 @@ quorum anyway.
   [`devloop/schemas/advisory.json`](../../devloop/schemas/advisory.json): a summary of the PR,
   the residual risks, what the operator should look at, points the reviewers of the quorum may
   have missed, and a non-binding opinion (`ok`, `dubbi`, `contrario`). A head gets one turn,
-  even when it failed or its publication did; a new head gets its own while the PR is still in
+  even when it failed or its publication did (an action that failed before its result was kept
+  gets one retry, see below); a new head gets its own while the PR is still in
   `agent:needs-operator`. The PR is read again before the turn and after it: when it is no
   longer open, its head moved, or it left `agent:needs-operator` or went to
   `agent:needs-supervisor` before the turn ended, nothing is published.
@@ -843,6 +876,17 @@ quorum anyway.
   summary, last: a head is done once it has that summary. When a write fails, a later tick
   publishes what is missing from the kept result, or from the native review already published,
   without a new turn; a PR back to the operator on the same head gets the result kept for it.
+- **Failed actions** (#381). An action that fails before the result of its turn is kept (an
+  unexpected error of the dispatcher, a git or GitHub failure) is recorded for its head in
+  `<state_dir>/advisory-failures.json`, so that the limit holds across a restart: the head is
+  not planned again for 60 seconds, then gets **one** more turn, and after a second failure no
+  turn again (`no new turn on this head` in the tick log). A new head starts over. When the
+  failure cannot be written to that file, the limit could not hold across a restart: the head
+  gets no new turn until devloop restarts (`no new turn on this head until a restart` in the
+  tick log). The turn of
+  a failed action is always closed in the ledger, with outcome `failure`, never left `open`;
+  each attempt writes its own turn record and nothing else. A result already kept, or a native
+  review already published, is still published by the next ticks, without a turn.
 - **Where.** A native GitHub review of type `COMMENT` on the head, never `APPROVE` nor
   `REQUEST_CHANGES` (GitHub accepts a `COMMENT` from the PR's author too), with the agent's
   identity and the title "Review consultiva: non conta per il quorum". The dispatcher then adds
@@ -852,7 +896,11 @@ quorum anyway.
 - **No effect.** It opens no round and does not count against `max_review_rounds`, creates no
   finding, changes no label and no promotion; devloop reads it only to know whether a head
   already has one and to show its opinion, never to decide. A failed action is never escalated:
-  the PR is already the operator's.
+  the PR is already the operator's. The exception is a turn refused by the
+  block on [uncertain turns](protocol.md#turn-journal) (`block_uncertain_turns`): it
+  escalates as `uncertain_turn`, with the turns to reconcile, once for those turns (taking
+  `agent:ready-to-merge` away, as every escalation does), and the PR gets no other advisory
+  action until they are reconciled.
 - **Cost.** One turn per head, recorded in the [ledger](protocol.md#evidence-and-telemetry) as a
   `turn` of kind `advisory`, and counted in the totals of the receipt.
 
@@ -876,6 +924,7 @@ python3 -m devloop tick --dry-run   # print the ready issues in start order and 
 python3 -m devloop tick             # run one round
 python3 -m devloop run --idle-timeout 900  # tick continuously (see Continuous loop)
 python3 -m devloop cleanup          # remove worktrees left by failed steps
+python3 -m devloop gc               # clean up state_dir now: old pinned copies, worktrees of closed issues and PRs, old logs (see Cleanup of the state directory)
 python3 -m devloop follow issue-52  # follow live the implementer of issue #52 (pr-<N>: reviewer or fixer)
 python3 -m devloop watch --timeout 3600  # wait for the next change on GitHub, for the supervising agent
 python3 -m devloop pin origin/main  # pin a commit of origin, after its smoke test (see Run from a pinned installation)
@@ -886,13 +935,63 @@ python3 -m devloop fallback reset agy  # forget the models agy remembers unavail
 Run it from any checkout of this repository. Worktrees, agent prompts and logs, and the lock that
 prevents two dispatchers from running at once live under `state_dir` (default `.ssdlc/devloop`)
 in the main checkout. `tick --dry-run` writes nothing and does not take that lock, so the
-[smoke test of a pin](#pin) runs it while `run` is active. Not even its git commands write to
-the repository: it does not fetch, so it plans from the remote branches as last fetched (a
+[smoke test of a pin](#pin) runs it while `run` is active. Like `status`, it reads the
+[turn journal](protocol.md#turn-journal) without writing it: the running dispatcher alone does.
+Not even its git commands write to the repository: it does not fetch, so it plans from the remote branches as last fetched (a
 branch never fetched leaves its merge mode not computable), and the objects that `git
 merge-tree` writes go to a temporary directory. In daily use run it from the pinned copy, through
 `scripts/devloop-pinned` ([Run from a pinned installation](#run-from-a-pinned-installation)).
 `--local-config <file>`, before the command, applies a local overlay to the configuration
-([Local config as an overlay](#local-config-as-an-overlay)).
+([Local config as an overlay](#local-config-as-an-overlay)). `state_dir` does not grow without
+limits: see [Cleanup of the state directory](#cleanup-of-the-state-directory).
+
+### Cleanup of the state directory
+
+Every pin adds a copy `pinned-<sha12>`, every turn adds its prompt and its log to `logs/`, and
+the worktrees of finished work stay in `worktrees/`. devloop cleans `state_dir` up (#380) as
+`[gc]` sets ([Configuration](reference.md#configuration)). The cleanup runs at a tick, before
+planning, when no action is running (in the [continuous mode](#continuous-mode) only at a tick
+with none running), at most every `interval_minutes` (default 60; 0: at every such tick; the
+time of the last one is in `state_dir/gc-state.json`), and at once with `devloop gc`, which
+holds the dispatcher lock like a tick. `tick --dry-run` never cleans up. Each removal is a line
+of the log that starts with `gc:`; a cleanup that fails is logged and never stops the tick.
+
+- **Pinned copies** (`pins`, on by default). After a successful pin, by hand or
+  [after a merge](#pin-after-a-merge), and at each cleanup, `current` and the `keep_pins`
+  (default 5) other copies pinned most recently stay; the other `pinned-<sha12>` are removed.
+  The order is the time of the last successful pin of each copy, a reused copy (a rollback)
+  included, recorded in `state_dir/pin-times.json`; a copy pinned before that record existed
+  counts with the time its directory was last modified. A copy is never removed while a process
+  uses it: the copy the dispatcher runs from, or one named by the `PYTHONPATH`, the command line
+  or the working directory of a process of the same user (read in `/proc`). Where `/proc` cannot
+  be read, or a live process of the same user cannot be inspected (one that is not dumpable, as
+  `ssh-agent`, hides its environment and its working directory), no copy is removed: it cannot
+  be told which copies are unused. Such a copy stays, and a later cleanup tries again. The rejected
+  copies (`rejected-<sha12>`) are never touched. A pin that runs meanwhile leaves the copies to a
+  later cleanup.
+- **Worktrees** (`worktrees`, on by default). The worktrees of a closed issue (`issue-<n>` and
+  its `issue-<n>-…` copies) and of a closed or merged PR (`pr-<n>`, `pr-<n>-review`, …) are
+  removed, their state read fresh from GitHub. Never one of an issue or PR with a turn still
+  open in the ledger (`state_dir/ledger-open-turns.json`), nor one whose state cannot be read;
+  when the ledger cannot be read, no worktree is removed. A worktree with another name is left
+  to `devloop cleanup`.
+- **Logs** (`logs`, off by default: turn it on in the
+  [local overlay](#local-config-as-an-overlay)). The files directly in `state_dir/logs` not
+  modified for `log_days` days (default 14) are removed, except every file of an open issue or
+  PR in `agent:needs-operator` or `agent:needs-supervisor`: its evidence (`timeout-…` and
+  `conclave-…` files) and the logs of its turns, which the escalation cites. Nor every file of
+  an issue or PR with a turn still open in the ledger, nor an evidence whose name has no issue
+  or PR. The state and the labels of each issue or PR are read fresh, one at a time, not from a
+  list of the escalations that a limit of GitHub could cut short. When an issue or PR cannot be
+  read its files stay, and when the ledger cannot be read every file of an issue or PR stays.
+
+```toml
+# .ssdlc/devloop/config.local.toml
+[gc]
+logs = true
+log_days = 30
+keep_pins = 3
+```
 
 ### From `agent:needs-human` to `agent:needs-operator`
 
@@ -1525,11 +1624,14 @@ skipped (--no-smoke)`. The smoke test needs the GitHub access of the dispatcher;
 commit from before the smoke test takes the dispatcher lock in `tick --dry-run`, so its smoke
 test fails while `run` is active. A copy that already exists for the same commit is reused,
 without a smoke test, but checked again against the current overlay: if a file it needs is
-missing, the pin fails. Earlier copies stay, for the rollback. `pin` uses the
+missing, the pin fails. Earlier copies stay for the rollback, up to `[gc] keep_pins` (default
+5) besides `current`: after a successful pin the older ones that no process uses are removed
+([Cleanup of the state directory](#cleanup-of-the-state-directory)). `pin` uses the
 overlay given with `--local-config`, or `.ssdlc/devloop/config.local.toml` when it exists. A
 `run` already started keeps the code it started with: restart it after a pin by hand (a pin
 after a merge restarts it by itself, see below). `devloop cleanup` removes only the agent
-worktrees under `state_dir/worktrees`, never a pinned copy.
+worktrees under `state_dir/worktrees`, never a pinned copy; `devloop gc` removes the pinned
+copies beyond `[gc] keep_pins`.
 
 #### Launcher
 
@@ -1611,7 +1713,9 @@ configuration at each run, as before.
 
 Pin the earlier commit again: its copy is reused, checked against the current overlay, and
 `current` points back at it, with no fetch needed. The pinned copies are the directories
-`.ssdlc/devloop/pinned-<sha12>`.
+`.ssdlc/devloop/pinned-<sha12>`: `current` and the `[gc] keep_pins` (default 5) pinned most
+recently ([Cleanup of the state directory](#cleanup-of-the-state-directory)). A commit whose
+copy was removed is pinned again from `origin`, with a new copy and its smoke test.
 
 ```bash
 sudo -u devloop -H ls /home/devloop/ssdlc/.ssdlc/devloop/                  # the pinned-<sha12> copies

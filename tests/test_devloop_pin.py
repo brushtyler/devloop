@@ -1115,7 +1115,7 @@ class RestartTests(unittest.TestCase):
                     cli.main(['tick'])
 
     def test_no_smoke_reaches_the_pin(self):
-        cfg = SimpleNamespace(state_dir='.ssdlc/devloop')
+        cfg = SimpleNamespace(state_dir='.ssdlc/devloop', gc=config.GCPolicy())
         with mock.patch.object(cli, 'load_config', return_value=cfg), \
                 mock.patch.object(cli, 'main_checkout', return_value=self.tmp), \
                 mock.patch.object(cli.pin, 'pin') as pinned:
@@ -1123,6 +1123,11 @@ class RestartTests(unittest.TestCase):
             self.assertIs(pinned.call_args.kwargs['smoke'], False)
             cli.main(['pin', 'main'])
             self.assertIs(pinned.call_args.kwargs['smoke'], True)
+            # The cleanup of the copies after the pin (#380): [gc] keep_pins, or none when off.
+            self.assertEqual(pinned.call_args.kwargs['keep'], 5)
+            cfg.gc = config.GCPolicy(pins=False)
+            cli.main(['pin', 'main'])
+            self.assertIsNone(pinned.call_args.kwargs['keep'])
 
     def test_reexec_passes_the_lock_open(self):
         calls = []

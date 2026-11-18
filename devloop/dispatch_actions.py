@@ -26,7 +26,7 @@ from .github import GitHubError, job_id
 from .ledger import fix_register
 from .localtests import failed_modules, select_modules, suite_summary
 from .markdown import (dispatcher_header, publishable, render_fix, render_native_review,
-                       render_review)
+                       render_review, without_attribution)
 from .planning import (BASE_CHANGED, FIX_COMMAND, RESYNC_AFTER_APPROVAL, ci_joins_round,
                        counted_rounds, pending_reviewers, preflight_state, voided_approval,
                        waived_rounds, waiting_reviewers)
@@ -99,6 +99,21 @@ class ActionsMixin:
     """The work actions of ``Dispatcher``: implement, CI failure, review, fix and sync (#296).
     They use the dispatcher state and its other methods through ``self``."""
 
+    def _story_root(self, number, comments):
+        """With ``story_identity`` (#363), the repository of which issue ``number`` is the root
+        of a story at its takeover, for its ``request`` record; None when the identity is off,
+        and for a child, which inherits its story only from the dispatcher's marker
+        (``Ledger.story_of``) and does not become a root. A story declared in any text is not
+        inherited: the issue is the root of a story of its own."""
+        if not self.cfg.story_identity:
+            return None
+        story = self.ledger.story_of(number, comments, self.cfg.repo)
+        if story is not None and story['issue'] != number:
+            self.log(f'  #{number} is a child of story {story["story"]} (root '
+                     f'#{story["issue"]})')
+            return None
+        return self.cfg.repo
+
     def _do_implement(self, number):
         cfg, lb = self.cfg, self.cfg.labels
         agent = cfg.agent(cfg.implementer)
@@ -115,7 +130,8 @@ class ActionsMixin:
                                                        issue['admitters']),
                                 comments=_trusted_comments(issue.get('comments') or [],
                                                            cfg.trusted_users)
-                                + issue['accepted'])
+                                + issue['accepted'],
+                                story_repo=self._story_root(number, issue['thread']))
         self.gh.edit_labels(number, add=[lb.working], remove=[lb.ready])
         name, branch = f'issue-{number}', f'{cfg.branch_prefix}{number}'
         path = self.ws.new_branch(name, branch)
@@ -453,12 +469,14 @@ class ActionsMixin:
         ci_summary, ci_jobs = self._ci_summary(pr)
         # The verified resolution of a unanimous conclave on the issue or the PR (#142).
         decision, _, resolution = self._resolution_for(pr.issue, issue, pr, pr.head_sha)
+        # Blind to the author (#389): no implementer key, no attribution header, no marker. The
+        # key stays in the PR's marker and in the ledger, for the selection of the reviewers.
         prompt = _template('review', repo=cfg.repo, base_branch=cfg.base_branch,
                            pr_number=pr.number, round=round_no, max_rounds=max_rounds,
-                           implementer=pr.meta.get('implementer', cfg.implementer),
                            ci=ci, ci_summary=ci_summary, test_cmd=cfg.test_cmd,
                            issue_number=pr.issue, issue_title=issue['title'],
-                           issue_body=issue.get('body') or '', pr_body=pr.body,
+                           issue_body=without_attribution(issue.get('body')),
+                           pr_body=without_attribution(pr.body),
                            acceptance_criteria=format_criteria(criteria),
                            acceptance_map=format_map(acceptance_map),
                            docs=docs_review_section(self._mapped_docs(path)),

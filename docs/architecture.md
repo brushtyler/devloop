@@ -76,7 +76,7 @@ The dispatcher reaches GitHub through three ports, declared in `devloop/ports.py
 | Port | Methods |
 |---|---|
 | `Tracker` | issues and their history, comments of issues and PRs, labels: `issues_with_label`, `issue`, `issue_history`, `issue_comments`, `pr_comments`, `labelers`, `label_events`, `labeled_events`, `edit_labels`, `comment`, `close_issue`, `edit_comment`, `ensure_label`, `repo_labels`, `rename_label` |
-| `CodeReview` | PRs and reviews: `open_prs`, `merged_prs`, `merge_state` (`clean`, `conflict` or `unknown`), `pr_head`, `pr_state`, `merge_pr`, `pr_reviews`, `create_pr`, `submit_review` |
+| `CodeReview` | PRs and reviews: `open_prs`, `merged_prs`, `find_pr` (#362), `merge_state` (`clean`, `conflict` or `unknown`), `pr_head`, `pr_state`, `merge_pr`, `pr_reviews`, `create_pr`, `submit_review` |
 | `CI` | checks of a commit: `checks` (summarized by `summarize_checks`), `check_details`, `check_runs`, `failed_log`, `job_log` (#300), `rerun_failed_jobs` (#200) |
 
 `Tracker` also has `issue_dependencies` (#277): the native "blocked by" dependencies of an
@@ -84,9 +84,27 @@ issue, with the state of each blocking issue and who added each block, read with
 query, more only when the events of an open block are older than the latest 100)
 ([Dependencies between issues](devloop/guide.md#dependencies-between-issues)).
 
+`CodeReview.find_pr` (#362) reads a PR in any state, or None when the number is an issue: the
+dispatcher uses it for a legacy turn imported from `ledger-open-turns.json` whose PR is not among
+the open ones, to link the turn to the issue of its work
+([Turn journal](devloop/protocol.md#turn-journal)).
+
 `CI` also has `commit_date` and `required_checks` (#263): the commit date of a head and the
 checks the base branch requires, for the wait for the
 [CI of a new head](devloop/reference.md#ci-of-a-new-head).
+
+`Tracker.comment` and `Tracker.edit_comment` tell three outcomes apart (#364): success, a
+failure (`GitHubError`: nothing was written) and an **uncertain** outcome (`GitHubUncertain`):
+a timeout, a connection lost after sending, a 5xx answer, so the write may have taken effect.
+The adapter treats a 4xx answer and a failure before the connection opened (`dial tcp`, `error
+connecting to`, a failed TLS handshake) as certain, and any other failure of these two writes
+as uncertain. `GitHubUncertain` is a `GitHubError`: the dispatcher still handles it as a failed
+write. `ports.reconcile_comment` tells whether an uncertain write took effect: it reads the
+comments of the issue or PR back and returns the one written by the same login whose body is
+exactly the one written, or that contains a given marker (for an edit, only the edited
+comment), or None when the write was not published. Nothing calls it yet: the outbox of
+[ADR 0004](adr/0004-passo-2-budget-stato-durevole.md) will. The other writes and the reads
+report every failure as a `GitHubError`, as before.
 
 The ports hold only the methods the dispatcher calls, with their current names and signatures,
 and return normalized data. `GitHub` (`devloop/github.py`) implements all three, and `Identities`
@@ -96,7 +114,10 @@ module docstring records where a method that could fit more than one port went.
 
 In the tests, `FakeGH` (`tests/helpers/devloop_fakes.py`) implements the ports in memory. It
 proves neither persistence nor atomicity. `tests/test_devloop_ports.py` checks that the adapter
-and every fake expose each port method with the same signature.
+and every fake expose each port method with the same signature. `FakeGH` can also simulate an
+uncertain `comment` or `edit_comment`, applied or lost (`uncertain_writes`), and give its
+comments ids (`with_ids`); the same test runs an uncertain write and its reconciliation on the
+adapter, with a scripted `gh`, and on the fake.
 
 ## The devloop boundary
 
