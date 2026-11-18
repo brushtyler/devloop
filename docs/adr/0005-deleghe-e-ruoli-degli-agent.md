@@ -1,6 +1,6 @@
 # ADR 0005: deleghe al supervisore, implementer generico e pool dei reviewer
 
-- **Stato:** proposto. Diventa approvato solo con l'approvazione e il merge dell'operatore (`operator_only_paths`, devloop/config.toml:141).
+- **Stato:** approvato dall'operatore con il merge di PR #373 (2026-11-18), accettando le raccomandazioni della sezione 4. Le decisioni riservate sono state prese il 2026-11-18 (vedi la [sezione 4](#4-decisioni-riservate-alloperatore)); quelle rimaste aperte sono indicate lì. Il resto del documento è il registro della proposta: le alternative e l'analisi restano come scritte prima dell'approvazione.
 - **Fase:** design (#370).
 - **Data:** 2026-11-18.
 - **Base verificata:** il commit 7b336c9 di `main`.
@@ -328,6 +328,44 @@ Non serve codice: è una prassi del supervisore, che l'operatore conferma o camb
 
 ## 4. Decisioni riservate all'operatore
 
+Decise dall'operatore il 2026-11-18, accettando le raccomandazioni di questa sezione, con il commento sulla PR #373 e il merge:
+
+- **D1.** ADR approvato.
+- **D2.** La decisione 5 dell'ADR 0001, i principi 3 e 4 dell'ADR 0002, la sezione 3.3 e la D2 dell'ADR 0004 sono rivisti in modo limitato, **solo** per le deleghe della [sezione 3.1](#31-deleghe-al-supervisore). Le deleghe sono tutte approvate, e ciascuna resta spenta finché l'operatore non la attiva (D10).
+- **D3.** Tolleranza di budget del **25%**, scritta nel codice come tetto.
+- **D4.**
+  - **+2 round per PR**;
+  - **3 concessioni al giorno**;
+  - durata massima di un limite temporaneo di capacità: **24 ore**;
+  - le concessioni si esercitano con il comando sul tracker, opzione (a) della sezione [Capacità](#capacità), mai modificando a mano l'overlay.
+- **D5.** Campo `security` per finding, opzione (a), con la regola che fallisce chiuso.
+- **Retry sulle PR dello stesso agent del supervisore.** Solo `tool_failure`, opzione (a) della sezione [Fallimenti tecnici sulle PR dello stesso agent](#fallimenti-tecnici-sulle-pr-dello-stesso-agent), con il limite esistente di 2 retry, condiviso con l'operatore.
+- **D6.**
+  - due app nuove, una per ruolo: `brushtyler-devloop-implementer` e `brushtyler-devloop-supervisor`;
+  - scripts/agent-token.py non le espone;
+  - le app `claude-agent`, `codex-agent` e `agy-agent` restano ai reviewer;
+  - il coordinatore oggi è l'operatore.
+- **D7.** Opzione (c): la label `impl:<agent>` prevale, poi la mappa per area, poi il default. La label la possono mettere gli utenti fidati e il supervisore, con le regole di #178.
+- **D8.**
+  - regola sul fornitore (ii);
+  - dichiarazione del fornitore (c);
+  - claude come terzo reviewer, con un modello diverso da quello dell'implementer claude (Sonnet 5.5) e in **ultima posizione** del pool, come riserva;
+  - divieto dei fallback sul fornitore degli autori.
+- **D9.** Due finestre fisse, alle **9 e alle 18 UTC**, opzione (a). Fuori finestra si interrompe l'operatore solo per sicurezza o per un fermo totale.
+- **D10.** Tutto spento per default. Si attiva una cosa per volta, nell'ordine raccomandato: retry, round, app implementer e app del supervisore, terzo reviewer, capacità, budget.
+
+Restano **aperti**, e chi li incontra li tratta come decisioni dell'operatore ancora da prendere:
+
+- i tetti per chiave di `max_open_prs`, `max_parked_prs` e `max_parallel_actions`, che l'operatore fissa in configurazione all'attivazione (D4);
+- la creazione delle due app e i loro permessi, che sono credenziali dell'operatore (D6);
+- l'eventuale scrittura delle finestre in `AGENTS.md` (D9).
+
+Restano valide tutte le decisioni riservate degli ADR 0001, 0002 e 0004, salvo le revisioni limitate di D2.
+
+### Domande come proposte
+
+Registro storico: le domande con le alternative e le raccomandazioni, come le poneva la versione proposta di questo ADR, prima delle decisioni qui sopra.
+
 Questo ADR le elenca, con le alternative e le raccomandazioni, ma **non le prende**. Restano valide tutte le decisioni riservate degli ADR 0001, 0002 e 0004, salvo le revisioni che l'operatore approva qui.
 
 - **D1. Approvazione di questo ADR,** con il merge della sua PR.
@@ -356,7 +394,7 @@ Questo ADR le elenca, con le alternative e le raccomandazioni, ma **non le prend
 
 ## 5. Piano delle issue
 
-Ogni issue si apre dopo l'approvazione di questo ADR, una per area.
+Ogni issue si apre dopo l'approvazione di questo ADR, una per area. Le issue nascono dopo il merge della PR #373 e citano la sezione di questo ADR su `main` che attuano, come chiede il [ciclo degli ADR](README.md#ciclo-di-un-adr).
 
 - Tutte toccano `devloop/` e richiedono il livello 2 di review: `devloop/` è in `sensitive_paths` (devloop/config.toml:93).
 - Quelle che toccano `AGENTS.md` o `CLAUDE.md` le mergia l'operatore (`operator_only_paths`, devloop/config.toml:141).
