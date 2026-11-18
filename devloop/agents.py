@@ -1,6 +1,7 @@
 """Headless invocation of the agent CLIs with schema-validated final output."""
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -306,10 +307,31 @@ def telemetry(kind, stdout):
     - codex (``--json``): the token usage of every ``turn.completed`` event, summed; its
       ``input_tokens`` already includes the cached input (``cached_input_tokens``). No cost,
       duration or model;
-    - agy: nothing known."""
+    - agy (``--output-format json``, #358): ``duration_seconds`` (as ``duration_ms``),
+      ``num_turns`` and ``usage``: ``input_tokens`` (without the cached input, unlike codex),
+      ``output_tokens`` and ``cache_read_tokens`` (as ``cache_read_input_tokens``). Only the
+      top-level keys of the envelope, never those of ``structured_output``. ``usage`` covers
+      the whole conversation, which is the turn because every turn starts a new one (``-p``,
+      never ``-c``). ``thinking_tokens`` and ``total_tokens`` are not kept; no cost or model."""
     fields = dict.fromkeys(TELEMETRY_FIELDS)
     models = None
-    if kind == 'claude':
+    if kind == 'agy':
+        try:
+            envelope = json.loads(stdout or '')
+        except json.JSONDecodeError:
+            return fields, None
+        if not isinstance(envelope, dict):
+            return fields, None
+        seconds = _amount(envelope.get('duration_seconds'))
+        if seconds is not None and math.isfinite(seconds):  # json reads Infinity too
+            fields['duration_ms'] = round(seconds * 1000)
+        fields['num_turns'] = _count(envelope.get('num_turns'))
+        usage = envelope.get('usage') if isinstance(envelope.get('usage'), dict) else {}
+        for source, target in (('input_tokens', 'input_tokens'),
+                               ('output_tokens', 'output_tokens'),
+                               ('cache_read_tokens', 'cache_read_input_tokens')):
+            fields[target] = _count(usage.get(source))
+    elif kind == 'claude':
         try:
             envelope = json.loads(stdout or '')
         except json.JSONDecodeError:

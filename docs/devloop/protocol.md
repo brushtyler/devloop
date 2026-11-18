@@ -716,10 +716,19 @@ readiness check, on the PR for review, fix, sync and CI. The turns of a review r
 |---|---|---|
 | claude | `--output-format json` | `total_cost_usd`, `duration_ms`, `num_turns`, `usage` (input, output, cache read and cache creation tokens); the real model is the list of the keys of `modelUsage`, with no main model chosen |
 | codex | `codex exec --json`, which devloop now passes | input, output and cached input tokens, summed over the `turn.completed` events (input already includes the cached input). No cost, duration or model |
-| agy | none | every field null |
+| agy | `agy -p … --output-format json`, the top-level keys of the envelope (never those of the structured output `--json-schema` adds) | `duration_seconds` (as `duration_ms`), `num_turns`, and from `usage` the input, output and cache read tokens (`cache_read_tokens` as `cache_read_input_tokens`). Input **excludes** the cached input, which agy counts apart. `thinking_tokens` and `total_tokens` are not kept (in the envelopes observed, `total_tokens` is input plus output). No cost or model |
+
+agy's `usage` covers the **whole conversation**, not a single request: it is the turn's because
+devloop starts a new conversation on every turn (`agy -p`, never `-c`). A turn that continued a
+conversation would have to subtract the previous envelope of the same conversation.
+
+The token counts of different CLIs do not mean the same thing: codex's input includes the cached
+input, claude's and agy's do not. Compare them only within the same agent; the totals of the
+[PR receipt](#pr-receipt) add up what each turn reports, whatever its agent.
 
 A value that is not attested is `null`, never 0, and the comment shows `non riportato`; the real
-model stays `null` next to the configured one when the CLI attests none.
+model stays `null` next to the configured one when the CLI attests none. An envelope that is
+missing, not JSON or without `usage` leaves the fields `null`: telemetry never makes a turn fail.
 
 **Turn persistence.** A turn's record is written before the CLI starts, as `open`; if that write
 fails the turn does not start and the step escalates like any `gh` failure. When the CLI ends the
