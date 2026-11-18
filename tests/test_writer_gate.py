@@ -10,7 +10,6 @@ import signal
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import unittest
 from unittest import mock
@@ -62,20 +61,22 @@ with ticket_lock(ticket / 'ticket.lock') as canonical, ticket_lock(ticket / 'sch
         print('HANDOFF', new, lease.generation, flush=True)
 '''
 
-# A controller whose trusted host command keeps writing, without daemonizing.
+# A controller that runs one trusted host command (its remaining arguments).
 CONTROLLER = r'''
 import sys
 from pathlib import Path
 from ssdlc_writer_gate import run_host, writer
-ticket, selector, beat = sys.argv[1], Path(sys.argv[2]), sys.argv[3]
-command = ("import os, sys, time\n"
+ticket, selector = sys.argv[1], Path(sys.argv[2])
+with writer(ticket, 'gen-1', selector.read_text, timeout=5) as lease:
+    run_host(lease, sys.argv[3:])
+'''
+
+# A host command that keeps writing, without daemonizing.
+BEATING = ("import os, sys, time\n"
            "while True:\n"
            "    with open(sys.argv[1], 'a') as out:\n"
            "        out.write(str(os.getpid()) + '\\n')\n"
            "    time.sleep(0.05)\n")
-with writer(ticket, 'gen-1', selector.read_text, timeout=5) as lease:
-    run_host(lease, [sys.executable, '-c', command, beat])
-'''
 
 
 def wait_for(predicate, timeout=15):
@@ -134,6 +135,11 @@ class GateCase(unittest.TestCase):
         child.stdin.close()
         self.assertEqual(self.line(child), 'DONE')
         self.assertEqual(child.wait(timeout=15), 0)
+
+    def require_subreaper(self):
+        reason = wg.host_tree_support()
+        if reason:
+            self.skipTest(f'host trees cannot be proven here: {reason}')
 
     def assert_refused(self, code, **kwargs):
         with self.assertRaises(GateError) as raised:
@@ -433,14 +439,28 @@ class HandoffTests(GateCase):
                 lease.check()
         self.assertEqual(self.read(), 'gen-1')
 
-    def test_handoff_after_host_commands_is_refused_and_resumes(self):
+    def test_handoff_after_unprovable_host_commands_is_refused_and_resumes(self):
         calls = []
         with writer(str(self.ticket), 'gen-1', self.read) as lease:
-            run_host(lease, ['true'])
+            with mock.patch.object(wg, 'host_tree_support', return_value='simulated: no subreaper'):
+                run_host(lease, ['true'])
             with self.assertRaises(GateError) as raised:
                 handoff(lease, calls.append)
             self.assertEqual(raised.exception.code, UNVERIFIABLE)
+            self.assertIn('simulated: no subreaper', raised.exception.detail)
             self.assertEqual((calls, lease.generation), ([], 'gen-1'))
+            lease.check()
+
+    def test_handoff_after_proven_host_commands_publishes(self):
+        self.require_subreaper()
+
+        def publish(proof):
+            proof.check()
+            self.selector.write_text('gen-2')
+            return 'gen-2'
+        with writer(str(self.ticket), 'gen-1', self.read) as lease:
+            run_host(lease, ['true'])
+            self.assertEqual(handoff(lease, publish), 'gen-2')
             lease.check()
 
 
@@ -448,11 +468,26 @@ class HostWriterTests(GateCase):
     def host_markers(self):
         return [json.loads(p.read_text()) for p in (self.ticket / wg.REGISTRY_NAME).glob('h-*.json')]
 
+    def registry_files(self, prefix):
+        return sorted((self.ticket / wg.REGISTRY_NAME).glob(f'{prefix}-*.json'))
+
     def kill_session(self, leader):
         with contextlib.suppress(ProcessLookupError):
             os.killpg(leader, signal.SIGKILL)
 
+    def kill(self, pid):
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+
+    def controller(self, *command):
+        child = subprocess.Popen([sys.executable, '-c', CONTROLLER, str(self.ticket), str(self.selector), *command],
+                                 cwd=ROOT, env=dict(os.environ, PYTHONPATH=str(ROOT)))
+        self.addCleanup(lambda: child.poll() is None and child.kill())
+        self.addCleanup(lambda: child.poll() is None or child.wait())
+        return child
+
     def test_host_commands_run_inside_the_lease_without_the_gate_descriptor(self):
+        self.require_subreaper()
         probe = ("import os\n"
                  "links = []\n"
                  "for f in os.listdir('/proc/self/fd'):\n"
@@ -461,36 +496,93 @@ class HostWriterTests(GateCase):
                  "    except OSError:\n"
                  "        pass\n"
                  "print('leak' if any(l.endswith('writer.gate') for l in links) else 'clean')\n"
-                 "print(os.getsid(0) == os.getpid())")
+                 "print(os.getsid(0) == os.getppid(), os.getpgid(0) == os.getpid())")
         with writer(str(self.ticket), 'gen-1', self.read) as lease:
             done = run_host(lease, [sys.executable, '-c', probe], capture_output=True, text=True)
-            self.assertEqual(done.stdout.split(), ['clean', 'True'])
+            # The supervisor leads its own session; the command leads its own group in it.
+            self.assertEqual(done.stdout.split(), ['clean', 'True', 'True'])
             self.assertEqual(run_host(lease, ['false']).returncode, 1)
+            self.assertEqual(run_host(lease, ['sh', '-c', 'kill -TERM $$']).returncode, -signal.SIGTERM)
         with self.assertRaises(GateError) as raised:
             run_host(lease, ['true'])
         self.assertEqual(raised.exception.code, 'lease_lost')
 
-    def test_finished_host_command_still_refuses_its_generation(self):
+    def test_finished_host_trees_are_proven_by_their_subreaper(self):
+        """Criterion 2: with every tree concluded, the kernel's proof allows the transition."""
+        self.require_subreaper()
         with writer(str(self.ticket), 'gen-1', self.read) as lease:
             self.assertEqual(run_host(lease, ['true']).returncode, 0)
-            run_host(lease, ['true'])
+            run_host(lease, ['sh', '-c', 'exit 3'])
         [marker] = self.host_markers()  # one marker per generation
-        self.assertEqual(marker['generation'], wg.generation_key('gen-1'))
-        self.assertFalse(wg.is_live(marker['identity']))
+        self.assertEqual((marker['generation'], marker['trees']), (wg.generation_key('gen-1'), wg.TREE_PROTOCOL))
+        trees = [json.loads(p.read_text()) for p in self.registry_files('t')]
+        done = [json.loads(p.read_text()) for p in self.registry_files('c')]
+        self.assertEqual([t['mechanism'] for t in trees], ['subreaper', 'subreaper'])
+        self.assertEqual(sorted(t['tree'] for t in trees), sorted(c['tree'] for c in done))
+        self.assertEqual(sorted(c['status'] for c in done), ['exit 0', 'exit 3'])
+        with transition(str(self.ticket), self.read) as proof:
+            proof.check()
+            found = holders(proof._gate)['host_trees']
+            self.assertEqual([(t['concluded'], t['supervisor_live']) for t in found], [(True, False)] * 2)
+
+    def test_mechanism_unavailable_refuses_with_an_explicit_reason(self):
+        """Criterion 3: without the subreaper the command runs, but fencing is refused and says why."""
+        reason = 'simulated: PR_SET_CHILD_SUBREAPER unsupported'
+        with writer(str(self.ticket), 'gen-1', self.read) as lease:
+            with mock.patch.object(wg, 'host_tree_support', return_value=reason):
+                done = run_host(lease, ['sh', '-c', 'echo ran'], capture_output=True, text=True)
+            self.assertEqual((done.returncode, done.stdout), (0, 'ran\n'))
+            if wg.host_tree_support() is None:
+                run_host(lease, ['true'])  # a later proven tree does not clear the refusal
+        [tree] = [json.loads(p.read_text()) for p in self.registry_files('t')
+                  if json.loads(p.read_text())['mechanism'] is None]
+        self.assertEqual(tree['reason'], reason)
         refused = self.assert_refused(UNVERIFIABLE)
+        self.assertIn(f'ran without a kernel mechanism: {reason}', refused.detail)
         self.assertIn('manual path', refused.detail)
         # Only a publication outside the gate (the manual path) moves the generation;
-        # the old marker then stays as a diagnostic and no longer refuses.
+        # the old records then stay as diagnostics and no longer refuse.
         self.selector.write_text('gen-2')
         with transition(str(self.ticket), self.read) as proof:
             proof.check()
             [diagnostic] = holders(proof._gate)['host_markers']
             self.assertEqual(diagnostic['generation'], wg.generation_key('gen-1'))
-            self.assertFalse(diagnostic['leader_live'])
-        with writer(str(self.ticket), 'gen-2', self.read) as lease:
+        # The availability check itself names the failing kernel interface.
+        with mock.patch.object(wg, '_prctl', side_effect=OSError(22, 'Invalid argument')):
+            self.assertEqual(wg.host_tree_support(), 'PR_GET_CHILD_SUBREAPER unavailable: Invalid argument')
+        with mock.patch.object(wg.sys, 'platform', 'darwin'):
+            self.assertEqual(wg.host_tree_support(), 'child subreapers need Linux')
+
+    def test_tree_without_its_own_conclusion_refuses(self):
+        self.require_subreaper()
+        with writer(str(self.ticket), 'gen-1', self.read) as lease:
             run_host(lease, ['true'])
-        self.assertEqual(len(self.host_markers()), 2)
-        self.assert_refused(UNVERIFIABLE)
+        [conclusion] = self.registry_files('c')
+        record = json.loads(conclusion.read_text())
+        # A supervisor that died before concluding leaves no record.
+        conclusion.unlink()
+        self.assertIn('ended without recording the proof', self.assert_refused(UNVERIFIABLE).detail)
+        # A conclusion of another supervisor or generation is not this tree's proof.
+        for forged in (dict(record, supervisor=dict(record['supervisor'], start_ticks=0)),
+                       dict(record, generation=wg.generation_key('gen-0'))):
+            with self.subTest(forged=forged):
+                conclusion.write_text(json.dumps(forged))
+                self.assert_refused(UNVERIFIABLE)
+        conclusion.write_text(json.dumps(record))
+        with transition(str(self.ticket), self.read) as proof:
+            proof.check()
+        # A tree record whose generation cannot be read counts as current.
+        [tree] = self.registry_files('t')
+        tree.write_text(json.dumps(dict(json.loads(tree.read_text()), generation='gen-1')))
+        self.assertIn('has no readable generation', self.assert_refused(UNVERIFIABLE).detail)
+
+    def test_marker_written_before_tree_records_refuses(self):
+        with transition(str(self.ticket), self.read):
+            pass
+        key = wg.generation_key('gen-1')
+        (self.ticket / wg.REGISTRY_NAME / wg.host_marker_name(key)).write_text(
+            json.dumps(dict(role='host', generation=key, identity=wg.self_identity()[0])))
+        self.assertIn('has no tree records', self.assert_refused(UNVERIFIABLE).detail)
 
     def test_marker_without_a_readable_generation_refuses(self):
         with transition(str(self.ticket), self.read):
@@ -542,71 +634,66 @@ class HostWriterTests(GateCase):
                 self.assert_refused(UNVERIFIABLE)
 
     def test_grandchild_spawned_between_pid_listing_and_state_reads_still_refuses(self):
-        """The race of PR #127: a process scan misses the grandchild, the gate does not."""
+        """Criterion 1, the race of PR #127: a process scan misses the grandchild, the subreaper does not."""
+        self.require_subreaper()
         work = self.ticket.parent
         started, go, spawned, beat = (work / name for name in ('started', 'go', 'grandchild', 'beat'))
         # The leader announces itself, waits for the scan to list PIDs, starts a writer
-        # in its own session and exits: nothing daemonizes or leaves the session.
+        # in its own process group and exits: nothing daemonizes or leaves the group.
         script = ('echo $$ > "$1.tmp" && mv "$1.tmp" "$1"; '
                   'while [ ! -e "$2" ]; do sleep 0.02; done; '
                   '(while :; do echo x >> "$4"; sleep 0.05; done) </dev/null >/dev/null 2>&1 & '
                   'echo $! > "$3.tmp" && mv "$3.tmp" "$3"; exit 0')
+        controller = self.controller('sh', '-c', script, 'sh', str(started), str(go), str(spawned), str(beat))
         scan = {}
-
-        def race():
+        try:
+            self.assertTrue(wait_for(started.exists), 'the host command never started')
+            leader = int(started.read_text())
+            identity = wg.process_identity(leader)[0]
+            proc = Proc()
+            listed = proc.pids()            # 1. the scan lists the PIDs
+        finally:
+            go.touch()                      # the leader starts the grandchild and exits
+        self.assertTrue(wait_for(spawned.exists) and wait_for(lambda: not wg.is_live(identity)))
+        grandchild = int(spawned.read_text())
+        self.addCleanup(self.kill, grandchild)
+        members = []
+        for pid in listed:                  # 2. the scan reads the states
             try:
-                if not wait_for(started.exists):
-                    return
-                leader = int(started.read_text())
-                identity = wg.process_identity(leader)[0]
-                proc = Proc()
-                listed = proc.pids()        # 1. the scan lists the PIDs
-            finally:
-                go.touch()                  # the leader starts the grandchild and exits
-            if not (wait_for(spawned.exists) and wait_for(lambda: not wg.is_live(identity))):
-                return
-            members = []
-            for pid in listed:              # 2. the scan reads the states
-                try:
-                    ident, state, _ = proc.stat(pid)
-                except (OSError, ValueError, IndexError):
-                    continue
-                if state != 'Z' and ident.sid == leader:
-                    members.append(pid)
-            scan.update(leader=leader, listed=listed, members=members, grandchild=int(spawned.read_text()))
-
-        with writer(str(self.ticket), 'gen-1', self.read) as lease:
-            racer = threading.Thread(target=race)
-            racer.start()
-            try:
-                done = run_host(lease, ['sh', '-c', script, 'sh', str(started), str(go), str(spawned), str(beat)],
-                                timeout=60)
-            finally:
-                go.touch()
-                racer.join(30)
-        self.assertEqual(done.returncode, 0)
-        self.assertIn('leader', scan, 'the race was not reproduced')
-        self.addCleanup(self.kill_session, scan['leader'])
-        grandchild = wg.process_identity(scan['grandchild'])
-        self.assertIsNotNone(grandchild, 'the grandchild must still be running')
-        self.assertEqual(grandchild[1], scan['leader'])  # same session as the leader
-        self.assertNotIn(scan['grandchild'], scan['listed'])
-        self.assertEqual(scan['members'], [], 'the scan believes the session is empty')
+                ident, state, _ = proc.stat(pid)
+            except (OSError, ValueError, IndexError):
+                continue
+            if state != 'Z' and ident.pgid == leader:
+                members.append(pid)
+        self.assertNotIn(grandchild, listed)
+        self.assertEqual(members, [], 'the scan believes the command group is empty')
+        # The kernel reparented the orphan to the subreaper, which outlives its controller.
+        supervisor = proc.stat(grandchild)[2]
+        [marker] = self.host_markers()
+        self.assertEqual(marker['identity']['pid'], supervisor)
+        controller.send_signal(signal.SIGKILL)
+        controller.wait(timeout=15)
+        self.assertIsNotNone(wg.process_identity(grandchild), 'the grandchild must still be running')
         written = beat.stat().st_size if beat.exists() else 0
         self.assertTrue(wait_for(lambda: beat.exists() and beat.stat().st_size > written))
-        # The gate never consults a process scan: it refuses on the marker alone.
+        # The gate never consults a process scan: the tree has no conclusion yet.
         with mock.patch.object(Proc, 'pids', side_effect=AssertionError('process scan used as evidence')):
             refused = self.assert_refused(UNVERIFIABLE)
         self.assertIn('cannot be proven finished', refused.detail)
-        self.kill_session(scan['leader'])
-        self.assertTrue(wait_for(lambda: not wg.is_live(grandchild[0])))
-        self.assert_refused(UNVERIFIABLE)  # its end is still not provable by the kernel
+        self.assertIn('supervisor still running', refused.detail)
+        self.assertEqual(self.registry_files('c'), [])
+        # Once the grandchild ends, the subreaper gets ECHILD and records it: the proof follows.
+        self.kill(grandchild)
+        self.assertTrue(wait_for(lambda: self.registry_files('c')), 'the subreaper never concluded')
+        self.assertTrue(wait_for(lambda: not wg.is_live(marker['identity'])))
+        with mock.patch.object(Proc, 'pids', side_effect=AssertionError('process scan used as evidence')):
+            with transition(str(self.ticket), self.read) as proof:
+                proof.check()
 
     def test_host_command_stays_refused_after_its_controller_is_killed(self):
+        self.require_subreaper()
         beat = self.ticket.parent / 'beat'
-        controller = subprocess.Popen([sys.executable, '-c', CONTROLLER, str(self.ticket), str(self.selector),
-                                       str(beat)], cwd=ROOT, env=dict(os.environ, PYTHONPATH=str(ROOT)))
-        self.addCleanup(lambda: controller.poll() is None and controller.kill())
+        controller = self.controller(sys.executable, '-c', BEATING, str(beat))
         self.assertTrue(wait_for(lambda: beat.exists() and beat.read_text().strip()))
         command = wg.process_identity(int(beat.read_text().split()[0]))[0]
         self.addCleanup(lambda: wg.is_live(command) and os.kill(command['pid'], signal.SIGKILL))
@@ -618,19 +705,61 @@ class HostWriterTests(GateCase):
         gate = open_gate(str(self.ticket))
         self.addCleanup(gate.close)
         [marker] = holders(gate)['host_markers']
-        self.assertEqual((marker['leader'], marker['leader_live']), (command, True))
+        supervisor = Proc().stat(command['pid'])[2]
+        self.assertEqual((marker['leader']['pid'], marker['leader_live']), (supervisor, True))
         os.kill(command['pid'], signal.SIGKILL)
-        self.assertTrue(wait_for(lambda: not wg.is_live(command)))
-        self.assert_refused(UNVERIFIABLE)
+        self.assertTrue(wait_for(lambda: self.registry_files('c')))
+        with transition(str(self.ticket), self.read) as proof:
+            proof.check()
+
+    def test_killing_the_supervisor_keeps_the_generation_refused(self):
+        """If the supervisor dies first, its orphans escape it and no proof is ever written."""
+        self.require_subreaper()
+        beat = self.ticket.parent / 'beat'
+        controller = self.controller(sys.executable, '-c', BEATING, str(beat))
+        self.assertTrue(wait_for(lambda: beat.exists() and beat.read_text().strip()))
+        command = int(beat.read_text().split()[0])
+        self.addCleanup(self.kill, command)
+        supervisor = Proc().stat(command)[2]
+        os.kill(supervisor, signal.SIGKILL)
+        controller.wait(timeout=15)
+        self.kill(command)
+        self.assertTrue(wait_for(lambda: wg.process_identity(command) is None))
+        self.assertEqual(self.registry_files('c'), [])
+        self.assertIn('ended without recording the proof', self.assert_refused(UNVERIFIABLE).detail)
+
+    def test_timeout_kills_the_whole_tree_then_concludes(self):
+        self.require_subreaper()
+        escaped = self.ticket.parent / 'escaped'
+        # A grandchild in its own session: killing the command's group cannot reach it.
+        script = (f'"{sys.executable}" -c "import os, sys, time; os.setsid(); '
+                  'open(sys.argv[1] + \'.tmp\', \'w\').write(str(os.getpid())); '
+                  'os.rename(sys.argv[1] + \'.tmp\', sys.argv[1]); time.sleep(600)" "$1" '
+                  '</dev/null >/dev/null 2>&1 & while :; do sleep 0.05; done')
+        with writer(str(self.ticket), 'gen-1', self.read) as lease:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                run_host(lease, ['sh', '-c', script, 'sh', str(escaped)], timeout=3)
+        self.assertTrue(escaped.exists(), 'the escaping grandchild never started')
+        self.assertIsNone(wg.process_identity(int(escaped.read_text())))
+        [conclusion] = [json.loads(p.read_text()) for p in self.registry_files('c')]
+        self.assertEqual(conclusion['status'], f'signal {int(signal.SIGKILL)}')
+        with transition(str(self.ticket), self.read) as proof:
+            proof.check()
 
     def test_host_command_never_runs_before_its_marker(self):
         marker = self.ticket.parent / 'ran'
         with writer(str(self.ticket), 'gen-1', self.read) as lease:
             refusal = GateError('registry_invalid', 'simulated')
-            with mock.patch.object(wg, '_mark_host', side_effect=refusal), self.assertRaises(GateError):
-                run_host(lease, [sys.executable, '-c', 'import sys; open(sys.argv[1], "w")', str(marker)])
-            self.assertFalse(marker.exists(), 'the command ran before its generation was marked')
-            self.assertEqual(self.host_markers(), [])
+            for step in ('_mark_host', '_record_tree'):
+                with self.subTest(step=step):
+                    with mock.patch.object(wg, step, side_effect=refusal), self.assertRaises(GateError):
+                        run_host(lease, [sys.executable, '-c', 'import sys; open(sys.argv[1], "w")', str(marker)])
+                    self.assertFalse(marker.exists(), 'the command ran before its tree was recorded')
+                    self.assertEqual(self.registry_files('t'), [])
+                    if step == '_mark_host':
+                        self.assertEqual(self.host_markers(), [])
+            [marked] = self.host_markers()  # by the attempt that failed to record its tree
+            self.assertEqual(marked['trees'], wg.TREE_PROTOCOL)
             done = run_host(lease, ['sh', '-c', 'read line; echo "$line"'], input='payload\n',
                             capture_output=True, text=True)
             self.assertEqual(done.stdout, 'payload\n')
@@ -648,6 +777,7 @@ class ProtocolDocumentationTests(unittest.TestCase):
             'ticket.lock is not a quiescence proof', 'not converted from shared to exclusive',
             'PID, boot id and start time', 'SSDLCOrchestrator.__init__',
             'HOST_TREE_UNVERIFIABLE', 'Process scans are never quiescence evidence',
+            'PR_SET_CHILD_SUBREAPER', 'ECHILD', 'If the supervisor dies', 'cgroup v2 was not chosen',
         ], issues=(45, 132))
 
 
