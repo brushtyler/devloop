@@ -7,8 +7,9 @@ Four measures stay separate and are never added to one another:
   not a charge;
 - ``tokens``: raw token counts, with the fields that overlap declared, so that no count is
   added twice, and whether the source reports them per turn or cumulatively;
-- ``quota_snapshots``: a versioned container, always empty and ``unknown`` here; part C
-  (#166) defines and collects its fields.
+- ``quota_snapshots``: a versioned container, empty and ``unknown`` unless a quota control is
+  enabled for the route of the call; then it holds the public snapshots taken before and after
+  the call and their deltas (``ssdlc_quota``, part C, #166).
 
 Every measure has a unit, a timestamp, a source and an availability (``reported``,
 ``estimated`` or ``unknown``). A value that was not reported is ``unknown`` (``None``),
@@ -88,7 +89,8 @@ def tokens(counts=None, *, scope=None, source=None, contract=(), overlaps=(), tu
 
 
 def quota_snapshots():
-    """Empty and unavailable in part A: part C (#166) defines and collects the snapshots."""
+    """The empty container: no quota control is enabled for the route of the call. A collected
+    one comes from ``ssdlc_quota.container`` (part C, #166)."""
     return {'availability': 'unknown', 'schema_version': QUOTA_SNAPSHOTS_VERSION,
             'status': 'not_collected', 'snapshots': []}
 
@@ -162,7 +164,8 @@ def validate(t):
             raise ValueError('An incomplete call has unknown telemetry')
         quota = t['quota_snapshots']
         if quota != quota_snapshots():
-            raise ValueError('Quota snapshots are not collected by this schema version')
+            import ssdlc_quota
+            ssdlc_quota.validate_container(quota)
     except (KeyError, TypeError, AttributeError):
         raise ValueError('Malformed telemetry record') from None
     return t
@@ -300,6 +303,8 @@ def breakdown(ledger):
     """Per-provider and per-measure view of a ledger. Each invocation is counted once, so a
     resumed or replayed record of the same invocation is not added twice."""
     providers, seen, duplicates = {}, set(), 0
+    quota = {'schema_version': QUOTA_SNAPSHOTS_VERSION, 'invocations_with_snapshots': 0,
+             'observed_account_deltas': 0, 'unknown_deltas': 0}
     for row in ledger or ():
         if not isinstance(row, dict):
             continue
@@ -320,6 +325,11 @@ def breakdown(ledger):
             duplicates += 1
             continue
         seen.add(t['invocation_id'])
+        if t['quota_snapshots']['status'] == 'collected':
+            quota['invocations_with_snapshots'] += 1
+            for change in t['quota_snapshots']['deltas']:
+                quota['observed_account_deltas' if change['status'] == 'observed_account_delta'
+                      else 'unknown_deltas'] += 1
         entry = providers.setdefault(t['provider'], _provider_entry())
         entry['invocations'][t['outcome']] += 1
         if t['outcome'] == 'incomplete':
@@ -361,7 +371,7 @@ def breakdown(ledger):
             coverage['ratio'] = coverage['available'] / coverage['completed']
     return {'schema': SCHEMA, 'schema_version': SCHEMA_VERSION, 'providers': dict(sorted(providers.items())),
             'duplicate_records_ignored': duplicates, 'measures_summed_together': False,
-            'quota_snapshots': quota_snapshots()}
+            'quota_snapshots': quota}
 
 
 def _number(value, fmt='{:,}'):
@@ -382,6 +392,15 @@ def row_cost_text(row):
     if t['estimate']['availability'] == 'estimated':
         parts.append(f"estimate ${t['estimate']['amount']:.4f} (API-equivalent)")
     return '; '.join(parts) or 'unknown'
+
+
+def _quota_text(quota):
+    """Quota snapshots in the Evidence Pack: collected only for routes with an enabled control."""
+    if not isinstance(quota, dict) or not quota.get('invocations_with_snapshots'):
+        return 'Quota snapshots: not collected (no quota control enabled for the calls).'
+    return (f"Quota snapshots: {quota['invocations_with_snapshots']} calls with snapshots before and after; "
+            f"{quota['observed_account_deltas']} bucket deltas observed on the account (never the consumption "
+            f"of the call), {quota['unknown_deltas']} unknown.")
 
 
 def render(report):
@@ -408,7 +427,7 @@ def render(report):
     return (f"Schema `{report['schema']}` v{report['schema_version']}. Charges, API-equivalent estimates and tokens "
             "are separate measures and are never added together; `unknown` means not reported, never zero. "
             "Estimate coverage: completed calls with an estimate, over all completed calls. Historical rows are "
-            "annotated as legacy and never reclassified. Quota snapshots: not collected.\n\n"
+            "annotated as legacy and never reclassified. " + _quota_text(report.get('quota_snapshots')) + "\n\n"
             "| Provider | Calls completed / incomplete | Charges (measured or reported) | API-equivalent estimate | "
             "Estimate coverage | Tokens input / cached input / cache creation / output / reasoning | "
             "Tokens total (no double counting) | Legacy rows | Rows without telemetry |\n"

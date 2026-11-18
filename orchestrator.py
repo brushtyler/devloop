@@ -55,6 +55,7 @@ from ssdlc_controller import assert_controller, controller_snapshot, execution_c
 from ssdlc_transitions import runtime_root
 import ssdlc_role_fencing as role_fencing
 import ssdlc_telemetry as telemetry_schema
+import ssdlc_quota as quota_schema
 from ssdlc_writer_gate import GateError
 
 from ssdlc_tasks import (
@@ -256,7 +257,103 @@ def _admission_target(engine, bound, limits):
 def _admit_route(engine, bound, limits, *, reserved=False):
     """Refuse, before reserve and launch, a call that the caps in force could not bound.
 
-    Returns the effective provider. A frozen profile makes both its dollar caps mandatory and
+    Returns the effective provider (see ``_admit``)."""
+    return _admit(engine, bound, limits, reserved=reserved)[0]
+
+
+_quota_inflight, _quota_lock = {}, threading.Lock()
+
+
+def _quota_snapshot(provider, cwd, max_age):
+    """One quota read of ``provider`` (``ssdlc_quota.collect``), run as the engine itself runs:
+    in its role container with the same authentication when the engine would use one. No model
+    is called. The account identity is the authentication location, kept private."""
+    cwd = Path(cwd) if cwd else Path.cwd()
+    container = provider in ('agy', 'codex') and EngineRunner._should_spawn_role_container()
+
+    def run(argv, stdin, timeout):
+        cmd = list(argv)
+        if container:
+            cmd = EngineRunner._wrap_in_role_container(cmd, cwd=cwd, writable_worktree=None, pass_ai_keys=False,
+                                                       stdin=stdin is not None,
+                                                       auth_profile='agy' if provider == 'agy' else None)
+        proc = EngineRunner._run_role_command(cmd, cwd=str(cwd), env=os.environ.copy(), timeout=timeout,
+                                              input=stdin)
+        return proc.returncode, proc.stdout
+    account = '\0'.join((provider, 'container' if container else 'host',
+                         str(EngineRunner._find_repo_root(cwd)) if container else str(Path.home()),
+                         os.environ.get('CODEX_HOME', '') if provider == 'codex' else ''))
+    return quota_schema.collect(provider, run, account=account, max_age=max_age)
+
+
+def _quota_admission(route, bound, refuse):
+    """The quota controls enabled for ``route`` (``SSDLC_QUOTA_CONTROLS``, #166), applied to a
+    snapshot read before the call. ``None`` when no control is enabled for the route.
+
+    A malformed configuration, a snapshot that cannot be verified or a reserve reached refuse
+    the call before launch. Nothing switches to overage, credits or a paid route instead."""
+    try:
+        controls = quota_schema.controls_for(quota_schema.parse_controls(os.environ), route)
+    except ValueError as exc:
+        raise refuse('LIMIT_REACHED', f'{exc}; dispatch refused before launch') from None
+    if not controls:
+        return None
+    max_age = min(c['max_age_seconds'] for c in controls)
+    provider = quota_schema.ROUTES[route]
+    snapshot = _quota_snapshot(provider, bound.get('cwd'), max_age)
+    try:
+        evidence = quota_schema.check(controls, snapshot)
+    except quota_schema.QuotaBlocked as exc:
+        raise refuse('LIMIT_REACHED', str(exc)) from None
+    return dict(route=route, provider=provider, cwd=bound.get('cwd'), max_age=max_age, before=snapshot,
+                evidence=evidence)
+
+
+def _with_quota(result, gate, started_at, concurrent):
+    """Attach the quota snapshots before and after the call, and their deltas, to the telemetry
+    of ``result``. A failed read leaves an unavailable snapshot and unknown deltas; it never
+    changes the result of the call."""
+    telemetry = getattr(result, 'telemetry', None)
+    if gate is None or not isinstance(telemetry, dict):
+        return result
+    try:
+        finished_at = quota_schema.utc_now()
+        after = _quota_snapshot(gate['provider'], gate['cwd'], None)
+        deltas = quota_schema.delta(gate['before'], after, started_at=started_at, finished_at=finished_at,
+                                    max_age=gate['max_age'], concurrent=concurrent)
+        result.telemetry = telemetry_schema.validate(dict(telemetry, quota_snapshots=quota_schema.container(
+            gate['route'], gate['before'], after, deltas, gate['evidence'])))
+    except Exception:  # noqa: BLE001 - the quota evidence must never alter the call outcome
+        logging.getLogger(__name__).warning('Quota snapshots could not be attached to the call telemetry')
+    return result
+
+
+def _quota_call(fn, gate, args, kwargs):
+    """Run the engine call, then attach its quota snapshots (no-op without an enabled control)."""
+    if gate is None:
+        return fn(*args, **kwargs)
+    started_at = quota_schema.utc_now()
+    provider = gate['provider']
+    # Calls on the same engine running or started in this process during this one.
+    with _quota_lock:
+        running, starts = _quota_inflight.get(provider, (0, 0))
+        _quota_inflight[provider] = (running + 1, starts + 1)
+        concurrent, started = running > 0, starts + 1
+    try:
+        result = fn(*args, **kwargs)
+    finally:
+        with _quota_lock:
+            running, starts = _quota_inflight[provider]
+            concurrent = concurrent or running > 1 or starts != started
+            _quota_inflight[provider] = (running - 1, starts)
+    return _with_quota(result, gate, started_at, concurrent)
+
+
+def _admit(engine, bound, limits, *, reserved=False):
+    """Refuse, before reserve and launch, a call that the caps in force could not bound.
+
+    Returns the effective provider and the quota gate of the call (``None`` without an enabled
+    quota control for its route). A frozen profile makes both its dollar caps mandatory and
     declares its own ``live_unknown_usage``; without one, the environment caps are in force
     unless explicitly set to zero, and ``SSDLC_UNMETERED_QUOTA`` is the only declaration.
     ``reserved``: a reservation already exists (a prepaid feedback call), so the refusal is
@@ -287,7 +384,8 @@ def _admit_route(engine, bound, limits, *, reserved=False):
                                declarations=declarations)
     except telemetry_schema.AdmissionRefused as exc:
         raise refuse('LIMIT_REACHED', str(exc)) from None
-    return provider
+    gate = _quota_admission(route, bound, refuse) if route in quota_schema.ROUTES else None
+    return provider, gate
 
 
 def admit_feedback_route(engine, limits):
@@ -314,9 +412,10 @@ def _supervised_dispatch(fn):
         # call without a key included), before any reservation, intent or launch (#165); the
         # intent keeps the requested engine. A prepaid feedback call was admitted before its
         # reservation, and a refusal here still proves that nothing was launched.
-        _admit_route(engine, bound, limits, reserved=getattr(_dispatch_local, 'prepaid', None) is not None)
+        # An enabled quota control (#166) is checked here too, on a snapshot read before launch.
+        _, gate = _admit(engine, bound, limits, reserved=getattr(_dispatch_local, 'prepaid', None) is not None)
         if not supervised and limits is None:
-            return fn(*args, **kwargs)
+            return _quota_call(fn, gate, args, kwargs)
         fields = dict(getattr(_dispatch_local, 'context', {}))
         if 'phase' in bound:
             from ssdlc_supervisor import PHASES
@@ -356,7 +455,7 @@ def _supervised_dispatch(fn):
         _supervision_fault('dispatch.after_started_before_engine')
         _dispatch_local.depth = 1
         try:
-            result = fn(*args, **kwargs)
+            result = _quota_call(fn, gate, args, kwargs)
         except BaseException as exc:
             _supervision_event('dispatch_finished', dispatch_id=dispatch_id, outcome='raised', exc_type=type(exc).__name__)
             if limits is not None and prepaid is None:
@@ -1429,7 +1528,7 @@ KNOWN_PROJECT_ENV_VARS = ROLE_OVERRIDE_ENV_VARS | frozenset({
     "SSDLC_INHERIT_HOST_CODEX_AUTH", "SSDLC_INHERIT_HOST_CLAUDE_AUTH", "SSDLC_AUTONOMOUS",
     "SSDLC_DEV_USE_OPENROUTER", "SSDLC_REVIEW_MODELS", "SSDLC_DEFAULT_TIER", "SSDLC_MAX_REASONING_EFFORT",
     "SSDLC_BUDGET_CAP_USD", "SSDLC_ESTIMATE_CAP_USD", "SSDLC_UNMETERED_QUOTA", "SSDLC_DEV_BUDGET_USD",
-    "SSDLC_MAX_DEV_RETRIES",
+    "SSDLC_QUOTA_CONTROLS", "SSDLC_MAX_DEV_RETRIES",
     "SSDLC_MAX_DESIGN_ROUNDS",
     "SSDLC_DEV_TIMEOUT", "SSDLC_REVIEW_MAX_DIFF_CHARS", "SSDLC_SUPERVISOR_HARD_TIMEOUT",
     "SSDLC_PREFLIGHT_MIN_FREE_MB", "SSDLC_CONTAINER_MEMORY", "SSDLC_CONTAINER_CPUS",

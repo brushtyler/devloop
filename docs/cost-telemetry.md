@@ -13,7 +13,7 @@ Every engine call records its cost telemetry in a shared, versioned schema
 | `spend` | A charge the provider measured or reported, in its own unit (currency or credits, never converted). Today only OpenRouter's `usage.cost`. | `reported` or `unknown` |
 | `estimate` | An API-equivalent value in USD estimated by the CLI. Claude CLI's `total_cost_usd` is an estimate: on a subscription it is not a charge. | `estimated` or `unknown` |
 | `tokens` | Raw counts: input, cached input, cache creation, output and reasoning, with the fields that overlap declared and whether the source reports them per turn or cumulatively. | `reported` or `unknown` |
-| `quota_snapshots` | A versioned container, always empty and `unknown` here. Part C ([#166](https://github.com/brushtyler/ssdlc/issues/166)) defines and collects the snapshots. | `unknown` |
+| `quota_snapshots` | A versioned container: empty and `unknown` unless a quota control is enabled for the route of the call; then the public snapshots before and after the call and their deltas ([Subscription quota snapshots and controls](#subscription-quota-snapshots-and-controls)) | `reported` or `unknown` |
 
 Each measure has a unit, a timestamp (`observed_at`) and a source. A value that
 was not reported is `unknown` (`null`), never 0. A zero the source reported
@@ -70,6 +70,8 @@ limits profiles are unchanged.
   (an explicit zero counts), over all completed calls. Incomplete calls appear
   apart as `unknown`.
 - `state.json` `phase_boundary.usage.cost_telemetry` holds the same breakdown.
+- The breakdown's `quota_snapshots` counts the calls with quota snapshots and their
+  bucket deltas, observed or `unknown`; the Evidence Pack states them under the table.
 
 Each invocation has an `invocation_id`, and the breakdown counts it once. A gate
 evaluation persists the record in its `invocation-N.json`, so a resumed or
@@ -163,3 +165,95 @@ existing profiles and caps in credits are part B2
 ([#214](https://github.com/brushtyler/ssdlc/issues/214)). A frozen profile keeps
 its own separate `metered_usd` and `cli_estimate_usd` caps and the frozen combined
 authority of its corrective transactions.
+
+## Subscription quota snapshots and controls
+
+[Issue #166](https://github.com/brushtyler/ssdlc/issues/166), part C of
+[#14](https://github.com/brushtyler/ssdlc/issues/14), with the defaults the
+operator approved on 2026-11-16 (module `ssdlc_quota.py`). The fixtures validate
+it offline; the live validation in the isolated runtime is the operator's.
+
+### Reading a quota
+
+No quota read runs a model. Each read has a time limit (30 seconds) and runs as
+the engine would run, in its role container with the same authentication.
+
+| Engine | Read | Buckets |
+| --- | --- | --- |
+| `agy` | `agy -p /usage --output-format json`, accepted only with `num_turns = 0` (contract observed on agy 1.5.9); any other value is refused as `inference_detected` | `command.data.groups[].buckets[]`: `id`, group, `window`, `remaining_fraction` and `reset_time` |
+| `codex` | `codex app-server`, messages `initialize`, `initialized` and `account/rateLimits/read` only (no thread, no turn) | one per window (`<limitId>.primary`, `<limitId>.secondary`) of each limit in `rateLimitsByLimitId`: `usedPercent`, `windowDurationMins` and `resetsAt`. `rateLimits` is the alias of one of those limits and is never counted twice: it is read only when the map is absent or empty |
+| `claude` | none in headless mode | the quota is `unknown` |
+
+The Codex fixture is synthetic and declared as such: it is built from the
+documented shape of the method. A read that fails, times out or returns something
+else is an `unavailable` snapshot, never a guess. A value missing or out of range
+is `null`, never 0; an explicit 0% is a value. Credits and plans are not read.
+
+A snapshot is cached per engine and account and reused only while it is younger
+than the maximum age the control accepts. The snapshot after the call is always
+read again.
+
+### Deltas
+
+When a control is enabled for the route of a call, a snapshot is read before the
+launch and another after the call. The delta is in **percentage points** of the
+bucket used: from 20% to 23% used is +3 pp. Two snapshots are compared only for
+the same account identity, bucket, window and reset, and only when both are valid
+and at most the control's maximum age away from the call.
+
+A positive delta is `observed_account_delta`: a change seen on the whole account,
+where other clients may be working at the same time. It is never the consumption
+of the call (`call_consumption` is always `null`), and it says
+`concurrent_use` when this process ran another call on the same engine during it
+(otherwise `concurrent_use_not_excluded`).
+Every other case is `unknown`, with its reason: `reset`, `refill` (a negative
+delta), `no_change_observed` (zero), `bucket_missing`, `bucket_disabled`,
+`window_changed`, `value_null`, `stale_snapshot`, `account_not_verified`,
+`snapshot_not_collected`. A negative or zero consumption is never recorded.
+
+The call's telemetry carries both snapshots, the deltas and the result of each
+control in `quota_snapshots` (`status: collected`). A failed read after the call
+leaves an `unavailable` snapshot and `unknown` deltas, and never changes the
+result of the call.
+
+### Controls
+
+Controls are enabled only explicitly, per route and per bucket, with
+`SSDLC_QUOTA_CONTROLS`: a JSON list where every field is mandatory.
+
+```bash
+export SSDLC_QUOTA_CONTROLS='[
+  {"route": "agy_cli", "bucket": "gemini-weekly", "min_reserve_percent": 10, "max_age_seconds": 300},
+  {"route": "codex_cli", "bucket": "codex.primary", "min_reserve_percent": 15, "max_age_seconds": 300}
+]'
+```
+
+| Field | Meaning |
+| --- | --- |
+| `route` | `agy_cli`, `codex_cli` or `claude_cli` |
+| `bucket` | the bucket id of the snapshot (agy `id`, Codex `<limitId>.primary` or `.secondary`) |
+| `min_reserve_percent` | minimum remaining share, in (0, 100]: at or below it the call is blocked |
+| `max_age_seconds` | maximum age of the snapshot, > 0 |
+
+Before the reservation and the launch, the call is refused with `LIMIT_REACHED`
+("refused before launch") when:
+
+- a control's snapshot cannot be verified: the read failed, timed out or ran a
+  model, the snapshot is too old or from the future, its bucket is missing,
+  disabled or `null`, or its reset has already passed. A `claude_cli` control
+  always blocks, because the Claude quota is `unknown`;
+- a control's reserve is reached;
+- the variable is malformed (missing field, unknown route, duplicate control):
+  then every call is refused.
+
+There is never an automatic switch to overage, extra credits or a paid route: a
+Codex account with credits left, or an agy bucket that offers AI credits, stays
+blocked. Without a control nothing is read and nothing is blocked.
+
+### Privacy
+
+The account identity is the authentication location of the engine, kept as a
+digest keyed with a secret of the process that is never written. The snapshots
+in telemetry, ledgers and the Evidence Pack hold no account identifier, email,
+plan, conversation identifier or authentication payload, and a container that
+carries one is refused.
