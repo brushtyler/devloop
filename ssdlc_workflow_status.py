@@ -16,6 +16,9 @@ Part 2 (#347) adds the ``status``: liveness observed in the kernel, its coverage
 activity, the native classification of a stop and the next action
 (``ssdlc_workflow_liveness``). Part 3 (#348) adds the ``projection`` of the remaining cost, computed by the pure
 ``ssdlc_workflow_projection.project`` from the data read here, frozen limits included.
+Part 4 (#349) adds the ``log``: the last persisted log, chosen from the coherent data,
+and its sanitized tail (at most ``TAIL_BYTES``), read after the check; the command
+itself is ``ssdlc_workflow_cli``.
 """
 import hashlib
 import json
@@ -43,6 +46,13 @@ FEEDBACK_FILES = ('feedback/authority.json', 'feedback/task-journal.jsonl')
 LIMITS_POLICY, LIMITS_JOURNAL = 'limits/policy.json', 'limits/task-journal.jsonl'
 LIMITS_PENDING = 'limits/extension-pending.json'
 
+# The last persisted log: references the task journal records, else logs registered as artifacts.
+LOG_KEYS = ('log_ref', 'developer_log_ref', 'output_ref')
+SAFE_REF = re.compile(r'[A-Za-z0-9_./-]{1,200}')
+TAIL_BYTES = 8192
+LOG_GAP = ("only logs the task journal references or the run registers as artifacts are seen; "
+           "the detached controller's stdout and stderr are not kept")
+
 NOT_OBSERVABLE = {
     'task_elapsed_sec': 'task journal events carry no timestamp; file mtimes are never used',
     'phase_elapsed_sec': 'phase start and end times are not persisted; file mtimes are never used',
@@ -59,6 +69,45 @@ class Changed(Exception):
     """A file changed while it was being read."""
 
 
+def _open_file(ticket, relative):
+    """A read-only descriptor of ``<ticket>/<relative>`` and its ``fstat``; ``(None, None)`` if absent.
+
+    No path component may be a symlink: ``O_NOFOLLOW`` on each one, from the
+    ticket root down. Anything that is not a regular file is refused. The last
+    component is opened with ``O_NONBLOCK``, so a FIFO without a writer or a
+    device is refused by ``fstat`` instead of blocking the open.
+    """
+    parts = Path(relative).parts
+    if (not parts or Path(relative).is_absolute() or '..' in parts
+            or any(ord(c) < 32 for c in relative) or '\\' in relative):
+        raise Unverifiable(f'unsafe path {relative!r}')
+    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, 'O_CLOEXEC', 0)
+    try:
+        fd = os.open(ticket, flags | os.O_DIRECTORY)
+    except OSError as exc:
+        raise Unverifiable(f'ticket root unreadable: {type(exc).__name__}') from None
+    try:
+        for index, part in enumerate(parts):
+            last = index == len(parts) - 1
+            try:
+                final = os.O_NONBLOCK | getattr(os, 'O_NOCTTY', 0)
+                child = os.open(part, flags | (final if last else os.O_DIRECTORY), dir_fd=fd)
+            except FileNotFoundError:
+                os.close(fd)
+                return None, None
+            except OSError as exc:
+                raise Unverifiable(f'{relative}: {type(exc).__name__}') from None
+            os.close(fd)
+            fd = child
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise Unverifiable(f'{relative}: not a regular file')
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd, info
+
+
 class Reader:
     """Reads files of the ticket without writing, recording what each read saw."""
 
@@ -69,33 +118,13 @@ class Reader:
     def _open(self, relative):
         """``(fingerprint, bytes)``; ``(None, None)`` when the file does not exist.
 
-        No path component may be a symlink: ``O_NOFOLLOW`` on each one, from the
-        ticket root down. The fingerprint is the content hash with the identity of
-        the open file, so an atomic replace with the same content is still seen.
+        The fingerprint is the content hash with the identity of the open file, so
+        an atomic replace with the same content is still seen.
         """
-        parts = Path(relative).parts
-        if (not parts or Path(relative).is_absolute() or '..' in parts
-                or any(ord(c) < 32 for c in relative) or '\\' in relative):
-            raise Unverifiable(f'unsafe path {relative!r}')
-        flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, 'O_CLOEXEC', 0)
+        fd, info = _open_file(self.ticket, relative)
+        if fd is None:
+            return None, None
         try:
-            fd = os.open(self.ticket, flags | os.O_DIRECTORY)
-        except OSError as exc:
-            raise Unverifiable(f'ticket root unreadable: {type(exc).__name__}') from None
-        try:
-            for index, part in enumerate(parts):
-                last = index == len(parts) - 1
-                try:
-                    child = os.open(part, flags | (0 if last else os.O_DIRECTORY), dir_fd=fd)
-                except FileNotFoundError:
-                    return None, None
-                except OSError as exc:
-                    raise Unverifiable(f'{relative}: {type(exc).__name__}') from None
-                os.close(fd)
-                fd = child
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode):
-                raise Unverifiable(f'{relative}: not a regular file')
             chunks = []
             while True:
                 chunk = os.read(fd, 1 << 20)
@@ -225,7 +254,7 @@ def _journal(reader, root):
     relative = JOURNAL if root == '.' else f'{root}/{JOURNAL}'
     data = reader.read(relative)
     if data is None:
-        return None, None
+        return None, None, (None, 0)
     boundary = data.rfind(b'\n') + 1
     try:
         state, sequence, sha = TaskJournal._replay(data[:boundary])
@@ -234,7 +263,136 @@ def _journal(reader, root):
         raise Unverifiable('task journal hash chain does not verify') from None
     if state is not None and not isinstance(state, dict):
         raise Unverifiable('task journal state is not an object')
-    return dict(sequence=sequence, sha256=sha or None, interrupted_tail_bytes=len(data) - boundary), state
+    head = dict(sequence=sequence, sha256=sha or None, interrupted_tail_bytes=len(data) - boundary)
+    return head, state, _journal_log(data[:boundary], relative.rsplit('/', 1)[0])
+
+
+def _log_refs(value, path=()):
+    """Every ``(path, reference)`` to a log in a task journal state, in document order."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in LOG_KEYS and isinstance(item, str):
+                yield path + (key,), item
+            else:
+                yield from _log_refs(item, path + (key,))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _log_refs(item, path + (index,))
+
+
+def _safe_ref(ref):
+    parts = ref.split('/')
+    return bool(SAFE_REF.fullmatch(ref)) and '..' not in parts and '' not in parts and '.' not in parts
+
+
+def _journal_log(data, directory):
+    """The log of the last journal event that introduces or updates a log reference, or None.
+
+    The chain was verified by the caller. References are relative to the tasks directory;
+    one that is not a plain relative path is skipped, never opened.
+    """
+    previous, found, unsafe = set(), None, 0
+    for line in data.splitlines():
+        event = json.loads(line)
+        current = set(_log_refs(event.get('state')))
+        introduced = [pair for pair in _log_refs(event.get('state')) if pair not in previous]
+        safe = [ref for _, ref in introduced if _safe_ref(ref)]
+        unsafe += len(introduced) - len(safe)
+        if safe:
+            found = dict(ref=f'{directory}/{safe[-1]}', source='task journal', sequence=event.get('sequence'),
+                         event=event.get('event') if isinstance(event.get('event'), str) else None,
+                         recorded_at=None)
+        previous = current
+    return found, unsafe
+
+
+def _recorded_at(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        moment = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else None
+
+
+def _last_log(journal_log, state, prefix):
+    """Which persisted log is the last one, and why; its tail is read after the check.
+
+    The task journal's order comes first: the last event that introduces or updates
+    a log reference. Without one, the log registered as an artifact with the latest
+    ``recorded_at``, the path breaking ties. Never a file's mtime.
+    """
+    found, unsafe = journal_log
+    notes = [LOG_GAP]
+    if unsafe:
+        notes.append(f'{unsafe} task journal log references are not plain relative paths and were skipped')
+    if found is None:
+        artifacts = (state or {}).get('artifacts')
+        candidates, unordered = [], 0
+        for meta in (artifacts.values() if isinstance(artifacts, dict) else ()):
+            path = meta.get('path') if isinstance(meta, dict) else None
+            if not isinstance(path, str) or not path.endswith('.log'):
+                continue
+            moment = _recorded_at(meta.get('recorded_at'))
+            if moment is None or not _safe_ref(path):
+                unordered += 1
+                continue
+            candidates.append((moment, path, meta['recorded_at']))
+        if unordered:
+            notes.append(f'{unordered} registered logs have no usable recorded_at or path and were skipped')
+        if candidates:
+            _, path, recorded = max(candidates)
+            found = dict(ref=prefix + path, source='artifacts', sequence=None, event=None, recorded_at=recorded)
+    if found is None:
+        return dict(ref=None, source=None, sequence=None, event=None, recorded_at=None, size_bytes=None,
+                    tail_bytes=None, truncated=None, text=None, coverage=NONE,
+                    reason='; '.join(['no log reference that can be ordered in the task journal or the artifacts']
+                                     + notes[1:]))
+    return dict(found, size_bytes=None, tail_bytes=None, truncated=None, text=None, coverage=PARTIAL,
+                reason='; '.join(notes))
+
+
+# CSI and OSC sequences, then any other two-character escape.
+ESCAPES = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[@-_]?')
+LINE_BREAKS = '\r\n\v\f\x1c\x1d\x1e\x1f\x85  '
+
+
+def sanitize(text, *, newlines=False):
+    """Text safe for a terminal: no escape sequences, no control or format characters.
+
+    Each removed character becomes U+FFFD; tabs and, with ``newlines``, line feeds stay.
+    Bidirectional overrides and other invisible format characters are removed too.
+    """
+    keep = '\t\n' if newlines else ''
+
+    def safe(c):
+        if c.isprintable() or c in keep:
+            return c
+        # A tab or a no-break space reads as a space; a line or page break never passes on one line.
+        return ' ' if c.isspace() and c not in LINE_BREAKS else '�'
+    return ''.join(safe(c) for c in ESCAPES.sub('�', str(text)))
+
+
+def _read_tail(ticket, log):
+    """The last ``TAIL_BYTES`` of the selected log, sanitized; never the whole file, never a symlink."""
+    if log['ref'] is None:
+        return log
+    try:
+        fd, info = _open_file(ticket, log['ref'])
+    except Unverifiable as exc:
+        return dict(log, reason=f'{log["reason"]}; the log is not readable: {exc}')
+    if fd is None:
+        return dict(log, reason=f'{log["reason"]}; the log no longer exists')
+    try:
+        start = max(0, info.st_size - TAIL_BYTES)
+        data = os.pread(fd, TAIL_BYTES, start)
+    except OSError as exc:
+        return dict(log, reason=f'{log["reason"]}; the log is not readable: {type(exc).__name__}')
+    finally:
+        os.close(fd)
+    return dict(log, size_bytes=info.st_size, tail_bytes=len(data), truncated=start > 0,
+                text=sanitize(data.decode('utf-8', errors='replace'), newlines=True))
 
 
 def _dag(plan, journal_state):
@@ -430,7 +588,7 @@ def _collect(reader):
         ledger = (state or {}).get('ledger')
         if not isinstance(ledger, list) or ledger[:len(history)] != history:
             raise Unverifiable('executed state lost its historical ledger prefix')
-    journal, journal_state = _journal(reader, root)
+    journal, journal_state, journal_log = _journal(reader, root)
     plan_present, plan = reader.document(prefix + PLAN)
     dag = _dag(plan, journal_state) if plan_present else None
     if dag is None and journal_state is not None:
@@ -449,14 +607,15 @@ def _collect(reader):
     native = None if state is None else {key: state.get(key) for key in ('status', 'failure', 'phase_boundary')}
     internal = dict(native=native, limits=limits, fencing=fencing(state))
     return dict(run=run, generation=generation, journal=journal, tasks=dag, feedback=feedback,
-                metrics=metrics, projection=projection, _internal=internal)
+                metrics=metrics, projection=projection, log=_last_log(journal_log, state, prefix),
+                _internal=internal)
 
 
 def _empty(ticket, status, attempts, now, reason, sources=None):
     return dict(schema=SCHEMA, schema_version=SCHEMA_VERSION, ticket=ticket,
                 read=dict(status=status, attempts=attempts, max_attempts=MAX_ATTEMPTS, observed_at=now, reason=reason),
                 sources=sources or {}, run=None, generation=None, journal=None, tasks=None, feedback=None, metrics=None,
-                projection=None, status=None)
+                projection=None, status=None, log=None)
 
 
 def snapshot(repo, ticket, *, clock=time.time, fault=lambda point, attempt: None, kernel=None):
@@ -503,6 +662,8 @@ def snapshot(repo, ticket, *, clock=time.time, fault=lambda point, attempt: None
         if reader.stable():
             result = _empty(ticket, COHERENT, attempt, now, None, reader.sources())
             result.update(data)
+            # The log is chosen from the coherent data; only its tail is read, after the check.
+            result['log'] = _read_tail(root, data['log'])
             result['status'] = liveness.classify(ticket, repo, internal['native'], data['tasks'], internal['limits'],
                                                  observations, components)
             return result

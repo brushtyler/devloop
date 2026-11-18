@@ -6,7 +6,8 @@ each extension. It covers raising named global limits, moving the run's
 absolute deadline,
 [verifying the same candidate again after a verifier timeout](#reverification-after-a-verifier-timeout),
 and the [per-task budget](#per-task-budget-and-reallocation): the allocation of
-an existing run and the transfer of unused cap from one task to another.
+an existing run and the transfer of unused cap from one task to another,
+and the [substitution of a USD obligation by a cap in credits](#caps-in-credits).
 Every extension needs an explicit operator
 authorization; there is no automatic or delegated path (decision A5 of
 [ADR 0001](adr/0001-prodotto-unico-fasi-su-tracker.md)). No command calls a model.
@@ -65,6 +66,7 @@ allowance of the ledger.
 | `reverify_after_timeout` | One more verification of the same captured candidate; the timeout of each named timed-out check (`check_timeout.<check_id>`), for that verification only | The whole profile, the limits journal and the chain; check commands, criteria and the other checks; the plan and quality contract |
 | `allocate_task_budget` | Adds the per-task caps (`task_budget`) to a profile without them, from the residual of the run | Every run cap, counters, consumption; nothing consumed before is charged to a task |
 | `reallocate_task_budget` | Moves available cap of one dimension from one allocated task to another | Every run cap and the sum of the task caps; counters, consumption, other tasks' caps |
+| `substitute_credit_cap` | Lets a credit cap the profile already configures replace the USD obligation of its engine's subscription route (`credit_caps.<engine>.replaces_usd`, [caps in credits](#caps-in-credits)) | Every cap, the credit cap itself, counters, consumption, the original authorization |
 
 For the extensions and the reverification, each change records the old and the
 new value and must increase it. An unknown
@@ -250,6 +252,43 @@ pending intent fences every reservation until the activation completes. Two
 proposals built on the same parent cannot both apply: the ticket and limits
 locks serialize activations, and the second one finds that its parent changed.
 A replay completes the published effects once.
+
+## Caps in credits
+
+Issue #214, with the operator's decision D6 of
+[ADR 0004](adr/0004-passo-2-budget-stato-durevole.md#5-decisioni-riservate-alloperatore).
+A credit cap of the profile (`credit_caps`, see
+[Cost telemetry](cost-telemetry.md#caps-in-credits-and-existing-profiles)) adds
+to the USD caps and does not replace their obligation: a `codex` or `agy` call
+without a `live_unknown_usage` rule is refused before launch even with a credit
+cap. `substitute_credit_cap` is the explicit transition of that profile that lets
+the credit cap replace the USD obligation of the engine's subscription route.
+
+- It applies only to a credit cap the frozen profile already configures, for an
+  engine without a `live_unknown_usage` rule. A profile in USD is never
+  migrated: there is nothing to substitute.
+- Each change is `{"dimension": "credit_caps.<engine>.replaces_usd", "new": true}`
+  (recorded with `old: false`). Any other dimension or value is refused.
+- The profile changes only by that flag. A new profile that declares it is
+  refused: the substitution exists only through this authorized transition, and
+  every load refuses a flag without its entry in the bound chain.
+
+```json
+{
+  "operation": "substitute_credit_cap",
+  "changes": [{"dimension": "credit_caps.agy.replaces_usd", "new": true}],
+  "cause": "The agy plan charges credits; the operator accepts its credit cap for this run.",
+  "evidence": [{"description": "plan terms", "sha256": "<sha256 of the saved document>"}],
+  "actor": "<operator>"
+}
+```
+
+Activation is the one of the other operations: the new `limits/policy.json`, a
+`CREDIT_CAP_SUBSTITUTED` event in the limits journal with unchanged counters,
+the bound chain entry and the receipt. The journal keeps its history and the
+original `LIMITS_AUTHORIZED` event; undoing the chain entry restores the
+authorized envelope exactly. Resuming with the original `--limits-profile` keeps
+the transition in force.
 
 ## Workflow
 

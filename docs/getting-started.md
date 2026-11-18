@@ -171,6 +171,7 @@ The full reference covers routing tables, reasoning effort, budgets, container l
 | `./ssdlc po` / `design` / `plan --ticket T` | Revalidate PO output, resume design, retry task planning (task mode) |
 | `./ssdlc approve T` / `reject T --reason "…"` | Human sign-off |
 | `python3 orchestrator.py start` / `status` / `cancel` / `resume` / `monitor` | Detached supervision ([docs](supervision.md)) |
+| `./ssdlc workflow-status --ticket T [--json] [--watch]` | Read-only status of a run in four sections, JSON or JSON Lines, with exit codes for scripts ([docs](workflow-status.md#the-workflow-status-command)) |
 | `python3 orchestrator.py bounce-preview …` | Read-only targeted-bounce preview ([docs](bounce-preview.md)) |
 | `python3 orchestrator.py continuation-*` | Explicit recovery transitions for stopped runs ([docs](recovery.md)) |
 | `./ssdlc limits inspect` / `propose` / `approve` / `activate` / `status` | Manual, operator-authorized extension of the limits or deadline of a stopped run, reverification of the same candidate after a verifier timeout, or allocation and transfer of per-task budget ([docs](limit-extensions.md)) |

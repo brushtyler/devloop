@@ -393,10 +393,13 @@ def _admit(engine, bound, limits, *, reserved=False):
     the proven non-dispatch ``NotDispatched`` rather than a stop."""
     from ssdlc_recovery import NotDispatched, RecoveryStop
     refuse = NotDispatched if reserved else RecoveryStop
+    credit_caps = None
     if limits is not None:
         policy = limits._load(repair=False)[0]['policy']
         spend_cap = estimate_cap = True
         declarations = policy.get('live_unknown_usage', {})
+        # Caps in credits exist only in a frozen profile, configured explicitly (#214).
+        credit_caps = policy.get('credit_caps', {})
     else:
         # Only an explicit zero disables a cap; a malformed value leaves it in force.
         try:
@@ -414,7 +417,7 @@ def _admit(engine, bound, limits, *, reserved=False):
     provider, route = _admission_target(engine, bound, limits)
     try:
         telemetry_schema.admit(provider, route, spend_cap=spend_cap, estimate_cap_active=estimate_cap,
-                               declarations=declarations)
+                               declarations=declarations, credit_caps=credit_caps)
     except telemetry_schema.AdmissionRefused as exc:
         raise refuse('LIMIT_REACHED', str(exc)) from None
     gate = _quota_admission(route, bound, refuse) if route in quota_schema.ROUTES else None
@@ -6072,6 +6075,25 @@ class SSDLCOrchestrator:
                 '| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n' + '\n'.join(rows) +
                 '\n\nNot covered live invocations: ' + uncovered + '\n')
 
+    def _workflow_status_disclosure(self):
+        """The workflow status read while the pack is compiled, kept as a local artifact.
+
+        The snapshot reads without writing; a failed read is an UNVERIFIABLE snapshot
+        with its reason, never a failed pack. The controller compiling the pack holds
+        the run's locks, so liveness is normally RUNNING here.
+        """
+        from ssdlc_workflow_cli import exit_code, take
+        from ssdlc_workflow_status import sanitize
+        snap = take(self.repo_root, self.ticket_id)
+        path = self.ssdlc_root / 'workflow-status.json'
+        atomic_json(path, snap)
+        self.record_artifact('workflow-status.json', path)
+        status = snap.get('status') or {}
+        field = lambda value: sanitize('-' if value is None else value).replace('`', "'")
+        return (f"\nWorkflow status at compilation: read `{field(snap['read']['status'])}`, liveness "
+                f"`{field(status.get('liveness'))}`, outcome `{field(status.get('outcome'))}`, "
+                f"`workflow-status` exit code {exit_code(snap)}: [workflow-status.json](./workflow-status.json).\n")
+
     @_supervised_phase('08-supervisor')
     def compile_evidence_pack(self, ready_for_signoff: bool) -> Path:
         print(f"\n==> [{self.project_id} | Phase 8: 08-supervisor] Compiling SHA-256 Evidence Pack for Human Supervisor...")
@@ -6116,6 +6138,7 @@ class SSDLCOrchestrator:
         completion_disclosures += ('\nFeedback provenance and counters: [feedback-summary.json](./feedback-summary.json).\n'
                                    if 'feedback' in summary else
                                    '\nImpact and limits metrics: [feedback-summary.json](./feedback-summary.json).\n')
+        completion_disclosures += self._workflow_status_disclosure()
 
         # QA shell_command reports remain separate from typed contract checks.
         artifact_rows = []
@@ -7024,6 +7047,9 @@ def main(argv=None) -> int:
     if words and words[0] == 'limits':
         from ssdlc_limit_extensions import main as limits_main
         return limits_main(words)
+    if words and words[0] == 'workflow-status':
+        from ssdlc_workflow_cli import main as workflow_status_main
+        return workflow_status_main(words[1:])
     if words and words[0].startswith('usage-profile-'):
         from ssdlc_usage_admission import main as usage_admission_main
         return usage_admission_main(words)
