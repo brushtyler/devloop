@@ -463,15 +463,16 @@ def activate_generation(ticket_root, preparation, authorization, *, fault=lambda
             selected = store.load()
             if selected != projection:
                 raise TransitionError('Another continuation is active')
-            from ssdlc_transitions import validate_authorization
-            validate_authorization(authorization, proposal)
+            from ssdlc_transitions import validate_operator_authorization
+            validate_operator_authorization(authorization, proposal)
+            store.replayed(proposal, authorization)
             from ssdlc_preparations import update, clear_pending, receipt_path
             if receipt_path(ticket_root, proposal['transition_id']).exists():
                 update(ticket_root, proposal['transition_id'], status='ACTIVE')
                 clear_pending(ticket_root, proposal['transition_id'])
             return selected
-        from ssdlc_transitions import validate_authorization
-        validate_authorization(authorization, proposal)
+        from ssdlc_transitions import validate_operator_authorization
+        validate_operator_authorization(authorization, proposal)
         if file_hash(_regular(preparation, 'recipe.json')) != proposal['artifacts']['recipe.json']:
             raise TransitionError('Prepared recipe changed')
         if file_hash(_regular(preparation, 'runtime-seal.json')) != proposal['artifacts']['runtime-seal.json']:

@@ -216,7 +216,7 @@ Every intermediate artifact is registered with a SHA-256 hash and checked on rec
 - **Changes are detected only at checkpoints.** There is no continuous containment against external writers; containment is workstream B of the autonomy plan.
 - **Coverage is partial.** Ignored Git files, unreferenced partial logs and artifacts outside the evidence inventory are not covered.
 - **Strict parsing of model output** does not establish model honesty or eliminate prompt injection.
-- **Locks** coordinate SSDLC processes. They do not stop arbitrary writers, and `source_fenced` in recovery authorizations remains an operator attestation (see [#45](https://github.com/brushtyler/ssdlc/issues/45)).
+- **Locks** coordinate SSDLC processes. They do not stop arbitrary writers, and `source_fenced` in recovery authorizations remains an operator attestation (see [#45](https://github.com/brushtyler/ssdlc/issues/45)). Only for a run admitted to automatic fencing can a transition replace it with the host's proof under the writer gate ([Writer fencing](writer-fencing.md#native-transitions-the-automatic-proof)).
 
 ### Task journal: guarantees and threat model
 
