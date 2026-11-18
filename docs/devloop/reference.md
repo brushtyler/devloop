@@ -54,6 +54,12 @@ tick; any other key needs a restart
 `label` (default `reviews:2`), `sensitive_paths` and `sensitive_path_lists`; changing any of them,
 or the reviewers of the pool (their order, app, kind, model, effort, `review_args` or
 `fallback_models`), changes the policy version, so pending approvals need a new review.
+`advisory_reviewer` (empty by default: off) names the agent of the
+[advisory review](guide.md#advisory-review-for-the-operator) of a PR in
+`agent:needs-operator` (#369); it may be the implementer, and an agent that is not configured,
+or a value that is not a string, stops devloop at startup. It counts for no quorum, so it is
+not part of the policy version: turning it on or off voids no approval. The local overlay
+turns it on.
 
 Each PR records its implementer and the first reviewer of the pool when it is opened, so
 changing the roles does not affect the level-1 reviewer of open PRs. If the recorded reviewer is
@@ -748,10 +754,11 @@ Each agent and the dispatcher can act on GitHub with its own GitHub App (#65), c
 
 | Actor | Does |
 |---|---|
-| dispatcher | every read, labels, escalations, CI rounds, re-runs of failed CI jobs not pertinent to the PR (needs `actions: write`, see [CI failures not pertinent to the PR](#ci-failures-not-pertinent-to-the-pr)), finding closures, a PR's readiness for merge, the labels of the readiness check and its escalation to the supervisor, the record of a [conclave](guide.md#conclave-on-a-block), the restart after a `UNANIMOUS` decision and the suspension after a [veto](guide.md#veto) |
+| dispatcher | every read, labels, escalations, CI rounds, re-runs of failed CI jobs not pertinent to the PR (needs `actions: write`, see [CI failures not pertinent to the PR](#ci-failures-not-pertinent-to-the-pr)), finding closures, a PR's readiness for merge, the labels of the readiness check and its escalation to the supervisor, the record of a [conclave](guide.md#conclave-on-a-block), the restart after a `UNANIMOUS` decision and the suspension after a [veto](guide.md#veto), the summary of an [advisory review](guide.md#advisory-review-for-the-operator) |
 | readiness checker (`preflight`) | the outcome of the [readiness check](guide.md#readiness-check-before-implementation) on the issue, with its `preflight` record, also when a fallback model ran it |
 | implementer | commits (author and committer are its bot), push, opens the PR, fix and blocked comments |
 | reviewer | one native GitHub review (`APPROVE`, `REQUEST_CHANGES` or `COMMENT`) on the reviewed commit, whose body is the review and its record (#325, see [Where a review is published](protocol.md#where-a-review-is-published)); an agent without an app publishes the review comment instead |
+| advisory reviewer (`advisory_reviewer`) | the [advisory review](guide.md#advisory-review-for-the-operator) of a head of a PR in `agent:needs-operator`: always a native review of type `COMMENT`, also from an agent without an app (with the ambient login) and also when it is the PR's implementer; the dispatcher writes its summary and edits the receipt |
 | merger | only the merges of the `strict` and `auto` [merge modes](guide.md#merge-modes) (see [The merger app](#the-merger-app)) |
 
 Apps are per agent, not per role: GitHub keeps one review state per identity, and it already

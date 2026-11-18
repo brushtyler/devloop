@@ -495,6 +495,22 @@ record of an agent with an app of its own, written with that app, and never by t
 implementer (see [Records bound to identities](#records-bound-to-identities)). Any other native
 review stays out of the conversation, as before.
 
+**Advisory review** (#369). The [advisory review](guide.md#advisory-review-for-the-operator) of a
+PR in `agent:needs-operator` is always a native review of type `COMMENT`, with the identity of
+the agent of `advisory_reviewer` (its app, or the ambient login without one), titled "Review
+consultiva: non conta per il quorum". The agent answers with JSON validated against
+[`devloop/schemas/advisory.json`](../../devloop/schemas/advisory.json) (prompt
+`devloop/prompts/advisory.md`). Its body ends with an `advisory` marker, never a `review`
+one: `head`, `reviewer`, `outcome` (`done`) and `opinion` (`ok`, `dubbi`, `contrario`). It is
+never part of the PR's conversation as the review records see it, so it is no round, no verdict
+and no finding. The dispatcher's summary of it ("Review consultiva per l'operatore") ends with
+an `advisory` marker too, with the same fields, or `outcome: failed` and `opinion: null` when
+the turn failed: only the dispatcher's identity writes it, and it carries no text of the agent.
+A head has its advisory review once it has that summary, written last. A published native
+review with an `advisory` marker of that head, written by the identity of the configured agent,
+stands for its turn: a head that has it without the summary gets the summary, and the receipt,
+without a new turn.
+
 **Compatibility.** The review comments published before #325 stay records, read with the same
 rules as before: a PR opened during the change, with rounds of both forms, keeps every round and
 every finding, and counts them as if all its rounds were comments.
@@ -702,7 +718,9 @@ dispatcher's app: the escalations and the operator-merge notices are its own; th
 agent that stopped (`Lavoro bloccato`) is published with that agent's app and stays out of the
 hash of the [readiness check](#readiness-check-records) like any text devloop published. Only
 the [conclave](#conclave-records) reads it, and only when written by the app of the agent it
-names. A `conclave` record counts only from the dispatcher's app. `trusted_users`
+names. A `conclave` record counts only from the dispatcher's app. An `advisory` record (#369)
+counts in a native review only from the identity of the agent of `advisory_reviewer`, and in a
+comment only from the dispatcher's app. `trusted_users`
 stays for people: it
 decides who can start work with `agent:ready`, and it cannot contain bots. The only app whose
 labels count is the supervisor's, on the issues described in
@@ -727,7 +745,7 @@ readiness check, on the PR for review, fix, sync and CI. The turns of a review r
 | Record | When | Content |
 |---|---|---|
 | `request` | The issue goes from `agent:ready` to `agent:working` | SHA-256 of title and body, author and time of the trusted `labeled` event of `agent:ready`, ids of the trusted comments given to the implementer, time of the takeover. It is a snapshot **at the takeover**, not at the time of the label |
-| `turn` | Every invocation of an agent CLI, retries, fallback models and failures included: implement, fix, sync with an agent, review, readiness check, conclave call | Kind, agent, GitHub identity (none: the operator's `gh` login), configured model and effort (for a fallback, the fallback model and the model it replaces), real model, start, end, duration, outcome (`success`, `failure`, `unavailable`), the error if any, telemetry, and the last command the turn ran or started when the CLI exposes it (`last_command`: only codex, from the `command_execution` items of `--json`; cleaned like the tail of a timeout, on one line, at most 200 characters; absent otherwise), also for a turn that timed out |
+| `turn` | Every invocation of an agent CLI, retries, fallback models and failures included: implement, fix, sync with an agent, review, readiness check, conclave call, [advisory review](guide.md#advisory-review-for-the-operator) (`advisory`, on the PR, in a comment of its own) | Kind, agent, GitHub identity (none: the operator's `gh` login), configured model and effort (for a fallback, the fallback model and the model it replaces), real model, start, end, duration, outcome (`success`, `failure`, `unavailable`), the error if any, telemetry, and the last command the turn ran or started when the CLI exposes it (`last_command`: only codex, from the `command_execution` items of `--json`; cleaned like the tail of a timeout, on one line, at most 200 characters; absent otherwise), also for a turn that timed out |
 | `verification` | Every test command the dispatcher runs after a writing turn (none when the [local tests](reference.md#local-tests) select nothing), and the full suite it runs before a review of a head without CI, or before the promotion of an approval given while no CI was known | Command, outcome, duration, the tree hash before and after the test, and the commit (none before a review) |
 | `event` | The CI of a head (`ci_round`): a failed CI round, the checks a review round saw whatever its verdict (`approve`, `request_changes` or `needs_operator`), or the passing checks read again just before the PR is promoted to `agent:ready-to-merge` (also at level 0); a sync without an agent, or the merge of `main` before a fix (`sync`) | For the CI, the head, the state (`fail`, `pass`, or `none` without checks), the review round (none at level 0) and each check with its outcome, the id of its GitHub Actions run (none for a commit status or a check outside Actions) and its duration in seconds (`duration_s`: none while it runs and for a commit status, #300). Every CI round also records `tests`, the [summary of the suite](reference.md#summary-of-the-ci-in-the-prompts) that the dispatcher reads for the review and fix prompts (read again from the job logs when a promotion records the round, for instance after a review that saw the CI pending): for each job whose log holds the final lines of `scripts/run-tests.py`, its name with `ran` and `slowest`, and for a job whose log could not be read, its name with `log: unavailable`; absent when no job has either. The same checks read again for the same head and round are not recorded twice, a new run is. A failure that joined a round that had approved its head carries `voided_approval: true` (#359). For a sync, the merged base commit and the old and new heads |
 
@@ -923,3 +941,18 @@ receipt, as before #338. The comments written before #338 keep that form and are
 are: a promotion with its `policy` record, then a receipt with its `receipt` record, then, after
 a merge, a comment of its own with the `merged` record. When devloop merges the PR, the
 [`merged` record](#merge-directives-and-record) goes in the comment of the promotion.
+
+**Advisory review** (#369). The opinion of the
+[advisory review](guide.md#advisory-review-for-the-operator) of the approved head is a section
+of its own, "Review consultiva": the agent, the head and the opinion (or that it failed), from
+the dispatcher's `advisory` record, never the agent's text. It is in the content, and so in the
+digest, only when the head has one: a receipt without it is the one before #369. After the
+advisory review the dispatcher edits the current receipt of the same head in place: section,
+digest and totals (with the `advisory` turn) recomputed from the ledger, while promotion,
+policy record and state stay, and so does the text before the receipt's title. A superseded
+receipt, or one of another head, is left as it is. Without a current receipt the opinion stays in
+the dispatcher's summary, and a later receipt of the same head carries it; no promotion is
+written for it. The receipt is edited before the dispatcher's summary: an edit that fails leaves
+the summary unwritten, and a later tick edits the receipt again, then writes the summary,
+without a new turn. A receipt that cannot hold the section is logged and left as it is: the
+summary tells the operator.
