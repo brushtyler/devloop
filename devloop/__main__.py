@@ -1,5 +1,5 @@
 """devloop command line: python3 -m devloop
-{setup,status,apps,tick,run,cleanup,follow,watch,pin,report,fallback}."""
+{setup,status,apps,tick,run,cleanup,gc,follow,watch,pin,report,fallback}."""
 
 import argparse
 import fcntl
@@ -20,6 +20,7 @@ from .dispatch_advisory import AdvisoryResults
 from .dispatcher import (Dispatcher, TickLog, Workers, ensure_labels, pr_counts_line,
                          pr_status_line)
 from .github import GitHub, GitHubError
+from .housekeeping import Housekeeping
 from .ledger import Ledger
 from .planning import plan, queue_lines
 from .stall import StallWatch
@@ -117,15 +118,24 @@ def build(args):
     # write it (#362): the running dispatcher keeps its chain in memory.
     command = getattr(args, 'command', None)
     read_only = command == 'status' or (command == 'tick' and getattr(args, 'dry_run', False))
+    ledger = Ledger(gh, state_dir=state, read_only=read_only)
     dispatcher = Dispatcher(cfg, gh, ws, runner, log=tick_log, identities=identities,
-                            activity=current,
-                            ledger=Ledger(gh, state_dir=state, read_only=read_only),
+                            activity=current, ledger=ledger,
                             merger=identities.merger(),
                             pinner=pin.AutoPin(root, state, args.local_config, log=tick_log,
-                                               fetch_lock=ws.shared_lock),
+                                               fetch_lock=ws.shared_lock,
+                                               keep=keep_pins(cfg)),
                             memory=unavailability.Memory(state),
-                            advisory_results=AdvisoryResults(state))
+                            advisory_results=AdvisoryResults(state),
+                            housekeeping=Housekeeping(state, ws, gh, ledger=ledger,
+                                                      log=tick_log))
     return cfg, state, dispatcher
+
+
+def keep_pins(cfg):
+    """How many pinned copies besides ``current`` a successful pin keeps (#380), or None when
+    ``[gc] pins`` is off."""
+    return cfg.gc.keep_pins if cfg.gc.pins else None
 
 
 def run_fallback(args):
@@ -158,7 +168,8 @@ def run_pin(args):
     state = root / cfg.state_dir
     local = args.local_config or state / pin.LOCAL_CONFIG
     try:
-        pin.pin(root, state, args.ref, local, log=log, smoke=not args.no_smoke)
+        pin.pin(root, state, args.ref, local, log=log, smoke=not args.no_smoke,
+                keep=keep_pins(cfg))
     except (pin.PinError, ConfigError, OSError) as exc:
         sys.exit(f'devloop: pin failed, the pinned copy is unchanged: {exc}')
 
@@ -317,6 +328,8 @@ def main(argv=None):
     run.add_argument('--interval', type=int, metavar='SECONDS',
                      help='deprecated alias of --idle-timeout')
     sub.add_parser('cleanup', help='remove devloop worktrees left by failed steps')
+    sub.add_parser('gc', help='clean up state_dir now as [gc] sets: old pinned copies, '
+                              'worktrees of closed issues and PRs, old log files')
     follow_cmd = sub.add_parser('follow', help='follow live the agent working in a devloop worktree')
     follow_cmd.add_argument('target', help='the worktree: issue-<N> (implementer) or pr-<N> '
                                            '(reviewer or fixer)')
@@ -451,6 +464,13 @@ def main(argv=None):
             for name in dispatcher.ws.names():
                 dispatcher.ws.remove(name)
                 log(f'removed worktree {name}')
+            return
+        if args.command == 'gc':
+            # Under the dispatcher lock: no action runs (#380).
+            if not cfg.gc.enabled():
+                log('gc: every cleanup is off in [gc]')
+                return
+            dispatcher.housekeeping.run(cfg, verbose=True)
             return
         try:
             if args.command == 'tick':
