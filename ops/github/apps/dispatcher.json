@@ -1,0 +1,22 @@
+{
+  "name": "dispatcher",
+  "description": "devloop: il dispatcher. Letture, label, commenti, escalation, rilancio dei job CI falliti (#200).",
+  "url": "https://github.com/@REPO@",
+  "hook_attributes": {
+    "url": "https://github.com/@REPO@",
+    "active": false
+  },
+  "redirect_url": "https://github.com/@REPO@",
+  "public": false,
+  "request_oauth_on_install": false,
+  "default_permissions": {
+    "actions": "write",
+    "checks": "read",
+    "contents": "read",
+    "issues": "write",
+    "metadata": "read",
+    "pull_requests": "write",
+    "statuses": "read"
+  },
+  "default_events": []
+}

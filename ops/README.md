@@ -1,0 +1,328 @@
+# ops: ricreare l'installazione di devloop e del supervisore
+
+Questa guida porta una VM vuota fino a devloop e al suo supervisore attivi, spiega come
+**migrare** l'installazione su un'altra macchina e come **riusarla per un altro progetto**. Gli
+script sono parametrici (`params.env`) e idempotenti; i file dichiarativi descrivono
+l'installazione in uso dal 2026-11-18.
+
+**Nessun segreto nel repository.** Chiavi private delle GitHub App, token e login delle CLI degli
+agent restano fuori: la guida spiega come ricrearli, e nessuno script li legge, li scrive o li
+stampa.
+
+Il funzionamento di devloop è descritto in [docs/devloop/guide.md](../docs/devloop/guide.md)
+(in particolare *Run from a pinned installation*) e in
+[docs/devloop/reference.md](../docs/devloop/reference.md) (*GitHub identities*); ruoli e
+responsabilità in [ADR 0002](../docs/adr/0002-ruoli-e-responsabilita.md).
+
+## Contenuto
+
+```
+ops/
+  README.md                  questa guida
+  params.env.example         i parametri: copiarlo in ops/params.env (locale: git lo ignora)
+  lib.sh                     funzioni comuni agli script (parametri, --dry-run, conferme)
+  host/
+    setup-devloop.sh         pacchetti, utente devloop, clone, state_dir e log, overlay d'esempio,
+                             key_dir e ~/.claude, ~/.codex 700, impostazioni di Claude Code, unità
+    setup-supervisor.sh      utente supervisor, ACL di attraversamento su /home/<devloop>,
+                             sudoers, clone, key_dir 700, impostazioni di Claude Code
+    devloop.service          unità systemd (con segnaposto @NOME@)
+    sudoers-supervisor       sudoers minimale del supervisore (con segnaposto @NOME@)
+    config.local.toml.example  overlay di devloop, tutto commentato
+    check-host.sh            verifica utenti, permessi (700/600), chiavi, ACL, sudoers, servizio,
+                             CLI e `devloop apps`
+    migrate.md               cosa copiare dalla macchina vecchia e cosa ricreare
+  github/
+    apps/<ruolo>.json        manifest delle GitHub App (flusso "manifest" di GitHub)
+    create-apps.sh           genera una pagina HTML locale che crea ciascuna app dal suo manifest
+    ruleset-main.json        ruleset del branch principale
+    tokens.md                token fine-grained da creare a mano
+```
+
+### Regole degli script
+
+- **Parametri.** Leggono `ops/params.env` (o il file di `--params`). I valori finiscono in un
+  sudoers e in un'unità systemd, quindi gli script accettano solo forme note (nomi utente, percorsi
+  assoluti senza spazi, `owner/nome`) e si fermano su un valore diverso.
+- **`--dry-run`.** Stampa ogni azione (`[dry-run] …`) e il contenuto dei file che scriverebbe,
+  senza fare nulla. Le verifiche in sola lettura (un utente esiste, una directory ha già il modo
+  giusto) si fanno lo stesso, così l'elenco mostra solo ciò che manca.
+- **Idempotenti.** Ogni passo controlla lo stato prima di agire: un utente, un clone, un overlay o
+  delle impostazioni già presenti non si toccano; directory e file con modo o contenuto diversi si
+  correggono. Rieseguirli non cambia un'installazione già a posto.
+- **Avvio.** Si avviano con `bash` (`sudo bash ops/host/setup-devloop.sh`), come il launcher di
+  devloop con `python3`: non serve il bit di esecuzione.
+- **Root.** `setup-*.sh` vanno eseguiti come root (`sudo`), tranne con `--dry-run`.
+  `check-host.sh` non cambia nulla, ma senza root non legge i file degli altri utenti.
+- **Piattaforma.** Controllano `/etc/os-release` e l'architettura: su una piattaforma diversa da
+  quella verificata avvisano e chiedono conferma (`--yes` per non chiederla), non rifiutano.
+- **Verifica.** Tutti superano `bash -n`; un test li esegue con `--dry-run`
+  (`tests/test_ops.py`). Prima di cambiarli si raccomanda anche
+  [`shellcheck`](https://www.shellcheck.net/) (`shellcheck ops/lib.sh ops/host/*.sh ops/github/*.sh`),
+  che non fa parte dei test perché non è disponibile offline.
+
+## Piattaforma verificata
+
+**Ubuntu 26.04 LTS su aarch64**, con `apt`, `systemd` e il Python 3 di sistema (3.14). Su altre
+distribuzioni con `apt` e `systemd` gli script dovrebbero funzionare, ma non sono stati provati.
+
+## Da una VM vuota a devloop e supervisore attivi
+
+I comandi si eseguono da un clone del repository dell'operatore (per esempio nella sua home), come
+utente con `sudo`. Dove compare `brushtyler/ssdlc`, `devloop` o `supervisor`, valgono i valori di
+`params.env`.
+
+### 1. Parametri
+
+```bash
+cp ops/params.env.example ops/params.env
+$EDITOR ops/params.env               # REPO, APP_PREFIX, utenti e percorsi
+```
+
+### 2. GitHub App
+
+Ogni app ha un manifest in `ops/github/apps/`. Per tutte: `metadata: read`, webhook spento,
+nessun evento, nessuna autorizzazione OAuth, app privata (installabile solo dall'account che la
+possiede).
+
+| App (`<APP_PREFIX><ruolo>`) | Permessi | Note |
+|---|---|---|
+| `dispatcher` | actions: write, checks: read, contents: read, issues: write, pull_requests: write, statuses: read | `actions: write` per rilanciare i job CI falliti non pertinenti (#200) |
+| `merger` | contents: write, pull_requests: write | solo i merge (#201) |
+| `claude-agent`, `codex-agent`, `agy-agent` | contents: write, issues: write, pull_requests: write, actions/checks/statuses: read | con l'ADR 0005, quando l'implementer è un'app a sé, i reviewer scendono a contents: read |
+| `implementer` | contents: write, issues: write, pull_requests: write | **mai `workflows`**: senza quel permesso GitHub rifiuta i push che cambiano `.github/workflows/` |
+| `supervisor` | issues: write, pull_requests: write | **nessun contents** |
+
+Nessuna app ha `workflows` o permessi di amministrazione. I permessi che devloop chiede per ogni
+azione sono in `devloop/apps.py` (`IMPLEMENT`, `REVIEW`, `PR_COMMENT`, `ISSUE_COMMENT`, `MERGE`,
+`RERUN`); un test (`tests/test_ops.py`) controlla che i manifest li coprano.
+
+```bash
+bash ops/github/create-apps.sh --dry-run            # le app e i loro permessi
+bash ops/github/create-apps.sh --out ~/create-apps.html
+```
+
+La pagina generata ha un pulsante per app; va aperta nel browser con la sessione GitHub del
+proprietario del repository (`GITHUB_OWNER_TYPE=org` per un'organizzazione). Per ciascuna app:
+
+1. **Crea**: GitHub mostra la pagina di creazione già compilata dal manifest; confermare. Se il
+   nome è già usato, l'app esiste già: saltarla. Dopo la creazione GitHub torna alla pagina del
+   repository con un parametro `code`: non serve, l'app è già creata.
+2. **Installa**: *Install App* → *Only select repositories* → solo il repository gestito.
+3. **Chiave privata**: *Generate a private key*. Il file scaricato, `<slug>.<data>.private-key.pem`,
+   va nella `key_dir` dell'utente che usa l'app (passo 4), mode 600, e poi tolto dai Download.
+4. **Configurazione**: `app_id` e `slug` (non segreti) in `[apps]` di `devloop/config.toml`, con
+   una PR. Le app `implementer` e `supervisor` non sono ancora in `[apps]`: si creano quando
+   servono (ADR 0005, P5-4).
+
+Se una regola del branch principale limita chi può fare push o merge, aggiungere `merger` fra gli
+ammessi.
+
+### 3. Ruleset del branch principale
+
+`ops/github/ruleset-main.json` è il ruleset attuale: niente cancellazione né force push; PR
+obbligatoria, con merge `merge`, `squash` o `rebase`; check obbligatori `Unit Tests (Python 3.12)`
+e `Isolated A5 Recovery Benchmark` di GitHub Actions (`integration_id` 15368); bypass solo per il
+ruolo admin (`actor_id` 5); si applica al branch di default (`~DEFAULT_BRANCH`).
+
+Lo applica l'operatore, con il proprio login `gh` di amministratore (non con il token del
+supervisore). Per non crearne un doppione, si aggiorna quello che c'è:
+
+```bash
+REPO=brushtyler/ssdlc
+id=$(gh api "repos/$REPO/rulesets" --jq '.[] | select(.name == "main") | .id')
+if [ -z "$id" ]; then
+    gh api -X POST "repos/$REPO/rulesets" --input ops/github/ruleset-main.json
+else
+    gh api -X PUT "repos/$REPO/rulesets/$id" --input ops/github/ruleset-main.json
+fi
+```
+
+**Raccomandato:** chiedere una nuova approvazione dopo un push, così un commit aggiunto dopo
+l'approvazione non entra senza una review. Il JSON non ammette commenti, quindi l'opzione è qui:
+in `ruleset-main.json`, nella regola `pull_request`, impostare
+
+```json
+"required_approving_review_count": 1,
+"dismiss_stale_reviews_on_push": true,
+"require_last_push_approval": true
+```
+
+`dismiss_stale_reviews_on_push` e `require_last_push_approval` contano solo con almeno
+un'approvazione obbligatoria. Prima di attivarle verificare che le approvazioni che servono
+(quelle dei reviewer di devloop o dell'operatore) arrivino da identità che il ruleset conta.
+
+Per un altro progetto: i nomi dei check obbligatori sono quelli dei job della sua CI.
+
+### 4. Host di devloop
+
+```bash
+sudo bash ops/host/setup-devloop.sh --dry-run    # cosa farebbe
+sudo bash ops/host/setup-devloop.sh
+```
+
+Installa i pacchetti che mancano (`python3`, `git`, `gh`, `openssl`, `acl`, `nodejs`, `npm`, …),
+crea l'utente `devloop` e il suo clone, `state_dir` con `run.log`, l'overlay d'esempio (solo se non
+esiste), `~/.ghapps`, `~/.claude` e `~/.codex` con mode 700, `~/.claude/settings.json` con gli
+aggiornamenti automatici spenti (solo se non esiste), e l'unità `devloop.service`. Non avvia il
+servizio.
+
+Poi le **chiavi**: in `key_dir` di `devloop` (`/home/devloop/.ghapps`) quelle delle app che usa il
+dispatcher (`DEVLOOP_KEYS`: `dispatcher`, `merger`, `claude-agent`, `codex-agent`, `agy-agent`):
+
+```bash
+sudo install -o devloop -g devloop -m 600 <slug>.<data>.private-key.pem /home/devloop/.ghapps/
+```
+
+### 5. CLI degli agent (passi manuali)
+
+Le CLI e i loro login non sono automatizzati: il login è interattivo e ogni fornitore ha il suo
+installatore. Tutto come utente `devloop` (`sudo -iu devloop`), con gli eseguibili in
+`~/.local/bin`, che è il primo elemento del `PATH` del servizio:
+
+| CLI | Installazione | Eseguibile |
+|---|---|---|
+| `claude` | `npm install -g --prefix ~/.local @anthropic-ai/claude-code` | `~/.local/bin/claude` |
+| `codex` | installazione standalone del fornitore, in `~/.codex/packages/standalone` | raggiungibile come `~/.local/bin/codex` |
+| `agy` | secondo le istruzioni del fornitore | `~/.local/bin/agy` |
+
+Per ciascuna: login (`claude`, `codex`, `agy` avviati una volta in una sessione interattiva) e
+verifica con `~/.local/bin/<cli> --version`.
+
+Gli aggiornamenti automatici restano spenti: devloop non deve avviare un turno mentre una CLI
+sostituisce il proprio eseguibile. Per Claude Code, `~/.claude/settings.json` con
+`"autoUpdates": false` e `"env": {"DISABLE_AUTOUPDATER": "1"}` (lo scrive `setup-devloop.sh`), e il
+launcher esporta `DISABLE_AUTOUPDATER=1`. Le CLI si aggiornano a mano con il loop fermo
+([docs/devloop/guide.md](../docs/devloop/guide.md#agent-clis)).
+
+### 6. Overlay e primo pin
+
+L'overlay `/home/devloop/ssdlc/.ssdlc/devloop/config.local.toml` contiene solo le chiavi che
+l'operatore sovrascrive (merge mode, `[pin] auto`, `[run] alert_issue`, …); quello d'esempio è
+tutto commentato. Poi il primo pin, che fa anche lo smoke test:
+
+```bash
+sudo -u devloop -H sh -c 'cd ~/ssdlc && python3 -m devloop pin origin/main'
+```
+
+### 7. Host del supervisore
+
+```bash
+sudo bash ops/host/setup-supervisor.sh --dry-run
+sudo bash ops/host/setup-supervisor.sh
+```
+
+Crea l'utente `supervisor`, gli dà **solo l'attraversamento** della home di devloop
+(`setfacl -m u:supervisor:--x /home/devloop`: raggiunge i log per percorso, ma non elenca la home,
+e `~/.ghapps`, `~/.claude` e `~/.codex` di devloop restano 700), installa il sudoers minimale dopo
+averlo validato con `visudo -c`, clona il repository e prepara `key_dir` e `~/.claude` (700).
+
+Il **sudoers** (`ops/host/sudoers-supervisor`) permette:
+
+- come `devloop`, solo `scripts/devloop-pinned` con `status`, `status *`, `watch *`, `report *`,
+  `tick --dry-run` e `pin *` (con `Defaults>devloop always_set_home, secure_path=…`);
+- come root, solo `systemctl start|stop|restart devloop` e `systemctl status devloop *`.
+
+Nessun comando scrive sull'overlay di devloop. Per esempio:
+
+```bash
+sudo -u devloop /usr/bin/python3 /home/devloop/ssdlc/scripts/devloop-pinned status
+sudo /usr/bin/systemctl restart devloop
+tail -f /home/devloop/ssdlc/.ssdlc/devloop/run.log
+```
+
+Poi, a mano:
+
+- **chiavi** in `key_dir` del supervisore (`/home/supervisor/.ghapps`, 600): solo `supervisor` e,
+  finché P5-4 non è attivo, `claude-agent`. Le scritture del supervisore passano da
+  `scripts/agent-token.py`, che conia un token con i soli permessi dell'azione (oggi lo script
+  accetta gli attori `claude`, `codex` e `agy`);
+- **token di sola lettura** per `gh` ([github/tokens.md](github/tokens.md));
+- **Claude Code** come utente `supervisor`, con lo stesso `npm install` del passo 5 e il login;
+- gli strumenti del diario (`~/supervisor`) e la memoria di Claude Code non vengono dal
+  repository: su una macchina nuova si copiano da quella vecchia ([host/migrate.md](host/migrate.md)).
+
+### 8. Verifica
+
+```bash
+sudo bash ops/host/check-host.sh             # esce con 1 se trova errori
+sudo bash ops/host/check-host.sh --no-apps   # senza interrogare GitHub
+```
+
+Verifica gli utenti; `key_dir`, `~/.claude` e `~/.codex` con mode 700 e il proprietario giusto;
+ogni chiave `*.pem` con mode 600 e del suo utente, una chiave per app attesa e, nella `key_dir`
+del supervisore, nessuna chiave in più; l'ACL `user:supervisor:--x` sulla home di devloop e
+nessuna ACL per il supervisore sulle sue directory private; che il supervisore legga `run.log`;
+il sudoers (440, root, accettato da `visudo`, uguale a quello generato); l'unità (uguale a quella
+generata, `KillMode=mixed`) e lo stato del servizio; `--version` di ogni CLI; e `devloop apps`
+(ogni app, la sua installazione e i suoi permessi). Con `--dry-run` stampa, senza eseguirle, le
+verifiche che passano da `sudo` o dalla rete.
+
+Poi, come in [docs/devloop/guide.md](../docs/devloop/guide.md#installation-as-a-dedicated-user):
+
+```bash
+sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned status
+sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned tick --dry-run
+```
+
+### 9. Avvio
+
+L'attivazione è dell'operatore: il loop spende le quote degli agent.
+
+```bash
+sudo systemctl start devloop
+sudo systemctl enable devloop       # se deve ripartire al boot
+sudo -u devloop -H tail -f /home/devloop/ssdlc/.ssdlc/devloop/run.log
+```
+
+L'unità (`ops/host/devloop.service`) è quella dell'installazione attuale: utente `devloop`,
+`WorkingDirectory` sul clone, `PYTHONUNBUFFERED=1`, il `PATH` con `~/.local/bin` prima,
+`ExecStart` sul launcher della copia fissata, stdout e stderr in append su `<state_dir>/run.log`,
+`KillMode=mixed` (SIGTERM solo al processo principale: devloop smette di pianificare e aspetta le
+azioni in corso, fino a `agent_timeout_seconds`), `TimeoutStopSec=4200`, `Restart=on-failure`
+con `RestartSec=60`, e `RestartPreventExitStatus=4` (dopo l'allarme di tre tick falliti il loop
+resta fermo, come descritto in *Continuous loop* della guida di devloop).
+
+## Migrazione su un'altra macchina
+
+Vedi [host/migrate.md](host/migrate.md): cosa copiare dallo `state_dir` e dal supervisore, cosa
+ricreare (copie fissate, login delle CLI, servizio), come trattare le chiavi delle app e in che
+ordine, senza mai due dispatcher attivi sullo stesso repository.
+
+## Un altro progetto
+
+devloop lavora sul repository che lo contiene: `pin` estrae devloop dallo stesso repository di cui
+crea i worktree. Per usarlo su un altro progetto, quindi, **il repository gestito contiene
+devloop**. Separare l'installazione dal repository gestito è fuori dal perimetro di questa guida.
+
+1. **Portare devloop nel repository** (con una PR, come ogni cambiamento):
+   - `devloop/` (con i prompt, `devloop/prompts/`, e gli schemi, `devloop/schemas/`);
+   - `core/`, che devloop importa per il budget;
+   - `scripts/devloop-pinned` (il launcher) e `scripts/agent-token.py` (le scritture del
+     supervisore con la sua app);
+   - `schemas/`, almeno i file che `review_policy.sensitive_path_lists` elenca: `pin` li estrae e
+     rifiuta una copia in cui mancano;
+   - `ops/`, per ricreare l'installazione;
+   - un `AGENTS.md` per gli agent: i prompt di `devloop/prompts/` chiedono di leggerlo, e citano la
+     sezione "Developing SSDLC" del README: adattarli al progetto.
+2. **Configurare `devloop/config.toml`** ([docs/devloop/reference.md](../docs/devloop/reference.md)
+   descrive ogni chiave):
+   - `repo`, `base_branch`, `branch_prefix`, `language`, `trusted_users`;
+   - `test_cmd` con la suite del progetto. `local_tests = "changed"` e `ci_rerun_unrelated`
+     presuppongono la struttura di questo repository (`tests/test_*.py`, le righe `FAILED MODULE`
+     di `scripts/run-tests.py`): altrove usare `local_tests = "full"` o `"none"` e
+     `ci_rerun_unrelated = false`;
+   - `[apps]`: `app_id` e `slug` delle app create al passo 2, con un `APP_PREFIX` nuovo;
+   - `[roles]` e `[agents.*]`: implementer, reviewer, supervisore e modelli;
+   - `protected_paths`, `review_policy.sensitive_paths` e `sensitive_path_lists`,
+     `merge.operator_only_paths` e `[docs.map]`, con i percorsi del progetto;
+   - i check della CI in `[review_policy.zero] checks`, se si usa il livello 0.
+3. **Parametri**: un `ops/params.env` con `REPO`, `APP_PREFIX`, utenti e percorsi del progetto.
+   Due progetti sulla stessa macchina usano utenti distinti (`DEVLOOP_USER`, `SUPERVISOR_USER`),
+   un `SERVICE_NAME` e un `SUDOERS_FILE` distinti: ogni dispatcher ha il suo clone, il suo
+   `state_dir`, le sue chiavi e il suo servizio.
+4. **GitHub**: app nuove dai manifest (`create-apps.sh`), installate solo sul nuovo repository;
+   un ruleset con i check della sua CI; un token di sola lettura per il suo supervisore.
+5. **Host**: i passi 4-9 sopra, con quei parametri.
+6. **Label**: devloop lavora sulle issue con `agent:ready` e usa le label descritte nella sua
+   guida; crearle sul nuovo repository se mancano.

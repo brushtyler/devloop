@@ -1,0 +1,19 @@
+{
+  "name": "implementer",
+  "description": "devloop: l'implementer come app a sé (ADR 0005). Mai il permesso workflows.",
+  "url": "https://github.com/@REPO@",
+  "hook_attributes": {
+    "url": "https://github.com/@REPO@",
+    "active": false
+  },
+  "redirect_url": "https://github.com/@REPO@",
+  "public": false,
+  "request_oauth_on_install": false,
+  "default_permissions": {
+    "contents": "write",
+    "issues": "write",
+    "metadata": "read",
+    "pull_requests": "write"
+  },
+  "default_events": []
+}

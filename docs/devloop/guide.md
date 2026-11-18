@@ -1491,7 +1491,10 @@ and prompts come from the pinned copy; GitHub state and worktrees come from the 
 
 #### Installation as a dedicated user
 
-The installation in use since 2026-11-16 (#185):
+The installation in use since 2026-11-16 (#185). To recreate it on another machine, together
+with the supervisor's user, its sudoers and the GitHub Apps, or to reuse it for another project,
+see the [ops guide](../../ops/README.md) (#402): parametric scripts, the systemd unit, the app
+manifests, a host check and the migration steps.
 
 - an unprivileged system user `devloop`, with a clone of its own (`/home/devloop/ssdlc`);
 - state, pinned copies and the local config in `.ssdlc/devloop` of that clone;
