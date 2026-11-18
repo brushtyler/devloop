@@ -807,6 +807,30 @@ def activate(ticket, sha, *, clock=time.time, guard=lambda: None, fault=lambda p
 
 # --- status ---------------------------------------------------------------
 
+def expiries(ticket, deadline_at, now):
+    """The run deadline and the authorizations bound to the run that an extension does not renew.
+
+    The feedback recording authority keeps its own frozen expiry: extending the
+    run deadline never renews it, so it is listed as still expired when it is.
+    Read-only; nothing is repaired or renewed.
+    """
+    run = None if deadline_at is None else dict(deadline_at=deadline_at,
+                                                 status='EXPIRED' if now >= deadline_at else 'ACTIVE')
+    dependent = []
+    if (ticket / 'feedback').exists() or (ticket / 'feedback').is_symlink():
+        from ssdlc_feedback import FeedbackStore, recording_status
+        row = dict(authorization='feedback-recording', renewed_by_run_extension=False)
+        try:
+            authority, state = FeedbackStore(ticket)._read()
+            if authority.get('status') != 'ACTIVE' or state is None:
+                raise LimitExtensionError('incomplete')
+            row.update(recording_status(authority['policy'], now))
+        except (TaskError, OSError, ValueError, KeyError, TypeError):
+            row.update(status='INVALID', reason='FEEDBACK_RECORDING_INCOMPLETE_OR_INVALID')
+        dependent.append(row)
+    return dict(run_deadline=run, dependent_authorizations=dependent)
+
+
 def status(ticket, *, clock=time.time):
     """Read-only list of proposals, authorizations, receipts and the bound chain."""
     ticket = _ticket(ticket)
@@ -844,12 +868,20 @@ def status(ticket, *, clock=time.time):
             unwind(envelope, generation)
     except (TaskError, OSError, ValueError, KeyError, TypeError) as exc:
         refusal = str(exc)[:240]
+    deadline_at = None
+    try:
+        path = root / 'limits/task-journal.jsonl'
+        if not path.is_symlink():
+            deadline_at = _peek(path)['deadline_at']
+    except (TaskError, OSError, ValueError, KeyError, TypeError):
+        pass
     return dict(ticket=ticket.name, source=kind, generation=generation,
                 pending=None if pending is None else pending['proposal_sha256'],
-                proposals=records, chain=chain, integrity_error=refusal, model_dispatches=0)
+                proposals=records, chain=chain, integrity_error=refusal,
+                **expiries(ticket, deadline_at, clock()), model_dispatches=0)
 
 
-def describe(source):
+def describe(source, *, clock=time.time):
     """Inspection output: facts and eligibility, never authority."""
     try:
         eligibility(source)
@@ -860,7 +892,8 @@ def describe(source):
                 status=source['state'].get('status'), eligible=refusal is None, refusal=refusal,
                 profile=source['envelope']['policy'], parent=parent(source),
                 consumption=consumption(source['envelope'], source['counters'], source['scheduler']),
-                chain=entries(source['envelope']), model_dispatches=0)
+                chain=entries(source['envelope']),
+                **expiries(source['ticket'], source['counters']['deadline_at'], clock()), model_dispatches=0)
 
 
 def main(argv=None):

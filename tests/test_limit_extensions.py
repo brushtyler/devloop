@@ -23,7 +23,11 @@ class Fault(Exception):
 
 
 def events(path):
-    return [json.loads(line)['event'] for line in Path(path).read_text().splitlines()]
+    return events_of(Path(path).read_bytes())
+
+
+def events_of(raw):
+    return [json.loads(line)['event'] for line in raw.decode().splitlines()]
 
 
 class NativeFixture:
@@ -763,6 +767,60 @@ class FeedbackLedgerTests(unittest.TestCase):
         state = self.store._read()[1]
         self.assertEqual(len(feedback_lineage(state, LimitsStore(self.root)._load(repair=False)[0])), 3)
         self.consult()
+
+    def test_expired_recording_stays_expired_and_blocking_after_a_run_deadline_extension(self):
+        """#168: the run is extended, the dependent recording is neither renewed nor recreated."""
+        from ssdlc_feedback import RECORDING_EXPIRED, FeedbackStore, RecordingExpired
+        from ssdlc_feedback_delivery import metrics
+        from ssdlc_feedback_roles import FundedFeedbackRoles
+        deadline = self.counters['deadline_at']
+        late = deadline + 60
+        clock = lambda: late
+        store = FeedbackStore(self.ticket, clock=clock)
+
+        def consult():
+            return FundedFeedbackRoles(store, LimitsStore(self.root, clock), guard=lambda: None)._authority()
+        authority_bytes = (self.ticket / 'feedback/authority.json').read_bytes()
+        history = self.journal.read_bytes()
+        # The consultation depends on the recording and is blocked with an explicit reason.
+        with self.assertRaises(RecordingExpired) as caught:
+            consult()
+        self.assertEqual(caught.exception.expires_at, deadline)
+        self.assertIn(RECORDING_EXPIRED, str(caught.exception))
+        before = describe(inspect(self.ticket, clock=clock), clock=clock)
+        self.assertEqual(before['run_deadline'], dict(deadline_at=deadline, status='EXPIRED'))
+        self.assertEqual([row['status'] for row in before['dependent_authorizations']], ['EXPIRED'])
+        # Operations that do not depend on the recording proceed: the run deadline is extended.
+        new = late + 3600
+        sha = propose(self.ticket, self.request('deadline_at', new, 'extend_deadline'), clock=clock)['proposal_sha256']
+        approve(self.ticket, sha, expires_at=late + 600, actor='operator', source_fenced=True, clock=clock)
+        activate(self.ticket, sha, clock=clock)
+        self.assertEqual(LimitsStore(self.root, clock)._load(repair=False)[1]['deadline_at'], new)
+        # Status and evidence show the run active again and the recording still expired.
+        expected = dict(authorization='feedback-recording', renewed_by_run_extension=False, status='EXPIRED',
+                        expires_at=deadline, reason=RECORDING_EXPIRED,
+                        blocked_operations=store.recording()['blocked_operations'],
+                        renewal='SEPARATE_CONTRACT_REQUIRED')
+        for result in (status(self.ticket, clock=clock), describe(inspect(self.ticket, clock=clock), clock=clock)):
+            self.assertEqual(result['run_deadline'], dict(deadline_at=new, status='ACTIVE'))
+            self.assertEqual(result['dependent_authorizations'], [expected])
+        self.assertEqual(store.public_projection()['recording']['status'], 'EXPIRED')
+        self.assertEqual(metrics(store)['recording']['expires_at'], deadline)
+        with self.assertRaises(RecordingExpired):
+            consult()
+        # No implicit renewal and no recreated ledger: the frozen authority is
+        # byte-identical and the history only grows by the recorded extension.
+        self.assertEqual((self.ticket / 'feedback/authority.json').read_bytes(), authority_bytes)
+        self.assertTrue(self.journal.read_bytes().startswith(history))
+        self.assertEqual(events(self.journal)[len(events_of(history)):], ['FEEDBACK_LIMITS_EXTENDED'])
+        with self.assertRaises(RecordingExpired):
+            store.authorize(self.policy, dict(schema_version=1, policy_sha256=digest(self.policy),
+                                              authorized=True, source_fenced=True))
+        renewed = dict(self.policy, expires_at=new)
+        with self.assertRaisesRegex(TaskError, 'cannot be replaced'):
+            store.authorize(renewed, dict(schema_version=1, policy_sha256=digest(renewed),
+                                          authorized=True, source_fenced=True))
+        self.assertEqual((self.ticket / 'feedback/authority.json').read_bytes(), authority_bytes)
 
     def test_ledger_rows_outside_the_bound_chain_are_ignored(self):
         from ssdlc_limit_extensions import feedback_lineage

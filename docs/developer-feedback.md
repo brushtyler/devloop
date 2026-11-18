@@ -228,6 +228,31 @@ The F2 host API binds these receipts to native funded reservations and validates
 the exact accounting advance before delegated activation. Offline tests inject
 role responses; a production provider adapter belongs to F3.
 
+### Expired recording
+
+The recording authority expires at the policy's `expires_at` (an F3 bootstrap
+sets it to the run deadline of that moment). From then on, only the operations
+that depend on a live recording are blocked: new requests, proposals, reviews,
+role intents and funded consultations, prerequisite proposals, delegated
+transitions and owner revalidation. They stop before any write, with the
+explicit reason `FEEDBACK_RECORDING_EXPIRED` and the expiry. The consultation
+gate checks the expiry first, before any admission or reservation. Everything
+else proceeds: status, projections and metrics, the capture of a returned role
+response, the native run, and the [manual limit extensions](limit-extensions.md).
+
+The expiry is visible in the status and in the evidence: `feedback-status` and
+the `metrics` of `feedback-summary.json` carry
+`recording: {status: ACTIVE|EXPIRED, expires_at, reason, blocked_operations,
+renewal: SEPARATE_CONTRACT_REQUIRED}`.
+
+The recording is never renewed implicitly and its ledger is never recreated.
+Repeating the initialization, with the same policy or a renewed one, is
+refused and writes nothing. Extending the run deadline (`extend_deadline`)
+does not renew the recording: `limits inspect` and `limits status` show the
+run deadline (`run_deadline`) and, in `dependent_authorizations`, the recording
+still `EXPIRED` with `renewed_by_run_extension: false`. A renewal needs a
+separate contract.
+
 For native sources the ledger retains an accounting anchor. A fresh source after
 consultation can match the original request only when the captured native role
 returns prove the exact accounting advance. The original binding and model

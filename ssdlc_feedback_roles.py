@@ -10,7 +10,7 @@ import json
 import math
 
 from ssdlc_controller import execution_contract
-from ssdlc_feedback import FeedbackError, ROLES
+from ssdlc_feedback import FeedbackError, ROLES, require_recording
 from ssdlc_recovery import NotDispatched, QuiescentTimeout
 from ssdlc_tasks import TaskJournal, digest, ticket_lock
 from ssdlc_transitions import _regular
@@ -51,8 +51,11 @@ class FundedFeedbackRoles:
         if not raw.endswith(b'\n'):
             raise FeedbackError('Incomplete native accounting requires reconciliation before consultation')
         authority, feedback_state = self.feedback._read()
-        envelope, counters = self.limits._load(repair=False)
         p = authority['policy']
+        # A consultation depends on the recording: its expiry blocks it before
+        # any admission or reservation, even after a run deadline extension.
+        require_recording(p, self.feedback.clock())
+        envelope, counters = self.limits._load(repair=False)
         from ssdlc_feedback_delegation import admitted as admitted_generation
         # resolve_execution validates the sealed transition and reconciliation.
         # Its exact admission binds the envelope (including the controller),
