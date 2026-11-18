@@ -576,7 +576,8 @@ The exception is a PR whose open findings are all `ci` findings while the CI of 
 is still running, has not appeared yet within the wait of a just pushed head, or has passed while
 the review ran (#334): the CI can still close them, so the approval stays recorded and the PR
 waits in `agent:review`. When the CI passes, the next tick closes its findings and the approval is applied without a new review; when it
-fails, a new CI round opens as usual. A `ci` finding whose head CI has already concluded without
+fails, the failure joins the round that approved as a `ci` finding, without a round of its own,
+and voids its approval (one head, one round, #359, see [Approval and CI](#approval-and-ci)). A `ci` finding whose head CI has already concluded without
 passing goes to the operator. When a reviewer
 of the round asks for changes, the fix receives every open finding, whoever owns it.
 Once the operator has closed them, putting the PR back into `agent:review` applies the recorded

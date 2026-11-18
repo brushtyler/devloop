@@ -61,8 +61,12 @@ Readiness belongs to the approved commit. Every tick re-checks ready PRs:
 - if CI is running again on the approved commit, readiness is suspended (`agent:review`) and the
   recorded approval is applied again, without a new review, once CI passes and if its policy
   receipt still matches;
-- if CI fails on the approved commit, the failure becomes a review round (`agent:changes`), or,
-  when no failed test module is pertinent to the PR, a single re-run of the failed jobs
+- if CI fails on the approved commit, the failure joins the round that approved it as a `ci`
+  finding, without a round of its own (one head, one round, #359): the approval decays and the
+  PR goes to `agent:changes` for the fix. An approval already void, without a policy receipt or
+  with a receipt found stale, still takes a CI round of its own; a
+  [level 0](reference.md#level-0-no-review) promotion goes back to `agent:review` instead. When
+  no failed test module is pertinent to the PR, the failed jobs are re-run once first
   ([CI failures not pertinent to the PR](reference.md#ci-failures-not-pertinent-to-the-pr)).
 
 Any step can stop at `agent:needs-operator` with a comment explaining why: the
