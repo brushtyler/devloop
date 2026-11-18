@@ -260,13 +260,29 @@ while the receipt of the round still waits for other reviewers.
 | `hash` | SHA-256 of the proposal's text: the content evaluated |
 | `stale` | why the frozen context stopped holding, `""` otherwise |
 | `outcome` | `UNANIMOUS`, `BLOCKED` or `RESERVED`; `""` while the conclave is open |
+| `resumed` | since #142, absent or null until a `UNANIMOUS` decision restarts the work, then `{evidence}`: the file of the dispatcher's logs with the uncommitted changes of the agent that stopped (`{file, bytes, sha256}`), or null when there were none |
 
 A record is read back only from the dispatcher's identity and with a valid structure, and it must
 hold together: `hash` is the hash of the recorded text, every vote was given on that hash, every
 contribution done records its `profile`, the profiles distinct two by two by identity and by
-`(kind, model, effort)`, and the recorded outcome is the one its contributions give. A record that does not hold is logged and
+`(kind, model, effort)`, the recorded outcome is the one its contributions give, and only a
+`UNANIMOUS` one is `resumed`. A record that does not hold is logged and
 left to the operator: the block gets no other conclave. Each call is also a ledger `turn` of kind
 `conclave` ([Evidence and telemetry](#evidence-and-telemetry)).
+
+**After the decision (#142).** The latest decision of an issue and its PR is the `UNANIMOUS`
+record, among those that hold, with the greatest comment id (GitHub's comment ids grow with
+time) on the thread of its block: `step` `implement` on the issue, `fix` or `review` on the PR,
+with `issue` the issue's number. Its resolution reaches a prompt only while `issue_hash` is the
+hash of the issue's request read now, `head`, when not null, is the head the step works on, and
+no trusted user wrote `/devloop veto` after it on either thread. A step that ran with it records
+the comment id of the record in `conclave`: in the `pr` marker of the implementation, in the
+`fix` and `review` markers, and in the `notice` of an agent that stopped, which then convenes no
+other conclave. The escalation of a veto (`class: conclave_veto`) records in its `notice` the
+comment of the decision (`veto_of`) and of the veto (`veto`): it spends that veto, and a PR is
+suspended once per decision. A `review` block whose record is `resumed`, on the PR's head and on
+its latest round, is not replayed: the next review opens a new round, as after `/devloop
+rereview`.
 
 ## Receipts
 

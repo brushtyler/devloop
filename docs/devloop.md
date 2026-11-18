@@ -6,7 +6,10 @@ split into three pages:
 - [Guide](devloop/guide.md), for the operator and the supervisor: the loop, labels and
   `/devloop` commands, merge modes and escalations, the conclave of three agents on a block
   (`conclave`, disabled by default: [Conclave on a block](devloop/guide.md#conclave-on-a-block)),
-  watching a tick and the continuous loop, the
+  with the restart of the work after a unanimous decision, the verified resolution in the
+  prompts and its annulment with `/devloop veto`
+  ([After a unanimous decision](devloop/guide.md#after-a-unanimous-decision),
+  [Veto](devloop/guide.md#veto)), watching a tick and the continuous loop, the
   installation from the dedicated user to the rollback (keys, agent CLIs, pin, overlay, start
   and stop), limits.
 - [Reference](devloop/reference.md): configuration, local tests, documentation map, agents and

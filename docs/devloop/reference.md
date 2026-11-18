@@ -17,7 +17,10 @@ than the implementer. `conclave` (absent by default) lists the three agents of t
 [conclave on a block](guide.md#conclave-on-a-block) (#141): exactly three configured agents,
 different from each other and with different `(kind, model, effort)`; anything else stops devloop
 at startup. Their fallback models are checked when each call runs: one whose tuple coincides with
-another member's is not used. Among the limits, `agent_stall_seconds` (an integer of at least 1, default 900)
+another member's is not used. The prompts of `implement`, `fix` and `review`
+(`devloop/prompts/`) end with `$conclave`: the verified resolution of the latest `UNANIMOUS`
+decision on the issue or its PR, or nothing ([After a unanimous
+decision](guide.md#after-a-unanimous-decision)). Among the limits, `agent_stall_seconds` (an integer of at least 1, default 900)
 and `agent_stall_action` (`"warn"`, the default, or `"abort"`) control the
 [stall check](guide.md#stalled-agents); other values stop devloop at startup. `max_parallel_actions`
 (default 1) sets how many actions of a tick run at once ([Parallel actions](#parallel-actions)).
@@ -741,7 +744,7 @@ Each agent and the dispatcher can act on GitHub with its own GitHub App (#65), c
 
 | Actor | Does |
 |---|---|
-| dispatcher | every read, labels, escalations, CI rounds, re-runs of failed CI jobs not pertinent to the PR (needs `actions: write`, see [CI failures not pertinent to the PR](#ci-failures-not-pertinent-to-the-pr)), finding closures, a PR's readiness for merge, the labels of the readiness check and its escalation to the supervisor, the record of a [conclave](guide.md#conclave-on-a-block) |
+| dispatcher | every read, labels, escalations, CI rounds, re-runs of failed CI jobs not pertinent to the PR (needs `actions: write`, see [CI failures not pertinent to the PR](#ci-failures-not-pertinent-to-the-pr)), finding closures, a PR's readiness for merge, the labels of the readiness check and its escalation to the supervisor, the record of a [conclave](guide.md#conclave-on-a-block), the restart after a `UNANIMOUS` decision and the suspension after a [veto](guide.md#veto) |
 | readiness checker (`preflight`) | the outcome of the [readiness check](guide.md#readiness-check-before-implementation) on the issue, with its `preflight` record, also when a fallback model ran it |
 | implementer | commits (author and committer are its bot), push, opens the PR, fix and blocked comments |
 | reviewer | one native GitHub review (`APPROVE`, `REQUEST_CHANGES` or `COMMENT`) on the reviewed commit, whose body is the review and its record (#325, see [Where a review is published](protocol.md#where-a-review-is-published)); an agent without an app publishes the review comment instead |

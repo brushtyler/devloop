@@ -349,8 +349,10 @@ With `conclave = ["claude", "codex", "agy"]` in the configuration (#141, part 2 
 block gets a conclave of three agents that votes on one written resolution. The distributed
 `devloop/config.toml` leaves it **disabled**, with a commented example: enabling it is the
 operator's decision. Without `conclave` the escalation is the one described above, and nothing
-else happens. This part produces and records the decision only: **nothing is unblocked**, the
-issue or PR stays in `agent:needs-operator`, and the operator decides as before.
+else happens. A `UNANIMOUS` decision restarts the work once (#142, [After a unanimous
+decision](#after-a-unanimous-decision)), and a trusted user can annul it with `/devloop veto`
+([Veto](#veto)). With any other outcome nothing is unblocked: the issue or PR stays in
+`agent:needs-operator`, and the operator decides as before.
 
 **When.** A block is an escalation to the operator of one of these kinds, when it is the latest
 escalation of the issue or PR and nothing moved the item on after it (a review, fix or sync
@@ -444,6 +446,68 @@ later tick; a call **started without a durable result** (a crash after the start
 failure, that is `BLOCCA`, and is not repeated. A failed `conclave` action, or one stopped by an
 unexpected error of the dispatcher (with `max_parallel_actions` above 1 too), is only logged: the
 item is already the operator's, and no other escalation is added, which would end the block.
+
+#### After a unanimous decision
+
+A `UNANIMOUS` decision restarts the step that stopped **once** (#142, part 3 of #114), with one
+more `conclave` action on a later tick, while the item is still in `agent:needs-operator` (not in
+`agent:needs-supervisor`). Before anything restarts, the dispatcher marks the record `resumed`:
+a restart is never repeated, also after a crash.
+
+- **Implementation or fix.** The step restarts from the **published commit**, as it always does:
+  the implementation from the base branch, on its branch created again, a fix from the PR's
+  head. The changes the agent that stopped left uncommitted in its worktree are not taken up as
+  work: the dispatcher saves them as a diff in its logs (`<state_dir>/logs/conclave-<issue-n or
+  pr-n>-<comment>.diff`), and the record cites the file, its size and its SHA-256 as
+  **evidence**. The implementation runs at once, within the same action, and takes a free slot
+  of `max_open_prs` as any implementation (without one it waits for a later tick); it does not
+  restart when the readiness check no longer covers the text, or the issue already has a devloop
+  PR, open or merged. A fix goes back to `agent:changes`, and the next tick runs it.
+- **Review with `needs_operator`.** The PR goes back to `agent:review`: the verdict of the block
+  is **not applied again**, and the next tick reviews the same head in a new round, within the
+  rounds `max_review_rounds` still allows; with none left the PR escalates for the round limit,
+  as usual.
+
+No limit, round or slot grows. The normal review of the PR and the human merge stay mandatory
+after every restart: the decision only settles the gap the step stopped on.
+
+**What reaches the prompts.** The trust in bots' comments does not widen, and `trusted_users`
+stays as it is. The prompts of the implementation, of the fixes and of the reviews of that issue
+and of its PR get **only the verified record** of the latest decision: a `conclave` record the
+dispatcher signed, that holds together, with outcome `UNANIMOUS`, on the thread of its block (an
+implementation on the issue, a fix or a review on the PR), with the resolution, the block it
+settled and the comment that records it. A comment of any other author, a bot included, never
+reaches a prompt as a resolution. The resolution **lapses**, and no prompt gets it, when:
+
+- the content it was taken on changed: the hash of the issue's request (title, body and trusted
+  comments, as for the [readiness check](#readiness-check-before-implementation));
+- on a PR, the head it was bound to changed (a decision on a fix or a review); a decision on an
+  implementation is bound to the issue's text only, and reaches the PR's fixes and reviews too;
+- a trusted user vetoed it.
+
+Every step that ran with a resolution records the comment of the decision (`conclave`) in its
+marker: the PR's, the fix's, the review's, or the notice of an agent that stopped. A block raised
+by such a step convenes **no other conclave**: the escalation stays with the operator, so that
+the protocol stays finite.
+
+#### Veto
+
+A trusted user annuls the latest applicable decision with a comment whose **first line** is
+`/devloop veto`, optionally followed by a reason, on the issue or on its PR. The same command
+from anyone else, a bot or a devloop app included, is ignored and logged.
+
+- The decision is annulled at once: from then on no prompt gets its resolution, and a decision
+  not yet applied no longer restarts anything.
+- From the next tick the steps after it are **suspended**: a PR devloop works on (`agent:review`,
+  `agent:changes` or `agent:ready-to-merge`) goes to `agent:needs-operator` with an escalation of
+  class `conclave_veto`, before any other action of the tick on it, a merge included. The
+  escalation records the decision and the veto, which it spends.
+- Before publishing anything a step produced with the resolution (the push of an implementation
+  or of a fix, a review), the dispatcher reads the comments again: with a veto written meanwhile
+  it publishes nothing, and suspends the item the same way. The implementation's commit stays in
+  the local worktree.
+- Commits already published are not reverted. A veto after the merge has no effect: the merge
+  stays a human act.
 
 ## Merge modes
 
@@ -583,6 +647,7 @@ check, and the `policy` marker of a level that cannot be reviewed or promoted. A
 | `tests_failed`, `blocked`, `interrupted`, `unattributable`, `lost_meta`, `inconsistent`, `configuration`, `failure` | Tests still failing (or no change), an agent that declared itself blocked, an interrupted implementation, findings without an owner, a lost PR marker, an inconsistent PR state, a configuration to decide, a `gh`, git or dispatcher error | Yes |
 | `receipt_conflict` | The [receipt of the PR](protocol.md#pr-receipt) contradicts the markers at its promotion | Yes |
 | `retry_limit`, `supervisor_escalated`, `supervisor_refused` | The supervisor's retries are spent, it handed the escalation over, or it gave a command the escalation does not admit | Yes |
+| `conclave_veto` | A trusted user annulled the latest decision of a [conclave](#conclave-on-a-block) with `/devloop veto` | Yes |
 
 Any other class, or none (escalations written before #182), is critical.
 

@@ -122,6 +122,8 @@ class ActionsMixin:
         start = self.ws.head(path)
         key = self._issue_key('implement', start, issue['request'])
         criteria = acceptance_criteria(issue.get('body'))
+        # The verified resolution of a unanimous conclave on this issue, if any (#142).
+        decision, _, resolution = self._resolution_for(number, issue)
 
         def prompt(attempt):
             # #203: the first attempt has no diff yet and gets the whole map; a later one the
@@ -132,7 +134,8 @@ class ActionsMixin:
                              issue_number=number, issue_title=issue['title'],
                              issue_body=issue.get('body') or '', issue_comments=comments,
                              acceptance_criteria=format_criteria(criteria),
-                             test_cmd=cfg.test_cmd, language=cfg.language, docs=docs)
+                             test_cmd=cfg.test_cmd, language=cfg.language, docs=docs,
+                             conclave=resolution)
         try:
             result, failure, used, tested, local = self._write_turn(
                 agent, prompt, 'implement', path, f'issue-{number}-implement',
@@ -142,7 +145,7 @@ class ActionsMixin:
             raise
         if result['status'] == 'blocked':
             return self._blocked(number, used, result['blocked_reason'], remove=[lb.working],
-                                 on_pr=False, step='implement', head=start)
+                                 on_pr=False, step='implement', head=start, conclave=decision)
         if failure:
             return self._escalate(number, failure[0], failure[1], remove=[lb.working],
                                   cls='tests_failed')
@@ -153,6 +156,12 @@ class ActionsMixin:
         protected = self._protected_changes(path)
         if protected:
             return self._escalate_protected(number, protected, remove=[lb.working])
+        veto = self._veto_after(number, None, decision) if decision is not None else None
+        if veto:
+            # Nothing produced with a vetoed resolution is published (#142).
+            return self._veto_suspend(number, decision, veto, [lb.working],
+                                      'l\'implementazione prodotta con quella risoluzione non è '
+                                      'pubblicata: il commit resta nel worktree locale.')
         self.ws.push(path, branch, replace=True, auth=auth)
         self._pushed(path)
         # The marker keeps the map the reviewer checks until a fix replaces it (#134).
@@ -161,6 +170,8 @@ class ActionsMixin:
                 'acceptance_map': result['acceptance_map'],
                 # Informative only (#169): no receipt nor approval depends on it.
                 'local_tests': local, **skipped_models(used)}
+        if decision is not None:
+            meta['conclave'] = decision  # the resolution its prompt had (#142)
         body = publishable(self.runner.header(used) + '\n' + result['pr_body'].strip()
                            + '\n\n' + render_map(result['acceptance_map'])
                            + f'\n\nCloses #{number}', 'pr', meta)
@@ -408,6 +419,8 @@ class ActionsMixin:
         acceptance_map = latest_map(pr.meta, pr.fixes)
         # The jobs of the head's CI, their durations and test summaries (#300).
         ci_summary, ci_jobs = self._ci_summary(pr)
+        # The verified resolution of a unanimous conclave on the issue or the PR (#142).
+        decision, _, resolution = self._resolution_for(pr.issue, issue, pr, pr.head_sha)
         prompt = _template('review', repo=cfg.repo, base_branch=cfg.base_branch,
                            pr_number=pr.number, round=round_no, max_rounds=max_rounds,
                            implementer=pr.meta.get('implementer', cfg.implementer),
@@ -420,7 +433,7 @@ class ActionsMixin:
                            diff_stat=self.ws.diff_stat(path),
                            previous=format_previous_rounds(earlier, pr.fixes, pr.closures),
                            operator_comments=format_operator_comments(comments),
-                           language=cfg.language)
+                           language=cfg.language, conclave=resolution)
         level2 = receipt['level'] > 1
         authors = (self._authors(pr) or []) if level2 else []
         peers = [p for p in map(profile_of, done) if p]
@@ -484,6 +497,15 @@ class ActionsMixin:
             if failures:
                 raise _review_failure(failures)
             return
+        veto = (self._veto_after(pr.issue, pr.number, decision)
+                if decision is not None and len(failures) < len(turns) else None)
+        if veto:
+            # A verdict given with a vetoed resolution is not published (#142).
+            self.ws.remove(name)
+            return self._veto_suspend(pr.number, decision, veto,
+                                      [self.cfg.labels.review, self.cfg.labels.changes,
+                                       self.cfg.labels.ready_to_merge],
+                                      'la review data con quella risoluzione non è pubblicata.')
         records = list(done)
         for key, (raw, used), _ in (turn for turn in turns if turn[2] is None):
             review = normalize_review(raw, previous_open=previous_open, round_no=round_no,
@@ -499,6 +521,8 @@ class ActionsMixin:
                 review['resync'] = resync
             review['profile'] = self._profile(key, 'review', used)
             review.update(skipped_models(used))
+            if decision is not None:
+                review['conclave'] = decision  # the resolution its prompt had (#142)
             reviewer_gh = self._as(key, REVIEW)
             if self._app_login(key):
                 # One native review under the reviewer's own app (#325): its body is the
@@ -638,6 +662,8 @@ class ActionsMixin:
             self.log('  branch changed after the review; sending it back to review')
             self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.changes])
             return
+        # The resolution of a unanimous conclave, bound to the head the fix starts from (#142).
+        decision, _, resolution = self._resolution_for(pr.issue, issue, pr, head)
         start, merged = self._align_fix(pr, agent, path, remove=[lb.changes])
         if start is None:
             return
@@ -653,13 +679,14 @@ class ActionsMixin:
                                  acceptance_criteria(issue.get('body'))),
                              acceptance_map=format_map(latest_map(pr.meta, pr.fixes)),
                              docs=docs_diff_section(self._mapped_docs(path)),
-                             requests='', base_branch=cfg.base_branch, language=cfg.language)
+                             requests='', base_branch=cfg.base_branch, language=cfg.language,
+                             conclave=resolution)
         result, failure, used, tested, local = self._write_turn(
             agent, prompt, 'fix', path, f'pr-{pr.number}-fix-r{latest["round"]}',
             where=(pr.number, 'fix'))
         self._publish_fix(pr, agent, name, path, (result, failure, used, tested, local),
                           since=start, round_no=latest['round'], remove=[lb.changes],
-                          merged=merged)
+                          merged=merged, conclave=decision)
 
     def _align_fix(self, pr, agent, path, remove):
         """Bring the branch of a fix in ``path`` up to ``origin/<base>`` before its agent starts
@@ -696,21 +723,28 @@ class ActionsMixin:
         return head, {'base': target, 'head': head, 'from': previous}
 
     def _publish_fix(self, pr, agent, name, path, turn, since, round_no, remove, extra=None,
-                     merged=None):
+                     merged=None, conclave=None):
         """Publish the outcome of a fix ``turn`` (``_write_turn``'s result) in worktree
         ``path``: escalate a blocked agent or failing tests (removing ``remove``), otherwise
         commit and push the changes made since commit ``since``, record the fix of round
         ``round_no`` (with ``extra`` fields in its marker) and send the PR back to review.
         ``merged``: the merge of the base the dispatcher made before the turn (``_align_fix``),
-        pushed with the fix even when the agent changed nothing."""
+        pushed with the fix even when the agent changed nothing. ``conclave``: the comment of
+        the conclave decision whose resolution the turn had (#142), recorded with the fix or the
+        block; a veto of it written meanwhile publishes nothing."""
         lb = self.cfg.labels
         result, failure, used, tested, local = turn
         if result['status'] == 'blocked':
             return self._blocked(pr.number, used, result['blocked_reason'], remove=remove,
-                                 on_pr=True, step='fix', head=pr.head_sha)
+                                 on_pr=True, step='fix', head=pr.head_sha, conclave=conclave)
         if failure:
             return self._escalate(pr.number, failure[0], failure[1], remove=remove,
                                   cls='tests_failed')
+        veto = self._veto_after(pr.issue, pr.number, conclave) if conclave is not None else None
+        if veto:
+            return self._veto_suspend(pr.number, conclave, veto, remove,
+                                      'la correzione prodotta con quella risoluzione non è '
+                                      'pubblicata.')
         changes = self.ws.has_changes(path)
         if changes or merged:
             auth = self._git_auth(agent.key, IMPLEMENT)
@@ -733,6 +767,8 @@ class ActionsMixin:
                    **skipped_models(used), **(extra or {}))
         if merged:
             fix['base_merge'] = dict(merged, branch=self.cfg.base_branch)
+        if conclave is not None:
+            fix['conclave'] = conclave
         self._as(agent.key, PR_COMMENT).comment(
             pr.number, render_fix(fix, self.runner.header(used), round_no))
         self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.changes])
@@ -765,6 +801,7 @@ class ActionsMixin:
         if self.ws.head(path) != pr.head_sha:
             self.log('  head moved since the snapshot; retrying next tick')
             return
+        decision, _, resolution = self._resolution_for(pr.issue, issue, pr, pr.head_sha)
         start, merged = self._align_fix(pr, agent, path, remove=remove)
         if start is None:
             return
@@ -780,12 +817,13 @@ class ActionsMixin:
                                  acceptance_criteria(issue.get('body'))),
                              acceptance_map=format_map(latest_map(pr.meta, pr.fixes)),
                              docs=docs_diff_section(self._mapped_docs(path)),
-                             base_branch=cfg.base_branch, language=cfg.language)
+                             base_branch=cfg.base_branch, language=cfg.language,
+                             conclave=resolution)
         turn = self._write_turn(agent, prompt, 'fix', path, f'pr-{pr.number}-fix-request',
                                 where=(pr.number, 'fix'))
         self._publish_fix(pr, agent, name, path, turn, since=start, round_no=round_no,
                           remove=remove, extra={'requests': requests, 'from': pr.head_sha},
-                          merged=merged)
+                          merged=merged, conclave=decision)
 
     def _sync_rounds_note(self, pr, conflicts, fix):
         """What the comment of a sync of ``pr`` says of the next review (#289): with

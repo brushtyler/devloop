@@ -132,6 +132,11 @@ class ConclaveWS(FakeWS):
     def pending_diff(self, name, commit):
         return self.diff_text
 
+    def save_evidence(self, name, text):
+        self.evidence = getattr(self, 'evidence', {})
+        self.evidence[name] = text
+        return Path('/state/logs') / name
+
 
 class Base(unittest.TestCase):
     cfg = CCFG
@@ -197,9 +202,12 @@ class UnanimousTests(Base):
         self.assertIn('**UNANIMOUS**', body)
         self.assertIn('Coerente con l\'issue.', body)
         self.assertEqual(self.gh.labels[100], {NEEDS_OPERATOR})
-        # Read back: valid and consistent, and nothing left to do.
+        # Read back: valid and consistent; what is left is the restart of the work (#142), one
+        # action, and no other conclave.
         self.assertEqual(conclave.consistent(record), (True, ''))
-        self.assertIsNone(self.d._conclave_view(100, self.gh.pr_comments(100), self.target()))
+        view = self.d._conclave_view(100, self.gh.pr_comments(100), self.target())
+        self.assertTrue(view['resume'])
+        self.assertEqual(view['calls'], 1)
         # The calls ran on a disposable checkout of the block's commit.
         self.assertEqual(self.ws.copies[0], ('pr-100-conclave', SHA1, 'agent/issue-7'))
         self.assertEqual(self.ws.removed.count('pr-100-conclave'), 3)
@@ -447,7 +455,7 @@ class HashTests(Base):
 
 class ResumeTests(Base):
     def test_a_concluded_block_never_convenes_a_second_conclave(self):
-        self.make(proposal(), vote(), vote())
+        self.make(proposal(), vote('BLOCCA'), vote())
         self.block_pr()
         self.run_conclave()
         # A replay of the same block, and a restart: nothing to plan, nothing runs.
@@ -490,7 +498,7 @@ class ResumeTests(Base):
 
     def test_a_conclave_out_of_slots_resumes_at_the_next_tick(self):
         cfg = dataclasses.replace(CCFG, max_actions_per_tick=2)
-        self.make(implemented('blocked'), proposal(), vote(), vote(), cfg=cfg)
+        self.make(implemented('blocked'), proposal(), vote(), vote(), implemented(), cfg=cfg)
         self.d._do_implement(7)
         first = self.d.tick()
         self.assertEqual([(a.kind, a.number) for a in first], [('conclave', 7)] * 2)
@@ -500,8 +508,13 @@ class ResumeTests(Base):
         second = self.d.tick()
         self.assertEqual([(a.kind, a.number) for a in second], [('conclave', 7)])
         self.assertEqual(self.record(7)['outcome'], conclave.UNANIMOUS)
+        # The unanimous decision restarts the implementation once (#142), on the next tick.
+        third = self.d.tick()
+        self.assertEqual([(a.kind, a.number) for a in third], [('conclave', 7)])
+        self.assertIsNotNone(self.record(7)['resumed'])
         self.assertEqual(self.d.tick(), [])
-        self.assertEqual(len(self.runner.calls), 4)  # implement, proposal, two votes
+        # implement, proposal, two votes, the implementation restarted
+        self.assertEqual(len(self.runner.calls), 5)
 
     def test_a_pr_head_that_moves_before_the_end_makes_it_blocked(self):
         self.make(proposal(), vote(), vote())

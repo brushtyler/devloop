@@ -131,6 +131,9 @@ class PullRequest:
     operator_notice: int = None
     promotions: int = 0
     operator_owned: bool = False
+    # A trusted user's ``/devloop veto`` of the latest conclave decision on the PR or its issue
+    # that the dispatcher has not applied yet (#142): ``{comment, by, reason, conclave}``.
+    veto: dict = None
 
 
 def operator_blocked(labels, lb):
@@ -409,6 +412,11 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
         # The dispatcher's own label of an operator merge (#248) does not stop devloop.
         if lb.needs_supervisor in pr.labels or operator_held(pr, lb):
             continue
+        if pr.veto:
+            # A trusted user vetoed the latest conclave decision (#142): the work it restarted
+            # stops before anything else, a merge included.
+            actions.append(Action('veto', pr.number, f'/devloop veto by {pr.veto["by"]}'))
+            continue
         if not pr.meta:
             actions.append(Action('lost_meta', pr.number, 'PR body no longer ends with its marker'))
             continue
@@ -562,8 +570,14 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
                           else '')
                 actions.append(Action('review', pr.number, reason))
     # The conclave on a block (#141): one action per call still due, each taking a slot of
-    # max_actions_per_tick; those beyond it run on a later tick, from the recorded point.
+    # max_actions_per_tick; those beyond it run on a later tick, from the recorded point. The
+    # restart of an implementation after a unanimous decision (#142) also takes a free PR slot,
+    # as the step itself would; without one it waits for a later tick.
     for item in snapshot.conclaves:
+        if item.get('opens'):
+            if free <= 0:
+                continue
+            free -= 1
         actions += [Action('conclave', item['number'], item['reason'])] * item['calls']
     # A ready issue that a merged devloop PR already resolved is never checked nor implemented
     # again (#228): it is escalated, once, and waits for whoever decides it.
