@@ -8,8 +8,15 @@ Each call (the proposal, then each vote) is one ``conclave`` action, which takes
 edited as the conclave goes on: written before each call (``started``), then with its result. A
 call not started yet runs on a later tick; a call started without a durable result counts as a
 failed one. One conclave per block: the marker is bound to the block's durable reference, and a
-block that already has one never gets another. The labels do not change: part 2 of #114 only
-records the decision, the escalation stays with the operator.
+block that already has one never gets another. While it runs the labels do not change.
+
+Since #142 (part 3 of #114) a ``UNANIMOUS`` decision restarts the work once, with one more
+``conclave`` action (``_conclave_resume``): the implementation from the base branch, a fix from
+the PR's head, a review as a new review of the same head. Only the latest decision the
+dispatcher verified reaches the prompts of the issue and of its PR (``_conclave_resolution``),
+while the issue text and, on a PR, the head it was taken on hold, and until a trusted user
+vetoes it (``/devloop veto``): the work it restarted is then suspended (``_do_veto``), and
+nothing produced with it is published after the veto.
 
 Pure logic, the record and its rendering are in :mod:`devloop.conclave`.
 """
@@ -18,18 +25,21 @@ from itertools import combinations
 
 from .agents import AgentError
 from .conclave import (DONE, MAX_DIFF, MAX_OPTION, MAX_OPTIONS, MAX_RESOLUTION, MAX_TEXT,
-                       PENDING, apply_proposal, apply_vote, calls_left, consistent,
-                       describe_block, make_stale, missing, new_record, next_call, outcome,
-                       render, settle_started, text_hash)
+                       PENDING, UNANIMOUS, VETO_COMMAND, apply_proposal, apply_vote, calls_left,
+                       consistent, describe_block, make_stale, missing, new_record, next_call,
+                       outcome, render, resolution_section, settle_started, text_hash,
+                       veto_command)
 from .context import _template
 from .dispatch_actions import Models
 from .dispatch_supervision import UntrustedChange
 from .github import GitHubError
 from .ledger import comment_ref
-from .markdown import read_marker
-from .planning import PullRequest, label_names, operator_blocked, operator_held, waiting_reviewers
+from .markdown import carries_record, read_marker
+from .planning import (Action, PullRequest, label_names, operator_blocked, operator_held,
+                       preflight_state, waiting_reviewers)
 from .policy import independent
 from .review import current_round, owner_of, round_verdict
+from .workspace import WorkspaceError
 
 # The steps whose ``blocked`` notice convenes a conclave (#141): the sync is not one of them.
 BLOCKED_STEPS = ('implement', 'fix')
@@ -77,10 +87,16 @@ class ConclaveMixin:
 
     @staticmethod
     def _conclave_item(number, view):
+        """``{number, calls, reason, opens}`` of a conclave due: ``opens`` when it restarts an
+        implementation (#142), which takes a free PR slot as the step itself would."""
         record = view['record']
+        if view.get('resume'):
+            return {'number': number, 'calls': 1, 'opens': record['step'] == 'implement',
+                    'reason': f'conclave resume: `{record["step"]}` with the unanimous '
+                              'resolution'}
         what = ('opens' if record is None else
                 'proposal' if record['proposal']['state'] != DONE else 'votes')
-        return {'number': number, 'calls': calls_left(record),
+        return {'number': number, 'calls': calls_left(record), 'opens': False,
                 'reason': f'conclave {what}: block of `{view["details"]["proposer"]}`'}
 
     def _conclave_records(self, comments):
@@ -146,7 +162,7 @@ class ConclaveMixin:
             return None
         block = {'kind': 'blocked', 'comment': ref, 'agent': agent, 'step': step}
         return block, {'proposer': agent, 'step': step, 'commit': record['head'],
-                       'reason': record['reason']}
+                       'reason': record['reason'], 'conclave': record.get('conclave')}
 
     def _review_block(self, comments, pr):
         """``(position, block, details)`` of the PR's latest review round when its verdict is
@@ -169,7 +185,8 @@ class ConclaveMixin:
                  'head': first['head_sha']}
         reason = (first.get('human_reason') or '').strip() or first['summary'].strip()
         return position, block, {'proposer': reviewer, 'step': 'review',
-                                 'commit': first['head_sha'], 'reason': reason}
+                                 'commit': first['head_sha'], 'reason': reason,
+                                 'conclave': first.get('conclave')}
 
     def _conclave_moves(self, comments):
         """The positions of the records that move an item on after an escalation."""
@@ -206,7 +223,10 @@ class ConclaveMixin:
         None when nothing: ``{block, details, record, comment, members, calls}``. ``record``
         is the conclave of the block already recorded (None before it opens), ``comment`` its
         comment id. A concluded conclave, or one whose record does not hold together
-        (``consistent``, logged), leaves nothing to do: a block never gets a second one."""
+        (``consistent``, logged), leaves nothing to do: a block never gets a second one. A
+        ``UNANIMOUS`` one whose work has not restarted yet is due once more, with ``resume``
+        (``_resume_view``, #142). A block raised by a step that already ran with a conclave's
+        resolution gets no conclave: the escalation stays with the operator."""
         found = self._conclave_block(comments, pr)
         if found is None:
             return None
@@ -221,10 +241,16 @@ class ConclaveMixin:
                          'operator')
                 return None
             if record['outcome']:
-                return None
+                if record['outcome'] != UNANIMOUS or record.get('resumed') is not None:
+                    return None
+                return self._resume_view(number, comments, pr, block, details, comment, record)
             members = [record['proposal']['agent'], *(v['agent'] for v in record['votes'])]
         else:
             comment, record = None, None
+            if details.get('conclave') is not None:
+                self.log(f'  #{number}: the block comes from a step that ran with the resolution '
+                         f'of conclave {details["conclave"]}; the escalation stays as it is')
+                return None
             members = self._conclave_members(details['proposer'])
             if members is None:
                 return None
@@ -283,6 +309,8 @@ class ConclaveMixin:
         if view is None:
             self.log('  no conclave due')
             return
+        if view.get('resume'):
+            return self._conclave_resume(number, pr, view)
         issue_number = pr.issue if pr is not None else number
         details, record, comment = view['details'], view['record'], view['comment']
         try:
@@ -409,6 +437,257 @@ class ConclaveMixin:
         if comment is None:
             raise GitHubError(f'the conclave record of #{number} cannot be found again')
         return comment
+
+    # Decisions, resume and veto (#142) --------------------------------------------------------
+    def _veto_commands(self, comments, number):
+        """``(comment id, login, reason)`` of the ``/devloop veto`` commands trusted users wrote
+        in ``comments``, oldest first. One from anyone else, a bot or a devloop app included, is
+        ignored and logged; devloop's records and native reviews are never commands."""
+        found = []
+        for comment in comments:
+            body = comment.get('body') or ''
+            if comment.get('native') or carries_record(body):
+                continue
+            reason = veto_command(body)
+            ident = comment_ref(comment)
+            if reason is None or not isinstance(ident, int) or isinstance(ident, bool):
+                continue
+            login = (comment.get('author') or {}).get('login')
+            if login not in self.cfg.trusted_users:
+                self.log(f'  #{number}: ignored `{VETO_COMMAND}` by {login}: the author is not a '
+                         'trusted user')
+                continue
+            found.append((ident, login, reason))
+        return sorted(found)
+
+    def _conclave_decision(self, issue_number, issue_comments, pr_comments=None):
+        """The latest decision of a conclave on issue ``issue_number`` and its PR, or None:
+        ``{comment, record, veto, spent}``. A decision is a ``conclave`` record the dispatcher
+        signed, that holds together (``consistent``), with outcome ``UNANIMOUS``, for this
+        issue, on the thread of its block: an implementation on the issue (``issue_comments``),
+        a fix or a review on the PR (``pr_comments``). GitHub's comment ids grow with time, on
+        the issue and on its PR alike: the latest is the one with the greatest id. ``veto``: the
+        first veto of a trusted user written after it on either thread (``_veto_commands``), or
+        None; ``spent``: whether a notice of the dispatcher already suspended the work for that
+        veto."""
+        threads = [(issue_comments, ('implement',))]
+        if pr_comments is not None:
+            threads.append((pr_comments, ('fix', 'review')))
+        found = [(cid, record) for comments, steps in threads
+                 for cid, record in self._conclave_records(comments)
+                 if isinstance(cid, int) and not isinstance(cid, bool)
+                 and record['outcome'] == UNANIMOUS and record['step'] in steps
+                 and record['issue'] == issue_number and consistent(record)[0]]
+        if not found:
+            return None
+        comment, record = max(found, key=lambda entry: entry[0])
+        vetoes = sorted(v for comments, _ in threads
+                        for v in self._veto_commands(comments, issue_number) if v[0] > comment)
+        spent = any(r.get('veto_of') == comment for comments, _ in threads
+                    for _, r in self._dispatcher_records(comments, 'notice', 'escalation'))
+        return {'comment': comment, 'record': record, 'veto': vetoes[0] if vetoes else None,
+                'spent': spent}
+
+    def _conclave_resolution(self, issue_number, request, issue_comments, pr_comments=None,
+                             head=None):
+        """``(comment id, record)`` of the decision whose resolution goes into the prompt of a
+        step on issue ``issue_number`` or on its PR, or None (logged): the latest decision
+        (``_conclave_decision``) only, while no trusted user vetoed it, the hash of the issue's
+        request is still ``request``, the one it was taken on, and a decision bound to a PR's
+        head is read with that same head (``head``: the head the step works on, None on an
+        issue). Nothing else reaches a prompt: no comment of a bot, nor a record that does not
+        hold."""
+        decision = self._conclave_decision(issue_number, issue_comments, pr_comments)
+        if decision is None:
+            return None
+        comment, record = decision['comment'], decision['record']
+        why = ('vetoed by `{}`'.format(decision['veto'][1]) if decision['veto']
+               else 'the text of the issue changed' if record['issue_hash'] != request
+               else 'the head of the PR changed'
+               if record['head'] is not None and record['head'] != head else '')
+        if why:
+            self.log(f'  conclave decision {comment} not in the prompt: {why}')
+            return None
+        return comment, record
+
+    def _resolution_for(self, issue_number, issue, pr=None, head=None):
+        """``(comment id, record, prompt section)`` of the resolution a step on issue
+        ``issue_number`` (``issue``, as ``_issue_context`` returns it) or on its ``pr`` gets,
+        read now, or ``(None, None, '')``. ``head``: the head the step works on."""
+        pr_comments = self.gh.pr_comments(pr.number) if pr is not None else None
+        found = self._conclave_resolution(issue_number, issue['request'], issue['thread'],
+                                          pr_comments, head)
+        if found is None:
+            return None, None, ''
+        self.log(f'  with the unanimous resolution of conclave {found[0]}')
+        return found[0], found[1], resolution_section(found[1], found[0])
+
+    def _veto_after(self, issue_number, pr_number, comment):
+        """The first veto of a trusted user written after the decision in ``comment`` on issue
+        ``issue_number`` or PR ``pr_number`` (None for none), read now, or None: what the
+        dispatcher checks before publishing anything a step produced with that resolution."""
+        threads = [self.gh.issue_comments(issue_number)]
+        if pr_number is not None:
+            threads.append(self.gh.pr_comments(pr_number))
+        vetoes = sorted(v for comments in threads
+                        for v in self._veto_commands(comments, issue_number) if v[0] > comment)
+        return vetoes[0] if vetoes else None
+
+    def _veto_suspend(self, number, comment, veto, remove, what):
+        """Suspend issue or PR ``number`` for ``veto`` of the decision in ``comment``: an
+        escalation of class ``conclave_veto`` to the operator, which records both and spends the
+        veto. ``what``: what the veto stopped."""
+        ident, login, reason = veto
+        text = (f'`{login}` ha annullato con `{VETO_COMMAND}` (commento {ident}) la decisione del '
+                f'conclave registrata nel commento {comment}: {what} I commit già pubblicati '
+                'restano: devloop non li annulla.')
+        if reason:
+            text += f'\n\nMotivo del veto: {reason}'
+        self._escalate(number, text, remove=remove, cls='conclave_veto',
+                       extra={'veto_of': comment, 'veto': ident})
+        self.log(f'  vetoed by {login}: suspended')
+
+    def _resume_view(self, number, comments, pr, block, details, comment, record):
+        """The view of a ``UNANIMOUS`` decision whose work has not restarted yet, due as one
+        ``conclave`` action with ``resume``, or None (logged): the decision must still be the
+        one that goes into the prompts (``_conclave_resolution``), not vetoed, on the same text
+        of the issue and, on a PR, on the same head. The restart of an implementation also waits
+        while the issue is blocked by an open issue (#277), as a ready issue and a retry do: it
+        is not due, and ``resumed`` stays unspent until the block closes. The snapshot reads it
+        for the plan, and ``_do_conclave`` again just before the restart."""
+        issue_number = pr.issue if pr is not None else number
+        if record['step'] == 'implement' and pr is None:
+            blocked_by = self._dependency_view([number])[number]['blocked_by']
+            if blocked_by:
+                self.log(f'  #{number}: the unanimous decision {comment} waits to restart the '
+                         'implementation, blocked by ' + ', '.join(blocked_by))
+                return None
+        try:
+            issue, _ = self._issue_context(issue_number)
+        except UntrustedChange as exc:
+            self.log(f'  #{number}: the unanimous decision does not restart the work: '
+                     f'{_short(exc)}')
+            return None
+        found = self._conclave_resolution(
+            issue_number, issue['request'], comments if pr is None else issue['thread'],
+            comments if pr is not None else None,
+            self.gh.pr_head(pr.number) if pr is not None else None)
+        if found is None or found[0] != comment:
+            self.log(f'  #{number}: the unanimous decision {comment} does not restart the work')
+            return None
+        members = [record['proposal']['agent'], *(v['agent'] for v in record['votes'])]
+        return {'block': block, 'details': details, 'record': record, 'comment': comment,
+                'members': members, 'calls': 1, 'resume': True}
+
+    def _conclave_resume(self, number, pr, view):
+        """Restart the work blocked by ``view``'s block after a ``UNANIMOUS`` decision (#142),
+        once. The changes the agent that stopped left uncommitted are not taken up as work: they
+        are saved in the dispatcher's logs, and the record cites them as evidence. The record is
+        marked ``resumed`` before anything restarts, so that a restart is never repeated. Then:
+
+        - an implementation runs now, from the base branch (``new_branch``), as the step does;
+        - a fix goes back to ``agent:changes``, and the next tick runs it from the PR's head;
+        - a review goes back to ``agent:review``: the verdict of the block is not applied again,
+          and the next tick reviews the same head in a new round, within ``max_review_rounds``.
+
+        Each step finds the resolution itself, verified again (``_resolution_for``)."""
+        lb = self.cfg.labels
+        record, comment, block = view['record'], view['comment'], view['block']
+        step = record['step']
+        issue_number = pr.issue if pr is not None else number
+        if step == 'implement':
+            if (self.cfg.preflight
+                    and preflight_state(self._preflight_view(number, ()))[0] != 'ready'):
+                self.log('  the readiness check does not cover the current text: the work does '
+                         'not restart')
+                return
+            opened = [p for p in map(self._devloop_pr, self.gh.open_prs())
+                      if p is not None and p.issue == number]
+            if opened or self._merged_prs(number):
+                self.log('  the issue already has a devloop PR: the work does not restart')
+                return
+        evidence = None
+        if block['kind'] == 'blocked':
+            name = f'pr-{pr.number}' if pr is not None else f'issue-{issue_number}'
+            diff = self.ws.pending_diff(name, record['commit'])
+            if diff:
+                file = f'conclave-{name}-{comment}.diff'
+                self.ws.save_evidence(file, diff)
+                evidence = {'file': file, 'sha256': text_hash(diff),
+                            'bytes': len(diff.encode('utf-8'))}
+                self.log(f'  uncommitted changes of the agent that stopped saved as {file}')
+        record['resumed'] = {'evidence': evidence}
+        self._conclave_publish(number, comment, record, pr)
+        self.log(f'  conclave {comment}: `{step}` restarts with the unanimous resolution')
+        if step != 'implement':
+            resume = lb.changes if step == 'fix' else lb.review
+            self.gh.edit_labels(number, add=[resume], remove=sorted(lb.operator()))
+            return
+        self.gh.edit_labels(number, remove=sorted(lb.operator()))
+        try:
+            self._do_implement(number)
+        except (AgentError, GitHubError, WorkspaceError, UntrustedChange) as exc:
+            # Escalated as the step's own failure: the conclave action itself never escalates.
+            self.log(f'  failed: {exc}')
+            self._escalate_failure(Action('implement', number, 'conclave'), None, exc)
+
+    def _human_merge(self, pr):
+        """The comment of the latest conclave decision that restarted work of ``pr`` or of its
+        issue (#142), read now, or None. After such a restart the merge is a human act for good:
+        the record stays ``resumed`` even when its resolution later lapses (a new text, a new
+        head) or a trusted user vetoes it, so that devloop never merges the PR itself, whatever
+        ``[merge]`` says: the snapshot plans it as mode ``off``, ``_operator_merge_reasons``
+        tells why, and ``_do_merge`` checks it again just before a merge."""
+        threads = (self.gh.issue_comments(pr.issue), self.gh.pr_comments(pr.number))
+        found = [cid for comments in threads for cid, record in self._conclave_records(comments)
+                 if record.get('resumed') is not None
+                 and isinstance(cid, int) and not isinstance(cid, bool)]
+        return max(found) if found else None
+
+    def _conclave_pr_state(self, pr, comments):
+        """What the conclave decisions of a PR devloop works on change in the snapshot (#142),
+        from its thread ``comments``: ``pr.veto``, a veto of a trusted user that the dispatcher
+        has not applied yet, and ``pr.rereview`` for a review block whose work restarted, so
+        that the verdict of the block is not applied again and the same head gets a new review.
+        The issue's comments are read only when the PR's thread holds a decision, or one of its
+        records says a step ran with one."""
+        used = any(r.get('conclave') is not None for r in [pr.meta, *pr.fixes, *pr.reviews])
+        if not used and not any(r['outcome'] == UNANIMOUS
+                                for _, r in self._conclave_records(comments)):
+            return
+        decision = self._conclave_decision(pr.issue, self.gh.issue_comments(pr.issue), comments)
+        if decision is None:
+            return
+        if decision['veto'] is not None:
+            if not decision['spent']:
+                ident, login, reason = decision['veto']
+                pr.veto = {'comment': ident, 'by': login, 'reason': reason,
+                           'conclave': decision['comment']}
+            return
+        record, latest = decision['record'], current_round(pr.reviews)
+        block = record['block']
+        if (record.get('resumed') is not None and block['kind'] == 'review' and latest
+                and latest[0]['round'] == block['round'] and block['head'] == pr.head_sha):
+            pr.rereview = True
+
+    def _do_veto(self, pr):
+        """Apply a trusted user's veto of the latest conclave decision on an open PR devloop
+        works on (#142), read again now: the PR goes to ``agent:needs-operator`` with an
+        escalation of class ``conclave_veto``, and the steps after it are suspended. A PR
+        merged or closed meanwhile is left as it is: the merge stays a human act."""
+        lb = self.cfg.labels
+        fresh = self.gh.pr_state(pr.number)
+        if fresh.get('state', 'OPEN') != 'OPEN':
+            self.log('  the PR is no longer open: the veto has no effect')
+            return
+        decision = self._conclave_decision(pr.issue, self.gh.issue_comments(pr.issue),
+                                           self.gh.pr_comments(pr.number))
+        if decision is None or decision['veto'] is None or decision['spent']:
+            self.log('  no veto to apply')
+            return
+        self._veto_suspend(pr.number, decision['comment'], decision['veto'],
+                           [lb.review, lb.changes, lb.ready_to_merge],
+                           'i passi successivi della PR sono sospesi.')
 
 
 def _diff_section(diff):

@@ -566,6 +566,11 @@ def render_fix(fix, head, round_no):
         payload['local_tests'] = fix['local_tests']  # informative only (#169)
     if fix.get('skipped_models'):
         payload['skipped_models'] = fix['skipped_models']  # informative only (#151)
+    if fix.get('conclave') is not None:
+        # The conclave decision whose resolution the fix had (#142).
+        parts += ['', f'La correzione ha seguito la risoluzione del conclave registrata nel '
+                      f'commento {fix["conclave"]}.']
+        payload['conclave'] = fix['conclave']
     return publishable(head + '\n' + '\n'.join(parts), 'fix', payload)
 
 
@@ -640,11 +645,13 @@ def operator_retry_text(step):
             'retry del supervisore).')
 
 
-def render_escalation(reason, detail='', cls='failure', supervised=None, retry=None):
+def render_escalation(reason, detail='', cls='failure', supervised=None, retry=None, extra=None):
     """An escalation (#182: of class ``cls``). ``supervised``, for a non-critical one the
     supervisor decides, holds the step, the key of its input and what a retry resumes; without
     it the escalation goes to the operator. ``retry``, for an escalation to the operator, holds
-    the same for a step that a trusted user may run again with ``/devloop retry`` (#321)."""
+    the same for a step that a trusted user may run again with ``/devloop retry`` (#321).
+    ``extra``: more fields of the marker, such as the conclave decision a veto annulled
+    (#142)."""
     title = 'Escalation al supervisore' if supervised else 'Serve un intervento dell\'operatore'
     resume = SUPERVISOR_RESUME if supervised else RESUME
     if retry and not supervised:
@@ -661,6 +668,7 @@ def render_escalation(reason, detail='', cls='failure', supervised=None, retry=N
         payload.update(supervised)
     elif retry:
         payload.update(retry)
+    payload.update(extra or {})
     return publishable(body, 'notice', payload)
 
 

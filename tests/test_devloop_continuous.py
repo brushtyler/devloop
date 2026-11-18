@@ -731,6 +731,43 @@ class ContinuousTickTests(unittest.TestCase):
         d._do_implement = implement
         return d
 
+    def resuming(self, max_open_prs):
+        """A dispatcher whose conclave on issue #7 restarts an implementation (#142) and runs
+        until ``self.release``: the action, and its item in the snapshot."""
+        d = self.make()
+        self.addCleanup(self.release.set)
+        d.cfg = dataclasses.replace(PCFG, max_open_prs=max_open_prs)
+        item = {'number': 7, 'calls': 1, 'opens': True,
+                'reason': 'conclave resume: `implement` with the unanimous resolution'}
+
+        def conclave(number):
+            self.ran.append(('conclave', number))
+            self.release.wait(timeout=10)
+        d._do_conclave = conclave
+        return d, item
+
+    def test_a_conclave_restarting_an_implementation_holds_its_pr_slot_while_it_runs(self):
+        # #142: max_open_prs = 1. The restart takes the only slot; on the ticks that follow,
+        # while it runs, no other issue starts, whether its record is already marked resumed
+        # (the item is gone) or not yet (the item is still there).
+        d, item = self.resuming(1)
+        d.snapshot = lambda: Snapshot([], [], [], conclaves=[item])
+        self.assertEqual(d.tick(), [Action('conclave', 7, item['reason'], True)])
+        d.snapshot = lambda: Snapshot([], [ready(8)], [])
+        self.assertEqual(d.tick(), [])
+        d.snapshot = lambda: Snapshot([], [ready(8)], [], conclaves=[item])
+        self.assertEqual(d.tick(), [])
+        self.assertEqual(self.ran, [('conclave', 7)])
+
+    def test_a_running_conclave_takes_no_second_pr_slot(self):
+        # #142: max_open_prs = 2. While the restart runs, its item still in the snapshot takes
+        # no slot besides the one it holds: the other slot starts issue #8.
+        d, item = self.resuming(2)
+        d.snapshot = lambda: Snapshot([], [], [], conclaves=[item])
+        self.assertEqual(d.tick(), [Action('conclave', 7, item['reason'], True)])
+        d.snapshot = lambda: Snapshot([], [ready(8)], [], conclaves=[item])
+        self.assertEqual(d.tick(), [Action('implement', 8)])
+
     def test_the_turns_of_running_actions_are_not_flagged_incomplete(self):
         ledger = mock.Mock()
         ledger.pending.return_value = [9, 10]

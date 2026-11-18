@@ -187,7 +187,8 @@ from .markdown import (RESUME, dispatcher_header, publishable, read_marker, rend
                        render_escalation, render_operator_merge)
 from .activity import iso, restart_line
 from .pin import PREFIX, PinError, Repinned, SmokeError
-from .planning import (BASE_CHANGED, MERGE_LANE, RESYNC_AFTER_APPROVAL, PullRequest, Snapshot,
+from .planning import (BASE_CHANGED, MERGE_LANE, MERGING, RESYNC_AFTER_APPROVAL, PullRequest,
+                       Snapshot,
                        admit, changes_before_ci, ci_unknown, counted_rounds, issue_priority,
                        label_names, numbers_of, operator_blocked, operator_held,
                        pending_reviewers, plan, pr_counts, queue_lines, round_reasons, schedule,
@@ -865,7 +866,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             if pr is None:
                 continue
             if pr.meta and pr.labels & {lb.review, lb.changes, lb.ready_to_merge}:
-                self._read_thread(pr, self._pr_thread(pr.number))
+                thread = self._pr_thread(pr.number)
+                self._read_thread(pr, thread)
+                # A veto to apply, or a review block restarted by a conclave (#142).
+                self._conclave_pr_state(pr, thread)
             # In agent:changes CI matters to close an open CI finding, and after a review that
             # asked for changes before the CI of the head was known: the fix waits for it, so
             # that a failure joins the same fix (#271, ``plan``).
@@ -904,6 +908,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             if (self.cfg.merge.enabled() and pr.meta and lb.ready_to_merge in pr.labels
                     and not operator_held(pr, lb)):
                 pr.merge_mode = self._merge_mode(pr)
+                if pr.merge_mode in MERGING and self._human_merge(pr) is not None:
+                    # Work of this PR restarted after a conclave (#142): the merge is human.
+                    pr.merge_mode = 'off'
             prs.append(pr)
         ready = []
         pr_issues = {pr.issue for pr in prs}
@@ -1182,9 +1189,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         # A PR an implementation opened while it still runs belongs to it too.
         busy |= {number for number, issue in issue_of.items() if issue in busy}
         self._flag_incomplete(snap, False, busy)
+        # A conclave that restarts an implementation (#142, ``Action.opens``) may open a PR too.
         reserved = sum(1 for action, _ in running
                        if action.kind in ('implement', 'preflight')
-                       or action.kind == 'supervise' and action.number not in prs)
+                       or action.kind == 'supervise' and action.number not in prs
+                       or action.kind == 'conclave' and action.opens)
         merging = any(action.kind in MERGE_LANE for action, _ in running)
         actions = plan(snap, self.cfg, busy, reserved, merging)
         # The limit may pass while the snapshot reads GitHub: checked again before any start.
@@ -1397,7 +1406,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
     # Helpers -------------------------------------------------------------
     def _escalate(self, number, reason, detail='', remove=(), cls='failure', supervised=None,
-                  why='', retry=None):
+                  why='', retry=None, extra=None):
         """Escalate issue or PR ``number`` with an escalation of class ``cls`` (#182). With
         ``supervised`` (``_supervised``) it goes to ``agent:needs-supervisor`` and an issue
         keeps ``agent:ready``; otherwise to ``agent:needs-operator``, with ``why`` a non-critical
@@ -1412,7 +1421,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             if why:
                 reason = (reason.rstrip() + f'\n\nIn modalità di merge `auto` questa '
                           f'escalation andrebbe al supervisore, ma resta all\'operatore: {why}.')
-            self.gh.comment(number, render_escalation(reason, detail, cls, retry=retry))
+            self.gh.comment(number, render_escalation(reason, detail, cls, retry=retry,
+                                                      extra=extra))
             self.gh.edit_labels(number, add=[lb.needs_operator], remove=remove)
         if lb.ready_to_merge in remove:
             # An escalation that takes the readiness away voids the receipt of the promotion
@@ -1475,10 +1485,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         listed = self.gh.issue_comments(number)
         accepted = [c for c in listed if self._accepted(c)]
         # ``request``: the hash of the request as read here (#182), part of the key of an
-        # implement turn's retries.
+        # implement turn's retries. ``thread``: the comments as read here, where the conclave
+        # records and the vetoes of the issue are (#142).
         issue = dict(self.gh.issue(number), title=history['title'], body=history['body'],
                      labeled=history['labeled'], admitters=self._admitters(history['author']),
-                     accepted=accepted, request=self._request_hash(history, listed))
+                     accepted=accepted, request=self._request_hash(history, listed),
+                     thread=listed)
         return issue, _render_issue_comments(issue.get('comments') or [], self.cfg.trusted_users,
                                              [read_marker(c['body'], 'supervision')
                                               for c in accepted])
@@ -1917,16 +1929,20 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             message += f'\n{agent.commit_trailer}\n'
         return message
 
-    def _blocked(self, number, agent, reason, remove, on_pr, step=None, head=None):
+    def _blocked(self, number, agent, reason, remove, on_pr, step=None, head=None,
+                 conclave=None):
         """An agent that stopped as ``blocked`` in ``step``, which started from commit
         ``head``: its notice, written with its identity, then ``agent:needs-operator``. The
         marker records the agent, the step, the commit and the reason, the block a conclave
-        (#141) works on."""
+        (#141) works on, and in ``conclave`` the comment of the conclave decision whose
+        resolution the step had (#142): such a block convenes no other conclave."""
         author = self._as(agent.key, PR_COMMENT if on_pr else ISSUE_COMMENT)
         payload = {'event': 'blocked', 'class': 'blocked', 'critical': True, 'to': 'operator',
                    'agent': agent.key, 'reason': reason.strip()}
         if step:
             payload.update(step=step, head=head)
+        if conclave is not None:
+            payload['conclave'] = conclave
         author.comment(number, publishable(self.runner.header(agent) + '\n## Lavoro bloccato\n\n'
                                            + reason.strip() + '\n\n' + RESUME,
                                            'notice', payload))
@@ -2130,6 +2146,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         if any(lvl == level and mode == 'off' for lvl, mode in merge.levels):
             lines.append(f'- `[merge.levels]` imposta `off` per il livello di review {level} di '
                          'questa PR.')
+        unblocked = self._human_merge(pr)
+        if unblocked is not None:
+            lines.append('- il lavoro di questa PR è ripartito dopo la decisione del conclave '
+                         f'registrata nel commento {unblocked}: dopo ogni sblocco il merge resta '
+                         'umano.')
         if not lines:
             self.log(f'  merge mode {merge.mode_for(level, paths)}: devloop may merge this PR')
         return '\n'.join(lines)

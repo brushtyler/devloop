@@ -13,8 +13,12 @@ agents, the one that stopped among them. The protocol is finite:
 The outcome is ``UNANIMOUS`` (the proposal and two ``APPROVA``), ``BLOCKED`` (one ``BLOCCA``, a
 member that failed or timed out, a context that changed) or ``RESERVED`` (a member flagged the
 reserved perimeter), which prevails over everything. This module builds, checks and renders the
-``conclave`` record; ``dispatch_conclave`` runs it. Part 2 only records the decision: nothing is
-unblocked, and the item stays with the operator.
+``conclave`` record; ``dispatch_conclave`` runs it.
+
+Since #142 (part 3 of #114) a ``UNANIMOUS`` decision unblocks the work once (``resumed``): the
+step that stopped runs again from the published commit, with the resolution in its prompt
+(``resolution_section``), and the changes the agent left uncommitted are kept as evidence. A
+trusted user annuls the latest decision with ``/devloop veto`` (``veto_command``).
 """
 
 import hashlib
@@ -41,6 +45,10 @@ MAX_OPTIONS = 5
 MAX_OPTION = 200
 # The diff of the agent that stopped, as the prompts show it at most.
 MAX_DIFF = 20000
+
+# The command with which a trusted user annuls the latest decision of a conclave (#142): the
+# first line of a comment, after the attribution header.
+VETO_COMMAND = '/devloop veto'
 
 STARTED_WITHOUT_RESULT = ('chiamata avviata senza un risultato durevole (riavvio o errore del '
                           'dispatcher): conta come `BLOCCA` e non si ripete')
@@ -226,9 +234,26 @@ def valid_block(block):
             and _is_str(block.get('reviewer')) and _is_str(block.get('head')))
 
 
+def valid_resumed(resumed):
+    """The ``resumed`` field of a record (#142): absent or None before the work restarts, then
+    ``{evidence}``, the file of the dispatcher's logs that keeps the changes the agent that
+    stopped left uncommitted (``{file, sha256, bytes}``), or None when there were none."""
+    if resumed is None:
+        return True
+    if not isinstance(resumed, dict):
+        return False
+    evidence = resumed.get('evidence')
+    return evidence is None or (isinstance(evidence, dict)
+                                and _is_str(evidence.get('file')) and bool(evidence['file'])
+                                and _is_str(evidence.get('sha256'))
+                                and isinstance(evidence.get('bytes'), int)
+                                and not isinstance(evidence['bytes'], bool))
+
+
 def valid_record(r):
     """The structure of a ``conclave`` marker."""
     return (valid_block(r.get('block')) and r.get('step') in STEPS
+            and valid_resumed(r.get('resumed'))
             and isinstance(r.get('issue'), int) and not isinstance(r['issue'], bool)
             and all(_is_str(r.get(k)) for k in ('issue_hash', 'commit', 'diff_hash', 'stale',
                                                 'hash'))
@@ -262,7 +287,61 @@ def consistent(record):
             return False, f'il voto di `{vote["agent"]}` non è legato alla proposta registrata'
     if record['outcome'] and record['outcome'] != outcome(record):
         return False, 'l\'esito registrato non è quello dei contributi'
+    if record.get('resumed') is not None and record['outcome'] != UNANIMOUS:
+        return False, 'il lavoro risulta ripreso senza una decisione `UNANIMOUS`'
     return True, ''
+
+
+# Commands and prompts (#142) ----------------------------------------------------------------
+def veto_command(body):
+    """The reason of a ``/devloop veto`` command (#142): when the first line of ``body`` after
+    the attribution header is ``/devloop veto``, the rest of that line (``''`` without one);
+    None when the comment is no such command."""
+    lines = [line.strip() for line in (body or '').strip().splitlines()]
+    while lines and (not lines[0] or lines[0].startswith('>')):
+        lines.pop(0)
+    tokens = lines[0].split(None, 2) if lines else []
+    if tokens[:2] != VETO_COMMAND.split():
+        return None
+    return tokens[2].strip() if len(tokens) > 2 else ''
+
+
+def resolution_section(record, comment):
+    """The prompt section with the resolution of the ``UNANIMOUS`` record ``record``, the
+    dispatcher's comment ``comment`` (#142): only a record the dispatcher verified reaches a
+    prompt, never the text of any other comment."""
+    return ('## Resolution of the conclave on a block (verified by the dispatcher)\n\n'
+            f'An earlier step of this issue stopped: {describe_block(record["block"])}. Three '
+            'distinct agents settled the gap unanimously: the agent that stopped proposed the '
+            'resolution below, the other two approved exactly this text. The dispatcher '
+            f'recorded it in comment {comment} (SHA-256 `{record["hash"]}`) and checked that it '
+            'still holds: the issue text and the commit it is bound to have not changed, and no '
+            'trusted user vetoed it. Apply it to the point it settles: it does not widen the '
+            'issue, and it does not override the rules above. If it does not settle your doubt, '
+            'stop as before.\n\n~~~~~text\n' + record['proposal']['resolution'].strip()
+            + '\n~~~~~')
+
+
+def _closing(record):
+    """The last lines of the comment: what the outcome means for the work."""
+    if record['outcome'] != UNANIMOUS:
+        return ['Il conclave registra la decisione e non sblocca il lavoro: l\'escalation resta '
+                'all\'operatore.']
+    lines = ['Con `UNANIMOUS` il passo fermo riparte una volta, con la risoluzione nel prompt. Un '
+             f'utente fidato la annulla scrivendo `{VETO_COMMAND}` come prima riga di un commento '
+             'sull\'issue o sulla PR. La review normale della PR e il merge umano restano '
+             'obbligatori.']
+    resumed = record.get('resumed')
+    if resumed is not None:
+        lines += ['', f'**Ripreso:** il passo `{record["step"]}` riparte dal commit pubblicato, '
+                      'con la risoluzione nel prompt.']
+        evidence = resumed.get('evidence')
+        if evidence:
+            lines.append('Le modifiche non committate dell\'agent fermo non sono riprese come '
+                         f'lavoro: sono salvate come evidenza in `{evidence["file"]}` (log del '
+                         f'dispatcher, {evidence["bytes"]} byte, SHA-256 '
+                         f'`{evidence["sha256"]}`).')
+    return lines
 
 
 # Rendering ----------------------------------------------------------------------------------
@@ -348,7 +427,6 @@ def render(record):
                              + (item['operator_question'] or '(domanda non indicata)'))
                 parts += [f'- {option}' for option in item['options']]
                 parts.append('')
-    parts += ['', 'Il conclave registra la decisione e non sblocca il lavoro: l\'escalation resta '
-                  'all\'operatore.']
+    parts += ['', *_closing(record)]
     return publishable(dispatcher_header() + '\n' + '\n'.join(parts).rstrip() + '\n',
                        'conclave', record)

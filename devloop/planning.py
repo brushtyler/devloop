@@ -131,6 +131,9 @@ class PullRequest:
     operator_notice: int = None
     promotions: int = 0
     operator_owned: bool = False
+    # A trusted user's ``/devloop veto`` of the latest conclave decision on the PR or its issue
+    # that the dispatcher has not applied yet (#142): ``{comment, by, reason, conclave}``.
+    veto: dict = None
 
 
 def operator_blocked(labels, lb):
@@ -187,6 +190,9 @@ class Action:
     kind: str
     number: int
     reason: str = ''
+    # Whether the action may open a PR although its kind does not say so: a conclave that
+    # restarts an implementation (#142). While it runs it holds a slot of ``max_open_prs``.
+    opens: bool = False
 
 
 def schedule(actions, issue_of):
@@ -365,7 +371,8 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
     In continuous mode (#227) ``busy`` holds the numbers of the issues and PRs that actions
     still running touch (``numbers_of``): no action of the plan touches them. ``reserved`` is
     how many of those actions may open a PR (an implementation, a readiness check, a supervisor
-    command on an issue): each holds a slot of ``max_open_prs``, as it did in its own tick.
+    command on an issue, a conclave that restarts an implementation, #142): each holds a slot
+    of ``max_open_prs``, as it did in its own tick.
     ``merging`` tells whether a merge runs (continuous mode only, None in a tick): merges run one
     at a time (``MERGE_LANE``, #264), so only the first merge of the plan, and none while one
     runs, takes a slot of ``max_actions_per_tick``. The others stay in the plan, where ``admit``
@@ -380,7 +387,10 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
             snapshot,
             ready_issues=[i for i in snapshot.ready_issues if i['number'] not in busy],
             supervised=[s for s in snapshot.supervised
-                        if not numbers_of(s['number'], issue_of) & busy])
+                        if not numbers_of(s['number'], issue_of) & busy],
+            # A conclave still running takes no second PR slot (#142).
+            conclaves=[c for c in snapshot.conclaves
+                       if not numbers_of(c['number'], issue_of) & busy])
     pr_issues = {pr.issue for pr in snapshot.prs}
     # Only the PRs devloop works on take the slots of max_open_prs; those waiting for a person
     # have their own limit, and once it is reached no new issue starts (#199), except a
@@ -408,6 +418,11 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
     for pr in snapshot.prs:
         # The dispatcher's own label of an operator merge (#248) does not stop devloop.
         if lb.needs_supervisor in pr.labels or operator_held(pr, lb):
+            continue
+        if pr.veto:
+            # A trusted user vetoed the latest conclave decision (#142): the work it restarted
+            # stops before anything else, a merge included.
+            actions.append(Action('veto', pr.number, f'/devloop veto by {pr.veto["by"]}'))
             continue
         if not pr.meta:
             actions.append(Action('lost_meta', pr.number, 'PR body no longer ends with its marker'))
@@ -562,9 +577,17 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
                           else '')
                 actions.append(Action('review', pr.number, reason))
     # The conclave on a block (#141): one action per call still due, each taking a slot of
-    # max_actions_per_tick; those beyond it run on a later tick, from the recorded point.
+    # max_actions_per_tick; those beyond it run on a later tick, from the recorded point. The
+    # restart of an implementation after a unanimous decision (#142) also takes a free PR slot,
+    # as the step itself would; without one it waits for a later tick. The action says so
+    # (``opens``): in continuous mode it keeps the slot while it runs (``reserved``).
     for item in snapshot.conclaves:
-        actions += [Action('conclave', item['number'], item['reason'])] * item['calls']
+        opens = bool(item.get('opens'))
+        if opens:
+            if free <= 0:
+                continue
+            free -= 1
+        actions += [Action('conclave', item['number'], item['reason'], opens)] * item['calls']
     # A ready issue that a merged devloop PR already resolved is never checked nor implemented
     # again (#228): it is escalated, once, and waits for whoever decides it.
     held_back = set()

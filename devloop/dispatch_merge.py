@@ -512,7 +512,8 @@ class MergeMixin:
         policy records and commands rebuilt from the comments read now: the PR still open,
         ``agent:ready-to-merge`` without ``agent:needs-operator`` nor ``agent:merge-hold``, no hold
         or release command waiting, the head unchanged, ``MERGEABLE`` and ``CLEAN``, CI
-        ``pass``, no open finding, the merge mode of the recomputed receipt, and the conditions
+        ``pass``, no open finding, the merge mode of the recomputed receipt, no work of the PR
+        restarted after a conclave (#142, ``_human_merge``), and the conditions
         of the promotion: the approvals of every required reviewer with a matching receipt, or
         at level 0 the checks of a level-0 promotion. When one is missing devloop does not
         merge: what the per-tick checks of a ready PR revoke is left to the next tick, a stale
@@ -564,6 +565,11 @@ class MergeMixin:
         mode = cfg.merge.mode_for(current['level'], paths)
         if mode not in MERGING:
             return skip(f'the merge mode of this PR is {mode}')
+        unblocked = self._human_merge(pr)
+        if unblocked is not None:
+            # Work of this PR restarted after a conclave (#142): the merge stays human.
+            return skip(f'its work restarted after the conclave decision {unblocked}: the merge '
+                        'is human')
         bases = []
         if pr.zero_head is not None:
             # Level 0: the same checks as its promotion, and its labels still in place.

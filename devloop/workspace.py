@@ -293,6 +293,16 @@ class Workspace:
             diff += _new_file_diff(path, new_name)
         return diff
 
+    def save_evidence(self, name, text):
+        """Write ``text`` as file ``name`` of the dispatcher's logs (``<state_dir>/logs``, next to
+        the worktrees), and return its path: the uncommitted changes of an agent that stopped,
+        kept as evidence when a conclave restarts its step from the published commit (#142)."""
+        logs = self.root.parent / 'logs'
+        logs.mkdir(parents=True, exist_ok=True)
+        path = logs / name
+        path.write_text(text, encoding='utf-8')
+        return path
+
     def review_copy(self, path, reviewer=None):
         """``(name, path)`` of a disposable worktree for a reviewer, detached at the HEAD of
         ``path`` and sharing its refs, so that ``origin/<base>`` resolves. What the reviewer and

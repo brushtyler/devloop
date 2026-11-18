@@ -52,6 +52,7 @@ CRITICAL = {
     'retry_limit': 'tentativi del supervisore esauriti',
     'supervisor_escalated': 'passata all\'operatore dal supervisore',
     'supervisor_refused': 'comando del supervisore non ammesso per questa escalation',
+    'conclave_veto': 'decisione del conclave annullata da un utente fidato con `/devloop veto`',
 }
 
 # The steps a ``retry`` can run again, and the PR label each one resumes from.
