@@ -6,7 +6,9 @@ approval before its promotion (``_approval_current``), the policy receipt of a P
 ``_base_checks``, ``_merge_check``), the choice of the reviewers (``_select``), the policy
 records and the escalation of a level (``_policy_comment``, ``_escalate_level``), the promotion
 (``_promote``, ``_promote_zero``) and its level-0 and acceptance checks (``_zero_problem``,
-``_acceptance_problems``, ``_refuse_zero``), the revocation of a readiness (``_do_revoke``), the
+``_acceptance_problems``, ``_refuse_zero``), the receipt of a promoted PR (#135:
+``_checked_receipt``, ``_publish_receipt``, ``_supersede_receipts``), the revocation of a
+readiness (``_do_revoke``), the
 merge commands and the merge (``_do_hold``, ``_do_merge``) and the issues a merge resolved
 (``_close_merged_issue``, ``_do_merged_issue``). ``Dispatcher`` inherits the methods.
 """
@@ -18,13 +20,17 @@ from .acceptance import acceptance_criteria, acceptance_findings, latest_map
 from .apps import MERGER
 from .context import _describe_bases, _open_findings_reason
 from .dispatch_supervision import RELEASE_COMMAND
+from . import receipt as pr_receipt
 from .github import GitHubError
+from .ledger import collect as ledger_collect
+from .ledger import timestamp as ledger_timestamp
 from .markdown import dispatcher_header, publishable
 from .planning import MERGING, label_names, pending_reviewers, touched_by_base
 from .policy import describe as describe_receipt
 from .policy import (MAX_LISTED_PATHS, ZERO_LEVEL, changes_requested, check_outcome,
                      check_states, differences, distinct, evaluate, independent, receipt_of,
                      recorded_level, zero_refused)
+from .receipt import CONFLICT as RECEIPT_CONFLICT
 from .review import FINDING_COMMAND, current_round, open_findings, round_verdict
 from .supervision import MERGED_ISSUE
 from .workspace import WorkspaceError
@@ -195,11 +201,14 @@ class MergeMixin:
             receipt, 'level', cls='review_level')
         self.gh.edit_labels(pr.number, add=[lb.needs_operator],
                             remove=[lb.review, lb.changes, lb.ready_to_merge])
+        if lb.ready_to_merge in pr.labels:
+            self._supersede_receipts(pr.number, f'il livello {level} richiede l\'operatore')
 
-    def _promote(self, pr, records):
+    def _promote(self, pr, records, reviews=None):
         """Promote a round whose approvals reach the quorum: every reviewer the receipt
         recomputed now requires approved the head with that same receipt. Otherwise record why
-        and leave the PR in review for a new review of the same head."""
+        and leave the PR in review for a new review of the same head. ``reviews``: every review
+        of the PR up to the round included, for its receipt (#135); the snapshot's by default."""
         lb = self.cfg.labels
         current, paths = self._receipt_and_paths(pr)
         if current['level'] == ZERO_LEVEL:
@@ -209,6 +218,11 @@ class MergeMixin:
         bases = self._approvals_match(pr, records, current, paths)
         if bases is None:
             return
+        coherent, prepared = self._checked_receipt(pr, current, records[0]['head_sha'],
+                                                   records[0]['round'],
+                                                   pr.reviews if reviews is None else reviews)
+        if not coherent:
+            return None
         by = ', '.join(f'`{key}`' for key in current['reviewers'])
         branch = self.cfg.base_branch
         revalidated = (f'\n\nLe approvazioni date su una base precedente restano valide sulla '
@@ -220,7 +234,9 @@ class MergeMixin:
             'confermata: la ricevuta di policy ricalcolata coincide con quella della review'
             + (', a parte la base' if bases else '') + '.' + revalidated,
             current, 'promoted', bases)
+        self._publish_receipt(pr, prepared)
         self.gh.edit_labels(pr.number, add=[lb.ready_to_merge], remove=[lb.review, lb.changes])
+        return None
 
     def _promote_zero(self, pr, receipt):
         """Level 0 (#107): promote the head without a review, only if no finding is open, the
@@ -261,6 +277,9 @@ class MergeMixin:
                                      'di ' + ', '.join(f'`{who}`' for who in blocking)
                                      + ' è ancora valida: va dismessa o sostituita da '
                                      'un\'approvazione dello stesso autore', states)
+        coherent, prepared = self._checked_receipt(pr, receipt, head, None, pr.reviews)
+        if not coherent:
+            return None
         self.gh.comment(pr.number, publishable(
             dispatcher_header() + '\n## Pronta per il merge (livello 0)\n\n'
             f'Il commit `{head[:12]}` non richiede review: la label di livello 0 è stata messa da '
@@ -268,7 +287,90 @@ class MergeMixin:
             'si sono conclusi con `success`. Il merge resta un\'azione dell\'operatore.\n\n'
             + listed + '\n\n' + describe_receipt(receipt),
             'policy', {'event': 'promoted', 'receipt': receipt, 'checks': states}))
+        self._publish_receipt(pr, prepared)
         self.gh.edit_labels(pr.number, add=[lb.ready_to_merge], remove=[lb.review, lb.changes])
+        return None
+
+    # PR receipt (#135) -----------------------------------------------------
+    def _checked_receipt(self, pr, current, approved_head, approved_round, reviews):
+        """``(coherent, prepared)`` for the promotion of ``pr`` with the policy receipt
+        ``current``: ``prepared`` is ``(content, thread)``, the receipt built from the ledger
+        records of the issue and of the PR and from the markers, and the PR comments read for
+        it; None without a ledger, which writes no receipt. When the receipt contradicts the
+        markers (``receipt.contradictions``) the PR goes to the operator with a comment that
+        lists why, and ``coherent`` is False: no promotion. Missing data never blocks."""
+        if self.ledger is None:
+            return True, None
+        thread = self.gh.pr_comments(pr.number)
+        on_issue = ledger_collect(self.gh.issue_comments(pr.issue), self._signed)
+        on_pr = ledger_collect(thread, self._signed)
+        # The criteria as the issue states them, read now; a text changed by someone outside
+        # trusted_users is not quoted.
+        history = self.gh.issue_history(pr.issue)
+        criteria = (None if self._untrusted_change(history)
+                    else acceptance_criteria(history['body']))
+        content = pr_receipt.build(
+            pr=pr.number, issue=pr.issue, head=current['head'], promotion=pr.promotions + 1,
+            policy=current, request=on_issue['request'], issue_records=on_issue,
+            pr_records=on_pr, reviews=reviews, closures=pr.closures,
+            approved_round=approved_round, criteria=criteria,
+            acceptance_map=latest_map(pr.meta, pr.fixes))
+        problems = pr_receipt.contradictions(content, implementer=pr.meta['implementer'],
+                                             approved_head=approved_head)
+        if problems:
+            lb = self.cfg.labels
+            self.log(f'  not promoted: the receipt contradicts the markers ({len(problems)})')
+            self._escalate(
+                pr.number, 'La ricevuta della PR, costruita dai record del registro del '
+                f'dispatcher e dai marker, contiene una contraddizione per il commit '
+                f'`{approved_head[:12]}`: devloop non promuove la PR.\n\n'
+                + '\n'.join(f'- {p}' for p in problems)
+                + '\n\nI dati storici mancanti non bloccano: qui i dati ci sono e non '
+                'coincidono. Va verificato quale record è corretto prima di rimettere '
+                f'`{lb.review}`.', remove=[lb.review, lb.changes, lb.ready_to_merge],
+                cls=RECEIPT_CONFLICT)
+            return False, None
+        return True, (content, thread)
+
+    def _publish_receipt(self, pr, prepared):
+        """Write the receipt of a promotion, after marking superseded every receipt still
+        current on the PR: only the latest promotion's holds. A failure raises: the promotion
+        stops before its label, as for any ``gh`` failure."""
+        if prepared is None:
+            return
+        content, thread = prepared
+        self._supersede_receipts(pr.number,
+                                 f'la promozione n. {content["promotion"]} la sostituisce',
+                                 thread, strict=True)
+        self.gh.comment(pr.number, pr_receipt.render(content))
+        self.log(f'  receipt of promotion {content["promotion"]} written')
+
+    def _supersede_receipts(self, number, why, comments=None, strict=False):
+        """Mark superseded, because ``why``, every receipt of PR ``number`` still current: the
+        dispatcher's ``receipt`` records read from ``comments`` (read now when None). An
+        approval revoked leaves no receipt current: a revocation, a new head, a stale policy
+        receipt, a failed round and every escalation that takes ``agent:ready-to-merge`` away
+        (``_escalate``) come here. Without ``strict`` a failure is logged: the next promotion
+        marks it again before writing its own."""
+        if self.ledger is None:
+            return
+        try:
+            if comments is None:
+                comments = self.gh.pr_comments(number)
+            at = ledger_timestamp(self.clock)
+            for position, record in self._dispatcher_records(comments, 'receipt'):
+                if record['state'] != 'current':
+                    continue
+                comment = comments[position]
+                if comment.get('id') is None:
+                    raise GitHubError(f'receipt on #{number}: comment id unknown, not edited')
+                self.gh.edit_comment(comment['id'], pr_receipt.superseded(
+                    comment['body'], record, why, at))
+                self.log(f'  receipt of promotion {record["promotion"]} marked superseded')
+        except GitHubError as exc:
+            if strict:
+                raise
+            self.log(f'  receipts of #{number} not marked superseded: {exc}')
 
     def _zero_problem(self, pr):
         """Why a PR ready at level 0 no longer is, or ``''``: on every tick its receipt is
@@ -333,6 +435,8 @@ class MergeMixin:
                        'class': 'level_zero'}))
         self.gh.edit_labels(pr.number, add=[lb.needs_operator],
                             remove=[lb.review, lb.changes, lb.ready_to_merge])
+        if lb.ready_to_merge in pr.labels:
+            self._supersede_receipts(pr.number, 'il livello 0 non vale più per il head')
 
     # Actions -------------------------------------------------------------
     def _do_revoke(self, pr):
@@ -376,6 +480,8 @@ class MergeMixin:
         self.gh.comment(pr.number,
                         publishable(dispatcher_header() + f'\n## {title}\n\n' + reason + '.'))
         self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.ready_to_merge, *released])
+        # The receipt of the promotion no longer holds (#135).
+        self._supersede_receipts(pr.number, title)
 
     def _do_hold(self, pr):
         """Apply a hold or release command (#172): add or remove ``agent:merge-hold``, then
