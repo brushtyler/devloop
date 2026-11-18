@@ -275,7 +275,10 @@ class ConclaveMixin:
         if not operator_blocked(labels, lb) or lb.needs_supervisor in labels:
             self.log('  labels changed since the snapshot: no conclave')
             return
-        comments = (self.gh.pr_comments if pr is not None else self.gh.issue_comments)(number)
+        # The same thread the snapshot read (``_conclave_items``): on a PR, the native reviews
+        # carry review records too (#325).
+        comments = (self._pr_thread(number) if pr is not None
+                    else self.gh.issue_comments(number))
         view = self._conclave_view(number, comments, pr)
         if view is None:
             self.log('  no conclave due')
