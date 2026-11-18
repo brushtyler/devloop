@@ -1,11 +1,13 @@
 # Workflow snapshot
 
 `ssdlc_workflow_status.snapshot(repo, ticket)` returns the `WorkflowSnapshot` of a run: the
-selected generation, the task DAG, the feedback ledger and the metrics already persisted. It is
-part 1 of the `workflow-status` CLI ([#46](https://github.com/brushtyler/ssdlc/issues/46),
-[#346](https://github.com/brushtyler/ssdlc/issues/346)). The command itself, the run states
-(`RUNNING`, `QUIESCENT`, `STALE`, …), projections, suggested commands, exit codes and `--watch`
-come in the next parts. Today the snapshot is a Python API, with no command of its own.
+selected generation, the task DAG, the feedback ledger, the metrics already persisted and the
+[cost projections](#accounting-and-projections). It covers parts 1 and 3 of the `workflow-status` CLI
+([#46](https://github.com/brushtyler/ssdlc/issues/46),
+[#346](https://github.com/brushtyler/ssdlc/issues/346),
+[#348](https://github.com/brushtyler/ssdlc/issues/348)). The command itself, the run states
+(`RUNNING`, `QUIESCENT`, `STALE`, …), suggested commands, exit codes and `--watch` come in the
+other parts. Today the snapshot is a Python API, with no command of its own.
 
 ## Read without writing
 
@@ -52,8 +54,9 @@ coherent with. The mtime is only a change signal; it is never reported as a time
 | `tasks` | `plan_revision`, `nodes` (`task_id`, `title`, `depends_on`, native `status`, `recorded`, `attempts`, `waiting_on`, `ready`), `counts` by status (`UNRECORDED` for a task without a journal record), `outside_plan` |
 | `feedback` | `status` (`absent`, `active`, `unavailable`), the ledger's public `projection`, `reason` |
 | `metrics` | See below |
+| `projection` | See [Accounting and projections](#accounting-and-projections) |
 
-Only `COHERENT` fills `run` to `metrics`; otherwise they are `null`.
+Only `COHERENT` fills `run` to `projection`; otherwise they are `null`.
 
 **Generation.** The snapshot reads the generation the published selectors name, with the same
 precedence as the engine (`execution/active.json`, then `continuations/active.json`, else the
@@ -93,3 +96,54 @@ task journal events have no timestamp, ordinary checks record only their outcome
 kept only for timeouts), and the wait for the operator is not recorded. The snapshot never infers
 them from file mtimes. Measuring them needs new instrumentation of the producers, a separate
 issue.
+
+## Accounting and projections
+
+`projection` ([#348](https://github.com/brushtyler/ssdlc/issues/348)) estimates what the rest of
+the run may cost, from the data the snapshot has already read: the ledger of `state.json`, the
+task DAG, the phase the engine recorded and the frozen limits of the generation
+(`limits/policy.json` and its journal, read without writing, like every other file of the
+snapshot). `ssdlc_workflow_projection.project` is pure: it changes no budget, no limit and no
+run, and its warnings never stop anything.
+
+**Separate measures.** Each monetary measure has its own projection, next to the frozen cap of its
+kind: `spend_usd` (charges in USD) against `metered_usd`, `estimate_usd` (API-equivalent
+estimates) against `cli_estimate_usd`. They are never added together.
+
+For each measure:
+
+| Field | Content |
+| --- | --- |
+| `spent` | The measure so far, the same value as the metric |
+| `development` | Average per completed task (the measure of the `03-dev-<task>-a<n>` calls of completed tasks, divided by the completed tasks), times the remaining tasks. `per_task`, `tasks_completed`, `tasks_remaining`. `0` when no task remains |
+| `gates` | One call for each remaining mandatory global gate (`04-review`, `05-qa`, `05b-appsec`), at the average measure of one gate call (`basis: gate_calls`) or, before any gate ran, of one call of the run (`basis: all_calls`). `per_call`, `gates_remaining` |
+| `central` | `spent` + `development` + `gates`: the sum of the known components |
+| `budget` | With active frozen limits: `cap`, `accounted` (as `LimitsStore` charges it: observed usage plus frozen reserves), `remaining`, `projected` (`accounted` + development + gates), `over_cap` |
+| `scenario` | With active frozen limits: `accounted` plus each remaining invocation (`invocations` cap minus those used) at the largest frozen reserve per invocation or observed charge of one invocation. `guaranteed_maximum: false`: it is a scenario, not a financial maximum |
+
+The remaining gates come from `state.json`: those at or after `current_phase`, none once the
+run is `AWAITING_SUPERVISOR_SIGNOFF` or `APPROVED_AND_MERGED`.
+
+**Coverage.** Each component is `{value, unit, coverage, source, reason}`, like a metric. A
+component without data is `value: null`, coverage `none`, with the reason: no task plan, no
+completed task, no development call of a completed task in the ledger, no call to price a gate,
+an unknown phase, no reserve or charge to price an invocation. Calls that reported no charge or
+no estimate, and unclassified legacy figures, make a component `partial`. `central` is
+`partial` as soon as one of its components is not complete, and `projection.coverage` is
+`complete`, `partial` or `none` over the development and gate components of both measures.
+
+**Limits.** `projection.limits` is `absent` without a frozen profile, `active`, or `unavailable`
+with the reason (a pending limit extension activation, a policy that does not validate, a journal
+that does not match it). The chain of limit extensions is not replayed: dispatch still does.
+Without active limits, `budget` and `scenario` are `null`.
+
+**Warnings.** `projection.warnings` lists, each with `effect: "none"`:
+
+| `code` | When |
+| --- | --- |
+| `BUDGET_NEARLY_EXHAUSTED` | The remaining cap of a measure is zero or less, or at most the cost of one call (`one_call`, the `per_call` of the gates) |
+| `FORECAST_OVER_CAP` | `budget.projected` exceeds the cap |
+| `INVOCATIONS_NEARLY_EXHAUSTED` | At most one invocation of the frozen `invocations` cap remains |
+
+They are information for the operator: the snapshot writes nothing, and the engine's own
+admission (`LimitsStore`) stays the only authority on dispatch.
