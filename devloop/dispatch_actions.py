@@ -12,6 +12,7 @@ imported from here, not re-exported by ``devloop/dispatcher.py``.
 """
 
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from .acceptance import acceptance_criteria, format_criteria, format_map, latest_map, render_map
@@ -33,6 +34,12 @@ from .review import (ci_failure_review, current_round, last_round, normalize_rev
                      open_findings, owner_of, round_verdict)
 from .supervision import SYNC_FAILED, TOOL_FAILURE
 from .workspace import WorkspaceError
+
+
+# The native review of an agent with an app is its review record (#325): a failed submission
+# is tried again, after a pause doubled each time, before the step escalates.
+REVIEW_ATTEMPTS = 3
+REVIEW_RETRY_PAUSE = 5  # seconds before the second attempt
 
 
 def rerun_of(reruns, head):
@@ -447,9 +454,10 @@ class ActionsMixin:
             copy_name, copy = (self.ws.review_copy(path, key) if len(keys) > 1
                                else self.ws.review_copy(path))
             try:
+                # Every turn of the round goes to the round's register (#325).
                 return self._turn(Models(cfg.agent(key)), 'review', prompt, 'review', copy,
                                   f'pr-{pr.number}-review', allowed_for(key),
-                                  where=(pr.number, 'review'))
+                                  where=(pr.number, 'review', round_no))
             except BaseException as exc:
                 with reserving:
                     reserved.pop(key, None)
@@ -492,16 +500,15 @@ class ActionsMixin:
             review['profile'] = self._profile(key, 'review', used)
             review.update(skipped_models(used))
             reviewer_gh = self._as(key, REVIEW)
-            reviewer_gh.comment(pr.number, render_review(review, self.runner.header(used)))
             if self._app_login(key):
-                # A native review under the reviewer's own identity, visible to branch
-                # protection. The marker comment above stays the record devloop reads.
-                try:
-                    reviewer_gh.submit_review(pr.number, commit=pr.head_sha,
-                                              **render_native_review(review,
-                                                                     self.runner.header(used)))
-                except GitHubError as exc:
-                    self.log(f'  native review not submitted: {exc}')
+                # One native review under the reviewer's own app (#325): its body is the
+                # record devloop reads, and its event the verdict branch protection sees.
+                self._submit_review(reviewer_gh, pr, key,
+                                    render_native_review(review, self.runner.header(used)))
+            else:
+                # An agent without an app publishes with the operator's login: the comment
+                # stays its record, as before.
+                reviewer_gh.comment(pr.number, render_review(review, self.runner.header(used)))
             records.append(review)
         new = records[len(done):]
         if new and ci != 'pending':
@@ -522,6 +529,40 @@ class ActionsMixin:
         if failures:
             # The verdicts above stay recorded: the round waits only for these reviewers.
             raise _review_failure(failures)
+
+    review_retry_pause = REVIEW_RETRY_PAUSE
+
+    def _submit_review(self, reviewer_gh, pr, key, native):
+        """Publish ``native`` (``render_native_review``), the review record of ``key``, as a
+        native review of ``pr``'s head with the reviewer's client (#325). A failure is tried
+        again up to ``REVIEW_ATTEMPTS`` times in all, after a pause doubled each time; before
+        each new attempt the reviews are read again, and a review already published with the
+        same body by the reviewer's app ends the retries. After the last failure it raises
+        ``GitHubError``: the step escalates like any failed write, and the verdicts already
+        published stay recorded."""
+        login = self._app_login(key)
+        error = None
+        for attempt in range(1, REVIEW_ATTEMPTS + 1):
+            if attempt > 1:
+                time.sleep(self.review_retry_pause * 2 ** (attempt - 2))
+                try:
+                    published = any(r.get('login') == login and r.get('body') == native['body']
+                                    for r in self.gh.pr_reviews(pr.number))
+                except GitHubError as exc:
+                    self.log(f'  reviews of #{pr.number} not readable: {exc}')
+                    published = False
+                if published:
+                    self.log(f'  native review of {key} found published after the error')
+                    return
+            try:
+                reviewer_gh.submit_review(pr.number, commit=pr.head_sha, **native)
+                return
+            except GitHubError as exc:
+                error = exc
+                self.log(f'  native review of {key} not submitted (attempt {attempt} of '
+                         f'{REVIEW_ATTEMPTS}): {exc}')
+        raise GitHubError(f'the review of {key} was not published: its native review, the '
+                          f'record devloop reads, failed {REVIEW_ATTEMPTS} times ({error})')
 
     def _together(self, keys, turn):
         """``(key, result, exception)`` of ``turn(key)`` for each of ``keys``, in order, run

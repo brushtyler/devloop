@@ -61,7 +61,7 @@ class ConclaveMixin:
             seen.add(pr.number)
             if lb.needs_supervisor in pr.labels or not operator_held(pr, lb):
                 continue
-            view = self._conclave_view(pr.number, self.gh.pr_comments(pr.number), pr)
+            view = self._conclave_view(pr.number, self._pr_thread(pr.number), pr)
             if view is not None:
                 items.append(self._conclave_item(pr.number, view))
         for label in sorted(lb.operator()):

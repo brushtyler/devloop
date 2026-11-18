@@ -17,7 +17,9 @@ Where a method went, when it was not obvious:
   although they also read pull requests: comments and labels are tracker state, shared by issues
   and pull requests.
 - ``edit_comment`` is in ``Tracker`` next to ``comment``: the ledger edits its own records.
-- ``pr_reviews`` (the native reviews) is in ``CodeReview``, and ``check_runs`` in ``CI``.
+- ``pr_reviews`` (the native reviews) is in ``CodeReview``, and ``check_runs`` in ``CI``. Since
+  #325 the native review of an agent with its own app is its review record: the dispatcher
+  reads it together with ``pr_comments``, in the order of their times.
 - ``rerun_failed_jobs`` (#200) is in ``CI``: the dispatcher re-runs the failed jobs of a run
   whose failed test modules are not pertinent to the PR, with a token limited to
   ``actions: write``.
@@ -138,7 +140,8 @@ class CodeReview(Protocol):
         """Merge PR ``number`` with a merge commit, only if its head is still ``head``."""
 
     def pr_reviews(self, number):
-        """The native reviews of PR ``number``, oldest first, as ``{id, login, state}``."""
+        """The native reviews of PR ``number``, oldest first, as ``{id, login, state, body,
+        submitted_at}``: the body of an agent's review is its devloop record (#325)."""
 
     def create_pr(self, *, base, head, title, body):
         """``(number, url)`` of the new pull request."""

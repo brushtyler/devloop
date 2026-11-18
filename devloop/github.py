@@ -375,11 +375,14 @@ class GitHub:
                                         'conclusion}')
 
     def pr_reviews(self, number):
-        """The native reviews of PR ``number``, oldest first, as ``{id, login, state}`` (state:
-        APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING)."""
+        """The native reviews of PR ``number``, oldest first, as ``{id, login, state, body,
+        submitted_at}`` (state: APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING;
+        ``submitted_at``, ISO 8601 in UTC, is null for a pending review). The body is the
+        record of a devloop review written by an agent with its own app (#325)."""
         return self._json_lines('api', '--paginate',
                                 f'repos/{self.repo}/pulls/{number}/reviews?per_page=100',
-                                '--jq', '.[] | {id, login: .user.login, state}')
+                                '--jq', '.[] | {id, login: .user.login, state, body, '
+                                        'submitted_at}')
 
     def failed_log(self, run_id, max_lines=80, job_id=None):
         """The last ``max_lines`` of the failed steps of run ``run_id`` (all of them with None),

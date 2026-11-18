@@ -8,8 +8,9 @@ changed into lines ``HH:MM <type> #N <detail>`` (UTC):
 - a new head of a PR, and its CI turning ``pass`` or ``fail`` (``GitHub.checks``, as the
   dispatcher reads it);
 - reviews with a verdict: devloop's from the valid ``review`` record in the conversation, written
-  by the identity that may write it (its native review is not reported again); a trusted user's
-  native ``APPROVED`` or ``CHANGES_REQUESTED``;
+  by the identity that may write it, or in the body of the native review of an agent with its
+  own app (#325), reported with its verdict and round; a trusted user's native ``APPROVED`` or
+  ``CHANGES_REQUESTED``;
 - comments of trusted users and of devloop's apps, those a trusted user wrote in person marked
   ``operator comment``; ledger records (#133) are left out;
 - issues and PRs opened, closed or merged.
@@ -392,14 +393,28 @@ class Watcher:
             entry = {'trusted': trusted, 'labels': sorted(label_names(raw.get('labels') or []))}
             if trusted:
                 head = raw['headRefOid']
+                reviews = []
+                for r in self.gh.pr_reviews(raw['number']):
+                    record = self._native_record(r)
+                    if record is not None:
+                        reviews.append([r['id'], r['login'], record])
+                    elif r.get('login') in self.trust.users and r.get('state') in VERDICTS:
+                        reviews.append([r['id'], r['login'], r['state']])
                 entry.update(title=clean(raw.get('title'), TITLE_LEN), head=head,
-                             ci=self.gh.checks(head)[0],
-                             reviews=[[r['id'], r['login'], r['state']]
-                                      for r in self.gh.pr_reviews(raw['number'])
-                                      if r.get('login') in self.trust.users
-                                      and r.get('state') in VERDICTS])
+                             ci=self.gh.checks(head)[0], reviews=reviews)
             prs[str(raw['number'])] = entry
         return prs
+
+    def _native_record(self, review):
+        """``<verdict> round <n>`` of a native review that is the ``review`` record of an agent
+        (#325), written by the identity that may write it; None for any other review."""
+        record = read_marker(review.get('body') or '', 'review')
+        if record is None or record['source'] != 'agent':
+            return None
+        actor = record.get('reviewer')
+        if not (isinstance(actor, str) and self.trust.wrote(review.get('login'), actor)):
+            return None
+        return f'{record["verdict"]} round {record["round"]}'
 
     def _read_issues(self, previous):
         issues = {}

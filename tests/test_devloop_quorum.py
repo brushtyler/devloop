@@ -8,7 +8,7 @@ import unittest
 from devloop import agents, config, markdown, policy, review
 from devloop.dispatcher import Dispatcher
 from devloop.planning import Action, plan
-from helpers.devloop_fakes import PORT_METHODS, FakeIdentities, SnapshotGH
+from helpers.devloop_fakes import PORT_METHODS, FakeIdentities, SnapshotGH, at
 from test_devloop import (CFG, IMPL, SHA1, SHA2, FakeRunner, FakeWS, finding, fixed, raw_review)
 
 DATA = tomllib.loads(config.DEFAULT_CONFIG.read_text())
@@ -64,9 +64,14 @@ class QuorumGH(SnapshotGH):
                      author={'login': FakeIdentities.LOGINS[IMPL]})]
 
     def pr_comments(self, number):
-        return self.earlier + [{'author': {'login': who}, 'body': body}
-                               for (n, body), who in zip(self.comments, self.written)
+        return self.earlier + [{'author': {'login': who}, 'body': body, 'created_at': at(2 * i)}
+                               for i, ((n, body), who) in enumerate(zip(self.comments,
+                                                                        self.written))
                                if n == number]
+
+    def _submitter(self):
+        # The reviewers' native reviews, their records since #325, carry their app's login.
+        return FakeIdentities.LOGINS[self.actor]
 
 
 class Quorum(unittest.TestCase):
@@ -88,7 +93,9 @@ class Quorum(unittest.TestCase):
         return plan(self.d.snapshot(), self.d.cfg)
 
     def records(self, kind):
-        return [r for r in (markdown.read_marker(b, kind) for _, b in self.gh.comments) if r]
+        """The records of ``kind`` in the PR's conversation, its native reviews included."""
+        return [r for r in (markdown.read_marker(c['body'], kind)
+                            for c in self.d._pr_thread(100)) if r]
 
     def reviewed(self):
         return [call[0] for call in self.runner.calls if call[1] == 'review']
@@ -113,10 +120,10 @@ class QuorumTests(Quorum):
             self.assertEqual(r['profile'], self.d._profile(r['reviewer'], 'review'))
         (promoted,) = self.records('policy')
         self.assertEqual(promoted['event'], 'promoted')
-        # Each reviewer's comment and native review come from its own app.
-        self.assertEqual(self.gh.written[:2], [FakeIdentities.LOGINS[FIRST],
-                                               FakeIdentities.LOGINS[SECOND]])
-        self.assertEqual(len(self.gh.native), 2)
+        # Each reviewer's native review, its only record (#325), comes from its own app.
+        self.assertEqual([r['login'] for _, r in self.gh.native],
+                         [FakeIdentities.LOGINS[FIRST], FakeIdentities.LOGINS[SECOND]])
+        self.assertNotIn(FakeIdentities.LOGINS[FIRST], self.gh.written)
         # Ready: the replay needs no inference; with [merge] off only the operator merge is
         # left to tell (#248).
         self.assertEqual([a.kind for a in self.planned()], ['operator_merge'])
@@ -124,10 +131,9 @@ class QuorumTests(Quorum):
     def test_two_approvals_of_the_same_reviewer_are_not_enough(self):
         self.make(raw_review(), raw_review())
         self.d.tick()
-        (first,) = self.gh.comments
+        (first,) = self.gh.native
         # The same reviewer's approval of the same round again, e.g. after a race.
-        self.gh.comments.append(first)
-        self.gh.written.append(self.gh.written[0])
+        self.gh.native.append(first)
         snap = self.d.snapshot()
         self.assertEqual(len(snap.prs[0].reviews), 2)
         self.assertEqual(len(review.current_round(snap.prs[0].reviews)), 1)  # deduplicated
