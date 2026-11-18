@@ -277,9 +277,10 @@ Ogni issue si apre dopo l'approvazione di questo ADR, una per area.
 **Ordine.**
 
 - P2-1 e P2-2 sono indipendenti e possono partire subito dopo l'approvazione.
-- P2-3 e P2-4 seguono P2-2, anche in parallelo. P2-5 chiude la parte di devloop.
+- P2-3 e P2-4 seguono P2-2, anche in parallelo. P2-5 segue P2-1, P2-2 e P2-3, e può procedere in parallelo a P2-4.
+- P2-4 e P2-5 chiudono insieme la parte di devloop: l'una non sostituisce l'altra.
 - P2-6 e P2-7 riguardano il motore locale, non dipendono dalle altre e partono quando l'operatore ha preso le decisioni D4 e D6.
-- Il passo 3 (fasi sul tracker) parte dopo P2-5 e dopo l'attivazione decisa in D8.
+- Il passo 3 (fasi sul tracker) parte solo dopo **sia P2-4 sia P2-5** e dopo l'attivazione decisa in D8. Senza P2-4 mancherebbero il salvataggio degli output e delle ricevute prima della pubblicazione e la riconciliazione delle pubblicazioni incerte, che il vincolo 3 dell'ADR 0001 richiede prima delle run con le fasi; senza P2-5 mancherebbe la prenotazione del budget del vincolo 2.
 
 **Esclusi da questo passo:**
 
