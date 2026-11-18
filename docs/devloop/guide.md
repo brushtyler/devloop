@@ -460,16 +460,24 @@ a restart is never repeated, also after a crash.
   work: the dispatcher saves them as a diff in its logs (`<state_dir>/logs/conclave-<issue-n or
   pr-n>-<comment>.diff`), and the record cites the file, its size and its SHA-256 as
   **evidence**. The implementation runs at once, within the same action, and takes a free slot
-  of `max_open_prs` as any implementation (without one it waits for a later tick); it does not
-  restart when the readiness check no longer covers the text, or the issue already has a devloop
-  PR, open or merged. A fix goes back to `agent:changes`, and the next tick runs it.
+  of `max_open_prs` as any implementation (without one it waits for a later tick); in the
+  continuous mode the action keeps that slot while it runs, so the ticks planned meanwhile do not
+  start another issue in its place. While the issue is blocked by an open issue
+  ([Dependencies](#dependencies-between-issues)) the restart waits, takes no slot and is not
+  spent: it runs on the tick after the block closes. It does not restart when the readiness check
+  no longer covers the text, or the issue already has a devloop PR, open or merged. A fix goes
+  back to `agent:changes`, and the next tick runs it.
 - **Review with `needs_operator`.** The PR goes back to `agent:review`: the verdict of the block
   is **not applied again**, and the next tick reviews the same head in a new round, within the
   rounds `max_review_rounds` still allows; with none left the PR escalates for the round limit,
   as usual.
 
 No limit, round or slot grows. The normal review of the PR and the human merge stay mandatory
-after every restart: the decision only settles the gap the step stopped on.
+after every restart: the decision only settles the gap the step stopped on. Once a record of the
+issue or of its PR is `resumed`, devloop **never merges** that PR, whatever `[merge]` says
+(`strict` or `auto`), also after the resolution lapses or is vetoed: the PR counts as one in
+mode `off`, ready PRs get the [operator merge](#ready-prs-whose-merge-is-the-operators) notice with the comment of the decision,
+and the final check before a merge refuses it as well.
 
 **What reaches the prompts.** The trust in bots' comments does not widen, and `trusted_users`
 stays as it is. The prompts of the implementation, of the fixes and of the reviews of that issue
@@ -560,7 +568,8 @@ routed as above.
 In `"auto"` or `"strict"`, `agent:ready-to-merge` usually means that devloop merges the PR. When
 it does not (#248), because the [merge mode](#merge-modes) of the PR is `"off"`, the dispatcher also adds
 `agent:needs-operator` once the PR is ready, with a comment ("Il merge spetta all'operatore")
-that says why: the reserved paths the diff touches, or the mode or the level. The comment
+that says why: the reserved paths the diff touches, the mode or the level, or the restart of its
+work after a [conclave](#after-a-unanimous-decision) (#142). The comment
 carries a `notice` marker of event `operator_merge` with the head, how many `labeled` events of
 the label came before, and the promotion it belongs to (how many promotions the PR's policy
 records count). There is one comment per head: a head promoted again, after its CI ran again

@@ -282,7 +282,9 @@ other conclave. The escalation of a veto (`class: conclave_veto`) records in its
 comment of the decision (`veto_of`) and of the veto (`veto`): it spends that veto, and a PR is
 suspended once per decision. A `review` block whose record is `resumed`, on the PR's head and on
 its latest round, is not replayed: the next review opens a new round, as after `/devloop
-rereview`.
+rereview`. Any `resumed` record of the dispatcher on the issue or on its PR, whether its
+resolution still holds or not, makes the merge of that PR human: the snapshot plans it in mode
+`off`, the `operator_merge` notice says why, and `_do_merge` checks it again before merging.
 
 ## Receipts
 

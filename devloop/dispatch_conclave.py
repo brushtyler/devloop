@@ -551,8 +551,17 @@ class ConclaveMixin:
         """The view of a ``UNANIMOUS`` decision whose work has not restarted yet, due as one
         ``conclave`` action with ``resume``, or None (logged): the decision must still be the
         one that goes into the prompts (``_conclave_resolution``), not vetoed, on the same text
-        of the issue and, on a PR, on the same head."""
+        of the issue and, on a PR, on the same head. The restart of an implementation also waits
+        while the issue is blocked by an open issue (#277), as a ready issue and a retry do: it
+        is not due, and ``resumed`` stays unspent until the block closes. The snapshot reads it
+        for the plan, and ``_do_conclave`` again just before the restart."""
         issue_number = pr.issue if pr is not None else number
+        if record['step'] == 'implement' and pr is None:
+            blocked_by = self._dependency_view([number])[number]['blocked_by']
+            if blocked_by:
+                self.log(f'  #{number}: the unanimous decision {comment} waits to restart the '
+                         'implementation, blocked by ' + ', '.join(blocked_by))
+                return None
         try:
             issue, _ = self._issue_context(issue_number)
         except UntrustedChange as exc:
@@ -621,6 +630,19 @@ class ConclaveMixin:
             # Escalated as the step's own failure: the conclave action itself never escalates.
             self.log(f'  failed: {exc}')
             self._escalate_failure(Action('implement', number, 'conclave'), None, exc)
+
+    def _human_merge(self, pr):
+        """The comment of the latest conclave decision that restarted work of ``pr`` or of its
+        issue (#142), read now, or None. After such a restart the merge is a human act for good:
+        the record stays ``resumed`` even when its resolution later lapses (a new text, a new
+        head) or a trusted user vetoes it, so that devloop never merges the PR itself, whatever
+        ``[merge]`` says: the snapshot plans it as mode ``off``, ``_operator_merge_reasons``
+        tells why, and ``_do_merge`` checks it again just before a merge."""
+        threads = (self.gh.issue_comments(pr.issue), self.gh.pr_comments(pr.number))
+        found = [cid for comments in threads for cid, record in self._conclave_records(comments)
+                 if record.get('resumed') is not None
+                 and isinstance(cid, int) and not isinstance(cid, bool)]
+        return max(found) if found else None
 
     def _conclave_pr_state(self, pr, comments):
         """What the conclave decisions of a PR devloop works on change in the snapshot (#142),

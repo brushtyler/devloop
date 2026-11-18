@@ -15,10 +15,14 @@ if _TESTS_DIR not in sys.path:
     sys.path.insert(0, _TESTS_DIR)
 
 from devloop import conclave, markdown, review  # noqa: E402
+from devloop.dispatcher import Dispatcher  # noqa: E402
 from devloop.planning import Snapshot, plan  # noqa: E402
 from devloop.workspace import Workspace  # noqa: E402
 from helpers.devloop_fakes import SHA1  # noqa: E402
-from test_devloop import finding, fixed, implemented, norm, pr, raw_review  # noqa: E402
+from test_devloop import (FakeRunner, FakeWS, finding, fixed, implemented, norm, pr,  # noqa: E402
+                          raw_review)
+from test_devloop_merge import AUTO, STRICT, MergeGH  # noqa: E402
+from test_devloop_merge import Identities as MergeIdentities  # noqa: E402
 from test_devloop_conclave import (CCFG, LOGINS, NEEDS_OPERATOR, RESOLUTION, SHA2, Base,  # noqa: E402,E501
                                    ConclaveWS, proposal, vote)
 
@@ -368,6 +372,87 @@ class VetoTests(ResumeBase):
         self.d._do_veto(p)
         self.assertEqual(self.escalations(100), [])
         self.assertEqual(self.gh.labels[100], {'agent:review'})
+
+
+class HumanMergeTests(ResumeBase):
+    """After a restart the merge stays human (#142), in ``strict`` and ``auto`` alike, also
+    when the resolution later lapses or is vetoed."""
+
+    def resumed_record(self):
+        """The body of the conclave record of issue #7 once its implementation restarted."""
+        cid = self.unanimous_issue(implemented())
+        self.d._do_conclave(7)
+        self.assertIsNotNone(self.record(7)['resumed'])
+        return next(c['body'] for c in self.gh.thread[7] if c['id'] == cid)
+
+    def merge_dispatcher(self, cfg):
+        """PR #100 of issue #7 ready to merge (``test_devloop_merge``), as the dispatcher signs
+        its records with the ambient login there."""
+        gh = MergeGH()
+        d = Dispatcher(cfg, gh, FakeWS(), FakeRunner(), log=self.logs.append,
+                       identities=MergeIdentities(gh))
+        return gh, d
+
+    def test_after_a_restart_devloop_never_merges_in_strict_or_auto(self):
+        body = self.resumed_record()
+        for cfg in (STRICT, AUTO):
+            with self.subTest(mode=cfg.merge.mode):
+                gh, d = self.merge_dispatcher(cfg)
+                # Without the restart devloop would merge this PR in this mode.
+                self.assertEqual(d.snapshot().prs[0].merge_mode, cfg.merge.mode)
+                cid = gh.say('brushtyler', body)
+                snap = d.snapshot()
+                self.assertEqual(snap.prs[0].merge_mode, 'off')
+                self.assertEqual([a.kind for a in plan(snap, cfg)], ['operator_merge'])
+                # The final check of the merge refuses it as well, whatever the plan said.
+                d._do_merge(dataclasses.replace(snap.prs[0], merge_mode=cfg.merge.mode))
+                self.assertEqual(gh.merged, [])
+                self.assertTrue(any(f'conclave decision {cid}' in line for line in self.logs))
+                # The operator is told why.
+                d._do_operator_merge(snap.prs[0])
+                self.assertIn(f'conclave registrata nel commento {cid}', gh.comments[-1][1])
+                self.assertIn('agent:needs-operator', gh.labels[100])
+
+    def test_the_constraint_outlives_the_resolution(self):
+        body = self.resumed_record()
+        gh, d = self.merge_dispatcher(STRICT)
+        cid = gh.say('brushtyler', body)
+        # A veto annuls the decision; the work it restarted keeps a human merge.
+        gh.say('brushtyler', '/devloop veto')
+        p = d.snapshot().prs[0]
+        self.assertEqual(d._human_merge(p), cid)
+        d._do_merge(dataclasses.replace(p, merge_mode='strict'))
+        self.assertEqual(gh.merged, [])
+
+
+class DependencyTests(ResumeBase):
+    """A restart of an implementation waits while the issue is blocked (#277, #142)."""
+
+    def block(self, state='OPEN'):
+        """Issue #7 blocked by #9, added by a trusted user."""
+        self.gh.issue_dependencies = lambda number: {
+            'author': 'brushtyler',
+            'blocked_by': [{'number': 9, 'state': state}] if number == 7 else [],
+            'added': [{'number': 9, 'by': 'brushtyler'}] if number == 7 else []}
+
+    def test_a_restart_waits_for_an_open_dependency_and_resumes_after_it_closes(self):
+        self.unanimous_issue(implemented())
+        self.block()
+        # Not due: no action, no slot, and the restart is not spent.
+        self.assertEqual(self.d._conclave_items([]), [])
+        self.assertTrue(any('blocked by #9' in line for line in self.logs))
+        # Checked again just before the restart.
+        self.d._do_conclave(7)
+        self.assertIsNone(self.record(7).get('resumed'))
+        self.assertEqual(len(self.runner.calls), 4)
+        self.assertEqual(self.gh.created, [])
+        # Once the block closes the restart is due again, and runs.
+        self.block(state='CLOSED')
+        items = self.d._conclave_items([])
+        self.assertEqual([(i['number'], i['opens']) for i in items], [(7, True)])
+        self.d._do_conclave(7)
+        self.assertIsNotNone(self.record(7)['resumed'])
+        self.assertEqual(len(self.gh.created), 1)
 
 
 class CommandTests(unittest.TestCase):

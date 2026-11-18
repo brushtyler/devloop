@@ -187,7 +187,8 @@ from .markdown import (RESUME, dispatcher_header, publishable, read_marker, rend
                        render_escalation, render_operator_merge)
 from .activity import iso, restart_line
 from .pin import PREFIX, PinError, Repinned, SmokeError
-from .planning import (BASE_CHANGED, MERGE_LANE, RESYNC_AFTER_APPROVAL, PullRequest, Snapshot,
+from .planning import (BASE_CHANGED, MERGE_LANE, MERGING, RESYNC_AFTER_APPROVAL, PullRequest,
+                       Snapshot,
                        admit, changes_before_ci, ci_unknown, counted_rounds, issue_priority,
                        label_names, numbers_of, operator_blocked, operator_held,
                        pending_reviewers, plan, pr_counts, queue_lines, round_reasons, schedule,
@@ -907,6 +908,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             if (self.cfg.merge.enabled() and pr.meta and lb.ready_to_merge in pr.labels
                     and not operator_held(pr, lb)):
                 pr.merge_mode = self._merge_mode(pr)
+                if pr.merge_mode in MERGING and self._human_merge(pr) is not None:
+                    # Work of this PR restarted after a conclave (#142): the merge is human.
+                    pr.merge_mode = 'off'
             prs.append(pr)
         ready = []
         pr_issues = {pr.issue for pr in prs}
@@ -1185,9 +1189,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         # A PR an implementation opened while it still runs belongs to it too.
         busy |= {number for number, issue in issue_of.items() if issue in busy}
         self._flag_incomplete(snap, False, busy)
+        # A conclave that restarts an implementation (#142, ``Action.opens``) may open a PR too.
         reserved = sum(1 for action, _ in running
                        if action.kind in ('implement', 'preflight')
-                       or action.kind == 'supervise' and action.number not in prs)
+                       or action.kind == 'supervise' and action.number not in prs
+                       or action.kind == 'conclave' and action.opens)
         merging = any(action.kind in MERGE_LANE for action, _ in running)
         actions = plan(snap, self.cfg, busy, reserved, merging)
         # The limit may pass while the snapshot reads GitHub: checked again before any start.
@@ -2140,6 +2146,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         if any(lvl == level and mode == 'off' for lvl, mode in merge.levels):
             lines.append(f'- `[merge.levels]` imposta `off` per il livello di review {level} di '
                          'questa PR.')
+        unblocked = self._human_merge(pr)
+        if unblocked is not None:
+            lines.append('- il lavoro di questa PR è ripartito dopo la decisione del conclave '
+                         f'registrata nel commento {unblocked}: dopo ogni sblocco il merge resta '
+                         'umano.')
         if not lines:
             self.log(f'  merge mode {merge.mode_for(level, paths)}: devloop may merge this PR')
         return '\n'.join(lines)
