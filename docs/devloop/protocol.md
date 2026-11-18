@@ -226,7 +226,8 @@ one since. The check loses the block, which then stays until a person removes it
 was removed and applied again, if a comment starting with the attribution header, written by an
 identity allowed to write devloop records, came after the check (another escalation, or
 anything that may be one, marker or not; the dispatcher's [ledger records](#evidence-and-telemetry),
-such as the turn of a recheck, do not count), or if the attribution is uncertain. A comment from
+such as the turn of a recheck, and its [supervision traces](#supervision-trace), such as the
+answer to a command that does not apply, do not count), or if the attribution is uncertain. A comment from
 anyone else, header or not, never touches the attribution. A label already present when the
 check failed is never the check's.
 
@@ -308,14 +309,24 @@ How devloop merges in the `"strict"` and `"auto"` [merge modes](guide.md#merge-m
 
 ## Supervision trace
 
-The trace of the commands of the [escalations to the supervisor](guide.md#escalations-to-the-supervisor):
+The trace of the commands of the [escalations to the supervisor](guide.md#escalations-to-the-supervisor)
+and of the [escalations to the operator](guide.md#commands-on-escalations-to-the-operator):
 
 **Trace.** Every command applied leaves a dispatcher comment with a `supervision` marker: the
 command, its author, its reason, the id of the comment that carried it, the class and the outcome
 (`applied`, `accepted`, `decided`, `escalated`, `refused` or `limit`), with the key and the
 attempt for a retry, the defaults for an acceptance and, for a decision, its text (in `reason`)
 and the gaps it answers. The record is written before the labels change, so a
-lost label change never runs a retry twice.
+lost label change never runs a retry twice. A command that does not apply (#321) gets the same
+record, `refused`, with the reason and how to resume in the comment: it spends the command, which
+is answered once. The applied retries counted against the limit are those of both records, the
+supervisor's and the operator's.
+
+**Escalation.** The `notice` marker of an escalation to the operator records, as one to the
+supervisor does, the step that failed, the key of its input and, for a PR, the label a retry
+resumes from, when the step is one a retry runs again (#321). A supervisor's escalation handed to
+the operator (`supervisor_escalated`, `supervisor_refused`) keeps them only for `tool_failure` and
+`sync_failed`: the key of a `preflight_default` or `merged_issue` escalation only routes it.
 
 ## Dependency cycles
 

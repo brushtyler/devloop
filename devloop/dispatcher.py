@@ -123,7 +123,10 @@ non-critical one (``tool_failure``, ``preflight_default``, ``sync_failed``) goes
 agent:needs-supervisor, unless something makes it critical (``_supervised``), and the
 supervisor's identity or a trusted user decides it with ``/devloop retry``, ``/devloop
 accept-defaults``, ``/devloop decide <text>`` or ``/devloop escalate <reason>``
-(``_do_supervise``). Critical and unknown classes always go to agent:needs-operator.
+(``_do_supervise``). Critical and unknown classes always go to agent:needs-operator. On an item
+in agent:needs-operator a trusted user may use ``/devloop retry`` on an escalation that records
+its step, and ``accept-defaults`` or ``decide`` on a ``preflight_default`` check (#321,
+``_operator_command``); a command that does not apply is answered with the way to resume.
 
 Requested fixes (#195): ``/devloop fix`` from a trusted user or the supervisor's identity, on a
 PR in agent:review or agent:changes, runs a fix of the current head with the rest of the comment
@@ -936,22 +939,29 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
 
     def _supervised_items(self, prs):
         """The issues and PRs in ``agent:needs-supervisor``, not in ``agent:needs-operator``,
-        with a supervisor command to apply (#182)."""
+        with a supervisor command to apply (#182), and those in ``agent:needs-operator`` with a
+        command of a trusted user (#321); either may be a command only to answer
+        (``_supervisor_view``)."""
         lb = self.cfg.labels
-        items = [(pr.number, True, self.gh.pr_comments) for pr in prs
-                 if lb.needs_supervisor in pr.labels and not operator_blocked(pr.labels, lb)]
-        items += [(raw['number'], False, self.gh.issue_comments)
-                  for raw in self.gh.issues_with_label(lb.needs_supervisor)
-                  if not operator_blocked(label_names(raw['labels']), lb)]
+        items = [(pr.number, True, self.gh.pr_comments, operator_blocked(pr.labels, lb))
+                 for pr in prs if lb.needs_supervisor in pr.labels
+                 or operator_blocked(pr.labels, lb)]
+        seen = set()
+        for label in (lb.needs_supervisor, *sorted(lb.operator())):
+            for raw in self.gh.issues_with_label(label):
+                if raw['number'] not in seen:
+                    seen.add(raw['number'])
+                    items.append((raw['number'], False, self.gh.issue_comments,
+                                  operator_blocked(label_names(raw['labels']), lb)))
         found = []
-        for number, is_pr, read in items:
-            view = self._supervisor_view(number, read(number))
+        for number, is_pr, read, operator in items:
+            view = self._supervisor_view(number, read(number), operator)
             if view is not None:
                 found.append(dict(view, number=number, pr=is_pr))
         # A retry of an issue's step waits while the issue is blocked (#277), as a ready issue
         # does: ``blocked_by`` holds its open blocks.
         retries = [item for item in found if item['command'] == RETRY and not item['pr']
-                   and item.get('step') in ISSUE_STEPS]
+                   and item.get('step') in ISSUE_STEPS and not item.get('refusal')]
         views = self._dependency_view([item['number'] for item in retries]) if retries else {}
         for item in retries:
             item['blocked_by'] = views[item['number']]['blocked_by']
@@ -1317,11 +1327,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
 
     # Helpers -------------------------------------------------------------
     def _escalate(self, number, reason, detail='', remove=(), cls='failure', supervised=None,
-                  why=''):
+                  why='', retry=None):
         """Escalate issue or PR ``number`` with an escalation of class ``cls`` (#182). With
         ``supervised`` (``_supervised``) it goes to ``agent:needs-supervisor`` and an issue
         keeps ``agent:ready``; otherwise to ``agent:needs-operator``, with ``why`` a non-critical
-        class in ``auto`` stays with the operator."""
+        class in ``auto`` stays with the operator, and with ``retry`` (``_retry_payload``) the
+        step a trusted user may run again with ``/devloop retry`` (#321)."""
         lb = self.cfg.labels
         if supervised:
             self.gh.comment(number, render_escalation(reason, detail, cls, supervised))
@@ -1331,7 +1342,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
         if why:
             reason = (reason.rstrip() + f'\n\nIn modalità di merge `auto` questa escalation '
                       f'andrebbe al supervisore, ma resta all\'operatore: {why}.')
-        self.gh.comment(number, render_escalation(reason, detail, cls))
+        self.gh.comment(number, render_escalation(reason, detail, cls, retry=retry))
         self.gh.edit_labels(number, add=[lb.needs_operator], remove=remove)
 
     def _log_hint(self, exc):
@@ -1355,11 +1366,16 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
         remove = ([lb.review, lb.changes, lb.ready_to_merge] if pr is not None
                   else [lb.working, lb.ready])
         try:
-            supervised, why = self._supervised(number, cls, action.kind, pr,
-                                               getattr(exc, 'reviewer', None),
-                                               key=getattr(exc, 'key', None))
+            reviewer, key = getattr(exc, 'reviewer', None), getattr(exc, 'key', None)
+            supervised, why = self._supervised(number, cls, action.kind, pr, reviewer, key=key)
+            # To the operator the step stays recorded too, for a trusted user's retry (#321).
+            retry = None if supervised else self._retry_payload(action.kind, pr, reviewer, key)
+            if retry and retry['step'] == 'preflight':
+                # A readiness check runs again only on an issue with agent:ready: one the
+                # operator may retry keeps it, as a failed check does.
+                remove = [label for label in remove if label != lb.ready]
             self._escalate(number, reason, getattr(exc, 'tail', ''), remove=remove, cls=cls,
-                           supervised=supervised, why=why)
+                           supervised=supervised, why=why, retry=retry)
         except GitHubError as gh_exc:
             self.log(f'  could not escalate: {gh_exc}')
 

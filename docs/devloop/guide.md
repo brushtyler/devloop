@@ -72,7 +72,9 @@ stalled with `agent_stall_action = "abort"` (see [Stalled agents](#stalled-agent
 untrusted user after `agent:ready`, or the PR body lost its marker. While `agent:needs-operator` is
 set devloop ignores the PR or issue, so to resume: fix the cause, **remove `agent:needs-operator`**
 and set the label that should run next (`agent:ready` on the issue, `agent:review` or
-`agent:changes` on the PR). Every escalation comment repeats this. The only exception is the
+`agent:changes` on the PR). Every escalation comment repeats this. When the escalation records a
+step that can run again, a trusted user may instead answer with `/devloop retry`, and the comment
+says so ([Commands on escalations to the operator](#commands-on-escalations-to-the-operator)). The only exception is the
 `agent:needs-operator` the dispatcher adds to a ready PR it does not merge (see
 [Ready PRs whose merge is the operator's](#ready-prs-whose-merge-is-the-operators)). Every escalation has a
 **class**, recorded in its marker; with `[merge].mode = "auto"` the non-critical ones go to
@@ -508,10 +510,16 @@ any, is one of:
 
 They count only in `"auto"`, from the identity of `[roles].supervisor` (the GitHub App of that
 agent) or from `trusted_users`, only on an item in `agent:needs-supervisor` without
-`agent:needs-operator`, and only when written after the latest escalation. Any other command is
-ignored and written to the dispatcher log; text devloop publishes is never a command. As for
-[holding a merge](#holding-a-merge), a dispatcher record spends the command it applied and every
-command before it, and among the commands that wait the latest wins.
+`agent:needs-operator`, and only when written after the latest escalation. On an item in
+`agent:needs-operator` the commands of trusted users follow
+[Commands on escalations to the operator](#commands-on-escalations-to-the-operator). A command
+from anyone else is ignored and written to the dispatcher log only; text devloop publishes is
+never a command. A command from an allowed author that does not apply (outside `"auto"`, a
+`decide` or an `escalate` without its text, or one refused below) always gets an answer: a
+dispatcher comment with the reason and how to resume, besides the log line. As for
+[holding a merge](#holding-a-merge), a dispatcher record, the answer included, spends the command
+it handled and every command before it, and among the commands that wait the latest applicable
+one wins; without one, the latest that does not apply is answered.
 
 - `/devloop retry` runs the failed step again, for `tool_failure` and `sync_failed`. A PR goes
   back to the label of its step (`agent:review` for a review or a sync, `agent:changes` for a
@@ -565,10 +573,56 @@ command before it, and among the commands that wait the latest wins.
 An escalation whose class is critical or unknown, or that was not routed to the supervisor,
 accepts no command: the command is refused and the item goes to `agent:needs-operator`. A command
 the class does not admit (`accept-defaults` or `decide` on a tool failure, `retry` on defaults) is refused
-and the escalation stays with the supervisor.
+and the escalation stays with the supervisor. The answer lists the commands that apply to the
+escalation (`retry` for `tool_failure` and `sync_failed`, `accept-defaults` and `decide` for
+`preflight_default`, none of them for an input changed since, `escalate` always) and the manual
+steps without the supervisor.
 
 **Trace.** Every command applied leaves a dispatcher record, described in
 [Supervision trace](protocol.md#supervision-trace).
+
+### Commands on escalations to the operator
+
+On an issue or PR in `agent:needs-operator` (#321) a user in `trusted_users` may use the same
+commands, in every merge mode, written after the record that put the item there: the latest
+dispatcher notice (an escalation, an agent that stopped, an [operator merge](#ready-prs-whose-merge-is-the-operators),
+which counts from the promotion it was last written for), escalation of the review level
+(`review_level`, `level_zero`) or failed readiness check. When the item moved on after that
+record (a command applied, a passed readiness check, a review, a fix, a sync, a policy record
+that is no escalation), the label is no longer that record's, for example one added by hand:
+no command applies, and the answer gives the manual steps. The commands valid there are:
+
+- `/devloop retry`, when that record is an escalation that records the step that failed and the
+  key of its input. Every escalation of a failed agent, `gh` or git step (`tool_failure`,
+  `failure`, `untrusted`) and of a sync with conflicts that failed (`sync_failed`,
+  `sync_sensitive`, `tool_failure`) records it, also when it goes to the operator; so do `supervisor_escalated` and `supervisor_refused`
+  of a `tool_failure` or `sync_failed` escalation, which keep the step of the supervisor's
+  escalation. Their comment says that `/devloop retry` applies. An issue whose readiness check
+  failed this way keeps `agent:ready`, so that the check can run again. The
+  class may be critical: a retry runs the step again and bypasses none of its checks. The
+  conditions are the supervisor's: the input of the step must still be the one that failed (the
+  same head, base and request), the issue must not be resolved by a merged devloop PR, a blocked
+  issue waits, and at most **two** retries run for the same key, the supervisor's and the
+  operator's together (so not after `retry_limit`). The readiness check runs again only on an
+  issue that still has `agent:ready`. devloop removes `agent:needs-operator` (and
+  `agent:needs-supervisor`); a PR goes back to the label of its step and the next tick runs it,
+  an issue's step runs at once.
+- `/devloop accept-defaults` and `/devloop decide <decisions>`, when that record is a failed
+  readiness check of class `preflight_default`, or the supervisor's escalation of one handed to
+  the operator (`supervisor_escalated`, `supervisor_refused`), under the conditions of the
+  supervisor's commands above. devloop records the defaults or the decisions and removes
+  `agent:needs-operator`, and the issue goes back in the queue. On a failed check, an ordinary
+  comment of a trusted user with the decisions works as well
+  ([Readiness check](#readiness-check-before-implementation)): the dispatcher's answers to
+  commands leave the block to the check.
+
+`/devloop escalate` never applies: the escalation is already the operator's. A command of the
+supervisor's identity on an escalation to the operator does not apply either. Every command that
+does not apply gets a dispatcher comment with the reason and how to resume (the manual steps
+above, `/devloop recheck` for a readiness check, the manual merge for an operator merge), and the
+item stays in `agent:needs-operator`. A command from outside `trusted_users` and the supervisor's
+identity is only logged. The trace is the one of the supervisor's commands, under the title
+"Comando su un'escalation all'operatore".
 
 ## Who does what
 
