@@ -22,6 +22,8 @@ class FeedbackError(TaskError):
 
 
 RECORDING_EXPIRED = 'FEEDBACK_RECORDING_EXPIRED'
+# Key of the host's automatic fencing proof in authority.json (ssdlc_fencing_proof.INTENT_KEY).
+FENCING_KEY = 'fencing'
 # Operations that need a live recording authority. Everything else (status,
 # capture of an already reserved role response, native resume, limit
 # extensions) does not depend on it and is not blocked by its expiry.
@@ -315,7 +317,7 @@ class FeedbackStore:
         self._paths()
         authority = json.loads(_regular(self.root, 'authority.json').read_text())
         validate_policy(authority['policy'])
-        validate_recording_authority(authority['policy'], authority.get('authorization'))
+        validate_recording_authority(authority['policy'], authority.get('authorization'), authority.get(FENCING_KEY))
         path = self.root / 'task-journal.jsonl'
         if not path.exists():
             if authority['status'] == 'INTENT':
@@ -334,16 +336,56 @@ class FeedbackStore:
         journal.load()
         journal.append(kind, state)
 
-    def authorize(self, policy, authorization, *, fault=lambda point: None):
+    def authorize(self, policy, authorization, *, fault=lambda point: None, fencing=None):
+        """Freeze the recording policy (F1) under the operator's exact authorization.
+
+        The operator attests that writers are stopped (``source_fenced: true``), or, for
+        a run admitted to automatic fencing, omits it and the host takes the automatic
+        proof (``ssdlc_fencing_proof``), recorded beside the authorization in
+        ``authority.json``. ``fencing`` replaces ``ssdlc_fencing_proof.fence`` in tests.
+        """
         validate_policy(policy)
         expected = dict(schema_version=1, policy_sha256=digest(policy), authorized=True, source_fenced=True)
-        if not exact_authorization(authorization, expected) or policy['ticket'] != self.ticket.name:
+        automatic = isinstance(authorization, dict) and 'source_fenced' not in authorization
+        if automatic:
+            expected.pop('source_fenced')
+        if ((automatic and not exact_automatic_authorization(authorization, expected))
+                or (not automatic and not exact_authorization(authorization, expected))
+                or policy['ticket'] != self.ticket.name):
             raise FeedbackError('Exact fenced feedback policy authorization required')
-        return self._initialize(policy, authorization, fault=fault)
+        if not automatic:
+            return self._initialize(policy, authorization, fault=fault)
+        return self._authorize_automatic(policy, authorization, fault=fault, fencing=fencing)
 
-    def _initialize(self, policy, authorization, *, fault=lambda point: None):
+    def _authorize_automatic(self, policy, authorization, *, fault, fencing):
+        import ssdlc_fencing_proof as fp
+        from ssdlc_writer_gate import GateError
+        self._paths()
+        if (self.root / 'authority.json').exists():
+            # A replay keeps the inputs of the stored authority: checked before any proof.
+            authority, _ = self._read()
+            self._same_authority(authority, policy, authorization)
+            if authority['status'] == 'ACTIVE':
+                # Published: no new proof, the run's writers may already record.
+                return self._initialize(policy, authorization, fault=fault, proof=authority[FENCING_KEY])
+        # The writers fenced are those of the generation the ticket's selectors name.
+        try:
+            source = self.ticket / fp.selected_generation(self.ticket)
+        except GateError as exc:
+            raise fp.FencingRefused(exc.code, exc.detail) from None
+        with (fencing or fp.fence)(self.ticket, source) as held:
+            return self._initialize(policy, authorization, fault=fault, proof=held.proof, held=held)
+
+    @staticmethod
+    def _same_authority(authority, policy, authorization):
+        """A replay never switches between the operator's attestation and the automatic proof."""
+        if (authority['policy'] != policy or authority.get('authorization') != authorization
+                or (FENCING_KEY in authority) != ('source_fenced' not in authorization)):
+            raise FeedbackError('Feedback authority replayed with different inputs')
+
+    def _initialize(self, policy, authorization, *, fault=lambda point: None, proof=None, held=None):
         validate_policy(policy)
-        validate_recording_authority(policy, authorization)
+        validate_recording_authority(policy, authorization, proof)
         if policy['ticket'] != self.ticket.name:
             raise FeedbackError('Feedback policy belongs to another ticket')
         # An expired authority is neither renewed nor recreated, even with the same policy.
@@ -355,10 +397,21 @@ class FeedbackStore:
                 authority, state = self._read()
                 if authority['policy'] != policy:
                     raise FeedbackError('Frozen feedback policy cannot be replaced')
+                if proof is not None or FENCING_KEY in authority:
+                    self._same_authority(authority, policy, authorization)
+                if held is not None and authority['status'] != 'ACTIVE':
+                    # Replay before publication: the fresh proof covers the same gate and
+                    # generation; the proof written first is kept, never rewritten.
+                    from ssdlc_fencing_proof import same_fence
+                    if not same_fence(authority[FENCING_KEY], proof):
+                        raise FeedbackError('Feedback authority replayed with different inputs')
             else:
                 if (self.root / 'task-journal.jsonl').exists() or (self.root / 'tasks-state.json').exists():
                     raise FeedbackError('Orphan feedback history requires reconciliation')
                 authority = dict(policy=copy.deepcopy(policy), authorization=authorization, status='INTENT')
+                if proof is not None:
+                    # The host's proof sits beside the operator's authorization, never inside it.
+                    authority[FENCING_KEY] = proof
                 atomic_json(path, authority)
                 state = None
             fault('policy_intent')
@@ -367,6 +420,8 @@ class FeedbackStore:
                 self._append('FEEDBACK_AUTHORIZED', state)
             fault('policy_journal')
             if authority['status'] != 'ACTIVE':
+                if held is not None:
+                    held.check()  # the exclusive lock is still ours when the authority goes live
                 authority['status'] = 'ACTIVE'
                 atomic_json(path, authority)
             return copy.deepcopy(state)
@@ -712,8 +767,27 @@ def exact_authorization(value, expected):
             and value.get('authorized') is True and value.get('source_fenced') is True)
 
 
-def validate_recording_authority(policy, authorization):
+def exact_automatic_authorization(value, expected):
+    """The operator's F1 authorization without ``source_fenced``: the host's proof replaces it."""
+    return (isinstance(value, dict) and value == expected and 'source_fenced' not in value
+            and type(value.get('schema_version')) is int and value.get('authorized') is True)
+
+
+def validate_recording_authority(policy, authorization, fencing=None):
+    """The recording authority: the operator's manual attestation, the operator's
+    authorization with the host's automatic fencing proof, or the native bootstrap.
+
+    A historical authority has no proof and validates as before; an authorization
+    without ``source_fenced`` and without a valid proof is refused, never automatic.
+    """
     expected = dict(schema_version=1, policy_sha256=digest(policy), authorized=True, source_fenced=True)
+    if fencing is not None:
+        from ssdlc_fencing_proof import validate_proof
+        expected.pop('source_fenced')
+        if not exact_automatic_authorization(authorization, expected):
+            raise FeedbackError('Automatic fencing replaces the operator attestation source_fenced, never both')
+        validate_proof(fencing)
+        return
     if exact_authorization(authorization, expected):
         return
     if isinstance(authorization, dict) and authorization.get('contract') == 'native-feedback-recording-v1':

@@ -13,7 +13,10 @@ Use a stable controller from the latest merged main, outside the candidate tree.
 Stop every original controller, supervisor and external writer. Docker mount
 observations and stable ticket/scheduler locks supplement the explicit
 `source_fenced: true` attestation; they do not prove arbitrary host processes are
-quiescent. Never delete locks or modify a historical journal to gain admission.
+quiescent. For a run admitted to automatic fencing, the authorization may omit
+`source_fenced` (the schema allows it): activation then proves that no writer
+runs, or refuses ([Writer fencing](writer-fencing.md#native-transitions-the-automatic-proof)).
+Never delete locks or modify a historical journal to gain admission.
 Keep requests, cap sources, proposals, authorizations and runtimes private.
 
 1. Run `python3 orchestrator.py continuation-limits-inspect --repo TARGET

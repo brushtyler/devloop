@@ -45,7 +45,12 @@ The F1 operator authorization binds the policy digest and explicit fencing
 attestation for initialization. F3 additionally supports a distinct
 `native-feedback-recording-v1` bootstrap from the frozen workflow grant and
 live host fencing; it never manufactures that operator attestation. This is **not** the future in-run technical
-fencing receipt. Replaying the same initialization is idempotent across intent
+fencing receipt. For a run admitted to automatic writer fencing, the operator can
+omit `source_fenced` from the F1 authorization: the host then takes the automatic
+fencing proof under `LOCK_EX` and records it beside the authorization in
+`authority.json`, or refuses
+([Writer fencing](writer-fencing.md#the-feedback-recording-authority-f1)).
+Replaying the same initialization is idempotent across intent
 and journal publication. A changed policy, missing active journal, corrupt
 chain, partial tail or symlink is refused. The snapshot is only a projection.
 Hashes assume a protected host; they are not authentication against an owner
@@ -345,6 +350,15 @@ registered evidence, valid completed receipts and exact task/plan bindings.
 Controller/environment migration is deliberately outside this contract.
 These are observations at guard boundaries under the existing trusted-host
 model, not authentication or continuous containment against a hostile host.
+
+For a run admitted to automatic writer fencing, the delegated publication (and
+the in-scope repair return) also needs the host's automatic fencing proof under
+`LOCK_EX` on the writer gate, recorded beside the delegated authorization: the
+delegated proof is strengthened, never replaced. The operator contracts of this
+page (profile admission, operator repair return, operator owner amendments) can
+omit `source_fenced` for such a run and get the same proof, or a refusal; so can
+the F1 recording initialization. See
+[Writer fencing](writer-fencing.md#native-transitions-the-automatic-proof).
 
 `prepare(session, repo, plan, request_id)` requires an eligible independent
 recorded approval, the exact captured funded planner and reviewer responses,

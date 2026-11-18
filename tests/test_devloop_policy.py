@@ -22,7 +22,7 @@ DATA = tomllib.loads(config.DEFAULT_CONFIG.read_text())
 # The ssdlc modules that decide permissions, fencing and authorizations (#171).
 SECURITY_MODULES = {
     'ssdlc_writer_gate.py', 'ssdlc_role_fencing.py', 'ssdlc_container_holder.py',
-    'ssdlc_locks.py', 'ssdlc_transitions.py', 'ssdlc_replay_gate.py', 'ssdlc_grader.py',
+    'ssdlc_locks.py', 'ssdlc_fencing_proof.py', 'ssdlc_transitions.py', 'ssdlc_replay_gate.py', 'ssdlc_grader.py',
     'ssdlc_feedback_delegation.py', 'ssdlc_feedback_admission.py', 'ssdlc_usage_admission.py',
     'scripts/agent-token.py'}
 

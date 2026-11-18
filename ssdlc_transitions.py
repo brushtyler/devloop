@@ -1,6 +1,8 @@
 """Host-owned, append-only transition primitives; never dispatch a model.
 
-Callers hold the ticket and scheduler locks and fence all old writers. A
+Callers hold the ticket and scheduler locks and fence all old writers: the
+operator attests it (``source_fenced: true``), or, for a run admitted to automatic
+fencing, the host proves it under the writer gate (``ssdlc_fencing_proof``). A
 transition preserves the source journal and publishes a separate generation.
 Only a fully materialized generation can be selected by its atomic pointer.
 """
@@ -40,7 +42,22 @@ def source_binding(root, refs):
     return {name: file_hash(_regular(root, name)) for name in sorted(refs)}
 
 
-def validate_authorization(authorization, proposal):
+# Automatic fencing asked for, its proof not taken yet (see validate_operator_authorization).
+PENDING = object()
+
+
+def validate_operator_authorization(authorization, proposal):
+    """The operator's authorization before the fence: manual, or automatic awaiting its proof.
+
+    The automatic form omits only ``source_fenced``; ``TransitionStore.publish`` then
+    takes the proof or refuses. Every other exact field is checked here as before.
+    """
+    from ssdlc_fencing_proof import requested
+    validate_authorization(authorization, proposal, PENDING if requested(authorization, proposal) else None)
+
+
+def validate_authorization(authorization, proposal, fencing=None):
+    """Exact operator authorization; ``fencing`` is the automatic proof that replaces ``source_fenced``."""
     from ssdlc_operator_recovery import CONTRACT as RECOVERY_CONTRACT
     if ('owner_allowance_sha256' in proposal
             and proposal.get('authorization_contract') not in {'scope-amendment-v1', RECOVERY_CONTRACT}):
@@ -51,6 +68,15 @@ def validate_authorization(authorization, proposal):
     if proposal.get('authorization_contract') == 'feedback-scope-delegation-v1':
         from ssdlc_feedback_delegation import validate_authorization as delegated
         return delegated(authorization, proposal)
+    if fencing is not None:
+        # The proof replaces only the operator's attestation that writers are stopped:
+        # an authorization carries one or the other, and every other field stays exact.
+        if not isinstance(authorization, dict) or 'source_fenced' in authorization:
+            raise TransitionError('Automatic fencing replaces the operator attestation source_fenced, never both')
+        if fencing is not PENDING:
+            from ssdlc_fencing_proof import validate_proof
+            validate_proof(fencing)
+        authorization = dict(authorization, source_fenced=True)
     expected = {'schema_version', 'transition_id', 'proposal_sha256', 'authorized',
                 'source_fenced', 'old_controller_sha256', 'new_controller_sha256'}
     if not isinstance(authorization, dict):
@@ -115,6 +141,36 @@ def validate_authorization(authorization, proposal):
         raise TransitionError('Transition requires exact, fenced operator authorization')
 
 
+def validate_intent(intent):
+    """A sealed intent: the operator's authorization and, if any, the host's fencing proof.
+
+    A historical intent has no proof and validates exactly as before, as the operator's
+    attestation; it is never read as an automatic proof. A proof replaces
+    ``source_fenced`` only for operator contracts; a delegated contract keeps its own.
+    """
+    from ssdlc_fencing_proof import INTENT_KEY, delegated, validate_proof
+    if INTENT_KEY not in intent:
+        validate_authorization(intent['authorization'], intent['proposal'])
+        return
+    proof = validate_proof(intent[INTENT_KEY])
+    if delegated(intent['proposal']):
+        validate_authorization(intent['authorization'], intent['proposal'])
+    else:
+        validate_authorization(intent['authorization'], intent['proposal'], proof)
+
+
+def _same_intent(stored, intent):
+    from ssdlc_fencing_proof import INTENT_KEY, same_fence, validate_proof
+    if (not isinstance(stored, dict) or set(stored) != set(intent)
+            or {k: stored[k] for k in ('proposal', 'authorization')}
+            != {k: intent[k] for k in ('proposal', 'authorization')}):
+        return False
+    if INTENT_KEY not in intent:
+        return True
+    validate_proof(stored[INTENT_KEY])
+    return same_fence(stored[INTENT_KEY], intent[INTENT_KEY])
+
+
 def preserve_allowances(old, new):
     """Counter/ledger preservation is exact; extensions are a separate operation."""
     for key in ('ledger', 'limits', 'counters'):
@@ -154,23 +210,91 @@ class TransitionStore:
     The published pointer is intentionally separate from historical artifacts.
     Integrating readers must validate the pointer before using its projection.
     """
-    def __init__(self, directory, fault=lambda point: None, observe=lambda path: None):
+    def __init__(self, directory, fault=lambda point: None, observe=lambda path: None, fencing=None):
         self.root = Path(directory)
         self.fault = fault
         # Called with each path ``load`` is about to read, before any check on it.
         self.observe = observe
+        # ``(ticket_root, source_root) -> context manager`` yielding a held automatic
+        # fence; ``ssdlc_fencing_proof.fence`` unless a test injects its Docker check.
+        self.fencing = fencing
 
     def _read(self, root, name):
         return json.loads(_regular(root, name).read_text())
+
+    def _fence(self, source, proposal, authorization):
+        """The automatic fence this publication needs, or None on the manual path.
+
+        An operator authorization without ``source_fenced`` asks for it, and is refused
+        unless the run is admitted. A delegated contract keeps its own proof and, for an
+        admitted run, needs this one too. Nothing here opens the gate for other runs.
+        """
+        import ssdlc_fencing_proof as fp
+        if not (fp.requested(authorization, proposal) or (fp.delegated(proposal) and fp.admitted(source))):
+            return None
+        return (self.fencing or fp.fence)(self.root.parent, source)
+
+    def _published(self, identity, proposal, authorization):
+        """The projection when a fenced replay finds its selector already published.
+
+        A crash after publication must not take a new proof: the source is no longer the
+        selected generation. The stored intent must be this one; ``load`` validates it.
+        """
+        if not (self.root / 'active.json').exists():
+            return None
+        current = self._read(self.root, 'active.json')
+        if not isinstance(current, dict) or current.get('transition_id') != identity:
+            return None
+        self._same_inputs(identity, proposal, authorization)
+        return self.load()
+
+    def _same_inputs(self, identity, proposal, authorization):
+        stored = self._read(self.root / identity, 'intent.json')
+        if (not isinstance(stored, dict) or stored.get('proposal') != proposal
+                or stored.get('authorization') != authorization):
+            raise TransitionError('Transition identity reused with different inputs')
+
+    def replayed(self, proposal, authorization):
+        """A caller's replay after its selector was published: the same inputs, no new proof.
+
+        The selector must name this transition and its intent must hold this exact
+        proposal and authorization, so a replay can switch neither between the
+        operator's ``source_fenced`` and the automatic proof nor any other field.
+        Callers use it before completing an already published activation.
+        """
+        identity = proposal.get('transition_id') if isinstance(proposal, dict) else None
+        current = self._read(self.root, 'active.json')
+        if not isinstance(current, dict) or current.get('transition_id') != identity:
+            raise TransitionError('Another generation is already selected')
+        self._same_inputs(identity, proposal, authorization)
 
     def publish(self, source, proposal, authorization, old_state, new_state, artifacts):
         identity = proposal.get('transition_id', '')
         if not re.fullmatch(r'[a-f0-9]{32}', identity):
             raise TransitionError('Invalid transition identity')
-        validate_authorization(authorization, proposal)
+        validate_operator_authorization(authorization, proposal)
         preserve_allowances(old_state, new_state)
         if digest(new_state) != proposal.get('projection_sha256'):
             raise TransitionError('Projection differs from reviewed proposal')
+        fence = self._fence(source, proposal, authorization)
+        if fence is None:
+            return self._publish(source, proposal, authorization, new_state, artifacts, None)
+        replayed = self._published(identity, proposal, authorization)
+        if replayed is not None:
+            return replayed
+        # LOCK_EX is held from source revalidation to selector publication.
+        with fence as held:
+            return self._publish(source, proposal, authorization, new_state, artifacts, held)
+
+    def _publish(self, source, proposal, authorization, new_state, artifacts, held):
+        identity = proposal['transition_id']
+        intent = {'proposal': proposal, 'authorization': authorization}
+        if held is not None:
+            import ssdlc_fencing_proof as fp
+            if not fp.delegated(proposal):
+                validate_authorization(authorization, proposal, held.proof)
+            # The host's proof sits beside the operator's authorization, never inside it.
+            intent[fp.INTENT_KEY] = held.proof
         if source_binding(source, proposal['source_files']) != proposal['source_files']:
             raise TransitionError('Historical source changed')
         if {name: hashlib.sha256(data).hexdigest() for name, data in artifacts.items()} != proposal['artifacts']:
@@ -181,9 +305,10 @@ class TransitionStore:
         if self.root.is_symlink():
             raise TransitionError('Unsafe transition store')
         generation = self.root / identity
-        intent = {'proposal': proposal, 'authorization': authorization}
         if generation.exists():
-            if self._read(generation, 'intent.json') != intent:
+            # A replay keeps the intent written first, proof included: it is never
+            # rewritten. Its fresh proof must cover the same gate and source generation.
+            if not _same_intent(self._read(generation, 'intent.json'), intent):
                 raise TransitionError('Transition identity reused with different inputs')
         else:
             temporary = Path(tempfile.mkdtemp(prefix='.intent-', dir=self.root))
@@ -248,6 +373,8 @@ class TransitionStore:
                 raise TransitionError('Another generation is already selected')
             self.load()  # Validate the exact parent, not merely its pointer bytes.
         self.fault('before_activation')
+        if held is not None:
+            held.check()  # the exclusive lock is still ours when the selector moves
         atomic_json(pointer, selected)
         self.fault('after_activation')
         return self.load()
@@ -279,7 +406,7 @@ class TransitionStore:
             raise TransitionError('Active generation artifacts changed')
         projection = self._read(generation, 'projection.json')
         intent = self._read(generation, 'intent.json')
-        validate_authorization(intent['authorization'], intent['proposal'])
+        validate_intent(intent)
         if digest(projection) != intent['proposal']['projection_sha256']:
             raise TransitionError('Active projection differs from reviewed proposal')
         return projection

@@ -22,7 +22,9 @@ writer before activation. Cooperative ticket/scheduler locks and repeated source
 hash checks detect cooperating writers and changed inputs; they do not prove
 that arbitrary same-user host processes have stopped. `source_fenced: true` is an
 explicit operator attestation, not a fact inferred from a PID lookup or model
-text. Hashes bind host-owned artifacts; they do not authenticate them against a
+text. Only for a run admitted to automatic fencing may the authorization omit it:
+activation then records the host's versioned proof, or refuses
+([Writer fencing](writer-fencing.md#native-transitions-the-automatic-proof)). Hashes bind host-owned artifacts; they do not authenticate them against a
 host user who can replace both payload and authorization. No lock is unlinked.
 
 ## Prepare, review, activate, verify

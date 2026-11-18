@@ -12,7 +12,8 @@ without the mechanism, refuses automatic fencing for the generation
 (``HOST_TREE_UNVERIFIABLE``). Process scans are never used as evidence.
 
 Role containers of admitted runs take the gate through their PID 1 holder
-(``ssdlc_role_fencing``, part c1); transitions do not use it yet (part c2).
+(``ssdlc_role_fencing``, part c1); native transitions of those runs take ``LOCK_EX``
+through ``ssdlc_fencing_proof`` (part c2).
 """
 import contextlib
 import ctypes

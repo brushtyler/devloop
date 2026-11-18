@@ -551,7 +551,7 @@ The criterion for a sensitive path: **the code that decides permissions, fencing
 authorizations goes to level 2**, besides devloop itself and the agents' instructions. So the
 repository's `config.toml` adds to the defaults above the ssdlc security modules (#171): writer
 fencing and locks (`ssdlc_writer_gate.py`, `ssdlc_role_fencing.py`,
-`ssdlc_container_holder.py`, `ssdlc_locks.py`), authorized transitions and gates
+`ssdlc_container_holder.py`, `ssdlc_locks.py`, `ssdlc_fencing_proof.py`), authorized transitions and gates
 (`ssdlc_transitions.py`, `ssdlc_replay_gate.py`, `ssdlc_grader.py`), delegations and
 admissions (`ssdlc_feedback_delegation.py`, `ssdlc_feedback_admission.py`,
 `ssdlc_usage_admission.py`) and the app tokens (`scripts/agent-token.py`). A PR that changes

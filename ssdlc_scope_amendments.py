@@ -18,7 +18,7 @@ from ssdlc_recovery import LimitsStore, RecoveryStop
 from ssdlc_tasks import (TaskError, TaskJournal, TaskScheduler, TaskPlanValidator,
                          atomic_json, digest, file_hash, git, ticket_lock, validate_document)
 from ssdlc_transitions import (TransitionError, TransitionStore, _regular,
-                               source_binding, sync_tree, validate_authorization)
+                               source_binding, sync_tree, validate_operator_authorization)
 from ssdlc_locks import transition_lock
 
 
@@ -689,7 +689,7 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
             or repair_session.ticket != ticket or repair_session.root != Path(recipe['source_root'])
             or repair_session.runtime != recipe['runtime_identity']):
         raise TransitionError('Delegated repair activation requires its live native owner')
-    validate_authorization(authorization, proposal)
+    validate_operator_authorization(authorization, proposal)
     with transition_lock(ticket / 'ticket.lock', held_locks):
         guard()
         if delegated:
@@ -700,6 +700,7 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
         selected, projected = store.load(), _read(preparation, 'projection.json')
         if selected['transition_id'] == proposal['transition_id']:
             if selected != projected: raise TransitionError('Activated projection changed')
+            store.replayed(proposal, authorization)
             _selected_execution_root(ticket, selected)
             if delegated:
                 finalize(delegation, proposal, recipe, selected, fault=fault)
