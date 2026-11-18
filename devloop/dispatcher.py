@@ -182,6 +182,8 @@ from pathlib import Path
 from .agents import (TAIL_LINES, AgentError, ModelsUnavailable, ModelUnavailable, NoOutput,
                      PermissionDenied, background_unfinished, denied_retry_note)
 from .apps import DISPATCHER, ISSUE_COMMENT, PR_COMMENT
+from .budget import BUDGET, OUTSIDE, BudgetRefused
+from .budget import reserve as budget_reserve
 from .config import INSTALL_ROOT, LEGACY_NEEDS_OPERATOR, ConfigError
 from .context import (LABEL_STYLE, _describe_bases, _failure_text, _open_findings_reason,
                       _render_issue_comments, both_labels_warning, label_transition,
@@ -1620,7 +1622,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         the turns it names still block the work the PR gets no other advisory action
         (``_advisory_held``).
 
-        The escalation of a ``TurnBlocked`` records the ids of the turns it names (``turns``)."""
+        The escalation of a ``TurnBlocked`` records the ids of the turns it names (``turns``).
+        A turn the budget envelope does not cover (``BudgetRefused``, #365, a ``TurnBlocked``
+        with no turns) escalates the same way, with class ``budget``."""
         if action.kind == 'conclave' and not isinstance(exc, TurnBlocked):
             self.log('  conclave: no escalation, it resumes from its record')
             return
@@ -1633,6 +1637,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             reason += kept_work_text(exc.kept_work, self.cfg.state_dir)
         cls = (TOOL_FAILURE if isinstance(exc, AgentError)
                else 'untrusted' if isinstance(exc, UntrustedChange)
+               else BUDGET if isinstance(exc, BudgetRefused)
                else UNCERTAIN_TURN if isinstance(exc, TurnBlocked) else 'failure')
         number = pr.number if pr is not None else action.number
         remove = ([lb.review, lb.changes, lb.ready_to_merge] if pr is not None
@@ -1646,7 +1651,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 # A readiness check runs again only on an issue with agent:ready: one the
                 # operator may retry keeps it, as a failed check does.
                 remove = [label for label in remove if label != lb.ready]
-            extra = ({'turns': [t['turn'] for t in exc.turns]} if isinstance(exc, TurnBlocked)
+            extra = ({'turns': [t['turn'] for t in exc.turns]}
+                     if isinstance(exc, TurnBlocked) and not isinstance(exc, BudgetRefused)
                      else None)
             self._escalate(number, reason, getattr(exc, 'tail', ''), remove=remove, cls=cls,
                            supervised=supervised, why=why, retry=retry, extra=extra)
@@ -1688,19 +1694,39 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
         With ``block_uncertain_turns`` (#362) a turn of a work, the issue and its PRs, with
         turns that block it (``_check_turns``) is refused before its intent (``TurnBlocked``):
-        the step escalates to the operator."""
+        the step escalates to the operator.
+
+        With the budget on (#365, ``[budget] enabled``) the turn is booked in the envelope of
+        its story in its intent, every fallback model and retry with a booking of its own, and
+        a turn the envelope does not cover is refused before its intent (``BudgetRefused``):
+        the step escalates (class ``budget``). A readiness check is outside the envelope."""
         if self.ledger is None or where is None:
             return None
         number, kind, *place = where
         fix = fix_register(where)
         issue = self._work_issue(number)
         self._check_turns(number)
-        return self.ledger.open_turn(
-            number, kind=kind, agent=candidate.key, identity=self._app_login(candidate.key),
-            mode=mode, model=candidate.model, effort=candidate.effort,
-            fallback_for=candidate.fallback_for, label=label,
-            round_no=place[0] if place and fix is None else None, register=fix,
-            issue=issue, repo=self.cfg.repo, attempt=self._turn_attempt(number, issue, kind))
+        budget = self.cfg.budget
+        reserve = None
+        if budget.enabled and kind not in OUTSIDE:
+            def reserve(journal):
+                booking = budget_reserve(budget, journal, repo=self.cfg.repo, issue=issue,
+                                         kind=kind, agent=candidate)
+                self.log(f'  turn {kind} of {candidate.key} on #{number} booked in story '
+                         f'{booking["story"]}')
+                return booking
+        try:
+            return self.ledger.open_turn(
+                number, kind=kind, agent=candidate.key, identity=self._app_login(candidate.key),
+                mode=mode, model=candidate.model, effort=candidate.effort,
+                fallback_for=candidate.fallback_for, label=label,
+                round_no=place[0] if place and fix is None else None, register=fix,
+                issue=issue, repo=self.cfg.repo, attempt=self._turn_attempt(number, issue, kind),
+                reserve=reserve, measure=budget.enabled)
+        except BudgetRefused as exc:
+            self.log(f'  turn refused on #{number}: not covered by the budget envelope '
+                     f'({exc.category})')
+            raise
 
     # Attempts (#384) ---------------------------------------------------------
     def _turn_attempt(self, number, issue, kind):

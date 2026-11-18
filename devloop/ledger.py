@@ -44,6 +44,7 @@ import time
 from dataclasses import dataclass, field
 
 from .agents import TELEMETRY_FIELDS
+from .budget import observed
 from .github import GitHubError
 from .journal import FAILED, LEGACY, NOT_DISPATCHED, RETURNED, JournalError, TurnJournal
 from .markdown import dispatcher_header, publishable, read_marker
@@ -132,6 +133,8 @@ class Entry:
     section: int = None
     register: object = None
     turn: str = field(default=None, repr=False)  # a turn's id in the journal (#362)
+    # With the budget on (#365): the outcome of the turn in the journal records its ``usage``.
+    measure: bool = field(default=False, repr=False)
 
 
 @dataclass
@@ -367,7 +370,8 @@ class Ledger:
                      register=FIX if register is not None else round_no)
 
     def open_turn(self, number, *, kind, agent, identity, mode, model, effort, fallback_for,
-                  label, round_no=None, register=None, issue=None, repo=None, attempt=None):
+                  label, round_no=None, register=None, issue=None, repo=None, attempt=None,
+                  reserve=None, measure=False):
         """Write the record of a turn about to start; raises ``GitHubError`` if it cannot, and
         then the turn must not start. Its intent is made durable in the journal first, with
         ``issue``, the issue of its work, and ``repo`` (#362), so that a crash right after
@@ -376,10 +380,14 @@ class Ledger:
         the turn was ``not_dispatched``. With ``round_no`` (a review turn, #325) the record is
         a section of that round's register; with ``register`` (a fix turn, #355), of that fix
         register. ``attempt``: the id of the attempt the turn belongs to (#384), in the intent
-        and in the record; without one, neither has the field, as before."""
+        and in the record; without one, neither has the field, as before.
+
+        With the budget on (#365): ``reserve`` books the turn in the envelope of its story, in
+        its intent (``TurnJournal.intent``), or raises ``BudgetRefused`` and nothing is written;
+        ``measure``: its outcome records the dollars the CLI reported (``usage``)."""
         turn = self.journal.intent(number, issue=number if issue is None else issue, repo=repo,
                                    kind=kind, agent=agent, model=model, label=label,
-                                   attempt=attempt)
+                                   attempt=attempt, reserve=reserve)
         record = {
             'type': 'turn', 'state': 'open', 'kind': kind, 'agent': agent, 'identity': identity,
             'mode': mode, 'model': model, 'effort': effort, 'fallback_for': fallback_for or None,
@@ -400,6 +408,7 @@ class Ledger:
             raise
         entry.started = self._monotonic()
         entry.turn = turn
+        entry.measure = measure
         return entry
 
     def close_turn(self, entry, outcome, report=None, error=None, last_command=None):
@@ -417,7 +426,8 @@ class Ledger:
                     if entry.started is not None else None)
         changes = {'last_command': last_command} if last_command else {}
         if entry.turn is not None:
-            self.journal.outcome(entry.turn, JOURNAL_OUTCOME[outcome], error)
+            self.journal.outcome(entry.turn, JOURNAL_OUTCOME[outcome], error,
+                                 usage=observed(fields) if entry.measure else None)
         try:
             self._edit(entry, state='closed', ended_at=self._now(), duration_ms=duration,
                        outcome=outcome, error=(str(error)[:300] if error else None),

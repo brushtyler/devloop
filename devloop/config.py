@@ -3,6 +3,7 @@
 import dataclasses
 import hashlib
 import json
+import math
 import re
 import tomllib
 from dataclasses import dataclass, field
@@ -109,13 +110,14 @@ class CIPolicy:
 
 @dataclass(frozen=True)
 class PinPolicy:
-    """``[pin]`` (#174): whether a merge by devloop that touches ``paths`` (``devloop/`` and the
-    files of ``review_policy.sensitive_path_lists``) pins ``origin/<base_branch>`` at the next
+    """``[pin]`` (#174): whether a merge by devloop that touches ``paths`` (``devloop/``,
+    ``core/``, which devloop imports since #365, and the files of
+    ``review_policy.sensitive_path_lists``) pins ``origin/<base_branch>`` at the next
     tick. In continuous mode the restart from the new copy waits for the running actions, while
     new ones except implementations (#342) still start, for at most ``restart_max_wait_minutes``
     (#301): after that no action starts until the restart."""
     auto: bool = False
-    paths: tuple = ('devloop/',) + DEFAULT_SENSITIVE_LISTS
+    paths: tuple = ('devloop/', 'core/') + DEFAULT_SENSITIVE_LISTS
     restart_max_wait_minutes: int = 30
 
     def touches(self, changed):
@@ -147,6 +149,44 @@ class GCPolicy:
 
     def enabled(self):
         return self.pins or self.worktrees or self.logs
+
+
+# The roles of a turn in the budget envelope (#365): the kinds of the turns charged to a story.
+# A readiness check (``preflight``) comes before the takeover and is outside the envelope.
+BUDGET_ROLES = ('implement', 'fix', 'review', 'sync', 'conclave', 'advisory')
+# The roles every envelope caps; ``conclave`` and ``advisory`` only when they are configured.
+BUDGET_BASE_ROLES = ('implement', 'fix', 'review', 'sync')
+# The kinds of phase (``journal.PHASES``): the current flow has only the implementation.
+BUDGET_PHASES = ('implementation',)
+BUDGET_USD = ('metered_usd', 'cli_estimate_usd')
+BUDGET_USAGE_MODELS = ('reserve_per_invocation', 'unmetered_quota')
+# The agent kinds whose CLI reports a dollar figure (an estimate: ``core.budget.REPORTED_COST``):
+# every other one needs a declared rule for unknown usage.
+BUDGET_REPORTED_COST = ('claude',)
+
+
+@dataclass(frozen=True)
+class BudgetPolicy:
+    """``[budget]`` (#365, ADR 0004, P2-5a): the envelope of each story. Off by default (D8):
+    devloop behaves as before. On, every value is explicit (D2: no default): ``turns`` of the
+    story, ``role_turns`` per role (the kind of the turn), ``phase_turns`` per kind of phase,
+    ``wall_seconds`` from the story's start, the dollar caps ``metered_usd`` and
+    ``cli_estimate_usd`` (measured spend and estimates apart), and ``usage``, the declared rule
+    for unknown usage of each agent: ``(agent, {model, reason, [metered_usd, cli_estimate_usd]})``
+    pairs. Token caps are not supported yet."""
+    enabled: bool = False
+    turns: int = 0
+    role_turns: tuple = ()   # ((role, cap), ...)
+    phase_turns: tuple = ()  # ((phase, cap), ...)
+    wall_seconds: int = 0
+    metered_usd: float = 0.0
+    cli_estimate_usd: float = 0.0
+    usage: tuple = ()        # ((agent, rule as a tuple of (key, value) pairs), ...)
+
+    def rule(self, agent):
+        """The declared rule of ``agent`` for unknown usage, as a dict, or None."""
+        found = dict(self.usage).get(agent)
+        return dict(found) if found is not None else None
 
 
 @dataclass(frozen=True)
@@ -307,6 +347,8 @@ class Config:
     # journal, in the PR marker and in the turn records. It needs ``story_identity``. Off by
     # default (ADR 0004, D8): devloop behaves as before.
     attempt_identity: bool = False
+    # The budget envelope of each story (#365, ADR 0004, P2-5a). Off by default (D8).
+    budget: BudgetPolicy = field(default_factory=BudgetPolicy)
     agent_timeout_seconds: int = 3600
     test_timeout_seconds: int = 3600
     agent_command_timeout_seconds: int = 600
@@ -591,7 +633,7 @@ def parse_merge(table, supervisor):
 def parse_pin(table, lists):
     """``[pin]`` (#174): ``auto`` (default false) and ``restart_max_wait_minutes`` (#301, default
     30, 0 or more). ``lists`` are the names of ``review_policy.sensitive_path_lists``, watched
-    with ``devloop/``."""
+    with ``devloop/`` and ``core/``."""
     if not isinstance(table, dict):
         raise ConfigError('pin: expected a table')
     unknown = set(table) - {'auto', 'restart_max_wait_minutes'}
@@ -604,7 +646,8 @@ def parse_pin(table, lists):
     if not isinstance(wait, int) or isinstance(wait, bool) or wait < 0:
         raise ConfigError('pin.restart_max_wait_minutes: expected a whole number of minutes, '
                           'at least 0')
-    return PinPolicy(auto=auto, paths=('devloop/', *lists), restart_max_wait_minutes=wait)
+    return PinPolicy(auto=auto, paths=('devloop/', 'core/', *lists),
+                     restart_max_wait_minutes=wait)
 
 
 def parse_run(table):
@@ -681,6 +724,131 @@ def parse_gc(table):
                 raise ConfigError(f'gc.{key}: expected a whole number of {what}, at least {low}')
             values[key] = value
     return GCPolicy(**values)
+
+
+def _no_tokens(table, where):
+    """Refuse a token cap (#365): its semantics are not decided yet (ADR 0004, P2-5a)."""
+    for key in table:
+        if 'token' in str(key).lower():
+            raise ConfigError(f'{where}.{key}: token caps are not supported yet: the budget '
+                              'envelope holds turns, time and attested dollars only')
+
+
+def _budget_count(table, key, where, low):
+    value = table[key]
+    if not isinstance(value, int) or isinstance(value, bool) or value < low:
+        raise ConfigError(f'{where}.{key}: expected a whole number, at least {low}')
+    return value
+
+
+def _budget_usd(table, key, where):
+    """A dollar cap or reserve: finite and above 0. A cap is exhausted at equality
+    (``core.budget.check_dollars``), so a cap of 0 would refuse every turn, of an agent without
+    dollars too; a reserve of 0 is refused by ``core.budget.validate_live_usage``."""
+    value = table[key]
+    if (not isinstance(value, (int, float)) or isinstance(value, bool)
+            or not math.isfinite(value) or value <= 0):
+        raise ConfigError(f'{where}.{key}: expected a finite number of dollars, above 0')
+    return float(value)
+
+
+def _budget_caps(table, key, where, names, required):
+    """``((name, cap), ...)`` of the sub-table ``key``: whole numbers of at least 0, keys from
+    ``names``, each of ``required`` present."""
+    sub = table.get(key, {})
+    at = f'{where}.{key}'
+    if not isinstance(sub, dict):
+        raise ConfigError(f'{at}: expected a table')
+    _no_tokens(sub, at)
+    unknown = set(sub) - set(names)
+    if unknown:
+        raise ConfigError(f'{at}: unknown keys {sorted(unknown)}, expected some of {list(names)}')
+    for name in required:
+        if name not in sub:
+            raise ConfigError(f'{at}: missing {name!r} (no default: the operator sets it)')
+    return tuple((name, _budget_count(sub, name, at, 0)) for name in names if name in sub)
+
+
+def _budget_rule(rule, where):
+    """A declared rule for unknown usage, as ``core.budget.validate_live_usage`` reads it."""
+    if not isinstance(rule, dict):
+        raise ConfigError(f'{where}: expected a table with model and reason')
+    _no_tokens(rule, where)
+    unknown = set(rule) - {'model', 'reason', *BUDGET_USD}
+    if unknown:
+        raise ConfigError(f'{where}: unknown keys {sorted(unknown)}')
+    model = rule.get('model')
+    if model not in BUDGET_USAGE_MODELS:
+        raise ConfigError(f'{where}.model: must be one of {BUDGET_USAGE_MODELS}')
+    reason = rule.get('reason')
+    if not isinstance(reason, str) or not reason.strip():
+        raise ConfigError(f'{where}.reason: expected a non-empty string')
+    values = [('model', model), ('reason', reason)]
+    if model == 'reserve_per_invocation':
+        for kind in BUDGET_USD:
+            if kind not in rule:
+                raise ConfigError(f'{where}: missing {kind!r}: a reserve is booked in both '
+                                  'dollar kinds')
+            values.append((kind, _budget_usd(rule, kind, where)))
+    elif set(rule) & set(BUDGET_USD):
+        raise ConfigError(f'{where}: unmetered_quota books no dollar reserve')
+    return tuple(values)
+
+
+def parse_budget(table, agents, roles=BUDGET_BASE_ROLES, story_identity=False):
+    """``[budget]`` (#365, ADR 0004, P2-5a). ``enabled`` (default false) turns the envelope on;
+    then every value is required, with no default (D2): ``turns`` and ``wall_seconds`` (at least
+    1), ``metered_usd`` and ``cli_estimate_usd`` (dollars, above 0), ``role_turns`` with each
+    of ``roles``, ``phase_turns`` with each kind of phase, and in ``usage`` a rule for each agent
+    whose kind reports no dollar figure (codex, agy). A story is the unit of the envelope: it
+    needs ``story_identity``. A token cap is refused, on or off: not supported yet."""
+    where = 'budget'
+    if not isinstance(table, dict):
+        raise ConfigError(f'{where}: expected a table')
+    _no_tokens(table, where)
+    keys = {'enabled', 'turns', 'wall_seconds', *BUDGET_USD, 'role_turns', 'phase_turns',
+            'usage'}
+    unknown = set(table) - keys
+    if unknown:
+        raise ConfigError(f'{where}: unknown keys {sorted(unknown)}')
+    enabled = table.get('enabled', False)
+    if not isinstance(enabled, bool):
+        raise ConfigError(f'{where}.enabled: expected true or false')
+    if enabled:
+        if not story_identity:
+            raise ConfigError(f'{where}.enabled: needs story_identity = true: the envelope is '
+                              'per story')
+        for key in ('turns', 'wall_seconds', *BUDGET_USD):
+            if key not in table:
+                raise ConfigError(f'{where}: missing {key!r} (no default: the operator sets it)')
+    values = {'enabled': enabled}
+    for key in ('turns', 'wall_seconds'):
+        if key in table:
+            values[key] = _budget_count(table, key, where, 1)
+    for key in BUDGET_USD:
+        if key in table:
+            values[key] = _budget_usd(table, key, where)
+    values['role_turns'] = _budget_caps(table, 'role_turns', where, BUDGET_ROLES,
+                                        roles if enabled else ())
+    values['phase_turns'] = _budget_caps(table, 'phase_turns', where, BUDGET_PHASES,
+                                         BUDGET_PHASES if enabled else ())
+    usage = table.get('usage', {})
+    if not isinstance(usage, dict):
+        raise ConfigError(f'{where}.usage: expected a table of agents')
+    rules = []
+    for agent, rule in usage.items():
+        if agent not in agents:
+            raise ConfigError(f'{where}.usage.{agent}: unknown agent {agent!r}')
+        rules.append((agent, _budget_rule(rule, f'{where}.usage.{agent}')))
+    if enabled:
+        declared = dict(rules)
+        for key, agent in agents.items():
+            if agent.kind not in BUDGET_REPORTED_COST and key not in declared:
+                raise ConfigError(f'{where}.usage.{key}: missing: {agent.kind} reports no dollar '
+                                  'cost, and its turns need a declared rule (unmetered_quota or '
+                                  'reserve_per_invocation)')
+    values['usage'] = tuple(rules)
+    return BudgetPolicy(**values)
 
 
 def _docs_path(value, where, document):
@@ -873,6 +1041,16 @@ def parse_config(data, root=INSTALL_ROOT):
     if attempt_identity and not story_identity:
         # An attempt belongs to a phase of a story (#384): without stories there is no phase.
         raise ConfigError('attempt_identity: needs story_identity = true')
+    review_policy = parse_review_policy(
+        data.get('review_policy', {}), root,
+        [(k, apps[k].slug if k in apps else None, agents[k].kind, agents[k].model,
+          agents[k].effort, agents[k].review_args,
+          tuple((f.model, f.effort) for f in agents[k].fallback_models),
+          agents[k].review_commands) for k in pool], agents)
+    # The roles whose turns can run (#365): conclave and advisory only when configured.
+    budget_roles = (BUDGET_BASE_ROLES + (('conclave',) if conclave else ())
+                    + (('advisory',) if review_policy.advisory_reviewer else ()))
+    budget = parse_budget(data.get('budget', {}), agents, budget_roles, story_identity)
     return Config(
         repo=_require(data, 'repo', str, 'config'),
         base_branch=data.get('base_branch', 'main'),
@@ -889,7 +1067,7 @@ def parse_config(data, root=INSTALL_ROOT):
         apps=apps, app_key_dir=key_dir, agent_stall_action=stall_action,
         local_tests=local_tests, ci_rerun_unrelated=ci_rerun,
         block_uncertain_turns=block_uncertain, story_identity=story_identity,
-        attempt_identity=attempt_identity,
+        attempt_identity=attempt_identity, budget=budget,
         merge=parse_merge(data.get('merge', {}), supervisor), supervisor=supervisor,
         pin=parse_pin(data.get('pin', {}), sensitive_lists(data)),
         run=parse_run(data.get('run', {})),
@@ -897,12 +1075,7 @@ def parse_config(data, root=INSTALL_ROOT):
         ci=parse_ci(data.get('ci', {})),
         gc=parse_gc(data.get('gc', {})),
         docs=parse_docs(data),
-        review_policy=parse_review_policy(
-            data.get('review_policy', {}), root,
-            [(k, apps[k].slug if k in apps else None, agents[k].kind, agents[k].model,
-              agents[k].effort, agents[k].review_args,
-              tuple((f.model, f.effort) for f in agents[k].fallback_models),
-              agents[k].review_commands) for k in pool], agents),
+        review_policy=review_policy,
         **ints)
 
 
@@ -947,6 +1120,8 @@ OVERLAY_KEYS = {
     'gc': dict.fromkeys(('pins', 'keep_pins', 'worktrees', 'logs', 'log_days',
                          'interval_minutes')),
     'docs': {'map': {'*': None}},
+    # Every key of [budget] (#365) is checked by ``parse_budget``, a token cap with its message.
+    'budget': {'*': None},
 }
 
 
