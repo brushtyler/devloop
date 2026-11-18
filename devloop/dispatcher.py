@@ -152,7 +152,9 @@ CI of a new head (#263, ``[ci]``): with ``local_tests`` other than ``full``, a P
 whose head has no CI is treated for ``grace_minutes`` after its push as if its CI were pending
 (``_ci_wait``): the push the dispatcher recorded, else the commit date. Then the full suite runs
 locally, as before, unless the base branch requires checks: the PR waits for them, and after
-``required_timeout_minutes`` it is escalated (``ci_missing``).
+``required_timeout_minutes`` it is escalated (``ci_missing``). A head that conflicts with the
+base is never waited for nor escalated (#392): GitHub runs no ``pull_request`` workflow on it, so
+the sync, or the fix that aligns the branch with the base, starts at once.
 
 Review during the CI (#271): a review starts with the CI of the head pending, or within that
 window, without the full suite locally; its record says CI ``pending``. The approval is promoted
@@ -1003,7 +1005,17 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                     details = (pr.check_details if pr.check_details is not None
                                else self.gh.check_details(pr.head_sha))
                     pr.rerun_waiting = rerun_waiting(record, details)
-                if (pr.meta and lb.review in pr.labels and pr.checks == 'none'
+                if (pr.merge_state == 'conflict' and pr.checks == 'none'
+                        and self.cfg.local_tests != 'full' and (pr.meta and lb.review in pr.labels
+                                                                 or blind)):
+                    # GitHub runs no pull_request workflow on a head that conflicts with the
+                    # base (#392): its CI never comes. Not waited for, nor escalated as
+                    # ci_missing: the sync, or the fix that aligns the branch with the base,
+                    # gives the PR a new head with its own CI.
+                    self.log(f'  PR #{pr.number}: no CI expected on {pr.head_sha[:12]}: it '
+                             f'conflicts with {self.cfg.base_branch}, and GitHub runs no '
+                             'pull_request workflow on it')
+                elif (pr.meta and lb.review in pr.labels and pr.checks == 'none'
                         and self.cfg.local_tests != 'full'):
                     pr.ci_wait, pr.ci_missing = self._ci_wait(pr)
                 elif blind and pr.checks == 'none' and self.cfg.local_tests != 'full':
