@@ -574,8 +574,8 @@ The dispatcher records the evidence and the telemetry of every step for itself (
 they no longer have to be pieced together from markers and logs. Each record is a dispatcher
 comment ending with a `ledger` marker, signed with the dispatcher's identity like its other
 records (only that identity's records count), on the issue for the implementation and the
-readiness check, on the PR for review, fix, sync and CI. They publish no receipt yet: that is
-#135.
+readiness check, on the PR for review, fix, sync and CI. The [PR receipt](#pr-receipt) (#135)
+gathers them at the promotion.
 
 | Record | When | Content |
 |---|---|---|
@@ -618,3 +618,77 @@ attempts that failed, or that no commit followed, have commit `null` too.
 **Earlier work.** PRs and issues started before these records have none of them. Missing data
 is declared missing (`request` null, no turns), and is never reconstructed from the summaries
 written by agents.
+
+## PR receipt
+
+When a PR goes to `agent:ready-to-merge`, at level 1 or 2 and at level 0, the dispatcher writes
+its **receipt** (#135): a comment for the operator who merges, bound to the approved head and to
+the promotion, that tells what was asked, who did what with which model and at which cost, what
+was verified on which commit, how the findings were closed and how the criteria are covered. It
+is written only with a [ledger](#evidence-and-telemetry), right after the `promoted` policy
+record and before the label. The comment has two forms of the same receipt:
+
+- the readable text, with the dispatcher's [header](#attribution);
+- a `receipt` marker, read like the other dispatcher records: only from the dispatcher's
+  identity, only as the last line, only with a valid structure. It records the identity of the
+  receipt (`pr`, `issue`, the approved `head`, `base`, the `policy` version, `level`, the number
+  of the `promotion` on the PR and the SHA-256 `digest` of its content), the `totals`, the data
+  declared `missing`, and `state` (`current` or `superseded`).
+
+**Content.** It comes only from the dispatcher's ledger records and from the markers, never from
+text written by agents: no summary, no finding title, no error text of a turn. The one part an
+agent declared is the final acceptance map, which the dispatcher recorded in its markers: its
+test references and reasons are kept as they are, in the content and in the digest, and shown
+only as inert code spans (one line, `|` escaped), so no Markdown, link, mention or HTML of them
+renders.
+
+| Section | Source |
+|---|---|
+| Request | The latest `request` snapshot of the issue |
+| Totals | Computed from the sections below (see after the table) |
+| Turns | Every `turn` record of the issue (readiness checks, implementation) and of the PR (review, fix, sync): kind, agent, configured and real model, start, outcome, duration, input and output tokens, cost |
+| CI and sync events | The `event` records of the PR (`ci_round`, `sync`) |
+| Verifications on the approved head | The local `verification` records bound to that commit, and the latest `ci_round` of that head and of the approved round (none at level 0), with each check, its outcome and its duration |
+| Rounds and verdicts | The `review` markers: each round with its head and the verdict of each reviewer (`ci` for a CI round) |
+| Findings | Every blocking finding ever opened (`round/reviewer/ID`) and who closed it: its owner in a later round, `ci` or `operator` with the author (`finding` records). One closed under the rules [before #110](#markers-written-before-110) has no recorded closer |
+| Policy | The policy receipt recomputed for the promotion: level, version, base, head, reasons, required reviewers |
+| Acceptance criteria | The latest map: for each entry, the criterion as the issue text states it now (not quoted when someone outside `trusted_users` changed the text), the status, the tests it declares (`file` and `name`) and its reason |
+
+**Totals:** the number of rounds (and of those that count against `max_review_rounds`) and of
+turns, the summed duration of the turns, the known tokens (input, output, cache read, cache
+creation) and the known cost, the number of turns whose cost is not reported and of those with
+no token reported. The duration of the verifications is apart: the local tests (ms) and the
+checks of the CI on the approved head (s). A value no record attests is `null` in the marker and
+`non riportato` in the text, never 0: a sum of values none of which is known is `null`.
+
+**Coherence.** Before the promotion the dispatcher builds the receipt and checks it against the
+markers. A **contradiction** blocks the promotion: the PR goes to `agent:needs-operator` with an
+escalation of class `receipt_conflict` (critical) that lists it, and neither the `promoted`
+record nor the receipt is written. These are contradictions:
+
+- the head of the policy receipt is not the approved head (the latest round's, or at level 0
+  the promoted one);
+- the latest `ci_round` the ledger records for the approved head and round has a state other
+  than `pass` or `none`, while the promotion relies on a CI passed or absent;
+- the request snapshot names another issue than the PR marker;
+- a `fix` or `sync` turn on the PR was run by another agent than the implementer the PR marker
+  names, or a `review` turn by that implementer.
+
+**Missing data** does not block: a PR or issue started before #133 or #134 has no snapshot, no
+turns, no turn of the implementation, no `ci_round` for the approved head, or no map, and the
+criteria cannot be quoted from a text no longer trusted. The receipt lists what is missing
+under "Dati storici mancanti" (`missing`: `request`, `turns`, `implement`, `ci`,
+`acceptance_map`, `criteria`) and reconstructs none of it.
+
+**Invalidation.** When the approval is revoked the receipt no longer holds, and its comment is
+edited: a warning "Ricevuta superata" with the time and the reason goes before its title, and
+its marker gets `state: superseded`, `superseded_at` and `reason`. This happens when a ready PR
+is [revoked](#merge-directives-and-record) (a new head, CI running again, the acceptance map or
+level 0 that no longer hold), when the recomputed policy receipt is `stale`, when a CI round
+fails on a ready PR, when a sync moves the head of a ready PR, and with every escalation that
+takes `agent:ready-to-merge` away (the round limit reached by a CI failure, open findings, a
+failed action, a lost marker, the level that requires the operator). A new promotion first marks
+every receipt still current, whatever revoked it, then writes a new
+one with the next promotion number: only the latest promotion's receipt is `current`. A failed
+edit at a revocation is logged and marked again at the next promotion; at the promotion it stops
+the promotion before its label, as any `gh` failure.
