@@ -19,6 +19,10 @@ COST_KINDS = ('metered_usd', 'cli_estimate_usd')
 # reports one, so dispatching it needs an explicit live unknown-usage model.
 REPORTED_COST = {'claude': 'cli_estimate_usd', 'openrouter': 'metered_usd'}
 RESERVE, UNMETERED = 'reserve_per_invocation', 'unmetered_quota'
+# A call whose route is bounded by a credit cap that replaces its USD obligation (#214).
+CREDIT = 'credit_cap'
+# The operator-limit-extension-v1 transition that lets a credit cap replace the USD obligation.
+SUBSTITUTE_CREDIT = 'substitute_credit_cap'
 
 
 def validate_live_usage(policy):
@@ -28,6 +32,37 @@ def validate_live_usage(policy):
             raise ValueError('Live unknown-usage rule needs a reason')
         if rule['model'] == RESERVE and not all(math.isfinite(rule[kind]) and rule[kind] > 0 for kind in COST_KINDS):
             raise ValueError('Nonfinite live unknown-usage reserve')
+
+
+def validate_credit_caps(policy, binding):
+    """Credit caps are explicit and finite (#214). One replaces the USD obligation of its route
+    (``replaces_usd``) only through the operator-authorized transition ``substitute_credit_cap``
+    bound in ``binding.limit_extensions``: never by the declaration of a new profile."""
+    caps = policy.get('credit_caps', {})
+    for cap in caps.values():
+        if not cap['reason'].strip():
+            raise ValueError('A credit cap needs a reason')
+        if not all(math.isfinite(cap[key]) and cap[key] > 0 for key in ('cap', 'per_invocation')):
+            raise ValueError('Nonfinite credit cap')
+    substituted = {engine for engine, cap in caps.items() if cap.get('replaces_usd')}
+    if not substituted:
+        return
+    entries = (binding or {}).get('limit_extensions') if isinstance(binding, dict) else None
+    authorized = {change['dimension'].split('.')[1]
+                  for entry in (entries if isinstance(entries, list) else ())
+                  if isinstance(entry, dict) and entry.get('operation') == SUBSTITUTE_CREDIT
+                  for change in entry.get('changes') or () if isinstance(change, dict)
+                  and isinstance(change.get('dimension'), str) and change['dimension'].count('.') == 2}
+    if not substituted <= authorized:
+        raise ValueError('A credit cap replaces the USD obligation of a route only through an '
+                         'operator-authorized substitute_credit_cap transition')
+
+
+def credit_refusal(engine, cap):
+    """Why a credit cap alone cannot admit ``engine``: credits add, they do not replace."""
+    return (f'Engine {engine} reports no dollar cost and charges in credits ({cap["unit"]}): the credit cap of '
+            'the profile adds to its USD caps and does not replace their obligation without an '
+            'operator-authorized transition (substitute_credit_cap); dispatch refused before launch')
 
 
 def uncovered(row):
@@ -114,6 +149,7 @@ class LimitsStore:
         if not all(math.isfinite(policy[k]) for k in ('metered_usd', 'cli_estimate_usd')):
             raise ValueError('Nonfinite limit')
         validate_live_usage(policy)
+        validate_credit_caps(policy, binding)
         ssdlc_task_budget.validate(policy)
         envelope ={'policy': policy, 'binding': binding}
         with ticket_lock(self.root / 'limits/limits.lock'):
@@ -194,6 +230,7 @@ class LimitsStore:
             validate_document('recovery-limits', envelope['policy'])
             validate_feedback_profile(envelope['policy'])
             validate_live_usage(envelope['policy'])
+            validate_credit_caps(envelope['policy'], envelope.get('binding'))
             ssdlc_task_budget.validate(envelope['policy'])
             state = self.journal.load() if repair else self.journal.peek()
         except (TaskError, KeyError, TypeError, ValueError, AttributeError):
@@ -267,6 +304,24 @@ class LimitsStore:
             raise RecoveryStop('LIMIT_REACHED', 'Live invocation reported no dollar cost and its engine has no '
                                'declared live unknown-usage model; unknown is not counted as zero')
         self._check_dollars(state, policy, rows)
+        self._check_credits(policy, rows)
+
+    @staticmethod
+    def _check_credits(policy, rows, *, reserving=False):
+        """Each credit cap bounds the credits booked by the calls of its engine, in its own unit
+        only: credits are never converted to or from dollars (#214). Like the dollar caps,
+        existing bookings exhaust a cap at equality and a new booking may only fill it.
+        Bookings and cap are summed and compared as the exact decimal their JSON numbers
+        write, never as binary floats, so ten bookings of 0.1 fill a cap of 1 exactly."""
+        exceeded = (lambda total, cap: total > cap) if reserving else (lambda total, cap: total >= cap)
+        exact = ssdlc_task_budget.exact
+        for engine, cap in sorted(policy.get('credit_caps', {}).items()):
+            booked = sum((exact(row['credit_reserve']['amount']) for row in rows
+                          if row.get('engine') == engine and isinstance(row.get('credit_reserve'), dict)
+                          and row['credit_reserve'].get('unit') == cap['unit']), exact(0))
+            if exceeded(booked, exact(cap['cap'])):
+                raise RecoveryStop('LIMIT_REACHED', ('Credit reserve would exceed the frozen credit cap of '
+                                                     if reserving else 'Frozen credit cap exhausted for ') + engine)
 
     def _check_dollars(self, state, policy, rows, *, reserving=False):
         """Existing rows exhaust a cap at equality; a new reserve may only fill it."""
@@ -311,7 +366,7 @@ class LimitsStore:
         engines, uncovered_ids = {}, []
         for identity, row in sorted(state['invocations'].items()):
             entry = engines.setdefault(row.get('engine') or 'unknown', dict(
-                invocations=0, observed_cost=0, reserved=0, unmetered_quota=0, uncovered=0,
+                invocations=0, observed_cost=0, reserved=0, unmetered_quota=0, credit_cap=0, uncovered=0,
                 historical_reserve=0, in_flight=0, not_dispatched=0,
                 reported_tokens=dict(input_tokens=None, output_tokens=None)))
             entry['invocations'] += 1
@@ -321,6 +376,9 @@ class LimitsStore:
                 entry['reserved'] += 1
             elif row.get('usage_model') == UNMETERED:
                 entry['unmetered_quota'] += 1
+            elif row.get('usage_model') == CREDIT:
+                # Bounded by its credit cap, outside the dollar caps (#214).
+                entry['credit_cap'] += 1
             elif uncovered(row):
                 entry['uncovered'] += 1
                 uncovered_ids.append(dict(invocation_id=identity, engine=row.get('engine'),
@@ -335,7 +393,7 @@ class LimitsStore:
                 if value is not None:
                     entry['reported_tokens'][key] = (entry['reported_tokens'][key] or 0) + value
         for entry in engines.values():
-            outside = entry['unmetered_quota'] + entry['uncovered']
+            outside = entry['unmetered_quota'] + entry['credit_cap'] + entry['uncovered']
             entry['dollar_caps_cover'] = 'all' if not outside else 'none' if outside == entry['invocations'] else 'partial'
         declared = envelope['policy'].get('live_unknown_usage', {})
         return dict(engines=engines, uncovered_invocations=uncovered_ids,
@@ -363,7 +421,10 @@ class LimitsStore:
         With the selected engine it is the same validation reserve() applies:
         the engine needs a reported cost or a declared live unknown-usage model,
         and its candidate reserve must fit the separate and combined dollar
-        caps. It returns that candidate row and writes nothing.
+        caps. A credit cap of the engine (#214) adds its credit booking, which
+        must fit that cap; it stands in for the missing USD rule only after the
+        operator-authorized ``substitute_credit_cap`` transition. It returns
+        that candidate row and writes nothing.
 
         With ``task_id``, the caps of that task in the allocation of the profile
         (``task_budget``, #163) apply as well; the run caps stay the limit.
@@ -384,16 +445,27 @@ class LimitsStore:
             self._check_task(p, state, task_id, role, phase, None)
             return None
         rule = p.get('live_unknown_usage', {}).get(engine)
+        credit = p.get('credit_caps', {}).get(engine)
         if rule is None and engine not in REPORTED_COST:
-            raise RecoveryStop('LIMIT_REACHED', 'Engine reports no dollar cost and the profile declares no live '
-                               'unknown-usage model; dispatch refused before launch')
+            if credit is None:
+                raise RecoveryStop('LIMIT_REACHED', 'Engine reports no dollar cost and the profile declares no live '
+                                   'unknown-usage model; dispatch refused before launch')
+            if not credit.get('replaces_usd'):
+                # Credits add to the USD obligation; they never replace it implicitly (#214).
+                raise RecoveryStop('LIMIT_REACHED', credit_refusal(engine, credit))
         row = {'role': role, 'phase': phase, 'engine': engine, 'status': 'reserved',
                'usage': {'metered_usd': None, 'cli_estimate_usd': None}}
         if rule is not None:
             row['usage_model'] = rule['model']
+        elif credit is not None and engine not in REPORTED_COST:
+            # The operator-authorized substitution bounds this call by its credit cap.
+            row['usage_model'] = CREDIT
         if rule is not None and rule['model'] == RESERVE:
             row['conservative_usage'] = {kind: rule[kind] for kind in COST_KINDS}
             self._check_dollars(state, p, [*rows, row], reserving=True)
+        if credit is not None:
+            row['credit_reserve'] = {'unit': credit['unit'], 'amount': credit['per_invocation']}
+            self._check_credits(p, [*rows, row], reserving=True)
         self._check_task(p, state, task_id, role, phase, row)
         return row
 

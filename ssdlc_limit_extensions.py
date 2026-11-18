@@ -23,6 +23,11 @@ explicit allocation of an existing run from its residual, and the transfer of
 unconsumed, uncommitted cap between two allocated tasks. Neither changes a run
 cap or a counter; the proposal lists the effects on every task.
 
+``substitute_credit_cap`` (#214) is the explicit transition that lets the credit cap
+of an engine, already configured in the frozen profile, replace the USD obligation of
+its subscription route (``credit_caps.<engine>.replaces_usd``). Without it a credit
+cap only adds to the USD caps. Counters, journal and authorizations are kept.
+
 ``reverify_after_timeout`` (#167) changes no limit: it authorizes one more
 verification of the same captured candidate after a verifier timeout, with
 longer timeouts for the timed-out checks only. Activation records the grant in
@@ -49,10 +54,13 @@ REVERIFY = 'reverify_after_timeout'
 # transfer between allocated tasks. Neither raises a run cap (ssdlc_task_budget).
 ALLOCATE, REALLOCATE = 'allocate_task_budget', 'reallocate_task_budget'
 BUDGET_OPERATIONS = (ALLOCATE, REALLOCATE)
+# Caps in credits (#214): the operator-authorized substitution of the USD obligation.
+SUBSTITUTE = 'substitute_credit_cap'
 # Operations that change the frozen profile and join the bound chain.
-LIMIT_OPERATIONS = ('extend_global_limit', 'extend_deadline') + BUDGET_OPERATIONS
+LIMIT_OPERATIONS = ('extend_global_limit', 'extend_deadline') + BUDGET_OPERATIONS + (SUBSTITUTE,)
 OPERATIONS = LIMIT_OPERATIONS + (REVERIFY,)
-EVENTS = {ALLOCATE: 'TASK_BUDGET_ALLOCATED', REALLOCATE: 'TASK_BUDGET_REALLOCATED'}
+EVENTS = {ALLOCATE: 'TASK_BUDGET_ALLOCATED', REALLOCATE: 'TASK_BUDGET_REALLOCATED',
+          SUBSTITUTE: 'CREDIT_CAP_SUBSTITUTED'}
 CHECK_TIMEOUT = 'check_timeout.'
 MONEY = ('metered_usd', 'cli_estimate_usd')
 COUNTS = ('invocations', 'development_attempts')
@@ -152,6 +160,15 @@ def unwind(envelope, generation):
                 if container.get(key) != change['new']:
                     raise LimitExtensionError('Task budget reallocation differs from the frozen profile')
                 container[key] = change['old']
+        elif entry['operation'] == SUBSTITUTE:
+            for change in reversed(entry['changes']):
+                engine = _credit_engine(change)
+                caps = policy.get('credit_caps')
+                cap = caps.get(engine) if isinstance(caps, dict) else None
+                if (not isinstance(cap, dict) or cap.get('replaces_usd') is not True
+                        or change['old'] is not False or change['new'] is not True):
+                    raise LimitExtensionError('Credit cap substitution differs from the frozen profile')
+                del cap['replaces_usd']
         else:
             for change in reversed(entry['changes']):
                 if not isinstance(change, dict) or set(change) != {'dimension', 'old', 'new'}:
@@ -165,6 +182,51 @@ def unwind(envelope, generation):
         if digest(current) != entry['source_policy_sha256']:
             raise LimitExtensionError('Limit extension chain does not restore its parent envelope')
     return current
+
+
+def _credit_engine(change):
+    """The engine of a ``credit_caps.<engine>.replaces_usd`` change."""
+    if not isinstance(change, dict) or set(change) != {'dimension', 'old', 'new'}:
+        raise LimitExtensionError('Limit extension change is malformed')
+    dimension = change['dimension']
+    match = re.fullmatch(r'credit_caps\.([a-z]+)\.replaces_usd', dimension) if isinstance(dimension, str) else None
+    if match is None:
+        raise LimitExtensionError('A credit cap substitution changes only credit_caps.<engine>.replaces_usd')
+    return match.group(1)
+
+
+def _substitution(source, requested):
+    """Changes and resulting profile of ``substitute_credit_cap`` (#214).
+
+    Only the flag of a credit cap the frozen profile already configures, for an engine whose
+    route has no USD rule of its own: the cap, its unit, its booking and every other field of
+    the profile stay the same. Counters are not touched."""
+    policy = copy.deepcopy(source['envelope']['policy'])
+    seen, changes = set(), []
+    for item in requested:
+        if not isinstance(item, dict) or set(item) - {'dimension', 'old', 'new'} or 'dimension' not in item:
+            raise LimitExtensionError('A change names its dimension and new value')
+        engine = _credit_engine(dict(dimension=item['dimension'], old=item.get('old', False), new=item.get('new')))
+        if engine in seen:
+            raise LimitExtensionError('Duplicate limit dimension')
+        seen.add(engine)
+        if item.get('old', False) is not False or item.get('new') is not True:
+            raise LimitExtensionError('A credit cap substitution sets replaces_usd from false to true')
+        cap = policy.get('credit_caps', {}).get(engine)
+        if cap is None:
+            raise LimitExtensionError('No credit cap is configured for ' + engine + ' in the frozen profile')
+        if cap.get('replaces_usd'):
+            raise LimitExtensionError('The credit cap of ' + engine + ' already replaces the USD obligation')
+        if engine in policy.get('live_unknown_usage', {}):
+            raise LimitExtensionError('The route of ' + engine + ' already has a USD rule (live_unknown_usage); '
+                                      'there is no obligation to replace')
+        cap['replaces_usd'] = True
+        changes.append(dict(dimension=item['dimension'], old=False, new=True))
+    try:
+        validate_document('recovery-limits', policy)
+    except TaskError as exc:
+        raise LimitExtensionError('Extended profile is invalid: ' + str(exc)[:200]) from None
+    return changes, policy
 
 
 def _locate(policy, dimension):
@@ -492,6 +554,8 @@ def _changes(source, operation, requested, now, task_id=None):
         raise LimitExtensionError('An extension names at least one dimension')
     if operation == REVERIFY:
         return _timeouts(source, requested, task_id)
+    if operation == SUBSTITUTE:
+        return _substitution(source, requested)
     policy = copy.deepcopy(source['envelope']['policy'])
     seen, changes = set(), []
     for item in requested:

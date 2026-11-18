@@ -31,7 +31,8 @@
         "extend_deadline",
         "reverify_after_timeout",
         "allocate_task_budget",
-        "reallocate_task_budget"
+        "reallocate_task_budget",
+        "substitute_credit_cap"
       ]
     },
     "run": {
@@ -232,13 +233,15 @@
           "old": {
             "type": [
               "number",
-              "null"
+              "null",
+              "boolean"
             ]
           },
           "new": {
             "type": [
               "number",
-              "null"
+              "null",
+              "boolean"
             ]
           }
         }
@@ -720,6 +723,54 @@
                 },
                 "new": {
                   "type": "number"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "substitute_credit_cap"
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "deadline"
+              ]
+            },
+            {
+              "required": [
+                "reverification"
+              ]
+            },
+            {
+              "required": [
+                "task_budget"
+              ]
+            }
+          ]
+        },
+        "properties": {
+          "changes": {
+            "maxItems": 2,
+            "items": {
+              "properties": {
+                "dimension": {
+                  "pattern": "^credit_caps\\.(codex|agy)\\.replaces_usd$"
+                },
+                "old": {
+                  "const": false
+                },
+                "new": {
+                  "const": true
                 }
               }
             }
