@@ -93,6 +93,19 @@ the open ones, to link the turn to the issue of its work
 checks the base branch requires, for the wait for the
 [CI of a new head](devloop/reference.md#ci-of-a-new-head).
 
+`Tracker.comment` and `Tracker.edit_comment` tell three outcomes apart (#364): success, a
+failure (`GitHubError`: nothing was written) and an **uncertain** outcome (`GitHubUncertain`):
+a timeout, a connection lost after sending, a 5xx answer, so the write may have taken effect.
+The adapter treats a 4xx answer and a failure before the connection opened (`dial tcp`, `error
+connecting to`, a failed TLS handshake) as certain, and any other failure of these two writes
+as uncertain. `GitHubUncertain` is a `GitHubError`: the dispatcher still handles it as a failed
+write. `ports.reconcile_comment` tells whether an uncertain write took effect: it reads the
+comments of the issue or PR back and returns the one written by the same login whose body is
+exactly the one written, or that contains a given marker (for an edit, only the edited
+comment), or None when the write was not published. Nothing calls it yet: the outbox of
+[ADR 0004](adr/0004-passo-2-budget-stato-durevole.md) will. The other writes and the reads
+report every failure as a `GitHubError`, as before.
+
 The ports hold only the methods the dispatcher calls, with their current names and signatures,
 and return normalized data. `GitHub` (`devloop/github.py`) implements all three, and `Identities`
 (`devloop/apps.py`) hands one out for each actor: they are the concrete adapters. The
@@ -101,7 +114,10 @@ module docstring records where a method that could fit more than one port went.
 
 In the tests, `FakeGH` (`tests/helpers/devloop_fakes.py`) implements the ports in memory. It
 proves neither persistence nor atomicity. `tests/test_devloop_ports.py` checks that the adapter
-and every fake expose each port method with the same signature.
+and every fake expose each port method with the same signature. `FakeGH` can also simulate an
+uncertain `comment` or `edit_comment`, applied or lost (`uncertain_writes`), and give its
+comments ids (`with_ids`); the same test runs an uncertain write and its reconciliation on the
+adapter, with a scripted `gh`, and on the fake.
 
 ## The devloop boundary
 

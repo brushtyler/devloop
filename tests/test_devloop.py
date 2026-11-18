@@ -85,6 +85,11 @@ class SchemaTests(unittest.TestCase):
         for name in schema.SCHEMA_NAMES:
             walk(schema.load_schema(name), name)
 
+    def test_every_schema_file_can_be_used_by_a_turn(self):
+        # A schema left out of SCHEMA_NAMES fails every turn that asks for it (#381).
+        self.assertEqual(sorted(p.stem for p in schema.SCHEMA_DIR.glob('*.json')),
+                         sorted(schema.SCHEMA_NAMES))
+
     def test_validator_rejects_shape_errors(self):
         s = schema.load_schema('review')
         schema.validate(raw_review(), s)
@@ -1073,7 +1078,7 @@ class FakeRunner:
         self.calls.append((agent.key, mode, schema_name, prompt))
         self.workdirs.append(workdir)
         out = self.outputs.pop(0)
-        if isinstance(out, Exception):
+        if isinstance(out, BaseException):
             raise out
         return out
 

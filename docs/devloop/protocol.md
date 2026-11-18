@@ -801,8 +801,10 @@ turn fail.
 
 **Turn persistence.** A turn's record is written before the CLI starts, as `open`; if that write
 fails the turn does not start and the step escalates like any `gh` failure. When the CLI ends the
-record is edited with end, duration, outcome and telemetry. A turn left without that closing
-write, because the dispatcher crashed or the edit failed, stays without end, outcome and
+record is edited with end, duration, outcome and telemetry. An unexpected error of the
+dispatcher while the turn runs (not an agent's failure, #381) closes it too, with outcome
+`failure` and the exception as its error, before the error goes on. A turn left without that
+closing write, because the dispatcher crashed or the edit failed, stays without end, outcome and
 telemetry: the next tick logs `incomplete turn on #<n>` and marks the record `incomplete` (only
 logs it with `--dry-run`). Where to look does not depend on labels, which change once a step
 ends: before writing a turn's record the dispatcher records its intent in the

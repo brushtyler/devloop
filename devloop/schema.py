@@ -11,7 +11,7 @@ from pathlib import Path
 
 SCHEMA_DIR = Path(__file__).resolve().parent / 'schemas'
 SCHEMA_NAMES = ('implement', 'fix', 'review', 'sync', 'preflight', 'conclave_proposal',
-                'conclave_vote')
+                'conclave_vote', 'advisory')
 
 
 class SchemaError(ValueError):

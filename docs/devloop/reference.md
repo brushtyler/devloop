@@ -149,6 +149,11 @@ This repository sets 3: implement, fix, sync and review of different issues and 
   unexpected exception escalates its issue or PR too, with `errore inatteso del dispatcher` and
   the exception, instead of stopping the tick. At the end the tick logs one
   `outcome of <action> #<N>: done|failed: …|unexpected error: …` line per action.
+- **Traceback.** The traceback of an unexpected exception of an action (#381) is written in the
+  local logs, `<state_dir>/logs/<time>-<action>-<N>-traceback.txt`, never on GitHub, and the
+  `unexpected error: …` line of the tick log ends with `(traceback in <file>)`, or with
+  `(traceback not written: …)` when the file could not be written. With
+  `max_parallel_actions = 1` the tick still stops on such an exception, after the same line.
 - **Tick log.** Each line of an action starts with `#<N>`, its issue or PR, and is written
   whole: the lines of parallel actions never mix.
 - **Shared state.** Worktrees, agent logs, markers and GitHub writes are already per number.
