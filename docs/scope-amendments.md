@@ -233,7 +233,10 @@ Authorization additionally requires the proposal's
 
 The original `started_at` and historical accounting anchor remain immutable.
 A bound extension chain and a new limits-journal event record the old/new
-deadline and wall allowance. Staging validates the proposed counters without
+deadline and wall allowance. The same chain also accepts the entries of the
+common [manual limit extension](limit-extensions.md) contract
+(`operator-limit-extension-deadline-v1`), with identical fields and rules; the
+receipts of this capability are unchanged. Staging validates the proposed counters without
 making them executable; only exact activation selects the new generation.
 An already expired proposed deadline is refused. Replay does not extend it
 again, and a changed extension chain or live deadline fails integrity checks.

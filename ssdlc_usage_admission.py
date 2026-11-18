@@ -73,8 +73,9 @@ def feedback_binding(source):
     authority, state = store._read()
     if state is None or authority['status'] != 'ACTIVE':
         raise TaskError('Live-usage admission requires a complete feedback authority')
+    from ssdlc_limit_extensions import feedback_lineage
     policy, envelope = authority['policy'], source['envelope']
-    frozen = (policy['limits_sha256'] == digest(envelope)
+    frozen = (policy['limits_sha256'] in [limits for limits, _ in feedback_lineage(state, envelope)]
               and policy['controller_sha256'] == digest(execution_contract(envelope['binding']['controller'])))
     if not frozen and not admitted(state, source):
         raise TaskError('Live-usage admission feedback source is outside admitted lineage')

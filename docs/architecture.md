@@ -195,7 +195,7 @@ Host
 
 The journals are authoritative: `task-journal.jsonl` for tasks and `limits/task-journal.jsonl` for frozen limits. JSON state files are projections of them.
 
-Recovery transitions never edit an existing generation. They create a new generation that preserves the journal prefix, attempts, invocations and limits, and select it atomically after an explicit authorization. Readers for status, journal, completion and deadline resolve the selected runtime.
+Recovery transitions never edit an existing generation. They create a new generation that preserves the journal prefix, attempts, invocations and limits, and select it atomically after an explicit authorization. Readers for status, journal, completion and deadline resolve the selected runtime. The one in-place change is a [manual limit extension](limit-extensions.md) (`limits activate`): it raises named limits or the deadline of the stopped run's frozen profile, appends to the journals instead of rewriting them, and records a bound chain that restores the authorized envelope.
 
 ## Controller contract
 

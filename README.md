@@ -59,6 +59,7 @@ Start from the [recovery index](docs/recovery.md): from the stop, to the transit
 | --- | --- |
 | [Candidate capture](docs/candidate-capture.md) | How developer output is captured and verified in disposable workspaces (I0) |
 | [Bounded recovery](docs/bounded-recovery.md) | Frozen limits, timeout capture, semantic design progress, A5 replay gate (I2) |
+| [Manual limit extensions](docs/limit-extensions.md) | Extending named limits or the deadline of a stopped run with an exact operator authorization (#162) |
 | [Continuations](docs/continuations.md) | Importing a stopped pre-checkpoint run for fresh verification (I1) |
 | [Historical reconciliation](docs/historical-reconciliation.md) | Admitting a stopped I1 generation to native development with cumulative limits |
 | [Scope amendments](docs/scope-amendments.md) | Recovering a task stopped on `SCOPE_REQUIRED` after a checkpoint |

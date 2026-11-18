@@ -60,7 +60,10 @@ class FundedFeedbackRoles:
         # not permission to substitute a controller or consult another runtime.
         admitted = projection is not None and admitted_generation(feedback_state,
             dict(envelope=envelope, projection=projection))
-        if ((p['limits_sha256'] != digest(envelope)
+        # Operator limit extensions the ledger recorded keep the frozen authority.
+        from ssdlc_limit_extensions import feedback_lineage
+        lineage = [limits for limits, _ in feedback_lineage(feedback_state, envelope)]
+        if ((p['limits_sha256'] not in lineage
                 or p['controller_sha256'] != digest(execution_contract(envelope['binding']['controller'])))
                 and not admitted
                 or p['ticket'] != envelope['binding']['ticket']
@@ -169,7 +172,8 @@ class FundedFeedbackRoles:
             if call is None or call['status'] != 'RETURNED' or 'native' not in call:
                 raise FeedbackError('Unconfirmed consultation outcome; no redispatch')
             binding = call['native']
-            if binding['limits_sha256'] != digest(envelope):
+            from ssdlc_limit_extensions import feedback_lineage
+            if binding['limits_sha256'] not in [limits for limits, _ in feedback_lineage(state, envelope)]:
                 raise FeedbackError('Consultation runtime changed')
             invocation = counters['invocations'].get(binding['invocation_id'])
             if (invocation is None or invocation['role'] != 'feedback-' + call['role']
