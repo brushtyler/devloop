@@ -23,10 +23,10 @@ from .context import (_failure_text, _format_conflicts, _format_findings, _revie
                       docs_map_section, docs_review_section, format_ci_summary,
                       format_fix_requests, format_operator_comments, format_previous_rounds)
 from .github import GitHubError, job_id
-from .ledger import fix_register
+from .ledger import attempt_branch, attempt_marker, fix_register
 from .localtests import failed_modules, select_modules, suite_summary
 from .markdown import (dispatcher_header, publishable, render_fix, render_native_review,
-                       render_review)
+                       render_review, without_attribution)
 from .planning import (BASE_CHANGED, FIX_COMMAND, RESYNC_AFTER_APPROVAL, ci_joins_round,
                        counted_rounds, pending_reviewers, preflight_state, voided_approval,
                        waived_rounds, waiting_reviewers)
@@ -132,8 +132,13 @@ class ActionsMixin:
                                                            cfg.trusted_users)
                                 + issue['accepted'],
                                 story_repo=self._story_root(number, issue['thread']))
+        # The attempt (#384), before the first turn: a second active one is refused.
+        attempt = self._take_attempt(number)
         self.gh.edit_labels(number, add=[lb.working], remove=[lb.ready])
-        name, branch = f'issue-{number}', f'{cfg.branch_prefix}{number}'
+        # One branch per attempt (#384, ADR 0004 §3.2 (i)): the first keeps that of today, a
+        # later one has its own, and never overwrites the branch of the previous attempt.
+        name = f'issue-{number}'
+        branch = attempt_branch(cfg.branch_prefix, number, attempt['n'] if attempt else 1)
         path = self.ws.new_branch(name, branch)
         # The input the turn runs on (#182), bound before it runs: the commit its branch starts
         # from and the request its prompt gets.
@@ -190,11 +195,21 @@ class ActionsMixin:
                 'local_tests': local, **skipped_models(used)}
         if decision is not None:
             meta['conclave'] = decision  # the resolution its prompt had (#142)
+        if attempt is not None:
+            meta['attempt'] = attempt_marker(attempt)  # the PR of this attempt (#384)
         body = publishable(self.runner.header(used) + '\n' + result['pr_body'].strip()
                            + '\n\n' + render_map(result['acceptance_map'])
                            + f'\n\nCloses #{number}', 'pr', meta)
         pr_number, url = self._as(agent.key, IMPLEMENT).create_pr(
             base=cfg.base_branch, head=branch, title=result['pr_title'], body=body)
+        if attempt is not None:
+            try:
+                self.ledger.journal.bind_pr(attempt['attempt'], pr_number)
+            except GitHubError as exc:
+                # The PR is open: the first turn on it records it (``_turn_attempt``), and so
+                # does a new implementation of the issue before resuming the attempt
+                # (``_take_attempt``), whatever the state of the PR by then.
+                self.log(f'  PR #{pr_number} of attempt {attempt["attempt"]} not recorded: {exc}')
         self.gh.edit_labels(pr_number, add=[lb.review])
         self.gh.edit_labels(number, remove=[lb.working])
         self.ws.remove(name)
@@ -469,12 +484,14 @@ class ActionsMixin:
         ci_summary, ci_jobs = self._ci_summary(pr)
         # The verified resolution of a unanimous conclave on the issue or the PR (#142).
         decision, _, resolution = self._resolution_for(pr.issue, issue, pr, pr.head_sha)
+        # Blind to the author (#389): no implementer key, no attribution header, no marker. The
+        # key stays in the PR's marker and in the ledger, for the selection of the reviewers.
         prompt = _template('review', repo=cfg.repo, base_branch=cfg.base_branch,
                            pr_number=pr.number, round=round_no, max_rounds=max_rounds,
-                           implementer=pr.meta.get('implementer', cfg.implementer),
                            ci=ci, ci_summary=ci_summary, test_cmd=cfg.test_cmd,
                            issue_number=pr.issue, issue_title=issue['title'],
-                           issue_body=issue.get('body') or '', pr_body=pr.body,
+                           issue_body=without_attribution(issue.get('body')),
+                           pr_body=without_attribution(pr.body),
                            acceptance_criteria=format_criteria(criteria),
                            acceptance_map=format_map(acceptance_map),
                            docs=docs_review_section(self._mapped_docs(path)),

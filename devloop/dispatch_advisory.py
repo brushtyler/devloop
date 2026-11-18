@@ -43,7 +43,7 @@ from .dispatch_actions import Models
 from .journal import JournalError, TurnBlocked
 from .ledger import timestamp as ledger_timestamp
 from .markdown import (ADVISORY_OPINIONS, MAX_BODY, dispatcher_header, fitted, publishable,
-                       read_marker)
+                       read_marker, without_attribution)
 from .planning import label_names, operator_blocked
 from .policy import ZERO_LEVEL
 from .supervision import UNCERTAIN_TURN
@@ -278,8 +278,9 @@ class AdvisoryMixin:
         lb = self.cfg.labels
         found = []
         for pr in prs:
-            if (not pr.meta or lb.needs_supervisor in pr.labels
+            if (not pr.meta or pr.attempt_problem or lb.needs_supervisor in pr.labels
                     or not operator_blocked(pr.labels, lb)):
+                # A PR whose attempt does not hold (#384) gets no work, nor an advisory review.
                 continue
             comments = self.gh.pr_comments(pr.number)
             if self._advisory_record(comments, pr.head_sha) is not None:
@@ -429,6 +430,12 @@ class AdvisoryMixin:
         labels = self._advisory_open(pr.number, head, 'since the snapshot')
         if labels is None:
             return
+        problem = self._attempt_problem(pr.number, pr.issue, pr.meta.get('attempt'))
+        if problem:
+            # The attempt of the PR does not hold (#384): no turn and nothing published, nor a
+            # failure recorded: the PR is the operator's (``_do_attempt``).
+            self.log(f'  no advisory review: {problem}')
+            return
         if self._advisory_done(pr.number, head):
             self.log('  the head already has its advisory review')
             self._advisory_forget(pr.number)
@@ -485,9 +492,10 @@ class AdvisoryMixin:
         try:
             prompt = _template('advisory', repo=cfg.repo, pr_number=pr.number, head=head,
                                base_branch=cfg.base_branch, why=why,
-                               implementer=pr.meta.get('implementer', cfg.implementer),
                                issue_number=pr.issue, issue_title=issue['title'],
-                               issue_body=issue.get('body') or '', pr_body=pr.body,
+                               # Blind to the author, as the review (#389).
+                               issue_body=without_attribution(issue.get('body')),
+                               pr_body=without_attribution(pr.body),
                                diff_stat=self.ws.diff_stat(path),
                                previous=format_previous_rounds(pr.reviews, pr.fixes,
                                                                pr.closures),

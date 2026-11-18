@@ -35,7 +35,12 @@ user reconciles it with `/devloop reconcile`. Off, the journal records the turns
 another value stops devloop at startup. `story_identity` (a boolean, default `false`) turns on the
 [story identity](protocol.md#story-identity) (#363): at the takeover of an issue the journal
 records its story and the `request` record carries the dispatcher's `story` marker. Off, devloop
-records no story; another value stops devloop at startup. `publication_outbox` (a boolean, default
+records no story; another value stops devloop at startup. `attempt_identity` (a boolean, default
+`false`) turns on the [attempt identity](protocol.md#attempt-identity) (#384): one active attempt
+per phase, in the journal, in the PR marker and in the turn records, with one branch per attempt
+(`<branch_prefix><issue>` for the first, `<branch_prefix><issue>-attempt-<k>` after). It needs
+`story_identity = true`; without it, or with another value, devloop stops at startup. Off,
+devloop records no attempt. `publication_outbox` (a boolean, default
 `false`) turns on the [publication outbox](protocol.md#publication-outbox) (#385): every comment,
 comment edit, native review and pull request of the dispatcher's and the agents' clients is saved
 in the turn journal before it is sent, an uncertain outcome is reconciled on the exact comment of

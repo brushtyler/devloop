@@ -308,6 +308,10 @@ class Config:
     # one is reconciled before any new POST. Off by default (ADR 0004, D8): devloop publishes as
     # before.
     publication_outbox: bool = False
+    # The attempt identity (#384, ADR 0004, P2-3b): one active attempt per phase, recorded in the
+    # journal, in the PR marker and in the turn records. It needs ``story_identity``. Off by
+    # default (ADR 0004, D8): devloop behaves as before.
+    attempt_identity: bool = False
     agent_timeout_seconds: int = 3600
     test_timeout_seconds: int = 3600
     agent_command_timeout_seconds: int = 600
@@ -871,6 +875,11 @@ def parse_config(data, root=INSTALL_ROOT):
                       if 'story_identity' in data else Config.story_identity)
     outbox = (_require(data, 'publication_outbox', bool, 'config')
               if 'publication_outbox' in data else Config.publication_outbox)
+    attempt_identity = (_require(data, 'attempt_identity', bool, 'config')
+                        if 'attempt_identity' in data else Config.attempt_identity)
+    if attempt_identity and not story_identity:
+        # An attempt belongs to a phase of a story (#384): without stories there is no phase.
+        raise ConfigError('attempt_identity: needs story_identity = true')
     return Config(
         repo=_require(data, 'repo', str, 'config'),
         base_branch=data.get('base_branch', 'main'),
@@ -887,7 +896,7 @@ def parse_config(data, root=INSTALL_ROOT):
         apps=apps, app_key_dir=key_dir, agent_stall_action=stall_action,
         local_tests=local_tests, ci_rerun_unrelated=ci_rerun,
         block_uncertain_turns=block_uncertain, story_identity=story_identity,
-        publication_outbox=outbox,
+        publication_outbox=outbox, attempt_identity=attempt_identity,
         merge=parse_merge(data.get('merge', {}), supervisor), supervisor=supervisor,
         pin=parse_pin(data.get('pin', {}), sensitive_lists(data)),
         run=parse_run(data.get('run', {})),
@@ -922,7 +931,8 @@ _AGENT_KEYS = dict.fromkeys(('kind', 'display_name', 'model', 'model_label', 'ef
 OVERLAY_KEYS = {
     **dict.fromkeys(('repo', 'base_branch', 'branch_prefix', 'state_dir', 'test_cmd',
                      'local_tests', 'ci_rerun_unrelated', 'block_uncertain_turns', 'story_identity',
-                     'publication_outbox', 'language', 'trusted_users', 'preflight',
+                     'publication_outbox', 'attempt_identity',
+                     'language', 'trusted_users', 'preflight',
                      'conclave', 'max_open_prs',
                      'max_parked_prs', 'max_review_rounds', 'max_actions_per_tick',
                      'max_parallel_actions', 'implement_test_retries', 'agent_timeout_seconds',

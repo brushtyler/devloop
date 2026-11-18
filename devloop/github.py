@@ -353,6 +353,15 @@ class GitHub:
                                                     'mergeCommit')
         return [dict(raw, author={'login': author_login(raw.get('author'))}) for raw in prs]
 
+    def branch_prs(self, branch):
+        """The PRs whose head branch is ``branch``, in any state, newest first, with the fields
+        of :meth:`open_prs` (the mergeability ones aside), ``state`` and ``createdAt`` (#384)."""
+        prs = self._json('pr', 'list', '-R', self.repo, '--state', 'all', '--head', branch,
+                         '--limit', '20', '--json', 'number,title,body,labels,headRefName,'
+                                                    'headRefOid,author,isCrossRepository,'
+                                                    'state,createdAt')
+        return [dict(raw, author={'login': author_login(raw.get('author'))}) for raw in prs]
+
     def find_pr(self, number):
         """PR ``number`` in any state, with the fields of :meth:`open_prs` (the mergeability
         ones aside) and ``state``, or None when ``number`` is an issue (#362). Read with REST

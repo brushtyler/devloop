@@ -41,6 +41,12 @@ story_identity = false
 # alone, and a restart resumes what was left half published.
 # Off here: turning it on is the operator's decision (ADR 0004, D8).
 publication_outbox = false
+# The attempt identity (issue #384, ADR 0004, P2-3b): an implementation runs in an attempt the
+# journal opens before its first turn, one active attempt per phase; the PR marker and the turn
+# records carry it, and a new attempt starts only once the previous one is concluded (its PR
+# merged or closed). It needs story_identity = true. Off here: turning it on is the operator's
+# decision (ADR 0004, D8).
+attempt_identity = false
 # Language of the text that agents write for GitHub.
 language = "Italian"
 
