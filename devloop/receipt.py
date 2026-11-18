@@ -15,6 +15,10 @@ never from text written by agents: no summary, no finding title, no error text. 
 acceptance map is the one part an agent declared: the dispatcher recorded it in its markers, and
 the receipt keeps its test references and reasons as they are, shown only as inert code. A value
 that was not attested is ``None`` in the data and ``non riportato`` in the text, never 0.
+With the budget on (#393), a section of its own shows the state of the budget of the issue's
+story as the dispatcher's journal records it (``budget.view``), its dollars not attested as
+``non attestato``; with the budget off there is no such section, and the content is the one
+before #393.
 
 Before the promotion the content is checked against the markers (:func:`contradictions`). A
 contradiction blocks the promotion; data that is simply missing, as in PRs started before #133,
@@ -29,6 +33,7 @@ import hashlib
 import json
 
 from .agents import TELEMETRY_FIELDS
+from .budget import NOT_ATTESTED, consumed_usd, usd
 from .markdown import dispatcher_header, publishable, split_markers, with_record
 from .planning import counted_rounds
 from .policy import describe as describe_policy
@@ -169,7 +174,7 @@ def totals(turns, verifications, ci, reviews):
 
 
 def build(*, pr, issue, head, promotion, policy, request, issue_records, pr_records, reviews,
-          closures, approved_round, criteria, acceptance_map, advisory=None):
+          closures, approved_round, criteria, acceptance_map, advisory=None, budget=None):
     """The content of the receipt of PR ``pr`` (issue ``issue``) promoted on ``head``.
 
     ``policy``: the policy receipt recomputed for the promotion; ``request``: the latest
@@ -179,7 +184,10 @@ def build(*, pr, issue, head, promotion, policy, request, issue_records, pr_reco
     approved round (None at level 0); ``criteria``: the criteria of the issue text (None when it
     cannot be trusted); ``acceptance_map``: the latest map (None when none is recorded);
     ``advisory``: the dispatcher's record of the advisory review of ``head`` (#369), or None.
-    Without one the content has no ``advisory`` key, and its digest is the one before #369."""
+    Without one the content has no ``advisory`` key, and its digest is the one before #369.
+    ``budget``: with the budget on (#393), the state of the budget of the issue's story from
+    the journal (``budget.view``), or ``{'story': None}`` when the issue belongs to no story;
+    None with the budget off, and then the content has no ``budget`` key."""
     turns = ([_turn(t, 'issue') for t in issue_records['turns']]
              + [_turn(t, 'pr') for t in pr_records['turns']])
     events = [_event(e) for e in pr_records['events']]
@@ -204,6 +212,8 @@ def build(*, pr, issue, head, promotion, policy, request, issue_records, pr_reco
     if advisory is not None:
         # Only the identity and the opinion, never the text the agent wrote (#369).
         content['advisory'] = {k: advisory.get(k) for k in ADVISORY_FIELDS}
+    if budget is not None:
+        content['budget'] = budget
     content['missing'] = missing(content)
     return content
 
@@ -488,7 +498,41 @@ def section(content):
               '', '### Criteri di accettazione', '', *_acceptance_text(content['acceptance'])]
     if content.get('advisory') is not None:
         parts += ['', '### Review consultiva', '', *_advisory_text(content['advisory'])]
+    if content.get('budget') is not None:
+        parts += ['', '### Budget della storia', '', *_budget_text(content['budget'])]
     return '\n'.join(parts)
+
+
+def _budget_text(found):
+    """The state of the budget of the story (#393, ``budget.view``): consumed, reserved and
+    available per dimension; a value no turn attests is ``non attestato``, never 0."""
+    if found.get('story') is None:
+        return ['L\'issue non appartiene a nessuna storia del journal: nessun envelope di '
+                'budget.']
+    lines = [f'Storia `{found["story"]}` (radice #{found["issue"]}), stato del journal al '
+             f'{found["at"]}. Consumato: i turni con un esito confermato e i dollari osservati; '
+             'prenotato: i turni senza esito confermato e le riserve non coperte da un costo '
+             f'osservato. Un valore che nessun turno attesta è `{NOT_ATTESTED}`, mai 0.', '',
+             '| Dimensione | Consumato | Prenotato | Disponibile | Tetto |',
+             '|---|---|---|---|---|']
+
+    def count(label, c):
+        cap = '—' if c['cap'] is None else c['cap']
+        available = '—' if c['available'] is None else c['available']
+        return f'| {label} | {c["consumed"]} | {c["reserved"]} | {available} | {cap} |'
+
+    lines.append(count('Turni', found['turns']))
+    lines += [count(f'Turni `{name}`', c) for name, c in found['roles'].items()]
+    lines += [count(f'Fase `{name}`', c) for name, c in found['phases'].items()]
+    for kind, d in found['usd'].items():
+        gap = (f' (turni senza valore attestato: {d["unattested"]})' if d['unattested']
+               else '')
+        lines.append(f'| `{kind}` | {consumed_usd(d)}{gap} | {usd(d["reserved"])} | '
+                     f'{usd(d["available"])} | {usd(d["cap"])} |')
+    t = found['time']
+    lines.append(f'| Tempo (s) | {t["consumed"]} | — | {t["available"]} | {t["cap"]} |')
+    lines += ['', f'Inizio della storia {t["started_at"]}, scadenza {t["deadline_at"]}.']
+    return lines
 
 
 def _advisory_text(advisory):

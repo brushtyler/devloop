@@ -868,8 +868,11 @@ A turn the envelope does not cover is refused before it starts, with an escalati
 story. Consumption is cumulative across child issues, attempts, fallback models, retries and
 restarts, and nothing refunds a booking. A story keeps the limits of its first booking, recorded
 in the journal: a later change of `[budget]` applies to new stories only. agy and codex accept
-only `unmetered_quota`, with the turn caps. The readiness check stays outside the envelope. With it
-off, devloop books nothing and behaves as before.
+only `unmetered_quota`, with the turn caps. The readiness check stays outside the envelope. The
+[state of the budget](reference.md#state-of-the-budget) of each story (#393), consumed, reserved
+and available per dimension, with the dollars no CLI reports shown as `non attestato` and never
+as 0, appears in `devloop status`, in a section of the PR receipt and in the escalation of a
+refused turn. With it off, devloop books nothing, shows no budget and behaves as before.
 
 With `publication_outbox = true` (#385, off by default), every comment, native review and pull
 request devloop writes is saved in the same journal before it is sent, through the
@@ -978,7 +981,7 @@ in `[roles]` of the configuration ([reference](reference.md#configuration)).
 
 ```bash
 python3 -m devloop setup            # create the agent:* labels, the priority:* labels and the review level labels (reviews:0 only when level 0 is on)
-python3 -m devloop status           # running action, devloop PRs (with rounds counted on max_review_rounds, merge state and conflicts), ready issues in start order with their priority, planned actions
+python3 -m devloop status           # running action, devloop PRs (with rounds counted on max_review_rounds, merge state and conflicts), ready issues in start order with their priority, planned actions; with [budget] on, the budget of the stories in progress
 python3 -m devloop apps             # check the GitHub App of each actor
 python3 -m devloop tick --dry-run   # print the ready issues in start order and the plan, change nothing (no lock: it runs beside a dispatcher)
 python3 -m devloop tick             # run one round
