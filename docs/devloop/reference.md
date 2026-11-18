@@ -820,7 +820,9 @@ before. With `publication_outbox` on (#385), `Identities.github` hands out each 
 [publication outbox](protocol.md#publication-outbox),
 which reconciles an uncertain write on the app's login, or on `trusted_users` for the ambient
 login; `Identities.direct` gives the client without it. Under the dispatcher lock,
-`Identities.hold` gives its descriptor to every client (`GitHub.lock_fd`): the `gh` of each
+`Identities.hold` gives its descriptor to every client (`GitHub.lock_fd`), those created before
+it included, such as the dispatcher's and the merger's that devloop builds before taking the
+lock: the `gh` of each
 write keeps the lock open while it runs, so no next dispatcher starts while it may still publish.
 An app that is configured but whose key is missing stops devloop at startup instead of
 silently falling back to the operator's login: remove it from `[apps]` (or use `--config`) to run

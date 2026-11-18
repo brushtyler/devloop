@@ -1147,6 +1147,59 @@ class WiringTests(unittest.TestCase):
                 if expected:
                     self.assertIs(box.journal, d.ledger.journal)
 
+    def test_the_app_clients_build_creates_get_the_lock_held_after_it(self):
+        # R4-1: build() creates the clients of the dispatcher's and the merger's apps, then
+        # main() takes the lock and calls hold(). Their writes hold it too: a POST cut short
+        # before it took effect is `held`, and the next dispatcher sends it once more.
+        import dataclasses
+
+        import devloop.__main__ as devloop_main
+        from test_devloop import CFG
+        posts, comments = [], []
+
+        def run(cmd, **kwargs):
+            if cmd[1:4] == ['api', '-X', 'POST']:
+                posts.append(kwargs.get('pass_fds'))
+                if len(posts) == 1:
+                    raise Crash  # the dispatcher stops before GitHub applied it
+                comments.append({'id': 4000 + len(comments),
+                                 'author': {'login': 'devloop-dispatcher[bot]'},
+                                 'body': kwargs['input'], 'created_at': '2026-11-18T15:30:00Z'})
+                return SimpleNamespace(returncode=0,
+                                       stdout=json.dumps({'id': comments[-1]['id']}), stderr='')
+            return SimpleNamespace(returncode=0, stdout=''.join(
+                json.dumps(c) + '\n' for c in comments), stderr='')
+        app = SimpleNamespace(token=lambda permissions, time_left=None: 'tok',
+                              login='devloop-dispatcher[bot]')
+        apps = {'dispatcher': app, 'merger': app}
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = dataclasses.replace(CFG, publication_outbox=True)
+            args = SimpleNamespace(config=None, local_config=None, command='run', dry_run=False)
+            with mock.patch.object(devloop_main, 'load_config', return_value=cfg), \
+                    mock.patch.object(devloop_main, 'main_checkout', return_value=Path(tmp)), \
+                    mock.patch.object(devloop_main.Identities, 'from_config',
+                                      return_value=Identities(cfg.repo, apps, run=run)):
+                _, state, d = devloop_main.build(args)
+            d.identities.hold(9)  # as main() does, once it holds the lock
+            self.assertEqual((d.gh.lock_fd, d.merger.lock_fd), (9, 9))
+            with self.assertRaises(Crash):
+                d.gh.comment(7, 'record')
+            self.assertEqual(posts, [(9,)])
+            # The next dispatcher.
+            clock = Clock()
+            clock.now = time.time()
+            identities = Identities(cfg.repo, apps, run=run)
+            identities.hold(9)
+            box = Outbox(TurnJournal(state), identities.direct, lambda actor: [app.login],
+                         clock=clock, sleep=clock.sleep)
+            [entry] = box.entries().values()
+            self.assertTrue(entry['held'])
+            clock.now += AFTER_A_CRASH
+            self.assertEqual(box.resume(), [])
+            self.assertEqual(statuses(box), [SENT])
+            self.assertEqual(posts, [(9,), (9,)])
+            self.assertEqual([c['body'] for c in comments], ['record'])
+
     def test_the_tick_resumes_the_outbox(self):
         lines = []
 

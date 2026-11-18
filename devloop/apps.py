@@ -18,6 +18,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import weakref
 from pathlib import Path
 
 from .github import GitHub, GitHubError
@@ -216,6 +217,9 @@ class Identities:
         self._run = run
         self._ambient = GitHub(repo, run=run)
         self._lock_fd = None
+        # The app clients already handed out (``build`` creates the dispatcher's and the
+        # merger's before the lock is taken): ``hold`` gives them the lock too (#385, R4-1).
+        self._clients = weakref.WeakSet()
 
     @classmethod
     def from_config(cls, cfg, run=subprocess.run):
@@ -231,9 +235,12 @@ class Identities:
 
     def hold(self, lock_fd):
         """The dispatcher lock is held on ``lock_fd``: the `gh` of each write of the clients
-        keeps it open while it runs (``GitHub.lock_fd``, #385)."""
+        keeps it open while it runs (``GitHub.lock_fd``, #385), the clients created before
+        this call included."""
         self._lock_fd = lock_fd
         self._ambient.lock_fd = lock_fd
+        for client in list(self._clients):
+            client.lock_fd = lock_fd
 
     def github(self, actor, permissions=None) -> Backend:
         """The client ``actor`` acts with: the ports, on GitHub, holding only ``permissions``;
@@ -253,6 +260,7 @@ class Identities:
         client = GitHub(self.repo, run=self._run,
                         token=lambda: app.token(permissions, time_left=client.time_left))
         client.lock_fd = self._lock_fd
+        self._clients.add(client)
         return client
 
     def login(self, actor):
