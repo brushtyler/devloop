@@ -673,6 +673,7 @@ check, and the `policy` marker of a level that cannot be reviewed or promoted. A
 | `retry_limit`, `supervisor_escalated`, `supervisor_refused` | The supervisor's retries are spent, it handed the escalation over, or it gave a command the escalation does not admit | Yes |
 | `conclave_veto` | A trusted user annulled the latest decision of a [conclave](#conclave-on-a-block) with `/devloop veto` | Yes |
 | `uncertain_turn` | With `block_uncertain_turns` on, a turn refused because its work has [uncertain turns](protocol.md#turn-journal) a trusted user has not reconciled with `/devloop reconcile` | Yes |
+| `attempt` | With `attempt_identity` on, a PR whose [attempt](protocol.md#attempt-identity) the journal does not confirm, or concluded already (a PR reopened after it was merged or closed) | Yes |
 
 Any other class, or none (escalations written before #182), is critical.
 
@@ -838,6 +839,13 @@ the issue, or adds the hash of the new request to the one it has, and the commen
 `request` record carries the dispatcher's `story` marker. An issue belongs to another's story
 only through that marker of the dispatcher, never through what its text, an agent or a user
 writes. With it off, and for issues taken over before, nothing changes.
+
+With `attempt_identity = true` too (#384, off by default) the implementation of a story's root
+runs in an [attempt](protocol.md#attempt-identity), opened in the journal before its first turn:
+its PR marker and its turn records carry it. Retries before the PR resume the same attempt; a new
+one starts only once the PR of the previous one is merged or closed, and is refused while that PR
+is open. A PR reopened after its attempt concluded is escalated (`attempt`). PRs opened before,
+without an attempt in their marker, are handled as before.
 
 ### Advisory review for the operator
 

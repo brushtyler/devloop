@@ -242,7 +242,8 @@ A CI already failed before the review is a CI round, as before: no review runs o
 
 A devloop PR is recognised by its branch, `agent/issue-<n>`, opened by a trusted user. Its body
 ends with a hidden marker that records the issue, implementer and reviewer: text may be edited
-above it, but the marker must stay the last line.
+above it, but the marker must stay the last line. With `attempt_identity` on (#384) it also
+records the [attempt](#attempt-identity) of the PR, which the journal must confirm.
 
 ## Readiness check records
 
@@ -767,7 +768,7 @@ readiness check, on the PR for review, fix, sync and CI. The turns of a review r
 | Record | When | Content |
 |---|---|---|
 | `request` | The issue goes from `agent:ready` to `agent:working` | SHA-256 of title and body, author and time of the trusted `labeled` event of `agent:ready`, ids of the trusted comments given to the implementer, time of the takeover. It is a snapshot **at the takeover**, not at the time of the label |
-| `turn` | Every invocation of an agent CLI, retries, fallback models and failures included: implement, fix, sync with an agent, review, readiness check, conclave call, [advisory review](guide.md#advisory-review-for-the-operator) (`advisory`, on the PR, in a comment of its own) | Kind, agent, GitHub identity (none: the operator's `gh` login), configured model and effort (for a fallback, the fallback model and the model it replaces), real model, start, end, duration, outcome (`success`, `failure`, `unavailable`), the error if any, telemetry, and the last command the turn ran or started when the CLI exposes it (`last_command`: only codex, from the `command_execution` items of `--json`; cleaned like the tail of a timeout, on one line, at most 200 characters; absent otherwise), also for a turn that timed out |
+| `turn` | Every invocation of an agent CLI, retries, fallback models and failures included: implement, fix, sync with an agent, review, readiness check, conclave call, [advisory review](guide.md#advisory-review-for-the-operator) (`advisory`, on the PR, in a comment of its own) | Kind, agent, GitHub identity (none: the operator's `gh` login), configured model and effort (for a fallback, the fallback model and the model it replaces), real model, start, end, duration, outcome (`success`, `failure`, `unavailable`), the error if any, telemetry, and the last command the turn ran or started when the CLI exposes it (`last_command`: only codex, from the `command_execution` items of `--json`; cleaned like the tail of a timeout, on one line, at most 200 characters; absent otherwise), also for a turn that timed out. With `attempt_identity` on, the id of the [attempt](#attempt-identity) the turn belongs to (`attempt`; absent for a turn of no attempt) |
 | `verification` | Every test command the dispatcher runs after a writing turn (none when the [local tests](reference.md#local-tests) select nothing), and the full suite it runs before a review of a head without CI, or before the promotion of an approval given while no CI was known | Command, outcome, duration, the tree hash before and after the test, and the commit (none before a review) |
 | `event` | The CI of a head (`ci_round`): a failed CI round, the checks a review round saw whatever its verdict (`approve`, `request_changes` or `needs_operator`), or the passing checks read again just before the PR is promoted to `agent:ready-to-merge` (also at level 0); a sync without an agent, or the merge of `main` before a fix (`sync`) | For the CI, the head, the state (`fail`, `pass`, or `none` without checks), the review round (none at level 0) and each check with its outcome, the id of its GitHub Actions run (none for a commit status or a check outside Actions) and its duration in seconds (`duration_s`: none while it runs and for a commit status, #300). Every CI round also records `tests`, the [summary of the suite](reference.md#summary-of-the-ci-in-the-prompts) that the dispatcher reads for the review and fix prompts (read again from the job logs when a promotion records the round, for instance after a review that saw the CI pending): for each job whose log holds the final lines of `scripts/run-tests.py`, its name with `ran` and `slowest`, and for a job whose log could not be read, its name with `log: unavailable`; absent when no job has either. The same checks read again for the same head and round are not recorded twice, a new run is. A failure that joined a round that had approved its head carries `voided_approval: true` (#359). For a sync, the merged base commit and the old and new heads |
 
@@ -908,7 +909,9 @@ their format does not change. The journal is append-only, one JSON event per lin
 - `reconciled` and `refused`: see below. `unsettled` and `settled`: a record on GitHub left open
   after a failed edit, and the tick that checked it. `linked`: the issue of the work of a legacy
   turn (see the migration). `story`, `request` and `child`: the stories, with `story_identity`
-  on (see [Story identity](#story-identity)).
+  on (see [Story identity](#story-identity)). `attempt`, `attempt_pr` and `concluded`: the
+  attempts, with `attempt_identity` on (see [Attempt identity](#attempt-identity)), and an
+  intent of a turn of an attempt carries its id.
 
 **Integrity.** Every read verifies the whole chain. An incomplete last line (a write cut short),
 or a last line that is not JSON, is set aside in `turn-journal-tail-<sha256>.bin` and cut off: the
@@ -1017,8 +1020,48 @@ behaves as before.
   and until then no issue gets the marker of a child.
 
 Issues taken over before, or with the identity off, have no marker and are handled as before.
-The identity of the attempt and the rule of one active attempt per phase are the second part of
-P2-3.
+
+### Attempt identity
+
+Since #384 (ADR 0004, P2-3b, recommendation (i) of section 3.2) the journal can hold the
+**attempts** of each phase, with **one active attempt per phase**. It is off by default
+(`attempt_identity = false`, ADR 0004, D8) and needs `story_identity = true`: with it off devloop
+records no attempt and behaves as before.
+
+- **Phase.** The triple (story, kind, approved upstream revision). The current flow has only the
+  `implementation` phase of the root of a story, with a null revision: the phase stays the same
+  across later requests and advances of the base branch. A child issue has no attempt of its own
+  until step 3.
+- **Identity.** An `attempt` event: the id the dispatcher assigns (`attempt-<n>-<8 hex digits>`),
+  the phase, its number in the phase (`n`, from 1), the repository and issue it works on, and the
+  key `(design, task)` of a unit generated by a plan (sha of the approved design, task id),
+  foreseen in the format and null until the phases of step 3.
+- **Opening.** The implementation opens its attempt after the `request` record and before its
+  first turn. Retries, fallbacks, fixes, syncs and reviews are turns of the active attempt, not
+  new attempts. An attempt whose PR was not opened yet (a failure before the PR) stays active, and
+  the retry of the implementation resumes it.
+- **One active attempt.** A new attempt of a phase is opened only once the previous one is
+  concluded with a recorded outcome, and it consumes the same story budget. While the PR of the
+  active attempt is open, a new one is refused (`AttemptActive`) before any turn, label or PR, and
+  the step escalates. A merged issue is still never implemented again (#228).
+- **Outcome.** A `concluded` event, once per attempt: `merged` or `closed` (its PR merged, or
+  closed without merge), recorded by the tick that finds the PR no longer open (`find_pr`), or by
+  the takeover that needs a new attempt; `abandoned`, with its reason, from an internal primitive
+  (`TurnJournal.abandon`) that **no command and no flow calls yet**.
+- **PR.** The PR of the attempt is recorded with an `attempt_pr` event, one per attempt, and its
+  [marker](#pr-marker) carries `attempt`: `{attempt, story, phase, revision, n, design, task}`.
+  The journal is the authority (D7): on each snapshot an attempt of a PR marker that the journal
+  does not hold, of another issue, phase or number, of another PR, or already concluded (a PR
+  reopened after it was merged or closed) does not hold: the PR gets no work nor merge, and is
+  escalated (`attempt`). A turn on such a PR is refused too.
+- **Turns.** The intent of each turn of an attempt in the journal and its `turn` record on GitHub
+  carry `attempt`, its id, with a "Tentativo" row in the text. A readiness check belongs to no
+  attempt.
+
+Each attempt keeps the branch of today (`branch_prefix` and the issue number): with one active
+attempt per phase no two attempts of an issue are on GitHub at the same time, and a closed PR is
+never reused: the next attempt opens a new one. PRs opened before, or with the identity off, have
+no attempt in their marker: they are handled as before, and their turns belong to no attempt.
 
 ## PR receipt
 

@@ -193,7 +193,8 @@ from .dispatch_merge import MergeMixin
 from .dispatch_preflight import PreflightMixin
 from .dispatch_supervision import SupervisionMixin, UntrustedChange
 from .github import GitHubError, author_login
-from .journal import RECONCILE_COMMAND, TurnBlocked, blocked_text, reconcile_command
+from .journal import (CLOSED, MERGED, RECONCILE_COMMAND, JournalError, TurnBlocked, blocked_text,
+                      reconcile_command)
 from .ledger import comment_ref, fix_register, open_turns
 from .localtests import module_command, select_modules
 from .markdown import (RESUME, carries_record, dispatcher_header, publishable, read_marker,
@@ -618,6 +619,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         # The issue of each devloop PR seen (#362, ``_work_issue``): its branch, checked against
         # the dispatcher's marker (``_devloop_pr``).
         self._issue_of = {}
+        # The ``attempt`` of the marker of each devloop PR seen (#384, ``_turn_attempt``), None
+        # for a PR whose marker has none.
+        self._pr_attempts = {}
         # The models found unavailable (``unavailability.Memory``, #151), or None: every turn
         # starts from the configured model.
         self.memory = memory
@@ -1002,8 +1006,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 if pr.merge_mode in MERGING and self._human_merge(pr) is not None:
                     # Work of this PR restarted after a conclave (#142): the merge is human.
                     pr.merge_mode = 'off'
+            if pr.meta:
+                pr.attempt_problem = self._attempt_problem(pr.number, pr.issue,
+                                                           pr.meta.get('attempt'))
             prs.append(pr)
         self._issue_of.update((pr.number, pr.issue) for pr in prs)
+        self._pr_attempts.update((pr.number, pr.meta.get('attempt')) for pr in prs)
         ready = []
         pr_issues = {pr.issue for pr in prs}
         skip = set(self.cfg.blocked_labels) | {lb.working, lb.needs_supervisor}
@@ -1236,6 +1244,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         snap = self.snapshot()
         self._flag_incomplete(snap, dry_run)
         self._reconcile_turns(snap, dry_run)
+        self._settle_attempts(snap, dry_run)
         actions = plan(snap, self.cfg)
         prs = {pr.number: pr for pr in snap.prs}
         self.log(f'{"[dry-run] " if dry_run else ""}{pr_counts_line(snap, self.cfg)}')
@@ -1294,6 +1303,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         busy |= {number for number, issue in issue_of.items() if issue in busy}
         self._flag_incomplete(snap, False, busy)
         self._reconcile_turns(snap, False)
+        self._settle_attempts(snap, False)
         # A conclave that restarts an implementation (#142, ``Action.opens``) may open a PR too.
         reserved = sum(1 for action, _ in running
                        if action.kind in ('implement', 'preflight')
@@ -1670,7 +1680,126 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             mode=mode, model=candidate.model, effort=candidate.effort,
             fallback_for=candidate.fallback_for, label=label,
             round_no=place[0] if place and fix is None else None, register=fix,
-            issue=issue, repo=self.cfg.repo)
+            issue=issue, repo=self.cfg.repo, attempt=self._turn_attempt(number, issue, kind))
+
+    # Attempts (#384) ---------------------------------------------------------
+    def _turn_attempt(self, number, issue, kind):
+        """With ``attempt_identity`` (#384), the id of the attempt a turn of ``kind`` on
+        ``number`` belongs to, of the work of issue ``issue``; None without one, as before.
+
+        A turn on a PR belongs to the attempt of its marker, which the journal must confirm
+        (``_attempt_problem``): an attempt it does not hold, of another issue or PR, or already
+        concluded (a PR reopened after its outcome) raises ``JournalError``, and the step
+        escalates. A PR opened before, without the attempt in its marker, has none. A turn on
+        the issue (implementation, retries, fallbacks) belongs to its active attempt, opened by
+        ``_take_attempt``. A readiness check belongs to none: it comes before the takeover."""
+        if not self.cfg.attempt_identity or kind == 'preflight':
+            return None
+        journal = self.ledger.journal
+        if number == issue:
+            active = journal.active_attempt_of(self.cfg.repo, issue)
+            return active['attempt'] if active is not None else None
+        mark = self._pr_attempts.get(number)
+        if mark is None:
+            return None
+        problem = self._attempt_problem(number, issue, mark)
+        if problem:
+            raise JournalError(problem)
+        # Its PR not recorded yet (a write that failed after the PR was opened): recorded now.
+        journal.bind_pr(mark['attempt'], number)
+        return mark['attempt']
+
+    def _attempt_problem(self, number, issue, mark):
+        """Why the attempt ``mark`` of the marker of PR ``number``, of issue ``issue``, does not
+        hold (#384), in Italian; ``''`` when it holds, without ``attempt_identity`` and for a PR
+        whose marker has no attempt (opened before: handled as today). The journal is the
+        authority (ADR 0004, D7): the attempt must be one it holds, of the same story, phase,
+        number and issue, active, and of this PR or of none yet."""
+        if not self.cfg.attempt_identity or mark is None or self.ledger is None:
+            return ''
+        try:
+            current = self.ledger.journal.attempts().get(mark['attempt'])
+        except JournalError as exc:
+            return f'il journal dei turni non è leggibile: {exc}'
+        if (current is None or current['repo'] != self.cfg.repo or current['issue'] != issue
+                or any(current[k] != mark[k] for k in ('story', 'phase', 'revision', 'n'))):
+            return (f'il tentativo `{mark["attempt"]}` del marker della PR non è confermato dal '
+                    'journal dei turni, che ne è l\'autorità')
+        if current['pr'] is not None and current['pr'] != number:
+            return (f'il tentativo `{mark["attempt"]}` del marker è quello della PR '
+                    f'#{current["pr"]}, non di questa')
+        if current['outcome'] is not None:
+            return (f'il tentativo `{mark["attempt"]}` di questa PR è già concluso '
+                    f'(`{current["outcome"]}`): una PR riaperta dopo la conclusione del suo '
+                    'tentativo non riprende il lavoro')
+        return ''
+
+    def _conclude_attempt(self, attempt):
+        """Record the outcome of ``attempt`` when its PR is merged (``merged``) or closed without
+        merge (``closed``), as GitHub has it now (#384); whether it is concluded."""
+        raw = self.gh.find_pr(attempt['pr'])
+        state = (raw or {}).get('state')
+        outcome = {'MERGED': MERGED, 'CLOSED': CLOSED}.get(state)
+        if outcome is None:
+            return False
+        self.ledger.journal.conclude(attempt['attempt'], outcome, f'PR #{attempt["pr"]} {state}')
+        self.log(f'  attempt {attempt["attempt"]} of #{attempt["issue"]} concluded: {outcome} '
+                 f'(PR #{attempt["pr"]})')
+        return True
+
+    def _settle_attempts(self, snap, dry_run):
+        """With ``attempt_identity`` (#384), record the outcome of each active attempt whose PR
+        is no longer open: merged, or closed without merge. An attempt without a PR yet stays
+        active, for the retries of its implementation."""
+        if not self.cfg.attempt_identity or self.ledger is None or dry_run:
+            return
+        open_prs = {pr.number for pr in snap.prs}
+        try:
+            attempts = self.ledger.journal.attempts().values()
+        except GitHubError as exc:
+            self.log(f'  attempts not checked: {exc}')
+            return
+        for attempt in attempts:
+            if (attempt['outcome'] is not None or attempt['pr'] is None
+                    or attempt['pr'] in open_prs or attempt['repo'] != self.cfg.repo):
+                continue
+            try:
+                self._conclude_attempt(attempt)
+            except GitHubError as exc:
+                self.log(f'  attempt {attempt["attempt"]} not checked: {exc}')
+
+    def _take_attempt(self, number):
+        """With ``attempt_identity`` (#384), the attempt of the implementation of issue
+        ``number``, before its first turn: its active attempt when it has no PR yet (a retry
+        after a failure before the PR), otherwise a new one, once the PR of the previous one is
+        merged or closed and its outcome recorded. While that PR is open, ``AttemptActive``: a
+        second active attempt in the same phase is refused, and the step escalates. None when
+        the identity is off and for an issue that is not the root of a story (a child has no
+        attempt of its own until step 3)."""
+        if not self.cfg.attempt_identity or self.ledger is None:
+            return None
+        journal = self.ledger.journal
+        found = journal.story_of(self.cfg.repo, number)
+        if found is None or found[1] != 'root':
+            return None
+        story = found[0]['story']
+        active = journal.active_attempt(story)
+        if active is not None and active['pr'] is not None and self._conclude_attempt(active):
+            active = None
+        if active is not None and active['pr'] is None:
+            self.log(f'  attempt {active["attempt"]} (n. {active["n"]}) of #{number} resumed')
+            return active
+        attempt = journal.open_attempt(story, number)
+        self.log(f'  attempt {attempt["attempt"]} (n. {attempt["n"]}) of #{number} opened')
+        return attempt
+
+    def _do_attempt(self, pr):
+        """A PR whose attempt does not hold (#384, ``_attempt_problem``): to the operator."""
+        lb = self.cfg.labels
+        self._escalate(pr.number, 'Il tentativo registrato nel marker di questa PR non vale: '
+                       f'{pr.attempt_problem}. devloop non prosegue il lavoro su questa PR: '
+                       'decide l\'operatore.',
+                       remove=[lb.review, lb.changes, lb.ready_to_merge], cls='attempt')
 
     def _work_issue(self, number):
         """The issue of the work of ``number`` (#362): the issue of a devloop PR, else

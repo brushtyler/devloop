@@ -84,6 +84,10 @@ class PullRequest:
     closures: list = field(default_factory=list)
     commands: list = field(default_factory=list)
     finding_problems: list = field(default_factory=list)
+    # Why the attempt of the marker does not hold (#384, ``attempt_identity``), ``''`` when it
+    # holds or the marker has none: an attempt the journal does not confirm, or one concluded
+    # already, as for a PR reopened after its outcome.
+    attempt_problem: str = ''
     # CI events the dispatcher's ledger already recorded (#133), as ``(head, state, round,
     # checks)``: reading the same checks again for the same head and round records nothing new.
     ci_recorded: list = field(default_factory=list)
@@ -434,6 +438,10 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
             continue
         if not pr.meta:
             actions.append(Action('lost_meta', pr.number, 'PR body no longer ends with its marker'))
+            continue
+        if pr.attempt_problem:
+            # Its attempt not confirmed by the journal, or concluded (#384): no work, no merge.
+            actions.append(Action('attempt', pr.number, 'the attempt of its marker does not hold'))
             continue
         if not pr.labels & {lb.review, lb.changes, lb.ready_to_merge}:
             # e.g. a crash between creating the PR and labelling it
