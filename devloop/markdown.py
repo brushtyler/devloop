@@ -286,14 +286,16 @@ def _valid_notice(n):
     return n.get('event') in NOTICES
 
 
-LEDGER_TYPES = ('request', 'turn', 'event', 'verification', 'round')
+LEDGER_TYPES = ('request', 'turn', 'event', 'verification', 'round', 'fix')
 TURN_STATES = ('open', 'closed', 'incomplete')
 # The records a round's register holds, each in a section of its own (#325).
 ROUND_RECORDS = ('turn', 'event')
+# The records a fix register holds (#355): its turns, the sync before it, its local tests.
+FIX_RECORDS = ('turn', 'event', 'verification')
 
 
-def _valid_section(s):
-    return (isinstance(s, dict) and s.get('type') in ROUND_RECORDS
+def _valid_section(s, types):
+    return (isinstance(s, dict) and s.get('type') in types
             and _is_int(s.get('section'), 1) and _valid_ledger(s))
 
 
@@ -301,13 +303,17 @@ def _valid_ledger(r):
     """A dispatcher record of evidence and telemetry (#133). A turn that is not closed has no
     end, outcome nor telemetry: they are null, never guessed. A ``round`` (#325) is the
     register of a review round: in ``records`` its review turns and its CI event, each with the
-    number of its ``section``, all different."""
+    number of its ``section``, all different. A ``fix`` (#355) is the register of a fix, of
+    round 0 for one asked before any review: in ``records`` its turns, the ``sync`` event before
+    it and its verifications, numbered the same way."""
     if r.get('type') not in LEDGER_TYPES:
         return False
-    if r['type'] == 'round':
+    if r['type'] in ('round', 'fix'):
         records = r.get('records')
-        return (_is_int(r.get('round'), 1) and isinstance(records, list)
-                and all(_valid_section(s) for s in records)
+        types = ROUND_RECORDS if r['type'] == 'round' else FIX_RECORDS
+        return (_is_int(r.get('round'), 1 if r['type'] == 'round' else 0)
+                and isinstance(records, list)
+                and all(_valid_section(s, types) for s in records)
                 and len({s['section'] for s in records}) == len(records))
     if r['type'] == 'turn':
         return (r.get('state') in TURN_STATES

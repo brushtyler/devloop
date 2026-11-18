@@ -56,7 +56,8 @@ dispatcher checks, in the fix worktree, whether the branch contains `origin/main
   implementer's identity, as for a sync, checks that it does not differ from `main` under
   `protected_paths`, and starts the agent on top of it. The push carries the merge commit and the
   fix, also when the agent changed nothing. The ledger records the `sync` event with the merged
-  base and the old and new heads, and the fix comment says that the merge was done;
+  base and the old and new heads, in the [fix register](#fix-register) (#355), and the fix
+  comment says that the merge was done;
 - **it does not, and the merge has conflicts**: the fix does not start. The usual sync runs
   instead (the implementer resolves the conflicts, tests, push), but the PR keeps its label
   (`agent:changes`, or `agent:review` for a `/devloop fix`), and the fix runs at the next tick on
@@ -417,7 +418,8 @@ The [daily summary](guide.md#daily-summary) (#256) reads only records bound to i
 of a configured reviewer written with its identity (a CI round with the dispatcher's), and the
 `pr` marker of a PR opened by the implementer it names. It reads the comments of the repository,
 not the native reviews: a round whose reviews are native reviews is counted from its
-[round register](#round-register), once a review turn of it succeeded or its CI was recorded. On `[report] issue` it writes two kinds of
+[round register](#round-register), once a review turn of it succeeded or its CI was recorded. The
+records of a [fix register](#fix-register) are read one by one, and open no round. On `[report] issue` it writes two kinds of
 `report` record, both with the day (`YYYY-MM-DD`, UTC):
 
 - `today`, at the end of the issue body: the day the body shows. It counts only when the
@@ -697,7 +699,8 @@ they no longer have to be pieced together from markers and logs. Each record is 
 comment ending with a `ledger` marker, signed with the dispatcher's identity like its other
 records (only that identity's records count), on the issue for the implementation and the
 readiness check, on the PR for review, fix, sync and CI. The turns of a review round and its
-`ci_round` event share one comment, the [round register](#round-register). The
+`ci_round` event share one comment, the [round register](#round-register); the turns, the
+`sync` and the local tests of a fix share another, the [fix register](#fix-register). The
 [PR receipt](#pr-receipt) (#135) gathers them at the promotion.
 
 | Record | When | Content |
@@ -766,10 +769,37 @@ two reviews and one register.
   recorded, the open turns and the [daily summary](#daily-summary) see each turn and event as
   before. A reviewer of the same round in a later action joins the round's register.
 
-The other records (`request`, `verification`, the turns of implement, fix, sync, readiness check
-and conclave, the `sync` and `ci_rerun` events, and the `ci_round` of a level-0 promotion, which
-has no round) keep a comment each. The records written before #325, one comment per turn and per
-CI round, stay valid and are read as before.
+A fix has a register of its own, the [fix register](#fix-register). The other records
+(`request`, the `verification` of an implementation, of a sync and of the full suite before a
+review, the turns of implement, sync, readiness check and conclave, the `sync` event of a sync
+without an agent, the `ci_rerun` events, and the `ci_round` of a level-0 promotion, which has no
+round) keep a comment each. The records written before #325, one comment per turn and per CI
+round, stay valid and are read as before.
+
+### Fix register
+
+Since #355 a fix (the answer to a review round, or one asked with `/devloop fix`) writes **one
+dispatcher comment** on the PR, `## Registro devloop: correzione del round <n>` (`correzione
+prima di ogni review` for a fix asked before any review, round 0), ending with a `ledger` marker
+of type `fix`. Its `records` hold, each in a section of its own with its number (`section`) and
+the same content as a record of its own:
+
+- every `turn` of the fix, retries after failed local tests and fallback models included;
+- every `verification` of its local tests, the passing one bound to the commit of the fix with
+  the same rule as before;
+- the `sync` event of the merge of the base the dispatcher made before the fix (#250), when it
+  made one, written once the merge is pushed with the fix.
+
+With the implementer's "Correzioni per il round N" comment, which has another author and stays
+apart, a fix leaves two elements in the PR's timeline instead of four. The rules of the
+[round register](#round-register) apply: the register is created with the first turn, `open`,
+before the CLI starts (if that write fails the turn does not start); every write re-reads it from
+GitHub under the same lock; only a register the dispatcher signed is edited; a fix interrupted
+before the closing write leaves its turn `open` in the register, and the next tick marks only
+that section `incomplete`. Each fix has its own register: it never joins the register of the
+round it answers, nor that of an earlier fix. Reads expand it into its records like a round's
+register. The records of a fix written before #355, one comment per turn, verification and
+`sync` event, stay valid and are read as before.
 
 ## PR receipt
 

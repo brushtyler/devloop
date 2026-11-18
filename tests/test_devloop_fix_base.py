@@ -37,8 +37,8 @@ class FixBaseTests(Quorum):
             self.pushed.append(list(self.ws.commits))
             return push(path, branch, replace=replace, auth=auth)
         self.runner.run, self.ws.push = spy_run, spy_push
-        self.d._ledger_event = lambda number, event, **fields: self.events.append(
-            (number, event, fields))
+        self.d._ledger_event = lambda number, event, register=None, **fields: (
+            self.events.append((number, event, fields)))
 
     def test_a_fix_behind_the_base_starts_on_its_merge_and_pushes_both(self):
         self.changes_requested(fixed())

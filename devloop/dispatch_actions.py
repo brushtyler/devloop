@@ -23,6 +23,7 @@ from .context import (_failure_text, _format_conflicts, _format_findings, _revie
                       docs_map_section, docs_review_section, format_ci_summary,
                       format_fix_requests, format_operator_comments, format_previous_rounds)
 from .github import GitHubError, job_id
+from .ledger import fix_register
 from .localtests import failed_modules, select_modules, suite_summary
 from .markdown import (dispatcher_header, publishable, render_fix, render_native_review,
                        render_review)
@@ -703,12 +704,13 @@ class ActionsMixin:
                              docs=docs_diff_section(self._mapped_docs(path)),
                              requests='', base_branch=cfg.base_branch, language=cfg.language,
                              conclave=resolution)
+        # One register for the fix's turns, local tests and sync (#355).
+        where = self._fix_where(pr.number, latest['round'])
         result, failure, used, tested, local = self._write_turn(
-            agent, prompt, 'fix', path, f'pr-{pr.number}-fix-r{latest["round"]}',
-            where=(pr.number, 'fix'))
+            agent, prompt, 'fix', path, f'pr-{pr.number}-fix-r{latest["round"]}', where=where)
         self._publish_fix(pr, agent, name, path, (result, failure, used, tested, local),
                           since=start, round_no=latest['round'], remove=[lb.changes],
-                          merged=merged, conclave=decision)
+                          merged=merged, conclave=decision, where=where)
 
     def _align_fix(self, pr, agent, path, remove):
         """Bring the branch of a fix in ``path`` up to ``origin/<base>`` before its agent starts
@@ -745,7 +747,7 @@ class ActionsMixin:
         return head, {'base': target, 'head': head, 'from': previous}
 
     def _publish_fix(self, pr, agent, name, path, turn, since, round_no, remove, extra=None,
-                     merged=None, conclave=None):
+                     merged=None, conclave=None, where=None):
         """Publish the outcome of a fix ``turn`` (``_write_turn``'s result) in worktree
         ``path``: escalate a blocked agent or failing tests (removing ``remove``), otherwise
         commit and push the changes made since commit ``since``, record the fix of round
@@ -753,7 +755,8 @@ class ActionsMixin:
         ``merged``: the merge of the base the dispatcher made before the turn (``_align_fix``),
         pushed with the fix even when the agent changed nothing. ``conclave``: the comment of
         the conclave decision whose resolution the turn had (#142), recorded with the fix or the
-        block; a veto of it written meanwhile publishes nothing."""
+        block; a veto of it written meanwhile publishes nothing. ``where``: the one the turn
+        ran with (``_fix_where``), whose register gets the ``sync`` event of ``merged`` (#355)."""
         lb = self.cfg.labels
         result, failure, used, tested, local = turn
         if result['status'] == 'blocked':
@@ -781,8 +784,10 @@ class ActionsMixin:
             self.ws.push(path, pr.head_ref, auth=auth)
             self._pushed(path)
         if merged:
-            # As for a sync without an agent (#133): an event, not a turn.
-            self._ledger_event(pr.number, 'sync', base=merged['base'], head=merged['head'],
+            # As for a sync without an agent (#133): an event, not a turn, in the fix's
+            # register (#355).
+            self._ledger_event(pr.number, 'sync', register=fix_register(where),
+                               base=merged['base'], head=merged['head'],
                                previous_head=merged['from'])
         fix = dict(result, head_sha=self.ws.head(path),
                    profile=self._profile(agent.key, 'write', used), local_tests=local,
@@ -841,11 +846,12 @@ class ActionsMixin:
                              docs=docs_diff_section(self._mapped_docs(path)),
                              base_branch=cfg.base_branch, language=cfg.language,
                              conclave=resolution)
+        where = self._fix_where(pr.number, round_no)
         turn = self._write_turn(agent, prompt, 'fix', path, f'pr-{pr.number}-fix-request',
-                                where=(pr.number, 'fix'))
+                                where=where)
         self._publish_fix(pr, agent, name, path, turn, since=start, round_no=round_no,
                           remove=remove, extra={'requests': requests, 'from': pr.head_sha},
-                          merged=merged, conclave=decision)
+                          merged=merged, conclave=decision, where=where)
 
     def _sync_rounds_note(self, pr, conflicts, fix):
         """What the comment of a sync of ``pr`` says of the next review (#289): with
