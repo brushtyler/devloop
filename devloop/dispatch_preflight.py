@@ -9,10 +9,10 @@ recording of its outcome (``_publish_preflight``) and the check itself (``_do_pr
 from here, not re-exported by ``devloop/dispatcher.py``.
 """
 
-from .agents import AgentError, ModelUnavailable, PermissionDenied, denied_retry_note
+from .agents import AgentError
 from .apps import DISPATCHER, ISSUE_COMMENT
 from .context import _render_issue_comments, _template
-from .dispatch_actions import ready_approval
+from .dispatch_actions import Models, ready_approval
 from .dispatch_supervision import UntrustedChange
 from .markdown import carries_record, read_marker, render_escalation, render_preflight
 from .planning import (RECHECK_COMMAND, label_names, operator_blocked, preflight_state,
@@ -159,15 +159,17 @@ class PreflightMixin:
             return approved[0]
         return None
 
-    def _publish_preflight(self, number, outcome, digest, agent_key, note='', base=None):
+    def _publish_preflight(self, number, outcome, digest, agent_key, note='', base=None,
+                           used=None):
         """Record a check's outcome on the issue and apply it to ``agent:needs-operator``: add
         the label when the check fails and the label is absent, remove it when the check passes
         and the label belongs to the readiness check, under whichever name it has (#248). A
         label someone else set stays. ``base``: the commit the check ran on, recorded with the
         outcome (#270); None for an outcome reused (the latest base then), which keeps the
-        commit of its own record, if any."""
+        commit of its own record, if any. ``used``: the configuration the check ran with, a
+        fallback model's included (#148), for the header; the configured agent by default."""
         lb = self.cfg.labels
-        agent = self.cfg.agent(agent_key)
+        agent = used or self.cfg.agent(agent_key)
         labels = label_names(self.gh.issue(number).get('labels') or [])
         comments = self.gh.issue_comments(number)
         records = self._preflight_records(comments)
@@ -248,31 +250,19 @@ class PreflightMixin:
             # checkout and the hash of the request its prompt gets.
             base = self.ws.head(path)
             key = self._issue_key('preflight', base, digest)
-            # A denied permission is retried once, in the same checkout (#180), as in ``_turn``,
-            # told what was denied and which commands it may run (#319).
-            text = prompt
-            for label in (name, f'{name}-retry'):
-                entry = self._open_turn((number, 'preflight'), agent, 'review', label)
-                try:
-                    raw = self.runner.run(agent, 'review', text, 'preflight', path, label)
-                except PermissionDenied as exc:
-                    self._close_turn(entry, 'failure', exc)
-                    error = self._permission_denied(agent, exc, retry=label == name)
-                    if error is None:
-                        text = prompt + denied_retry_note(agent, 'review', exc)
-                        continue
-                    error.key = key
-                    raise error from exc
-                except AgentError as exc:
-                    self._close_turn(entry, 'unavailable' if isinstance(exc, ModelUnavailable)
-                                     else 'failure', exc)
-                    exc.key = key
-                    raise
-                self._close_turn(entry, 'success')
-                break
+            # The chain of models of ``_turn`` (#148): an unavailable model leaves the turn to
+            # the next one, with a note fit for the check; a denied permission is retried once,
+            # in the same checkout (#180, #319).
+            try:
+                raw, used = self._turn(Models(agent), 'review', prompt, 'preflight', path, name,
+                                       where=(number, 'preflight'), note='preflight')
+            except AgentError as exc:
+                exc.key = key
+                raise
         finally:
             self.ws.remove(name)
-        self._publish_preflight(number, normalize_preflight(raw), digest, agent.key, base=base)
+        self._publish_preflight(number, normalize_preflight(raw), digest, agent.key, base=base,
+                                used=used)
 
     def _do_preflight_block(self, number):
         """Block again an issue whose latest check, still valid for its text (and its base,

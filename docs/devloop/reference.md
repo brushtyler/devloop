@@ -392,10 +392,11 @@ each agy turn its minimal permissions, and treats a stop without output as a fai
   Any other failure (an unavailable
   model, a non-zero exit, a stop that names no permission, invalid output, a timeout) is not
   retried: it escalates or starts the fallback as before, except an empty run (see above). After a fallback, the next model gets
-  its own single retry. The [readiness check](guide.md#readiness-check-before-implementation), which
-  has no fallback, gets the same single retry, with the same retry prompt, in the same checkout,
-  with its own log and turn record (`issue-<n>-preflight-retry`); its second denial escalates
-  naming the model and what was denied.
+  its own single retry. The [readiness check](guide.md#readiness-check-before-implementation) runs
+  on the same chain (#148) and gets the same single retry, with the same retry prompt, in the
+  same checkout, with its own log and turn record (`issue-<n>-preflight-retry`); its second
+  denial moves to the next model, and on the last one escalates naming the model and what was
+  denied.
 
 ```toml
 [agents.agy]
@@ -452,9 +453,13 @@ fallback_models = [
   trying further models, and its comment lists the models tried too, the failed one included.
 - **Worktree.** The fallback is a new session with the same prompt and worktree. Partial changes
   of the previous attempt, and the merge in progress of a sync, stay as they are, without any
-  rollback; the prompt tells the agent that the worktree may contain them.
+  rollback; the prompt tells the agent that the worktree may contain them. The
+  [readiness check](guide.md#readiness-check-before-implementation) uses the chain of its checker
+  too (#148), in the same checkout of the base branch, with a note of its own: files the previous
+  attempt left there are not part of the base branch.
 - **Traceability.** The model actually used goes into the attribution header of the text
-  published for the turn, into the profile of the `pr`, `review`, `fix` or `sync` marker, into
+  published for the turn (the outcome of a readiness check included), into the profile of the
+  `pr`, `review`, `fix` or `sync` marker, into
   the tick log (`<agent> ran on fallback model <model>`) and, while the turn runs, into
   `devloop status`. The policy receipt keeps binding the configured reviewers.
 - **Independence.** At level 2 a reviewer's fallback model runs only if it is still independent
@@ -731,7 +736,8 @@ Each agent and the dispatcher can act on GitHub with its own GitHub App (#65), c
 
 | Actor | Does |
 |---|---|
-| dispatcher | every read, labels, escalations, CI rounds, re-runs of failed CI jobs not pertinent to the PR (needs `actions: write`, see [CI failures not pertinent to the PR](#ci-failures-not-pertinent-to-the-pr)), finding closures, readiness |
+| dispatcher | every read, labels, escalations, CI rounds, re-runs of failed CI jobs not pertinent to the PR (needs `actions: write`, see [CI failures not pertinent to the PR](#ci-failures-not-pertinent-to-the-pr)), finding closures, a PR's readiness for merge, the labels of the readiness check and its escalation to the supervisor |
+| readiness checker (`preflight`) | the outcome of the [readiness check](guide.md#readiness-check-before-implementation) on the issue, with its `preflight` record, also when a fallback model ran it |
 | implementer | commits (author and committer are its bot), push, opens the PR, fix and blocked comments |
 | reviewer | the review comment and a native GitHub review (`APPROVE`, `REQUEST_CHANGES` or `COMMENT`) on the reviewed commit |
 | merger | only the merges of the `strict` and `auto` [merge modes](guide.md#merge-modes) (see [The merger app](#the-merger-app)) |
