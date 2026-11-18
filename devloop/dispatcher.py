@@ -1549,16 +1549,48 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         """With ``block_uncertain_turns`` (#362), raise ``TurnBlocked`` when the work of
         ``number`` has turns that block it (``TurnJournal.blocking``): uncertain turns not
         reconciled, turns that ended without a durable outcome or that a tick could not make
-        uncertain, and legacy turns of the issue or of its PRs. Turns still running in this
-        process, in parallel actions, never block. Without a ledger or the block, nothing."""
+        uncertain, and legacy turns of the issue or of its PRs, open or closed: those not linked
+        to their work yet are linked first (``_link_legacy``), and one whose work cannot be read
+        blocks every turn. Turns still running in this process, in parallel actions, never
+        block. Without a ledger or the block, nothing."""
         if self.ledger is None or not self.cfg.block_uncertain_turns:
             return
         issue = self._work_issue(number)
+        if self.ledger.journal.unlinked():
+            self._link_legacy()
         held = self.ledger.journal.blocking(self.cfg.repo, issue, number, dict(self._issue_of))
         if held:
             self.log(f'  turn refused on #{number}: turns of issue #{issue} without a reconciled '
                      'outcome: ' + ', '.join(t['turn'] for t in held))
             raise TurnBlocked(blocked_text(issue, held), held)
+
+    def _link_legacy(self):
+        """Link each legacy turn imported from ``ledger-open-turns.json`` (#362) to the issue of
+        its work, durably (``TurnJournal.link``): through the dispatcher's map of the open PRs
+        and, with ``block_uncertain_turns``, by reading the others on GitHub in any state. A
+        devloop PR, recognised by its branch and author as in the snapshot (``_devloop_pr``),
+        belongs to the work of its issue; an issue, or a PR devloop does not recognise, only to
+        its own number. A number that cannot be read stays unlinked, and blocks every new turn
+        until a later read links it."""
+        journal = self.ledger.journal
+        found = {}
+        for number in journal.unlinked():
+            if number in self._issue_of:
+                found[number] = self._issue_of[number]
+                continue
+            if not self.cfg.block_uncertain_turns:
+                continue
+            try:
+                raw = self.gh.find_pr(number)
+                pr = self._devloop_pr(dict(raw, headRefOid=raw.get('headRefOid') or '')) \
+                    if raw is not None else None
+            except GitHubError as exc:
+                self.log(f'  legacy turn on #{number} not linked to its work: {exc}')
+                continue
+            found[number] = pr.issue if pr is not None else number
+        if found:
+            for turn in journal.link(found, self.cfg.repo):
+                self.log(f'  legacy turn {turn} linked to the work of its issue')
 
     def _close_turn(self, entry, outcome, error=None):
         """Close a turn's record with what the CLI attested and the last command its output
@@ -1695,8 +1727,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         traced number becomes ``uncertain``, logged with its id: it is never run again
         automatically, and with ``block_uncertain_turns`` it blocks the work until a trusted
         user reconciles it (``_reconcile_turns``). The number stays traced until its records
-        on GitHub are checked. The legacy turns on a PR the dispatcher recognises are linked to
-        the issue of its work (``TurnJournal.link``)."""
+        on GitHub are checked. The legacy turns are linked to the issue of their work
+        (``_link_legacy``)."""
         if self.ledger is None:
             return
         lb = self.cfg.labels
@@ -1708,8 +1740,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         journal = self.ledger.journal
         if not dry_run:
             try:
-                for turn in journal.link(dict(self._issue_of), self.cfg.repo):
-                    self.log(f'  legacy turn {turn} linked to the work of its issue')
+                self._link_legacy()
             except GitHubError as exc:
                 self.log(f'  legacy turns not linked to their issue: {exc}')
         for number in traced:

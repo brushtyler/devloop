@@ -21,8 +21,10 @@ before it (``previous``) and its own (``sha256``), like the journal of the local
 - ``migrated``: the counts of ``ledger-open-turns.json``, the trace this journal replaces,
   imported once as legacy turns explicitly ``uncertain`` (``legacy-<number>-<hex>``), with
   number and count and no outcome made up;
-- ``linked``: the issue of the work of a legacy turn on a PR, as the dispatcher recognises it
-  from its markers, kept so that the turn blocks the whole work also after a restart.
+- ``linked``: the issue of the work of a legacy turn, as the dispatcher recognises it from the
+  branch and marker of its PR, open or closed (the number itself for an issue), kept so that
+  the turn blocks the whole work also after a restart. Until it is linked, a legacy turn may
+  be on a PR of any work, and with the block it blocks every new turn.
 
 Reads verify the whole chain. An incomplete or unreadable last line (a write cut short) is set
 aside in ``turn-journal-tail-<sha256>.bin`` and removed, and the valid records before it stay; a
@@ -99,8 +101,12 @@ def reconcile_command(body):
 def describe_turn(turn):
     """A short Italian description of a turn of ``TurnJournal.turns``."""
     if turn.get('legacy') is not None:
-        return (f'`{turn["turn"]}`: turni aperti importati da `{LEGACY}` su #{turn["number"]} '
+        text = (f'`{turn["turn"]}`: turni aperti importati da `{LEGACY}` su #{turn["number"]} '
                 f'({turn["legacy"]}), senza esito noto')
+        if turn.get('issue') is None:
+            text += (': non si è ancora potuto leggere su GitHub a quale lavoro appartiene, e '
+                     'finché non lo si legge blocca ogni nuovo turno')
+        return text
     text = (f'`{turn["turn"]}`: turno `{turn["kind"]}` di `{turn["agent"]}` su '
             f'#{turn["number"]}, iniziato {turn["at"]}')
     if turn.get('outcome') is None:
@@ -369,7 +375,9 @@ class TurnJournal:
 
         A legacy turn has only its number: it belongs to the work of ``issue`` when it is on
         the issue or on ``number``, or on a PR of that issue as its ``linked`` event or
-        ``issue_of`` (``{PR: issue}``, the dispatcher's map) say."""
+        ``issue_of`` (``{PR: issue}``, the dispatcher's map) say. One whose work neither says
+        (``unlinked``) may be on a PR of any work: it blocks every new turn until it is
+        linked."""
         issue_of = issue_of or {}
         with self._lock:
             self._load()
@@ -384,7 +392,7 @@ class TurnJournal:
                 continue
             if t.get('legacy') is not None:
                 work = t['issue'] if t['issue'] is not None else issue_of.get(t['number'])
-                if t['number'] in (issue, number) or work == issue:
+                if t['number'] in (issue, number) or work in (issue, None):
                     found.append(t)
             elif t.get('repo') == repo and (t.get('issue') == issue or t['number'] == number):
                 found.append(t)
@@ -442,18 +450,27 @@ class TurnJournal:
                 self._append('outcome', {'turn': t['turn'], 'outcome': UNCERTAIN})
             return flagged
 
+    def unlinked(self):
+        """The numbers of the legacy turns not reconciled whose work is not recorded yet."""
+        with self._lock:
+            self._load()
+            return list(dict.fromkeys(
+                t['number'] for t in self._state()[0].values()
+                if t.get('legacy') is not None and t['reconciled'] is None
+                and t['issue'] is None))
+
     def link(self, issue_of, repo):
-        """Record the work of each legacy turn not reconciled on a PR of ``issue_of``
-        (``{PR: issue}``, as the dispatcher recognises them from their markers), so that it
-        blocks the whole work also after a restart, once the PR is closed. Returns the turns
-        linked."""
+        """Record the work of each legacy turn not reconciled whose number is in ``issue_of``
+        (``{number: issue}``: the issue of a PR as the dispatcher recognises it from its branch
+        and marker, or the number itself for an issue or a PR of no work), so that it blocks
+        the whole work also after a restart, once the PR is closed. Returns the turns linked."""
         with self._lock:
             self._load()
             linked = []
             for t in self._state()[0].values():
                 work = issue_of.get(t['number'])
                 if (t.get('legacy') is None or t['reconciled'] is not None
-                        or t['issue'] is not None or work is None or work == t['number']):
+                        or t['issue'] is not None or work is None):
                     continue
                 self._append('linked', {'turn': t['turn'], 'number': t['number'],
                                         'issue': work, 'repo': repo})

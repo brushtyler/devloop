@@ -816,7 +816,8 @@ A turn left without an outcome, because devloop stopped while it ran, becomes `u
 and its PRs, with an escalation of class `uncertain_turn` that lists the turns; so does a turn
 whose outcome could not be written, from the next turn of the same step (a retry, a fallback)
 onwards, and a legacy turn imported from `ledger-open-turns.json` on the issue or on one of its
-PRs. A conclave call refused this way ends that conclave with the escalation. Only a trusted
+PRs, open or closed (read on GitHub to find its issue; until it can be read, it blocks every
+work). A conclave call refused this way ends that conclave with the escalation. Only a trusted
 user reconciles them, with a comment whose first line is
 `/devloop reconcile <turn id> <returned|failed|not_dispatched>` and whose next lines give the
 reason, mandatory. The outcome is recorded once, also with the block off; then the step resumes

@@ -16,7 +16,7 @@ from devloop.journal import (JOURNAL, LEGACY, SNAPSHOT, JournalError, TurnJourna
                              reconcile_command)
 from devloop.ledger import Ledger
 from devloop.planning import Action, Snapshot
-from test_devloop import CFG, REV, implemented, pr, raw_review
+from test_devloop import CFG, META, REV, implemented, pr, raw_review
 from test_devloop_ledger import LedgerGH, ReportingRunner, TreeWS
 
 EMPTY = Snapshot(prs=[], ready_issues=[], working_issues=[])
@@ -205,11 +205,18 @@ class MigrationTests(unittest.TestCase):
             (Path(tmp) / LEGACY).write_text(json.dumps({'100': 1, '8': 1}))
             j = TurnJournal(tmp)
             (turn,) = [t for t, v in j.turns().items() if v['number'] == 100]
-            # Before the link, only the dispatcher's map ties #100 to issue #7.
-            self.assertEqual(j.blocking(CFG.repo, 7, 7), [])
-            self.assertEqual([t['turn'] for t in j.blocking(CFG.repo, 7, 7, {100: 7})], [turn])
-            self.assertEqual(j.link({100: 7, 8: 8}, CFG.repo), [turn])
+            (issue8,) = [t for t, v in j.turns().items() if v['number'] == 8]
+            # Before the link, #100 may be a PR of any work: it blocks every one; with the
+            # dispatcher's map it blocks the work of issue #7 alone.
+            self.assertEqual(sorted(j.unlinked()), [8, 100])
+            self.assertIn(turn, [t['turn'] for t in j.blocking(CFG.repo, 9, 9)])
+            self.assertEqual(j.blocking(CFG.repo, 9, 9, {100: 7, 8: 8}), [])
+            self.assertEqual([t['turn'] for t in j.blocking(CFG.repo, 7, 7, {100: 7, 8: 8})],
+                             [turn])
+            # An issue is linked to itself.
+            self.assertEqual(sorted(j.link({100: 7, 8: 8}, CFG.repo)), sorted([turn, issue8]))
             self.assertEqual(j.link({100: 7}, CFG.repo), [])  # once
+            self.assertEqual(j.unlinked(), [])
             again = TurnJournal(tmp)
             self.assertEqual((again.turns()[turn]['issue'], again.turns()[turn]['repo']),
                              (7, CFG.repo))
@@ -400,6 +407,59 @@ class DispatcherJournalTests(unittest.TestCase):
             d._do_implement(7)
         self.assertRegex(caught.exception.turns[0]['turn'], r'^legacy-7-[0-9a-f]{8}$')
         self.assertEqual(self.runner.calls, [])
+        # #7 is an issue (GitHub says so): linked to itself, it blocks no other work.
+        self.assertEqual(self.journal().unlinked(), [])
+        d._check_turns(8)
+
+    @staticmethod
+    def closed_pr(number=100, issue=7, author='brushtyler'):
+        """A PR closed while the dispatcher was stopped, as ``find_pr`` reads it."""
+        return {'number': number, 'title': 't', 'state': 'CLOSED',
+                'body': markdown.publishable('b', 'pr', dict(META, issue=issue)),
+                'labels': [], 'headRefName': f'agent/issue-{issue}', 'headRefOid': 'a' * 40,
+                'author': {'login': author}, 'isCrossRepository': False}
+
+    def test_with_the_block_a_legacy_turn_on_a_closed_pr_blocks_its_whole_work(self):
+        # PR #100 of issue #7 closed before the first start: no open PR, no map to read.
+        (self.state / LEGACY).write_text(json.dumps({'100': 1}))
+        d = self.make(implemented(), cfg=BLOCKING)
+        self.gh.any_prs = {100: self.closed_pr()}
+        with mock.patch.object(self.gh, 'find_pr', side_effect=GitHubError('HTTP 502')):
+            d._flag_incomplete(EMPTY, dry_run=False)
+            # Its work not read yet: it blocks every new turn, of any work.
+            with self.assertRaises(journal_mod.TurnBlocked) as caught:
+                d._check_turns(8)
+        self.assertIn('blocca ogni nuovo turno', str(caught.exception))
+        self.assertEqual(self.journal().unlinked(), [100])
+        # The next read links it to issue #7, durably, before any turn is admitted.
+        with self.assertRaises(journal_mod.TurnBlocked) as caught:
+            d._do_implement(7)
+        self.assertRegex(caught.exception.turns[0]['turn'], r'^legacy-100-[0-9a-f]{8}$')
+        (legacy,) = self.journal().turns().values()
+        self.assertEqual((legacy['issue'], legacy['repo']), (7, CFG.repo))
+        # A new process, GitHub unreachable: the journal ties #100 to the work of #7.
+        restarted = Dispatcher(BLOCKING, self.gh, self.ws, self.runner, log=self.logs.append,
+                               ledger=Ledger(self.gh, state_dir=self.state))
+        with mock.patch.object(self.gh, 'find_pr', side_effect=GitHubError('HTTP 502')):
+            with self.assertRaises(journal_mod.TurnBlocked):
+                restarted._do_implement(7)
+            restarted._issue_of[101] = 7  # another PR of the same work
+            with self.assertRaises(journal_mod.TurnBlocked):
+                restarted._check_turns(101)
+            restarted._check_turns(8)  # another work is not blocked
+        self.assertEqual(self.runner.calls, [])
+
+    def test_with_the_block_a_legacy_turn_on_a_pr_of_no_work_blocks_its_number(self):
+        # A PR devloop does not recognise (another author): its work is its number alone.
+        (self.state / LEGACY).write_text(json.dumps({'100': 1}))
+        d = self.make(implemented(), cfg=BLOCKING)
+        self.gh.any_prs = {100: self.closed_pr(author='stranger')}
+        d._do_implement(7)
+        self.assertEqual(len(self.runner.calls), 1)
+        (legacy,) = [t for t in self.journal().turns().values() if t.get('legacy')]
+        self.assertEqual(legacy['issue'], 100)
+        with self.assertRaises(journal_mod.TurnBlocked):
+            d._check_turns(100)
 
     def test_with_the_block_a_legacy_turn_on_a_pr_blocks_its_whole_work(self):
         (self.state / LEGACY).write_text(json.dumps({'100': 1}))
