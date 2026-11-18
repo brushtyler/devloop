@@ -908,6 +908,7 @@ python3 -m devloop tick --dry-run   # print the ready issues in start order and 
 python3 -m devloop tick             # run one round
 python3 -m devloop run --idle-timeout 900  # tick continuously (see Continuous loop)
 python3 -m devloop cleanup          # remove worktrees left by failed steps
+python3 -m devloop gc               # clean up state_dir now: old pinned copies, worktrees of closed issues and PRs, old logs (see Cleanup of the state directory)
 python3 -m devloop follow issue-52  # follow live the implementer of issue #52 (pr-<N>: reviewer or fixer)
 python3 -m devloop watch --timeout 3600  # wait for the next change on GitHub, for the supervising agent
 python3 -m devloop pin origin/main  # pin a commit of origin, after its smoke test (see Run from a pinned installation)
@@ -925,7 +926,56 @@ branch never fetched leaves its merge mode not computable), and the objects that
 merge-tree` writes go to a temporary directory. In daily use run it from the pinned copy, through
 `scripts/devloop-pinned` ([Run from a pinned installation](#run-from-a-pinned-installation)).
 `--local-config <file>`, before the command, applies a local overlay to the configuration
-([Local config as an overlay](#local-config-as-an-overlay)).
+([Local config as an overlay](#local-config-as-an-overlay)). `state_dir` does not grow without
+limits: see [Cleanup of the state directory](#cleanup-of-the-state-directory).
+
+### Cleanup of the state directory
+
+Every pin adds a copy `pinned-<sha12>`, every turn adds its prompt and its log to `logs/`, and
+the worktrees of finished work stay in `worktrees/`. devloop cleans `state_dir` up (#380) as
+`[gc]` sets ([Configuration](reference.md#configuration)). The cleanup runs at a tick, before
+planning, when no action is running (in the [continuous mode](#continuous-mode) only at a tick
+with none running), at most every `interval_minutes` (default 60; 0: at every such tick; the
+time of the last one is in `state_dir/gc-state.json`), and at once with `devloop gc`, which
+holds the dispatcher lock like a tick. `tick --dry-run` never cleans up. Each removal is a line
+of the log that starts with `gc:`; a cleanup that fails is logged and never stops the tick.
+
+- **Pinned copies** (`pins`, on by default). After a successful pin, by hand or
+  [after a merge](#pin-after-a-merge), and at each cleanup, `current` and the `keep_pins`
+  (default 5) other copies pinned most recently stay; the other `pinned-<sha12>` are removed.
+  The order is the time of the last successful pin of each copy, a reused copy (a rollback)
+  included, recorded in `state_dir/pin-times.json`; a copy pinned before that record existed
+  counts with the time its directory was last modified. A copy is never removed while a process
+  uses it: the copy the dispatcher runs from, or one named by the `PYTHONPATH`, the command line
+  or the working directory of a process of the same user (read in `/proc`). Where `/proc` cannot
+  be read, or a live process of the same user cannot be inspected (one that is not dumpable, as
+  `ssh-agent`, hides its environment and its working directory), no copy is removed: it cannot
+  be told which copies are unused. Such a copy stays, and a later cleanup tries again. The rejected
+  copies (`rejected-<sha12>`) are never touched. A pin that runs meanwhile leaves the copies to a
+  later cleanup.
+- **Worktrees** (`worktrees`, on by default). The worktrees of a closed issue (`issue-<n>` and
+  its `issue-<n>-…` copies) and of a closed or merged PR (`pr-<n>`, `pr-<n>-review`, …) are
+  removed, their state read fresh from GitHub. Never one of an issue or PR with a turn still
+  open in the ledger (`state_dir/ledger-open-turns.json`), nor one whose state cannot be read;
+  when the ledger cannot be read, no worktree is removed. A worktree with another name is left
+  to `devloop cleanup`.
+- **Logs** (`logs`, off by default: turn it on in the
+  [local overlay](#local-config-as-an-overlay)). The files directly in `state_dir/logs` not
+  modified for `log_days` days (default 14) are removed, except every file of an open issue or
+  PR in `agent:needs-operator` or `agent:needs-supervisor`: its evidence (`timeout-…` and
+  `conclave-…` files) and the logs of its turns, which the escalation cites. Nor every file of
+  an issue or PR with a turn still open in the ledger, nor an evidence whose name has no issue
+  or PR. The state and the labels of each issue or PR are read fresh, one at a time, not from a
+  list of the escalations that a limit of GitHub could cut short. When an issue or PR cannot be
+  read its files stay, and when the ledger cannot be read every file of an issue or PR stays.
+
+```toml
+# .ssdlc/devloop/config.local.toml
+[gc]
+logs = true
+log_days = 30
+keep_pins = 3
+```
 
 ### From `agent:needs-human` to `agent:needs-operator`
 
@@ -1558,11 +1608,14 @@ skipped (--no-smoke)`. The smoke test needs the GitHub access of the dispatcher;
 commit from before the smoke test takes the dispatcher lock in `tick --dry-run`, so its smoke
 test fails while `run` is active. A copy that already exists for the same commit is reused,
 without a smoke test, but checked again against the current overlay: if a file it needs is
-missing, the pin fails. Earlier copies stay, for the rollback. `pin` uses the
+missing, the pin fails. Earlier copies stay for the rollback, up to `[gc] keep_pins` (default
+5) besides `current`: after a successful pin the older ones that no process uses are removed
+([Cleanup of the state directory](#cleanup-of-the-state-directory)). `pin` uses the
 overlay given with `--local-config`, or `.ssdlc/devloop/config.local.toml` when it exists. A
 `run` already started keeps the code it started with: restart it after a pin by hand (a pin
 after a merge restarts it by itself, see below). `devloop cleanup` removes only the agent
-worktrees under `state_dir/worktrees`, never a pinned copy.
+worktrees under `state_dir/worktrees`, never a pinned copy; `devloop gc` removes the pinned
+copies beyond `[gc] keep_pins`.
 
 #### Launcher
 
@@ -1644,7 +1697,9 @@ configuration at each run, as before.
 
 Pin the earlier commit again: its copy is reused, checked against the current overlay, and
 `current` points back at it, with no fetch needed. The pinned copies are the directories
-`.ssdlc/devloop/pinned-<sha12>`.
+`.ssdlc/devloop/pinned-<sha12>`: `current` and the `[gc] keep_pins` (default 5) pinned most
+recently ([Cleanup of the state directory](#cleanup-of-the-state-directory)). A commit whose
+copy was removed is pinned again from `origin`, with a new copy and its smoke test.
 
 ```bash
 sudo -u devloop -H ls /home/devloop/ssdlc/.ssdlc/devloop/                  # the pinned-<sha12> copies

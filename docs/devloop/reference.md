@@ -47,6 +47,13 @@ is not an issue number (an integer of at least 1), or an unknown key, stops devl
 [daily summary](guide.md#daily-summary): the dedicated issue it is published on and the minutes
 between two automatic publications of `devloop run`; an `issue` that is not an issue number, an
 `interval` that is not a whole number of at least 1, or an unknown key, stops devloop at startup.
+`[gc]` sets the [cleanup of the state directory](guide.md#cleanup-of-the-state-directory)
+(#380): `pins` (default `true`) with `keep_pins` (default 5, the pinned copies kept besides
+`current`), `worktrees` (default `true`), `logs` (default `false`) with `log_days` (default 14),
+and `interval_minutes` (default 60, the minimum time between two cleanups of the ticks; 0: at
+every tick with nothing running); a `pins`, `worktrees` or `logs` that is not a boolean, a
+`keep_pins` or `interval_minutes` that is not a whole number of at least 0, a `log_days` that is
+not a whole number of at least 1, or an unknown key, stops devloop at startup.
 `[docs] map` sets the
 [documentation map](#documentation-map). Operator overrides go into the
 [local overlay](guide.md#local-config-as-an-overlay), not into this file. A running

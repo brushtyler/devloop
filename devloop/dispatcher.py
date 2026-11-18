@@ -592,8 +592,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
     def __init__(self, cfg, gh: Backend, ws, runner, log=print, identities=None, activity=None,
                  ledger=None, merger=None, pinner=None, memory=None, clock=time.time,
-                 advisory_results=None, advisory_failures=None):
+                 advisory_results=None, advisory_failures=None, housekeeping=None):
         self.cfg = cfg
+        # The cleanup of state_dir (#380, ``housekeeping.Housekeeping``), or None: run at a
+        # tick with nothing running (``_housekeeping``).
+        self.housekeeping = housekeeping
         # Wall-clock seconds, and since when each head waits for its CI (#263): the time of
         # the dispatcher's own push, else its commit date, read once.
         self.clock = clock
@@ -1227,6 +1230,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         if self.workers is not None and not dry_run:
             return self._tick_continuous()
         self._auto_pin(dry_run)
+        if not dry_run:
+            self._housekeeping()
         self._transition_labels(dry_run)
         snap = self.snapshot()
         self._flag_incomplete(snap, dry_run)
@@ -1273,6 +1278,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         self._auto_pin(False, defer=bool(running))
         if not running:
             self._restart_if_pending()
+            self._housekeeping()
         elif self._restart is not None:
             if self._restart_wait_over(running):
                 return []
@@ -1347,6 +1353,16 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             return
         self.log(f'nothing runs: restart from {Path(copy).name}')
         raise Repinned(copy)
+
+    def _housekeeping(self):
+        """The cleanup of ``state_dir`` (#380), at a tick with nothing running, before planning:
+        a failure is logged and never fails the tick."""
+        if self.housekeeping is None:
+            return
+        try:
+            self.housekeeping.tick(self.cfg)
+        except Exception as exc:  # the cleanup never stops the tick
+            self.log(f'gc: the cleanup failed: {type(exc).__name__}: {exc}')
 
     def _run_started(self, action, prs):
         """Run an action of the continuous mode in its worker thread, as a lane of one, and log

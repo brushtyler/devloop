@@ -144,7 +144,10 @@ the base changed the same lines, the worktree stays as created, and the prompt c
 as text (at most 100,000 characters) with its files. Either way the prompt says that the
 previous turn timed out, that its changes must be examined before going on, and to run the
 targeted tests before any long suite. The patch is taken once: the file is renamed
-`timeout-<label>.diff.used-<time>` and stays as evidence. A turn that fails otherwise, that was
+`timeout-<label>.diff.used-<time>` and stays as evidence. The retention of the logs (`[gc] logs`,
+off by default) never removes it while its issue or PR is in `agent:needs-operator` or
+`agent:needs-supervisor` ([Cleanup of the state directory](guide.md#cleanup-of-the-state-directory)).
+A turn that fails otherwise, that was
 stopped as stalled, or a sync (whose worktree holds a merge in progress) keeps nothing, and a
 timeout without uncommitted work escalates as before.
 
@@ -810,7 +813,9 @@ either. The next tick checks every issue or PR the journal still holds, for exam
 whose PR is already open or a PR escalated to `agent:needs-operator`, and then forgets it. In
 case that trace is lost, it also looks at open devloop PRs not in
 `agent:needs-operator` (or in it only for an [operator merge](guide.md#ready-prs-whose-merge-is-the-operators)),
-issues in `agent:working` and issues waiting for a readiness check.
+issues in `agent:working` and issues waiting for a readiness check. While an issue or PR is
+noted there, the [cleanup of the state directory](guide.md#cleanup-of-the-state-directory)
+removes neither its worktrees nor its files in the logs.
 
 **Tests and commits.** A passing test is bound to the commit created right after it only if the
 tree is the same at three points: before the test, after the test and in the commit. The tree is

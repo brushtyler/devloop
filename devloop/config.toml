@@ -168,6 +168,21 @@ operator_only_paths = ["docs/adr/", "AGENTS.md", "CLAUDE.md"]
 auto = false
 restart_max_wait_minutes = 30
 
+# The cleanup of state_dir (issue #380, see docs/devloop/guide.md). It runs at a tick with
+# nothing running, at most every interval_minutes (0: at every such tick), and with `devloop gc`;
+# each removal goes to the log. pins: after a successful pin, keep `current` and the keep_pins
+# copies pinned most recently, and remove the other pinned-* copies that no process uses.
+# worktrees: remove the worktrees of closed issues and of closed or merged PRs. logs (off by
+# default, turned on in the local overlay): remove the files of logs/ not modified for log_days
+# days, never the evidence of an open escalation nor the files of a turn still open in the ledger.
+[gc]
+pins = true
+keep_pins = 5
+worktrees = true
+logs = false
+log_days = 14
+interval_minutes = 60
+
 # `devloop run` (issue #177): after three consecutive failed ticks the loop stops and the
 # dispatcher posts an alert on this issue; without it the alert goes only to the local log, and
 # the loop stops all the same. Which issue gets it is the operator's choice (local overlay).
