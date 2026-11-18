@@ -343,6 +343,11 @@ class Config:
     # its story, and the comment of its ``request`` record carries the dispatcher's ``story``
     # marker. Off by default (ADR 0004, D8): devloop behaves as before.
     story_identity: bool = False
+    # The outbox of the publications (#385, ``outbox.Outbox``): every comment, edit, native
+    # review and pull request is in the journal of the turns before it is sent, and an uncertain
+    # one is reconciled before any new POST. Off by default (ADR 0004, D8): devloop publishes as
+    # before.
+    publication_outbox: bool = False
     # The attempt identity (#384, ADR 0004, P2-3b): one active attempt per phase, recorded in the
     # journal, in the PR marker and in the turn records. It needs ``story_identity``. Off by
     # default (ADR 0004, D8): devloop behaves as before.
@@ -1045,6 +1050,8 @@ def parse_config(data, root=INSTALL_ROOT):
                        if 'block_uncertain_turns' in data else Config.block_uncertain_turns)
     story_identity = (_require(data, 'story_identity', bool, 'config')
                       if 'story_identity' in data else Config.story_identity)
+    outbox = (_require(data, 'publication_outbox', bool, 'config')
+              if 'publication_outbox' in data else Config.publication_outbox)
     attempt_identity = (_require(data, 'attempt_identity', bool, 'config')
                         if 'attempt_identity' in data else Config.attempt_identity)
     if attempt_identity and not story_identity:
@@ -1076,7 +1083,7 @@ def parse_config(data, root=INSTALL_ROOT):
         apps=apps, app_key_dir=key_dir, agent_stall_action=stall_action,
         local_tests=local_tests, ci_rerun_unrelated=ci_rerun,
         block_uncertain_turns=block_uncertain, story_identity=story_identity,
-        attempt_identity=attempt_identity, budget=budget,
+        publication_outbox=outbox, attempt_identity=attempt_identity, budget=budget,
         merge=parse_merge(data.get('merge', {}), supervisor), supervisor=supervisor,
         pin=parse_pin(data.get('pin', {}), sensitive_lists(data)),
         run=parse_run(data.get('run', {})),
@@ -1106,7 +1113,7 @@ _AGENT_KEYS = dict.fromkeys(('kind', 'display_name', 'model', 'model_label', 'ef
 OVERLAY_KEYS = {
     **dict.fromkeys(('repo', 'base_branch', 'branch_prefix', 'state_dir', 'test_cmd',
                      'local_tests', 'ci_rerun_unrelated', 'block_uncertain_turns', 'story_identity',
-                     'attempt_identity',
+                     'publication_outbox', 'attempt_identity',
                      'language', 'trusted_users', 'preflight',
                      'conclave', 'max_open_prs',
                      'max_parked_prs', 'max_review_rounds', 'max_actions_per_tick',

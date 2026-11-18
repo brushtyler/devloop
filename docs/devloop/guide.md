@@ -871,6 +871,25 @@ in the journal: a later change of `[budget]` applies to new stories only. agy an
 only `unmetered_quota`, with the turn caps. The readiness check stays outside the envelope. With it
 off, devloop books nothing and behaves as before.
 
+With `publication_outbox = true` (#385, off by default), every comment, native review and pull
+request devloop writes is saved in the same journal before it is sent, through the
+[publication outbox](protocol.md#publication-outbox). A write whose outcome is uncertain (a
+timeout, a 5xx answer) is looked for on GitHub before anything else is sent: found, it is not
+sent again; not found once it can no longer take effect (30 seconds after the attempt, waited
+for in the step), it is sent once more. After a restart, the first tick finishes what was left
+half published, without duplicates: a write cut short is sent again only when it is still absent
+30 seconds after the restart (counted from when the new dispatcher first read the journal, never
+from when the write was recorded). The `gh` of each write holds the dispatcher lock while it
+runs: if the dispatcher is killed while one of them runs, the next dispatcher does not start
+(`another dispatcher is running (lock held)`) until that `gh` has ended, so that it never sends
+again a write the `gh` may still publish. A `gh` left stopped keeps devloop from starting until
+it is ended (`pgrep -a gh` lists it).
+A native review whose outcome stays uncertain is not retried by the review step: the outbox
+settles it. A line `publication <id> ... not settled` in
+the log is a write that could not be checked on GitHub yet, or not conclusively: the next tick
+tries again, and nothing new is sent on that issue or PR until it is settled. If the journal
+cannot take an outcome, nothing is sent until it does.
+
 ### Advisory review for the operator
 
 With `[review_policy] advisory_reviewer` set (#369; empty, and so off, by default: the local
@@ -965,6 +984,7 @@ prevents two dispatchers from running at once live under `state_dir` (default `.
 in the main checkout. `tick --dry-run` writes nothing and does not take that lock, so the
 [smoke test of a pin](#pin) runs it while `run` is active. Like `status`, it reads the
 [turn journal](protocol.md#turn-journal) without writing it: the running dispatcher alone does.
+For the same reason they never use the [publication outbox](protocol.md#publication-outbox).
 Not even its git commands write to the repository: it does not fetch, so it plans from the remote branches as last fetched (a
 branch never fetched leaves its merge mode not computable), and the objects that `git
 merge-tree` writes go to a temporary directory. In daily use run it from the pinned copy, through
@@ -1232,7 +1252,8 @@ The log keeps the full message of each failed tick.
 **Lock.** The loop holds the dispatcher lock (`state_dir/dispatcher.lock`) for as long as it
 runs, waits included: a manual `devloop tick` (or `cleanup`) exits with `another dispatcher is
 running (lock held)`, and a loop does not start while a manual tick runs. To run a tick by hand,
-stop the loop first. A [pin after a merge](#pin-after-a-merge) restarts the loop from the new
+stop the loop first. The `gh` of each GitHub write holds the lock too while it runs (#385): one
+that outlived a dispatcher killed meanwhile keeps the next one from starting until it ends. A [pin after a merge](#pin-after-a-merge) restarts the loop from the new
 copy with the same arguments and the lock still held, unless a stop was requested meanwhile.
 
 **Activation is the operator's.** The loop runs unsupervised and spends the agents' quotas, so
