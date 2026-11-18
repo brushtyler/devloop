@@ -4,7 +4,7 @@ SSDLC is one product, in one repository, with two components that today work sid
 will converge ([ADR 0001](adr/0001-prodotto-unico-fasi-su-tracker.md)). The first sections of
 this page describe the product: its components, how the local engine and the devloop dispatcher
 relate, the ports through which devloop reaches GitHub, the boundary that keeps devloop
-independent of the engine, and the `core` package planned for the code they will share. The
+independent of the engine, and the `core` package for the code they share. The
 sections from [Phases](#phases) on describe the local engine: phases, risk tiers, isolation, run
 layout, controller contract and integrity model.
 
@@ -17,7 +17,8 @@ layout, controller contract and integrity model.
 
 Both components share the test suite in `tests/` (run by `scripts/run-tests.py` and by the CI,
 see the [development guide](development.md)) and the documentation in `docs/`, with the
-decisions in `docs/adr/`.
+decisions in `docs/adr/`. The `core` package (`core/`) holds pure validators and calculations
+written for both; neither uses it yet (see [Future `core` package](#future-core-package)).
 
 devloop's modules, by part:
 
@@ -37,7 +38,7 @@ The operator's view of devloop is in the [guide](devloop/guide.md), its configur
 Today the two components do not call each other:
 
 - **No run-time link.** devloop does not run the engine's pipeline, and the engine does not run
-  devloop. devloop imports only the standard library and itself (see
+  devloop. devloop may import only the standard library, itself and `core` (see
   [The devloop boundary](#the-devloop-boundary)); the engine does not import `devloop`.
 - **Each has its own pinned installation.** The engine's controller is bound to each run by the
   [controller contract](#controller-contract), and when SSDLC develops itself a pinned
@@ -100,13 +101,18 @@ and every fake expose each port method with the same signature.
 ## The devloop boundary
 
 `tests/test_devloop_boundary.py` reads every `.py` file under `devloop/` and fails if any of
-them imports a module other than the standard library (`sys.stdlib_module_names`) or `devloop`
-itself. Relative imports inside the package are allowed.
+them imports a module other than the standard library (`sys.stdlib_module_names`), `devloop`
+itself or the [`core` package](#future-core-package). Relative imports inside the package are
+allowed. The same test checks `core`: its files may import only `math`, `re` and `core` itself
+(no `ssdlc_*`, no `orchestrator`, no `devloop`, no third-party package), may not call `open`,
+`exec`, `eval` or `__import__` and have no `global` statements, and importing `core` in a fresh
+interpreter loads no engine or devloop module.
 
 - **What it keeps.** devloop depends on no `ssdlc_*` module, on `orchestrator.py` and on no
-  third-party package. Its pinned copy needs no engine code, and a change to an engine module
-  does not change the code that dispatches, reviews and merges. The engine is the candidate under
-  test of the replay gate; the boundary keeps it out of the code that develops it.
+  third-party package, neither directly nor through `core`. Its pinned copy needs no engine code,
+  and a change to an engine module does not change the code that dispatches, reviews and merges.
+  The engine is the candidate under test of the replay gate; the boundary keeps it out of the
+  code that develops it.
 - **What it does not check.** It reads `import` statements only: it does not see code loaded
   with `importlib` or `__import__`, subprocesses, or files read as data. The commands devloop
   runs in a worktree, such as `test_cmd`, run the repository's code, engine included, outside
@@ -118,15 +124,47 @@ itself. Relative imports inside the package are allowed.
 ## Future `core` package
 
 ADR 0001 lets devloop reuse code of the engine **only** through a declared `core` package,
-added to the allowlist of `tests/test_devloop_boundary.py`. The package does not exist yet; it
-is expected with the phases on the tracker (step 3). Its conditions:
+added to the allowlist of `tests/test_devloop_boundary.py`. Its conditions:
 
 - **Pure validators only**, such as the requirements catalogue and plan validation. No stateful
   loop: not `DesignSession`, not `orchestrator.py`.
 - **Prompts and schemas reused as data**, copied into the pinned installation.
 - **Never a direct import of `ssdlc_*` modules.**
 
-Until `core` exists, the allowlist is the standard library and `devloop`.
+The package exists since step 2 of ADR 0001
+([ADR 0004](adr/0004-passo-2-budget-stato-durevole.md#34-riuso-del-pacchetto-core-e-confine-di-devloop),
+P2-1), with the budget validators. It is written **next to** the engine, not extracted from it,
+and **neither the engine nor devloop uses it yet**: devloop will use it for the budget envelope
+(P2-5), the engine only when it converges (step 6). Its modules:
+
+| Module | What it holds | Engine counterpart |
+|---|---|---|
+| `core/schema.py` | A small JSON Schema validator for the schemas read as data. It knows only the keywords it lists and refuses a schema with any other one, instead of ignoring a constraint it cannot check | `validate_document` in `ssdlc_tasks.py`, with the `jsonschema` package |
+| `core/budget.py` | Validation of a limits profile (`schemas/recovery-limits.schema.json`, passed in as data) and of the rules for unknown usage per agent (`reserve_per_invocation` or `unmetered_quota`); the charge of each invocation, the dollar caps and the capacity for an imminent call on a given state, with the current time as an argument; reported tokens per agent | `LimitsStore` and `validate_live_usage` in `ssdlc_recovery.py` |
+| `core/telemetry.py` | The `ssdlc.cost-telemetry` record: its validation, its spend, estimate and tokens kept apart, the classification of ledger rows, the USD figures the caps read, route admission | `ssdlc_telemetry.py` |
+
+The rules are the engine's:
+
+- an agent that reports no dollar cost, such as codex or agy, needs a declared rule; without one
+  the call is refused before launch. No reserve in USD is ever derived for it, from tokens or
+  anything else: only the declared rule applies;
+- a value that was not reported is unknown (`None`), never 0;
+- a reserve stays charged and an observed cost can only raise it; an invocation without a
+  confirmed outcome blocks any new one;
+- tokens are never priced, and the tokens of different agents are never added or compared.
+
+`core` does not validate the feedback sections of a profile (`feedback_workflow`,
+`feedback_delegation`), and holds nothing with state: the journal, the lock and the deadline
+and limit extensions stay in the engine, and devloop's own journal will stay in devloop.
+
+`tests/test_core.py` tests the package alone. `tests/test_core_equivalence.py` runs the same
+profiles, states, telemetry records, ledgers and routes through `core` and through the engine,
+including every variant of reference profiles and records with one value deleted or replaced,
+and requires the same answers: acceptance or refusal, refusal category and message, booked rows
+and figures. The engine and its tests are unchanged.
+
+When devloop imports `core`, its pinned copy will have to include it: today `devloop pin`
+extracts `devloop/` and the sensitive-path lists only.
 
 ## Phases
 
