@@ -1,6 +1,6 @@
 # ADR 0005: deleghe al supervisore, implementer generico e pool dei reviewer
 
-- **Stato:** approvato dall'operatore con il merge di PR #373 (2026-11-18), accettando le raccomandazioni della sezione 4. Le decisioni riservate sono state prese il 2026-11-18 (vedi la [sezione 4](#4-decisioni-riservate-alloperatore)); quelle rimaste aperte sono indicate lì. Il resto del documento è il registro della proposta: le alternative e l'analisi restano come scritte prima dell'approvazione.
+- **Stato:** approvato dall'operatore con il merge di PR #373 (2026-11-18), accettando le raccomandazioni della sezione 4. Le decisioni riservate sono state prese il 2026-11-18 (vedi la [sezione 4](#4-decisioni-riservate-alloperatore)); quelle rimaste aperte sono indicate lì. Il resto del documento è il registro della proposta: le alternative e l'analisi restano come scritte prima dell'approvazione. Fanno eccezione le due integrazioni chieste dall'operatore il 2026-11-18 alle 15:20, prima del merge: l'analisi delle cause per ogni estensione di limiti e le chiavi degli agent in configurazione. Sono scritte nelle sezioni 3.1, 3.2, 3.3, 4 e 5.
 - **Fase:** design (#370).
 - **Data:** 2026-11-18.
 - **Base verificata:** il commit 7b336c9 di `main`.
@@ -56,7 +56,7 @@ Il ciclo degli ADR proposto da #367 non è ancora su `main` al commit di base: q
 | Comandi del supervisore | `/devloop retry`, `accept-defaults`, `decide <testo>` ed `escalate <motivo>`, solo in modalità di merge `auto` e solo sulle escalation in `agent:needs-supervisor` | devloop/supervision.py:7-17, :65-66, :120-140 |
 | Comandi su un'escalation all'operatore | Un comando dell'identità del supervisore su un elemento in `agent:needs-operator` riceve solo la risposta "non applicabile" | devloop/dispatch_supervision.py:245-251 |
 | Retry | Al massimo `MAX_RETRIES = 2` per passo e input, contando insieme i retry del supervisore e dell'operatore; poi `retry_limit`, critica | devloop/supervision.py:61; devloop/dispatch_supervision.py:494-517 |
-| Retry sulle PR dello stesso agent | Un'escalation su una PR il cui `implementer` coincide con `roles.supervisor` va all'operatore, **anche se è un `tool_failure`**. È il caso di #357 | devloop/dispatch_supervision.py:106-107 |
+| Retry sulle PR dello stesso agent | Un'escalation su una PR il cui `implementer` coincide con `roles.supervisor` va all'operatore, **anche se è un `tool_failure`**. È il caso di #357. Il confronto è fra **chiavi** di agent, non fra kind | devloop/dispatch_supervision.py:106-107 |
 | Fallimenti tecnici | Un `AgentError` (crash, timeout, stallo, modello non disponibile, permesso negato) è `tool_failure` | devloop/dispatcher.py:1449-1465 |
 | Traccia dei comandi | Ogni comando lascia un record `supervision` firmato dal dispatcher, scritto prima del cambio di label | devloop/dispatch_supervision.py:327-331, :388-395 |
 | Ledger | Record `request`, `turn`, `verification` ed `event` | devloop/ledger.py:1-18 |
@@ -77,6 +77,7 @@ Il ciclo degli ADR proposto da #367 non è ancora su `main` al commit di base: q
 | Attribuzione | Il corpo della PR inizia con l'intestazione dell'agent e del modello che hanno davvero lavorato, fallback compresi | devloop/dispatch_actions.py:177-179 |
 | Identità del supervisore | I comandi, le label e le richieste di fix del supervisore valgono se li scrive l'app dell'agent configurato come `roles.supervisor`: oggi `claude-agent`, la stessa app dell'implementer | devloop/dispatcher.py:679-693 |
 | App | Un'app per agent, più `dispatcher` e `merger`, che non sono agent; ogni attore ha la sua app | devloop/config.py:205-207, :766-780; devloop/config.toml:381-405 |
+| Chiave dell'agent | La chiave `[agents.<chiave>]` sceglie anche l'app: un agent firma con `[apps.<chiave>]` (`[apps.claude]` è `brushtyler-devloop-claude-agent`), e la stessa app non può servire due attori. La chiave compare anche nel marker della PR, nei record `turn` del ledger, nella memoria dei modelli non disponibili e nella ricevuta della policy | devloop/config.toml:388-398; devloop/config.py:771-780, :824; devloop/dispatcher.py:571-579; devloop/dispatch_actions.py:170; devloop/ledger.py:314; devloop/unavailability.py:3-9 |
 | Token per le sessioni | scripts/agent-token.py espone `claude`, `codex` e `agy`; `dispatcher` e `merger` sono riservati | scripts/agent-token.py:12-14, :35-36 |
 | Preflight | Deve essere un agent diverso dall'implementer, controllato una volta sola all'avvio | devloop/config.py:754-759 |
 
@@ -146,13 +147,21 @@ La decisione 5 dell'ADR 0001 si rivede **solo** per le deleghe elencate in quest
 6. **Revoca.** Ogni delega ha una chiave di configurazione dell'operatore, per esempio `[delegations] rounds = false`. Spenta, il comando riceve la risposta "non applicabile" e l'escalation resta all'operatore, come oggi (devloop/dispatch_supervision.py:245-251). Tutte le deleghe nuove sono **spente per default**: attivarle è una decisione dell'operatore (D10).
 7. **Il supervisore non approva mai.** Concede round, budget o capacità, ma il giudizio sul codice resta ai reviewer. Nessuna delega cambia le direttive di merge (docs/adr/0002-ruoli-e-responsabilita.md:54-63).
 8. **Fallisce chiuso.** Se il dispatcher non può verificare una condizione (record illeggibile, finding senza classificazione, escalation di un altro tipo), il comando è rifiutato e l'escalation resta o passa all'operatore.
+9. **Analisi delle cause** (decisione dell'operatore del 2026-11-18). Vale per ogni estensione di limiti: round concessi, tolleranza di budget e capacità.
+   - Il supervisore non concede un'estensione senza un'analisi scritta del perché serve. L'analisi sta nel motivo del comando oppure nel diario #76, e in quel caso il motivo la cita.
+   - L'analisi nomina la causa: finding nuovi o in calo, sync, CI, PR troppo grande, interazione con altre PR.
+   - Se la causa è correggibile, per esempio un difetto di devloop o un'issue troppo larga, il supervisore apre l'issue che la corregge e la cita nell'analisi.
+   - devloop rifiuta un comando di estensione senza motivo. Il contenuto dell'analisi lo verifica il coordinatore (regola 5), che legge le concessioni nel riepilogo di #316.
+10. **Problemi ricorrenti** (decisione dell'operatore del 2026-11-18). Un problema che si ripete su più PR non si risolve con estensioni caso per caso: per esempio, più PR che arrivano al limite dei round per la stessa causa.
+    - Il supervisore lo valuta e propone all'operatore, nella finestra delle decisioni (sezione 3.4), un aumento del limite in configurazione oppure la revisione o la riscrittura delle issue: divisione, perimetro più stretto, criteri più precisi.
+    - Il valore del limite resta dell'operatore. Il supervisore lo propone, ma non lo cambia, e non copre il problema con altre estensioni in attesa della decisione.
 
 #### Round di review
 
 Oggi `round_limit` è critica e porta la PR all'operatore (devloop/dispatcher.py:2103-2108). Proposta:
 
 - quando la PR raggiunge il limite, il dispatcher valuta se la concessione è delegabile. Se lo è, l'escalation ha una nuova classe non critica, per esempio `round_grantable`, e va in `agent:needs-supervisor`. Altrimenti resta `round_limit` e va all'operatore;
-- il supervisore risponde con `/devloop grant-round <motivo>`. Il dispatcher rilegge le condizioni, concede **un** round a quella PR e registra la concessione. Il limite della PR diventa `max_review_rounds` + round esentati + round concessi: è il calcolo di oggi (devloop/dispatch_actions.py:353-356) con un termine in più. `max_review_rounds` non cambia;
+- il supervisore risponde con `/devloop grant-round <motivo>`, dove il motivo riporta o cita l'analisi delle cause (regola 9). Il dispatcher rilegge le condizioni, concede **un** round a quella PR e registra la concessione. Il limite della PR diventa `max_review_rounds` + round esentati + round concessi: è il calcolo di oggi (devloop/dispatch_actions.py:353-356) con un termine in più. `max_review_rounds` non cambia;
 - il tetto è +2 round per PR, nel codice. Un terzo round torna all'operatore come `round_limit`.
 
 Condizioni di delegabilità, tutte verificate dal dispatcher:
@@ -172,7 +181,7 @@ Condizioni di delegabilità, tutte verificate dal dispatcher:
 
 #### Budget, dopo #365
 
-- Comando `/devloop grant-budget <motivo>` sulla storia in escalation per envelope esaurito.
+- Comando `/devloop grant-budget <motivo>` sulla storia in escalation per envelope esaurito, con l'analisi delle cause nel motivo (regola 9).
 - Estende solo le dimensioni **turni** e **tempo** dell'envelope (ADR 0004, sezione 3.3, docs/adr/0004-passo-2-budget-stato-durevole.md:192-196), di una percentuale fissa del valore iniziale, **una volta per storia**.
 - Mai i dollari, i token o una seconda estensione: restano dell'operatore con il contratto di #162 (docs/adr/0004-passo-2-budget-stato-durevole.md:201).
 - L'estensione segue le regole di consumo dell'ADR 0004: niente rimborsa una prenotazione.
@@ -195,11 +204,11 @@ Oggi il controllo di devloop/dispatch_supervision.py:106-107 manda all'operatore
 - (b) **Tutte le classi non critiche.** Ma una sync con conflitti scrive codice, e un `/devloop decide` è un giudizio.
 - (c) **Nessun cambio.**
 
-**Raccomandazione: (a),** con il limite esistente di 2 retry (devloop/supervision.py:61), che resta condiviso con i retry dell'operatore. Con l'implementer generico (sezione 3.2) il controllo continua a confrontare l'**agent** effettivo dell'implementer, non l'app: la regola serve quando l'agent del supervisore è anche quello dell'implementer.
+**Raccomandazione: (a),** con il limite esistente di 2 retry (devloop/supervision.py:61), che resta condiviso con i retry dell'operatore. Con l'implementer generico (sezione 3.2) il controllo continua a confrontare l'**agent** effettivo dell'implementer, non l'app: la regola serve quando l'agent del supervisore è anche quello dell'implementer. Con le chiavi `*-impl` della sezione 3.2 il confronto passa dalla chiave al kind: `claude-impl` e `claude` sono chiavi diverse dello stesso agent, e il confronto fra chiavi di oggi (devloop/dispatch_supervision.py:106-107) non riconoscerebbe più il caso.
 
 #### Capacità
 
-- Comando `/devloop capacity <chiave> <valore> <durata> <motivo>` per `max_open_prs`, `max_parked_prs` e `max_parallel_actions`, sulla issue del riepilogo (`[report] issue`, devloop/config.toml:164-170), l'unica che il dispatcher già tiene come propria.
+- Comando `/devloop capacity <chiave> <valore> <durata> <motivo>` per `max_open_prs`, `max_parked_prs` e `max_parallel_actions`, sulla issue del riepilogo (`[report] issue`, devloop/config.toml:164-170), l'unica che il dispatcher già tiene come propria. Il motivo riporta l'analisi delle cause (regola 9).
 - Il valore deve stare entro un tetto che l'operatore fissa in configurazione per ciascuna chiave; la durata ha un massimo nel codice, per esempio 24 ore. Alla scadenza torna il valore della configurazione.
 - `max_parallel_actions` oggi richiede un riavvio (devloop/config.py:925-927): la delega vale solo per le chiavi che si applicano a caldo, oppure l'implementazione la estende.
 
@@ -243,16 +252,35 @@ Credenziali e permessi delle due app sono decisioni dell'operatore (D6). La prop
 - app implementer: `contents: write` per il push, `pull_requests: write`, `issues: write`;
 - app del supervisore: `issues: write` e `pull_requests: write` per commenti e label, senza `contents: write`, perché il supervisore non implementa e non mergia (docs/adr/0002-ruoli-e-responsabilita.md:31).
 
+#### Chiavi degli agent e app dichiarata
+
+Decisione dell'operatore del 2026-11-18. Oggi la chiave `[agents.<chiave>]` sceglie anche l'app, e la stessa chiave compare nel marker, nei record dei turni, nella memoria dei modelli non disponibili e nella ricevuta (sezione 1, riga "Chiave dell'agent").
+
+- **Reviewer.** Le chiavi `claude`, `codex` e `agy` restano ai reviewer, simmetriche alle app `claude-agent`, `codex-agent` e `agy-agent`, che continuano a dedurre dalla chiave (`[apps.claude]`, devloop/config.toml:388-398). Il terzo reviewer claude è la chiave `claude` (sezione 3.3): non serve una chiave `claude-review`.
+- **Implementer.** Una chiave per agent con il suffisso `-impl`: `claude-impl`, e in seguito `codex-impl` e `agy-impl`. Il nome dell'agent nella chiave serve: con l'implementer selezionabile (D7) ogni agent implementer è una voce distinta, con modello, argomenti di scrittura e permessi propri. Una chiave unica `implementer` non potrebbe descrivere tre agent diversi.
+- **App dichiarata.** Tutte le chiavi `*-impl` pubblicano con l'unica app `brushtyler-devloop-implementer`. L'agent quindi dichiara la sua app, per esempio `app = "implementer"`, invece di dedurla dalla chiave. Un agent senza `app` resta com'è oggi: la sua app è quella con la sua chiave.
+- **App di ruolo.** `[apps.implementer]` e `[apps.supervisor]` sono app di ruolo, come `dispatcher` e `merger` (devloop/config.py:207), e non agent. L'app del supervisore è legata al ruolo: firma gli atti del supervisore qualunque sia l'agent di `roles.supervisor`, senza che quell'agent la dichiari.
+- **Vincoli della configurazione.** Oggi ogni app appartiene a un solo attore (devloop/config.py:779-780). Il vincolo resta per le tabelle `[apps.*]`, ma più agent possono dichiarare la stessa app di ruolo. Solo un agent `*-impl` può dichiarare `app = "implementer"`. Nessun reviewer del pool può dichiarare un'app di ruolo: la sua review sarebbe firmata come implementer o come supervisore.
+- **Record.** La chiave resta quella registrata nel marker, nei record `turn`, nella memoria dei modelli non disponibili e nella ricevuta: `claude-impl` e `claude` vi compaiono come agent distinti.
+- **Stesso agent del supervisore.** Il controllo sulle PR implementate dall'agent del supervisore confronta il kind, non la chiave (sezione 3.1, [Fallimenti tecnici sulle PR dello stesso agent](#fallimenti-tecnici-sulle-pr-dello-stesso-agent)).
+
+**Migrazione.**
+
+- `roles.implementer = "claude"` diventa `"claude-impl"`, con `app = "implementer"` e il modello di oggi.
+- `claude` passa al pool dei reviewer, con un modello diverso da quello di `claude-impl` (D8), e firma con `claude-agent` come oggi.
+- I fix e le sync di una PR aperta li esegue l'agent registrato nel suo marker (devloop/dispatch_actions.py:681-686). Una PR aperta prima della migrazione ha `implementer = "claude"` nel marker: dopo la migrazione la correggerebbe il reviewer. La migrazione si attiva quindi quando nessuna PR aperta ha `implementer = "claude"`, oppure P5-3 tratta quel valore come `claude-impl`.
+
 #### Selezione dell'agent
 
 Oggi c'è un solo implementer per tutte le issue (devloop/config.py:744-746).
 
 - (a) **Label `impl:<agent>`** sull'issue, messa da un utente fidato o dal supervisore, con le regole delle label di priorità di #178 (devloop/config.toml:68-72): vale solo su issue di autori fidati o delle app di devloop.
-- (b) **Mappa per area in configurazione**, per esempio `[roles.implementers] "area:docs" = "claude"`, `"area:ui" = "agy"`, `"phase:design" = "codex"`, letta dalle label di area dell'issue.
+- (b) **Mappa per area in configurazione**, per esempio `[roles.implementers] "area:docs" = "claude-impl"`, `"area:ui" = "agy-impl"`, `"phase:design" = "codex-impl"`, letta dalle label di area dell'issue.
 - (c) **Entrambe:** la label `impl:<agent>` prevale, poi la mappa, poi il default `roles.implementer`.
 
 **Raccomandazione: (c).** In ogni caso:
 
+- la label nomina l'agent e sceglie la sua chiave `-impl`: `impl:claude` sceglie `claude-impl` (sezione [Chiavi degli agent e app dichiarata](#chiavi-degli-agent-e-app-dichiarata));
 - l'agent si sceglie **alla presa in carico** e si registra nel record `request` del ledger e nel marker della PR. Una label cambiata dopo non cambia l'implementer di una PR aperta;
 - un'issue con due label `impl:` diverse, o con aree che portano ad agent diversi, va all'operatore come `configuration`;
 - l'agent scelto deve essere diverso dal preflight. Oggi il controllo è solo all'avvio (devloop/config.py:754-759) e diventa per issue;
@@ -290,10 +318,10 @@ Al livello 2 tutti i reviewer richiesti devono approvare (docs/adr/0002-ruoli-e-
 
 #### Claude come terzo reviewer
 
-- Un agent nuovo nel pool, per esempio `claude-review`, kind `claude`, con un modello diverso da quello dell'implementer claude: per esempio Sonnet 5.5 contro Opus 5.5. La configurazione lo permette già, perché la chiave è diversa da `claude`.
-- Pool proposto: `["codex", "agy", "claude-review"]`, in quest'ordine: claude entra solo quando uno dei primi due manca o non è indipendente.
-- Firma le review con `claude-agent`, che con le due app di ruolo resta solo ai reviewer. Poiché ogni attore ha la sua app (devloop/config.py:779-780), l'app passa dalla chiave `claude` a quella del reviewer.
-- Prerequisiti: le app implementer e del supervisore (sezione 3.2, D6). Prima, `claude-agent` firma anche il codice e i comandi del supervisore, e una sessione del supervisore potrebbe scrivere un record di review che devloop accetta.
+- Il terzo reviewer è la **chiave `claude`** (decisione dell'operatore del 2026-11-18), kind `claude`, con un modello diverso da quello dell'implementer `claude-impl`: Sonnet 5.5 contro Opus 5.5. Non serve una chiave `claude-review`. Oggi la configurazione rifiuta nel pool la chiave dell'implementer (devloop/config.py:687-688): `claude` entra nel pool dopo la migrazione dell'implementer a `claude-impl` (sezione [Chiavi degli agent e app dichiarata](#chiavi-degli-agent-e-app-dichiarata)).
+- Pool: `["codex", "agy", "claude"]`, in quest'ordine: claude entra solo quando uno dei primi due manca o non è indipendente.
+- Firma le review con `claude-agent`, cioè `[apps.claude]` (devloop/config.toml:388-390), che con le due app di ruolo resta solo ai reviewer. La chiave e l'app restano quelle di oggi: non si sposta niente.
+- Prerequisiti: le app implementer e del supervisore (sezione 3.2, D6) e la migrazione di `roles.implementer` a `claude-impl`. Prima, `claude-agent` firma anche il codice e i comandi del supervisore, e una sessione del supervisore potrebbe scrivere un record di review che devloop accetta.
 - Con le app di ruolo, claude può fare la review anche delle PR implementate da claude, purché rispetti la regola sul fornitore e sul modello di D8.
 - Cambiare il pool cambia l'hash della policy (devloop/config.py:822-827) e annulla le approvazioni delle PR aperte: va attivato quando nessuna PR è vicina al merge.
 
@@ -310,7 +338,7 @@ Oggi un fallback di un reviewer al livello 2 deve solo restare indipendente per 
 **Proposta, scritta nel codice.** È un vincolo **separato dalla regola di quorum** (sezione precedente) e vale qualunque alternativa scelga l'operatore in D8: la regola di quorum decide quali reviewer formano la coppia, questo vincolo decide quali modelli di fallback un reviewer può usare.
 
 - a runtime, a entrambi i livelli, un modello di fallback di un reviewer **non è mai ammesso** se il suo fornitore coincide con quello di un autore effettivo della PR: l'implementer, ogni fixer e ogni sync con conflitti, con i modelli di fallback che hanno davvero usato. Il fatto che un altro reviewer della coppia sia già di un fornitore diverso non lo rende ammissibile: con la regola (ii), su una PR implementata da claude e revisionata da codex e agy, agy non può ripiegare su un modello Claude anche se codex garantisce già un fornitore diverso. Se nessun modello rimasto nella catena è ammesso, il turno fallisce come `tool_failure`, senza review;
-- il modello primario di un reviewer resta soggetto solo alla regola di quorum: `claude-review` può fare la review di una PR di claude se la regola scelta lo permette, ma i suoi fallback, tutti Claude, non sono ammessi su quella PR;
+- il modello primario di un reviewer resta soggetto solo alla regola di quorum: il reviewer `claude` può fare la review di una PR di claude se la regola scelta lo permette, ma i suoi fallback, tutti Claude, non sono ammessi su quella PR;
 - simmetricamente, un fallback dell'implementer o di un fixer entra negli autori con il suo fornitore, come oggi entra con la sua tupla;
 - all'avvio, come controllo anticipato, la configurazione si rifiuta se un reviewer del pool ha nella catena un fallback di un fornitore diverso da quello del suo modello primario e uguale al fornitore di un agent che può fare l'implementer (il default `roles.implementer`, gli agent della mappa per area e quelli selezionabili con `impl:<agent>`). È il caso di agy con un fallback Claude. Il controllo a runtime resta comunque quello che garantisce il vincolo, perché l'implementer effettivo si conosce solo per PR.
 
@@ -331,25 +359,29 @@ Non serve codice: è una prassi del supervisore, che l'operatore conferma o camb
 Decise dall'operatore il 2026-11-18, accettando le raccomandazioni di questa sezione, con il commento sulla PR #373 e il merge:
 
 - **D1.** ADR approvato.
-- **D2.** La decisione 5 dell'ADR 0001, i principi 3 e 4 dell'ADR 0002, la sezione 3.3 e la D2 dell'ADR 0004 sono rivisti in modo limitato, **solo** per le deleghe della [sezione 3.1](#31-deleghe-al-supervisore). Le deleghe sono tutte approvate, e ciascuna resta spenta finché l'operatore non la attiva (D10).
+- **D2.** La decisione 5 dell'ADR 0001, i principi 3 e 4 dell'ADR 0002, la sezione 3.3 e la D2 dell'ADR 0004 sono rivisti in modo limitato, **solo** per le deleghe della [sezione 3.1](#31-deleghe-al-supervisore). Le deleghe sono tutte approvate, e ciascuna resta spenta finché l'operatore non la attiva (D10). Integrazione del 2026-11-18 alle 15:20:
+  - ogni estensione di limiti (round concessi, tolleranza di budget, capacità) richiede un'analisi scritta delle cause, nel comando o nel diario #76. Se la causa è correggibile, il supervisore apre l'issue che la corregge (regola 9 della [sezione 3.1](#regole-comuni-a-tutte-le-deleghe));
+  - un problema che si ripete su più PR non si risolve con estensioni caso per caso: il supervisore propone all'operatore un aumento del limite in configurazione oppure la revisione o la riscrittura delle issue (regola 10).
 - **D3.** Tolleranza di budget del **25%**, scritta nel codice come tetto.
 - **D4.**
   - **+2 round per PR**;
   - **3 concessioni al giorno**;
   - durata massima di un limite temporaneo di capacità: **24 ore**;
-  - le concessioni si esercitano con il comando sul tracker, opzione (a) della sezione [Capacità](#capacità), mai modificando a mano l'overlay.
+  - le concessioni si esercitano con il comando sul tracker, opzione (a) della sezione [Capacità](#capacità), mai modificando a mano l'overlay;
+  - nessuna concessione senza l'analisi delle cause (D2). Il valore dei limiti in configurazione resta dell'operatore, anche quando il supervisore ne propone l'aumento per un problema ricorrente.
 - **D5.** Campo `security` per finding, opzione (a), con la regola che fallisce chiuso.
 - **Retry sulle PR dello stesso agent del supervisore.** Solo `tool_failure`, opzione (a) della sezione [Fallimenti tecnici sulle PR dello stesso agent](#fallimenti-tecnici-sulle-pr-dello-stesso-agent), con il limite esistente di 2 retry, condiviso con l'operatore.
 - **D6.**
   - due app nuove, una per ruolo: `brushtyler-devloop-implementer` e `brushtyler-devloop-supervisor`;
   - scripts/agent-token.py non le espone;
   - le app `claude-agent`, `codex-agent` e `agy-agent` restano ai reviewer;
-  - il coordinatore oggi è l'operatore.
-- **D7.** Opzione (c): la label `impl:<agent>` prevale, poi la mappa per area, poi il default. La label la possono mettere gli utenti fidati e il supervisore, con le regole di #178.
+  - il coordinatore oggi è l'operatore;
+  - chiavi degli agent (integrazione del 2026-11-18 alle 15:20, sezione [Chiavi degli agent e app dichiarata](#chiavi-degli-agent-e-app-dichiarata)): `claude`, `codex` e `agy` restano ai reviewer, simmetriche alle app `*-agent`. Gli implementer hanno una chiave per agent con il suffisso `-impl` (`claude-impl`, poi `codex-impl` e `agy-impl`), e tutte pubblicano con l'unica app implementer, che l'agent dichiara con `app = "implementer"` invece di dedurla dalla chiave. Anche l'app del supervisore è legata al ruolo, non a un agent.
+- **D7.** Opzione (c): la label `impl:<agent>` prevale, poi la mappa per area, poi il default. La label la possono mettere gli utenti fidati e il supervisore, con le regole di #178. La label e la mappa scelgono la chiave `<agent>-impl`. Il default diventa `roles.implementer = "claude-impl"`.
 - **D8.**
   - regola sul fornitore (ii);
   - dichiarazione del fornitore (c);
-  - claude come terzo reviewer, con un modello diverso da quello dell'implementer claude (Sonnet 5.5) e in **ultima posizione** del pool, come riserva;
+  - claude come terzo reviewer, con un modello diverso da quello dell'implementer claude (Sonnet 5.5) e in **ultima posizione** del pool, come riserva. Il terzo reviewer è la chiave `claude`, non una chiave `claude-review`: entra nel pool dopo la migrazione dell'implementer a `claude-impl`;
   - divieto dei fallback sul fornitore degli autori.
 - **D9.** Due finestre fisse, alle **9 e alle 18 UTC**, opzione (a). Fuori finestra si interrompe l'operatore solo per sicurezza o per un fermo totale.
 - **D10.** Tutto spento per default. Si attiva una cosa per volta, nell'ordine raccomandato: retry, round, app implementer e app del supervisore, terzo reviewer, capacità, budget.
@@ -404,19 +436,20 @@ Ogni issue si apre dopo l'approvazione di questo ADR, una per area. Le issue nas
 
 | Issue | Titolo proposto | Perimetro | Dipendenze | Review |
 |---|---|---|---|---|
-| P5-1 | feat(devloop): comando di concessione dei round con tetti e registro | `/devloop grant-round <motivo>`; classe non critica `round_grantable` quando le condizioni della [sezione 3.1](#round-di-review) sono verificate; limite per PR = `max_review_rounds` + esentati + concessi; tetto +2 per PR nel codice; tetto giornaliero comune; record `supervision` ed `event` del ledger; chiave di revoca. Campo `security` dei finding nello schema e nel prompt della review, secondo D5. Le regole comuni delle deleghe nascono qui e le riusano P5-2, P5-7 e P5-8 | Approvazione dell'ADR, D2, D4 e D5 | Livello 2 |
+| P5-1 | feat(devloop): comando di concessione dei round con tetti e registro | `/devloop grant-round <motivo>`; classe non critica `round_grantable` quando le condizioni della [sezione 3.1](#round-di-review) sono verificate; limite per PR = `max_review_rounds` + esentati + concessi; tetto +2 per PR nel codice; tetto giornaliero comune; record `supervision` ed `event` del ledger; chiave di revoca; comando di estensione rifiutato senza il motivo che porta l'analisi delle cause (regola 9). Campo `security` dei finding nello schema e nel prompt della review, secondo D5. Le regole comuni delle deleghe nascono qui e le riusano P5-2, P5-7 e P5-8 | Approvazione dell'ADR, D2, D4 e D5 | Livello 2 |
 | P5-2 | feat(devloop): retry dei fallimenti tecnici sulle PR dello stesso agent del supervisore | Il controllo di devloop/dispatch_supervision.py:106-107 non vale più per `tool_failure`; resta per le altre classi. Limite di 2 retry invariato e condiviso con l'operatore. Chiave di revoca | Approvazione dell'ADR e D2 | Livello 2 |
-| P5-3 | feat(devloop): app implementer e selezione dell'agent | Attore riservato `implementer` con la sua app per commit, push, PR e record dei fix; scripts/agent-token.py non lo espone; `identity` del profilo uguale all'app implementer. Selezione dell'agent secondo D7, registrata nel record `request` e nel marker della PR; controllo del preflight per issue; esclusione del pool per PR. `AGENTS.md`, tabella delle identità, aggiornato: la mergia l'operatore | Approvazione dell'ADR, D6 (app implementer creata dall'operatore) e D7 | Livello 2, merge dell'operatore |
-| P5-4 | feat(devloop): app del supervisore | Attore riservato `supervisor` con la sua app per comandi, label, issue e diario: `_may_hold`, gli ammessi alle label e i comandi sulle escalation la riconoscono al posto dell'app dell'agent `roles.supervisor` (devloop/dispatcher.py:679-693); `roles.supervisor` resta la chiave dell'agent, per il controllo sulle PR dello stesso agent. scripts/agent-token.py non la espone; percorso dedicato con cui il supervisore ottiene il token. `AGENTS.md`, tabella delle identità, aggiornato: la mergia l'operatore | Approvazione dell'ADR e D6 (app del supervisore creata dall'operatore). Indipendente da P5-3 | Livello 2, merge dell'operatore |
-| P5-5 | feat(devloop): esclusione dei reviewer per agent effettivo e terzo reviewer | Chiave `provider` per agent e fallback, tabella di prefissi come controllo; regola di quorum sul fornitore secondo D8, a entrambi i livelli; indipendenza per tupla anche al livello 1; salto del reviewer non disponibile alla scelta di un nuovo round; claude come terzo reviewer nel pool, con l'app `claude-agent` | P5-3, P5-4 e D8 | Livello 2 |
+| P5-3 | feat(devloop): app implementer e selezione dell'agent | Attore riservato `implementer` con la sua app per commit, push, PR e record dei fix; scripts/agent-token.py non lo espone; `identity` del profilo uguale all'app implementer. Chiavi `<agent>-impl` e app dichiarata dall'agent (`app = "implementer"`), con i vincoli della sezione [Chiavi degli agent e app dichiarata](#chiavi-degli-agent-e-app-dichiarata); controllo sulle PR dello stesso agent del supervisore per kind, non per chiave. Migrazione: `roles.implementer = "claude"` diventa `"claude-impl"`, attivata senza PR aperte con `implementer = "claude"` nel marker, oppure leggendo quel valore come `claude-impl`. Selezione dell'agent secondo D7, registrata nel record `request` e nel marker della PR; controllo del preflight per issue; esclusione del pool per PR. `AGENTS.md`, tabella delle identità, aggiornato: la mergia l'operatore | Approvazione dell'ADR, D6 (app implementer creata dall'operatore) e D7 | Livello 2, merge dell'operatore |
+| P5-4 | feat(devloop): app del supervisore | Attore riservato `supervisor` con la sua app di ruolo `[apps.supervisor]` per comandi, label, issue e diario, che nessun agent dichiara: `_may_hold`, gli ammessi alle label e i comandi sulle escalation la riconoscono al posto dell'app dell'agent `roles.supervisor` (devloop/dispatcher.py:679-693); `roles.supervisor` resta la chiave dell'agent, per il controllo sulle PR dello stesso agent. scripts/agent-token.py non la espone; percorso dedicato con cui il supervisore ottiene il token. `AGENTS.md`, tabella delle identità, aggiornato: la mergia l'operatore | Approvazione dell'ADR e D6 (app del supervisore creata dall'operatore). Indipendente da P5-3 | Livello 2, merge dell'operatore |
+| P5-5 | feat(devloop): esclusione dei reviewer per agent effettivo e terzo reviewer | Chiave `provider` per agent e fallback, tabella di prefissi come controllo; regola di quorum sul fornitore secondo D8, a entrambi i livelli; indipendenza per tupla anche al livello 1; salto del reviewer non disponibile alla scelta di un nuovo round; claude come terzo reviewer nel pool con la chiave `claude` e l'app `claude-agent` (`[apps.claude]`), in ultima posizione: `["codex", "agy", "claude"]` | P5-3 (con la migrazione a `claude-impl`), P5-4 e D8 | Livello 2 |
 | P5-6 | feat(devloop): nessun fallback sullo stesso fornitore dell'implementer | Divieto a runtime, a entrambi i livelli e indipendente dalla regola di quorum di D8, di ogni fallback di un reviewer sul fornitore di un autore effettivo della PR, con `tool_failure` se la catena non ha modelli ammessi; fallback dell'implementer e dei fixer registrati con il fornitore; rifiuto all'avvio dei reviewer con un fallback sul fornitore di un possibile implementer diverso dal fornitore del loro modello primario | P5-5 | Livello 2 |
-| P5-7 | feat(devloop): tolleranza dell'envelope di budget delegata al supervisore | `/devloop grant-budget <motivo>`: una volta per storia, solo turni e tempo, del X% deciso in D3, mai USD né token; registro e revoca come P5-1 | #365, P5-1 e D3 | Livello 2 |
-| P5-8 | feat(devloop): limiti di capacità temporanei del supervisore | `/devloop capacity` sulla issue del riepilogo, entro i tetti di D4 e con scadenza; ritorno automatico al valore configurato | P5-1 e D4 | Livello 2 |
+| P5-7 | feat(devloop): tolleranza dell'envelope di budget delegata al supervisore | `/devloop grant-budget <motivo>`: una volta per storia, solo turni e tempo, del X% deciso in D3, mai USD né token; registro, revoca e analisi delle cause come P5-1 | #365, P5-1 e D3 | Livello 2 |
+| P5-8 | feat(devloop): limiti di capacità temporanei del supervisore | `/devloop capacity` sulla issue del riepilogo, entro i tetti di D4 e con scadenza; ritorno automatico al valore configurato; analisi delle cause come P5-1 | P5-1 e D4 | Livello 2 |
 
 **Ordine.**
 
 - P5-1 e P5-2 sono indipendenti e possono partire subito dopo l'approvazione. P5-2 è la più piccola e toglie da sola il caso di #357.
-- P5-3 e P5-4 partono quando l'operatore ha creato la rispettiva app (D6), e sono indipendenti fra loro. P5-5 le aspetta tutte e due: finché `claude-agent` firma il codice dell'implementer o i comandi del supervisore, claude non può entrare nel pool dei reviewer. P5-6 segue P5-5.
+- P5-3 e P5-4 partono quando l'operatore ha creato la rispettiva app (D6), e sono indipendenti fra loro. P5-5 le aspetta tutte e due: finché `claude-agent` firma il codice dell'implementer o i comandi del supervisore, claude non può entrare nel pool dei reviewer. P5-5 aspetta anche la migrazione di P5-3: la chiave `claude` entra nel pool solo dopo che l'implementer è passato a `claude-impl`. P5-6 segue P5-5.
+- Le regole 9 e 10 della sezione 3.1 non hanno un'issue a parte: P5-1 rifiuta i comandi senza motivo, e il resto è una prassi del supervisore che verifica il coordinatore.
 - P5-7 aspetta #365, cioè l'envelope dell'ADR 0004 (P2-5).
 - P5-8 segue P5-1 e non blocca niente.
 - Il ritmo delle decisioni (sezione 3.4) non ha un'issue: parte con D9.
