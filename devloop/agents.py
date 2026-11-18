@@ -283,8 +283,9 @@ def unavailable_reason(agent, returncode, text):
     return None
 
 
+# ``thinking_tokens``: only agy reports them apart (#358); never added to another field.
 TELEMETRY_FIELDS = ('cost_usd', 'duration_ms', 'num_turns', 'input_tokens', 'output_tokens',
-                    'cache_read_input_tokens', 'cache_creation_input_tokens')
+                    'cache_read_input_tokens', 'cache_creation_input_tokens', 'thinking_tokens')
 
 
 def _count(value):
@@ -294,6 +295,19 @@ def _count(value):
 
 def _amount(value):
     return value if type(value) in (int, float) and value >= 0 else None
+
+
+def _milliseconds(seconds):
+    """A duration in seconds as whole milliseconds, or None when it is not one: json reads
+    Infinity, NaN and integers too large for a float, and ``1e308 * 1000`` is infinite."""
+    seconds = _amount(seconds)
+    if seconds is None:
+        return None
+    try:
+        ms = float(seconds) * 1000
+    except OverflowError:
+        return None
+    return round(ms) if math.isfinite(ms) else None
 
 
 def telemetry(kind, stdout):
@@ -309,27 +323,31 @@ def telemetry(kind, stdout):
       duration or model;
     - agy (``--output-format json``, #358): ``duration_seconds`` (as ``duration_ms``),
       ``num_turns`` and ``usage``: ``input_tokens`` (without the cached input, unlike codex),
-      ``output_tokens`` and ``cache_read_tokens`` (as ``cache_read_input_tokens``). Only the
-      top-level keys of the envelope, never those of ``structured_output``. ``usage`` covers
-      the whole conversation, which is the turn because every turn starts a new one (``-p``,
-      never ``-c``). ``thinking_tokens`` and ``total_tokens`` are not kept; no cost or model."""
+      ``output_tokens``, ``cache_read_tokens`` (as ``cache_read_input_tokens``) and
+      ``thinking_tokens``, each as reported: whether ``output_tokens`` already counts the
+      thinking is not established. Only the top-level keys of the envelope, never those of
+      ``structured_output``. ``usage`` covers the whole conversation, which is the turn because
+      every turn starts a new one (``-p``, never ``-c``). Without ``usage`` every field is None,
+      duration and turns included; a duration that is not a finite number of milliseconds is
+      None. ``total_tokens`` is not kept; no cost or model."""
     fields = dict.fromkeys(TELEMETRY_FIELDS)
     models = None
     if kind == 'agy':
         try:
             envelope = json.loads(stdout or '')
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):  # also an integer with too many digits
             return fields, None
         if not isinstance(envelope, dict):
             return fields, None
-        seconds = _amount(envelope.get('duration_seconds'))
-        if seconds is not None and math.isfinite(seconds):  # json reads Infinity too
-            fields['duration_ms'] = round(seconds * 1000)
+        usage = envelope.get('usage')
+        if not isinstance(usage, dict):
+            return fields, None
+        fields['duration_ms'] = _milliseconds(envelope.get('duration_seconds'))
         fields['num_turns'] = _count(envelope.get('num_turns'))
-        usage = envelope.get('usage') if isinstance(envelope.get('usage'), dict) else {}
         for source, target in (('input_tokens', 'input_tokens'),
                                ('output_tokens', 'output_tokens'),
-                               ('cache_read_tokens', 'cache_read_input_tokens')):
+                               ('cache_read_tokens', 'cache_read_input_tokens'),
+                               ('thinking_tokens', 'thinking_tokens')):
             fields[target] = _count(usage.get(source))
     elif kind == 'claude':
         try:
