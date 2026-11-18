@@ -225,6 +225,7 @@ required_timeout_minutes = 30
 "ssdlc_role_fencing.py" = ["docs/writer-fencing.md"]
 "ssdlc_container_holder.py" = ["docs/writer-fencing.md"]
 "ssdlc_telemetry.py" = ["docs/cost-telemetry.md", "docs/bounded-recovery.md"]
+"ssdlc_quota.py" = ["docs/cost-telemetry.md"]
 "ssdlc_recovery.py" = ["docs/cost-telemetry.md", "docs/bounded-recovery.md"]
 "ssdlc_feedback.py" = ["docs/developer-feedback.md"]
 "ssdlc_feedback_admission.py" = ["docs/developer-feedback.md"]
@@ -265,6 +266,7 @@ required_timeout_minutes = 30
 "ssdlc_amendments.py" = ["docs/scope-amendments.md"]
 "ssdlc_verification_repair.py" = ["docs/scope-amendments.md", "docs/recovery.md"]
 "ssdlc_deadline_extensions.py" = ["docs/scope-amendments.md"]
+"ssdlc_limit_extensions.py" = ["docs/limit-extensions.md", "docs/recovery.md"]
 "ssdlc_locks.py" = ["docs/writer-fencing.md"]
 # One key per schema, towards the document that uses it: no "schemas/" prefix, since the entries
 # that cover a file add up.
@@ -282,6 +284,8 @@ required_timeout_minutes = 30
 "schemas/diagnosis-record.schema.json" = ["docs/native-gate-convergence.md"]
 "schemas/gate-findings.schema.json" = ["docs/task-mode.md"]
 "schemas/history-snapshot.schema.json" = ["docs/native-gate-convergence.md"]
+"schemas/limit-extension-authorization.schema.json" = ["docs/limit-extensions.md"]
+"schemas/limit-extension-proposal.schema.json" = ["docs/limit-extensions.md"]
 "schemas/plan.schema.json" = ["docs/task-mode.md"]
 "schemas/quality-contract.schema.json" = ["docs/configuration.md"]
 "schemas/reconciliation-authorization.schema.json" = ["docs/historical-reconciliation.md"]

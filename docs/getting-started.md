@@ -152,6 +152,7 @@ The settings used most often:
 | `SSDLC_BUDGET_CAP_USD` | S $3, M $6, L $20 | Measured-spend circuit breaker: charges only, never CLI estimates |
 | `SSDLC_ESTIMATE_CAP_USD` | S $3, M $6, L $20 | Separate circuit breaker on API-equivalent estimates (Claude CLI) |
 | `SSDLC_UNMETERED_QUOTA` | none | Subscription CLIs (`codex,agy`) declared outside the dollar caps without a limits profile; undeclared ones are refused before launch while a cap is in force |
+| `SSDLC_QUOTA_CONTROLS` | none | Explicit subscription quota controls per route and bucket, with a mandatory minimum reserve and snapshot age; a reserve reached or an unverifiable snapshot refuses the call |
 | `SSDLC_SYNC_REMOTE` | `auto` | GitHub/GitLab synchronization of branches, issues and draft PRs |
 | `GITHUB_TOKEN` / `GH_TOKEN` | — | Needed to create issues and PRs (`export GITHUB_TOKEN="$(gh auth token)"`) |
 
@@ -172,6 +173,7 @@ The full reference covers routing tables, reasoning effort, budgets, container l
 | `python3 orchestrator.py start` / `status` / `cancel` / `resume` / `monitor` | Detached supervision ([docs](supervision.md)) |
 | `python3 orchestrator.py bounce-preview …` | Read-only targeted-bounce preview ([docs](bounce-preview.md)) |
 | `python3 orchestrator.py continuation-*` | Explicit recovery transitions for stopped runs ([docs](recovery.md)) |
+| `./ssdlc limits inspect` / `propose` / `approve` / `activate` / `status` | Manual, operator-authorized extension of the limits or deadline of a stopped run ([docs](limit-extensions.md)) |
 | `python3 orchestrator.py usage-profile-*` | Add engine usage rules to the limits profile of a stopped generation ([docs](bounded-recovery.md#live-calls-without-a-reported-cost-issue-43)) |
 | `python3 orchestrator.py feedback-*` | Developer-feedback diagnosis and delegation ([docs](developer-feedback.md)) |
 

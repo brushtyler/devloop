@@ -117,6 +117,9 @@ class MapConfigTests(unittest.TestCase):
             'ssdlc_amendments.py': ('docs/scope-amendments.md',),
             'ssdlc_verification_repair.py': ('docs/scope-amendments.md', 'docs/recovery.md'),
             'ssdlc_deadline_extensions.py': ('docs/scope-amendments.md',),
+            'ssdlc_limit_extensions.py': ('docs/limit-extensions.md', 'docs/recovery.md'),
+            'schemas/limit-extension-proposal.schema.json': ('docs/limit-extensions.md',),
+            'schemas/limit-extension-authorization.schema.json': ('docs/limit-extensions.md',),
             'ssdlc_locks.py': ('docs/writer-fencing.md',),
             'schemas/quality-contract.schema.json': ('docs/configuration.md',),
             'schemas/recovery-grader-baseline.json': ('docs/bounded-recovery.md',
@@ -142,7 +145,8 @@ class MapConfigTests(unittest.TestCase):
         # The documents of the map name the schemas they describe by file.
         for key in ('plan', 'task-plan-review', 'design-review', 'candidate-capture',
                     'continuation-snapshot', 'reconciliation-request',
-                    'reconciliation-authorization', 'recovery-limits', 'quality-contract'):
+                    'reconciliation-authorization', 'recovery-limits', 'quality-contract',
+                    'limit-extension-proposal', 'limit-extension-authorization'):
             schema = f'schemas/{key}.schema.json'
             with self.subTest(schema=schema):
                 self.assertTrue(any(schema in (REPO / document).read_text()

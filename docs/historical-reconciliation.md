@@ -81,6 +81,9 @@ Keep requests, cap sources, proposals, authorizations and runtimes private.
    New status, journal, completion and deadline readers resolve the selected
    runtime. Earlier recon/PO/design/planning entrypoints are refused before they
    can allocate new sessions. Current review, QA and other global gates still run.
+   If the selected generation later stops on its limits, the operator can extend
+   them in place with a [manual limit extension](limit-extensions.md); the
+   selector is then resolved through the bound extension chain.
 
 To abandon an unselected preparation, use `continuation-limits-discard --repo
 TARGET --ticket TICKET --preparation PREPARATION`. For an I1 preparation use

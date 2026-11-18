@@ -115,6 +115,11 @@ class LimitsStore:
         validate_live_usage(policy)
         envelope ={'policy': policy, 'binding': binding}
         with ticket_lock(self.root / 'limits/limits.lock'):
+            if self._extended_from(envelope):
+                # The original profile of a run whose limits an operator later
+                # extended (operator-limit-extension-v1): keep the extension.
+                self._load()
+                return
             marker, recorded, _ = bounded_mode(self.root)
             expected = {'kind': 'bounded-i2', 'policy_sha256': digest(envelope)}
             if marker is not None and {k: marker[k] for k in expected} != expected:
@@ -144,6 +149,20 @@ class LimitsStore:
                 'invocations': {}, 'transports': [], 'diagnoses': []})
             self._publish_mode(envelope)
 
+    def _extended_from(self, envelope):
+        """True when the frozen envelope is exactly ``envelope`` plus bound local extensions."""
+        import json
+        if not self.policy_path.is_file() or self.policy_path.is_symlink():
+            return False
+        try:
+            stored = json.loads(self.policy_path.read_text())
+            if not stored.get('binding', {}).get('limit_extensions'):
+                return False
+            from ssdlc_limit_extensions import unwind
+            return digest(unwind(stored, self.generation())) == digest(envelope)
+        except (TaskError, OSError, ValueError, KeyError, TypeError, AttributeError):
+            return False
+
     def _publish_mode(self, envelope, state=None):
         expected = {'kind': 'bounded-i2', 'policy_sha256': digest(envelope)}
         marker, recorded, existing = bounded_mode(self.root)
@@ -158,6 +177,11 @@ class LimitsStore:
 
     def _load(self, expected=None, *, repair=True):
         import json
+        pending = self.root / 'limits/extension-pending.json'
+        if pending.exists() or pending.is_symlink():
+            # A published limit-extension intent fences every use of the limits
+            # until its activation is completed by replaying `limits activate`.
+            raise DevelopmentBlocked('INTEGRITY', 'A limit extension activation is pending; repeat limits activate')
         if self.policy_path.is_symlink():
             raise DevelopmentBlocked('INTEGRITY', 'Limit policy is a symlink')
         try:
@@ -183,6 +207,12 @@ class LimitsStore:
                 or (self.root / 'state.json').exists() and recorded != expected_mode):
             raise DevelopmentBlocked('INTEGRITY', 'Persistent bounded execution mode changed or disappeared')
         binding = envelope.get('binding', {})
+        if 'limit_extensions' in binding:
+            from ssdlc_limit_extensions import unwind
+            try:
+                unwind(envelope, self.generation())
+            except (TaskError, OSError, KeyError, TypeError, ValueError, AttributeError):
+                raise DevelopmentBlocked('INTEGRITY', 'Bound limit extension chain changed') from None
         if binding.get('historical_sha256'):
             from ssdlc_deadline_extensions import accounting_anchor
             try:
@@ -196,6 +226,14 @@ class LimitsStore:
             if any(state['invocations'].get(identity) != row for identity, row in binding['historical_invocations'].items()):
                 raise DevelopmentBlocked('INTEGRITY', 'Historical invocation counters changed')
         return envelope, state
+
+    def generation(self):
+        """The selected I2 generation of this limits root, or None for a native ticket."""
+        import json
+        marker = self.root / 'generation.json'
+        if marker.is_symlink():
+            raise ValueError('Symlinked generation marker')
+        return json.loads(marker.read_text())['transition_id'] if marker.is_file() else None
 
     def remaining(self):
         _, state = self._load(repair=False)
