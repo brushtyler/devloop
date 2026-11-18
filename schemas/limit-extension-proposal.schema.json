@@ -86,9 +86,89 @@
         "limits_journal",
         "scheduler_journal",
         "selector_sha256",
-        "state_status"
+        "state_status",
+        "inputs",
+        "feedback"
       ],
       "properties": {
+        "inputs": {
+          "type": "object",
+          "description": "SHA-256 of the run inputs the proposal was reviewed against; null when the file is absent.",
+          "additionalProperties": false,
+          "required": [
+            "state.json",
+            "02-design/plan.json",
+            "00-recon/quality-contract.json",
+            "01-po/requirements.md",
+            "02-design/adr.md",
+            "02-design/threat-model.md"
+          ],
+          "properties": {
+            "state.json": {
+              "$ref": "#/$defs/optional_sha256"
+            },
+            "02-design/plan.json": {
+              "$ref": "#/$defs/optional_sha256"
+            },
+            "00-recon/quality-contract.json": {
+              "$ref": "#/$defs/optional_sha256"
+            },
+            "01-po/requirements.md": {
+              "$ref": "#/$defs/optional_sha256"
+            },
+            "02-design/adr.md": {
+              "$ref": "#/$defs/optional_sha256"
+            },
+            "02-design/threat-model.md": {
+              "$ref": "#/$defs/optional_sha256"
+            }
+          }
+        },
+        "feedback": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "description": "The feedback ledger of the run: its authority, journal head and the unresolved requests the extension does not convert.",
+              "additionalProperties": false,
+              "required": [
+                "authority_sha256",
+                "journal",
+                "unresolved_requests"
+              ],
+              "properties": {
+                "authority_sha256": {
+                  "$ref": "#/$defs/sha256"
+                },
+                "journal": {
+                  "$ref": "#/$defs/head"
+                },
+                "unresolved_requests": {
+                  "type": "array",
+                  "maxItems": 1000,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "request_id",
+                      "disposition"
+                    ],
+                    "properties": {
+                      "request_id": {
+                        "type": "string"
+                      },
+                      "disposition": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
         "envelope_sha256": {
           "$ref": "#/$defs/sha256"
         },
@@ -231,7 +311,7 @@
       "required": [
         "source_statuses",
         "resolved_invocations",
-        "no_feedback_ledger",
+        "quiescent_feedback_ledger",
         "quiescent_writers",
         "operator_authorization"
       ],
@@ -246,7 +326,7 @@
         "resolved_invocations": {
           "const": true
         },
-        "no_feedback_ledger": {
+        "quiescent_feedback_ledger": {
           "const": true
         },
         "quiescent_writers": {
@@ -320,6 +400,16 @@
     "sha256": {
       "type": "string",
       "pattern": "^[a-f0-9]{64}$"
+    },
+    "optional_sha256": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/sha256"
+        }
+      ]
     },
     "head": {
       "type": "object",

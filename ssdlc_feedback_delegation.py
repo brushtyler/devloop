@@ -381,9 +381,12 @@ def ensure_reconciled(ticket, projection, proposal):
 
 def admitted(state, source):
     """Only a natively published and reconciled descendant can use old recording caps."""
+    from ssdlc_limit_extensions import feedback_lineage
     entry = state.get('admitted_generations', {}).get(source['projection']['transition_id'])
-    return bool(entry and entry['limits_sha256'] == digest(source['envelope'])
-                and entry['profile_sha256'] == digest(source['envelope']['policy'])
+    # The admitted envelope, or that envelope plus operator limit extensions the
+    # ledger recorded (operator-limit-extension-v1); never another authority.
+    return bool(entry and (entry['limits_sha256'], entry['profile_sha256'])
+                in feedback_lineage(state, source['envelope'])
                 and entry['projection_sha256'] == digest(source['projection']))
 
 

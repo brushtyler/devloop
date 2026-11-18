@@ -23,9 +23,34 @@ The run must be stopped (`FAILED`, `ESCALATED_TO_SUPERVISOR` or
 `HALTED_BUDGET_EXCEEDED`) and quiescent: no invocation in `reserved` or
 `uncertain`, no task in progress, no interrupted journal tail, no pending
 preparation or other extension. Reconcile writers and uncertain outcomes first.
-A run with a feedback recording ledger (`feedback/`) is refused: the ledger binds
-the exact limits envelope, so its own admissions remain the way to change it.
 I1 continuations are not eligible.
+
+### Runs with a feedback ledger
+
+A run with a feedback recording ledger (`feedback/`) is eligible when the ledger
+is complete and quiescent:
+
+- the recording authority is `ACTIVE` and its history has no interrupted tail;
+- no role call has an unknown outcome (`INTENT`);
+- no request still waits for a step bound to the current counters and journals
+  (dispositions `WAITING`, `NATIVE_AMENDMENT_REQUIRED`,
+  `NATIVE_REPAIR_RETURN_REQUIRED`, `OWNER_REVALIDATION_REQUIRED`). Complete
+  those steps first.
+
+The proposal binds the ledger's authority and journal head, and lists the other
+unresolved requests (for example `OPERATOR_DECISION`). Those requests are not
+converted: they stay bound to the parent counters, so after the extension a
+new feedback request is needed to continue them.
+
+Activation records the extension in the ledger
+(`FEEDBACK_LIMITS_EXTENDED`, in `limit_extensions`) with the parent and new
+envelope and profile hashes. The recording authority frozen on the parent
+envelope, and a generation admitted with it, keep exactly that authority through
+the recorded extension. A ledger row counts only if the envelope's own bound
+chain contains the same proposal and authorization. Recording allowances,
+feedback paths and scope authorizations stay separate. Raising a
+`role_invocations.feedback-*` cap raises only the native cap, not the recording
+allowance of the ledger.
 
 ## Operations
 
@@ -83,8 +108,10 @@ controller, the supervisor and every other writer.
    `limit-extensions/<sha256>/proposal.json` and prints its SHA-256. The proposal
    records the cause and evidence, the run identity, the parent generation (the
    envelope, profile and counter hashes, the limits and task journal heads, the
-   selector), the current consumption and reserves, the actor and the
-   applicability conditions. It authorizes nothing.
+   selector, the hashes of the run inputs `state.json`, `02-design/plan.json`,
+   `00-recon/quality-contract.json` and the context documents, with `null` for
+   an absent one, and the feedback ledger binding), the current consumption and
+   reserves, the actor and the applicability conditions. It authorizes nothing.
 3. Review the proposal, then authorize exactly that hash:
    `./ssdlc limits approve --ticket TICKET --proposal SHA256 --expires-at UNIX_SECONDS --actor NAME --source-fenced`.
    `--expires-at` is mandatory and must be in the future; `--source-fenced` is
@@ -94,8 +121,8 @@ controller, the supervisor and every other writer.
 4. `./ssdlc limits activate --ticket TICKET --proposal SHA256` checks the
    authorization against the exact proposal hash, the expiry, the Docker mounts
    of the run, and that the source still matches the proposal: same run,
-   generation, inputs, journals and consumption. Any change is refused; write a
-   new proposal. Then it applies the extension.
+   generation, input files, journals, feedback ledger and consumption. Any
+   change is refused; write a new proposal. Then it applies the extension.
 5. `./ssdlc limits status --ticket TICKET` lists the proposals (`PROPOSED`,
    `AUTHORIZED`, `EXPIRED`, `ACTIVATING`, `ACTIVE`) and the bound chain.
 
@@ -104,17 +131,25 @@ Resume the run as usual. A native run resumes with or without its original
 
 ## Atomic activation and replay
 
-Activation runs under the ticket, scheduler and limits locks. The expiry is
-checked only at the first activation, before anything is written. Activation
-then publishes an intent (`limits/extension-pending.json`) and applies, in
-order: the new `limits/policy.json`, a `LIMITS_EXTENDED` event in the limits
-journal, an `ATTEMPT_LIMIT_EXTENDED` event in the task journal when attempts
-grow, the bounded-mode markers, and a receipt in `limit-extensions/<sha256>/`.
+Activation runs under the ticket, scheduler and limits locks, and under the
+feedback consultation and ledger locks when the run has a feedback ledger. The
+expiry is checked only at the first activation: before the source checks and
+again immediately before the intent is published, so an authorization (or a
+proposed deadline) that expires during the checks is refused and nothing is
+written. Activation then publishes an intent (`limits/extension-pending.json`)
+and applies, in order: the new `limits/policy.json`, a `LIMITS_EXTENDED` event in
+the limits journal, an `ATTEMPT_LIMIT_EXTENDED` event in the task journal when
+attempts grow, the `FEEDBACK_LIMITS_EXTENDED` event in the feedback ledger when
+there is one, the bounded-mode markers, and a receipt in
+`limit-extensions/<sha256>/`.
 While the intent exists, every use of the limits is fenced.
 
 After an interruption, repeat the same `limits activate`. The replay only
 completes the published effects, even after the authorization has expired; each
-step checks whether it already happened, so nothing is extended twice. A replay
+step checks whether it already happened, so nothing is extended twice. A torn
+append of the feedback event itself is trimmed (and kept as
+`interrupted-tail-*.bin`) and written again; any other interrupted feedback
+history is refused. A replay
 of an active proposal only confirms it. Another proposal cannot activate while
 an intent is pending, and a proposal bound to the parent of a completed
 extension is refused.

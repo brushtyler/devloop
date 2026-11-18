@@ -11,10 +11,14 @@ The extension is applied in place to the selected limits root: the native ticket
 unknown usage, reserves and attempts stay unchanged; only the named dimensions
 of the frozen profile change. Each extension is recorded in a bound chain in the
 envelope binding, so the parent envelope stays reconstructible and verifiable.
+A run with a feedback ledger records the same extension in that ledger, so the
+recording authority and the admitted generations bound to the parent envelope
+follow it (``feedback_lineage``); recording allowances and scope stay separate.
 The specialized contracts (verification repair, deadline extension, operator
 recovery) and their receipts are untouched. No model is called.
 """
 import copy
+import hashlib
 import json
 import math
 import os
@@ -36,6 +40,13 @@ CAPS = ('role_invocations', 'phase_invocations')
 STOPPED = ('ESCALATED_TO_SUPERVISOR', 'FAILED', 'HALTED_BUDGET_EXCEEDED')
 STORE = 'limit-extensions'
 PENDING = 'limits/extension-pending.json'
+# Run inputs a proposal binds besides limits, journals and selector.
+INPUTS = ('state.json', '02-design/plan.json', '00-recon/quality-contract.json',
+          '01-po/requirements.md', '02-design/adr.md', '02-design/threat-model.md')
+# Feedback dispositions that still wait for an automatic or native step bound to
+# the exact source counters and journals: an extension would invalidate them.
+FEEDBACK_PENDING = ('WAITING', 'NATIVE_AMENDMENT_REQUIRED', 'NATIVE_REPAIR_RETURN_REQUIRED',
+                    'OWNER_REVALIDATION_REQUIRED')
 ENTRY_FIELDS = {'contract', 'operation', 'generation', 'proposal_sha256', 'authorization_sha256',
                 'source_policy_sha256', 'changes'}
 DEADLINE_FIELDS = {'capability', 'started_at', 'old_deadline_at', 'new_deadline_at',
@@ -123,6 +134,29 @@ def entries(envelope):
     return copy.deepcopy(envelope.get('binding', {}).get('limit_extensions', []))
 
 
+def feedback_lineage(state, envelope):
+    """(limits, profile) digests this envelope had before the extensions the feedback ledger recorded.
+
+    The first pair is the envelope itself. A recorded extension extends the
+    lineage only when it produced the previous pair and is bound in the
+    envelope's own chain (which ``LimitsStore._load`` validates), so a feedback
+    authority frozen on, or a generation admitted with, the parent envelope
+    keeps exactly that authority after an operator limit extension.
+    """
+    pairs = [(digest(envelope), digest(envelope['policy']))]
+    rows = state.get('limit_extensions') if isinstance(state, dict) else None
+    if not isinstance(rows, list) or not rows:
+        return pairs
+    bound = {(e.get('proposal_sha256'), e.get('authorization_sha256'))
+             for e in entries(envelope) if isinstance(e, dict)}
+    for row in reversed(rows):
+        if (isinstance(row, dict) and row.get('contract') == CONTRACT
+                and (row.get('limits_sha256'), row.get('profile_sha256')) == pairs[-1]
+                and (row.get('proposal_sha256'), row.get('authorization_sha256')) in bound):
+            pairs.append((row.get('parent_limits_sha256'), row.get('parent_profile_sha256')))
+    return pairs
+
+
 # --- source ---------------------------------------------------------------
 
 def _ticket(path):
@@ -144,10 +178,8 @@ def _json(path):
 
 def _root(ticket):
     """Locate the limits root without loading it: native ticket or selected generation."""
-    if (ticket / 'feedback').exists() or (ticket / 'feedback').is_symlink():
-        # The feedback ledger binds the exact envelope digest; its specialized
-        # admissions remain the only way to change limits there.
-        raise LimitExtensionError('A run with a feedback recording ledger uses its specialized contracts')
+    if (ticket / 'feedback').is_symlink():
+        raise LimitExtensionError('Unsafe feedback ledger')
     if (ticket / 'execution/active.json').exists():
         from ssdlc_transitions import TransitionStore
         projection = TransitionStore(ticket / 'execution').load()
@@ -171,6 +203,37 @@ def _complete_journal(path):
     raw = path.read_bytes() if path.exists() else b''
     if raw and not raw.endswith(b'\n'):
         raise LimitExtensionError('Interrupted journal tail requires reconciliation: ' + path.parent.name)
+
+
+def _inputs(root):
+    """Hashes of the run inputs a proposal is reviewed against; a missing one is null."""
+    result = {}
+    for ref in INPUTS:
+        path = root / ref
+        if path.is_symlink() or path.exists() and not path.is_file():
+            raise LimitExtensionError('Unsafe run input: ' + ref)
+        result[ref] = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
+    return result
+
+
+def _feedback(ticket):
+    """The feedback ledger of the run, read without locks or repairs, or None."""
+    if not (ticket / 'feedback').exists():
+        return None
+    from ssdlc_feedback import FeedbackStore
+    try:
+        store = FeedbackStore(ticket)
+        authority, state = store._read()
+    except (TaskError, OSError, ValueError, KeyError, TypeError):
+        raise LimitExtensionError('The feedback recording authority is incomplete or invalid; '
+                                  'reconcile it first') from None
+    path = store.root / 'task-journal.jsonl'
+    if authority.get('status') != 'ACTIVE' or state is None:
+        raise LimitExtensionError('The feedback recording authority is incomplete; reconcile it first')
+    requests = [dict(request_id=identity, disposition=store.disposition(identity))
+                for identity in sorted(state.get('requests', {}))]
+    return dict(authority_sha256=digest(authority), journal=TaskJournal.head(path), state=state,
+                requests=[row for row in requests if row['disposition'] not in ('APPLIED', 'IN_SCOPE_RETURN_APPLIED')])
 
 
 def consumption(envelope, counters, scheduler):
@@ -227,7 +290,8 @@ def inspect(ticket, *, clock=time.time):
     return dict(ticket=ticket, root=root, source=kind, generation=generation, selector_sha256=selector,
                 envelope=envelope, counters=counters, state=state, scheduler=scheduler,
                 limits_head=TaskJournal.head(root / 'limits/task-journal.jsonl'),
-                scheduler_head=TaskJournal.head(scheduler_path) if scheduler is not None else None)
+                scheduler_head=TaskJournal.head(scheduler_path) if scheduler is not None else None,
+                inputs=_inputs(root), feedback=_feedback(ticket))
 
 
 def _peek(path):
@@ -245,13 +309,27 @@ def eligibility(source):
     if scheduler is not None and any(row.get('status') not in ('FAILED', 'COMPLETED', 'PENDING')
                                      for row in scheduler['tasks'].values()):
         raise LimitExtensionError('Active task work must be reconciled before an extension')
+    feedback = source['feedback']
+    if feedback is not None:
+        if any(call.get('status') == 'INTENT' for call in feedback['state'].get('role_calls', [])):
+            raise LimitExtensionError('Unknown feedback role outcome must be reconciled before an extension')
+        pending = [row['request_id'] for row in feedback['requests'] if row['disposition'] in FEEDBACK_PENDING]
+        if pending:
+            raise LimitExtensionError('A feedback request still waits for a step bound to the current limits; '
+                                      'complete it before an extension: ' + ', '.join(pending)[:120])
 
 
 def parent(source):
+    feedback = source['feedback']
+    if feedback is not None:
+        # Unresolved requests are listed for the operator: they are not converted.
+        feedback = dict(authority_sha256=feedback['authority_sha256'], journal=feedback['journal'],
+                        unresolved_requests=copy.deepcopy(feedback['requests']))
     return dict(envelope_sha256=digest(source['envelope']), profile_sha256=digest(source['envelope']['policy']),
                 counters_sha256=digest(source['counters']), limits_journal=source['limits_head'],
                 scheduler_journal=source['scheduler_head'], selector_sha256=source['selector_sha256'],
-                state_status=source['state'].get('status'))
+                state_status=source['state'].get('status'), inputs=copy.deepcopy(source['inputs']),
+                feedback=feedback)
 
 
 # --- proposal -------------------------------------------------------------
@@ -341,7 +419,7 @@ def build(source, request, now):
                     changes=changes, new_profile=profile, cause=request.get('cause'),
                     evidence=_evidence(request.get('evidence')), actor=request.get('actor'),
                     applicability=dict(source_statuses=list(STOPPED), resolved_invocations=True,
-                                       no_feedback_ledger=True, quiescent_writers=True,
+                                       quiescent_feedback_ledger=True, quiescent_writers=True,
                                        operator_authorization='exact-proposal-sha256-with-expiry'),
                     created_at=now)
     if operation == 'extend_deadline':
@@ -510,7 +588,13 @@ def _extended(source, proposal, authorization_sha, sha):
                 attempts = dict(old=change['old'], new=change['new'])
     if unwind(envelope, source['generation']) != unwind(source['envelope'], source['generation']):
         raise LimitExtensionError('Extension chain does not restore its parent')
-    return envelope, counters, attempts
+    feedback = None
+    if source['feedback'] is not None:
+        feedback = dict(contract=CONTRACT, proposal_sha256=sha, authorization_sha256=authorization_sha,
+                        generation=source['generation'], parent_limits_sha256=digest(source['envelope']),
+                        limits_sha256=digest(envelope), parent_profile_sha256=digest(source['envelope']['policy']),
+                        profile_sha256=digest(envelope['policy']))
+    return envelope, counters, attempts, feedback
 
 
 def _conserved(before, after):
@@ -538,7 +622,41 @@ def _publish_mode(root, parent_sha, new_sha):
             atomic_json(state_path, state)
 
 
-def _complete(root, intent, fault):
+def _record_feedback(ticket, entry, parent_head):
+    """Append the extension to the feedback ledger once; a replay only confirms it.
+
+    The caller holds the feedback locks. Only a torn tail that is a prefix of
+    this very event is trimmed (and kept for audit, as TaskJournal does); any
+    other incomplete history is refused.
+    """
+    path = ticket / 'feedback/task-journal.jsonl'
+    if path.is_symlink():
+        raise LimitExtensionError('Unsafe feedback history')
+    raw = path.read_bytes()
+    complete = raw[:raw.rfind(b'\n') + 1]
+    state, sequence, previous = TaskJournal._replay(complete)
+    if state is None:
+        raise LimitExtensionError('Feedback history disappeared during extension activation')
+    recorded = [row for row in state.get('limit_extensions', [])
+                if isinstance(row, dict) and row.get('proposal_sha256') == entry['proposal_sha256']]
+    if recorded:
+        if recorded != [entry] or raw != complete:
+            raise LimitExtensionError('Feedback ledger differs from the authorized extension')
+        return
+    if dict(sequence=sequence, sha256=previous) != parent_head:
+        raise LimitExtensionError('Feedback ledger moved during extension activation')
+    extended = copy.deepcopy(state)
+    extended.setdefault('limit_extensions', []).append(copy.deepcopy(entry))
+    event = {'sequence': sequence + 1, 'previous': previous, 'event': 'FEEDBACK_LIMITS_EXTENDED', 'state': extended}
+    line = (json.dumps(dict(event, sha256=digest(event)), sort_keys=True) + '\n').encode()
+    if not line.startswith(raw[len(complete):]):
+        raise LimitExtensionError('Incomplete feedback history requires reconciliation')
+    journal = TaskJournal(ticket / 'feedback')
+    journal.load()
+    journal.append('FEEDBACK_LIMITS_EXTENDED', extended)
+
+
+def _complete(ticket, root, intent, fault):
     """Idempotent steps from the published intent; never repeats an effect."""
     parent_sha, envelope = intent['parent_envelope_sha256'], intent['new_envelope']
     new_sha = digest(envelope)
@@ -579,6 +697,9 @@ def _complete(root, intent, fault):
         elif tasks.get('attempt_limit') != attempts['new']:
             raise LimitExtensionError('Task attempt limit differs from the authorized extension')
     fault('scheduler_updated')
+    if intent['feedback_extension'] is not None:
+        _record_feedback(ticket, intent['feedback_extension'], intent['parent_feedback_journal'])
+    fault('feedback_recorded')
     _publish_mode(root, parent_sha, new_sha)
     fault('mode_published')
 
@@ -614,6 +735,10 @@ def activate(ticket, sha, *, clock=time.time, guard=lambda: None, fault=lambda p
         with contextlib.ExitStack() as stack:
             if (root / '03-dev/tasks').is_dir():
                 stack.enter_context(ticket_lock(root / '03-dev/tasks/scheduler.lock'))
+            if (ticket / 'feedback').is_dir() and not (ticket / 'feedback').is_symlink():
+                # No consultation or feedback ledger write runs during the activation.
+                stack.enter_context(ticket_lock(ticket / 'feedback/consultation.lock'))
+                stack.enter_context(ticket_lock(ticket / 'feedback/feedback.lock'))
             stack.enter_context(ticket_lock(root / 'limits/limits.lock'))
             pending = root / PENDING
             receipt_path = folder / 'receipt.json'
@@ -639,26 +764,35 @@ def activate(ticket, sha, *, clock=time.time, guard=lambda: None, fault=lambda p
             else:
                 guard()
                 now = clock()
-                # The expiry is checked here, at the first atomic activation, and
-                # nowhere later: a replay only completes these published effects.
                 if not now < authorization['expires_at']:
                     raise LimitExtensionError('The operator authorization expired before activation')
                 source = inspect(ticket, clock=clock)
                 if source['root'] != root:
                     raise LimitExtensionError('Selected generation changed')
                 validate(proposal, source, now)
-                envelope, counters, attempts = _extended(source, proposal, digest(authorization), sha)
+                envelope, counters, attempts, feedback = _extended(source, proposal, digest(authorization), sha)
                 intent = dict(schema_version=1, contract=CONTRACT, proposal_sha256=sha,
                               authorization_sha256=digest(authorization), generation=generation,
                               parent_envelope_sha256=digest(source['envelope']), new_envelope=envelope,
                               parent_limits_journal=source['limits_head'],
                               parent_scheduler_journal=source['scheduler_head'],
-                              deadline_at=counters['deadline_at'], attempt_limit=attempts, activated_at=now)
+                              feedback_extension=feedback,
+                              parent_feedback_journal=None if feedback is None else source['feedback']['journal'],
+                              deadline_at=counters['deadline_at'], attempt_limit=attempts)
                 fault('before_intent')
+                # The expiry is checked again immediately before the intent, the
+                # first atomic step, is published, and nowhere later: a replay
+                # only completes these published effects.
+                now = clock()
+                if not now < authorization['expires_at']:
+                    raise LimitExtensionError('The operator authorization expired before activation')
+                if proposal['operation'] == 'extend_deadline' and not proposal['deadline']['new_deadline_at'] > now:
+                    raise LimitExtensionError('The proposed deadline has already passed')
+                intent['activated_at'] = now
                 atomic_json(pending, intent)
                 replayed = False
             fault('intent_published')
-            _complete(root, intent, fault)
+            _complete(ticket, root, intent, fault)
             atomic_json(receipt_path, _receipt(intent))
             fault('receipt_written')
             _clear(pending)

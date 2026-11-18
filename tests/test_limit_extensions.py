@@ -3,6 +3,7 @@ import copy
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 
 from ssdlc_deadline_extensions import CAPABILITY as REPAIR_DEADLINE, LIMIT_CAPABILITY, accounting_anchor
@@ -14,7 +15,7 @@ from test_recovery_limits import policy
 
 
 POINTS = ('intent_published', 'policy_written', 'journal_appended', 'scheduler_updated',
-          'mode_published', 'receipt_written', 'pending_cleared')
+          'feedback_recorded', 'mode_published', 'receipt_written', 'pending_cleared')
 
 
 class Fault(Exception):
@@ -188,8 +189,8 @@ class ProposalValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(LimitExtensionError, 'stopped run'):
             self.f.propose()
         atomic_json(self.f.ticket / 'state.json', state)
-        (self.f.ticket / 'feedback').mkdir()
-        with self.assertRaisesRegex(LimitExtensionError, 'feedback recording ledger'):
+        (self.f.ticket / 'feedback').mkdir()  # A ledger without a complete authority.
+        with self.assertRaisesRegex(LimitExtensionError, 'feedback recording authority is incomplete'):
             self.f.propose()
 
 
@@ -271,6 +272,58 @@ class AuthorizationAndActivationTests(unittest.TestCase):
         tasks.append('ATTEMPT', state)
         with self.assertRaisesRegex(LimitExtensionError, 'changed since the proposal'):
             self.f.activate(sha)
+
+    def test_changed_run_inputs_are_refused(self):
+        plan = self.f.ticket / '02-design/plan.json'
+        plan.parent.mkdir(parents=True)
+        atomic_json(plan, {'ticket_id': 'T1', 'tasks': [{'task_id': 'T01', 'title': 'Original'}]})
+        atomic_json(self.f.ticket / '00-recon/quality-contract.json', {'checks': []})
+        sha = self.f.propose()
+        proposal = json.loads((self.f.ticket / 'limit-extensions' / sha / 'proposal.json').read_text())
+        inputs = proposal['parent']['inputs']
+        self.assertIsNotNone(inputs['02-design/plan.json'])
+        self.assertIsNone(inputs['02-design/adr.md'])  # Absent inputs are bound as absent.
+        state = json.loads((self.f.ticket / 'state.json').read_text())
+        edits = [
+            lambda: atomic_json(plan, {'ticket_id': 'T1', 'tasks': [{'task_id': 'T01', 'title': 'Changed'}]}),
+            lambda: atomic_json(self.f.ticket / '00-recon/quality-contract.json', {'checks': ['new']}),
+            lambda: (self.f.ticket / '01-po').mkdir() or (self.f.ticket / '01-po/requirements.md').write_text('New'),
+            lambda: atomic_json(self.f.ticket / 'state.json', dict(state, ledger=['changed'])),
+        ]
+        for index, edit in enumerate(edits):
+            with self.subTest(edit=index):
+                sha = self.f.propose()
+                self.f.approve(sha)
+                edit()
+                before = self.f.snapshot()
+                with self.assertRaisesRegex(LimitExtensionError, 'inputs or consumption changed since the proposal'):
+                    self.f.activate(sha)
+                self.assertEqual(self.f.snapshot(), before)
+                self.assertFalse((self.f.ticket / 'limits/extension-pending.json').exists())
+
+    def test_authorization_expiring_during_activation_checks_is_refused(self):
+        sha = self.f.propose()
+        self.f.approve(sha, expires=self.f.now + 5)
+        before = self.f.snapshot()
+        def late(point):
+            if point == 'before_intent':
+                self.f.now = 200  # The checks outlast the authorization.
+        with self.assertRaisesRegex(LimitExtensionError, 'expired before activation'):
+            self.f.activate(sha, fault=late)
+        self.assertEqual(self.f.snapshot(), before)
+        self.assertFalse((self.f.ticket / 'limits/extension-pending.json').exists())
+        self.assertNotEqual(status(self.f.ticket, clock=self.f.clock)['proposals'][0]['state'], 'ACTIVE')
+        # A proposed deadline that passes during the checks is refused too.
+        self.f.now = 100
+        sha = self.f.propose(self.f.request(operation='extend_deadline',
+                                            changes=[{'dimension': 'deadline_at', 'new': 1200}]))
+        self.f.approve(sha, expires=5000)
+        def slow(point):
+            if point == 'before_intent':
+                self.f.now = 1300
+        with self.assertRaisesRegex(LimitExtensionError, 'already passed'):
+            self.f.activate(sha, fault=slow)
+        self.assertEqual(self.f.snapshot(), before)
 
     def test_activation_extends_exactly_and_conserves_consumption(self):
         envelope, counters = self.f.load()
@@ -593,6 +646,206 @@ class ReconciledGenerationTests(unittest.TestCase):
         self.assertEqual(unwind(extended, root.name), envelope)
         self.assertEqual([e['generation'] for e in extended['binding']['limit_extensions']], [root.name] * 2)
         self.assertEqual(activate(ticket, first)['replayed'], True)
+
+    def test_changed_plan_of_the_selected_generation_is_refused(self):
+        ticket, root = reconciled(self)
+        request = dict(operation='extend_global_limit', cause='Exhausted estimate.', actor='operator',
+                       evidence=[{'description': 'limits inspect'}],
+                       changes=[{'dimension': 'cli_estimate_usd', 'new': 20}])
+        sha = propose(ticket, request)['proposal_sha256']
+        approve(ticket, sha, expires_at=time.time() + 600, actor='operator', source_fenced=True)
+        plan = json.loads((root / '02-design/plan.json').read_text())
+        plan['tasks'][0]['title'] = 'Changed after the proposal'
+        atomic_json(root / '02-design/plan.json', plan)
+        policy_bytes = (root / 'limits/policy.json').read_bytes()
+        with self.assertRaisesRegex(LimitExtensionError, 'inputs or consumption changed since the proposal'):
+            activate(ticket, sha)
+        self.assertEqual((root / 'limits/policy.json').read_bytes(), policy_bytes)
+
+
+def reconciled(case):
+    """A stopped selected I2 generation of the reconciliation fixture."""
+    import test_reconciliation as fixtures
+    from ssdlc_transitions import runtime_root
+    f = fixtures.ReconciliationTests()
+    f.setUp()
+    case.addCleanup(f.doCleanups)
+    f.select(f.stage())
+    root = runtime_root(f.target)
+    outer = json.loads((root / 'state.json').read_text())
+    atomic_json(root / 'state.json', dict(outer, status='FAILED'))
+    return f.target, root
+
+
+class FeedbackLedgerTests(unittest.TestCase):
+    """A selected generation with an existing feedback ledger keeps its authority across an extension."""
+    def build(self):
+        from ssdlc_controller import execution_contract
+        from ssdlc_feedback import FeedbackStore
+        self.ticket, self.root = reconciled(self)
+        self.envelope, self.counters = LimitsStore(self.root)._load(repair=False)
+        self.policy = dict(schema_version=1, capability='record-only-v1', ticket=self.ticket.name,
+                           source_binding_sha256='d' * 64, limits_sha256=digest(self.envelope),
+                           controller_sha256=digest(execution_contract(self.envelope['binding']['controller'])),
+                           allowed_files=['tests/test_extension.py'], max_requests=3, max_amendments=2,
+                           max_added_files=2, max_rounds=1, max_amendments_per_task=1,
+                           role_calls={'diagnosis': 1, 'planner': 1, 'reviewer': 1},
+                           expires_at=self.counters['deadline_at'], require_strong_independence=True)
+        self.store = FeedbackStore(self.ticket, clock=lambda: 1)
+        self.store.authorize(self.policy, dict(schema_version=1, policy_sha256=digest(self.policy),
+                                               authorized=True, source_fenced=True))
+        self.journal = self.ticket / 'feedback/task-journal.jsonl'
+
+    def setUp(self):
+        self.build()
+
+    def request(self, dimension='cli_estimate_usd', new=20, operation='extend_global_limit'):
+        return dict(operation=operation, cause='The reviewed generation exhausted its estimate.', actor='operator',
+                    evidence=[{'description': 'limits inspect'}], changes=[{'dimension': dimension, 'new': new}])
+
+    def extend(self, request=None, **kwargs):
+        sha = propose(self.ticket, request or self.request())['proposal_sha256']
+        approve(self.ticket, sha, expires_at=time.time() + 600, actor='operator', source_fenced=True)
+        activate(self.ticket, sha, **kwargs)
+        return sha
+
+    def consult(self):
+        """The consultation gate of the frozen recording authority."""
+        from ssdlc_feedback import FeedbackStore
+        from ssdlc_feedback_roles import FundedFeedbackRoles
+        return FundedFeedbackRoles(FeedbackStore(self.ticket), LimitsStore(self.root), guard=lambda: None)._authority()
+
+    def ledger(self, **changes):
+        """Append a synthetic ledger state (unresolved work) as the feedback store would."""
+        tasks = TaskJournal(self.ticket / 'feedback')
+        state = tasks.load()
+        state.update(copy.deepcopy(changes))
+        tasks.append('SYNTHETIC', state)
+
+    def test_monetary_extension_keeps_the_feedback_authority_and_replays_once(self):
+        from ssdlc_feedback_delegation import admitted
+        from ssdlc_limit_extensions import feedback_lineage
+        from ssdlc_transitions import TransitionStore
+        self.consult()
+        sha = propose(self.ticket, self.request())['proposal_sha256']
+        proposal = json.loads((self.ticket / 'limit-extensions' / sha / 'proposal.json').read_text())
+        self.assertEqual(proposal['parent']['feedback']['journal'], TaskJournal.head(self.journal))
+        self.assertEqual(proposal['parent']['feedback']['unresolved_requests'], [])
+        approve(self.ticket, sha, expires_at=time.time() + 600, actor='operator', source_fenced=True)
+        activate(self.ticket, sha)
+        envelope, counters = LimitsStore(self.root)._load(repair=False)
+        self.assertEqual(envelope['policy']['cli_estimate_usd'], 20)
+        self.assertEqual(counters['invocations'], self.counters['invocations'])
+        self.assertEqual(events(self.journal).count('FEEDBACK_LIMITS_EXTENDED'), 1)
+        authority, state = self.store._read()
+        self.assertEqual(authority['policy'], self.policy)  # Recording allowances and scope stay separate.
+        self.assertEqual(state['limit_extensions'], [dict(
+            contract=CONTRACT, proposal_sha256=sha, authorization_sha256=envelope['binding']['limit_extensions'][0][
+                'authorization_sha256'], generation=self.root.name, parent_limits_sha256=digest(self.envelope),
+            limits_sha256=digest(envelope), parent_profile_sha256=digest(self.envelope['policy']),
+            profile_sha256=digest(envelope['policy']))])
+        self.assertEqual(feedback_lineage(state, envelope), [
+            (digest(envelope), digest(envelope['policy'])),
+            (digest(self.envelope), digest(self.envelope['policy']))])
+        self.consult()  # The authority frozen on the parent envelope follows the recorded extension.
+        # An admitted generation bound to the parent envelope stays admitted.
+        projection = TransitionStore(self.ticket / 'execution').load()
+        admission = dict(limits_sha256=digest(self.envelope), profile_sha256=digest(self.envelope['policy']),
+                         projection_sha256=digest(projection))
+        source = dict(envelope=envelope, projection=projection)
+        self.assertTrue(admitted(dict(state, admitted_generations={projection['transition_id']: admission}), source))
+        self.assertFalse(admitted(dict(admitted_generations={projection['transition_id']: admission}), source))
+        # A replay confirms without writing the ledger again; a deadline then stacks on the lineage.
+        before = self.journal.read_bytes()
+        self.assertTrue(activate(self.ticket, sha)['replayed'])
+        self.assertEqual(self.journal.read_bytes(), before)
+        self.extend(self.request('deadline_at', counters['deadline_at'] + 3600, 'extend_deadline'))
+        state = self.store._read()[1]
+        self.assertEqual(len(feedback_lineage(state, LimitsStore(self.root)._load(repair=False)[0])), 3)
+        self.consult()
+
+    def test_ledger_rows_outside_the_bound_chain_are_ignored(self):
+        from ssdlc_limit_extensions import feedback_lineage
+        sha = self.extend()
+        envelope = LimitsStore(self.root)._load(repair=False)[0]
+        row = self.store._read()[1]['limit_extensions'][0]
+        forged = [dict(row, proposal_sha256='e' * 64), dict(row, contract='other-v1'),
+                  dict(row, limits_sha256='f' * 64)]
+        for value in forged:
+            with self.subTest(row=value):
+                self.assertEqual(len(feedback_lineage({'limit_extensions': [value]}, envelope)), 1)
+        self.assertEqual(row['proposal_sha256'], sha)
+        # Without the recorded row, the consultation gate refuses the parent-bound authority.
+        self.ledger(limit_extensions=[])
+        with self.assertRaisesRegex(TaskError, 'differs from frozen native authority'):
+            self.consult()
+
+    def test_unresolved_feedback_work_is_refused_or_listed(self):
+        from test_feedback import a
+        self.ledger(role_calls=[dict(operation_id='0' * 64, request_id='r1', role='planner',
+                                     actor=a('planner'), status='INTENT', reserved_at=1)])
+        with self.assertRaisesRegex(LimitExtensionError, 'Unknown feedback role outcome'):
+            propose(self.ticket, self.request())
+        waiting = dict(request_id='r1', status='REQUESTED', source_reconciliation_required=False, rounds=0,
+                       request={'cause': 'MISSING_TARGET'}, developer=a('developer'))
+        self.ledger(role_calls=[], requests={'r1': waiting})
+        with self.assertRaisesRegex(LimitExtensionError, 'still waits for a step bound to the current limits'):
+            propose(self.ticket, self.request())
+        # An operator-decision request is not converted: it is listed for the operator.
+        self.ledger(requests={'r1': dict(waiting, source_reconciliation_required=True)})
+        sha = propose(self.ticket, self.request())['proposal_sha256']
+        proposal = json.loads((self.ticket / 'limit-extensions' / sha / 'proposal.json').read_text())
+        self.assertEqual(proposal['parent']['feedback']['unresolved_requests'],
+                         [dict(request_id='r1', disposition='OPERATOR_DECISION')])
+        approve(self.ticket, sha, expires_at=time.time() + 600, actor='operator', source_fenced=True)
+        # The ledger moved after the proposal: the proposal is refused.
+        self.ledger()
+        policy_bytes = (self.root / 'limits/policy.json').read_bytes()
+        with self.assertRaisesRegex(LimitExtensionError, 'changed since the proposal'):
+            activate(self.ticket, sha)
+        self.assertEqual((self.root / 'limits/policy.json').read_bytes(), policy_bytes)
+
+    def test_interruptions_around_the_feedback_record_complete_exactly_once(self):
+        for point in ('scheduler_updated', 'feedback_recorded', 'mode_published', 'receipt_written'):
+            with self.subTest(point=point):
+                self.build()
+                def fail(name, point=point):
+                    if name == point:
+                        raise Fault(name)
+                with self.assertRaises(Fault):
+                    sha = self.extend(fault=fail)
+                sha = next(path.name for path in (self.ticket / 'limit-extensions').iterdir())
+                with self.assertRaisesRegex(TaskError, 'pending'):
+                    self.consult()
+                activate(self.ticket, sha)
+                activate(self.ticket, sha)
+                self.assertEqual(events(self.journal).count('FEEDBACK_LIMITS_EXTENDED'), 1)
+                self.consult()
+
+    def test_torn_feedback_record_is_recovered_and_a_foreign_tail_is_refused(self):
+        def stop(after):
+            def fail(name):
+                if name == after:
+                    raise Fault(name)
+            return fail
+        with self.assertRaises(Fault):
+            self.extend(fault=stop('feedback_recorded'))
+        sha = next(path.name for path in (self.ticket / 'limit-extensions').iterdir())
+        raw = self.journal.read_bytes()
+        last = raw[:-1].rfind(b'\n') + 1
+        self.journal.write_bytes(raw[:last + (len(raw) - last) // 2])  # A torn append of this very event.
+        activate(self.ticket, sha)
+        self.assertEqual(events(self.journal).count('FEEDBACK_LIMITS_EXTENDED'), 1)
+        self.assertTrue(list((self.ticket / 'feedback').glob('interrupted-tail-*.bin')))
+        self.consult()
+        self.build()
+        with self.assertRaises(Fault):
+            self.extend(fault=stop('scheduler_updated'))
+        sha = next(path.name for path in (self.ticket / 'limit-extensions').iterdir())
+        with self.journal.open('ab') as stream:
+            stream.write(b'{"foreign":')
+        with self.assertRaisesRegex(LimitExtensionError, 'Incomplete feedback history'):
+            activate(self.ticket, sha)
 
 
 if __name__ == '__main__':
