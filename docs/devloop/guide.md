@@ -665,6 +665,7 @@ check, and the `policy` marker of a level that cannot be reviewed or promoted. A
 | `receipt_conflict` | The [receipt of the PR](protocol.md#pr-receipt) contradicts the markers at its promotion | Yes |
 | `retry_limit`, `supervisor_escalated`, `supervisor_refused` | The supervisor's retries are spent, it handed the escalation over, or it gave a command the escalation does not admit | Yes |
 | `conclave_veto` | A trusted user annulled the latest decision of a [conclave](#conclave-on-a-block) with `/devloop veto` | Yes |
+| `uncertain_turn` | With `block_uncertain_turns` on, a turn refused because its work has [uncertain turns](protocol.md#turn-journal) a trusted user has not reconciled with `/devloop reconcile` | Yes |
 
 Any other class, or none (escalations written before #182), is critical.
 
@@ -808,6 +809,15 @@ above, `/devloop recheck` for a readiness check, the manual merge for an operato
 item stays in `agent:needs-operator`. A command from outside `trusted_users` and the supervisor's
 identity is only logged. The trace is the one of the supervisor's commands, under the title
 "Comando su un'escalation all'operatore".
+
+A turn left without an outcome, because devloop stopped while it ran, becomes `uncertain` in the
+[turn journal](protocol.md#turn-journal) and is never run again automatically. With
+`block_uncertain_turns = true` (off by default) it also refuses every new turn of the same issue
+and its PRs, with an escalation of class `uncertain_turn` that lists the turns. Only a trusted
+user reconciles them, with a comment whose first line is
+`/devloop reconcile <turn id> <returned|failed|not_dispatched>` and whose next lines give the
+reason, mandatory. The outcome is recorded once, also with the block off; then the step resumes
+as from any escalation to the operator.
 
 ## Who does what
 

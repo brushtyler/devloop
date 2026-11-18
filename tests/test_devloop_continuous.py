@@ -807,6 +807,11 @@ class ContinuousTickTests(unittest.TestCase):
     def test_the_turns_of_running_actions_are_not_flagged_incomplete(self):
         ledger = mock.Mock()
         ledger.pending.return_value = [9, 10]
+        # The journal (#362): a turn without outcome on each.
+        ledger.journal.turns.return_value = {
+            f'turn-{n}': {'turn': f'turn-{n}', 'number': n, 'outcome': None, 'kind': 'implement',
+                          'agent': 'claude', 'at': '2026-11-18T10:00:00Z'} for n in (9, 10)}
+        ledger.journal.waiting.return_value = []
         d = self.make(ledger=ledger)
         d.snapshot = lambda: Snapshot([], [ready(9)], [])
         checked = []
@@ -814,10 +819,13 @@ class ContinuousTickTests(unittest.TestCase):
         self.assertEqual(d.tick(), [Action('implement', 9)])
         checked.clear()
         ledger.settle.reset_mock()
+        ledger.journal.uncertain.reset_mock()
         d.snapshot = lambda: Snapshot([], [ready(9)], [9])
         self.assertEqual(d.tick(), [])
         self.assertEqual(checked, [10])
         ledger.settle.assert_called_once_with(10)
+        # Nor are they uncertain in the journal: only #10's turn is.
+        ledger.journal.uncertain.assert_called_once_with(10)
         self.release.set()
 
     def test_with_a_restart_pending_a_checked_issue_leaves_its_slot_to_a_check(self):

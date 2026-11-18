@@ -183,10 +183,11 @@ from .dispatch_merge import MergeMixin
 from .dispatch_preflight import PreflightMixin
 from .dispatch_supervision import SupervisionMixin, UntrustedChange
 from .github import GitHubError, author_login
-from .ledger import fix_register, open_turns
+from .journal import RECONCILE_COMMAND, TurnBlocked, blocked_text, reconcile_command
+from .ledger import comment_ref, fix_register, open_turns
 from .localtests import module_command, select_modules
-from .markdown import (RESUME, dispatcher_header, publishable, read_marker, render_cycle,
-                       render_escalation, render_operator_merge)
+from .markdown import (RESUME, carries_record, dispatcher_header, publishable, read_marker,
+                       render_cycle, render_escalation, render_operator_merge)
 from .activity import iso, restart_line
 from .pin import PREFIX, PinError, Repinned, SmokeError
 from .planning import (BASE_CHANGED, MERGE_LANE, MERGING, RESYNC_AFTER_APPROVAL, PullRequest,
@@ -201,7 +202,7 @@ from .ports import Backend, Tracker, summarize_checks
 from .review import (CI, OPERATOR, current_round, finding_commands, finding_key, open_findings,
                      owner_of, round_verdict)
 from .supervision import (ACCEPT_DEFAULTS, DECIDE, ISSUE_STEPS, RETRY, TOOL_FAILURE,
-                          supervisor_command)
+                          UNCERTAIN_TURN, supervisor_command)
 from .workspace import WorkspaceError
 
 LEVEL_LABEL_STYLE = ('5319e7', 'devloop: la PR richiede una review di livello 2')
@@ -537,6 +538,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         self.identities = identities
         self.activity = activity
         self.ledger = ledger  # bound to the dispatcher's signature (``ledger`` below)
+        # The issue of each devloop PR seen (#362, ``_work_issue``): its branch, checked against
+        # the dispatcher's marker (``_devloop_pr``).
+        self._issue_of = {}
         # The models found unavailable (``unavailability.Memory``, #151), or None: every turn
         # starts from the configured model.
         self.memory = memory
@@ -914,6 +918,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                     # Work of this PR restarted after a conclave (#142): the merge is human.
                     pr.merge_mode = 'off'
             prs.append(pr)
+        self._issue_of.update((pr.number, pr.issue) for pr in prs)
         ready = []
         pr_issues = {pr.issue for pr in prs}
         skip = set(self.cfg.blocked_labels) | {lb.working, lb.needs_supervisor}
@@ -1142,6 +1147,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         self._transition_labels(dry_run)
         snap = self.snapshot()
         self._flag_incomplete(snap, dry_run)
+        self._reconcile_turns(snap, dry_run)
         actions = plan(snap, self.cfg)
         prs = {pr.number: pr for pr in snap.prs}
         self.log(f'{"[dry-run] " if dry_run else ""}{pr_counts_line(snap, self.cfg)}')
@@ -1193,6 +1199,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         # A PR an implementation opened while it still runs belongs to it too.
         busy |= {number for number, issue in issue_of.items() if issue in busy}
         self._flag_incomplete(snap, False, busy)
+        self._reconcile_turns(snap, False)
         # A conclave that restarts an implementation (#142, ``Action.opens``) may open a PR too.
         reserved = sum(1 for action, _ in running
                        if action.kind in ('implement', 'preflight')
@@ -1462,7 +1469,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         lb = self.cfg.labels
         reason = f'Il passo `{action.kind}` è fallito: {_failure_text(exc)}{self._log_hint(exc)}'
         cls = (TOOL_FAILURE if isinstance(exc, AgentError)
-               else 'untrusted' if isinstance(exc, UntrustedChange) else 'failure')
+               else 'untrusted' if isinstance(exc, UntrustedChange)
+               else UNCERTAIN_TURN if isinstance(exc, TurnBlocked) else 'failure')
         number = pr.number if pr is not None else action.number
         remove = ([lb.review, lb.changes, lb.ready_to_merge] if pr is not None
                   else [lb.working, lb.ready])
@@ -1511,16 +1519,33 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
     def _open_turn(self, where, candidate, mode, label):
         """The ledger record of a turn about to start, or None without a ledger. A failed write
         raises ``GitHubError``: the turn does not start. ``where``: ``(number, kind)``, with the
-        round of a review turn (#325) or the ``FixRegister`` of a fix turn (#355) after them."""
+        round of a review turn (#325) or the ``FixRegister`` of a fix turn (#355) after them.
+
+        With ``block_uncertain_turns`` (#362) a turn of a work, the issue and its PRs, with
+        uncertain turns not reconciled is refused before its intent (``TurnBlocked``): the step
+        escalates to the operator."""
         if self.ledger is None or where is None:
             return None
         number, kind, *place = where
         fix = fix_register(where)
+        issue = self._work_issue(number)
+        if self.cfg.block_uncertain_turns:
+            held = self.ledger.journal.blocking(self.cfg.repo, issue, number)
+            if held:
+                self.log(f'  turn refused on #{number}: uncertain turns of issue #{issue} not '
+                         'reconciled: ' + ', '.join(t['turn'] for t in held))
+                raise TurnBlocked(blocked_text(issue, held), held)
         return self.ledger.open_turn(
             number, kind=kind, agent=candidate.key, identity=self._app_login(candidate.key),
             mode=mode, model=candidate.model, effort=candidate.effort,
             fallback_for=candidate.fallback_for, label=label,
-            round_no=place[0] if place and fix is None else None, register=fix)
+            round_no=place[0] if place and fix is None else None, register=fix,
+            issue=issue, repo=self.cfg.repo)
+
+    def _work_issue(self, number):
+        """The issue of the work of ``number`` (#362): the issue of a devloop PR, else
+        ``number`` itself."""
+        return self._issue_of.get(number, number)
 
     def _close_turn(self, entry, outcome, error=None):
         """Close a turn's record with what the CLI attested and the last command its output
@@ -1649,7 +1674,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         was escalated, a PR in ``agent:needs-operator``. Then, in case that trace was lost, open
         devloop PRs that devloop still works on (``operator_held``), issues in
         ``agent:working`` and issues waiting for a readiness check. A number leaves the trace
-        once checked."""
+        once checked.
+
+        In the journal (#362), before reading GitHub, every turn left without an outcome on a
+        traced number becomes ``uncertain``, logged with its id: it is never run again
+        automatically, and with ``block_uncertain_turns`` it blocks the work until a trusted
+        user reconciles it (``_reconcile_turns``)."""
         if self.ledger is None:
             return
         lb = self.cfg.labels
@@ -1658,6 +1688,20 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         except GitHubError as exc:
             self.log(f'  trace of the open turns not readable: {exc}')
             traced = []
+        journal = self.ledger.journal
+        for number in traced:
+            if number in busy:
+                continue
+            try:
+                left = [t for t in journal.turns().values()
+                        if t['number'] == number and t['outcome'] is None]
+                for turn in left:
+                    self.log(f'uncertain turn {turn["turn"]} on #{number}: {turn["kind"]} by '
+                             f'{turn["agent"]}, started {turn["at"]}, no outcome recorded')
+                if left and not dry_run:
+                    journal.uncertain(number)
+            except GitHubError as exc:
+                self.log(f'  turns of #{number} not marked uncertain: {exc}')
         numbers = list(traced)
         numbers += [pr.number for pr in snap.prs if not operator_held(pr, lb)]
         numbers += list(snap.working_issues)
@@ -1676,6 +1720,75 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                     self.ledger.settle(number)
             except GitHubError as exc:
                 self.log(f'  turn records of #{number} not checked: {exc}')
+
+    def _reconcile_turns(self, snap, dry_run):
+        """Apply the ``/devloop reconcile`` commands of trusted users (#362) to the uncertain
+        turns not reconciled yet, whether or not ``block_uncertain_turns`` is on. They are read
+        on the issue or PR of each such turn, on the issue of its work and on that issue's open
+        PRs. A command of anyone else is ignored and logged; one that does not apply is
+        refused and answered once."""
+        if self.ledger is None:
+            return
+        journal = self.ledger.journal
+        try:
+            waiting = journal.waiting()
+        except GitHubError as exc:
+            self.log(f'  journal of the turns not readable: {exc}')
+            return
+        numbers = []
+        for turn in waiting:
+            issue = turn['issue'] if turn.get('issue') is not None else self._work_issue(
+                turn['number'])
+            numbers += [turn['number'], issue] + [pr.number for pr in snap.prs
+                                                  if pr.issue == issue]
+        for number in dict.fromkeys(numbers):
+            try:
+                for comment in self.gh.issue_comments(number):
+                    self._reconcile_comment(number, comment, dry_run)
+            except GitHubError as exc:
+                self.log(f'  reconciliations on #{number} not checked: {exc}')
+
+    def _reconcile_comment(self, number, comment, dry_run):
+        """Apply the ``/devloop reconcile`` command of ``comment`` on ``number``, if any."""
+        body = comment.get('body') or ''
+        if comment.get('native') or carries_record(body):
+            return
+        command = reconcile_command(body)
+        ident = comment_ref(comment)
+        if command is None or not isinstance(ident, int) or isinstance(ident, bool):
+            return
+        journal = self.ledger.journal
+        if journal.handled(ident):
+            return
+        login = (comment.get('author') or {}).get('login')
+        if login not in self.cfg.trusted_users:
+            self.log(f'  #{number}: ignored `{RECONCILE_COMMAND}` by {login}: the author is not '
+                     'a trusted user')
+            return
+        turn, outcome, note = command
+        try:
+            if turn is None:
+                raise ValueError('la prima riga deve essere `/devloop reconcile <turno> <esito>`, '
+                                 'con l\'id di un turno come lo riporta l\'escalation')
+            if outcome is None:
+                raise ValueError('esito mancante o non ammesso: usare `returned`, `failed` o '
+                                 '`not_dispatched`')
+            if dry_run:
+                self.log(f'[dry-run] #{number}: {login} reconciles {turn} as {outcome}')
+                return
+            applied = journal.reconcile(turn, outcome, by=login, comment=ident, note=note)
+        except ValueError as exc:
+            self.log(f'  #{number}: `{RECONCILE_COMMAND}` of comment {ident} by {login} refused: '
+                     f'{exc}')
+            if not dry_run:
+                journal.refuse(ident, login, turn, str(exc))
+                self.gh.comment(number, publishable(
+                    dispatcher_header() + '\n## Riconciliazione non applicata\n\n'
+                    f'Il comando `{RECONCILE_COMMAND}` del commento {ident} di `{login}` non è '
+                    f'stato applicato: {exc}.'))
+            return
+        self.log(f'  #{number}: {turn} reconciled as {outcome} by {login} (comment {ident})'
+                 if applied else f'  #{number}: {turn} already reconciled as {outcome}')
 
     def _permission_denied(self, candidate, exc, retry):
         """Log an agy turn stopped on a denied permission (``PermissionDenied``, #180) with the

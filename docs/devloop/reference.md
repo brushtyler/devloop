@@ -28,6 +28,10 @@ and `agent_stall_action` (`"warn"`, the default, or `"abort"`) control the
 open PRs in progress and those waiting for a person ([Open PR limits](guide.md#open-pr-limits)).
 `ci_rerun_unrelated` (a boolean, default `true`) re-runs once a CI failure in test modules not
 pertinent to the PR ([CI failures not pertinent to the PR](#ci-failures-not-pertinent-to-the-pr));
+another value stops devloop at startup. `block_uncertain_turns` (a boolean, default `false`)
+turns on the block on uncertain turns of the [turn journal](protocol.md#turn-journal) (#362): a
+turn left without outcome refuses every new turn of its work, with an escalation, until a trusted
+user reconciles it with `/devloop reconcile`. Off, the journal records the turns all the same;
 another value stops devloop at startup.
 `[merge]` (`mode`, `levels`, `operator_only_paths`) and `roles.supervisor` set the
 [merge modes](guide.md#merge-modes); an unknown mode, level or key stops devloop at startup.

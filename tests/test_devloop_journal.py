@@ -1,0 +1,425 @@
+"""devloop: the durable journal of the turns' intents and outcomes (#362, ADR 0004, P2-2)."""
+
+import dataclasses
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from devloop import journal as journal_mod
+from devloop import markdown
+from devloop.config import ConfigError, load_config, parse_config, load_data
+from devloop.dispatcher import Dispatcher
+from devloop.github import GitHubError
+from devloop.journal import (JOURNAL, LEGACY, SNAPSHOT, JournalError, TurnJournal,
+                             reconcile_command)
+from devloop.ledger import Ledger
+from devloop.planning import Action, Snapshot
+from test_devloop import CFG, REV, implemented, pr, raw_review
+from test_devloop_ledger import LedgerGH, ReportingRunner, TreeWS
+
+EMPTY = Snapshot(prs=[], ready_issues=[], working_issues=[])
+BLOCKING = dataclasses.replace(CFG, block_uncertain_turns=True)
+
+
+def intent(j, number=7, issue=7, kind='implement'):
+    return j.intent(number, issue=issue, repo=CFG.repo, kind=kind, agent='claude', model='m',
+                    label=f'issue-{number}-{kind}-1')
+
+
+def lines(path):
+    return path.read_bytes().splitlines()
+
+
+class Crash(Exception):
+    """The dispatcher stops while a CLI runs."""
+
+
+class JournalChainTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.path = self.dir / JOURNAL
+
+    def test_each_record_carries_the_hash_of_the_previous_one(self):
+        j = TurnJournal(self.dir)
+        turn = intent(j)
+        j.outcome(turn, 'returned')
+        first, second = [json.loads(line) for line in lines(self.path)]
+        self.assertEqual((first['sequence'], first['previous']), (1, ''))
+        self.assertEqual((second['sequence'], second['previous']), (2, first['sha256']))
+        self.assertEqual(second['sha256'], journal_mod.digest(
+            {k: v for k, v in second.items() if k != 'sha256'}))
+        # Read again by a new process: the same turn, with its outcome.
+        self.assertEqual(TurnJournal(self.dir).turns()[turn]['outcome'], 'returned')
+        snapshot = json.loads((self.dir / SNAPSHOT).read_text())
+        self.assertEqual(snapshot, {'sequence': 2, 'sha256': second['sha256']})
+
+    def test_a_hash_that_does_not_match_is_an_explicit_error(self):
+        j = TurnJournal(self.dir)
+        intent(j)
+        intent(j, number=8, issue=8)
+        records = [json.loads(line) for line in lines(self.path)]
+        for name, index in (('a record before the last', 0), ('the last record', 1)):
+            with self.subTest(name):
+                altered = [dict(r) for r in records]
+                altered[index]['data'] = dict(altered[index]['data'], number=99)
+                self.path.write_text(''.join(json.dumps(r) + '\n' for r in altered))
+                with self.assertRaisesRegex(JournalError, 'hash chain breaks at line'):
+                    TurnJournal(self.dir).turns()
+                # Nothing is set aside nor cut: the error is not ignored.
+                self.assertEqual(len(lines(self.path)), 2)
+                self.assertEqual(list(self.dir.glob('turn-journal-tail-*')), [])
+
+    def test_an_unreadable_record_before_the_last_is_an_error(self):
+        j = TurnJournal(self.dir)
+        intent(j)
+        intent(j, number=8, issue=8)
+        good = lines(self.path)
+        self.path.write_bytes(b'{not json\n' + good[1] + b'\n')
+        with self.assertRaisesRegex(JournalError, 'line 1 is not a record'):
+            TurnJournal(self.dir).turns()
+
+    def test_a_truncated_or_corrupt_last_record_is_set_aside_and_the_valid_ones_stay(self):
+        for name, tail in (('truncated, no newline', b'{"sequence": 3, "prev'),
+                           ('corrupt, with its newline', b'\x00garbage\n')):
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                folder = Path(tmp)
+                j = TurnJournal(folder)
+                first = intent(j)
+                j.outcome(first, 'failed')
+                path = folder / JOURNAL
+                good = path.read_bytes()
+                path.write_bytes(good + tail)
+                again = TurnJournal(folder)
+                self.assertEqual(again.turns()[first]['outcome'], 'failed')
+                self.assertEqual(path.read_bytes(), good)  # cut off, records kept
+                (aside,) = folder.glob('turn-journal-tail-*.bin')
+                self.assertEqual(aside.read_bytes(), tail)
+                # The chain goes on from the last valid record.
+                second = intent(again, number=8, issue=8)
+                self.assertIn(second, TurnJournal(folder).turns())
+
+    def test_a_snapshot_without_its_journal_is_refused(self):
+        j = TurnJournal(self.dir)
+        intent(j)
+        self.path.unlink()
+        with self.assertRaisesRegex(JournalError, 'refused without its journal'):
+            TurnJournal(self.dir).turns()
+        # An empty journal is no better.
+        self.path.write_bytes(b'')
+        with self.assertRaisesRegex(JournalError, 'refused without its journal'):
+            TurnJournal(self.dir).turns()
+
+    def test_a_journal_behind_its_snapshot_is_refused(self):
+        j = TurnJournal(self.dir)
+        intent(j)
+        kept = self.path.read_bytes()
+        intent(j, number=8, issue=8)
+        self.path.write_bytes(kept)  # rolled back to an older copy
+        with self.assertRaisesRegex(JournalError, 'does not reach its snapshot'):
+            TurnJournal(self.dir).turns()
+
+    def test_a_record_that_cannot_be_made_durable_is_an_error(self):
+        j = TurnJournal(self.dir)
+        first = intent(j)
+        with mock.patch.object(journal_mod.os, 'fsync', side_effect=OSError('EIO')):
+            with self.assertRaisesRegex(JournalError, 'intent not written'):
+                intent(j, number=8, issue=8)
+        self.assertEqual(list(j.turns()), [first])
+        # The line written in part is cut back: the chain goes on, valid.
+        second = intent(j, number=9, issue=9)
+        self.assertEqual(list(TurnJournal(self.dir).turns()), [first, second])
+
+    def test_an_outcome_is_recorded_once(self):
+        j = TurnJournal()
+        turn = intent(j)
+        j.outcome(turn, 'returned')
+        with self.assertRaisesRegex(JournalError, 'already has outcome'):
+            j.outcome(turn, 'failed')
+        with self.assertRaises(ValueError):
+            j.outcome(intent(j), 'success')  # not an outcome of the journal
+
+
+class MigrationTests(unittest.TestCase):
+    def test_the_old_trace_is_imported_once_as_uncertain_legacy_turns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / LEGACY).write_text(json.dumps({'7': 2, '100': 1, 'x': 3, '8': 0}))
+            j = TurnJournal(folder)
+            turns = j.turns()
+            legacy = sorted((t['number'], t['legacy'], t['outcome']) for t in turns.values())
+            # Number and count, explicitly uncertain; no outcome made up.
+            self.assertEqual(legacy, [(7, 2, 'uncertain'), (100, 1, 'uncertain')])
+            self.assertTrue(all(t['turn'].startswith(f'legacy-{t["number"]}-')
+                                for t in turns.values()))
+            self.assertFalse((folder / LEGACY).exists())
+            self.assertEqual(sorted(j.pending()), [7, 100])
+            # Once: a file that comes back is not imported again.
+            (folder / LEGACY).write_text(json.dumps({'9': 1}))
+            again = TurnJournal(folder)
+            self.assertEqual(sorted(t['number'] for t in again.turns().values()), [7, 100])
+            self.assertFalse((folder / LEGACY).exists())
+            events = [json.loads(line)['event'] for line in lines(folder / JOURNAL)]
+            self.assertEqual(events, ['migrated'])
+
+    def test_an_unreadable_old_trace_stops_the_turn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / LEGACY).write_text('[1, 2]')
+            with self.assertRaisesRegex(JournalError, 'not a JSON object'):
+                TurnJournal(tmp).turns()
+            self.assertTrue((Path(tmp) / LEGACY).exists())
+
+
+class ReconcileCommandTests(unittest.TestCase):
+    def test_the_command_and_its_note(self):
+        header = '> [!NOTE]\n> **Agent:** x\n\n'
+        self.assertEqual(
+            reconcile_command(header + '/devloop reconcile turn-3-0a1b2c3d failed\n'
+                                       'Il processo è stato ucciso prima di pushare.\n'),
+            ('turn-3-0a1b2c3d', 'failed', 'Il processo è stato ucciso prima di pushare.'))
+        self.assertEqual(reconcile_command('/devloop reconcile legacy-7-0a1b2c3d returned'),
+                         ('legacy-7-0a1b2c3d', 'returned', None))  # no note: malformed
+        self.assertEqual(reconcile_command('/devloop reconcile turn-3-0a1b2c3d uncertain\nn'),
+                         ('turn-3-0a1b2c3d', None, 'n'))
+        self.assertEqual(reconcile_command('/devloop reconcile turn-3 returned\nn'),
+                         (None, 'returned', 'n'))
+        self.assertEqual(reconcile_command('/devloop reconcile turn-3-0a1b2c3d returned why\nn'),
+                         (None, None, 'n'))
+        self.assertIsNone(reconcile_command('/devloop retry'))
+        self.assertIsNone(reconcile_command('text\n/devloop reconcile turn-3-0a1b2c3d failed'))
+
+    def test_one_reconciliation_per_turn_and_never_of_a_turn_not_uncertain(self):
+        j = TurnJournal()
+        turn = intent(j)
+        with self.assertRaisesRegex(ValueError, 'non è incerto'):
+            j.reconcile(turn, 'failed', by='brushtyler', comment=1, note='n')
+        j.uncertain(7)
+        with self.assertRaisesRegex(ValueError, 'nota'):
+            j.reconcile(turn, 'failed', by='brushtyler', comment=1, note='  ')
+        with self.assertRaisesRegex(ValueError, 'non ammesso'):
+            j.reconcile(turn, 'uncertain', by='brushtyler', comment=1, note='n')
+        self.assertTrue(j.reconcile(turn, 'failed', by='brushtyler', comment=1, note='n'))
+        self.assertFalse(j.reconcile(turn, 'failed', by='brushtyler', comment=2, note='n'))
+        with self.assertRaisesRegex(ValueError, 'esito diverso è rifiutato'):
+            j.reconcile(turn, 'returned', by='brushtyler', comment=3, note='n')
+        done = j.turns()[turn]['reconciled']
+        self.assertEqual((done['outcome'], done['by'], done['comment'], done['note']),
+                         ('failed', 'brushtyler', 1, 'n'))
+        self.assertRegex(done['at'], r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
+        # Still counted: the turn keeps its intent and its uncertain outcome.
+        self.assertEqual(j.turns()[turn]['outcome'], 'uncertain')
+        with self.assertRaisesRegex(ValueError, 'non è nel journal'):
+            j.reconcile('turn-99-0a1b2c3d', 'failed', by='brushtyler', comment=4, note='n')
+
+
+class DispatcherJournalTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state = Path(self.tmp.name)
+
+    def make(self, *outputs, cfg=CFG, number=7):
+        self.gh = LedgerGH()
+        self.ws = TreeWS()
+        self.runner = ReportingRunner(*outputs, gh=self.gh, number=number)
+        self.logs = []
+        return Dispatcher(cfg, self.gh, self.ws, self.runner, log=self.logs.append,
+                          ledger=Ledger(self.gh, state_dir=self.state))
+
+    def journal(self):
+        return TurnJournal(self.state)
+
+    def escalations(self, number):
+        found = [markdown.read_marker(c['body'], 'notice') for c in self.gh.thread.get(number, [])]
+        return [n for n in found if n and n.get('event') == 'escalation']
+
+    def crashed_implementation(self, cfg=CFG):
+        """An implementation on issue 7 whose dispatcher stopped while the CLI ran, and the
+        dispatcher started again; returns it after its first tick checked the turn."""
+        d = self.make(Crash('dispatcher killed'))
+        with self.assertRaises(Crash):
+            d._do_implement(7)
+        # The same repository, a new process.
+        self.runner = ReportingRunner(raw_review(), gh=self.gh, number=100)
+        restarted = Dispatcher(cfg, self.gh, self.ws, self.runner, log=self.logs.append,
+                               ledger=Ledger(self.gh, state_dir=self.state))
+        restarted._flag_incomplete(EMPTY, dry_run=False)
+        return restarted
+
+    def test_the_intent_is_durable_before_the_cli_starts(self):
+        seen = []
+        d = self.make(implemented())
+        run = self.runner.run
+
+        def check(*args):
+            # What a new process would read now, while the CLI runs.
+            seen.append([(t['kind'], t['number'], t['outcome'])
+                         for t in TurnJournal(self.state).turns().values()])
+            return run(*args)
+        self.runner.run = check
+        d._do_implement(7)
+        self.assertEqual(seen, [[('implement', 7, None)]])
+        (turn,) = self.journal().turns().values()
+        self.assertEqual((turn['outcome'], turn['issue'], turn['repo'], turn['agent']),
+                         ('returned', 7, CFG.repo, CFG.implementer))
+
+    def test_a_turn_does_not_start_if_its_intent_cannot_be_written(self):
+        d = self.make(raw_review(), number=100)
+        with mock.patch.object(journal_mod.os, 'fsync', side_effect=OSError('EIO')):
+            with self.assertRaises(GitHubError):
+                d._do_review(pr())
+        self.assertEqual(self.runner.calls, [])
+        self.assertEqual(self.gh.records(100, 'turn'), [])
+
+    def test_a_turn_whose_record_cannot_be_written_is_not_dispatched(self):
+        d = self.make(raw_review(), number=100)
+        self.gh.fail = lambda body: markdown.read_marker(body, 'ledger') is not None
+        with self.assertRaises(GitHubError):
+            d._do_review(pr())
+        self.assertEqual(self.runner.calls, [])
+        (turn,) = self.journal().turns().values()
+        self.assertEqual(turn['outcome'], 'not_dispatched')
+
+    def test_failed_turns_are_failed_in_the_journal(self):
+        from devloop.agents import AgentError
+        d = self.make(AgentError('codex exited with 1'), number=100)
+        with self.assertRaises(AgentError):
+            d._do_review(pr())
+        (turn,) = self.journal().turns().values()
+        self.assertEqual((turn['kind'], turn['outcome']), ('review', 'failed'))
+
+    def test_the_ledger_on_github_keeps_its_format(self):
+        d = self.make(implemented())
+        d._do_implement(7)
+        (record,) = self.gh.records(7, 'turn')
+        self.assertEqual(set(record), {
+            'type', 'state', 'kind', 'agent', 'identity', 'mode', 'model', 'effort',
+            'fallback_for', 'model_real', 'label', 'started_at', 'ended_at', 'duration_ms',
+            'outcome', 'error', 'telemetry'})
+        self.assertNotIn('turn-', self.gh.thread[7][-1]['body'])
+
+    def test_an_interrupted_turn_becomes_uncertain_and_is_never_retried(self):
+        d = self.crashed_implementation()
+        (turn,) = self.journal().turns().values()
+        self.assertEqual(turn['outcome'], 'uncertain')
+        self.assertTrue(any(f'uncertain turn {turn["turn"]} on #7' in m for m in self.logs))
+        self.assertEqual(self.gh.records(7, 'turn')[0]['state'], 'incomplete')
+        self.assertEqual(self.journal().pending(), [])
+        # Without the block the work goes on as before: a new turn of issue 7's PR runs.
+        p = pr()
+        self.gh.labels[100] = set(p.labels)
+        d._issue_of[100] = 7
+        d._do_review(p)
+        self.assertEqual(len(self.runner.calls), 1)
+
+    def test_with_the_block_a_new_turn_of_the_same_work_is_refused_with_an_escalation(self):
+        d = self.crashed_implementation(cfg=BLOCKING)
+        (uncertain,) = self.journal().turns().values()
+        p = pr()  # the PR of issue 7, as the snapshot recognises it by its branch and marker
+        self.gh.labels[100] = set(p.labels)
+        d._issue_of[100] = 7
+        error = d._run_action(Action('review', 100), {100: p})
+        self.assertIsInstance(error, journal_mod.TurnBlocked)
+        self.assertEqual(self.runner.calls, [])  # no CLI, no record, no intent
+        self.assertEqual(self.gh.records(100, 'turn'), [])
+        self.assertEqual(list(self.journal().turns()), [uncertain['turn']])
+        (escalation,) = self.escalations(100)
+        self.assertEqual(escalation['class'], 'uncertain_turn')
+        body = self.gh.thread[100][-1]['body']
+        self.assertIn(uncertain['turn'], body)
+        self.assertIn('/devloop reconcile', body)
+        self.assertIn('agent:needs-operator', self.gh.labels[100])
+        # Another work is not blocked.
+        other = pr(number=101, issue=8)
+        self.gh.labels[101] = set(other.labels)
+        d._issue_of[101] = 8
+        self.runner.number = 101
+        d._do_review(other)
+        self.assertEqual(len(self.runner.calls), 1)
+
+    def test_with_the_block_legacy_turns_block_their_number(self):
+        (self.state / LEGACY).write_text(json.dumps({'7': 1}))
+        d = self.make(implemented(), cfg=BLOCKING)
+        with self.assertRaises(journal_mod.TurnBlocked) as caught:
+            d._do_implement(7)
+        self.assertRegex(caught.exception.turns[0]['turn'], r'^legacy-7-[0-9a-f]{8}$')
+        self.assertEqual(self.runner.calls, [])
+
+    def test_without_the_block_legacy_turns_are_checked_as_before(self):
+        (self.state / LEGACY).write_text(json.dumps({'100': 1}))
+        d = self.make(number=100)
+        self.gh.comment(100, markdown.publishable('x', 'ledger', {
+            'type': 'turn', 'state': 'open', 'kind': 'review', 'agent': REV,
+            'started_at': '2026-11-18T10:00:00Z'}))
+        self.assertEqual(d.ledger.pending(), [100])
+        d._flag_incomplete(EMPTY, dry_run=False)
+        self.assertEqual(self.gh.records(100, 'turn')[0]['state'], 'incomplete')
+        self.assertEqual(d.ledger.pending(), [])
+
+    def reconcile(self, number, body, login='brushtyler'):
+        self.gh.comment(number, body)
+        self.gh.thread[number][-1]['author'] = {'login': login}
+        return self.gh.thread[number][-1]['id']
+
+    def test_reconcile_only_by_a_trusted_user_once_with_its_note(self):
+        d = self.crashed_implementation(cfg=BLOCKING)
+        (turn,) = self.journal().turns()
+        command = f'/devloop reconcile {turn} failed'
+        # Neither an agent's app nor a stranger.
+        for login in ('brushtyler-devloop-claude-agent[bot]', 'stranger'):
+            self.reconcile(7, command + '\nNota.', login=login)
+        # A trusted user without the note: refused, answered once.
+        self.reconcile(7, command)
+        snap = Snapshot(prs=[pr()], ready_issues=[], working_issues=[])
+        d._reconcile_turns(snap, dry_run=False)
+        d._reconcile_turns(snap, dry_run=False)
+        self.assertIsNone(self.journal().turns()[turn]['reconciled'])
+        answers = [c for c in self.gh.thread[7] if 'Riconciliazione non applicata' in c['body']]
+        self.assertEqual(len(answers), 1)
+        self.assertIn('nota', answers[0]['body'])
+        self.assertTrue(any('ignored `/devloop reconcile` by stranger' in m for m in self.logs))
+        # On the PR of the same work: applied, then a different outcome is refused.
+        applied = self.reconcile(100, command + '\nIl processo è stato ucciso dopo il push.')
+        self.reconcile(100, f'/devloop reconcile {turn} returned\nAnzi no.')
+        d._reconcile_turns(snap, dry_run=False)
+        done = self.journal().turns()[turn]['reconciled']
+        self.assertEqual((done['outcome'], done['by'], done['comment'], done['note']),
+                         ('failed', 'brushtyler', applied,
+                          'Il processo è stato ucciso dopo il push.'))
+        refused = [c for c in self.gh.thread[100] if 'Riconciliazione non applicata' in c['body']]
+        self.assertEqual(len(refused), 1)
+        self.assertIn('esito diverso è rifiutato', refused[0]['body'])
+        # Reconciled: the work runs again, and the turn stays counted.
+        p = pr()
+        self.gh.labels[100] = set(p.labels)
+        d._issue_of[100] = 7
+        d._do_review(p)
+        self.assertEqual(len(self.runner.calls), 1)
+        self.assertEqual(self.journal().turns()[turn]['outcome'], 'uncertain')
+
+    def test_reconcile_records_the_outcome_with_the_block_off(self):
+        d = self.crashed_implementation()
+        (turn,) = self.journal().turns()
+        self.reconcile(7, f'/devloop reconcile {turn} not_dispatched\nMai partito.')
+        d._reconcile_turns(EMPTY, dry_run=True)
+        self.assertIsNone(self.journal().turns()[turn]['reconciled'])
+        d._reconcile_turns(EMPTY, dry_run=False)
+        self.assertEqual(self.journal().turns()[turn]['reconciled']['outcome'], 'not_dispatched')
+
+
+class ConfigTests(unittest.TestCase):
+    def test_the_block_is_off_by_default(self):
+        self.assertFalse(load_config().block_uncertain_turns)
+        data = load_data()
+        data.pop('block_uncertain_turns', None)
+        self.assertFalse(parse_config(data).block_uncertain_turns)
+        self.assertTrue(parse_config(dict(data, block_uncertain_turns=True)).block_uncertain_turns)
+        with self.assertRaises(ConfigError):
+            parse_config(dict(data, block_uncertain_turns='yes'))
+
+
+if __name__ == '__main__':
+    unittest.main()
