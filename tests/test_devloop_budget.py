@@ -7,10 +7,11 @@ import math
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from core import budget as core
-from devloop import agents, budget, markdown, supervision
-from devloop.budget import BudgetRefused
+from devloop import agents, budget, config, markdown, supervision
+from devloop.budget import ROLE_NOT_IN_ENVELOPE, BudgetRefused
 from devloop.config import BudgetPolicy, ConfigError, load_config, load_data, parse_config
 from devloop.dispatch_actions import Models
 from devloop.dispatcher import Dispatcher
@@ -28,8 +29,17 @@ ENVELOPE = {
     'cli_estimate_usd': 5,
     'role_turns': {'implement': 3, 'fix': 3, 'review': 3, 'sync': 3},
     'phase_turns': {'implementation': 10},
-    'usage': {'codex': dict(RULE), 'agy': dict(RULE)}}
+    'usage': {'claude': dict(RULE), 'codex': dict(RULE), 'agy': dict(RULE)}}
 START = 1_800_000_000  # 2027-01-15T08:00:00Z
+
+
+def setUpModule():
+    # #396: turning the budget on is refused while a story at its limit has no extension
+    # (grant-budget, ADR 0005). The tests of the envelope run as if it existed; those of the
+    # refusal turn it off again (``BudgetActivationTests``).
+    patcher = mock.patch.object(config, 'BUDGET_EXTENSION', True)
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
 
 
 def envelope(**changes):
@@ -73,7 +83,7 @@ class BudgetConfigTests(unittest.TestCase):
         self.assertEqual(dict(policy.phase_turns), {'implementation': 10})
         self.assertEqual(policy.rule('codex'), RULE)
         self.assertEqual(policy.rule('agy'), RULE)
-        self.assertIsNone(policy.rule('claude'))  # claude reports its own (estimated) cost
+        self.assertEqual(policy.rule('claude'), RULE)  # required too (#396)
 
     def test_a_missing_value_with_the_budget_on_refuses_the_configuration(self):
         cases = {key: envelope(**{key: None})
@@ -82,7 +92,9 @@ class BudgetConfigTests(unittest.TestCase):
             cases[f'role {role}'] = envelope(role_turns={
                 k: v for k, v in ENVELOPE['role_turns'].items() if k != role})
         cases['phase'] = envelope(phase_turns={})
-        for agent in ('codex', 'agy'):  # their CLI reports no cost: a rule is required
+        # codex and agy report no cost; claude only when its turn completes (#396): a rule is
+        # required for each.
+        for agent in ('codex', 'agy', 'claude'):
             cases[f'rule of {agent}'] = envelope(usage={
                 k: v for k, v in ENVELOPE['usage'].items() if k != agent})
         cases['reserve without a dollar kind'] = envelope(usage=dict(
@@ -128,7 +140,8 @@ class BudgetConfigTests(unittest.TestCase):
                              '[budget.role_turns]\nimplement = 1\nfix = 1\nreview = 1\n'
                              'sync = 1\n[budget.phase_turns]\nimplementation = 4\n'
                              '[budget.usage.codex]\nmodel = "unmetered_quota"\nreason = "r"\n'
-                             '[budget.usage.agy]\nmodel = "unmetered_quota"\nreason = "r"\n')
+                             '[budget.usage.agy]\nmodel = "unmetered_quota"\nreason = "r"\n'
+                             '[budget.usage.claude]\nmodel = "unmetered_quota"\nreason = "r"\n')
             self.assertEqual(load_config(None, local).budget.turns, 4)
 
     def test_invalid_values_are_refused(self):
@@ -179,6 +192,37 @@ class BudgetConfigTests(unittest.TestCase):
         self.assertIn(budget.BUDGET, supervision.CRITICAL)
 
 
+class BudgetActivationTests(unittest.TestCase):
+    """#396 (2): without an extension of a story at its limit (grant-budget, ADR 0005) the
+    budget cannot be turned on: the configuration is refused at startup."""
+
+    def setUp(self):
+        patcher = mock.patch.object(config, 'BUDGET_EXTENSION', False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_budget_on_is_refused_at_startup_without_an_extension(self):
+        with self.assertRaisesRegex(ConfigError, 'budget.enabled: the budget cannot be turned '
+                                    'on yet') as caught:
+            cfg_with(envelope())
+        self.assertIn('grant-budget, ADR 0005', str(caught.exception))
+        self.assertIn('enabled = false', str(caught.exception))
+        # From the local overlay too, as devloop loads it at startup.
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / 'config.local.toml'
+            local.write_text('story_identity = true\n[budget]\nenabled = true\n')
+            with self.assertRaisesRegex(ConfigError, 'cannot be turned on yet'):
+                load_config(None, local)
+        # Off, the configuration loads as before, values written or not.
+        self.assertFalse(cfg_with(envelope(enabled=False)).budget.enabled)
+        self.assertFalse(load_config().budget.enabled)
+
+    def test_the_constant_is_off_in_the_distributed_code(self):
+        # Only the tests of the envelope turn it on (``setUpModule``).
+        source = Path(config.__file__).read_text()
+        self.assertIn('\nBUDGET_EXTENSION = False\n', source)
+
+
 class EnvelopeTests(unittest.TestCase):
     """The booking on the journal, with ``core.budget``."""
 
@@ -226,7 +270,7 @@ class EnvelopeTests(unittest.TestCase):
                 turns.append(turn)
         # No reserve in USD, invented or derived: they charge no dollar.
         current = budget.state(self.journal.stories()[self.story], self.journal.turns(), set(),
-                               cfg.budget.wall_seconds)
+                               START, cfg.budget.wall_seconds)
         for kind in core.COST_KINDS:
             self.assertEqual(sum(core.kind_charge(r, kind)
                                  for r in current['invocations'].values()), 0)
@@ -264,17 +308,17 @@ class EnvelopeTests(unittest.TestCase):
         self.journal.outcome(second, 'returned', usage={'metered_usd': None,
                                                         'cli_estimate_usd': 2.5})
         current = budget.state(self.journal.stories()[self.story], self.journal.turns(), set(),
-                               cfg.budget.wall_seconds)
+                               START, cfg.budget.wall_seconds)
         self.assertEqual(sum(core.kind_charge(r, 'cli_estimate_usd')
                              for r in current['invocations'].values()), 4.5)
         # A third reserve of 2 would pass the cap of 5: refused before its intent.
         with self.assertRaisesRegex(BudgetRefused, 'cli_estimate_usd cap'):
             self.book(cfg, agent='claude')
 
-    def test_claude_without_a_rule_counts_its_estimate_and_unknown_is_not_zero(self):
+    def test_claude_with_its_rule_counts_its_estimate(self):
         cfg = cfg_with(envelope(cli_estimate_usd=2))
         turn = self.book(cfg, kind='implement', agent='claude')
-        self.assertNotIn('usage_model', self.booked(turn))
+        self.assertEqual(self.booked(turn)['usage_model'], 'unmetered_quota')
         self.journal.outcome(turn, 'returned', usage=budget.observed(report(1.5)[0]))
         self.assertEqual(self.journal.turns()[turn]['usage'],
                          {'metered_usd': None, 'cli_estimate_usd': 1.5})
@@ -282,14 +326,49 @@ class EnvelopeTests(unittest.TestCase):
         self.journal.outcome(turn, 'returned', usage=budget.observed(report(0.6)[0]))
         with self.assertRaisesRegex(BudgetRefused, 'cli_estimate_usd cap exhausted'):
             self.book(cfg, kind='review')
-        # A claude turn that reported no cost blocks the next one: unknown is not 0.
+
+    def test_a_claude_turn_without_its_cost_does_not_block_the_story(self):
+        # #396 (1): a claude turn that ends without total_cost_usd (a model not available, a
+        # timeout, a crash, no output) is covered by the rule claude must now declare: the
+        # next turns of the story, the fallback in the same step included, still start.
+        reserve = {'model': 'reserve_per_invocation', 'reason': 'r', 'metered_usd': 1,
+                   'cli_estimate_usd': 1}
+        for name, rule in (('unmetered_quota', RULE), ('reserve_per_invocation', reserve)):
+            with self.subTest(name):
+                self.tmp.cleanup()
+                self.state.mkdir()
+                self.journal = self.open()
+                story = self.journal.story(REPO, 7, 'h1')['story']
+                cfg = cfg_with(envelope(metered_usd=10, cli_estimate_usd=10,
+                                        role_turns=dict(ENVELOPE['role_turns'], implement=5),
+                                        usage=dict(ENVELOPE['usage'], claude=rule)))
+                for outcome in ('failed', 'returned', 'failed'):
+                    turn = self.book(cfg, kind='implement', agent='claude')
+                    self.journal.outcome(turn, outcome, usage=budget.observed(report()[0]))
+                    self.assertEqual(self.booked(turn)['usage_model'], name)
+                # Nothing invented: the reserve declared by the operator, or no dollar at all.
+                current = budget.state(self.journal.stories()[story],
+                                       self.journal.turns(), set(), START, 86400)
+                self.assertEqual(sum(core.kind_charge(r, 'cli_estimate_usd')
+                                     for r in current['invocations'].values()),
+                                 3.0 if name == 'reserve_per_invocation' else 0)
+                self.book(cfg, kind='implement', agent='claude')
+        # Without the rule (a configuration the startup now refuses, or a booking from before)
+        # the engine's rule still holds: unknown is not 0, and the story is blocked.
+        self.tmp.cleanup()
+        self.state.mkdir()
         self.journal = self.open()
-        other = self.journal.story(REPO, 8, 'h2')['story']
-        turn = self.book(cfg, kind='implement', agent='claude', issue=8)
+        self.journal.story(REPO, 7, 'h1')
+        bare = dataclasses.replace(cfg.budget, usage=tuple(
+            (agent, rule) for agent, rule in cfg.budget.usage if agent != 'claude'))
+        cfg = dataclasses.replace(cfg, budget=bare)
+        turn = self.book(cfg, kind='implement', agent='claude')
         self.journal.outcome(turn, 'failed', usage=budget.observed(report()[0]))
         with self.assertRaisesRegex(BudgetRefused, 'unknown is not counted as zero'):
-            self.book(cfg, kind='implement', agent='claude', issue=8)
-        self.assertEqual(self.booked(turn)['story'], other)
+            self.book(cfg, kind='implement', agent='claude')
+        with self.assertRaisesRegex(ConfigError, r'budget\.usage\.claude: missing'):
+            cfg_with(envelope(usage={k: v for k, v in ENVELOPE['usage'].items()
+                                     if k != 'claude'}))
 
     def test_consumption_accumulates_across_attempts_children_restarts_and_outcomes(self):
         cfg = cfg_with(envelope(turns=6, role_turns=dict(ENVELOPE['role_turns'], review=6)))
@@ -417,12 +496,70 @@ class EnvelopeTests(unittest.TestCase):
         with self.assertRaisesRegex(BudgetRefused, 'wall-time exhausted'):
             self.book(cfg)
 
+    def test_the_wall_time_starts_at_the_first_booking_not_at_the_takeover(self):
+        # #396 (3): a story taken over long before the budget was on is not frozen at its first
+        # turn with a deadline already past: its time starts at its first booking.
+        cfg = cfg_with(envelope(wall_seconds=3600))
+        self.now = START + 10 * 86400
+        first = self.book(cfg)
+        self.journal.outcome(first, 'returned', usage=budget.observed(report()[0]))
+        recorded = self.booked(first)['envelope']
+        self.assertEqual((recorded['started_at'], recorded['deadline_at']),
+                         ('2027-01-25T08:00:00Z', '2027-01-25T09:00:00Z'))
+        # Later bookings, across a restart, keep that start.
+        self.now = START + 10 * 86400 + 3599
+        later = self.book(cfg, journal=self.open())
+        self.assertEqual(self.booked(later, self.open())['envelope']['started_at'],
+                         '2027-01-25T08:00:00Z')
+        self.open().outcome(later, 'returned', usage=budget.observed(report()[0]))
+        self.now = START + 10 * 86400 + 3600
+        with self.assertRaisesRegex(BudgetRefused, 'wall-time exhausted'):
+            self.book(cfg, journal=self.open())
+        # A booking recorded before ``started_at`` existed keeps the start of its deadline.
+        story = self.journal.stories()[self.story]
+        old = {'t': {'budget': {'story': self.story, 'envelope': {
+            'wall_seconds': 60, 'deadline_at': '2027-01-15T08:01:00Z'}}}}
+        self.assertEqual(budget.started(story, old, START + 999), START)
+        self.assertEqual(budget.started(story, {}, START + 999), START + 999)
+
     def test_an_issue_without_a_story_is_not_covered(self):
+        # #396 (3): an issue taken over before story_identity is excluded, with no migration,
+        # and the refusal says so.
         cfg = cfg_with(envelope())
         with self.assertRaises(BudgetRefused) as caught:
             self.book(cfg, issue=9)
         self.assertEqual(caught.exception.category, 'SCOPE_REQUIRED')
         self.assertEqual(len(self.journal.turns()), 0)
+        self.assertIn(budget.no_story(9), str(caught.exception))
+        self.assertIn('presa in carico prima', budget.no_story(9))
+        self.assertIn('senza migrazione', budget.no_story(9))
+        # ``devloop status`` gives the same reason, for those issues only, with the budget on.
+        lines = budget.status_lines(cfg.budget, self.journal, REPO, [9, 7, 9])
+        self.assertEqual([line for line in lines if line.startswith('budget #')],
+                         [f'budget #9: {budget.no_story(9)}'])
+        self.assertEqual(budget.status_lines(BudgetPolicy(), self.journal, REPO, [9]), [])
+
+    def test_a_role_configured_after_the_freeze_is_a_dedicated_refusal(self):
+        # #396 (4): the story keeps its frozen envelope, with no default cap for the new role,
+        # and the refusal names the role instead of a generic LIMIT_REACHED.
+        base = cfg_with(envelope())
+        self.journal.outcome(self.book(base), 'returned', usage=budget.observed(report()[0]))
+        later = cfg_with(envelope(role_turns=dict(ENVELOPE['role_turns'], advisory=2)),
+                         review_policy=dict(DATA['review_policy'], advisory_reviewer='agy'))
+        with self.assertRaises(BudgetRefused) as caught:
+            self.book(later, kind='advisory', agent='agy')
+        self.assertEqual(caught.exception.category, ROLE_NOT_IN_ENVELOPE)
+        text = str(caught.exception)
+        self.assertIn('il ruolo `advisory` non ha un tetto', text)
+        self.assertIn('La configurazione attuale gli dà 2 turni', text)
+        self.assertIn('nessun tetto predefinito', text)
+        self.assertNotIn('LIMIT_REACHED', text)
+        self.assertEqual(len(self.journal.turns()), 1)  # nothing written for the refusal
+        # The frozen roles still book, and a new story gets the new role.
+        self.book(later, kind='review')
+        self.journal.story(REPO, 8, 'h2')
+        turn = self.book(later, kind='advisory', agent='agy', issue=8)
+        self.assertEqual(self.booked(turn)['envelope']['role_turns']['advisory'], 2)
 
     def test_the_envelope_of_a_story_is_frozen_across_a_restart_with_a_new_configuration(self):
         first = cfg_with(envelope(turns=1, wall_seconds=60))
@@ -575,8 +712,8 @@ class DispatcherBudgetTests(unittest.TestCase):
     def test_an_advisory_review_refused_by_the_budget_escalates_once_and_waits(self):
         from devloop.planning import plan
         from test_devloop import FakeRunner
-        from test_devloop_advisory import ON, AdvisoryWS, OperatorGH, answer
-        from helpers.devloop_fakes import FakeIdentities
+        from test_devloop_advisory import SHA2, ON, AdvisoryWS, OperatorGH, answer
+        from helpers.devloop_fakes import SHA1, FakeIdentities
         roles = dict(ENVELOPE['role_turns'], advisory=0)
         policy = cfg_with(envelope(role_turns=roles),
                           review_policy=dict(DATA['review_policy'],
@@ -601,9 +738,10 @@ class DispatcherBudgetTests(unittest.TestCase):
         self.assertIsInstance(error, BudgetRefused)
         self.assertEqual((runner.calls, ws.copies), ([], []))  # refused before the checkout
         (escalation,) = self.escalations(100)
-        self.assertEqual((escalation['class'], escalation['category']),
-                         ('budget', 'LIMIT_REACHED'))
+        self.assertEqual((escalation['class'], escalation['category'], escalation['head']),
+                         ('budget', 'LIMIT_REACHED', SHA1))
         self.assertNotIn('turns', escalation)
+        self.assertIn(f'head `{SHA1[:12]}` resta sospesa', self.gh.thread[100][-1]['body'])
         # The refusal already escalated: no other action nor escalation, tick after tick.
         for _ in range(3):
             snap, errors = tick()
@@ -612,6 +750,27 @@ class DispatcherBudgetTests(unittest.TestCase):
         self.assertEqual((runner.calls, ws.copies, len(self.escalations(100))), ([], [], 1))
         self.assertEqual(d.advisory_failures.get(100, snap.prs[0].head_sha), None)
         self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
+        # #396 (5): the wait looks only at the escalations of the current head. A new head is
+        # not held in silence: its refusal escalates once more, with its head, then waits.
+        self.gh.head = SHA2
+        snap, (error,) = tick()
+        self.assertIsInstance(error, BudgetRefused)
+        self.assertEqual([e['head'] for e in self.escalations(100)], [SHA1, SHA2])
+        for _ in range(2):
+            snap, errors = tick()
+            self.assertEqual((snap.advisories, errors), ([], []))
+        self.assertEqual((runner.calls, len(self.escalations(100))), ([], 2))
+        # An escalation of the same class without a head (or of another one) holds nothing.
+        def escalation_of(head):
+            return next(c for c in self.gh.thread[100]
+                        if (markdown.read_marker(c['body'], 'notice') or {}).get('head') == head)
+        last = escalation_of(SHA2)
+        self.assertTrue(d._advisory_held(100, [last], SHA2))
+        headless = dict(last, body=markdown.render_escalation(
+            'r', cls='budget', extra={'category': 'LIMIT_REACHED'}))
+        for comments in ([headless], [escalation_of(SHA1)]):
+            with self.subTest(comments=comments), self.assertRaises(BudgetRefused):
+                d._advisory_held(100, comments, SHA2)
 
     def test_a_conclave_call_refused_by_the_budget_records_nothing_as_started(self):
         from test_devloop_conclave import CCFG, ConclaveWS, HookRunner, ThreadGH
@@ -642,6 +801,42 @@ class DispatcherBudgetTests(unittest.TestCase):
                          ('budget', 'LIMIT_REACHED'))
         self.assertIn('turni `conclave` 0 di 0', self.gh.thread[100][-1]['body'])
         self.assertIn('agent:needs-operator', self.gh.labels[100])
+
+    def test_a_role_added_after_the_freeze_escalates_with_its_own_category(self):
+        # #396 (4): the envelope of the story was frozen without `advisory`; the advisory
+        # reviewer configured afterwards gets a dedicated escalation, not LIMIT_REACHED.
+        cfg = cfg_with(envelope())
+        d = self.make(cfg, implemented(), reports=[report(0.1)], number=100)
+        p = self.implement(d, cfg)
+        later = cfg_with(envelope(role_turns=dict(ENVELOPE['role_turns'], advisory=1)),
+                         review_policy=dict(DATA['review_policy'], advisory_reviewer='agy'))
+        d = self.make(later)
+        d._issue_of[100] = 7
+        with self.assertRaises(BudgetRefused) as caught:
+            d._turn(Models(later.agent('agy')), 'review', 'p', 'advisory', self.state,
+                    'pr-100-advisory', where=(100, 'advisory'))
+        self.assertEqual(self.runner.calls, [])
+        d._escalate_failure(Action('advisory', 100), p, caught.exception)
+        (escalation,) = self.escalations(100)
+        self.assertEqual((escalation['class'], escalation['category'], escalation['head']),
+                         ('budget', ROLE_NOT_IN_ENVELOPE, p.head_sha))
+        body = self.gh.thread[100][-1]['body']
+        self.assertIn('il ruolo `advisory` non ha un tetto', body)
+        self.assertNotIn('LIMIT_REACHED', body)
+
+    def test_status_names_the_issues_without_a_story(self):
+        # #396 (3): the issues taken over before story_identity are excluded; status says why.
+        from types import SimpleNamespace
+        snap = SimpleNamespace(working_issues=[9], prs=[pr(issue=7), pr(number=101, issue=11)])
+        cfg = cfg_with(envelope())
+        d = self.make(cfg)
+        d.ledger.journal.story(REPO, 7, 'h1')
+        issues = list(snap.working_issues) + [p.issue for p in snap.prs]
+        lines = d.budget_status(issues)
+        self.assertIn(f'budget #9: {budget.no_story(9)}', lines)
+        self.assertIn(f'budget #11: {budget.no_story(11)}', lines)
+        self.assertFalse([line for line in lines if line.startswith('budget #7:')])
+        self.assertEqual(self.make(cfg_with()).budget_status(issues), [])  # budget off
 
     def test_status_shows_the_budget_of_a_story_and_nothing_with_the_budget_off(self):
         import devloop.__main__ as cli
@@ -679,7 +874,7 @@ class DispatcherBudgetTests(unittest.TestCase):
         self.assertIn('`metered_usd` consumati non attestato (turni senza valore attestato: 1)',
                       line)
         self.assertIn('tempo trascorso ', line)
-        self.assertEqual(none, 'budget #9: nessuna storia nel journal, nessun envelope')
+        self.assertEqual(none, f'budget #9: {budget.no_story(9)}')
 
     def test_the_readiness_check_is_outside_the_envelope(self):
         cfg = cfg_with(envelope(turns=1))

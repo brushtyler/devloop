@@ -860,15 +860,23 @@ one. A PR reopened after its attempt concluded, or whose marker lost the attempt
 to it, is escalated (`attempt`). PRs opened before, without an attempt in their marker, are
 handled as before.
 
+The budget cannot be turned on yet: until a story at its limit can be extended (`grant-budget`,
+ADR 0005), `[budget] enabled = true` stops devloop at startup. The
+[prerequisites of activation](reference.md#prerequisites-of-activation) list what is settled
+and what is still open (#396). What follows describes the envelope as it works once on.
+
 With `[budget] enabled = true` (#365, off by default; it needs `story_identity = true`) each turn
 of an agent is booked, before its CLI starts, in the [budget envelope](reference.md#budget-envelope)
 of its story: turns in total, per role and per phase, time, and dollars where a CLI attests them.
 A turn the envelope does not cover is refused before it starts, with an escalation of class
 `budget` that says which limit and how much the story has used; so is a turn of an issue with no
-story. Consumption is cumulative across child issues, attempts, fallback models, retries and
-restarts, and nothing refunds a booking. A story keeps the limits of its first booking, recorded
-in the journal: a later change of `[budget]` applies to new stories only. agy and codex accept
-only `unmetered_quota`, with the turn caps. The readiness check stays outside the envelope. The
+story, such as one taken over before `story_identity` (excluded, and named by `devloop status`).
+Consumption is cumulative across child issues, attempts, fallback models, retries and restarts,
+and nothing refunds a booking. A story keeps the limits of its first booking, recorded in the
+journal, and its time starts there: a later change of `[budget]` applies to new stories only, and
+a role configured later escalates as `ROLE_NOT_IN_ENVELOPE`. Every agent declares a rule for
+unknown usage, claude included; agy and codex accept only `unmetered_quota`, with the turn caps.
+The readiness check stays outside the envelope. The
 [state of the budget](reference.md#state-of-the-budget) of each story (#393), consumed, reserved
 and available per dimension, with the dollars no CLI reports shown as `non attestato` and never
 as 0, appears in `devloop status`, in a section of the PR receipt and in the escalation of a
@@ -962,8 +970,9 @@ issue and the PR description without attribution headers and markers (see
   escalates as `uncertain_turn`, with the turns to reconcile, once for those turns (taking
   `agent:ready-to-merge` away, as every escalation does), and the PR gets no other advisory
   action until they are reconciled. So does a turn the [budget envelope](reference.md#budget-envelope)
-  refuses: it escalates as `budget` once for that refusal, and the PR gets no other advisory
-  action while the story does not cover the turn.
+  refuses: it escalates as `budget` once for that refusal on that head, and the PR gets no other
+  advisory action on that head while the story does not cover the turn; a new head is tried
+  again, and escalated again if refused.
 - **Cost.** One turn per head, recorded in the [ledger](protocol.md#evidence-and-telemetry) as a
   `turn` of kind `advisory`, and counted in the totals of the receipt.
 

@@ -942,8 +942,11 @@ their format does not change. The journal is append-only, one JSON event per lin
   the agent has a declared rule for unknown usage, `usage_model` and, for
   `reserve_per_invocation`, `conservative_usage` (the reserve in `metered_usd` and
   `cli_estimate_usd`), and `envelope`, the limits of the story (`turns`, `role_turns`,
-  `phase_turns`, `wall_seconds`, `deadline_at`, `metered_usd`, `cli_estimate_usd`): those of its
-  first booking, which the later ones keep, across restarts and configuration changes. The
+  `phase_turns`, `wall_seconds`, `started_at`, `deadline_at`, `metered_usd`,
+  `cli_estimate_usd`): those of its first booking, which the later ones keep, across restarts and
+  configuration changes. `started_at` is the time of that first booking, from which
+  `wall_seconds` runs, not the takeover of the story (#396); a booking without it, from before,
+  starts `wall_seconds` before its `deadline_at`. The
   check and the booking are one step under the journal's lock; a turn the
   envelope does not cover writes no intent. The `outcome` of every turn, a readiness check
   included, then carries `usage`: `{metered_usd, cli_estimate_usd}`, what its CLI reported, `null`

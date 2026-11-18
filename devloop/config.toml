@@ -239,16 +239,18 @@ required_timeout_minutes = 30
 # (class budget). Consumption is cumulative across child issues, attempts, fallback models,
 # retries and restarts, recorded in the journal of state_dir; nothing refunds a booking. The
 # readiness check (preflight) is outside the envelope. With enabled = true every value is
-# required, with no default: turns of the story, wall_seconds from its start, the dollar caps
-# metered_usd (measured spend) and cli_estimate_usd (estimates, today claude's), both above 0 (a
-# cap is exhausted at equality: 0 would refuse every turn), role_turns for
+# required, with no default: turns of the story, wall_seconds from its first booking, the dollar
+# caps metered_usd (measured spend) and cli_estimate_usd (estimates, today claude's), both above 0
+# (a cap is exhausted at equality: 0 would refuse every turn), role_turns for
 # implement, fix, review and sync (conclave and advisory too when configured), phase_turns for
-# implementation, and in [budget.usage.<agent>] a rule for each agent whose CLI reports no cost
-# (codex, agy): model = "unmetered_quota" (no reserve in USD, only the turn caps, D2) and a
-# reason; "reserve_per_invocation" (with metered_usd and cli_estimate_usd) only for claude. The
-# limits a story gets at its first booking stay its own: a later change applies to new stories.
-# Token caps are refused: not supported yet. Off here: the values and turning it on are the operator's decisions
-# (ADR 0004, D2 and D8).
+# implementation, and in [budget.usage.<agent>] a rule for every agent, claude included (#396):
+# model = "unmetered_quota" (no reserve in USD, only the turn caps, D2) and a reason, the only
+# rule of codex and agy; "reserve_per_invocation" (with metered_usd and cli_estimate_usd) only for
+# claude. The limits a story gets at its first booking stay its own: a later change applies to
+# new stories. Token caps are refused: not supported yet. Off here: the values and turning it on
+# are the operator's decisions (ADR 0004, D2 and D8). enabled = true is refused at startup until
+# a story at its limit can be extended (grant-budget, ADR 0005; docs/devloop/reference.md,
+# "Prerequisites of activation").
 # The shape, with no value: the values are not decided yet (D2).
 [budget]
 enabled = false
@@ -269,6 +271,9 @@ enabled = false
 # [budget.usage.agy]
 # model = "unmetered_quota"
 # reason = "agy reports no cost: the turn caps bound it"
+# [budget.usage.claude]
+# model = "unmetered_quota"
+# reason = "claude reports its estimate only when a turn completes"
 
 # Documentation map (issue #203): code paths and the documents that describe them. A key is a
 # directory prefix ending in "/" or a file, relative to the root, with no pattern characters;

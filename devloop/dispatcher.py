@@ -1652,7 +1652,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
         The escalation of a ``TurnBlocked`` records the ids of the turns it names (``turns``).
         A turn the budget envelope does not cover (``BudgetRefused``, #365, a ``TurnBlocked``
-        with no turns) escalates the same way, with class ``budget``."""
+        with no turns) escalates the same way, with class ``budget``, its ``category`` and, on
+        a PR, its ``head`` (#396)."""
         if action.kind == 'conclave' and not isinstance(exc, TurnBlocked):
             self.log('  conclave: no escalation, it resumes from its record')
             return
@@ -1663,6 +1664,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         reason = f'Il passo `{action.kind}` è fallito: {_failure_text(exc)}{self._log_hint(exc)}'
         if getattr(exc, 'kept_work', None):  # what a timed-out writing turn left (#374)
             reason += kept_work_text(exc.kept_work, self.cfg.state_dir)
+        if action.kind == 'advisory' and isinstance(exc, BudgetRefused) and pr is not None:
+            reason += (f'\n\nLa review consultiva della head `{pr.head_sha[:12]}` resta sospesa '
+                       'finché la storia non copre il turno. Una nuova head non resta sospesa '
+                       'in silenzio: la sua review consultiva viene ritentata e, se rifiutata, '
+                       'segnalata con un\'altra escalation.')
         cls = (TOOL_FAILURE if isinstance(exc, AgentError)
                else 'untrusted' if isinstance(exc, UntrustedChange)
                else BUDGET if isinstance(exc, BudgetRefused)
@@ -1679,7 +1685,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 # A readiness check runs again only on an issue with agent:ready: one the
                 # operator may retry keeps it, as a failed check does.
                 remove = [label for label in remove if label != lb.ready]
-            extra = ({'category': exc.category} if isinstance(exc, BudgetRefused)
+            # A budget refusal on a PR records its head (#396): an advisory review waits only
+            # on the refusal of the head it would review (``_advisory_held``).
+            extra = ({'category': exc.category,
+                      **({'head': pr.head_sha} if pr is not None else {})}
+                     if isinstance(exc, BudgetRefused)
                      else {'turns': [t['turn'] for t in exc.turns]}
                      if isinstance(exc, TurnBlocked) else None)
             self._escalate(number, reason, getattr(exc, 'tail', ''), remove=remove, cls=cls,
@@ -1950,10 +1960,15 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
     def budget_status(self, issues):
         """``devloop status`` (#393): the lines of the state of the budget of the stories of
-        ``issues``, from the journal. Without a ledger, or with the budget off, none."""
+        ``issues``, from the journal, with the reason the turns of an issue of no story are
+        refused (``budget.no_story``, #396). Without a ledger, or with the budget off, none."""
         if self.ledger is None:
             return []
-        return budget_status_lines(self.cfg.budget, self.ledger.journal, self.cfg.repo, issues)
+        try:
+            return budget_status_lines(self.cfg.budget, self.ledger.journal, self.cfg.repo,
+                                       issues)
+        except JournalError as exc:
+            return [f'budget: the journal cannot be read: {exc}']
 
     def _budget_view(self, issue):
         """With the budget on (#393), the state of the budget of the story of issue ``issue``

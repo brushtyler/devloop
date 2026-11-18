@@ -161,8 +161,14 @@ BUDGET_PHASES = ('implementation',)
 BUDGET_USD = ('metered_usd', 'cli_estimate_usd')
 BUDGET_USAGE_MODELS = ('reserve_per_invocation', 'unmetered_quota')
 # The agent kinds whose CLI reports a dollar figure (an estimate: ``core.budget.REPORTED_COST``):
-# every other one needs a declared rule for unknown usage.
+# the only ones that may declare a reserve in USD. With the budget on, every agent, these
+# included, needs a declared rule for unknown usage (#396).
 BUDGET_REPORTED_COST = ('claude',)
+# Whether devloop can extend the envelope of a story at its limit (``grant-budget``, ADR 0005).
+# Until it can, ``[budget] enabled = true`` is refused at startup (#396): a story at its limit
+# could leave it only by turning the budget off for every story. The tests of the envelope set
+# it; nothing else does.
+BUDGET_EXTENSION = False
 
 
 @dataclass(frozen=True)
@@ -807,10 +813,12 @@ def parse_budget(table, agents, roles=BUDGET_BASE_ROLES, story_identity=False):
     """``[budget]`` (#365, ADR 0004, P2-5a). ``enabled`` (default false) turns the envelope on;
     then every value is required, with no default (D2): ``turns`` and ``wall_seconds`` (at least
     1), ``metered_usd`` and ``cli_estimate_usd`` (dollars, above 0), ``role_turns`` with each
-    of ``roles``, ``phase_turns`` with each kind of phase, and in ``usage`` a rule for each agent
-    whose kind reports no dollar figure (codex, agy): only ``unmetered_quota`` (D2), while a
-    ``reserve_per_invocation`` is accepted only for claude. A story is the unit of the envelope: it
-    needs ``story_identity``. A token cap is refused, on or off: not supported yet."""
+    of ``roles``, ``phase_turns`` with each kind of phase, and in ``usage`` a rule for each
+    agent, claude included (#396): only ``unmetered_quota`` for those whose kind reports no
+    dollar figure (codex, agy, D2), while a ``reserve_per_invocation`` is accepted only for
+    claude. A story is the unit of the envelope: it needs ``story_identity``. Turning it on is
+    refused while a story at its limit has no extension (``BUDGET_EXTENSION``, #396). A token cap
+    is refused, on or off: not supported yet."""
     where = 'budget'
     if not isinstance(table, dict):
         raise ConfigError(f'{where}: expected a table')
@@ -824,6 +832,12 @@ def parse_budget(table, agents, roles=BUDGET_BASE_ROLES, story_identity=False):
     if not isinstance(enabled, bool):
         raise ConfigError(f'{where}.enabled: expected true or false')
     if enabled:
+        if not BUDGET_EXTENSION:
+            raise ConfigError(
+                f'{where}.enabled: the budget cannot be turned on yet: a story that reaches '
+                'its limit has no extension (grant-budget, ADR 0005, not available), and the '
+                'only way out would be enabled = false for every story. Keep enabled = false '
+                'until the extension exists (#396)')
         if not story_identity:
             raise ConfigError(f'{where}.enabled: needs story_identity = true: the envelope is '
                               'per story')
@@ -860,10 +874,19 @@ def parse_budget(table, agents, roles=BUDGET_BASE_ROLES, story_identity=False):
     if enabled:
         declared = dict(rules)
         for key, agent in agents.items():
-            if agent.kind not in BUDGET_REPORTED_COST and key not in declared:
+            if key in declared:
+                continue
+            if agent.kind not in BUDGET_REPORTED_COST:
                 raise ConfigError(f'{where}.usage.{key}: missing: {agent.kind} reports no dollar '
                                   'cost, and its turns need a declared rule: unmetered_quota, '
                                   'with the turn caps (ADR 0004, D2)')
+            # #396: a turn that ends without its cost (a model not available, a timeout, a
+            # crash, no output) would leave the story uncovered, refusing every later turn.
+            raise ConfigError(f'{where}.usage.{key}: missing: {agent.kind} reports its cost '
+                              'only when a turn completes, and a turn that ends without it '
+                              'would block its story for good: declare unmetered_quota, or '
+                              'reserve_per_invocation with metered_usd and cli_estimate_usd '
+                              '(ADR 0004, D2)')
     values['usage'] = tuple(rules)
     return BudgetPolicy(**values)
 
