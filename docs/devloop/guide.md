@@ -33,8 +33,9 @@ once the CI of the **same head** passes, without a second review. If that CI fai
 does not count for the merge: the failure becomes a CI round, counted as today, and the PR goes
 to `agent:changes` for the fix (or its failed jobs are re-run once, when no failed test module is
 pertinent to the PR). A review that asks for changes while the CI runs sends the PR to
-`agent:changes`, but the fix waits for that CI: if it fails, the failure becomes a CI round and
-the same fix answers the reviewer's findings and the CI failure together. A CI that already
+`agent:changes`, but the fix waits for that CI: if it fails, the failure joins the round of that
+review as a `ci` finding, without a round of its own (one head, one round, #352), and the same
+fix answers the reviewer's findings and the CI failure together. A CI that already
 failed before the review sends the PR to the fix without a review, as before. A PR with the [level 0](reference.md#level-0-no-review) label, when level 0
 is enabled, has no review to start early: it still waits for its CI.
 

@@ -11,9 +11,13 @@ files as they all were at one instant between the collection and the check.
 Metrics are only the ones already persisted. Each declares its coverage
 (``complete``, ``partial`` or ``none``); a value that is not observable is
 ``null`` with the reason. No timestamp is ever derived from a file's mtime.
+
+Part 3 (#348) adds the ``projection`` of the remaining cost, computed by the pure
+``ssdlc_workflow_projection.project`` from the data read here, frozen limits included.
 """
 import hashlib
 import json
+import math
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +38,8 @@ STORES = (('execution', 'execution', 'execution-runtimes'),
 JOURNAL = '03-dev/tasks/task-journal.jsonl'
 PLAN = '02-design/plan.json'
 FEEDBACK_FILES = ('feedback/authority.json', 'feedback/task-journal.jsonl')
+LIMITS_POLICY, LIMITS_JOURNAL = 'limits/policy.json', 'limits/task-journal.jsonl'
+LIMITS_PENDING = 'limits/extension-pending.json'
 
 NOT_OBSERVABLE = {
     'task_elapsed_sec': 'task journal events carry no timestamp; file mtimes are never used',
@@ -279,6 +285,54 @@ def _feedback(reader):
     return dict(status='active', projection=projection, reason=None)
 
 
+def _amounts(values, nullable=True):
+    """A map of dollar amounts as ``LimitsStore`` writes them: finite and non-negative.
+
+    An observed ``usage`` may be None (unknown); a ``conservative_usage`` reserve never is,
+    since ``LimitsStore`` adds it to the charge of its kind."""
+    return isinstance(values, dict) and all(
+        (v is None and nullable) or (type(v) in (int, float) and math.isfinite(v) and v >= 0)
+        for v in values.values())
+
+
+def _limits(reader, prefix):
+    """The frozen limits of the generation, read without writing: ``{status, reason, policy, state}``.
+
+    ``absent`` without a frozen profile; ``unavailable``, with the reason, when a limit
+    extension activation is pending or the policy and its journal do not verify. The
+    chain of limit extensions is not replayed: dispatch still does.
+    """
+    from ssdlc_recovery import validate_live_usage
+    from ssdlc_tasks import TaskError, TaskJournal, digest, validate_document
+    data, journal = reader.read(prefix + LIMITS_POLICY), reader.read(prefix + LIMITS_JOURNAL)
+    pending = reader.read(prefix + LIMITS_PENDING)
+
+    def result(status, reason=None, policy=None, state=None):
+        return dict(status=status, reason=reason, policy=policy, state=state)
+    if data is None and journal is None and pending is None:
+        return result('absent', 'no frozen limits profile in this run')
+    if pending is not None:
+        return result('unavailable', 'a limit extension activation is pending')
+    if data is None or journal is None:
+        return result('unavailable', 'the frozen limits policy or its journal is missing')
+    try:
+        envelope = json.loads(data)
+        validate_document('recovery-limits', envelope['policy'])
+        validate_live_usage(envelope['policy'])
+        # Only complete lines, as ``TaskJournal.peek``: an interrupted tail is not repaired.
+        state = TaskJournal._replay(journal[:journal.rfind(b'\n') + 1])[0]
+        if not isinstance(state, dict) or state.get('policy_sha256') != digest(envelope):
+            return result('unavailable', 'the limits journal does not match the frozen policy')
+        rows = state.get('invocations')
+        if not isinstance(rows, dict) or not all(
+                isinstance(row, dict) and _amounts(row.get('usage', {}))
+                and _amounts(row.get('conservative_usage', {}), nullable=False) for row in rows.values()):
+            return result('unavailable', 'the limits journal has malformed invocations')
+    except (TaskError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        return result('unavailable', f'frozen limits do not verify: {type(exc).__name__}')
+    return result('active', None, envelope['policy'], state)
+
+
 def metric(value, coverage, source, unit=None, reason=None):
     if coverage != COMPLETE and not reason:
         raise ValueError('a metric without complete coverage needs a reason')
@@ -383,14 +437,19 @@ def _collect(reader):
     run = None
     if state is not None:
         run = {key: state.get(key) for key in ('status', 'current_phase', 'current_step')}
+    metrics = _metrics(state, dag, feedback)
+    from ssdlc_workflow_projection import project
+    ledger = (state or {}).get('ledger')
+    projection = project(run, ledger if isinstance(ledger, list) else [], dag, _limits(reader, prefix), metrics)
     return dict(run=run, generation=generation, journal=journal, tasks=dag, feedback=feedback,
-                metrics=_metrics(state, dag, feedback))
+                metrics=metrics, projection=projection)
 
 
 def _empty(ticket, status, attempts, now, reason, sources=None):
     return dict(schema=SCHEMA, schema_version=SCHEMA_VERSION, ticket=ticket,
                 read=dict(status=status, attempts=attempts, max_attempts=MAX_ATTEMPTS, observed_at=now, reason=reason),
-                sources=sources or {}, run=None, generation=None, journal=None, tasks=None, feedback=None, metrics=None)
+                sources=sources or {}, run=None, generation=None, journal=None, tasks=None, feedback=None, metrics=None,
+                projection=None)
 
 
 def snapshot(repo, ticket, *, clock=time.time, fault=lambda point, attempt: None):

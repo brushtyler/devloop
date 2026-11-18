@@ -202,8 +202,10 @@ class Records:
                 continue
             ledger = read_marker(body, 'ledger')
             if ledger is not None:
-                # A round's register (#325) holds the records of its turns and of its CI.
-                for record in ledger['records'] if ledger['type'] == 'round' else [ledger]:
+                # A round's register (#325) holds the records of its turns and of its CI, a fix
+                # register (#355) those of its turns, sync and local tests.
+                for record in (ledger['records'] if ledger['type'] in ('round', 'fix')
+                               else [ledger]):
                     self._ledger(out, day, number, record, created)
                 continue
             merged = read_marker(body, 'merged')
