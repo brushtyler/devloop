@@ -11,6 +11,13 @@ returns them and summarized by :func:`summarize_checks`.
 actor: those stay the concrete adapters. ``Backend`` is the three ports together, as the
 dispatcher takes them. The ports raise ``github.GitHubError`` when the backend fails.
 
+``Tracker.comment`` and ``Tracker.edit_comment`` tell three outcomes apart (#364, ADR 0001
+"Porta del tracker"): success, failure (``github.GitHubError``: nothing was written) and
+**uncertain** (``github.GitHubUncertain``, a ``GitHubError``: a timeout, a connection lost
+after sending, a 5xx answer, so the write may have taken effect). :func:`reconcile_comment`
+tells, by reading the comments back, whether an uncertain write took effect. Nothing calls it
+yet, and the dispatcher handles an uncertain outcome as a failure, as it did before.
+
 Where a method went, when it was not obvious:
 
 - ``pr_comments``, ``label_events``, ``labeled_events`` and ``labelers`` are in ``Tracker``
@@ -99,13 +106,15 @@ class Tracker(Protocol):
         """Add and remove labels; removing a label that is not there is not an error."""
 
     def comment(self, number, body):
-        """Post a comment; returns its id, or None if unknown."""
+        """Post a comment; returns its id, or None if unknown. Raises ``GitHubUncertain`` when
+        the outcome is unknown (#364)."""
 
     def close_issue(self, number):
         """Close issue ``number`` as completed."""
 
     def edit_comment(self, comment_id, body):
-        """Replace the body of comment ``comment_id``."""
+        """Replace the body of comment ``comment_id``. Raises ``GitHubUncertain`` when the
+        outcome is unknown (#364)."""
 
     def ensure_label(self, name, color, description):
         """Create or update label ``name``."""
@@ -201,6 +210,30 @@ def port_methods(port):
     """The names of the methods ``port`` declares, in declaration order."""
     return [name for name, value in vars(port).items()
             if callable(value) and not name.startswith('_')]
+
+
+def reconcile_comment(tracker, number, author, body, *, comment_id=None, marker=None):
+    """Whether a write on issue or PR ``number`` that raised ``github.GitHubUncertain`` took
+    effect (#364): the comment that carries it, or None when the write was not published.
+
+    Only a comment of ``author``, the login that wrote, counts: an identical comment of anyone
+    else never does. A comment carries the write when its body is exactly ``body`` or, with a
+    non-empty ``marker``, contains ``marker``. For a ``comment``, the oldest such comment is returned;
+    for an ``edit_comment``, ``comment_id`` restricts the search to the edited comment.
+
+    The answer is only as precise as what identifies the write: an identical body that
+    ``author`` posted before also counts, and so does a marker that the comment carried before
+    an edit. Give a ``marker`` unique to the write when either can happen. A failed read
+    raises ``github.GitHubError``, and the outcome stays uncertain."""
+    for comment in tracker.issue_comments(number):
+        if (comment.get('author') or {}).get('login') != author:
+            continue
+        if comment_id is not None and comment.get('id') != comment_id:
+            continue
+        text = comment.get('body') or ''
+        if text == body or (marker and marker in text):
+            return comment
+    return None
 
 
 def summarize_checks(checks):
