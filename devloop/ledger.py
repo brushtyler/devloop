@@ -70,6 +70,16 @@ def request_hash(title, body):
     return hashlib.sha256(data.encode('utf-8')).hexdigest()
 
 
+def story_marker(story, number):
+    """The ``story`` marker of issue ``number`` in ``story`` (``TurnJournal.stories``): the
+    root's carries the hashes of its ``request`` records, a child's none (#363)."""
+    mark = {'story': story['story'], 'repo': story['repo'], 'root': story['issue'],
+            'issue': number}
+    if number == story['issue']:
+        mark['hashes'] = list(story['hashes'])
+    return mark
+
+
 def comment_ref(comment):
     """A comment's id: the numeric id of its URL (``gh issue view``), else its ``id``, else
     None."""
@@ -241,15 +251,76 @@ class Ledger:
             self.gh.edit_comment(comment['id'], render(record))
 
     # Writes ----------------------------------------------------------------
-    def request(self, number, *, title, body, labeled, comments):
+    def request(self, number, *, title, body, labeled, comments, story_repo=None):
         """The snapshot of the request at the takeover. ``labeled``: ``(login, at)`` of the
         trusted ``labeled`` event of the ready label, or None; ``comments``: the trusted
-        comments given to the implementer."""
+        comments given to the implementer.
+
+        With ``story_repo`` (#363, ``story_identity``) issue ``number`` of that repository is
+        the root of a story: the journal records it first (``TurnJournal.story``: the story
+        assigned now, or the same one with the hash of this record added when it changed), and
+        the comment of the record carries its ``story`` marker. If the journal cannot record
+        it, ``JournalError`` and no record is written."""
         by, at = labeled or (None, None)
-        return self._post(number, {
+        record = {
             'type': 'request', 'issue': number, 'hash': request_hash(title, body),
             'labeled_by': by, 'labeled_at': at, 'comments': [comment_ref(c) for c in comments],
-            'taken_at': self._now()})
+            'taken_at': self._now()}
+        if story_repo is None:
+            return self._post(number, record)
+        story = story_marker(self.journal.story(story_repo, number, record['hash']), number)
+        return Entry(number, self.gh.comment(number, render(record, story=story)), record)
+
+    # Stories (#363) --------------------------------------------------------
+    def story_of(self, number, comments, repo):
+        """The story issue ``number`` of ``repo`` belongs to, as the journal records it, read
+        from the ``story`` marker in ``comments`` (its comments): only a marker the dispatcher
+        signed counts (``signed``; without it, none does), the latest one. Never the text of the
+        issue, of an agent or of a user: a story declared there is not inherited. None without
+        such a marker: the issue is handled as before (#363).
+
+        The journal is the authority (ADR 0004, D7): a marker it does not confirm, for another
+        issue, a story it does not hold, or an issue that is neither its root nor one of its
+        children, raises ``JournalError``. So does the marker of a root whose ``hashes`` are not
+        a prefix of the story's in the journal: a marker behind the journal (a write that failed
+        after the journal recorded the hash) is valid, one that diverges from it or goes beyond
+        it (a journal restored from before) contradicts it."""
+        if self.signed is None:
+            return None
+        found = [read_marker(c.get('body', ''), 'story') for c in comments
+                 if self.signed((c.get('author') or {}).get('login'))]
+        found = [m for m in found if m is not None]
+        if not found:
+            return None
+        mark = found[-1]
+        story = self.journal.stories().get(mark['story'])
+        role = self.journal.story_of(repo, number)
+        if (mark['issue'] != number or mark['repo'] != repo or story is None
+                or story['issue'] != mark['root'] or role is None
+                or role[0]['story'] != story['story']):
+            raise JournalError(f'#{number}: the dispatcher\'s story marker ({mark["story"]}, '
+                               f'root #{mark["root"]}) is not confirmed by the journal: the '
+                               'journal is the authority, and the story is not used')
+        hashes = mark.get('hashes')
+        if hashes is not None and story['hashes'][:len(hashes)] != hashes:
+            raise JournalError(f'#{number}: the hashes of the dispatcher\'s story marker '
+                               f'({mark["story"]}) are not a prefix of those the journal '
+                               'records: the journal is the authority, and the story is not '
+                               'used')
+        return story
+
+    def mark_child(self, number, story, repo):
+        """Associate issue ``number`` of ``repo`` with ``story`` as its child (#363): the journal
+        records it first (``TurnJournal.child``), then the dispatcher writes the ``story``
+        marker on the issue, from which alone it inherits the story. Returns the comment's id.
+
+        No flow calls it yet: which act authorizes the association of a child is decided with
+        step 3 of ADR 0001, and until then no issue gets the marker of a child."""
+        current = self.journal.child(story, repo, number)
+        mark = story_marker(current, number)
+        text = '\n'.join(_render_story(mark))
+        return self.gh.comment(number, publishable(dispatcher_header() + '\n' + text,
+                                                   'story', mark))
 
     def fix_register(self, number, round_no):
         """The register of a fix of PR ``number`` answering round ``round_no`` (#355), to pass
@@ -510,13 +581,33 @@ def _render_fix(r):
     return parts
 
 
+def _render_story(s, title='## Registro devloop: storia'):
+    """The readable part of a ``story`` marker (#363)."""
+    if s['issue'] == s['root']:
+        note = (f'Questa issue è la radice della storia `{s["story"]}`, assegnata dal '
+                'dispatcher alla presa in carico. Gli hash sono quelli dei record `request` della '
+                'radice, dal primo.')
+        rows = [('Storia', s['story']), ('Repository', s['repo']),
+                ('Hash delle richieste (SHA-256)', s['hashes'])]
+    else:
+        note = (f'Questa issue è figlia della storia `{s["story"]}` della radice '
+                f'#{s["root"]}: la eredita solo da questo marker del dispatcher.')
+        rows = [('Storia', s['story']), ('Repository', s['repo']), ('Radice', s['root'])]
+    return [title, '', note, '', _rows(rows)]
+
+
 _RENDER = {'turn': _render_turn, 'request': _render_request,
            'verification': _render_verification, 'event': _render_event,
            'round': _render_round, 'fix': _render_fix}
 
 
-def render(record):
+def render(record, story=None):
     """The comment of a ledger record: the dispatcher's header, a readable summary and the
-    marker."""
-    return publishable(dispatcher_header() + '\n' + '\n'.join(_RENDER[record['type']](record)),
-                       'ledger', record)
+    marker; with ``story``, the ``story`` marker of the root of a ``request`` record (#363)
+    after it."""
+    parts = _RENDER[record['type']](record)
+    if story is None:
+        return publishable(dispatcher_header() + '\n' + '\n'.join(parts), 'ledger', record)
+    parts += [''] + _render_story(story, '### Storia')
+    return publishable(dispatcher_header() + '\n' + '\n'.join(parts), 'ledger', record,
+                       records=[('story', story)])

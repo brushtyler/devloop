@@ -99,6 +99,21 @@ class ActionsMixin:
     """The work actions of ``Dispatcher``: implement, CI failure, review, fix and sync (#296).
     They use the dispatcher state and its other methods through ``self``."""
 
+    def _story_root(self, number, comments):
+        """With ``story_identity`` (#363), the repository of which issue ``number`` is the root
+        of a story at its takeover, for its ``request`` record; None when the identity is off,
+        and for a child, which inherits its story only from the dispatcher's marker
+        (``Ledger.story_of``) and does not become a root. A story declared in any text is not
+        inherited: the issue is the root of a story of its own."""
+        if not self.cfg.story_identity:
+            return None
+        story = self.ledger.story_of(number, comments, self.cfg.repo)
+        if story is not None and story['issue'] != number:
+            self.log(f'  #{number} is a child of story {story["story"]} (root '
+                     f'#{story["issue"]})')
+            return None
+        return self.cfg.repo
+
     def _do_implement(self, number):
         cfg, lb = self.cfg, self.cfg.labels
         agent = cfg.agent(cfg.implementer)
@@ -115,7 +130,8 @@ class ActionsMixin:
                                                        issue['admitters']),
                                 comments=_trusted_comments(issue.get('comments') or [],
                                                            cfg.trusted_users)
-                                + issue['accepted'])
+                                + issue['accepted'],
+                                story_repo=self._story_root(number, issue['thread']))
         self.gh.edit_labels(number, add=[lb.working], remove=[lb.ready])
         name, branch = f'issue-{number}', f'{cfg.branch_prefix}{number}'
         path = self.ws.new_branch(name, branch)

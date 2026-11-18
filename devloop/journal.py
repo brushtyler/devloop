@@ -26,6 +26,18 @@ before it (``previous``) and its own (``sha256``), like the journal of the local
   the turn blocks the whole work also after a restart. Until it is linked, a legacy turn may
   be on a PR of any work, and with the block it blocks every new turn.
 
+With ``story_identity`` on (#363, ADR 0004, P2-3a) it also holds the stories, the unit of the
+budget:
+
+- ``story``: a story the dispatcher assigned at the takeover of its root issue, with its id
+  (``story-<sequence>-<hex>``), the repository and number of the root and the hash of the
+  ``request`` record of that takeover;
+- ``request``: the hash of a later ``request`` record of the root that differs from the last
+  one (a trusted user changed the issue): the story keeps its id and every earlier hash;
+- ``child``: an issue of the same repository associated with a story. Only the dispatcher writes
+  it (``Ledger.mark_child``), and no flow does yet: which act authorizes it is decided with step
+  3 of ADR 0001.
+
 Reads verify the whole chain. An incomplete or unreadable last line (a write cut short) is set
 aside in ``turn-journal-tail-<sha256>.bin`` and removed, and the valid records before it stay; a
 hash that does not match, or an unreadable line before the last, is an explicit error. Next to
@@ -64,6 +76,8 @@ RECONCILE_COMMAND = '/devloop reconcile'
 # between journals, so that a command written for the turns of a journal since lost never
 # reconciles a turn of a new one.
 _TURN_ID = re.compile(r'(turn|legacy)-[1-9][0-9]*-[0-9a-f]{8}')
+# A story's id (#363), made the same way.
+STORY_ID = re.compile(r'story-[1-9][0-9]*-[0-9a-f]{8}')
 
 
 class JournalError(GitHubError):
@@ -545,3 +559,85 @@ class TurnJournal:
             self._load()
             self._append('refused', {'comment': comment, 'by': by, 'turn': turn,
                                      'reason': reason})
+
+    # Stories (#363) --------------------------------------------------------
+    def _stories(self):
+        stories = {}
+        for e in self._events:
+            kind, d = e['event'], e['data']
+            if kind == 'story':
+                stories[d['story']] = {'story': d['story'], 'repo': d['repo'],
+                                       'issue': d['issue'], 'hashes': [d['hash']],
+                                       'children': [], 'at': d['at']}
+            elif kind == 'request' and d['story'] in stories:
+                stories[d['story']]['hashes'].append(d['hash'])
+            elif kind == 'child' and d['story'] in stories:
+                stories[d['story']]['children'].append(d['issue'])
+        return stories
+
+    def stories(self):
+        """Every story, by id: ``repo`` and ``issue`` of its root, ``hashes`` of the ``request``
+        records of the root, oldest first, and ``children``, the numbers of its child issues."""
+        with self._lock:
+            self._load()
+            return self._stories()
+
+    @staticmethod
+    def _find(stories, repo, issue):
+        """``(story, role)`` of issue ``issue`` of ``repo``: ``root`` or ``child``; or None."""
+        for s in stories.values():
+            if s['repo'] == repo and s['issue'] == issue:
+                return s, 'root'
+            if s['repo'] == repo and issue in s['children']:
+                return s, 'child'
+        return None
+
+    def story_of(self, repo, issue):
+        """``(story, role)`` of issue ``issue`` of ``repo`` as the journal records it, or
+        None: an issue no story holds."""
+        with self._lock:
+            self._load()
+            return self._find(self._stories(), repo, issue)
+
+    def story(self, repo, issue, request):
+        """The story whose root is issue ``issue`` of ``repo``, taken over with the request
+        hashed ``request`` (the ``hash`` of its ``request`` record): assigned now when there is
+        none, with ``request`` as its first hash; otherwise the same story, with ``request``
+        added after the others when it differs from the last one. Raises ``JournalError`` when
+        the issue is a child of a story: it never becomes a root."""
+        with self._lock:
+            self._load()
+            found = self._find(self._stories(), repo, issue)
+            if found is None:
+                story = f'story-{len(self._events) + 1}-{secrets.token_hex(4)}'
+                self._append('story', {'story': story, 'repo': repo, 'issue': issue,
+                                       'hash': request})
+                return self._stories()[story]
+            story, role = found
+            if role != 'root':
+                raise JournalError(f'{repo}#{issue} is a child of story {story["story"]}: it '
+                                   'does not become the root of a story')
+            if story['hashes'][-1] != request:
+                self._append('request', {'story': story['story'], 'hash': request})
+            return self._stories()[story['story']]
+
+    def child(self, story, repo, issue):
+        """Associate issue ``issue`` of ``repo`` with ``story`` as its child; the story. Raises
+        ``JournalError`` for an unknown story, another repository, or an issue that is already
+        the root or the child of a story (the same story's child is recorded once)."""
+        with self._lock:
+            self._load()
+            stories = self._stories()
+            current = stories.get(story)
+            if current is None:
+                raise JournalError(f'story {story} not in the journal')
+            if current['repo'] != repo:
+                raise JournalError(f'story {story} is of {current["repo"]}, not of {repo}')
+            found = self._find(stories, repo, issue)
+            if found is not None:
+                if found == (current, 'child'):
+                    return current
+                raise JournalError(f'{repo}#{issue} is already the {found[1]} of story '
+                                   f'{found[0]["story"]}')
+            self._append('child', {'story': story, 'repo': repo, 'issue': issue})
+            return self._stories()[story]

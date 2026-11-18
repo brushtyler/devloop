@@ -32,7 +32,10 @@ another value stops devloop at startup. `block_uncertain_turns` (a boolean, defa
 turns on the block on uncertain turns of the [turn journal](protocol.md#turn-journal) (#362): a
 turn left without outcome refuses every new turn of its work, with an escalation, until a trusted
 user reconciles it with `/devloop reconcile`. Off, the journal records the turns all the same;
-another value stops devloop at startup.
+another value stops devloop at startup. `story_identity` (a boolean, default `false`) turns on the
+[story identity](protocol.md#story-identity) (#363): at the takeover of an issue the journal
+records its story and the `request` record carries the dispatcher's `story` marker. Off, devloop
+records no story; another value stops devloop at startup.
 `[merge]` (`mode`, `levels`, `operator_only_paths`) and `roles.supervisor` set the
 [merge modes](guide.md#merge-modes); an unknown mode, level or key stops devloop at startup.
 `[pin]` (`auto`, default `false`; `restart_max_wait_minutes`, default 30) sets the
