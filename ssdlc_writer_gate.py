@@ -337,12 +337,16 @@ def open_gate(ticket_root, expected_identity=None, *, create=True):
 # deny anything. A host marker is never evidence of quiescence; it only refuses
 # automatic fencing for its generation, and nothing here removes it.
 
-def _registry(gate):
-    with contextlib.suppress(FileExistsError):
-        os.mkdir(REGISTRY_NAME, 0o755, dir_fd=gate.dirfd)
+def _registry(gate, create=True):
+    """The registry descriptor; with ``create=False`` nothing is created and None means absent."""
+    if create:
+        with contextlib.suppress(FileExistsError):
+            os.mkdir(REGISTRY_NAME, 0o755, dir_fd=gate.dirfd)
     try:
         return os.open(REGISTRY_NAME, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=gate.dirfd)
     except OSError as exc:
+        if not create and exc.errno == errno.ENOENT:
+            return None
         raise GateError('registry_invalid', f'{REGISTRY_NAME}: {exc.strerror}') from None
 
 
@@ -470,9 +474,14 @@ def _record_tree(gate, tree, key, supervisor, controller, mechanism, reason):
         raise GateError('registry_invalid', f'host tree record {tree_record_name(tree)} already exists')
 
 
-def _records(gate):
-    """All registry records, plus the names of entries that cannot be read as records."""
-    rfd = _registry(gate)
+def _records(gate, create=True):
+    """All registry records, plus the names of entries that cannot be read as records.
+
+    With ``create=False`` (read-only observers) a missing registry is no record at all.
+    """
+    rfd = _registry(gate, create)
+    if rfd is None:
+        return [], []
     try:
         found, malformed = [], []
         for name in sorted(os.listdir(rfd)):

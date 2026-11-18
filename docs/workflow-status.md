@@ -1,13 +1,15 @@
 # Workflow snapshot
 
 `ssdlc_workflow_status.snapshot(repo, ticket)` returns the `WorkflowSnapshot` of a run: the
-selected generation, the task DAG, the feedback ledger, the metrics already persisted and the
-[cost projections](#accounting-and-projections). It covers parts 1 and 3 of the `workflow-status` CLI
+selected generation, the task DAG, the feedback ledger, the metrics already persisted, the
+[cost projections](#accounting-and-projections) and the [status](#liveness-and-next-action):
+liveness observed in the kernel, its coverage, the activity, the native classification of a stop
+and the next action. It covers parts 1, 2 and 3 of the `workflow-status` CLI
 ([#46](https://github.com/brushtyler/ssdlc/issues/46),
 [#346](https://github.com/brushtyler/ssdlc/issues/346),
-[#348](https://github.com/brushtyler/ssdlc/issues/348)). The command itself, the run states
-(`RUNNING`, `QUIESCENT`, `STALE`, …), suggested commands, exit codes and `--watch` come in the
-other parts. Today the snapshot is a Python API, with no command of its own.
+[#347](https://github.com/brushtyler/ssdlc/issues/347),
+[#348](https://github.com/brushtyler/ssdlc/issues/348)). The command itself, exit codes and
+`--watch` come in another part. Today the snapshot is a Python API, with no command of its own.
 
 ## Read without writing
 
@@ -55,8 +57,9 @@ coherent with. The mtime is only a change signal; it is never reported as a time
 | `feedback` | `status` (`absent`, `active`, `unavailable`), the ledger's public `projection`, `reason` |
 | `metrics` | See below |
 | `projection` | See [Accounting and projections](#accounting-and-projections) |
+| `status` | See [Liveness and next action](#liveness-and-next-action) |
 
-Only `COHERENT` fills `run` to `projection`; otherwise they are `null`.
+Only `COHERENT` fills `run` to `status`; otherwise they are `null`.
 
 **Generation.** The snapshot reads the generation the published selectors name, with the same
 precedence as the engine (`execution/active.json`, then `continuations/active.json`, else the
@@ -154,3 +157,68 @@ Without active limits, `budget` and `scenario` are `null`.
 
 They are information for the operator: the snapshot writes nothing, and the engine's own
 admission (`LimitsStore`) stays the only authority on dispatch.
+
+## Liveness and next action
+
+`status` ([#347](https://github.com/brushtyler/ssdlc/issues/347), `ssdlc_workflow_liveness`) keeps
+three things apart: the canonical state of the run, its liveness and its activity. The classification
+is pure; the observations it uses read without writing: the gate is located with `lstat` and never
+opened, the [writer gate](writer-fencing.md) registry is read only if it exists, Docker is only listed.
+
+| Field | Content |
+| --- | --- |
+| `state` | The native `state.json` status, as the engine wrote it (`IN_PROGRESS`, `PAUSED_AT_PHASE_BOUNDARY`, `FAILED`, …) |
+| `outcome` | `in_progress`, `paused`, `ready` (`PO_READY`, `DESIGN_READY`, `PLAN_READY`, `CONTINUATION_IMPORTED`, `CONTINUATION_VERIFIED`), `awaiting_signoff`, `completed`, `stopped` (`FAILED`, `HALTED_BUDGET_EXCEEDED`, `ESCALATED_TO_SUPERVISOR`, `CONTINUATION_BLOCKED`, `CONTINUATION_CHECKS_FAILED`), `unknown` for any other status, `absent` without `state.json` |
+| `liveness` | `RUNNING`, `QUIESCENT`, `STALE` or `UNVERIFIED` (below) |
+| `writers` | The kernel holders seen: `lock` (`writer.gate` or `ticket.lock`), `mode`, `pid` |
+| `coverage` | `complete` and, for each component (`writers`, `controller`, `host_trees`, `containers`), `covered` and the `reason` it is not |
+| `activity` | `value` (`invocation`, `verification`, `idle` or `null`), the `invocations` and `verifications` recorded in progress, `reason` |
+| `stop` | For a stopped run, or a `STALE` one: the native `class` and `reason_code`, `mode`, the recorded failure `category`, `detail`; otherwise `null` |
+| `next_action` | `action`, `mode`, `command` (`argv` and `cwd`, or `null`), `prerequisites` |
+
+**Liveness.** The writers are the processes holding a kernel `flock` on the ticket's
+`writer.gate` or `ticket.lock`, read in `/proc/locks`. They are observed before each collection and
+again after it; then the coverage is read, and only then are the files checked, so the files did not
+move while the kernel was read.
+
+| `liveness` | When |
+| --- | --- |
+| `RUNNING` | A writer was seen by either observation, whatever the coverage |
+| `UNVERIFIED` | No writer seen, and the coverage is not complete |
+| `QUIESCENT` | No writer seen, complete coverage, and the run at rest (`paused`, `ready`, `awaiting_signoff`, `completed`, `stopped`) |
+| `STALE` | No writer seen, complete coverage, and work the engine left in progress (`in_progress` or `unknown`): the controller, a gate writer, is verified gone |
+
+**Coverage.** Every writer of the run must be visible to the kernel or proven ended. Each
+component has a reason when it is not:
+
+| Component | Covered when |
+| --- | --- |
+| `writers` | Linux, a local filesystem, a `writer.gate` with its anchor, and `/proc/locks` readable |
+| `controller` | `state.json` declares `writer_fencing_controller: host-tree-v1`: the controller holds a writer lease for its whole life and runs every host command through `run_host()`. The controller writes it from [#345](https://github.com/brushtyler/ssdlc/issues/345) on; until then no real run has it |
+| `host_trees` | Every host command tree of the generation is proven ended, as the [writer gate](writer-fencing.md#host-writers) requires, and no registry entry is unreadable |
+| `containers` | The run is admitted to automatic fencing (`writer_fencing: v1`, never refused) and Docker lists no container of the ticket; Docker is consulted only when every other component is covered |
+
+Until #345, real runs are therefore `RUNNING` when a process holds one of the locks, and `UNVERIFIED`
+otherwise: never `QUIESCENT` without complete coverage. The same rules give `QUIESCENT` and `STALE`
+once the controller declares its coverage.
+
+**Activity.** `invocation` when a task of the journal is `RUNNING` or the frozen limits journal holds
+a `reserved` invocation, `verification` when a task is `VERIFYING`. Without writers and with complete
+coverage the activity is `idle`, and recorded work is reported as interrupted. Otherwise, with nothing
+recorded, it is `null`: other activities are not persisted, and no wait for a provider is deduced.
+
+**Stops.** A stop keeps the classes of the supervisor's
+[recovery matrix](supervision.md) (`RECOVERY_MATRIX`): `HALTED_BUDGET_EXCEEDED` is `limits`,
+`ESCALATED_TO_SUPERVISOR` is `operator_decision`; for `FAILED`, the recorded `failure.category` maps as
+in the supervisor (authentication, `INTEGRITY`, the recovery stops such as `LIMIT_REACHED`,
+`ENVIRONMENT_RESOURCE`). The categories the supervisor binds only through its controller events
+(`CHECK_FAILURE`, `SCOPE_REQUIRED`, …) and a missing category stay `uncertain_outcome`,
+`terminal_unbound`, as in its fallback row. A `STALE` run is `uncertain_outcome` too.
+
+**Next action.** `action` and `mode` are those of the recovery matrix for a stop. A `command` is given
+only when every argument is available: today only sign-off, `./ssdlc approve <ticket>` from the
+repository, for `AWAITING_SUPERVISOR_SIGNOFF`. Every other action has `command: null` and lists what is
+missing in `prerequisites`: an authorization, a limit value (none is proposed), or the parameters of a
+resume, which are never reconstructed from files (a pause names its `--from-phase`, nothing else).
+`RUNNING` asks to wait; `UNVERIFIED` first asks to confirm that no process of the run still runs, with
+the coverage reasons.
