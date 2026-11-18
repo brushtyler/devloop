@@ -112,8 +112,8 @@ class PinPolicy:
     """``[pin]`` (#174): whether a merge by devloop that touches ``paths`` (``devloop/`` and the
     files of ``review_policy.sensitive_path_lists``) pins ``origin/<base_branch>`` at the next
     tick. In continuous mode the restart from the new copy waits for the running actions, while
-    new ones still start, for at most ``restart_max_wait_minutes`` (#301): after that no action
-    starts until the restart."""
+    new ones except implementations (#342) still start, for at most ``restart_max_wait_minutes``
+    (#301): after that no action starts until the restart."""
     auto: bool = False
     paths: tuple = ('devloop/',) + DEFAULT_SENSITIVE_LISTS
     restart_max_wait_minutes: int = 30

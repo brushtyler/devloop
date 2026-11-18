@@ -153,8 +153,8 @@ only once the CI of the same head passes, replayed without a new review (``_appr
 a CI that fails makes it a ``ci_failed`` round. An approval that saw no CI, on a head still
 without CI past the window, gets the full suite locally before its promotion
 (``_do_apply_review``). A request for changes made before the CI was known waits for that CI in
-agent:changes (``changes_before_ci``): a failure is a ``ci_failed`` round first, so that one fix
-answers both.
+agent:changes (``changes_before_ci``): a failure joins that same round as a ``ci`` finding
+(#352, ``ci_joins_round``), without a round of its own, so that one fix answers both.
 """
 
 import functools
@@ -181,7 +181,7 @@ from .dispatch_merge import MergeMixin
 from .dispatch_preflight import PreflightMixin
 from .dispatch_supervision import SupervisionMixin, UntrustedChange
 from .github import GitHubError, author_login
-from .ledger import open_turns
+from .ledger import fix_register, open_turns
 from .localtests import module_command, select_modules
 from .markdown import (RESUME, dispatcher_header, publishable, read_marker, render_cycle,
                        render_escalation, render_operator_merge)
@@ -1165,9 +1165,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         The pin after a merge runs at once, also while actions run (#301): a new copy only
         moves ``current``, and the restart from it waits for the first tick at which nothing
         runs, while this one plans and starts actions with the code it loaded, as without
-        ``[pin] auto``. After ``[pin] restart_max_wait_minutes`` of a pending restart nothing
-        starts until the running actions end and the restart happens. A merge that requests a
-        pin while this tick reads GitHub (#264) is pinned by the next tick."""
+        ``[pin] auto``. While the restart is pending no new implementation starts (#342), the
+        long action, so that the running ones end soon; the short ones still start. After
+        ``[pin] restart_max_wait_minutes`` of a pending restart nothing starts until the running
+        actions end and the restart happens. A merge that requests a pin while this tick reads
+        GitHub (#264) is pinned by the next tick."""
         workers = self.workers
         # An action that ends from here on wakes the loop again: its result is not in this plan.
         workers.clear()
@@ -1195,9 +1197,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                        or action.kind == 'supervise' and action.number not in prs
                        or action.kind == 'conclave' and action.opens)
         merging = any(action.kind in MERGE_LANE for action, _ in running)
-        actions = plan(snap, self.cfg, busy, reserved, merging)
+        # #342: no new implementation, the long action, while the restart waits; the plan
+        # leaves its slots to the other actions.
+        pending = bool(running) and self._restart is not None
+        actions = plan(snap, self.cfg, busy, reserved, merging, implement=not pending)
         # The limit may pass while the snapshot reads GitHub: checked again before any start.
-        if running and self._restart is not None and self._restart_wait_over(running):
+        if pending and self._restart_wait_over(running):
             return []
         started = admit(actions, issue_of, running, workers.free())
         self.log(f'{pr_counts_line(snap, self.cfg)}; running: '
@@ -1214,8 +1219,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         limit = self.cfg.pin.restart_max_wait_minutes
         if self.clock() - since < limit * 60:
             return False
-        self.log(f'{restart_line(sha, iso(since), len(running))}: over [pin] '
-                 f'restart_max_wait_minutes ({limit}), no action starts until the restart')
+        self.log(restart_line(sha, iso(since), len(running),
+                              f'over [pin] restart_max_wait_minutes ({limit}), no action starts '
+                              'until the restart'))
         return True
 
     def _set_restart(self, copy):
@@ -1502,15 +1508,17 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
     def _open_turn(self, where, candidate, mode, label):
         """The ledger record of a turn about to start, or None without a ledger. A failed write
-        raises ``GitHubError``: the turn does not start."""
+        raises ``GitHubError``: the turn does not start. ``where``: ``(number, kind)``, with the
+        round of a review turn (#325) or the ``FixRegister`` of a fix turn (#355) after them."""
         if self.ledger is None or where is None:
             return None
-        number, kind, *register = where
+        number, kind, *place = where
+        fix = fix_register(where)
         return self.ledger.open_turn(
             number, kind=kind, agent=candidate.key, identity=self._app_login(candidate.key),
             mode=mode, model=candidate.model, effort=candidate.effort,
             fallback_for=candidate.fallback_for, label=label,
-            round_no=register[0] if register else None)
+            round_no=place[0] if place and fix is None else None, register=fix)
 
     def _close_turn(self, entry, outcome, error=None):
         """Close a turn's record with what the CLI attested and the last command its output
@@ -1539,7 +1547,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
     def _run_tests(self, where, path, attempt, command):
         """Run ``command``, recording it in the ledger with the tree tested; returns
-        ``(passed, tail, entry)``."""
+        ``(passed, tail, entry)``. The test of a fix is a section of its register (#355)."""
         if self.ledger is None or where is None:
             return (*self.ws.run_tests(path, command, self.cfg.test_timeout_seconds), None)
         before = self.ws.tree(path)
@@ -1550,7 +1558,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         entry = self.ledger.verification(where[0], kind=where[1], attempt=attempt,
                                          command=command, passed=passed,
                                          duration_ms=duration, tree_before=before,
-                                         tree_after=after)
+                                         tree_after=after, register=fix_register(where))
         return passed, tail, entry
 
     def _verify(self, where, path, attempt):
@@ -1574,9 +1582,17 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         except GitHubError as exc:
             self.log(f'  verification record on #{tested.number} not updated: {exc}')
 
-    def _ledger_event(self, number, event, **fields):
+    def _ledger_event(self, number, event, register=None, **fields):
+        """An event of its own, or with ``register`` a section of that fix register (#355)."""
         if self.ledger is not None:
-            self.ledger.event(number, event, **fields)
+            self.ledger.event(number, event, register=register, **fields)
+
+    def _fix_where(self, number, round_no):
+        """The ``where`` of the turns and tests of a fix of PR ``number`` answering round
+        ``round_no``: with a ledger they share one register (#355), its ``FixRegister`` last."""
+        if self.ledger is None:
+            return (number, 'fix')
+        return (number, 'fix', self.ledger.fix_register(number, round_no))
 
     def _read_ci(self, head):
         """``(state, checks)`` of ``head``'s CI: with a ledger, from the same read that gives

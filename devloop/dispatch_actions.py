@@ -23,11 +23,13 @@ from .context import (_failure_text, _format_conflicts, _format_findings, _revie
                       docs_map_section, docs_review_section, format_ci_summary,
                       format_fix_requests, format_operator_comments, format_previous_rounds)
 from .github import GitHubError, job_id
+from .ledger import fix_register
 from .localtests import failed_modules, select_modules, suite_summary
 from .markdown import (dispatcher_header, publishable, render_fix, render_native_review,
                        render_review)
-from .planning import (BASE_CHANGED, FIX_COMMAND, RESYNC_AFTER_APPROVAL, counted_rounds,
-                       pending_reviewers, preflight_state, waived_rounds, waiting_reviewers)
+from .planning import (BASE_CHANGED, FIX_COMMAND, RESYNC_AFTER_APPROVAL, ci_joins_round,
+                       counted_rounds, pending_reviewers, preflight_state, waived_rounds,
+                       waiting_reviewers)
 from .policy import ZERO_LEVEL, distinct, independent, profile_of
 from .ports import summarize_checks
 from .review import (ci_failure_review, current_round, last_round, normalize_review,
@@ -200,26 +202,47 @@ class ActionsMixin:
         if self._rerun_unrelated(pr, paths):
             return
         log_tail = '\n'.join(self.gh.failed_log(run) for run in pr.failed_runs[:2])
+        # One head, one round (#352): a failure on the head of a round that asked for changes
+        # is a ci finding of that round, not a round of its own.
+        joined = ci_joins_round(pr)
+        round_no = joined[0]['round'] if joined else last_round(pr.reviews) + 1
+        earlier = [r for r in pr.reviews if r['round'] < round_no]
         review = ci_failure_review(failed_checks=pr.failed_checks, log_tail=log_tail,
-                                   previous_open=open_findings(pr.reviews, pr.closures),
-                                   round_no=last_round(pr.reviews) + 1,
+                                   previous_open=open_findings(earlier, pr.closures),
+                                   round_no=round_no,
                                    max_rounds=self._last_round_allowed(pr.reviews),
                                    head_sha=pr.head_sha)
+        notes = []
+        if joined:
+            notes.append(f'La review del round {round_no} ha chiesto modifiche su questo stesso '
+                         'commit: il fallimento della CI entra nel suo round, non ne apre uno '
+                         'nuovo, e una sola correzione risponde a tutti i finding.')
         rerun = rerun_of(pr.reruns, pr.head_sha)
         if rerun is not None:
-            review['note'] = (
+            notes.append(
                 'I job falliti di questo commit erano già stati rilanciati una volta, perché '
                 'nessun modulo fallito era pertinente alla PR (run '
                 + ', '.join(str(r) for r in rerun['runs']) + '; moduli: '
                 + (', '.join(rerun['modules']) or 'nessuno') + '). Anche il rilancio è fallito: '
-                'questo fallimento conta come round.')
+                + ('questo fallimento entra nel round.' if joined
+                   else 'questo fallimento conta come round.'))
+        review['note'] = ' '.join(notes)
         review['receipt'] = receipt
         if self.ledger is not None:
+            # The event of a joined round is a section of that round's register (#325).
             details = self.gh.check_details(pr.head_sha)
             self._record_ci(pr, pr.head_sha, summarize_checks(details)[0], details,
                             review['round'], jobs=self._ci_jobs(details))
         self.gh.comment(pr.number, render_review(review, dispatcher_header()))
-        self._apply_round(pr, [review], announce=True, reviews=pr.reviews + [review])
+        records = joined + [review]
+        if joined and waiting_reviewers(records, self.cfg.conclave):
+            # The round still waits for its other reviewers: it is applied after them.
+            self.log(f'  CI failure joins round {round_no}, which waits for '
+                     + ', '.join(waiting_reviewers(records, self.cfg.conclave)))
+            return
+        if joined:
+            self.log(f'  CI failure joins round {round_no}')
+        self._apply_round(pr, records, announce=True, reviews=earlier + records)
 
     def _rerun_unrelated(self, pr, paths):
         """Re-run once the failed jobs of the head's CI when its failure does not concern the
@@ -681,12 +704,13 @@ class ActionsMixin:
                              docs=docs_diff_section(self._mapped_docs(path)),
                              requests='', base_branch=cfg.base_branch, language=cfg.language,
                              conclave=resolution)
+        # One register for the fix's turns, local tests and sync (#355).
+        where = self._fix_where(pr.number, latest['round'])
         result, failure, used, tested, local = self._write_turn(
-            agent, prompt, 'fix', path, f'pr-{pr.number}-fix-r{latest["round"]}',
-            where=(pr.number, 'fix'))
+            agent, prompt, 'fix', path, f'pr-{pr.number}-fix-r{latest["round"]}', where=where)
         self._publish_fix(pr, agent, name, path, (result, failure, used, tested, local),
                           since=start, round_no=latest['round'], remove=[lb.changes],
-                          merged=merged, conclave=decision)
+                          merged=merged, conclave=decision, where=where)
 
     def _align_fix(self, pr, agent, path, remove):
         """Bring the branch of a fix in ``path`` up to ``origin/<base>`` before its agent starts
@@ -723,7 +747,7 @@ class ActionsMixin:
         return head, {'base': target, 'head': head, 'from': previous}
 
     def _publish_fix(self, pr, agent, name, path, turn, since, round_no, remove, extra=None,
-                     merged=None, conclave=None):
+                     merged=None, conclave=None, where=None):
         """Publish the outcome of a fix ``turn`` (``_write_turn``'s result) in worktree
         ``path``: escalate a blocked agent or failing tests (removing ``remove``), otherwise
         commit and push the changes made since commit ``since``, record the fix of round
@@ -731,7 +755,8 @@ class ActionsMixin:
         ``merged``: the merge of the base the dispatcher made before the turn (``_align_fix``),
         pushed with the fix even when the agent changed nothing. ``conclave``: the comment of
         the conclave decision whose resolution the turn had (#142), recorded with the fix or the
-        block; a veto of it written meanwhile publishes nothing."""
+        block; a veto of it written meanwhile publishes nothing. ``where``: the one the turn
+        ran with (``_fix_where``), whose register gets the ``sync`` event of ``merged`` (#355)."""
         lb = self.cfg.labels
         result, failure, used, tested, local = turn
         if result['status'] == 'blocked':
@@ -759,8 +784,10 @@ class ActionsMixin:
             self.ws.push(path, pr.head_ref, auth=auth)
             self._pushed(path)
         if merged:
-            # As for a sync without an agent (#133): an event, not a turn.
-            self._ledger_event(pr.number, 'sync', base=merged['base'], head=merged['head'],
+            # As for a sync without an agent (#133): an event, not a turn, in the fix's
+            # register (#355).
+            self._ledger_event(pr.number, 'sync', register=fix_register(where),
+                               base=merged['base'], head=merged['head'],
                                previous_head=merged['from'])
         fix = dict(result, head_sha=self.ws.head(path),
                    profile=self._profile(agent.key, 'write', used), local_tests=local,
@@ -819,11 +846,12 @@ class ActionsMixin:
                              docs=docs_diff_section(self._mapped_docs(path)),
                              base_branch=cfg.base_branch, language=cfg.language,
                              conclave=resolution)
+        where = self._fix_where(pr.number, round_no)
         turn = self._write_turn(agent, prompt, 'fix', path, f'pr-{pr.number}-fix-request',
-                                where=(pr.number, 'fix'))
+                                where=where)
         self._publish_fix(pr, agent, name, path, turn, since=start, round_no=round_no,
                           remove=remove, extra={'requests': requests, 'from': pr.head_sha},
-                          merged=merged, conclave=decision)
+                          merged=merged, conclave=decision, where=where)
 
     def _sync_rounds_note(self, pr, conflicts, fix):
         """What the comment of a sync of ``pr`` says of the next review (#289): with

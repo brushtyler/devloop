@@ -365,7 +365,7 @@ def pr_counts(snapshot, cfg):
     return len(snapshot.prs) - held, held
 
 
-def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
+def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=True):
     """Pure planning: the actions one tick should take, in order.
 
     In continuous mode (#227) ``busy`` holds the numbers of the issues and PRs that actions
@@ -378,7 +378,10 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
     runs, takes a slot of ``max_actions_per_tick``. The others stay in the plan, where ``admit``
     holds them back with their numbers, and take no slot from the actions that can start now.
     A merge that finds the limit already spent is dropped and does not take the lane: so is
-    every merge after it, which would otherwise start in its place past the limit."""
+    every merge after it, which would otherwise start in its place past the limit.
+    Without ``implement`` (a restart pending in continuous mode, #342) no implementation is
+    planned, and an issue that would start one takes no slot of ``max_open_prs`` nor of
+    ``max_actions_per_tick``: they stay to the other actions, readiness checks included."""
     lb = cfg.labels
     actions = []
     issue_of = {pr.number: pr.issue for pr in snapshot.prs}
@@ -508,6 +511,11 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
                 # The review asked for changes with the CI of this head running (#271): the
                 # fix waits for its outcome, so that a failure joins the same fix.
                 continue
+            elif blind and pr.checks == 'fail' and ci_joins_round(pr):
+                # One head, one round (#352): the failure joins the round that asked for
+                # changes, as a ci finding, and takes no round of the limit.
+                actions.append(Action('ci_failed', pr.number,
+                                      'CI failed after the review: it joins its round'))
             elif blind and pr.checks == 'fail':
                 actions.append(Action('ci_failed', pr.number, 'CI failed after the review')
                                if rounds_left else Action('round_limit', pr.number))
@@ -556,7 +564,12 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
                     # is applied without a new review; failed, it goes to ci_failed below.
                     continue
                 actions.append(Action('apply_review', pr.number, 'approval already recorded'))
-            elif partial and pr.checks != 'fail':
+            elif partial and pr.checks == 'fail' and ci_joins_round(pr):
+                # A reviewer of the round in progress asked for changes (#352): the failure
+                # joins the round, which still waits for its other reviewers.
+                actions.append(Action('ci_failed', pr.number,
+                                      'CI failed during the review: it joins its round'))
+            elif partial and (pr.checks != 'fail' or ci_in_round(latest)):
                 actions.append(Action('review', pr.number, 'the round waits for '
                                       + ', '.join(pending)))
             elif not rounds_left and not resync:
@@ -613,8 +626,8 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
                   '(max_parked_prs)')
         free = slots
     if cfg.preflight:
-        actions += _plan_preflight(snapshot, cfg, pr_issues | held_back, free, urgent)
-    elif free > 0:
+        actions += _plan_preflight(snapshot, cfg, pr_issues | held_back, free, urgent, implement)
+    elif free > 0 and implement:
         blocked = set(cfg.blocked_labels) | lb.operator() | {lb.working, lb.needs_supervisor}
         candidates = [i for i in snapshot.ready_issues
                       if not (i['labels'] & blocked) and i['number'] not in pr_issues
@@ -641,7 +654,7 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
     return capped
 
 
-def _plan_preflight(snapshot, cfg, pr_issues, free, urgent=''):
+def _plan_preflight(snapshot, cfg, pr_issues, free, urgent='', implement=True):
     """New work with the readiness check (#114), for the ready issues not in ``pr_issues`` (an
     open PR, a merged one, #228, or an open block, #277). Issues start in the usual order, up to
     ``free``: one whose check for its current text passed is implemented, one without a valid
@@ -653,7 +666,8 @@ def _plan_preflight(snapshot, cfg, pr_issues, free, urgent=''):
     for it or someone who may admit it added ``agent:ready`` again (#270); when the base branch
     advanced past a failure that depends on it (#270), only within ``free``, as any check. Any
     other ``agent:needs-operator`` (or its name before #248) is left alone. An issue in
-    ``agent:needs-supervisor`` waits for the supervisor (#182)."""
+    ``agent:needs-supervisor`` waits for the supervisor (#182). Without ``implement`` (#342) an
+    issue whose check passed waits, and takes no slot from the checks of the others."""
     lb = cfg.labels
     excluded = set(cfg.blocked_labels) | {lb.working, lb.needs_supervisor}
     issues = [i for i in snapshot.ready_issues
@@ -677,6 +691,8 @@ def _plan_preflight(snapshot, cfg, pr_issues, free, urgent=''):
         elif state == 'not_ready':
             actions.append(Action('preflight_block', issue['number'],
                                   'the readiness check of the current text failed'))
+        elif state == 'ready' and not implement:
+            continue  # a restart is pending (#342): implemented after it
         elif taken < free and (not urgent or issue.get('priority') == 'high'):
             taken += 1
             actions.append(Action('implement', issue['number'], urgent) if state == 'ready'
@@ -794,12 +810,37 @@ def ci_unknown(records):
     return any(r.get('ci') == 'pending' for r in records)
 
 
+def ci_in_round(records):
+    """Whether the round ``records`` already holds the failure of the CI (#352)."""
+    return any(owner_of(r) == CI for r in records)
+
+
+def ci_joins_round(pr):
+    """The records of the round that a CI failure of ``pr``'s head joins (#352), or ``[]``
+    when the failure opens a CI round of its own. One head, one round: the latest round is an
+    agent round of this very head, not answered by a fix nor voided by a rereview request, that
+    holds no CI failure yet and in which a reviewer asked for changes, the round complete or
+    still waiting for other reviewers. Its failed checks become a ``ci`` finding of that round,
+    and one fix answers everything. A round that only approved does not take it: the approval
+    no longer holds, and the failure is a round of its own, as before."""
+    latest = current_round(pr.reviews)
+    if (not latest or latest[0]['source'] != 'agent' or latest[0]['head_sha'] != pr.head_sha
+            or pr.rereview or ci_in_round(latest)
+            or any(f['round'] == latest[0]['round'] for f in pr.fixes)):
+        return []
+    if not any(current_verdict(r['verdict']) == 'request_changes' for r in latest):
+        return []
+    return latest
+
+
 def changes_before_ci(pr):
     """Whether ``pr``, in agent:changes, waits for the CI of its head before the fix (#271):
-    its latest round asked for changes on this very head before the CI outcome was known.
-    A CI that then fails joins the same fix as a ``ci_failed`` round."""
+    its latest round asked for changes on this very head before the CI outcome was known, and
+    does not hold the CI failure yet. A CI that then fails joins that same round (#352,
+    ``ci_joins_round``), and the same fix."""
     latest = current_round(pr.reviews)
-    return bool(latest) and latest[0]['head_sha'] == pr.head_sha and ci_unknown(latest)
+    return (bool(latest) and latest[0]['head_sha'] == pr.head_sha and ci_unknown(latest)
+            and not ci_in_round(latest))
 
 
 def counted_rounds(reviews):
@@ -848,6 +889,8 @@ def round_reasons(reviews, fixes=(), syncs=()):
                 why = 'nuova review dello stesso head'
             else:
                 why = 'review di un nuovo head'
+            if first['source'] == 'agent' and ci_in_round(_round_records(reviews, number)):
+                why += ', con la CI fallita dello stesso head'  # one head, one round (#352)
             reasons.append((number, why, True))
         previous = first
     return reasons

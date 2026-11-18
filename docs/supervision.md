@@ -20,7 +20,7 @@ python3 orchestrator.py resume --ticket T-1 --entrypoint design --rounds 4 --rep
 ```
 
 - **`run --detach`** is an alias for `start`.
-- **`status`** is read-only. It reports the state, heartbeat age, phase, deadlines, recovery allowance, preflight checks, classification and the next action.
+- **`status`** is read-only. It reports the state, heartbeat age, phase, deadlines, recovery allowance, preflight checks, classification and the next action. The run's files (generation, task DAG, feedback, persisted metrics) are read by the [workflow snapshot](workflow-status.md), coherent or `TORN`, without writing.
 - **`monitor --restart-worker`** (or `--adopt`) explicitly restores a worker after a verified loss. It is **not** read-only.
 - **`start` on a terminal run** records a refusal and exits with code 14. Use an explicit, supported `resume` instead.
 

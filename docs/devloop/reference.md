@@ -33,7 +33,8 @@ another value stops devloop at startup.
 [merge modes](guide.md#merge-modes); an unknown mode, level or key stops devloop at startup.
 `[pin]` (`auto`, default `false`; `restart_max_wait_minutes`, default 30) sets the
 [pin after a merge](guide.md#pin-after-a-merge) and how long, in the continuous mode, the restart
-from the new copy may wait for the running actions while new ones still start; an `auto` that is
+from the new copy may wait for the running actions while new ones, except implementations, still
+start; an `auto` that is
 not a boolean, a `restart_max_wait_minutes` that is not a whole number of at least 0, or an
 unknown key, stops devloop at startup. `[run]` (`alert_issue`, unset by
 default) names the issue of the alert of the [continuous loop](guide.md#continuous-loop); a value that
@@ -239,8 +240,10 @@ the suite fails only in modules not pertinent to the PR and another job fails wi
   review, no merge. A ready PR stays in `agent:ready-to-merge` meanwhile, and goes back to
   `agent:review` as for any CI running again on the approved commit.
 - **Second failure.** One re-run per head: if the re-run fails too, the failure is a normal
-  `ci_failed`, which counts as a round, and its comment cites the re-run (runs and modules). A new
-  head starts again from its first failure.
+  `ci_failed`, which counts as a round, and its comment cites the re-run (runs and modules). On a
+  head whose review round asked for changes the failure joins that round instead, without a round
+  of its own ([one head, one round](protocol.md#approval-and-ci), #352). A new head starts again
+  from its first failure.
 
 The rerun needs **`actions: write`** on the dispatcher's app. Its token is minted with only that
 permission. Without it (GitHub answers 403, or refuses to mint the token; also when the

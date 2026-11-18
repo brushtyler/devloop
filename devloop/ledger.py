@@ -25,6 +25,11 @@ re-reads it from GitHub and runs under a lock of the ledger, so that reviewers r
 parallel lose none of each other's updates. Reads expand a register into its records, each
 with its ``section`` and, in ``register``, the round: everything else reads them as before.
 
+A fix has a register of its own too (#355), a ``fix`` record with the same rules: its turns, the
+``sync`` event of the merge of the base made before it, and the ``verification`` of its local
+tests, each in a section. It is written with the first turn, ``open``, before the CLI starts.
+Its sections read with ``register`` set to ``FIX``.
+
 A value the CLI or GitHub did not attest is null, never 0, and reads ``non riportato``. Nothing
 is reconstructed from what agents wrote: data missing for work started before these records is
 missing.
@@ -47,6 +52,8 @@ from .ports import Tracker
 NOT_REPORTED = 'non riportato'
 PENDING = 'ledger-open-turns.json'  # in state_dir: issues and PRs with turns not closed
 TURN_KINDS = ('implement', 'fix', 'sync', 'review', 'preflight', 'conclave')
+REGISTERS = ('round', 'fix')  # the records whose ``records`` hold sections (#325, #355)
+FIX = 'fix'  # the ``register`` of the sections of a fix register, as reads expand them
 _COMMENT_URL = re.compile(r'#issuecomment-(\d+)$')
 
 
@@ -71,14 +78,35 @@ def comment_ref(comment):
 
 @dataclass
 class Entry:
-    """A record written on issue or PR ``number`` as comment ``comment_id``; in the register of
-    round ``register``, as its section ``section`` (#325)."""
+    """A record written on issue or PR ``number`` as comment ``comment_id``; in a register, as
+    its section ``section``: ``register`` is the round of a round's register (#325), ``FIX`` for
+    a fix register (#355)."""
     number: int
     comment_id: object
     record: dict
     started: float = field(default=None, repr=False)  # monotonic time a turn started
     section: int = None
-    register: int = None
+    register: object = None
+
+
+@dataclass
+class FixRegister:
+    """The register of one fix on PR ``number``, answering round ``round`` (0 for a fix asked
+    before any review, #195): no comment until its first section is written, then
+    ``comment_id`` (#355)."""
+    number: int
+    round: int
+    comment_id: object = None
+
+
+def fix_register(where):
+    """The ``FixRegister`` that ends ``where`` (``(number, kind, …)`` of a step), or None."""
+    last = where[-1] if where else None
+    return last if isinstance(last, FixRegister) else None
+
+
+def _register_name(register):
+    return 'fix register' if register == FIX else f'register of round {register}'
 
 
 class LedgerError(GitHubError):
@@ -180,13 +208,14 @@ class Ledger:
 
     # Round registers (#325) ------------------------------------------------
     def _register(self, number, round_no, comment_id=None):
-        """``(comment, record)`` of the register of round ``round_no`` on ``number`` as GitHub
-        has it now, the dispatcher's only: the comment ``comment_id`` when known, otherwise the
-        latest register of that round. None when there is none."""
+        """``(comment, record)`` of a register on ``number`` as GitHub has it now, the
+        dispatcher's only: the comment ``comment_id`` when known (a round's register or a fix
+        register), otherwise the latest register of round ``round_no``. None when there is
+        none."""
         found = None
         for comment in self.gh.issue_comments(number):
             record = read_marker(comment.get('body', ''), 'ledger')
-            if record is None or record['type'] != 'round':
+            if record is None or record['type'] not in REGISTERS:
                 continue
             if self.signed is not None and not self.signed(
                     (comment.get('author') or {}).get('login')):
@@ -194,23 +223,37 @@ class Ledger:
             if comment_id is not None:
                 if comment.get('id') == comment_id:
                     return comment, record
-            elif record['round'] == round_no:
+            elif record['type'] == 'round' and record['round'] == round_no:
                 found = (comment, record)
         return found
 
     def _add_section(self, number, round_no, section):
-        """Add ``section`` (a turn or an event) to the register of round ``round_no``, writing
-        the register when the round has none yet; returns ``(comment id, section number)``."""
+        """Add ``section`` to a register, writing it when there is none yet: a turn or an event
+        to the register of round ``round_no``, or, when ``round_no`` is a ``FixRegister``
+        (#355), a turn, an event or a verification to that fix's register. Returns
+        ``(comment id, section number)``."""
+        fix = round_no if isinstance(round_no, FixRegister) else None
+        name = _register_name(FIX if fix else round_no)
         with self._registers:
-            found = self._register(number, round_no)
+            if fix is None:
+                found = self._register(number, round_no)
+            elif fix.comment_id is None:
+                found = None
+            else:
+                found = self._register(number, None, fix.comment_id)
+                if found is None:
+                    raise GitHubError(f'{name} on #{number} not found, not edited')
             if found is None:
-                record = {'type': 'round', 'round': round_no,
-                          'records': [dict(section, section=1)]}
-                return self.gh.comment(number, render(record)), 1
+                record = ({'type': 'fix', 'round': fix.round} if fix
+                          else {'type': 'round', 'round': round_no})
+                record['records'] = [dict(section, section=1)]
+                comment_id = self.gh.comment(number, render(record))
+                if fix:
+                    fix.comment_id = comment_id
+                return comment_id, 1
             comment, record = found
             if comment.get('id') is None:
-                raise GitHubError(f'register of round {round_no} on #{number}: comment id '
-                                  'unknown, not edited')
+                raise GitHubError(f'{name} on #{number}: comment id unknown, not edited')
             n = max((s['section'] for s in record['records']), default=0) + 1
             record = dict(record, records=record['records'] + [dict(section, section=n)])
             self.gh.edit_comment(comment['id'], render(record))
@@ -219,18 +262,17 @@ class Ledger:
     def _edit_section(self, entry, changes):
         """Apply ``changes`` to the section of ``entry`` in its register, re-read first."""
         with self._registers:
+            name = _register_name(entry.register)
             found = self._register(entry.number, entry.register, entry.comment_id)
             if found is None:
-                raise GitHubError(f'register of round {entry.register} on #{entry.number} not '
-                                  'found, not edited')
+                raise GitHubError(f'{name} on #{entry.number} not found, not edited')
             comment, record = found
             sections = record['records']
             if not any(s['section'] == entry.section for s in sections):
-                raise GitHubError(f'section {entry.section} of the register of round '
-                                  f'{entry.register} on #{entry.number} not found, not edited')
+                raise GitHubError(f'section {entry.section} of the {name} on #{entry.number} not '
+                                  'found, not edited')
             if comment.get('id') is None:
-                raise GitHubError(f'register of round {entry.register} on #{entry.number}: '
-                                  'comment id unknown, not edited')
+                raise GitHubError(f'{name} on #{entry.number}: comment id unknown, not edited')
             record = dict(record, records=[dict(s, **changes) if s['section'] == entry.section
                                            else s for s in sections])
             self.gh.edit_comment(comment['id'], render(record))
@@ -246,25 +288,37 @@ class Ledger:
             'labeled_by': by, 'labeled_at': at, 'comments': [comment_ref(c) for c in comments],
             'taken_at': self._now()})
 
+    def fix_register(self, number, round_no):
+        """The register of a fix of PR ``number`` answering round ``round_no`` (#355), to pass
+        as ``register`` to the writes of that fix: written with its first section."""
+        return FixRegister(number, round_no)
+
+    def _section(self, number, record, round_no, register):
+        """``record`` written as a section of a register: of round ``round_no``, or of the fix
+        register ``register``."""
+        where = register if register is not None else round_no
+        comment_id, section = self._add_section(number, where, record)
+        return Entry(number, comment_id, dict(record, section=section), section=section,
+                     register=FIX if register is not None else round_no)
+
     def open_turn(self, number, *, kind, agent, identity, mode, model, effort, fallback_for,
-                  label, round_no=None):
+                  label, round_no=None, register=None):
         """Write the record of a turn about to start; raises ``GitHubError`` if it cannot, and
         then the turn must not start. ``number`` is traced first (``PENDING``), so that a crash
         right after the record is written still leaves the trace; if the trace cannot be
         written, ``LedgerError`` (a ``GitHubError``) and the turn does not start either. With
-        ``round_no`` (a review turn, #325) the record is a section of that round's register."""
+        ``round_no`` (a review turn, #325) the record is a section of that round's register;
+        with ``register`` (a fix turn, #355), of that fix register."""
         self._count(number, +1)
         record = {
             'type': 'turn', 'state': 'open', 'kind': kind, 'agent': agent, 'identity': identity,
             'mode': mode, 'model': model, 'effort': effort, 'fallback_for': fallback_for or None,
             'model_real': None, 'label': label, 'started_at': self._now(), 'ended_at': None,
             'duration_ms': None, 'outcome': None, 'error': None, 'telemetry': None}
-        if round_no is None:
+        if round_no is None and register is None:
             entry = self._post(number, record)
         else:
-            comment_id, section = self._add_section(number, round_no, record)
-            entry = Entry(number, comment_id, dict(record, section=section), section=section,
-                          register=round_no)
+            entry = self._section(number, record, round_no, register)
         entry.started = self._monotonic()
         return entry
 
@@ -285,12 +339,16 @@ class Ledger:
         self._count(entry.number, -1)
 
     def verification(self, number, *, kind, attempt, command, passed, duration_ms, tree_before,
-                     tree_after):
-        return self._post(number, {
+                     tree_after, register=None):
+        """A test the dispatcher ran; with ``register``, a section of that fix register."""
+        record = {
             'type': 'verification', 'kind': kind, 'attempt': attempt, 'command': command,
             'outcome': 'pass' if passed else 'fail', 'duration_ms': duration_ms,
             'tree_before': tree_before, 'tree_after': tree_after, 'commit': None,
-            'at': self._now()})
+            'at': self._now()}
+        if register is None:
+            return self._post(number, record)
+        return self._section(number, record, None, register)
 
     def bind_commit(self, entry, commit, commit_tree):
         """Bind a passing verification to ``commit`` if its tree is the one tested, before and
@@ -302,15 +360,14 @@ class Ledger:
         self._edit(entry, commit=commit)
         return True
 
-    def event(self, number, event, round_no=None, **fields):
+    def event(self, number, event, round_no=None, register=None, **fields):
         """An event; with ``round_no`` (the ``ci_round`` of a review round, #325) a section of
-        that round's register."""
+        that round's register, with ``register`` (the ``sync`` before a fix, #355) of that fix
+        register."""
         record = dict(fields, type='event', event=event, at=self._now())
-        if round_no is None:
+        if round_no is None and register is None:
             return self._post(number, record)
-        comment_id, section = self._add_section(number, round_no, record)
-        return Entry(number, comment_id, dict(record, section=section), section=section,
-                     register=round_no)
+        return self._section(number, record, round_no, register)
 
     def flag_incomplete(self, number, comment_id, record):
         """Mark a turn that was never closed: end, outcome and telemetry stay null. ``record``
@@ -324,14 +381,17 @@ class Ledger:
 def entries(comments, signed):
     """``(comment id, record)`` of the ledger records in ``comments`` whose author ``signed``
     accepts (the dispatcher's identity). A round's register (#325) gives each of its records,
-    in order, with its ``section`` and, in ``register``, the round."""
+    in order, with its ``section`` and, in ``register``, the round; a fix register (#355) the
+    same, with ``register`` set to ``FIX``. Records of their own, as written before, are read
+    as they are."""
     found = []
     for comment in comments:
         record = read_marker(comment.get('body', ''), 'ledger')
         if record is None or not signed((comment.get('author') or {}).get('login')):
             continue
-        if record['type'] == 'round':
-            found += [(comment.get('id'), dict(s, register=record['round']))
+        if record['type'] in REGISTERS:
+            register = record['round'] if record['type'] == 'round' else FIX
+            found += [(comment.get('id'), dict(s, register=register))
                       for s in record['records']]
         else:
             found.append((comment.get('id'), record))
@@ -412,8 +472,8 @@ def _render_request(r):
                    ('Presa in carico', r.get('taken_at'))])]
 
 
-def _render_verification(r):
-    return ['## Registro devloop: verifica locale', '',
+def _render_verification(r, title=None):
+    return [title or '## Registro devloop: verifica locale', '',
             'Comando eseguito dal dispatcher. Il commit è indicato solo se l\'albero testato, '
             'prima e dopo il test, coincide con quello committato.', '',
             _rows([('Passo', r.get('kind')), ('Tentativo', r.get('attempt')),
@@ -442,17 +502,33 @@ def _render_round(r):
              'completata quando finisce.']
     for s in r['records']:
         parts.append('')
-        if s['type'] == 'turn':
-            parts += _render_turn(s, f'### {s["section"]}. Turno `{s["kind"]}` di '
-                                     f'`{s["agent"]}`')
-        else:
-            parts += _render_event(s, f'### {s["section"]}. Evento `{s["event"]}`')
+        parts += _render_section(s)
+    return parts
+
+
+def _render_section(s):
+    if s['type'] == 'turn':
+        return _render_turn(s, f'### {s["section"]}. Turno `{s["kind"]}` di `{s["agent"]}`')
+    if s['type'] == 'verification':
+        return _render_verification(s, f'### {s["section"]}. Verifica locale')
+    return _render_event(s, f'### {s["section"]}. Evento `{s["event"]}`')
+
+
+def _render_fix(r):
+    which = f'del round {r["round"]}' if r['round'] else 'prima di ogni review'
+    parts = [f'## Registro devloop: correzione {which}', '',
+             'Un solo registro per correzione: ogni turno, il merge della base fatto prima della '
+             'correzione e ogni verifica locale hanno la loro sezione. La sezione di un turno è '
+             'scritta prima di avviare la CLI e completata quando finisce.']
+    for s in r['records']:
+        parts.append('')
+        parts += _render_section(s)
     return parts
 
 
 _RENDER = {'turn': _render_turn, 'request': _render_request,
            'verification': _render_verification, 'event': _render_event,
-           'round': _render_round}
+           'round': _render_round, 'fix': _render_fix}
 
 
 def render(record):
