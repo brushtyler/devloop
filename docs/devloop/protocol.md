@@ -303,7 +303,8 @@ How devloop merges in the `"strict"` and `"auto"` [merge modes](guide.md#merge-m
   [merge lane](guide.md#the-merge-lane), one merge at a time, alongside the actions on other numbers.
 - **Record.** A dispatcher comment with a `merged` marker records the head, the receipt, the
   level and the mode, and in `merged_by` the login of the merger app when it merged (none with
-  the local login).
+  the local login). Its text says that devloop decided the merge and names who ran it: the
+  merger app (its login without `[bot]`) or the local `gh` login.
 
 ## Supervision trace
 

@@ -599,6 +599,11 @@ class MergerAppTests(unittest.TestCase):
         (record,) = records(gh, 'merged')
         self.assertEqual(record['merged_by'], MERGER_LOGIN)
         self.assertIsInstance(client, GitHub)
+        # The comment names the app that wrote to the base, not the dispatcher (#323).
+        (body,) = [b for _, b in gh.comments if markdown.read_marker(b, 'merged')]
+        self.assertIn('## Mergiata da devloop', body)
+        self.assertIn("devloop ha deciso il merge e l'ha eseguito con l'app "
+                      '`brushtyler-devloop-merger`: commit `' + SHA1[:12] + '`', body)
 
     def test_without_the_merger_app_the_merge_uses_the_ambient_login(self):
         dispatcher = StubApp('d[bot]', 'disp-tok')
@@ -614,6 +619,11 @@ class MergerAppTests(unittest.TestCase):
         (record,) = records(gh, 'merged')
         self.assertEqual(record, {'head': SHA1, 'level': 1, 'mode': 'strict',
                                   'receipt': receipt()})
+        # The comment names the local login, and no app (#323).
+        (body,) = [b for _, b in gh.comments if markdown.read_marker(b, 'merged')]
+        self.assertIn("devloop ha deciso il merge e l'ha eseguito con il login `gh` locale: "
+                      'commit `' + SHA1[:12] + '`', body)
+        self.assertNotIn("con l'app", body)
 
     def test_build_hands_the_merger_client_to_the_dispatcher(self):
         merger = StubApp(MERGER_LOGIN, 'merger-tok')

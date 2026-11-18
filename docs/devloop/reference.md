@@ -821,4 +821,6 @@ slug = "brushtyler-devloop-merger"
 lists `merger` with its installation and permissions; without the app it reports that merges use
 the ambient `gh` login. Each merge asks for a new token, limited to `contents=write` and
 `pull_requests=write`, when it runs; `--match-head-commit` binds it to the approved head as
-before, and the `merged` record carries in `merged_by` the app's login.
+before, and the `merged` record carries in `merged_by` the app's login. The text of the
+"Mergiata da devloop" comment names the app that ran the merge; without the app, the local `gh`
+login.
