@@ -238,7 +238,9 @@ transitions and owner revalidation. They stop before any write, with the
 explicit reason `FEEDBACK_RECORDING_EXPIRED` and the expiry. The consultation
 gate checks the expiry first, before any admission or reservation. Everything
 else proceeds: status, projections and metrics, the capture of a returned role
-response, the native run, and the [manual limit extensions](limit-extensions.md).
+response, the reconciliation of a captured consultation after a crash
+(`resume_response`, which calls no provider and keeps every other integrity
+check), the native run, and the [manual limit extensions](limit-extensions.md).
 
 The expiry is visible in the status and in the evidence: `feedback-status` and
 the `metrics` of `feedback-summary.json` carry
