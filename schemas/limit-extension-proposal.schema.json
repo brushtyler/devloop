@@ -328,6 +328,7 @@
               "check_id",
               "exit_code",
               "timeout_sec",
+              "applied_timeout_sec",
               "elapsed_seconds",
               "log_ref",
               "log_sha256"
@@ -342,7 +343,13 @@
               },
               "timeout_sec": {
                 "type": "integer",
-                "minimum": 1
+                "minimum": 1,
+                "description": "The configured timeout of the check, which the reverification leaves unchanged."
+              },
+              "applied_timeout_sec": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The timeout the failed verification actually ran the check with: longer than timeout_sec after a previous reverification."
               },
               "elapsed_seconds": {
                 "type": "number",

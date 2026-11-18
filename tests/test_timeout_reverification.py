@@ -133,9 +133,35 @@ class TimeoutReverificationTests(fixtures.RepositoryTests):
         self.assertEqual(facts['verifications_used'], 1)
         self.assertEqual(facts['verification_limit'], 3)
         [check] = facts['timed_out_checks']
-        self.assertEqual((check['check_id'], check['exit_code'], check['timeout_sec']), ('CHECK-GLOBAL', 124, 5))
+        self.assertEqual((check['check_id'], check['exit_code'], check['timeout_sec'], check['applied_timeout_sec']),
+                         ('CHECK-GLOBAL', 124, 5, 5))
         self.assertIsInstance(check['elapsed_seconds'], (int, float))
         self.assertEqual(proposal['changes'], [dict(dimension='check_timeout.CHECK-GLOBAL', old=5, new=20)])
+
+    def test_next_proposal_cites_the_timeout_applied_by_the_failed_reverification(self):
+        self.needed = 25   # Still too slow at 20 s: the reverification times out again.
+        self.authorize(20)
+        with self.assertRaises(DevelopmentBlocked):
+            self.resume()
+        self.stop()
+        failure = self.record()['failed_attempts'][-1]
+        [result] = [c for c in failure['checks'] if c['exit_code'] == 124]
+        self.assertEqual(result['applied_timeout_sec'], 20)
+        proposal = self.propose(self.request(25))['proposal']
+        [check] = proposal['reverification']['timed_out_checks']
+        # The evidence of the new failure, with the timeout it actually ran with;
+        # the configured timeout stays unchanged.
+        self.assertEqual((check['timeout_sec'], check['applied_timeout_sec'], check['log_ref']),
+                         (5, 20, result['log_ref']))
+        self.assertEqual(proposal['changes'], [dict(dimension='check_timeout.CHECK-GLOBAL', old=5, new=25)])
+        for new in (10, 20):   # Not longer than the timeout that just timed out.
+            with self.subTest(new=new):
+                with self.assertRaisesRegex(LimitExtensionError, 'longer than the timed-out one'):
+                    self.propose(self.request(new))
+        self.authorize(25)
+        self.assertEqual(self.resume()['tasks']['T1']['status'], 'COMPLETED')
+        self.assertIn(('slow-suite', 25, True), self.calls)
+        self.assertEqual(self.dispatches, [])
 
     def test_exit_124_without_a_measured_duration_is_refused(self):
         journal = TaskJournal(self.artifacts / '03-dev/tasks')
@@ -217,13 +243,49 @@ class TimeoutReverificationTests(fixtures.RepositoryTests):
                 self.assertFalse([c for c in self.calls if c[2]])
         self.assertEqual(self.dispatches, [])
 
+    def test_grant_is_checked_against_its_authorization_and_the_frozen_policy(self):
+        before = self.snapshot()
+        self.authorize(20)
+        journal = TaskJournal(self.artifacts / '03-dev/tasks')
+        state = journal.load()
+        grant = state['tasks']['T1']['timeout_reverifications'][-1]
+        # Consistent with itself, but not with the proposal, the authorization,
+        # the receipt or the policy frozen at 30 s.
+        for forged in (dict(grant, invocation_timeout_seconds=300, timeouts={'CHECK-GLOBAL': dict(old=5, new=300)}),
+                       dict(grant, timeouts={'CHECK-GLOBAL': dict(old=5, new=25)}),
+                       dict(grant, authorization_sha256='d' * 64),
+                       dict(grant, proposal_sha256='c' * 64)):
+            with self.subTest(forged=forged):
+                changed = copy.deepcopy(state)
+                changed['tasks']['T1']['timeout_reverifications'][-1] = forged
+                journal.append('FORGED_FIXTURE', changed)
+                with self.assertRaisesRegex(DevelopmentBlocked, 'differs from its operator authorization'):
+                    self.resume()
+                self.assertFalse([c for c in self.calls if c[2]])
+        self.assertEqual(self.dispatches, [])
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.record()['attempts'], 1)
+        # The genuine grant still runs once restored.
+        journal.append('RESTORED_FIXTURE', state)
+        self.assertEqual(self.resume()['tasks']['T1']['status'], 'COMPLETED')
+        self.assertIn(('slow-suite', 20, True), self.calls)
+
+    def test_missing_receipt_refuses_the_grant(self):
+        sha = self.authorize(20)
+        (self.artifacts / 'limit-extensions' / sha / 'receipt.json').unlink()
+        with self.assertRaisesRegex(DevelopmentBlocked, 'differs from its operator authorization'):
+            self.resume()
+        self.assertFalse([c for c in self.calls if c[2]])
+        self.assertEqual(self.dispatches, [])
+
     # --- criterion 3: the fourth verification is refused -----------------------
 
     def test_fourth_verification_is_refused(self):
         self.needed = 99   # Every reverification times out again.
-        for used in (1, 2):
-            self.assertEqual(self.propose()['proposal']['reverification']['verifications_used'], used)
-            self.authorize()
+        for used, new in ((1, 20), (2, 25)):   # Each longer than the timeout that last timed out.
+            self.assertEqual(self.propose(self.request(new))['proposal']['reverification']['verifications_used'],
+                             used)
+            self.authorize(new)
             with self.assertRaises(DevelopmentBlocked):
                 self.resume()
             self.stop()
@@ -238,8 +300,27 @@ class TimeoutReverificationTests(fixtures.RepositoryTests):
         row = state['tasks']['T1']
         row['timeout_reverifications'].append(dict(row['timeout_reverifications'][-1], status='AUTHORIZED',
                                                     failure_sha256=digest(row['failed_attempts'][-1]),
+                                                    timeouts={'CHECK-GLOBAL': dict(old=5, new=30)},
                                                     proposal_sha256='c' * 64))
         journal.append('FORGED_FIXTURE', state)
+        with self.assertRaisesRegex(DevelopmentBlocked, 'differs from its operator authorization'):
+            self.resume()
+        self.assertFalse([c for c in self.calls if c[2]])
+        self.assertEqual(self.dispatches, [])
+        self.assertEqual(len(self.record()['capture_verifications']), 3)
+
+    def test_scheduler_refuses_a_fourth_verification_even_with_a_genuine_grant(self):
+        self.needed = 99
+        self.authorize()
+        with self.assertRaises(DevelopmentBlocked):
+            self.resume()
+        self.stop()
+        self.authorize(25)   # Proposed and activated with two verifications used.
+        # A third verification recorded after the activation leaves no room for this one.
+        journal = TaskJournal(self.artifacts / '03-dev/tasks')
+        state = journal.load()
+        state['tasks']['T1']['capture_verifications'].append({'attempt': 1, 'dir': 'T1/attempt-1/verification-3'})
+        journal.append('THIRD_VERIFICATION_FIXTURE', state)
         with self.assertRaisesRegex(DevelopmentBlocked, 'verification allowance exhausted'):
             self.resume()
         self.assertFalse([c for c in self.calls if c[2]])

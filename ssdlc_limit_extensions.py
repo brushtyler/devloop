@@ -403,10 +403,15 @@ def reverification(source, task_id):
                                       + result['check_id'][:80] + ' has no measured duration')
         if _evidence_hash(source['root'], result['log_ref']) != result['sha256']:
             raise LimitExtensionError('Timed-out check evidence changed')
-        timed_out.append(dict(check_id=result['check_id'], exit_code=124,
-                              timeout_sec=checks[result['check_id']]['timeout_sec'],
-                              elapsed_seconds=result['elapsed_seconds'], log_ref=result['log_ref'],
-                              log_sha256=result['sha256']))
+        configured, applied = checks[result['check_id']]['timeout_sec'], result.get('applied_timeout_sec')
+        if type(applied) is not int or applied < configured:
+            raise LimitExtensionError('The timed-out check ' + result['check_id'][:80]
+                                      + ' does not record the timeout it ran with')
+        # The configured timeout stays unchanged; the applied one is the timeout
+        # this failure actually ran with, longer after a previous reverification.
+        timed_out.append(dict(check_id=result['check_id'], exit_code=124, timeout_sec=configured,
+                              applied_timeout_sec=applied, elapsed_seconds=result['elapsed_seconds'],
+                              log_ref=result['log_ref'], log_sha256=result['sha256']))
     return dict(task_id=task_id, attempt=failure['attempt'], failure_sha256=digest(failure),
                 capture_sha256=row['capture_sha256'], candidate_tree=failure['tree'],
                 verifications_used=len(used), verification_limit=VERIFICATIONS_PER_ATTEMPT,
@@ -430,10 +435,10 @@ def _timeouts(source, requested, task_id):
         if check not in timed_out:
             raise LimitExtensionError('Only a timed-out check of the failed verification may receive a longer '
                                       'timeout: ' + str(dimension)[:80])
-        old = timed_out[check]['timeout_sec']
+        old, applied = timed_out[check]['timeout_sec'], timed_out[check]['applied_timeout_sec']
         if 'old' in item and item['old'] != old:
             raise LimitExtensionError('Declared old value differs from the check timeout: ' + dimension[:80])
-        if type(new) is not int or not old < new <= facts['invocation_timeout_seconds']:
+        if type(new) is not int or not applied < new <= facts['invocation_timeout_seconds']:
             raise LimitExtensionError('A reverification timeout must be longer than the timed-out one and within '
                                       'invocation_timeout_seconds')
         changes.append(dict(dimension=dimension, old=old, new=new))
@@ -749,6 +754,44 @@ def _reverification_recorded(root, proposal, sha, authorization_sha):
     row = (tasks or {}).get('tasks', {}).get(proposal['run']['task_id'], {})
     return any(g.get('proposal_sha256') == sha and g.get('authorization_sha256') == authorization_sha
                for g in row.get('timeout_reverifications', []))
+
+
+def admitted_reverification(root, grant):
+    """Check a task-journal grant against sources independent of the task journal.
+
+    The scheduler calls it before a reverification runs. The grant must be
+    exactly the one its stored proposal, operator authorization and activation
+    receipt produce, and every longer timeout must stay within the
+    ``invocation_timeout_seconds`` of the frozen limits policy. A grant edited
+    in the task journal, its bound included, is refused.
+    """
+    from ssdlc_recovery import LimitsStore
+    root = Path(root)
+    store = LimitsStore(root)
+    generation = store.generation()
+    if generation is None:
+        ticket = root
+    elif root.name == generation and root.parent.name == 'execution-runtimes':
+        ticket = root.parents[1]
+    else:
+        raise LimitExtensionError('The limits root is not a selected generation of its ticket')
+    sha = grant.get('proposal_sha256')
+    folder, proposal = _proposal(ticket, sha)
+    if proposal['operation'] != REVERIFY or proposal['run']['generation'] != generation:
+        raise LimitExtensionError('The grant names another proposal')
+    authorization = _authorization(folder, sha)
+    authorization_sha = digest(authorization)
+    receipt = _json(folder / 'receipt.json')
+    if (receipt.get('contract') != CONTRACT or receipt.get('proposal_sha256') != sha
+            or receipt.get('authorization_sha256') != authorization_sha or receipt.get('generation') != generation):
+        raise LimitExtensionError('The grant has no matching activation receipt')
+    expected = _grant(proposal, sha, authorization_sha)
+    if {k: v for k, v in grant.items() if k != 'status'} != {k: v for k, v in expected.items() if k != 'status'}:
+        raise LimitExtensionError('The grant differs from its authorized proposal')
+    envelope, _ = store._load(repair=False)
+    bound = envelope['policy']['invocation_timeout_seconds']
+    if grant['invocation_timeout_seconds'] > bound or any(t['new'] > bound for t in grant['timeouts'].values()):
+        raise LimitExtensionError('The grant exceeds invocation_timeout_seconds of the frozen policy')
 
 
 def _conserved(before, after):

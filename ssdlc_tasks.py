@@ -1256,9 +1256,11 @@ class TaskScheduler:
             results.append({'check_id': check['check_id'], 'exit_code': rc, 'empty_suite': empty,
                             'log_ref': str(log.relative_to(self.directory)), 'sha256': file_hash(log)})
             if rc == 124:
-                # The measured duration of a timed-out check: an operator
-                # reverification cites it, exit 124 alone justifies nothing.
-                results[-1]['elapsed_seconds'] = round(time.monotonic() - started, 3)
+                # The measured duration of a timed-out check and the timeout it
+                # actually ran with (longer only in an authorized reverification):
+                # an operator reverification cites both, exit 124 alone justifies nothing.
+                results[-1].update(elapsed_seconds=round(time.monotonic() - started, 3),
+                                   applied_timeout_sec=check['timeout_sec'])
             record['checks'] = results
             if reuse is not None:
                 reuse[digest(check)] = copy.deepcopy(results[-1])
@@ -1716,7 +1718,9 @@ class TaskScheduler:
         """The operator-authorized reverification of the current captured timeout, or None.
 
         ``limits activate`` records it (operation ``reverify_after_timeout`` of
-        operator-limit-extension-v1) bound to the exact failure and capture.
+        operator-limit-extension-v1) bound to the exact failure and capture. The
+        grant is also checked against its stored proposal, authorization and
+        receipt and against the frozen policy: the task journal alone is no authority.
         """
         grants = record.get('timeout_reverifications', [])
         if not grants or grants[-1].get('status') != 'AUTHORIZED':
@@ -1724,7 +1728,8 @@ class TaskScheduler:
         grant = grants[-1]
         failures = record.get('failed_attempts', [])[record.get('failed_floor', 0):]
         checks = {c['check_id']: c for c in self._check_plan(task)}
-        timed_out = {c['check_id'] for c in failures[-1]['checks'] if c['exit_code'] == 124} if failures else set()
+        timed_out = ({c['check_id']: c for c in failures[-1]['checks'] if c['exit_code'] == 124}
+                     if failures else {})
         timeouts, bound = grant.get('timeouts'), grant.get('invocation_timeout_seconds')
         if (record['status'] != 'FAILED' or not failures or not self.isolate_candidates
                 or failures[-1]['category'] != 'ENVIRONMENT_DIAGNOSIS'
@@ -1736,8 +1741,16 @@ class TaskScheduler:
                 or any(cid not in timed_out or not isinstance(change, dict)
                        or checks.get(cid, {}).get('timeout_sec') != change.get('old')
                        or type(change.get('new')) is not int or not change['old'] < change['new'] <= bound
+                       # Longer than the timeout the check actually timed out with.
+                       or not timed_out[cid].get('applied_timeout_sec', change['old']) < change['new']
                        for cid, change in timeouts.items())):
             raise DevelopmentBlocked('INTEGRITY', 'Timeout reverification differs from its captured failure')
+        from ssdlc_limit_extensions import admitted_reverification
+        try:
+            admitted_reverification(self.directory.parents[1], grant)
+        except (TaskError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise DevelopmentBlocked('INTEGRITY', 'Timeout reverification differs from its operator '
+                                                  f'authorization: {exc}'[:300]) from None
         return grant
 
     def _reverify_after_timeout(self, task, record, grant):

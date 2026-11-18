@@ -92,14 +92,19 @@ the others exited 0 or 124 (the same condition as
 
 - **Only timed-out checks.** Each change names a check of the failed
   verification that exited 124, as `check_timeout.<check_id>`, with a new
-  integral timeout longer than the current one and at most the profile's
-  `invocation_timeout_seconds`. Any other check, a shorter or equal timeout, a
-  value beyond the bound and any limit dimension are refused.
+  integral timeout longer than the one the check timed out with and at most the
+  profile's `invocation_timeout_seconds`. The change records as `old` the
+  configured timeout, which stays unchanged. Any other check, a timeout not
+  longer than the one that timed out, a value beyond the bound and any limit
+  dimension are refused.
 - **Exit 124 alone justifies nothing.** The proposal cites, for every timed-out
-  check, the timeout applied, the duration the controller measured
-  (`elapsed_seconds`, recorded with each exit-124 result) and its log with the
-  SHA-256. A failure recorded without a measured duration cannot be reverified:
-  use verification repair or a new attempt.
+  check, its configured timeout (`timeout_sec`), the timeout the failed
+  verification actually ran it with (`applied_timeout_sec`: after a
+  reverification that timed out again, the longer one it was granted), the
+  duration the controller measured (`elapsed_seconds`) and its log with the
+  SHA-256. The controller records the applied timeout and the duration with each
+  exit-124 result. A failure recorded without them cannot be reverified: use
+  verification repair or a new attempt.
 - **Temporary.** The longer timeouts apply only to this reverification. The
   plan, the quality contract, the commands, the criteria, the other checks, the
   checkpoint preflight and every later verification keep their timeouts.
@@ -134,7 +139,11 @@ timeouts. Then resume the run with `run --from-phase 03-dev`. After the
 checkpoint preflight, the scheduler:
 
 1. checks the grant against the last failure, the capture, the current check
-   timeouts and the bound, and refuses any difference;
+   timeouts and the bound, then against sources the task journal does not hold:
+   it must equal the grant that the stored proposal, the operator authorization
+   and the activation receipt produce, and its timeouts must stay within the
+   `invocation_timeout_seconds` of the frozen policy. Any difference, a grant
+   edited in the task journal included, is refused;
 2. records the verification (`TIMEOUT_REVERIFICATION_STARTED`), restores the
    archived candidate tree and loads its capture receipt;
 3. runs the task and quality checks, with the longer timeout only for the
