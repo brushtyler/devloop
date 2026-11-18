@@ -2,8 +2,10 @@
 
 `operator-limit-extension-v1` is the common contract for extending the frozen
 limits of a stopped bounded run, case by case, without a controller change for
-each extension. It covers two operations: raising named global limits, and moving
-the run's absolute deadline. Every extension needs an explicit operator
+each extension. It covers three operations: raising named global limits, moving
+the run's absolute deadline, and
+[verifying the same candidate again after a verifier timeout](#reverification-after-a-verifier-timeout).
+Every extension needs an explicit operator
 authorization; there is no automatic or delegated path (decision A5 of
 [ADR 0001](adr/0001-prodotto-unico-fasi-su-tracker.md)). No command calls a model.
 
@@ -58,6 +60,7 @@ allowance of the ledger.
 | --- | --- | --- |
 | `extend_global_limit` | Exactly the named dimensions: `metered_usd`, `cli_estimate_usd`, `invocations`, an existing `role_invocations.<role>` or `phase_invocations.<phase>` cap, `development_attempts` | Every other profile field; `combined_reported_usd_cap`; the deadline |
 | `extend_deadline` | The absolute deadline (`deadline_at`); `wall_seconds` grows by exactly the same integral number of seconds | `started_at`, every other profile field |
+| `reverify_after_timeout` | One more verification of the same captured candidate; the timeout of each named timed-out check (`check_timeout.<check_id>`), for that verification only | The whole profile, the limits journal and the chain; check commands, criteria and the other checks; the plan and quality contract |
 
 Each change records the old and the new value and must increase it. An unknown
 operation, a dimension outside this list, a decrease, a duplicate or a value that
@@ -77,6 +80,72 @@ that the historical accounting anchor follows.
 
 Counters, observed costs, unknown usage (which stays `null`, never 0), reserves,
 transport retries, diagnoses and task attempts stay unchanged.
+
+## Reverification after a verifier timeout
+
+`reverify_after_timeout` verifies **the same candidate** again after a verifier
+timeout, without a model call and without a new developer attempt. It applies to
+a failed task whose last attempt has a quiescent captured candidate and ended in
+`ENVIRONMENT_DIAGNOSIS` because of a timeout: at least one check exited 124 and
+the others exited 0 or 124 (the same condition as
+[verification repair](scope-amendments.md#operator-repair-after-a-verification-timeout)).
+
+- **Only timed-out checks.** Each change names a check of the failed
+  verification that exited 124, as `check_timeout.<check_id>`, with a new
+  integral timeout longer than the current one and at most the profile's
+  `invocation_timeout_seconds`. Any other check, a shorter or equal timeout, a
+  value beyond the bound and any limit dimension are refused.
+- **Exit 124 alone justifies nothing.** The proposal cites, for every timed-out
+  check, the timeout applied, the duration the controller measured
+  (`elapsed_seconds`, recorded with each exit-124 result) and its log with the
+  SHA-256. A failure recorded without a measured duration cannot be reverified:
+  use verification repair or a new attempt.
+- **Temporary.** The longer timeouts apply only to this reverification. The
+  plan, the quality contract, the commands, the criteria, the other checks, the
+  checkpoint preflight and every later verification keep their timeouts.
+- **Three verifications per attempt.** The reverification counts among the
+  three verifications of the captured candidate of an attempt
+  (`capture_verifications`), with the one that timed out. When three are used,
+  the proposal is refused, and the scheduler refuses a fourth as well.
+
+Write a request with the task:
+
+```json
+{
+  "operation": "reverify_after_timeout",
+  "task_id": "T03",
+  "changes": [{"dimension": "check_timeout.CHECK-GLOBAL", "new": 900}],
+  "cause": "The suite outgrew its 600 s timeout on the captured candidate.",
+  "evidence": [{"description": "timed-out check log", "sha256": "<sha256 of the log>"}],
+  "actor": "<operator>"
+}
+```
+
+The proposal adds a `reverification` object: the task and attempt, the hashes of
+the failure and of the capture, the candidate tree, the verifications already
+used and the limit, `invocation_timeout_seconds`, and the timed-out checks. Its
+`new_profile` equals the current profile. Approve and activate it as usual.
+
+Activation changes no limit: the envelope, the limits journal and the chain stay
+as they are. It appends one `TIMEOUT_REVERIFICATION_AUTHORIZED` event to the
+task journal, under the scheduler lock, with a grant bound to the proposal,
+authorization, failure and capture hashes and to the exact old and new
+timeouts. Then resume the run with `run --from-phase 03-dev`. After the
+checkpoint preflight, the scheduler:
+
+1. checks the grant against the last failure, the capture, the current check
+   timeouts and the bound, and refuses any difference;
+2. records the verification (`TIMEOUT_REVERIFICATION_STARTED`), restores the
+   archived candidate tree and loads its capture receipt;
+3. runs the task and quality checks, with the longer timeout only for the
+   granted checks, and the owner revalidation when one applies.
+
+If every check passes, the task completes with the same candidate and the same
+attempt number. Otherwise a new failed record (`origin:
+timeout_reverification`) keeps the evidence, the candidate is rolled back and
+the run stops; the grant is spent. If the reverification is interrupted, the
+next resume marks it `INTERRUPTED` and rolls the candidate back without running
+it again: the verification stays counted, and continuing needs a new proposal.
 
 ## Workflow
 
@@ -141,7 +210,8 @@ and applies, in order: the new `limits/policy.json`, a `LIMITS_EXTENDED` event i
 the limits journal, an `ATTEMPT_LIMIT_EXTENDED` event in the task journal when
 attempts grow, the `FEEDBACK_LIMITS_EXTENDED` event in the feedback ledger when
 there is one, the bounded-mode markers, and a receipt in
-`limit-extensions/<sha256>/`.
+`limit-extensions/<sha256>/`. A `reverify_after_timeout` activation applies
+only the task-journal grant and the receipt.
 While the intent exists, every use of the limits is fenced.
 
 After an interruption, repeat the same `limits activate`. The replay only
@@ -163,7 +233,9 @@ limits undoes the chain of the current limits root step by step and refuses a
 chain that does not restore its parent exactly. The selector of a reconciled run
 still binds the envelope its generation was authorized with: resolution accepts
 it only through this chain. A later generation inherits the chain as part of its
-own authorized envelope.
+own authorized envelope. A reverification changes no envelope, so it has no
+chain entry: its grant lives in the task journal and its receipt next to the
+proposal.
 
 Hashes bind host-owned files: they detect inconsistent edits, not a host user
 who rewrites the proposal, the authorization and the journals together.

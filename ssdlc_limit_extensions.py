@@ -16,6 +16,11 @@ recording authority and the admitted generations bound to the parent envelope
 follow it (``feedback_lineage``); recording allowances and scope stay separate.
 The specialized contracts (verification repair, deadline extension, operator
 recovery) and their receipts are untouched. No model is called.
+
+``reverify_after_timeout`` (#167) changes no limit: it authorizes one more
+verification of the same captured candidate after a verifier timeout, with
+longer timeouts for the timed-out checks only. Activation records the grant in
+the task journal; the resumed scheduler runs it without a developer call.
 """
 import copy
 import hashlib
@@ -33,7 +38,11 @@ from ssdlc_tasks import TaskError, TaskJournal, atomic_json, digest, ticket_lock
 # The mirrored entry in the deadline-extension chain (DEADLINE_CAPABILITY) lets the
 # historical accounting anchor of reconciled runs follow the extended deadline.
 CONTRACT = 'operator-limit-extension-v1'
-OPERATIONS = ('extend_global_limit', 'extend_deadline')
+REVERIFY = 'reverify_after_timeout'
+# Operations that change the frozen profile and join the bound chain.
+LIMIT_OPERATIONS = ('extend_global_limit', 'extend_deadline')
+OPERATIONS = LIMIT_OPERATIONS + (REVERIFY,)
+CHECK_TIMEOUT = 'check_timeout.'
 MONEY = ('metered_usd', 'cli_estimate_usd')
 COUNTS = ('invocations', 'development_attempts')
 CAPS = ('role_invocations', 'phase_invocations')
@@ -85,7 +94,7 @@ def unwind(envelope, generation):
     while entries and isinstance(entries[-1], dict) and entries[-1].get('generation') == generation:
         entry = entries.pop()
         if (set(entry) - {'deadline'} != ENTRY_FIELDS or entry['contract'] != CONTRACT
-                or entry['operation'] not in OPERATIONS or not _hex(entry['proposal_sha256'])
+                or entry['operation'] not in LIMIT_OPERATIONS or not _hex(entry['proposal_sha256'])
                 or not _hex(entry['authorization_sha256']) or not _hex(entry['source_policy_sha256'])
                 or not isinstance(entry['changes'], list) or not entry['changes']
                 or ('deadline' in entry) != (entry['operation'] == 'extend_deadline')):
@@ -334,12 +343,111 @@ def parent(source):
 
 # --- proposal -------------------------------------------------------------
 
-def _changes(source, operation, requested, now):
+def _evidence_hash(root, ref):
+    path = Path(ref) if isinstance(ref, str) else None
+    if path is None or path.is_absolute() or '..' in path.parts:
+        raise LimitExtensionError('Unsafe timed-out check evidence reference')
+    full = root / '03-dev/tasks' / path
+    if any(p.is_symlink() for p in [full, *full.parents][:len(path.parts)]) or not full.is_file():
+        raise LimitExtensionError('Timed-out check evidence is missing or unsafe')
+    return hashlib.sha256(full.read_bytes()).hexdigest()
+
+
+def reverification(source, task_id):
+    """Facts of the captured verifier timeout a reverification is bound to.
+
+    The same candidate of the current attempt, its exact failure and capture,
+    each timed-out check with its applied timeout, measured duration and log,
+    and the verifications the attempt already used. Exit 124 alone justifies
+    nothing: a timed-out check without a measured duration is refused.
+    """
+    from ssdlc_tasks import VERIFICATIONS_PER_ATTEMPT
+    from ssdlc_verification_repair import require_timeout
+    scheduler = source['scheduler']
+    if scheduler is None or not isinstance(task_id, str) or task_id not in scheduler['tasks']:
+        raise LimitExtensionError('A reverification names a task of the task journal')
+    row = scheduler['tasks'][task_id]
+    if row.get('status') != 'FAILED' or not row.get('failed_attempts') or not scheduler.get('candidate_isolation'):
+        raise LimitExtensionError('A reverification requires a failed task with a captured candidate')
+    try:
+        require_timeout(dict(journal=scheduler, task_id=task_id))
+    except TaskError as exc:
+        raise LimitExtensionError(str(exc)) from None
+    failure = row['failed_attempts'][-1]
+    if failure['attempt'] != row['attempts']:
+        raise LimitExtensionError('A reverification uses the captured candidate of the current attempt')
+    grants = row.get('timeout_reverifications', [])
+    if grants and grants[-1].get('status') in ('AUTHORIZED', 'RUNNING'):
+        raise LimitExtensionError('A timeout reverification of this task is already authorized')
+    used = [r for r in row.get('capture_verifications', []) if r.get('attempt') == failure['attempt']]
+    if len(used) >= VERIFICATIONS_PER_ATTEMPT:
+        raise LimitExtensionError('The candidate already used its %d verifications; another verification '
+                                  'is refused' % VERIFICATIONS_PER_ATTEMPT)
+    plan, quality = _json(source['root'] / '02-design/plan.json'), _json(source['root'] / '00-recon/quality-contract.json')
+    task = [t for t in plan.get('tasks', []) if t.get('task_id') == task_id]
+    if len(task) != 1:
+        raise LimitExtensionError('The task is missing from the plan')
+    checks = {}
+    for check in task[0]['verification']['checks'] + quality['checks']:
+        if check['check_id'] in checks:
+            raise LimitExtensionError('Duplicate check identity')
+        checks[check['check_id']] = check
+    timed_out = []
+    for result in failure['checks']:
+        if result['exit_code'] != 124:
+            continue
+        if result['check_id'] not in checks:
+            raise LimitExtensionError('The timed-out check is missing from the plan or quality contract')
+        if not _number(result.get('elapsed_seconds')) or type(result['elapsed_seconds']) is bool:
+            raise LimitExtensionError('Exit 124 alone does not justify a longer timeout: the timed-out check '
+                                      + result['check_id'][:80] + ' has no measured duration')
+        if _evidence_hash(source['root'], result['log_ref']) != result['sha256']:
+            raise LimitExtensionError('Timed-out check evidence changed')
+        timed_out.append(dict(check_id=result['check_id'], exit_code=124,
+                              timeout_sec=checks[result['check_id']]['timeout_sec'],
+                              elapsed_seconds=result['elapsed_seconds'], log_ref=result['log_ref'],
+                              log_sha256=result['sha256']))
+    return dict(task_id=task_id, attempt=failure['attempt'], failure_sha256=digest(failure),
+                capture_sha256=row['capture_sha256'], candidate_tree=failure['tree'],
+                verifications_used=len(used), verification_limit=VERIFICATIONS_PER_ATTEMPT,
+                invocation_timeout_seconds=source['envelope']['policy']['invocation_timeout_seconds'],
+                timed_out_checks=timed_out)
+
+
+def _timeouts(source, requested, task_id):
+    """Longer timeouts of timed-out checks only, within invocation_timeout_seconds."""
+    facts = reverification(source, task_id)
+    timed_out = {c['check_id']: c for c in facts['timed_out_checks']}
+    seen, changes = set(), []
+    for item in requested:
+        if not isinstance(item, dict) or set(item) - {'dimension', 'old', 'new'} or 'dimension' not in item:
+            raise LimitExtensionError('A change names its dimension and new value')
+        dimension, new = item['dimension'], item.get('new')
+        if dimension in seen:
+            raise LimitExtensionError('Duplicate limit dimension')
+        seen.add(dimension)
+        check = dimension[len(CHECK_TIMEOUT):] if isinstance(dimension, str) and dimension.startswith(CHECK_TIMEOUT) else None
+        if check not in timed_out:
+            raise LimitExtensionError('Only a timed-out check of the failed verification may receive a longer '
+                                      'timeout: ' + str(dimension)[:80])
+        old = timed_out[check]['timeout_sec']
+        if 'old' in item and item['old'] != old:
+            raise LimitExtensionError('Declared old value differs from the check timeout: ' + dimension[:80])
+        if type(new) is not int or not old < new <= facts['invocation_timeout_seconds']:
+            raise LimitExtensionError('A reverification timeout must be longer than the timed-out one and within '
+                                      'invocation_timeout_seconds')
+        changes.append(dict(dimension=dimension, old=old, new=new))
+    return changes, copy.deepcopy(source['envelope']['policy'])
+
+
+def _changes(source, operation, requested, now, task_id=None):
     """Exact old/new values of the named dimensions, and the resulting profile."""
     if operation not in OPERATIONS:
         raise LimitExtensionError('Unknown limit extension operation')
     if not isinstance(requested, list) or not requested or len(requested) > 32:
         raise LimitExtensionError('An extension names at least one dimension')
+    if operation == REVERIFY:
+        return _timeouts(source, requested, task_id)
     policy = copy.deepcopy(source['envelope']['policy'])
     seen, changes = set(), []
     for item in requested:
@@ -404,11 +512,13 @@ def build(source, request, now):
     if request.get('schema_version', 1) != 1:
         raise LimitExtensionError('Unsupported extension request version')
     operation = request.get('operation')
-    changes, profile = _changes(source, operation, request.get('changes'), now)
+    task = request.get('task_id')
+    if operation == REVERIFY and task is None:
+        raise LimitExtensionError('A reverification names its task')
+    changes, profile = _changes(source, operation, request.get('changes'), now, task)
     if 'profile' in request and request['profile'] != profile:
         raise LimitExtensionError('The requested profile changes dimensions it does not name; '
                                   'no implicit increase is allowed')
-    task = request.get('task_id')
     if task is not None and (source['scheduler'] is None or task not in source['scheduler']['tasks']):
         raise LimitExtensionError('Unknown task reference')
     proposal = dict(schema_version=1, contract=CONTRACT, operation=operation,
@@ -428,6 +538,8 @@ def build(source, request, now):
                                     old_deadline_at=changes[0]['old'], new_deadline_at=changes[0]['new'],
                                     old_wall_seconds=old_wall, new_wall_seconds=profile['wall_seconds'],
                                     expired_at_proposal=now >= changes[0]['old'])
+    if operation == REVERIFY:
+        proposal['reverification'] = reverification(source, task)
     _schema('limit-extension-proposal', proposal)
     return proposal
 
@@ -454,12 +566,15 @@ def validate(proposal, source, now):
     if proposal['consumption'] != consumption(source['envelope'], source['counters'], source['scheduler']):
         raise LimitExtensionError('Consumption changed since the proposal')
     changes, profile = _changes(source, proposal['operation'], [dict(dimension=c['dimension'], old=c['old'],
-                                new=c['new']) for c in proposal['changes']], now)
+                                new=c['new']) for c in proposal['changes']], now, proposal['run']['task_id'])
     if changes != proposal['changes']:
         raise LimitExtensionError('Proposal changes differ from the frozen profile')
     if proposal['new_profile'] != profile:
         raise LimitExtensionError('The proposed profile changes dimensions it does not name; '
                                   'no implicit increase is allowed')
+    if (proposal['operation'] == REVERIFY
+            and proposal['reverification'] != reverification(source, proposal['run']['task_id'])):
+        raise LimitExtensionError('The reverification differs from the captured timeout')
     if proposal['operation'] == 'extend_deadline':
         deadline = proposal['deadline']
         if (deadline['started_at'] != source['counters']['started_at']
@@ -597,6 +712,45 @@ def _extended(source, proposal, authorization_sha, sha):
     return envelope, counters, attempts, feedback
 
 
+def _grant(proposal, sha, authorization_sha):
+    """The task-journal grant of one reverification of the same captured candidate."""
+    facts = proposal['reverification']
+    return dict(contract=CONTRACT, operation=REVERIFY, proposal_sha256=sha, authorization_sha256=authorization_sha,
+                task_id=facts['task_id'], attempt=facts['attempt'], failure_sha256=facts['failure_sha256'],
+                capture_sha256=facts['capture_sha256'],
+                invocation_timeout_seconds=facts['invocation_timeout_seconds'],
+                timeouts={c['dimension'][len(CHECK_TIMEOUT):]: dict(old=c['old'], new=c['new'])
+                          for c in proposal['changes']},
+                status='AUTHORIZED')
+
+
+def _record_reverification(root, grant, parent_head):
+    """Append the grant to the task journal once; a replay only confirms it."""
+    journal = TaskJournal(root / '03-dev/tasks')
+    tasks = journal.load()
+    if tasks is None or grant['task_id'] not in tasks.get('tasks', {}):
+        raise LimitExtensionError('Task journal disappeared during reverification activation')
+    row = tasks['tasks'][grant['task_id']]
+    recorded = [g for g in row.get('timeout_reverifications', [])
+                if g.get('proposal_sha256') == grant['proposal_sha256']]
+    if recorded:
+        if recorded != [grant]:
+            raise LimitExtensionError('Task journal differs from the authorized reverification')
+        return
+    if dict(sequence=journal.sequence, sha256=journal.previous) != parent_head:
+        raise LimitExtensionError('Task journal moved during reverification activation')
+    row.setdefault('timeout_reverifications', []).append(copy.deepcopy(grant))
+    journal.append('TIMEOUT_REVERIFICATION_AUTHORIZED', tasks)
+
+
+def _reverification_recorded(root, proposal, sha, authorization_sha):
+    path = root / '03-dev/tasks/task-journal.jsonl'
+    tasks = _peek(path) if path.is_file() and not path.is_symlink() else None
+    row = (tasks or {}).get('tasks', {}).get(proposal['run']['task_id'], {})
+    return any(g.get('proposal_sha256') == sha and g.get('authorization_sha256') == authorization_sha
+               for g in row.get('timeout_reverifications', []))
+
+
 def _conserved(before, after):
     """Only the policy digest and, for a deadline, the deadline may differ."""
     strip = lambda state: {k: v for k, v in state.items() if k not in ('policy_sha256', 'deadline_at')}
@@ -658,6 +812,11 @@ def _record_feedback(ticket, entry, parent_head):
 
 def _complete(ticket, root, intent, fault):
     """Idempotent steps from the published intent; never repeats an effect."""
+    if intent.get('reverification') is not None:
+        # No limit changes: the profile, the limits journal and the chain stay as they are.
+        _record_reverification(root, intent['reverification'], intent['parent_scheduler_journal'])
+        fault('scheduler_updated')
+        return
     parent_sha, envelope = intent['parent_envelope_sha256'], intent['new_envelope']
     new_sha = digest(envelope)
     policy_path = root / 'limits/policy.json'
@@ -750,6 +909,10 @@ def activate(ticket, sha, *, clock=time.time, guard=lambda: None, fault=lambda p
                         raise LimitExtensionError('Another limit extension activation is pending')
                     _clear(pending)
                 envelope, _ = LimitsStore(root, clock)._load(repair=False)
+                if proposal['operation'] == REVERIFY:
+                    if not _reverification_recorded(root, proposal, sha, receipt['authorization_sha256']):
+                        raise LimitExtensionError('Active receipt differs from the task journal')
+                    return dict(status='ACTIVE', proposal_sha256=sha, replayed=True, model_dispatches=0)
                 if not any(e.get('proposal_sha256') == sha and e.get('authorization_sha256') == receipt['authorization_sha256']
                            for e in entries(envelope)):
                     raise LimitExtensionError('Active receipt differs from the bound limit chain')
@@ -770,8 +933,14 @@ def activate(ticket, sha, *, clock=time.time, guard=lambda: None, fault=lambda p
                 if source['root'] != root:
                     raise LimitExtensionError('Selected generation changed')
                 validate(proposal, source, now)
-                envelope, counters, attempts, feedback = _extended(source, proposal, digest(authorization), sha)
-                intent = dict(schema_version=1, contract=CONTRACT, proposal_sha256=sha,
+                grant = None
+                if proposal['operation'] == REVERIFY:
+                    envelope, counters = copy.deepcopy(source['envelope']), copy.deepcopy(source['counters'])
+                    attempts, feedback = None, None
+                    grant = _grant(proposal, sha, digest(authorization))
+                else:
+                    envelope, counters, attempts, feedback = _extended(source, proposal, digest(authorization), sha)
+                intent = dict(schema_version=1, contract=CONTRACT, proposal_sha256=sha, reverification=grant,
                               authorization_sha256=digest(authorization), generation=generation,
                               parent_envelope_sha256=digest(source['envelope']), new_envelope=envelope,
                               parent_limits_journal=source['limits_head'],
