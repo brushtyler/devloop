@@ -14,8 +14,10 @@ of the canonical ticket is running. This page describes the protocol implemented
 > versioned automatic proof (see
 > [Native transitions](#native-transitions-the-automatic-proof)). Other runs and the
 > supervisor keep the manual path. Host command
-> trees can be proven finished by a child subreaper (#132, [Host writers](#host-writers));
-> `run_host()` is not yet used by the controller, so nothing changes for real runs.
+> trees can be proven finished by a child subreaper (#132, [Host writers](#host-writers)),
+> and since #345 the controller runs the Git commands of an admitted run through
+> `run_host()` ([The controller's host commands](#the-controllers-host-commands)), so new
+> runs reach the automatic proof without the operator's attestation.
 
 ## Invariants
 
@@ -165,7 +167,10 @@ proven finished cannot hand off automatically: its transition refuses with
 ## Host writers
 
 Trusted host commands of the controller (Git, which also runs on the host in the Docker
-path, and the commands of local mode) run through `run_host(lease, argv)`:
+path; see [The controller's host commands](#the-controllers-host-commands)) run through
+`run_host(lease, argv)`. Role and verification commands of local mode are not host
+commands of this kind: they leave automatic fencing before they start
+([Roles without a role container](#roles-without-a-role-container)).
 
 - the controller holds a live writer lease, checked before and after the command;
 - the command runs under a **host tree supervisor** (`python3 ssdlc_writer_gate.py
@@ -250,6 +255,37 @@ as diagnostics.
 A transition also refuses automatic fencing (`uncovered_execution`) whenever a caller's
 coverage probe reports an execution tree not covered by the gate, for example a role
 container.
+
+### The controller's host commands
+
+Since #345 the controller's Git commands go through `ssdlc_role_fencing.host_command()`:
+the helpers `ssdlc_tasks.git()` and the resume and worktree Git of `orchestrator.py`,
+the remote synchronization, the disposable checkouts of `ssdlc_candidates.py`, the Git
+reads of `ssdlc_impact.py` and `ssdlc_bounce.py`, and the scratch repository of
+`ssdlc_owner_revalidation.py`. What happens depends on where the command starts:
+
+- **Inside an orchestrator entrypoint of an admitted run** (the scope that also fences
+  its role containers, see [Role containers](#role-containers-activation-and-admission)),
+  the command runs through `run_fenced()`: a writer lease is taken for that command only
+  (`LOCK_SH`, bounded wait of 30 s, the generation the controller runs must be the
+  selected one), the command runs under `run_host()` and its subreaper, and the lease is
+  closed when the whole tree has ended. Its tree record and conclusion stay in the
+  registry, so a later transition of that generation proves the tree finished.
+- **A refusal before the command runs** (`HostCommandNotRun`: unsupported platform or
+  filesystem, a gate refusal, a moved generation, a lease not obtained in time, a
+  supervisor that did not start, a registry entry that could not be published) is
+  recorded in the run's state as `writer_fencing_refusal` first and printed as
+  `[writer-fencing] Automatic fencing refused (<code>: <detail>)`; the command then runs
+  plainly, once. From then on the run is no longer admitted: its later host commands run
+  plainly and its transitions need `source_fenced: true`.
+- **A refusal after the command ran** (the lease lost or the generation moved under it)
+  is recorded the same way and raised: the command is never run a second time.
+- **A run that is not admitted** (historical, or refused once), and any host command
+  started outside an orchestrator entrypoint, run plainly with `subprocess.run`, as
+  before: no gate is created, no registry record is written.
+
+A tree run without the subreaper, or not concluded, keeps refusing automatic fencing for
+its generation (`HOST_TREE_UNVERIFIABLE`), as above.
 
 ## Containers: the PID 1 holder
 
@@ -621,17 +657,28 @@ an authorized I2 generation without `state.json` is refused before anything is c
   manual path ([Admission](#admission)); their transitions still need the operator's
   `source_fenced: true` ([Native transitions](#native-transitions-the-automatic-proof)).
 - **Controllers are serialized, not gated.** A transition still holds `ticket.lock` and
-  the source `scheduler.lock`, which exclude cooperating controllers; the controller's
-  own host processes do not hold the gate. The proof covers the role containers (the
-  gate and the Docker check) and refuses on host command trees not proven finished.
+  the source `scheduler.lock`, which exclude cooperating controllers. The controller
+  itself does not hold the gate for its whole life: it holds `LOCK_SH` only while one of
+  its host commands runs (#345). The proof covers the role containers (the gate and the
+  Docker check) and the controller's Git commands (their concluded trees), and refuses
+  on host command trees not proven finished.
 - **Host commands are covered only through `run_host()` and its subreaper** (#132).
   Without the subreaper, or with a tree not concluded, they disable automatic fencing
-  for their generation. `run_host()` is not yet wired into the controller: real runs
-  keep using the manual path. Work a host command delegates over IPC to another
-  service (the Docker daemon, systemd, an agent socket) is not part of its tree; it
-  needs its own coverage probe. The supervisor runs with the controller's identity, so
-  a host command could kill it or forge a conclusion: host commands are trusted, and a
-  killed supervisor fails closed. Each host command leaves two small registry records.
+  for their generation. The controller routes its Git commands through it in the
+  entrypoints of admitted runs ([The controller's host commands](#the-controllers-host-commands)).
+  Other host processes are not covered: the Docker client (`docker run`, `docker rm`,
+  `docker ps`, `docker image inspect`; its containers are covered by the holder and the
+  Docker probe), the version probes, `gh auth token`, the controller snapshot of the
+  toolkit (`ssdlc_controller.py`, read-only), the read-only `git cat-file -e` of the
+  replay grader (`ssdlc_grader.py`, pinned by its reviewed baseline), and Git run outside an orchestrator entrypoint
+  (construction, CLI helpers, operator commands). Work a host command delegates over
+  IPC to another service (the Docker daemon, systemd, an agent socket) is not part of its
+  tree; it needs its own coverage probe. The supervisor runs with the controller's
+  identity, so a host command could kill it or forge a conclusion: host commands are
+  trusted, and a killed supervisor fails closed. Each host command starts one supervisor
+  process (a Python interpreter, about 0.1 s per Git command on the operator's host) and
+  leaves two small registry records (its tree record and conclusion, beside
+  one host marker per generation), which are never removed.
 - A deleted or replaced gate is detected through its anchor, the registry, a bound
   identity or an open lease, and is never recreated. Only deleting the gate, its anchor
   and the whole `writer-gate.d/` registry together makes the ticket look never

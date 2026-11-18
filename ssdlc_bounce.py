@@ -424,8 +424,9 @@ def verify_transitional_expectations(worktree, head, plan):
     as raw bytes, so trailing newlines and line endings are not normalized.
     """
     import subprocess
+    from ssdlc_role_fencing import host_command
     for item in plan.get('transitional_expectations', []):
-        proc = subprocess.run(['git', 'cat-file', 'blob', f'{head}:{item["test_path"]}'],
+        proc = host_command(['git', 'cat-file', 'blob', f'{head}:{item["test_path"]}'],
                               cwd=worktree, capture_output=True, stdin=subprocess.DEVNULL)
         if proc.returncode:
             raise BounceError('contradictory_evidence')

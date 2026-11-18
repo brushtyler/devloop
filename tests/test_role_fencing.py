@@ -334,7 +334,12 @@ class RefusalTests(FencingTestCase):
         after = modes()
         self.assertEqual({p: v for p, v in after.items() if p in before and p.name != 'state.json'},
                          {p: v for p, v in before.items() if p.name != 'state.json'})
-        self.assertFalse(wg.gate_path(self.ticket).exists())
+        # The refusal creates no gate: only the run's host Git commands, under run_host()
+        # (#345), initialized it, and each of their trees was concluded.
+        registry = self.ticket / wg.REGISTRY_NAME
+        trees = sorted(p.name[2:] for p in registry.glob('t-*.json'))
+        self.assertTrue(trees)
+        self.assertEqual(trees, sorted(p.name[2:] for p in registry.glob('c-*.json')))
 
     def test_a_new_cache_the_controller_cannot_hand_over_is_refused(self):
         os.environ['SSDLC_CONTAINER_PAYLOAD_USER'] = PAYLOAD

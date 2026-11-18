@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ssdlc_catalogues import CatalogueError, heading_anchors, requirement_catalogue
+from ssdlc_role_fencing import host_command
 
 SCHEMA_DIR = Path(__file__).resolve().parent / 'schemas'
 PROTECTED = {'.git', '.ssdlc', '.agents', '.codex', '.aws'}
@@ -696,7 +697,7 @@ class TaskJournal:
 
 
 def git(repo: Path, *args: str) -> str:
-    proc = subprocess.run(['git', '--literal-pathspecs', *args], cwd=repo, capture_output=True, text=True)
+    proc = host_command(['git', '--literal-pathspecs', *args], cwd=repo, capture_output=True, text=True)
     if proc.returncode:
         raise TaskError(f'git {args[0]} failed: {proc.stderr.strip()}')
     return proc.stdout.rstrip('\n')
@@ -1383,7 +1384,7 @@ class TaskScheduler:
         if head == expected:
             return True
         return (any(g['from_head'] == head for g in self.state.get('generations', []))
-                and subprocess.run(['git', 'merge-base', '--is-ancestor', head, expected],
+                and host_command(['git', 'merge-base', '--is-ancestor', head, expected],
                                    cwd=self.wt, capture_output=True).returncode == 0)
 
     def _evidence_valid(self, record, task_id=None) -> bool:
@@ -1833,7 +1834,7 @@ class TaskScheduler:
 
     def _restore_attempt_paths(self, record: dict, changed: list[str]) -> None:
         for path in changed:
-            tracked = subprocess.run(['git', '--literal-pathspecs', 'cat-file', '-e', f'{record["start_commit"]}:{path}'], cwd=self.wt, capture_output=True).returncode == 0
+            tracked = host_command(['git', '--literal-pathspecs', 'cat-file', '-e', f'{record["start_commit"]}:{path}'], cwd=self.wt, capture_output=True).returncode == 0
             if tracked:
                 git(self.wt, 'restore', '--source', record['start_commit'], '--staged', '--worktree', '--', path)
             else:
