@@ -462,7 +462,10 @@ class RegisterTests(Quorum):
         self.assertEqual(self.planned(), [Action('fix', 100)])
 
     def test_an_interrupted_turn_stays_open_in_the_register(self):
-        self.make_register(outputs={SECOND: [RuntimeError('dispatcher killed')]})
+        # The process dies during the turn: an Exception would close it as a failure (#381).
+        class Killed(BaseException):
+            pass
+        self.make_register(outputs={SECOND: [Killed('dispatcher killed')]})
         self.d.tick()
         ((comment_id, register),) = self.registers()
         states = {s['agent']: s['state'] for s in register['records'] if s['type'] == 'turn'}

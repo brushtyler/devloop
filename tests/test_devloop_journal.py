@@ -32,8 +32,9 @@ def lines(path):
     return path.read_bytes().splitlines()
 
 
-class Crash(Exception):
-    """The dispatcher stops while a CLI runs."""
+class Crash(BaseException):
+    """The dispatcher stops while a CLI runs: not an ``Exception``, which closes the turn as
+    ``failure`` (#381), but a stop the dispatcher does not handle (a signal, an interrupt)."""
 
 
 class JournalChainTests(unittest.TestCase):

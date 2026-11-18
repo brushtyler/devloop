@@ -51,7 +51,7 @@ class SleepingRunner:
             self.calls.append((agent.key, mode, schema_name, prompt))
             queue = self.outputs.get(agent.key)
             out = queue.pop(0) if queue else raw_review()
-        if isinstance(out, Exception):
+        if isinstance(out, BaseException):
             raise out
         return out
 
@@ -235,7 +235,9 @@ class ParallelTickTests(unittest.TestCase):
             'outcome of fix #101: done',
             'outcome of sync #102: failed: agent died',
             'outcome of sync #100: done'])
-        self.assertIn("#100   unexpected error: KeyError: 'boom'", d.logs)
+        # With where its traceback is, or why it is not (#381): this workspace keeps no logs.
+        self.assertIn("#100   unexpected error: KeyError: 'boom' (traceback not written: "
+                      'AttributeError)', d.logs)
 
     def test_log_lines_of_parallel_actions_do_not_mix(self):
         written = []

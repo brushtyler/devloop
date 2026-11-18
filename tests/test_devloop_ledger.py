@@ -415,7 +415,8 @@ class LedgerDispatcherTests(unittest.TestCase):
         self.assertEqual(self.runner.calls, [])
 
     def test_a_turn_never_closed_is_flagged_incomplete_by_the_next_tick(self):
-        class Crash(Exception):
+        # The process dies during the turn: an Exception would close it as a failure (#381).
+        class Crash(BaseException):
             pass
         d = self.make(Crash('dispatcher killed'))
         with self.assertRaises(Crash):

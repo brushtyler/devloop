@@ -22,6 +22,12 @@ of the configured agent already published stands for it: a later action publishe
 missing (the native review, the receipt, then the summary, last) without a new turn. A head is
 done once it has the dispatcher's summary. Before the turn and before any publication the PR is
 read again: open, on the same head, in ``agent:needs-operator`` and not with the supervisor.
+
+An action that fails before the result of its turn is kept (an error of the dispatcher, of git
+or of GitHub, #381) is recorded for its head in ``state_dir`` (``AdvisoryFailures``): the head
+gets one retry, not before ``RETRY_SECONDS``, and after ``MAX_ATTEMPTS`` failed actions no turn
+again. A new head starts over. A failure that cannot be written holds the head in the process,
+with no new turn until a restart.
 """
 
 import json
@@ -35,6 +41,7 @@ from .apps import REVIEW
 from .context import _template, format_previous_rounds
 from .dispatch_actions import Models
 from .journal import JournalError, TurnBlocked
+from .ledger import timestamp as ledger_timestamp
 from .markdown import (ADVISORY_OPINIONS, MAX_BODY, dispatcher_header, fitted, publishable,
                        read_marker)
 from .planning import label_names, operator_blocked
@@ -46,6 +53,10 @@ from .review import current_round
 ADVISORY_TITLE = 'Review consultiva: non conta per il quorum'
 # What the readable text keeps of the agent's answer: at most so many points per list.
 MAX_POINTS = 20
+# An action that failed on a head without a result of its turn kept (#381): the turn of that
+# head runs at most ``MAX_ATTEMPTS`` times, the next one not before ``RETRY_SECONDS``.
+MAX_ATTEMPTS = 2
+RETRY_SECONDS = 60
 
 
 def _short(exc, limit=300):
@@ -125,15 +136,12 @@ def render_advisory_summary(record, error=''):
                        + text + '\n', 'advisory', record)
 
 
-class AdvisoryResults:
-    """The advisory turns run and not yet published (#369), one per PR: ``{head, reviewer,
-    advisory, error, header}``, ``advisory`` being the normalized answer (None for a failed
-    turn, then ``error`` says why) and ``header`` the attribution of the native review. Kept in
-    ``state_dir`` (``FILE``), so that a restart does not lose them; without ``state_dir`` they
-    last as long as the process. A file that cannot be read, or an entry that is not valid,
-    counts as missing. Parallel actions (#176) share it under a lock."""
+class _StateFile:
+    """A JSON object of entries by PR number, kept in ``state_dir`` (``FILE``), so that a
+    restart does not lose them; without ``state_dir`` they last as long as the process. A file
+    that cannot be read counts as empty. Parallel actions (#176) share it under a lock."""
 
-    FILE = 'advisory-results.json'
+    FILE = None
 
     def __init__(self, state_dir=None):
         self._path = Path(state_dir) / self.FILE if state_dir is not None else None
@@ -161,6 +169,22 @@ class AdvisoryResults:
         tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + '\n', encoding='utf-8')
         os.replace(tmp, self._path)
 
+    def drop(self, number):
+        """Forget the entry of PR ``number``."""
+        with self._lock:
+            data = self._load()
+            if data.pop(str(number), None) is not None:
+                self._store(data)
+
+
+class AdvisoryResults(_StateFile):
+    """The advisory turns run and not yet published (#369), one per PR: ``{head, reviewer,
+    advisory, error, header}``, ``advisory`` being the normalized answer (None for a failed
+    turn, then ``error`` says why) and ``header`` the attribution of the native review. Kept in
+    ``state_dir`` (``FILE``); an entry that is not valid counts as missing."""
+
+    FILE = 'advisory-results.json'
+
     def get(self, number, head, reviewer):
         """The result kept for ``head`` of PR ``number`` by ``reviewer``, or None."""
         with self._lock:
@@ -184,12 +208,58 @@ class AdvisoryResults:
             data[str(number)] = entry
             self._store(data)
 
-    def drop(self, number):
-        """Forget the result of PR ``number``."""
+
+class AdvisoryFailures(_StateFile):
+    """The advisory actions that failed on a head (#381), one entry per PR: ``{head, failures,
+    retry_at}``, ``retry_at`` the epoch before which the head gets no new turn. Kept in
+    ``state_dir`` (``FILE``), so that the limit and the pause hold across a restart; an entry
+    that is not valid, or of another head, counts as missing."""
+
+    FILE = 'advisory-failures.json'
+
+    def __init__(self, state_dir=None):
+        super().__init__(state_dir)
+        # The failures that could not be written, by PR number: they hold in this process,
+        # and before the file, so that a failed write never lifts the limit nor the pause.
+        self._unsaved = {}
+
+    def get(self, number, head):
+        """The failures recorded for ``head`` of PR ``number``, or None."""
+        with self._lock:
+            entry = self._unsaved.get(str(number)) or self._load().get(str(number))
+        if (not isinstance(entry, dict) or entry.get('head') != head
+                or not isinstance(entry.get('failures'), int)
+                or not isinstance(entry.get('retry_at'), (int, float))):
+            return None
+        return entry
+
+    def record(self, number, head, now):
+        """One more failure of ``head`` of PR ``number``: the entry written, which replaces the
+        one of an earlier head. ``OSError`` when the file cannot be written: the budget of the
+        head can no longer be kept across a restart, so the failure is kept in this process as
+        ``MAX_ATTEMPTS`` failures, and the head gets no new turn until a restart."""
         with self._lock:
             data = self._load()
-            if data.pop(str(number), None) is not None:
+            entry = self._unsaved.get(str(number)) or data.get(str(number))
+            failures = (entry['failures'] if isinstance(entry, dict)
+                        and entry.get('head') == head
+                        and isinstance(entry.get('failures'), int) else 0)
+            entry = {'head': head, 'failures': failures + 1, 'retry_at': now + RETRY_SECONDS}
+            data[str(number)] = entry
+            try:
                 self._store(data)
+            except OSError:
+                self._unsaved[str(number)] = {**entry,
+                                              'failures': max(entry['failures'], MAX_ATTEMPTS)}
+                raise
+            self._unsaved.pop(str(number), None)
+        return entry
+
+    def drop(self, number):
+        """Forget the failures of PR ``number``, also those not written."""
+        with self._lock:
+            self._unsaved.pop(str(number), None)
+        super().drop(number)
 
 
 class AdvisoryMixin:
@@ -213,6 +283,8 @@ class AdvisoryMixin:
                 continue
             comments = self.gh.pr_comments(pr.number)
             if self._advisory_record(comments, pr.head_sha) is not None:
+                continue
+            if self._advisory_retry_held(pr.number, pr.head_sha, key) is not None:
                 continue
             try:
                 if self._advisory_held(pr.number, comments):
@@ -240,6 +312,24 @@ class AdvisoryMixin:
                 return True
             raise
         return False
+
+    def _advisory_retry_held(self, number, head, key):
+        """Why ``head`` of PR ``number`` gets no new turn of ``key`` now (#381), or None: after
+        a failed action, nothing kept of its turn, the head waits ``RETRY_SECONDS`` for its one
+        retry, and after ``MAX_ATTEMPTS`` failures it gets no turn again. A head whose turn
+        left a result, kept or already published as ``key``'s native review, is never held:
+        publishing the rest runs no turn."""
+        failed = self.advisory_failures.get(number, head)
+        if failed is None or self.advisory_results.get(number, head, key) is not None:
+            return None
+        if failed['failures'] >= MAX_ATTEMPTS:
+            held = f'failed {failed["failures"]} times on this head: not tried again'
+        elif self.clock() < failed['retry_at']:
+            until = ledger_timestamp(lambda: failed['retry_at'])
+            held = f'failed on this head: retry not before {until}'
+        else:
+            return None
+        return None if self._advisory_published(number, head, key) is not None else held
 
     def _advisory_record(self, comments, head):
         """The latest ``advisory`` record of ``head`` the dispatcher signed in ``comments``,
@@ -286,13 +376,41 @@ class AdvisoryMixin:
         return labels
 
     def _advisory_forget(self, number):
-        try:
-            self.advisory_results.drop(number)
-        except OSError as exc:
-            self.log(f'  advisory result of #{number} not forgotten: {exc}')
+        for store, what in ((self.advisory_results, 'result'),
+                            (self.advisory_failures, 'failures')):
+            try:
+                store.drop(number)
+            except OSError as exc:
+                self.log(f'  advisory {what} of #{number} not forgotten: {exc}')
 
     # The action ---------------------------------------------------------------------------
     def _do_advisory(self, pr):
+        """``_advisory_action``, with its failure recorded for the head (#381): whatever the
+        exception, which then propagates as before. Without a result of the turn kept, the
+        head gets one retry, not before ``RETRY_SECONDS`` (``_advisory_retry_held``). A turn
+        refused by the block on uncertain turns (``TurnBlocked``, #362) is no failure of the
+        action: it escalates, and ``_advisory_held`` holds the review until reconciled."""
+        try:
+            self._advisory_action(pr)
+        except TurnBlocked:
+            raise
+        except Exception:
+            try:
+                failed = self.advisory_failures.record(pr.number, pr.head_sha, self.clock())
+            except OSError as exc:
+                self.log(f'  advisory failure of #{pr.number} not recorded: {exc}: no new turn '
+                         'on this head until a restart')
+                failed = None
+            if failed is None:
+                raise  # the action's own error
+            until = ledger_timestamp(lambda: failed['retry_at'])
+            self.log(f'  advisory action on {pr.head_sha[:12]} failed ({failed["failures"]} of '
+                     f'{MAX_ATTEMPTS}): ' + (f'a new turn not before {until}'
+                                             if failed['failures'] < MAX_ATTEMPTS
+                                             else 'no new turn on this head'))
+            raise
+
+    def _advisory_action(self, pr):
         """The advisory review of the head of ``pr``, once, while the PR is still open in
         ``agent:needs-operator`` on the same head: the agent's turn, its native ``COMMENT``
         review, the receipt of the head, if current, and the dispatcher's summary, last.
@@ -327,6 +445,10 @@ class AdvisoryMixin:
         if kept is not None:
             self.log(f'  advisory review of {key} already run on this head: no new turn')
         else:
+            held = self._advisory_retry_held(pr.number, head, key)
+            if held is not None:
+                self.log(f'  no advisory turn: {held}')
+                return
             # With the block on uncertain turns (#362), before the issue is read and the
             # checkout made: blocking turns not escalated yet raise ``TurnBlocked``, which
             # escalates; those already escalated hold the review back until reconciled.
