@@ -374,6 +374,57 @@ class RegisterTests(Quorum):
                          [('agent', 1), ('ci', 1)])
         self.assertEqual(self.round_items(), [('turn', REV, 'closed'),
                                               ('event', 'ci_round', 'fail')])
+        ((_, register),) = self.registers()
+        (event,) = [s for s in register['records'] if s['type'] == 'event']
+        self.assertNotIn('voided_approval', event)  # no approval to void (#359)
+        snap = self.d.snapshot()
+        self.assertEqual(counted_rounds(snap.prs[0].reviews), 1)
+        self.assertEqual(self.planned(), [Action('fix', 100)])
+
+    def test_a_ci_failure_after_an_approval_joins_its_round_and_register(self):
+        # One head, one round (#359): the review approved with the CI pending, the CI then
+        # failed. The failure is a ci finding of round 1, its event in round 1's register
+        # says that it voided the approval, and the fix follows without a new round.
+        self.make_register(cfg=CFG, outputs={REV: [raw_review()]})
+        self.ws.diff = list(LEVEL1)
+        self.pending_ci()
+        self.d.tick()
+        self.assertEqual(self.gh.labels[100], {'agent:review'})
+        self.assertEqual(self.d.tick(), [])  # the approval waits for the CI of the head
+        self.fail_ci()
+        self.assertEqual(self.d.tick(), [Action('ci_failed', 100, 'CI failed after the '
+                                                'approval: it joins its round')])
+        self.assertEqual([(r['source'], r['round'], r['verdict'])
+                          for r in self.records('review')],
+                         [('agent', 1, 'approve'), ('ci', 1, 'request_changes')])
+        self.assertEqual(self.round_items(), [('turn', REV, 'closed'),
+                                              ('event', 'ci_round', 'fail')])
+        ((_, register),) = self.registers()
+        (event,) = [s for s in register['records'] if s['type'] == 'event']
+        self.assertIs(event['voided_approval'], True)
+        self.assertEqual(self.gh.labels[100], {'agent:changes'})
+        snap = self.d.snapshot()
+        self.assertEqual(counted_rounds(snap.prs[0].reviews), 1)
+        self.assertEqual(self.planned(), [Action('fix', 100)])
+
+    def test_a_ci_failure_joins_a_round_that_only_approved_so_far(self):
+        # Level 2 (#359): the first reviewer approved with the CI pending, the CI failed before
+        # the second reviewed. The failure joins the round, which waits for the second; the
+        # approval decays and the fix follows, without a new round.
+        self.make_register(cfg=CFG, outputs={FIRST: [raw_review()], SECOND: [raw_review()]})
+        self.pending_ci()
+        self.d.tick()
+        self.assertEqual(self.gh.labels[100], {'agent:review'})
+        self.fail_ci()
+        self.assertEqual(self.planned(), [Action('ci_failed', 100, 'CI failed during the '
+                                                 'review: it joins its round')])
+        self.d.tick()
+        self.assertIn(f'  CI failure joins round 1, which waits for {SECOND}', self.logs)
+        self.d.tick()
+        self.assertEqual(self.reviewed(), [FIRST, SECOND])
+        self.assertEqual(self.gh.labels[100], {'agent:changes'})
+        self.assertEqual([(r['reviewer'], r['round']) for r in self.records('review')],
+                         [(FIRST, 1), ('ci', 1), (SECOND, 1)])
         snap = self.d.snapshot()
         self.assertEqual(counted_rounds(snap.prs[0].reviews), 1)
         self.assertEqual(self.planned(), [Action('fix', 100)])

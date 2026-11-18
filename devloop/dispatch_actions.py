@@ -28,8 +28,8 @@ from .localtests import failed_modules, select_modules, suite_summary
 from .markdown import (dispatcher_header, publishable, render_fix, render_native_review,
                        render_review)
 from .planning import (BASE_CHANGED, FIX_COMMAND, RESYNC_AFTER_APPROVAL, ci_joins_round,
-                       counted_rounds, pending_reviewers, preflight_state, waived_rounds,
-                       waiting_reviewers)
+                       counted_rounds, pending_reviewers, preflight_state, voided_approval,
+                       waived_rounds, waiting_reviewers)
 from .policy import ZERO_LEVEL, distinct, independent, profile_of
 from .ports import summarize_checks
 from .review import (ci_failure_review, current_round, last_round, normalize_review,
@@ -202,9 +202,10 @@ class ActionsMixin:
         if self._rerun_unrelated(pr, paths):
             return
         log_tail = '\n'.join(self.gh.failed_log(run) for run in pr.failed_runs[:2])
-        # One head, one round (#352): a failure on the head of a round that asked for changes
-        # is a ci finding of that round, not a round of its own.
+        # One head, one round (#352, #359): a failure on the head of a round that asked for
+        # changes, or approved, is a ci finding of that round, not a round of its own.
         joined = ci_joins_round(pr)
+        voided = bool(joined) and voided_approval(joined)
         round_no = joined[0]['round'] if joined else last_round(pr.reviews) + 1
         earlier = [r for r in pr.reviews if r['round'] < round_no]
         review = ci_failure_review(failed_checks=pr.failed_checks, log_tail=log_tail,
@@ -213,7 +214,12 @@ class ActionsMixin:
                                    max_rounds=self._last_round_allowed(pr.reviews),
                                    head_sha=pr.head_sha)
         notes = []
-        if joined:
+        if voided:
+            notes.append(f'La review del round {round_no} ha approvato questo stesso commit: '
+                         'il fallimento della CI fa decadere l\'approvazione ed entra nel suo '
+                         'round, non ne apre uno nuovo; il verdetto del round diventa '
+                         '`request_changes` e la correzione risponde ai finding della CI.')
+        elif joined:
             notes.append(f'La review del round {round_no} ha chiesto modifiche su questo stesso '
                          'commit: il fallimento della CI entra nel suo round, non ne apre uno '
                          'nuovo, e una sola correzione risponde a tutti i finding.')
@@ -231,8 +237,10 @@ class ActionsMixin:
         if self.ledger is not None:
             # The event of a joined round is a section of that round's register (#325).
             details = self.gh.check_details(pr.head_sha)
+            # Its approval voided by the failure leaves a trace in the event (#359).
             self._record_ci(pr, pr.head_sha, summarize_checks(details)[0], details,
-                            review['round'], jobs=self._ci_jobs(details))
+                            review['round'], jobs=self._ci_jobs(details),
+                            voided_approval=voided)
         self.gh.comment(pr.number, render_review(review, dispatcher_header()))
         records = joined + [review]
         if joined and waiting_reviewers(records, self.cfg.conclave):
@@ -241,7 +249,8 @@ class ActionsMixin:
                      + ', '.join(waiting_reviewers(records, self.cfg.conclave)))
             return
         if joined:
-            self.log(f'  CI failure joins round {round_no}')
+            self.log(f'  CI failure joins round {round_no}'
+                     + (', voiding its approval' if voided else ''))
         self._apply_round(pr, records, announce=True, reviews=earlier + records)
 
     def _rerun_unrelated(self, pr, paths):
