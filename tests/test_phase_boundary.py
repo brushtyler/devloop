@@ -7,6 +7,7 @@ from unittest.mock import patch
 import orchestrator as o
 import ssdlc_supervisor as s
 from orchestrator import SSDLCOrchestrator, TaskError, git
+from helpers.host_commands import direct_host_commands
 from replay.repository_fixtures import RepositoryTests
 from test_supervisor_core import CoreCase
 import test_supervisor_cancel_resume as supervised
@@ -32,6 +33,9 @@ class PhaseBoundaryTests(RepositoryTests):
 
     def setUp(self):
         super().setUp()
+        # Writer fencing is verified by test_host_command_fencing: here the host
+        # commands of the run go to Git directly, without the run_host() supervisor.
+        direct_host_commands(self)
         for target in (patch.object(SSDLCOrchestrator, '_verification_environment', return_value={
                 'mode': 'role_container', 'platform': 'fixture',
                 'image_id': 'sha256:' + '1' * 64, 'reuse_eligible': True}),

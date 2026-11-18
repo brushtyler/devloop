@@ -38,6 +38,7 @@ from pathlib import Path, PurePosixPath
 import re
 import subprocess
 
+from ssdlc_role_fencing import host_command
 from ssdlc_tasks import TaskError, digest, file_hash
 
 
@@ -57,7 +58,7 @@ class ImpactError(TaskError):
 
 def _git_bytes(repo, *args, data=None):
     # Object reads only; never refresh the index or run repository hooks/monitors.
-    proc = subprocess.run(['git', '-C', str(repo), '-c', 'core.fsmonitor=false', *args],
+    proc = host_command(['git', '-C', str(repo), '-c', 'core.fsmonitor=false', *args],
                           input=data, capture_output=True)
     if proc.returncode:
         raise ImpactError('Impact report requires the plan base commit in the target repository')

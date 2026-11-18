@@ -1,6 +1,6 @@
 # ADR 0004: piano del passo 2 dell'ADR 0001 (budget, prenotazione e stato durevole)
 
-- **Stato:** proposto. Come previsto dall'ADR 0001, diventa approvato solo con l'approvazione e il merge dell'operatore (`operator_only_paths`).
+- **Stato:** approvato dall'operatore con il merge di PR #343 (2026-11-18), accettando le raccomandazioni della sezione 5. Le decisioni riservate sono state prese il 2026-11-18 (vedi la [sezione 5](#5-decisioni-riservate-alloperatore)); quelle rimaste aperte sono indicate lì. Il resto del documento è il registro della proposta: le alternative e l'analisi restano come scritte prima dell'approvazione.
 - **Fase:** design (#326). È il passo 2 del [piano dell'ADR 0001](0001-prodotto-unico-fasi-su-tracker.md#piano-ordine-rivisto-dal-conclave): "Budget, prenotazione e stato durevole (vincoli 2 e 3), sulla base di #133. Comprende l'identità di storia, fase e tentativo". Il passo 1, le porte del tracker (#138), è su `main`.
 - **Data:** 2026-11-18.
 - **Base verificata:** il commit 2002ee3 di `main`.
@@ -283,7 +283,7 @@ In entrambi i casi alcuni consumi non sono attribuibili a un task: design, piano
 
 ## 4. Piano delle issue
 
-Ogni issue si apre dopo l'approvazione di questo ADR, una per area.
+Ogni issue si apre dopo l'approvazione di questo ADR, una per area. Dopo l'approvazione le issue sono state aperte: P2-1 è #361, P2-2 #362, P2-3 #363, P2-4 #364, P2-5 #365, P2-6 #163 e P2-7 #214.
 
 - Le issue che toccano `devloop/` o `tests/test_devloop_boundary.py` richiedono il livello 2 di review: `devloop/` è in `sensitive_paths`, e l'allowlist del confine è un'autorità.
 - Quelle che toccano `docs/adr/`, `AGENTS.md` o `CLAUDE.md` le mergia l'operatore (`operator_only_paths`, devloop/config.toml:141).
@@ -293,13 +293,13 @@ Ogni issue si apre dopo l'approvazione di questo ADR, una per area.
 
 | Issue | Titolo proposto | Perimetro | Dipendenze | Review |
 |---|---|---|---|---|
-| P2-1 | feat: pacchetto `core` con i validatori puri del budget | Il pacchetto `core` (nome da confermare in D7) con la validazione del profilo e delle regole sui consumi ignoti, il calcolo di addebito e capienza su uno stato dato e la classificazione della telemetria. Allowlist di `tests/test_devloop_boundary.py` estesa a `core`. Test di equivalenza con ssdlc_recovery.py e ssdlc_telemetry.py sugli stessi casi. Motore invariato. `docs/architecture.md` aggiornato (sezioni "The devloop boundary" e "Future `core` package") | Approvazione dell'ADR | Livello 2 |
-| P2-2 | feat(devloop): journal durevole degli intenti e degli esiti dei turni | Journal locale con hash concatenati in `state_dir`: intento prima di ogni turno, esiti `returned`, `failed`, `uncertain` e `not_dispatched`, gestione della coda incompleta e rifiuto di uno snapshot senza journal (vincolo 3). Sostituisce `ledger-open-turns.json`. Un turno incompleto diventa `uncertain` e blocca un nuovo turno dello stesso lavoro fino alla riconciliazione, con escalation. I record `ledger` su GitHub restano invariati | Approvazione dell'ADR | Livello 2 |
-| P2-3 | feat(devloop): identità di storia, fase e tentativo | Entità e identità della [sezione 3.2](#32-identità-di-storia-fase-e-tentativo) nel journal di P2-2. Marker del dispatcher sulla radice e sulle issue figlie; identità del tentativo nel marker della PR e nei record dei turni; un solo tentativo attivo per fase; chiave `(sha del design approvato, task-id)` prevista nel formato. Rappresentazione dei tentativi secondo la scelta della sezione 3.2 | P2-2 | Livello 2 |
-| P2-4 | feat(devloop): outbox per i record e le ricevute | Record del ledger, output degli agent e ricevute salvati nel journal prima della pubblicazione e pubblicati da un outbox riprendibile, sul modello di `ProjectionOutbox`: riconciliazione sul commento esatto dello stesso autore prima di ogni nuovo POST, nessun POST ripetuto su un esito incerto. Nella porta `Tracker`, un esito incerto distinto per `comment` ed `edit_comment` (ADR 0001, "Porta del tracker"), con fake e test di conformità aggiornati | P2-2 | Livello 2 |
-| P2-5 | feat(devloop): envelope di budget per storia e prenotazione dei turni | Envelope per storia della [sezione 3.3](#33-modello-di-prenotazione-del-budget), con i calcoli di `core`: prenotazione prima di ogni turno, regole dichiarate per agent e route, rifiuto prima dell'avvio di un turno non coperto, consumo cumulativo attraverso fasi, issue figlie, tentativi, fallback e riavvii. Chiavi di configurazione con il budget spento per default; stato del budget in `status` e nella ricevuta della PR. Valori e attivazione secondo D2, D3 e D8 | P2-1, P2-2, P2-3 | Livello 2 |
-| P2-6 | feat: budget per task e trasferimenti nel motore locale (#163) | Come deciso dall'operatore in D4: nuova operazione del contratto di #162, dimensioni trasferibili e regole di consumo, allocazione sui profili nuovi e transizione per le run esistenti, conto condiviso dei consumi non attribuibili. Non tocca i file fissati dalla baseline: se servisse, la revisione della baseline è un'issue separata autorizzata dall'operatore (D5) | Approvazione dell'ADR e D4 | Livello 2 (limiti e autorizzazioni) |
-| P2-7 | feat: telemetria B2, transizioni dei profili e tetti in crediti (#214) | Come deciso dall'operatore in D6 | Approvazione dell'ADR e D6 | Livello 2 |
+| P2-1 (#361) | feat: pacchetto `core` con i validatori puri del budget | Il pacchetto `core` (nome da confermare in D7) con la validazione del profilo e delle regole sui consumi ignoti, il calcolo di addebito e capienza su uno stato dato e la classificazione della telemetria. Allowlist di `tests/test_devloop_boundary.py` estesa a `core`. Test di equivalenza con ssdlc_recovery.py e ssdlc_telemetry.py sugli stessi casi. Motore invariato. `docs/architecture.md` aggiornato (sezioni "The devloop boundary" e "Future `core` package") | Approvazione dell'ADR | Livello 2 |
+| P2-2 (#362) | feat(devloop): journal durevole degli intenti e degli esiti dei turni | Journal locale con hash concatenati in `state_dir`: intento prima di ogni turno, esiti `returned`, `failed`, `uncertain` e `not_dispatched`, gestione della coda incompleta e rifiuto di uno snapshot senza journal (vincolo 3). Sostituisce `ledger-open-turns.json`. Un turno incompleto diventa `uncertain` e blocca un nuovo turno dello stesso lavoro fino alla riconciliazione, con escalation. I record `ledger` su GitHub restano invariati | Approvazione dell'ADR | Livello 2 |
+| P2-3 (#363) | feat(devloop): identità di storia, fase e tentativo | Entità e identità della [sezione 3.2](#32-identità-di-storia-fase-e-tentativo) nel journal di P2-2. Marker del dispatcher sulla radice e sulle issue figlie; identità del tentativo nel marker della PR e nei record dei turni; un solo tentativo attivo per fase; chiave `(sha del design approvato, task-id)` prevista nel formato. Rappresentazione dei tentativi secondo la scelta della sezione 3.2 | P2-2 | Livello 2 |
+| P2-4 (#364) | feat(devloop): outbox per i record e le ricevute | Record del ledger, output degli agent e ricevute salvati nel journal prima della pubblicazione e pubblicati da un outbox riprendibile, sul modello di `ProjectionOutbox`: riconciliazione sul commento esatto dello stesso autore prima di ogni nuovo POST, nessun POST ripetuto su un esito incerto. Nella porta `Tracker`, un esito incerto distinto per `comment` ed `edit_comment` (ADR 0001, "Porta del tracker"), con fake e test di conformità aggiornati | P2-2 | Livello 2 |
+| P2-5 (#365) | feat(devloop): envelope di budget per storia e prenotazione dei turni | Envelope per storia della [sezione 3.3](#33-modello-di-prenotazione-del-budget), con i calcoli di `core`: prenotazione prima di ogni turno, regole dichiarate per agent e route, rifiuto prima dell'avvio di un turno non coperto, consumo cumulativo attraverso fasi, issue figlie, tentativi, fallback e riavvii. Chiavi di configurazione con il budget spento per default; stato del budget in `status` e nella ricevuta della PR. Valori e attivazione secondo D2, D3 e D8 | P2-1, P2-2, P2-3 | Livello 2 |
+| P2-6 (#163) | feat: budget per task e trasferimenti nel motore locale (#163) | Come deciso dall'operatore in D4: nuova operazione del contratto di #162, dimensioni trasferibili e regole di consumo, allocazione sui profili nuovi e transizione per le run esistenti, conto condiviso dei consumi non attribuibili. Non tocca i file fissati dalla baseline: se servisse, la revisione della baseline è un'issue separata autorizzata dall'operatore (D5) | Approvazione dell'ADR e D4 | Livello 2 (limiti e autorizzazioni) |
+| P2-7 (#214) | feat: telemetria B2, transizioni dei profili e tetti in crediti (#214) | Come deciso dall'operatore in D6 | Approvazione dell'ADR e D6 | Livello 2 |
 
 **Ordine.**
 
@@ -319,7 +319,28 @@ Ogni issue si apre dopo l'approvazione di questo ADR, una per area.
 
 ## 5. Decisioni riservate all'operatore
 
-Questo ADR le elenca, con le alternative e le raccomandazioni, ma **non le prende**. Restano valide tutte le decisioni riservate degli ADR 0001 e 0002.
+Decise dall'operatore il 2026-11-18, accettando le raccomandazioni di questa sezione, con il commento sulla PR #343 e il merge:
+
+- **D1.** ADR approvato.
+- **D2.** Per agy e codex, `unmetered_quota` più i tetti di turni e, se fissati, di token dell'agent, invece di una riserva in USD. Le estensioni dell'envelope seguono il contratto di #162, caso per caso e senza delega. **I valori dell'envelope restano da fissare.**
+- **D3.** Nessuna nuova credenziale e nessun nuovo permesso. **La lettura delle quote in abbonamento (#166) con le credenziali degli agent resta da decidere** quando servirà.
+- **D4 (#163).** Trasferimenti autorizzati come in (a); dimensioni trasferibili come in (a); allocazione con plafond cumulativi per i profili nuovi e quote del residuo, con una transizione per le run esistenti, più un conto condiviso per i consumi non attribuibili.
+- **D5.** Nessuna nuova baseline. Ogni modifica a file fissati è un'issue separata, da autorizzare caso per caso.
+- **D6 (#214).** (a) transizione solo per i profili con tetti in crediti; (b) un tetto in crediti sostituisce l'obbligo USD di una route solo con una transizione autorizzata dall'operatore per quel profilo.
+- **D7.** Il journal locale è l'autorità e il ledger su GitHub ne è la proiezione. La telemetria delle CLI può alzare un addebito, mai ridurlo sotto la riserva. Le issue figlie ereditano la storia solo dal marker del dispatcher. Il journal con hash concatenati resta in devloop.
+- **D8.** Budget e blocco sugli esiti incerti diventano obbligatori prima del passo 3. Per il flusso attuale di devloop si passa prima da un periodo in sola registrazione.
+
+Restano **aperti**, e chi li incontra li tratta come decisioni dell'operatore ancora da prendere:
+
+- i valori dell'envelope per storia (D2);
+- la lettura delle quote in abbonamento (#166) con le credenziali degli agent, e in quale ambiente (D3);
+- il nome del pacchetto `core`, che P2-1 rimandava a D7: la decisione D7 ne fissa il contenuto (il journal resta in devloop), non il nome.
+
+Restano valide tutte le decisioni riservate degli ADR 0001 e 0002.
+
+### Domande come proposte
+
+Registro storico: le domande con le alternative e le raccomandazioni, come le poneva la versione proposta di questo ADR, prima delle decisioni qui sopra.
 
 - **D1. Approvazione di questo ADR,** con il merge della sua PR.
 - **D2. Budget.**

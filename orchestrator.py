@@ -56,7 +56,7 @@ from ssdlc_transitions import runtime_root
 import ssdlc_role_fencing as role_fencing
 import ssdlc_telemetry as telemetry_schema
 import ssdlc_quota as quota_schema
-from ssdlc_writer_gate import GateError
+from ssdlc_writer_gate import GateError, HostCommandNotRun
 
 from ssdlc_tasks import (
     PlanError, TaskError, DevelopmentBlocked, ResourceLimitError, TaskPlanValidator, TaskScheduler, TaskJournal, atomic_json,
@@ -80,10 +80,11 @@ def _dispatch_context(task_id=None, attempt=None, phase=None):
 
 @contextlib.contextmanager
 def _writer_fencing_scope(run):
-    """Role containers started in this scope belong to ``run`` (docs/writer-fencing.md).
+    """Role containers and host commands started in this scope belong to ``run``
+    (docs/writer-fencing.md).
 
     Only the run's own state decides admission; without a scope a container keeps the
-    manual path.
+    manual path and a host command runs plainly.
     """
     previous = getattr(_dispatch_local, 'fencing', None)
     if not (isinstance(getattr(run, 'state', None), dict) and isinstance(getattr(run, 'ssdlc_root', None), Path)
@@ -91,9 +92,29 @@ def _writer_fencing_scope(run):
         run = None
     _dispatch_local.fencing = run
     try:
-        yield
+        with role_fencing.host_commands(None if run is None else functools.partial(_host_command, run)):
+            yield
     finally:
         _dispatch_local.fencing = previous
+
+
+def _host_command(run, argv, **kwargs):
+    """A trusted host command of ``run``: through ``run_host()`` while the run is admitted.
+
+    A refusal before the command runs is recorded first, so the run leaves automatic
+    fencing, and the command then runs plainly (the manual path). A refusal after it
+    ran is recorded and raised.
+    """
+    if not role_fencing.admitted(run.state):
+        return subprocess.run(argv, **kwargs)
+    try:
+        return role_fencing.run_fenced(run.ticket_lock_path.parent, run.ssdlc_root, argv, **kwargs)
+    except HostCommandNotRun as exc:
+        EngineRunner._refuse_fencing(run, exc)
+    except GateError as exc:
+        EngineRunner._refuse_fencing(run, exc)
+        raise
+    return subprocess.run(argv, **kwargs)
 
 
 def _supervision_event(event_type, **fields):
@@ -567,7 +588,7 @@ def _supervised_preflight():
 
 
 def _resume_git(repo, *args):
-    proc = subprocess.run(['git', '--no-optional-locks', *args], cwd=repo,
+    proc = role_fencing.host_command(['git', '--no-optional-locks', *args], cwd=repo,
                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
     if proc.returncode:
         raise PlanError('Resume baseline is unavailable')
@@ -2598,7 +2619,7 @@ class RemoteSyncManager:
 
     def _detect_remote(self) -> None:
         try:
-            res = subprocess.run(
+            res = role_fencing.host_command(
                 ["git", "remote", "get-url", "origin"],
                 cwd=str(self.repo_root),
                 capture_output=True,
@@ -2690,7 +2711,7 @@ class RemoteSyncManager:
             elif self.provider == "gitlab" and self.token and self.owner and self.repo:
                 push_target = f"https://oauth2:{self.token}@{self.host}/{self.owner}/{self.repo}.git"
             cmd = ["git", "push", "-u", push_target, f"{branch}:{branch}"]
-            proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True)
+            proc = role_fencing.host_command(cmd, cwd=str(cwd), capture_output=True, text=True)
             if proc.returncode == 0:
                 print(f"    [OK] Remote branch synced: {self.remote_url} ({branch})")
                 return True
@@ -4675,7 +4696,7 @@ class SSDLCOrchestrator:
 
     @staticmethod
     def _get_head_sha(repo: Path) -> str:
-        proc = subprocess.run(
+        proc = role_fencing.host_command(
             ["git", "rev-parse", "HEAD"],
             cwd=str(repo),
             capture_output=True,
@@ -4684,14 +4705,14 @@ class SSDLCOrchestrator:
         return proc.stdout.strip() if proc.returncode == 0 else "UNCOMMITTED"
 
     def _gather_repo_context(self) -> str:
-        proc = subprocess.run(
+        proc = role_fencing.host_command(
             ["git", "ls-files"],
             cwd=str(self.repo_root),
             capture_output=True,
             text=True,
         )
         files = proc.stdout.strip().splitlines()[:250] if proc.returncode == 0 else []
-        log_proc = subprocess.run(
+        log_proc = role_fencing.host_command(
             ["git", "log", "-n", "10", "--oneline"],
             cwd=str(self.repo_root),
             capture_output=True,
@@ -5220,12 +5241,12 @@ class SSDLCOrchestrator:
             return self.worktree_dir
         if self.worktree_dir.exists():
             shutil.rmtree(self.worktree_dir)
-        subprocess.run(
+        role_fencing.host_command(
             ["git", "worktree", "prune"],
             cwd=str(self.repo_root),
             capture_output=True,
         )
-        chk = subprocess.run(
+        chk = role_fencing.host_command(
             ["git", "rev-parse", "--verify", branch],
             cwd=str(self.repo_root),
             capture_output=True,
@@ -5234,7 +5255,7 @@ class SSDLCOrchestrator:
             cmd = ["git", "worktree", "add", str(self.worktree_dir), branch]
         else:
             cmd = ["git", "worktree", "add", "-b", branch, str(self.worktree_dir), self.state["base_commit"]]
-        proc = subprocess.run(cmd, cwd=str(self.repo_root), capture_output=True, text=True)
+        proc = role_fencing.host_command(cmd, cwd=str(self.repo_root), capture_output=True, text=True)
         if proc.returncode != 0:
             raise RuntimeError(f"Failed to create git worktree: {proc.stderr}")
         self.isolation.ensure_trusted_path(self.worktree_dir)
@@ -6244,7 +6265,7 @@ To **REJECT** and record feedback (free text authorizes no repair):
             branch = self.state.get("dev_branch", f"ssdlc/{self.ticket_id}")
             base_branch = "main"
             try:
-                cur_b = subprocess.run(
+                cur_b = role_fencing.host_command(
                     ["git", "branch", "--show-current"],
                     cwd=str(self.repo_root),
                     capture_output=True,
@@ -6656,16 +6677,18 @@ To **REJECT** and record feedback (free text authorizes no repair):
 
         # Prune worktree to reclaim disk space while preserving .ssdlc/<ticket> evidence
         if wt.exists():
-            subprocess.run(["git", "worktree", "remove", "--force", str(wt)], cwd=str(self.repo_root), capture_output=True)
+            role_fencing.host_command(["git", "worktree", "remove", "--force", str(wt)], cwd=str(self.repo_root),
+                                      capture_output=True)
         self.state["status"] = "APPROVED_AND_MERGED"
         self.record_gate("SUPERVISOR_SIGNOFF", True, "Supervisor approved, merged branch, and pruned temporary worktree.")
         print(f"[OK] Ticket {self.ticket_id} approved, merged, and worktree cleaned up.")
 
         if self.remote_sync.enabled:
-            cur_b = subprocess.run(["git", "branch", "--show-current"], cwd=str(self.repo_root), capture_output=True, text=True)
+            cur_b = role_fencing.host_command(["git", "branch", "--show-current"], cwd=str(self.repo_root),
+                                              capture_output=True, text=True)
             if cur_b.returncode == 0 and cur_b.stdout.strip():
                 print(f"==> [Remote-Sync] Pushing merged '{cur_b.stdout.strip()}' to origin...")
-                subprocess.run(["git", "push", "origin", cur_b.stdout.strip()], cwd=str(self.repo_root))
+                role_fencing.host_command(["git", "push", "origin", cur_b.stdout.strip()], cwd=str(self.repo_root))
 
 
 def cmd_doctor(repo: Path) -> int:

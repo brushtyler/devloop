@@ -15,6 +15,7 @@ import itertools
 from unittest.mock import patch
 
 import orchestrator as o
+from helpers.host_commands import direct_host_commands
 from ssdlc_tasks import PlanError, TaskError, TaskJournal, atomic_json, digest, git
 import test_task_bootstrap as fixtures
 from test_full_checkpoint_review import framed
@@ -26,6 +27,9 @@ class UnifiedExecutionTests(fixtures.RepositoryTests):
 
     def setUp(self):
         super().setUp()
+        # Writer fencing is verified by test_host_command_fencing: here the host
+        # commands of the run go to Git directly, without the run_host() supervisor.
+        direct_host_commands(self)
         # Simulate the role boundary and an immutable image, retaining real
         # candidate capture, isolated workspaces and scheduler checks.
         runtime = patch.object(o.EngineRunner, '_should_spawn_role_container', return_value=True)

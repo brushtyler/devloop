@@ -67,7 +67,7 @@ Start from the [recovery index](docs/recovery.md): from the stop, to the transit
 | [Developer feedback](docs/developer-feedback.md) | Scope diagnosis, reviewed feedback roles, delegated amendments, GitHub projections (#39) |
 | [Native gate convergence](docs/native-gate-convergence.md) | Candidate checks collected before the reviews that need them |
 | [Bounce preview](docs/bounce-preview.md) | Read-only preview of a targeted bounce from a gate |
-| [Writer fencing](docs/writer-fencing.md) | Writer gate protocol and in-container PID 1 holder for automatic fencing (#45); every new run records `writer_fencing: v1`, and the role containers of admitted runs start under the holder |
+| [Writer fencing](docs/writer-fencing.md) | Writer gate protocol and in-container PID 1 holder for automatic fencing (#45); every new run records `writer_fencing: v1`, and the role containers of admitted runs start under the holder, their host Git commands under `run_host()` |
 
 ### Operating devloop
 

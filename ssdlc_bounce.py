@@ -424,8 +424,9 @@ def verify_transitional_expectations(worktree, head, plan):
     as raw bytes, so trailing newlines and line endings are not normalized.
     """
     import subprocess
+    from ssdlc_role_fencing import host_command
     for item in plan.get('transitional_expectations', []):
-        proc = subprocess.run(['git', 'cat-file', 'blob', f'{head}:{item["test_path"]}'],
+        proc = host_command(['git', 'cat-file', 'blob', f'{head}:{item["test_path"]}'],
                               cwd=worktree, capture_output=True, stdin=subprocess.DEVNULL)
         if proc.returncode:
             raise BounceError('contradictory_evidence')
@@ -565,8 +566,11 @@ def preview_snapshot(root, state):
     """Hash immutable ticket bytes and semantic state, excluding preview refs.
 
     The worktree is included: neither ignored source files nor raw projections
-    may be changed by publication. Lock files are coordination, not evidence.
+    may be changed by publication. Lock files are coordination, not evidence, and
+    so is the writer gate: the controller's host commands record their trees there
+    while the preview runs (docs/writer-fencing.md, #345).
     """
+    from ssdlc_writer_gate import ANCHOR_NAME, GATE_NAME, REGISTRY_NAME
     root = Path(root)
     frozen = copy.deepcopy(state)
     frozen.pop('updated_at', None)
@@ -575,7 +579,8 @@ def preview_snapshot(root, state):
     files = {}
     for path in root.rglob('*'):
         rel = path.relative_to(root)
-        if rel.parts[0] == 'bounce-preview' or str(rel) in ('state.json', 'ticket.lock'):
+        if (rel.parts[0] in ('bounce-preview', GATE_NAME, ANCHOR_NAME, REGISTRY_NAME)
+                or str(rel) in ('state.json', 'ticket.lock')):
             continue
         if path.is_symlink():
             import os
