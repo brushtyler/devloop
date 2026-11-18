@@ -645,6 +645,10 @@ or a transition:
 Contention is logged by the `ssdlc_writer_gate` logger with the kernel holders from
 `/proc/locks`.
 
+The [workflow status](workflow-status.md#liveness-and-next-action) observes the same holders and
+host trees read-only: it locates the gate with `lstat` without opening it, and reads the registry
+only if it exists (`_records(gate, create=False)`), never creating it.
+
 ## Initialization order
 
 `SSDLCOrchestrator.__init__` creates the phase directories and, through

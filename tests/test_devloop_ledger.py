@@ -27,6 +27,13 @@ CLAUDE_ENVELOPE = {
     'usage': {'input_tokens': 10, 'output_tokens': 2000, 'cache_read_input_tokens': 50000,
               'cache_creation_input_tokens': 3000},
     'modelUsage': {'claude-opus-5-5': {'costUSD': 1.2}, 'claude-haiku-5-5': {'costUSD': 0.05}}}
+# What agy 1.5.11 printed for `agy --output-format=json --print=...` (#358).
+AGY_ENVELOPE = (
+    '{"conversation_id":"c0ffee","status":"SUCCESS","response":"ok\\n",'
+    '"duration_seconds":2.37,"num_turns":1,"usage":{"input_tokens":9415,"output_tokens":26,'
+    '"thinking_tokens":21,"cache_read_tokens":0,"total_tokens":9441}}')
+AGY_FIELDS = dict(NULLS, duration_ms=2370, num_turns=1, input_tokens=9415, output_tokens=26,
+                  cache_read_input_tokens=0, thinking_tokens=21)
 
 
 def ledger_records(comments, kind=None):
@@ -163,7 +170,8 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(fields, {'cost_usd': 1.25, 'duration_ms': 64000, 'num_turns': 12,
                                   'input_tokens': 10, 'output_tokens': 2000,
                                   'cache_read_input_tokens': 50000,
-                                  'cache_creation_input_tokens': 3000})
+                                  'cache_creation_input_tokens': 3000,
+                                  'thinking_tokens': None})  # inside output, not apart
         # Every model the CLI attests, without picking a main one.
         self.assertEqual(models, ['claude-haiku-5-5', 'claude-opus-5-5'])
 
@@ -180,6 +188,64 @@ class TelemetryTests(unittest.TestCase):
                                       cache_read_input_tokens=40))
         self.assertIsNone(models)  # codex attests no model, and no cost
 
+    def test_agy_telemetry_comes_from_the_json_envelope(self):
+        fields, models = agents.telemetry('agy', AGY_ENVELOPE)
+        # input_tokens as agy reports it, without the cached input (unlike codex); the thinking
+        # tokens in their own field, never added to output; total tokens are not kept, and agy
+        # attests no cost and no model.
+        self.assertEqual(fields, AGY_FIELDS)
+        self.assertIsNone(models)
+
+    def test_agy_duration_that_does_not_fit_is_null_and_the_turn_goes_on(self):
+        # 1e308 passes isfinite but 1e308 * 1000 is infinite; 10**309 overflows a float.
+        for duration in ('1e308', '1' + '0' * 309, 'NaN', '-Infinity'):
+            with self.subTest(duration):
+                stdout = AGY_ENVELOPE.replace('2.37', duration)
+                self.assertEqual(agents.telemetry('agy', stdout),
+                                 (dict(AGY_FIELDS, duration_ms=None), None))
+        # An integer too long for int() is not JSON for telemetry: every field null.
+        self.assertEqual(agents.telemetry('agy', AGY_ENVELOPE.replace('2.37', '1' * 5000)),
+                         (NULLS, None))
+        envelope = dict(json.loads(AGY_ENVELOPE), response='', structured_output=raw_review())
+        stdout = json.dumps(envelope).replace('2.37', '1' + '0' * 309)
+
+        def fake_run(argv, **kw):
+            return SimpleNamespace(returncode=0, stdout=stdout, stderr='')
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = agents.AgentRunner(tmp, 1, run=fake_run)
+            result = runner.run(CFG.agent('agy'), 'review', 'p', 'review', tmp, 'x')
+        self.assertEqual(result, raw_review())
+        self.assertEqual(runner.last_report, (dict(AGY_FIELDS, duration_ms=None), None))
+
+    def test_agy_usage_is_the_turn_because_every_turn_is_a_new_conversation(self):
+        # agy's usage covers the whole conversation: it is the turn's only while devloop never
+        # continues one. With -c the turn would be the difference from the previous envelope.
+        for mode in agents.MODES:
+            argv, _ = agents.build_command(CFG.agent('agy'), mode, 'p', schema_file='s',
+                                           out_file='o')
+            self.assertEqual(argv[:2], ['agy', '-p'])
+            self.assertFalse({'-c', '--continue', '--resume', '-r'} & set(argv), argv)
+        # Taken as reported, never reduced by an earlier envelope.
+        self.assertEqual(agents.telemetry('agy', AGY_ENVELOPE),
+                         agents.telemetry('agy', AGY_ENVELOPE))
+
+    def test_agy_envelope_with_structured_output(self):
+        envelope = dict(json.loads(AGY_ENVELOPE), response='', structured_output=raw_review())
+
+        def fake_run(argv, **kw):
+            self.assertIn('--json-schema', argv)
+            return SimpleNamespace(returncode=0, stdout=json.dumps(envelope), stderr='')
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = agents.AgentRunner(tmp, 1, run=fake_run)
+            result = runner.run(CFG.agent('agy'), 'review', 'p', 'review', tmp, 'x')
+        self.assertEqual(result, raw_review())
+        self.assertEqual(runner.last_report, (AGY_FIELDS, None))
+        # Usage-like keys of the structured answer are the answer, not the telemetry.
+        answer = {'usage': {'input_tokens': 5}, 'num_turns': 3, 'duration_seconds': 9}
+        stdout = json.dumps({'status': 'SUCCESS', 'structured_output': answer,
+                             'response': json.dumps(answer)})
+        self.assertEqual(agents.telemetry('agy', stdout), (NULLS, None))
+
     def test_codex_is_invoked_with_json_events(self):
         argv, _ = agents.build_command(CFG.agent('codex'), 'write', 'p', schema_file='s',
                                        out_file='o')
@@ -187,8 +253,20 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(argv[argv.index('-o') + 1], 'o')  # the final message stays in -o
 
     def test_values_not_attested_are_null_never_zero(self):
+        without_usage = json.loads(AGY_ENVELOPE)
+        del without_usage['usage']  # duration and turns stay: still every field null
         cases = {
-            'agy': ('agy', json.dumps({'status': 'SUCCESS', 'structured_output': {}})),
+            'agy without usage': ('agy', json.dumps(without_usage)),
+            'agy without usage, structured': ('agy', json.dumps(dict(without_usage,
+                                                                     structured_output={}))),
+            'agy not JSON': ('agy', 'Error: quota exceeded'),
+            'agy empty': ('agy', ''),
+            'agy not an object': ('agy', '[1, 2]'),
+            'agy with wrong types': ('agy', json.dumps({
+                'duration_seconds': '2.37', 'num_turns': True, 'usage': {
+                    'input_tokens': -1, 'output_tokens': 1.5, 'cache_read_tokens': None}})),
+            'agy with usage not an object': ('agy', json.dumps({'usage': [9415, 26]})),
+            'agy infinite duration': ('agy', '{"duration_seconds": Infinity}'),
             'claude without telemetry': ('claude', json.dumps({'is_error': False,
                                                                'structured_output': {},
                                                                'modelUsage': {}})),
@@ -247,6 +325,18 @@ class LedgerDispatcherTests(unittest.TestCase):
         self.assertIn('alla presa in carico', body)
         self.assertIn('non all\'istante della label', body)
         self.assertTrue(body.startswith('> [!NOTE]\n> **Bot:** devloop dispatcher'))
+
+    def test_agy_telemetry_reaches_the_turn_record(self):
+        d = self.make(implemented(), reports=(agents.telemetry('agy', AGY_ENVELOPE),))
+        d._do_implement(7)
+        (turn,) = self.gh.records(7, 'turn')
+        self.assertEqual(turn['telemetry'], AGY_FIELDS)
+        self.assertIsNone(turn['model_real'])
+        (body,) = [c['body'] for c in self.gh.thread[7]
+                   if markdown.read_marker(c['body'], 'ledger') == turn]
+        self.assertIn('- **input_tokens:** `9415`', body)
+        self.assertIn('- **thinking_tokens:** `21`', body)
+        self.assertIn('- **cost_usd:** non riportato', body)
 
     def test_every_cli_invocation_is_a_turn_retries_included(self):
         report = agents.telemetry('claude', json.dumps(CLAUDE_ENVELOPE))

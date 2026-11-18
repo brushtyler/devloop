@@ -121,6 +121,46 @@
       },
       "description": "Explicit per-engine rule for live invocations that report no dollar cost. Absent is not zero: an engine that never reports cost is refused before launch, and a returned live row with null usage blocks the next dispatch."
     },
+    "task_budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "capability",
+        "tasks"
+      ],
+      "description": "Per-task caps on cumulative consumption (#163). The run caps stay the defaults and the overall limit; a task without an entry is bound by them only. The sum of the task caps of a dimension never exceeds the run cap. Dollar task caps are decimals with at most six places. Calls no task owns stay on the shared run account.",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "capability": {
+          "const": "task-budget-v1"
+        },
+        "tasks": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 200,
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/task_caps"
+          }
+        },
+        "prior_invocations": {
+          "type": "array",
+          "maxItems": 10000,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "description": "Invocations recorded before an allocate_task_budget transition: listed, never charged to a task."
+        }
+      }
+    },
     "feedback_delegation": {
       "type": "object",
       "additionalProperties": false,
@@ -364,6 +404,42 @@
           }
         }
       ]
+    },
+    "task_caps": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "invocations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "metered_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cli_estimate_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "role_invocations": {
+          "$ref": "#/$defs/task_family_caps"
+        },
+        "phase_invocations": {
+          "$ref": "#/$defs/task_family_caps"
+        }
+      }
+    },
+    "task_family_caps": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+      },
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
     },
     "caps": {
       "type": "object",

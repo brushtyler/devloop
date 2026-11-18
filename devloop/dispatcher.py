@@ -150,11 +150,13 @@ locally, as before, unless the base branch requires checks: the PR waits for the
 Review during the CI (#271): a review starts with the CI of the head pending, or within that
 window, without the full suite locally; its record says CI ``pending``. The approval is promoted
 only once the CI of the same head passes, replayed without a new review (``_approval_current``);
-a CI that fails makes it a ``ci_failed`` round. An approval that saw no CI, on a head still
-without CI past the window, gets the full suite locally before its promotion
-(``_do_apply_review``). A request for changes made before the CI was known waits for that CI in
-agent:changes (``changes_before_ci``): a failure joins that same round as a ``ci`` finding
-(#352, ``ci_joins_round``), without a round of its own, so that one fix answers both.
+a CI that fails joins that same round as a ``ci`` finding (#359, ``ci_joins_round``), voids the
+approval and makes the round's verdict ``request_changes``, without a round of its own. An
+approval that saw no CI, on a head still without CI past the window, gets the full suite
+locally before its promotion (``_do_apply_review``). A request for changes made before the CI
+was known waits for that CI in agent:changes (``changes_before_ci``): a failure joins that same
+round as a ``ci`` finding (#352, ``ci_joins_round``), without a round of its own, so that one
+fix answers both.
 """
 
 import functools
@@ -1602,7 +1604,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         details = self.gh.check_details(head)
         return summarize_checks(details)[0], details
 
-    def _record_ci(self, pr, head, state, details, round_no, jobs=None):
+    def _record_ci(self, pr, head, state, details, round_no, jobs=None, voided_approval=False):
         """Record the CI of ``head`` as a ``ci_round`` event (#133), failed or passed: each
         check with its outcome, its duration in seconds (#300; None while it runs, and for a
         commit status) and, for a GitHub Actions run, its id (a commit status has none).
@@ -1612,7 +1614,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         the CI pending, a level-0 promotion) they are read now from ``details``, so that the
         event has them whatever path records it. The same checks read again for the same head
         and round are not recorded twice. The event of a review round is a section of that
-        round's register (#325)."""
+        round's register (#325). ``voided_approval``: the failure joined a round that had
+        approved the head, and voided that approval (#359); the event says so."""
         if self.ledger is None or details is None:
             return
         checks = [{'name': c['name'], 'outcome': c.get('conclusion') or c['bucket'],
@@ -1629,6 +1632,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                  for j in jobs or () if j.get('tests') or j.get('log')]
         if tests:
             extra['tests'] = tests
+        if voided_approval:
+            extra['voided_approval'] = True
         self.ledger.event(pr.number, 'ci_round', round_no=round_no, head=head, state=state,
                           **extra, checks=checks)
         pr.ci_recorded.append(key)
@@ -2251,7 +2256,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         limit = self.cfg.max_review_rounds
         self._escalate(pr.number, round_limit_reason(
             f'Raggiunto il limite di {limit} round di review: un nuovo round (review o CI '
-            'fallita) non parte senza una decisione dell\'operatore.', pr.reviews, pr.fixes,
+            'fallita) non parte senza una decisione dell\'operatore. Una CI fallita sul head di '
+            'un round di review che ha approvato o chiesto modifiche entra in quel round e non '
+            'ne apre uno nuovo.', pr.reviews, pr.fixes,
             pr.syncs, limit), remove=[lb.review, lb.changes, lb.ready_to_merge], cls='round_limit')
 
     def _do_apply_review(self, pr):

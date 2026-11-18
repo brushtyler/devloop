@@ -30,9 +30,12 @@ plans the next steps and runs them. A crashed tick is resumed by the next one.
 The review starts while the CI of the head runs (#271), and the reviewer is told the CI is
 `pending`. The merge still waits for that CI: an approval leads to `agent:ready-to-merge` only
 once the CI of the **same head** passes, without a second review. If that CI fails, the approval
-does not count for the merge: the failure becomes a CI round, counted as today, and the PR goes
-to `agent:changes` for the fix (or its failed jobs are re-run once, when no failed test module is
-pertinent to the PR). A review that asks for changes while the CI runs sends the PR to
+does not count for the merge: the failure joins the round of that approval as a `ci` finding,
+without a round of its own (one head, one round, #359), the round's verdict becomes
+`request_changes` and the PR goes to `agent:changes` for the fix (or its failed jobs are re-run
+once, when no failed test module is pertinent to the PR). The same holds when the CI of the
+approved head fails with the PR already in `agent:ready-to-merge`. A round where a reviewer asked
+for the operator keeps its escalation. A review that asks for changes while the CI runs sends the PR to
 `agent:changes`, but the fix waits for that CI: if it fails, the failure joins the round of that
 review as a `ci` finding, without a round of its own (one head, one round, #352), and the same
 fix answers the reviewer's findings and the CI failure together. A CI that already
@@ -58,8 +61,12 @@ Readiness belongs to the approved commit. Every tick re-checks ready PRs:
 - if CI is running again on the approved commit, readiness is suspended (`agent:review`) and the
   recorded approval is applied again, without a new review, once CI passes and if its policy
   receipt still matches;
-- if CI fails on the approved commit, the failure becomes a review round (`agent:changes`), or,
-  when no failed test module is pertinent to the PR, a single re-run of the failed jobs
+- if CI fails on the approved commit, the failure joins the round that approved it as a `ci`
+  finding, without a round of its own (one head, one round, #359): the approval decays and the
+  PR goes to `agent:changes` for the fix. An approval already void, without a policy receipt or
+  with a receipt found stale, still takes a CI round of its own; a
+  [level 0](reference.md#level-0-no-review) promotion goes back to `agent:review` instead. When
+  no failed test module is pertinent to the PR, the failed jobs are re-run once first
   ([CI failures not pertinent to the PR](reference.md#ci-failures-not-pertinent-to-the-pr)).
 
 Any step can stop at `agent:needs-operator` with a comment explaining why: the
@@ -1615,10 +1622,11 @@ issue once per refused commit (its commit and failed step; the error stays in th
 recorded in `.ssdlc/devloop/pin-alerted.json`; a comment that cannot be published is only
 logged. The next merge that requests a pin tries again, on the new `origin/main`.
 
-devloop imports only the Python standard library and itself, and a test enforces this
-(`tests/test_devloop_boundary.py`). [ADR 0001](../adr/0001-prodotto-unico-fasi-su-tracker.md) keeps
-devloop and ssdlc in one repository and allows reuse of ssdlc code only through a declared `core`
-package, added to that test's allowlist; there is no such package yet.
+devloop may import only the Python standard library, itself and the `core` package, and a test
+enforces this (`tests/test_devloop_boundary.py`). [ADR 0001](../adr/0001-prodotto-unico-fasi-su-tracker.md) keeps
+devloop and ssdlc in one repository and allows reuse of ssdlc code only through `core`, pure
+functions that import no engine module ([Architecture](../architecture.md#future-core-package)).
+devloop does not import `core` yet, so the pinned copy does not need it.
 
 ## Limits
 

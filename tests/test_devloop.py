@@ -794,8 +794,10 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(self.kinds(Snapshot([moved], [], [])), [('round_limit', 100)])
         failed = pr(reviews=rounds, head=SHA2, checks='fail')
         self.assertEqual(self.kinds(Snapshot([failed], [], [])), [('round_limit', 100)])
+        # The CI of the approved head failing joins the round that approved it (#359): no new
+        # round, so no round_limit either.
         ready_failed = pr(labels=['agent:ready-to-merge'], reviews=rounds, checks='fail')
-        self.assertEqual(self.kinds(Snapshot([ready_failed], [], [])), [('round_limit', 100)])
+        self.assertEqual(self.kinds(Snapshot([ready_failed], [], [])), [('ci_failed', 100)])
         # Replaying a recorded approval is not a new round.
         self.assertEqual(self.kinds(Snapshot([pr(reviews=rounds)], [], [])),
                          [('apply_review', 100)])

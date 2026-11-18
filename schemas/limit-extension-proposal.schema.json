@@ -29,7 +29,9 @@
       "enum": [
         "extend_global_limit",
         "extend_deadline",
-        "reverify_after_timeout"
+        "reverify_after_timeout",
+        "allocate_task_budget",
+        "reallocate_task_budget"
       ]
     },
     "run": {
@@ -228,11 +230,37 @@
             "type": "string"
           },
           "old": {
-            "type": "number"
+            "type": [
+              "number",
+              "null"
+            ]
           },
           "new": {
-            "type": "number"
+            "type": [
+              "number",
+              "null"
+            ]
           }
+        }
+      }
+    },
+    "task_budget": {
+      "type": "object",
+      "description": "Reviewed facts of a task budget operation (#163): the allocation or the transfer, the run defaults, both accounts, and the effects on every task (caps and availability before and after, the changed tasks and the tasks that depend on them).",
+      "required": [
+        "defaults",
+        "effects",
+        "accounts"
+      ],
+      "properties": {
+        "defaults": {
+          "type": "object"
+        },
+        "effects": {
+          "type": "object"
+        },
+        "accounts": {
+          "type": "object"
         }
       }
     },
@@ -460,6 +488,11 @@
               "required": [
                 "reverification"
               ]
+            },
+            {
+              "required": [
+                "task_budget"
+              ]
             }
           ]
         },
@@ -469,6 +502,12 @@
               "properties": {
                 "dimension": {
                   "pattern": "^(metered_usd|cli_estimate_usd|invocations|development_attempts|role_invocations\\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}|phase_invocations\\.[A-Za-z0-9][A-Za-z0-9_-]{0,63})$"
+                },
+                "old": {
+                  "type": "number"
+                },
+                "new": {
+                  "type": "number"
                 }
               }
             }
@@ -489,8 +528,17 @@
           "deadline"
         ],
         "not": {
-          "required": [
-            "reverification"
+          "anyOf": [
+            {
+              "required": [
+                "reverification"
+              ]
+            },
+            {
+              "required": [
+                "task_budget"
+              ]
+            }
           ]
         },
         "properties": {
@@ -500,6 +548,12 @@
               "properties": {
                 "dimension": {
                   "const": "deadline_at"
+                },
+                "old": {
+                  "type": "number"
+                },
+                "new": {
+                  "type": "number"
                 }
               }
             }
@@ -520,8 +574,17 @@
           "reverification"
         ],
         "not": {
-          "required": [
-            "deadline"
+          "anyOf": [
+            {
+              "required": [
+                "deadline"
+              ]
+            },
+            {
+              "required": [
+                "task_budget"
+              ]
+            }
           ]
         },
         "properties": {
@@ -549,9 +612,127 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "allocate_task_budget"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "task_budget"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "deadline"
+              ]
+            },
+            {
+              "required": [
+                "reverification"
+              ]
+            }
+          ]
+        },
+        "properties": {
+          "task_budget": {
+            "required": [
+              "allocation",
+              "residual",
+              "prior_invocations",
+              "prior_accounts",
+              "prior_by_task",
+              "reattributed"
+            ],
+            "properties": {
+              "reattributed": {
+                "const": false
+              }
+            }
+          },
+          "changes": {
+            "items": {
+              "properties": {
+                "dimension": {
+                  "$ref": "#/$defs/task_budget_dimension"
+                },
+                "old": {
+                  "type": "null"
+                },
+                "new": {
+                  "type": "number"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "reallocate_task_budget"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "task_budget"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "deadline"
+              ]
+            },
+            {
+              "required": [
+                "reverification"
+              ]
+            }
+          ]
+        },
+        "properties": {
+          "task_budget": {
+            "required": [
+              "transfer",
+              "donor_before",
+              "donor_after",
+              "recipient_before",
+              "recipient_after"
+            ]
+          },
+          "changes": {
+            "items": {
+              "properties": {
+                "dimension": {
+                  "$ref": "#/$defs/task_budget_dimension"
+                },
+                "old": {
+                  "type": "number"
+                },
+                "new": {
+                  "type": "number"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   ],
   "$defs": {
+    "task_budget_dimension": {
+      "type": "string",
+      "pattern": "^task_budget\\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}\\.(invocations|metered_usd|cli_estimate_usd|role_invocations\\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}|phase_invocations\\.[A-Za-z0-9][A-Za-z0-9_-]{0,63})$"
+    },
     "sha256": {
       "type": "string",
       "pattern": "^[a-f0-9]{64}$"

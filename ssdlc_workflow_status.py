@@ -12,7 +12,9 @@ Metrics are only the ones already persisted. Each declares its coverage
 (``complete``, ``partial`` or ``none``); a value that is not observable is
 ``null`` with the reason. No timestamp is ever derived from a file's mtime.
 
-Part 3 (#348) adds the ``projection`` of the remaining cost, computed by the pure
+Part 2 (#347) adds the ``status``: liveness observed in the kernel, its coverage, the
+activity, the native classification of a stop and the next action
+(``ssdlc_workflow_liveness``). Part 3 (#348) adds the ``projection`` of the remaining cost, computed by the pure
 ``ssdlc_workflow_projection.project`` from the data read here, frozen limits included.
 """
 import hashlib
@@ -439,20 +441,25 @@ def _collect(reader):
         run = {key: state.get(key) for key in ('status', 'current_phase', 'current_step')}
     metrics = _metrics(state, dag, feedback)
     from ssdlc_workflow_projection import project
+    from ssdlc_workflow_liveness import fencing
     ledger = (state or {}).get('ledger')
-    projection = project(run, ledger if isinstance(ledger, list) else [], dag, _limits(reader, prefix), metrics)
+    limits = _limits(reader, prefix)
+    projection = project(run, ledger if isinstance(ledger, list) else [], dag, limits, metrics)
+    # What the liveness classification needs beyond the public fields; never published as is.
+    native = None if state is None else {key: state.get(key) for key in ('status', 'failure', 'phase_boundary')}
+    internal = dict(native=native, limits=limits, fencing=fencing(state))
     return dict(run=run, generation=generation, journal=journal, tasks=dag, feedback=feedback,
-                metrics=metrics, projection=projection)
+                metrics=metrics, projection=projection, _internal=internal)
 
 
 def _empty(ticket, status, attempts, now, reason, sources=None):
     return dict(schema=SCHEMA, schema_version=SCHEMA_VERSION, ticket=ticket,
                 read=dict(status=status, attempts=attempts, max_attempts=MAX_ATTEMPTS, observed_at=now, reason=reason),
                 sources=sources or {}, run=None, generation=None, journal=None, tasks=None, feedback=None, metrics=None,
-                projection=None)
+                projection=None, status=None)
 
 
-def snapshot(repo, ticket, *, clock=time.time, fault=lambda point, attempt: None):
+def snapshot(repo, ticket, *, clock=time.time, fault=lambda point, attempt: None, kernel=None):
     """The ``WorkflowSnapshot`` of ``<repo>/.ssdlc/<ticket>``; it never writes.
 
     ``read.status`` is ``COHERENT``, ``TORN`` (the files kept changing for
@@ -460,7 +467,14 @@ def snapshot(repo, ticket, *, clock=time.time, fault=lambda point, attempt: None
     that is stable on disk but does not read or verify). Only a coherent snapshot
     carries data. ``fault(point, attempt)`` is called after each collection,
     before the check (point ``collected``): tests use it to write concurrently.
+
+    ``status`` (#347) adds liveness from ``kernel`` (``ssdlc_workflow_liveness.Kernel``
+    by default): its writers are observed before each collection and again after it,
+    then coverage, and only then are the files checked. A writer seen by either
+    observation makes the run ``RUNNING``.
     """
+    import ssdlc_workflow_liveness as liveness
+    kernel = kernel or liveness.Kernel()
     now = datetime.fromtimestamp(clock(), timezone.utc).isoformat()
     if not isinstance(ticket, str) or not TICKET.fullmatch(ticket):
         return _empty(ticket, UNVERIFIABLE, 0, now, 'invalid ticket name')
@@ -470,6 +484,7 @@ def snapshot(repo, ticket, *, clock=time.time, fault=lambda point, attempt: None
     reason = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
         reader = Reader(root)
+        before = kernel.writers(root)
         try:
             data = _collect(reader)
         except Changed as exc:
@@ -481,9 +496,15 @@ def snapshot(repo, ticket, *, clock=time.time, fault=lambda point, attempt: None
             reason = 'files changed while they were read'
             continue
         fault('collected', attempt)
+        internal = data.pop('_internal')
+        observations = [before, kernel.writers(root)]
+        components = kernel.coverage(root, data['generation']['root'], internal['fencing'])
+        # Checked after the last observation: the files did not move while the kernel was read.
         if reader.stable():
             result = _empty(ticket, COHERENT, attempt, now, None, reader.sources())
             result.update(data)
+            result['status'] = liveness.classify(ticket, repo, internal['native'], data['tasks'], internal['limits'],
+                                                 observations, components)
             return result
         reason = 'files changed while they were read'
     return _empty(ticket, TORN, MAX_ATTEMPTS, now, reason)

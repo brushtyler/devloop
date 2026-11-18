@@ -21,7 +21,8 @@ SECTIONS = ('### Richiesta', '### Totali', '### Turni', '### Eventi della CI e d
             '### Verifiche sul head approvato', '### Round e verdetti', '### Finding',
             '### Policy', '### Criteri di accettazione')
 NULLS = dict.fromkeys(('cost_usd', 'duration_ms', 'num_turns', 'input_tokens', 'output_tokens',
-                       'cache_read_input_tokens', 'cache_creation_input_tokens'))
+                       'cache_read_input_tokens', 'cache_creation_input_tokens',
+                       'thinking_tokens'))
 
 
 class ReceiptGH(SnapLedgerGH):
@@ -133,6 +134,15 @@ class ReceiptPromotionTests(unittest.TestCase):
         self.assertEqual((totals['tokens']['input_tokens'], totals['tokens_unreported']),
                          (10, 2))
         self.assertEqual(totals['turns_ms'], 150)
+        self.assertIsNone(totals['tokens']['thinking_tokens'])
+        # agy's thinking tokens add up in their own total, never into output (#358).
+        agy = {'duration_ms': 1, 'telemetry': dict(NULLS, output_tokens=26, thinking_tokens=21)}
+        thinking = receipt.totals([agy, agy], [], None, [])
+        self.assertEqual((thinking['tokens']['output_tokens'],
+                          thinking['tokens']['thinking_tokens'],
+                          thinking['tokens_unreported']), (52, 42, 0))
+        self.assertIn('ragionamento (contato a parte) `42`',
+                      '\n'.join(receipt._totals(thinking)))
         self.assertIsNone(totals['verifications_ms'])
         self.assertIsNone(totals['ci_s'])
         self.assertEqual((totals['rounds'], totals['turns']), (0, 3))
@@ -232,18 +242,20 @@ class ReceiptPromotionTests(unittest.TestCase):
         self.assertEqual(self.gh.edited, [comment['id']])  # the forged copy is left alone
 
     def test_the_round_limit_after_the_promotion_supersedes_the_receipt(self):
-        # Promoted at the last round available, then the CI of the approved head fails: no new
-        # round can start, the PR goes to the operator and its receipt no longer holds.
+        # Promoted at the last round available, then the CI of the approved head fails: the
+        # failure joins that round (#359), which no longer approves and has no round left for
+        # a fix. The PR goes to the operator and its receipt no longer holds.
         d = self.make()
         d.cfg = dataclasses.replace(CFG, max_review_rounds=1)
         d.tick()
         self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
         self.gh.details = [dict(GREEN[0], bucket='fail', conclusion='failure')]
-        self.assertEqual([a.kind for a in d.tick()], ['round_limit'])
+        self.assertEqual([a.kind for a in d.tick()], ['ci_failed'])
         self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
+        self.assertIn('round_limit', self.gh.comments[-1][1])
         ((comment, record),) = receipts(self.gh)
         self.assertEqual(record['state'], 'superseded')
-        self.assertIn('round_limit', record['reason'])
+        self.assertIn('il round 1 non approva', record['reason'])
         self.assertIn('> **Ricevuta superata** il ', comment['body'])
 
     def test_an_escalation_that_keeps_the_readiness_leaves_the_receipt(self):

@@ -725,7 +725,7 @@ class TaskScheduler:
                  runtime_identity: dict | None = None, recover_timeouts: bool = False,
                  historical_capture_authority=None, dispatch_budget=None, historical_task_floors=None,
                  scope_reconciliations=None, feedback_enabled=False, bootstrap: dict | None = None,
-                 dispatch_engine: Callable | None = None):
+                 dispatch_engine: Callable | None = None, task_budget: Callable | None = None):
         self.bootstrap = copy.deepcopy(bootstrap)
         self.wt = worktree
         self.directory = directory
@@ -745,6 +745,7 @@ class TaskScheduler:
         self.feedback_enabled = feedback_enabled
         self.dispatch_budget = dispatch_budget or budget
         self.dispatch_engine = dispatch_engine
+        self.task_budget = task_budget
         self.runtime_identity = copy.deepcopy(runtime_identity or {})
         from ssdlc_grader import protected_paths
         self.grader_paths = protected_paths(worktree, plan['base_commit'])
@@ -1988,10 +1989,16 @@ class TaskScheduler:
         """Pre-flight check of the imminent developer call with its selected engine.
 
         It writes nothing; the atomic reservation at the dispatch boundary stays.
+        ``task_budget`` checks the caps of this task in the profile's allocation.
         """
+        engine = None
         if self.dispatch_engine is None:
-            return self.dispatch_budget()
-        return self.dispatch_budget(self.dispatch_engine(task, attempt))
+            self.dispatch_budget()
+        else:
+            engine = self.dispatch_engine(task, attempt)
+            self.dispatch_budget(engine)
+        if self.task_budget is not None:
+            self.task_budget(task['task_id'], engine)
 
     def _capture_developer(self, task, record, prompt, attempt_dir):
         self._assert_prompt_bound(prompt)
