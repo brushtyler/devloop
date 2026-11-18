@@ -1712,7 +1712,9 @@ devloop does not import `core` yet, so the pinned copy does not need it.
 - **Failures escalate immediately.** A timeout or a transient error of an agent, `gh` or `git`
   goes to `agent:needs-operator` rather than being retried. The only exception is an unavailable
   model of an agent with [fallback models](reference.md#fallback-models), which runs the turn again on the
-  next one.
+  next one. The uncommitted work of an implementation or a fix that timed out is saved, never
+  committed, and given back to the retry of the same step
+  ([Failed agent turns](protocol.md#failed-agent-turns)).
 - **Single host.** One dispatcher runs at a time. With `max_parallel_actions = 1` (the
   default) a tick runs its actions one at a time; above 1, actions on different issues and PRs
   run in threads of that one process ([Parallel actions](reference.md#parallel-actions)), and in

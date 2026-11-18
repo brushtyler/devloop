@@ -130,6 +130,24 @@ its output only at the end, such as `claude --output-format json`, may leave not
 turn's [ledger record](#evidence-and-telemetry) keeps its duration and, when the CLI exposes it,
 the last command it ran or started.
 
+An implementation or a fix that times out (`agent_timeout_seconds`) may leave uncommitted work in
+its worktree (#374). devloop never commits it. It saves it as evidence,
+`timeout-<label>.diff` in `<state_dir>/logs` (`<label>` is the step's, such as
+`issue-7-implement` or `pr-9-fix-r2`): a patch against the commit the turn started from, with
+new files that git does not ignore, deleted files and binary files. The patch is handled as bytes
+from the save to `git apply`, so line ends (CRLF) and text that is not UTF-8 come back unchanged;
+only the copy in a prompt is decoded, with replacement characters. The escalation names that
+file and lists its files with the lines added and removed. The retry of the same step (same
+label) recreates the worktree, then, before the agent starts, the dispatcher applies the patch
+with `git apply`, all or nothing, without staging it. If it does not apply, for example because
+the base changed the same lines, the worktree stays as created, and the prompt carries the patch
+as text (at most 100,000 characters) with its files. Either way the prompt says that the
+previous turn timed out, that its changes must be examined before going on, and to run the
+targeted tests before any long suite. The patch is taken once: the file is renamed
+`timeout-<label>.diff.used-<time>` and stays as evidence. A turn that fails otherwise, that was
+stopped as stalled, or a sync (whose worktree holds a merge in progress) keeps nothing, and a
+timeout without uncommitted work escalates as before.
+
 An agent CLI that could not start because its executable is missing or not executable
 (`FileNotFoundError`, `PermissionError`), as for the few seconds in which a CLI replaces itself
 while it updates, is started once more after 30 seconds, in the same turn (#218). Only if it

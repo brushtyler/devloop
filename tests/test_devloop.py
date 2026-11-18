@@ -1054,6 +1054,14 @@ class FakeWS:
     def remove(self, name):
         self.removed.append(name)
 
+    # The work a timed-out writing turn left uncommitted (#374): none by default, and none
+    # saved by an earlier turn. A real Workspace in test_devloop_timeout_work.
+    def keep_work(self, path, commit, name):
+        return None
+
+    def take_work(self, name):
+        return None
+
 
 class FakeRunner:
     def __init__(self, *outputs):

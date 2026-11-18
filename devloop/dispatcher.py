@@ -169,6 +169,7 @@ fix answers both.
 import functools
 import hashlib
 import json
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
@@ -252,6 +253,68 @@ FALLBACK_NOTE = {
                  'commit of reference, which is what `git status` and `git diff` show against '
                  'it.\n'),
 }
+# The writing steps whose uncommitted work a timeout keeps for the retry of the step (#374). A
+# sync is not one: its worktree holds a merge in progress, which a new worktree starts again.
+KEEPS_WORK = ('implement', 'fix')
+# At most this many characters of a kept patch that does not apply go to the prompt, and this
+# many of its files to the escalation (#374).
+MAX_KEPT_PROMPT = 100_000
+MAX_KEPT_LISTED = 30
+
+
+def kept_work_file(label):
+    """The file of ``<state_dir>/logs`` that keeps the uncommitted work of a timed-out writing
+    turn of step ``label`` (``issue-7-implement``, ``pr-9-fix-r2``) until its retry (#374)."""
+    return f'timeout-{label}.diff'
+
+
+def _kept_line(name, added, removed):
+    return f'- `{name}`: ' + ('binario' if added is None else f'+{added} −{removed}')
+
+
+def kept_work_text(kept, state_dir):
+    """The paragraph an escalation gets for the uncommitted work a timed-out turn left (#374):
+    the evidence file, its files and lines, and what a retry does with it."""
+    stats = kept['stats']
+    added = sum(a for _, a, _ in stats if a is not None)
+    removed = sum(r for _, _, r in stats if r is not None)
+    listed = [_kept_line(*entry) for entry in stats[:MAX_KEPT_LISTED]]
+    if len(stats) > MAX_KEPT_LISTED:
+        listed.append(f'- … e altri {len(stats) - MAX_KEPT_LISTED} file')
+    return (f'\n\nIl turno in timeout ha lasciato modifiche non committate: {len(stats)} file, '
+            f'+{added} −{removed} righe. devloop non le ha committate: le ha salvate come '
+            f'evidenza in `{kept["file"]}` in `{state_dir}/logs`. Un retry dello stesso passo le '
+            'riapplica al worktree nuovo prima di avviare l\'agent; se non si applicano, le passa '
+            'all\'agent nel prompt.\n\n' + '\n'.join(listed))
+
+
+def kept_work_note(timeout, stats, applied, error, patch):
+    """The note appended to the prompt of the retry of a step whose previous turn timed out
+    leaving uncommitted work (#374): reapplied to the new worktree, or, when ``git apply``
+    refused it, the patch itself, cut to ``MAX_KEPT_PROMPT`` characters. ``patch``: its bytes,
+    decoded here for the prompt only (bytes that are not UTF-8 shown as replacement
+    characters); a string is taken as it is."""
+    if isinstance(patch, bytes):
+        patch = patch.decode('utf-8', 'replace')
+    files = '\n'.join(f'- `{name}`' for name, _, _ in stats) or '- (none listed)'
+    note = ('\n\n## The previous turn timed out\n\nThe previous turn of this same step was '
+            f'stopped after {timeout} seconds (`agent_timeout_seconds`) before it finished, and '
+            'left uncommitted changes. devloop saved them; this worktree is a new one. ')
+    if applied:
+        note += ('They have been reapplied to it, uncommitted, before this turn started. '
+                 f'Files:\n\n{files}\n\nExamine them first (`git status`, `git diff`): keep what '
+                 'is correct, fix what is not, then finish the task.\n')
+    else:
+        text = patch if len(patch) <= MAX_KEPT_PROMPT else (
+            patch[:MAX_KEPT_PROMPT] + f'\n[… cut: the patch has {len(patch)} characters]')
+        fence = '`' * max(3, 1 + max((len(run) for run in re.findall('`+', text)), default=0))
+        note += ('They could not be reapplied to it (`git apply`: '
+                 f'{error or "refused"}), so this worktree does not contain them. Files:\n\n'
+                 f'{files}\n\nThis is their diff, against the commit the previous turn started '
+                 'from: examine it first, redo what is still correct, then finish the task.\n\n'
+                 f'{fence}diff\n{text.rstrip()}\n{fence}\n')
+    return note + ('\nTo end within the time limit, run the targeted tests of what you change '
+                   'first, and any long suite only after them.\n')
 
 
 def _timestamp(value):
@@ -1497,6 +1560,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             return
         lb = self.cfg.labels
         reason = f'Il passo `{action.kind}` è fallito: {_failure_text(exc)}{self._log_hint(exc)}'
+        if getattr(exc, 'kept_work', None):  # what a timed-out writing turn left (#374)
+            reason += kept_work_text(exc.kept_work, self.cfg.state_dir)
         cls = (TOOL_FAILURE if isinstance(exc, AgentError)
                else 'untrusted' if isinstance(exc, UntrustedChange)
                else UNCERTAIN_TURN if isinstance(exc, TurnBlocked) else 'failure')
@@ -2062,7 +2127,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 models.tried.append((candidate.model, str(exc)))
                 error = ModelsUnavailable(models.agent.key, models.tried, exc.log,
                                           last_failed=True)
-                error.tail = exc.tail
+                error.tail, error.timed_out = exc.tail, exc.timed_out
                 raise error from exc
             self._close_turn(entry, 'success')
             models.left.insert(0, candidate)  # available: later attempts of the action use it
@@ -2115,13 +2180,26 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         commit that follows (None without a ledger or without a passing test), and the mode and
         modules of the local tests of the last attempt (None when no test was due: a blocked
         turn, or an implementation without changes). A model found
-        unavailable is not tried again in later attempts."""
+        unavailable is not tried again in later attempts.
+
+        An implementation or a fix (``KEEPS_WORK``) whose turn times out with uncommitted work
+        saves it as evidence (``_keep_timed_out``), never committed, for the escalation and the
+        retry of the same step (#374): that retry, before its first turn, applies it to its new
+        worktree, or passes it in the prompt (``_resume_kept``)."""
         models = Models(agent)
         failures = ''
+        keep = schema in KEEPS_WORK
+        start = self.ws.head(path) if keep else None
+        resumed = self._resume_kept(path, label) if keep else ''
         for attempt in range(1 + self.cfg.implement_test_retries):
-            text = (prompt(attempt) if callable(prompt) else prompt) + failures
-            result, used = self._turn(models, 'write', text, schema, path,
-                                      f'{label}-{attempt + 1}', where=where)
+            text = (prompt(attempt) if callable(prompt) else prompt) + resumed + failures
+            try:
+                result, used = self._turn(models, 'write', text, schema, path,
+                                          f'{label}-{attempt + 1}', where=where)
+            except AgentError as exc:
+                if keep and exc.timed_out:
+                    self._keep_timed_out(exc, path, start, label)
+                raise
             if result['status'] == 'blocked':
                 if background_unfinished(result.get('blocked_reason')):
                     # The turn ended before its own background work (#219): a failure of the
@@ -2138,6 +2216,46 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                          f'failed. Fix the cause, then finish again.\n\n```text\n{tail}\n```\n')
         return (result, ('I test locali falliscono anche dopo i tentativi di correzione.', tail),
                 used, None, local)
+
+    def _keep_timed_out(self, exc, path, start, label):
+        """Save what the timed-out turn ``exc`` of step ``label`` left uncommitted in ``path``
+        beyond commit ``start`` (#374), as ``kept_work_file(label)`` in the logs, and record it
+        on ``exc`` (``kept_work``: file and stats) for the escalation. Nothing is committed. A
+        failure to save is logged and leaves the escalation as it was."""
+        file = kept_work_file(label)
+        try:
+            kept = self.ws.keep_work(path, start, file)
+        except (WorkspaceError, OSError, UnicodeError) as error:
+            self.log(f'  uncommitted work of the timed-out turn not saved: {error}')
+            return
+        if kept is None:
+            return
+        exc.kept_work = {'file': file, 'stats': kept[1]}
+        self.log(f'  uncommitted work of the timed-out turn saved as {file}, not committed')
+
+    def _resume_kept(self, path, label):
+        """The prompt note of the retry of step ``label`` (#374), '' when its previous turn left
+        no saved work. The saved patch is taken once (``take_work``), as bytes, and applied as
+        it is to the new worktree ``path``; when it does not apply, the note carries it as
+        text."""
+        try:
+            patch = self.ws.take_work(kept_work_file(label))
+        except (OSError, UnicodeError) as error:
+            self.log(f'  work saved by the timed-out turn not read: {error}')
+            return ''
+        if not patch:
+            return ''
+        try:
+            applied, error = self.ws.apply_work(path, patch)
+        except WorkspaceError as exc:
+            applied, error = False, str(exc)
+        try:
+            stats = self.ws.patch_stats(path, patch)
+        except WorkspaceError:
+            stats = []
+        self.log(f'  work saved by the timed-out turn {"reapplied" if applied else "not applied"}'
+                 f' ({len(stats)} files)' + ('' if applied else f': {error}'))
+        return kept_work_note(self.cfg.agent_timeout_seconds, stats, applied, error, patch)
 
     def _commit_message(self, agent, message, issue):
         message = message.strip() + f'\n\nRefs #{issue}\n'

@@ -77,9 +77,11 @@ def isolated_env(gh_config_dir, base=None):
 
 class AgentError(RuntimeError):
     """A failed turn. ``log``: the turn's local log; ``tail``: for a turn the dispatcher stopped
-    (a timeout, issue #215), the last lines of its output, cleaned by ``output_tail``, or ''."""
+    (a timeout, issue #215), the last lines of its output, cleaned by ``output_tail``, or ''.
+    ``timed_out``: the turn was stopped after the runner's timeout (#374)."""
 
     tail = ''
+    timed_out = False
 
     def __init__(self, message, log=None):
         super().__init__(message)
@@ -792,6 +794,7 @@ class AgentRunner:
             self.last_command = public_command(agent.kind, out, workdir, self._env)
             error = AgentError(message, log)
             error.tail = output_tail(out, err, workdir, self._env)
+            error.timed_out = True
             raise error from exc
         except OSError as exc:
             stopped_log(f'could not start{retried}: {exc}')
