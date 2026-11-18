@@ -73,6 +73,25 @@ Questo ADR contiene solo analisi e proposta: non modifica codice né altri docum
 
 #133 (ledger), #134 (mappa dei criteri di accettazione) e #135 (ricevuta della PR) sono su `main` (PR #154, #157 e #328).
 
+### Misure disponibili per agent
+
+Cosa si può misurare di un turno, per agent. Dove manca una misura non c'è un valore da usare: è `null`, mai 0.
+
+| Agent | USD | % di quota | Token |
+|---|---|---|---|
+| claude | stima (`total_cost_usd`), non un addebito | non leggibile in modalità headless | sì |
+| codex | no | solo delta dell'intero account, mai per chiamata | sì |
+| agy | no | solo delta dell'intero account | no, in devloop non esporta niente |
+
+Fonti:
+
+- USD e token nei turni di devloop: devloop/agents.py:285-286 (campi della telemetria) e :298-309 (cosa attesta ciascuna CLI: claude costo stimato e token, codex solo token, agy niente).
+- USD per route nel motore locale: #164 e #165, dove claude ha solo una stima e codex e agy nessun costo ([misure per route](../cost-telemetry.md#measures-required-per-route)).
+- Quote: #166. Il delta è un'osservazione sull'intero account, dove possono lavorare altri client, e `call_consumption` è sempre `null`; claude non ha una quota leggibile ([lettura](../cost-telemetry.md#reading-a-quota), [delta](../cost-telemetry.md#deltas)).
+- I token di agy esistono solo nell'adattatore del motore locale, che legge la `usage` della busta JSON ([adattatori](../cost-telemetry.md#adapters)). devloop non li raccoglie, e nemmeno se lo facesse sarebbero confrontabili con quelli di altri agent.
+
+Ne segue che le uniche misure valide per tutti gli agent sono quelle che devloop fa da sé, senza fidarsi della CLI: il **numero di turni** e il **tempo**. È la base della regola della [sezione 3.3](#33-modello-di-prenotazione-del-budget).
+
 ## 2. Lacune rispetto ai vincoli 2 e 3
 
 | # | Lacuna | Vincolo dell'ADR 0001 | devloop oggi | Motore locale oggi | Cosa manca |
@@ -158,7 +177,9 @@ Come rappresentare più tentativi sullo stesso lavoro: la tabella "Cosa si perde
   - è il modello già provato nel motore locale (ssdlc_recovery.py:353-401), con le stesse regole: una riserva resta addebitata e un costo osservato la può solo alzare;
   - senza regola il turno è rifiutato prima dell'avvio (L2);
   - i limiti di numero e di tempo restano il limite rigido, come nel motore locale.
-- Contro: le riserve sono stime dell'operatore, non costi reali, e un budget troppo stretto ferma il lavoro.
+- Contro:
+  - le riserve sono stime dell'operatore, non costi reali, e un budget troppo stretto ferma il lavoro;
+  - per un agent che non esporta costi (codex e agy, vedi [Misure disponibili per agent](#misure-disponibili-per-agent)) una `reserve_per_invocation` in USD è una **stima inventata** da chi la imposta: nessuna misura la conferma né la smentisce, e un costo osservato non arriva mai ad alzarla.
 
 **Alternativa C: ammissione sulle quote dell'abbonamento.** Si legge la quota prima del turno, come i controlli di #166.
 
@@ -167,7 +188,12 @@ Come rappresentare più tentativi sullo stesso lavoro: la tabella "Cosa si perde
 
 **Raccomandazione: B, con C come controllo facoltativo.**
 
-- Il budget è un **envelope per storia**: tetti di numero (turni totali, per ruolo, per tipo di fase), di tempo e di dollari separati per spesa misurata e stime, come in #165.
+- Il budget è un **envelope per storia**. Le sue dimensioni seguono le [misure disponibili per agent](#misure-disponibili-per-agent):
+  - le **sole dimensioni universali** sono quelle che devloop misura da sé, senza fidarsi della CLI: il **numero di turni**, totale, per ruolo e per tipo di fase, e il **tempo**. Valgono per tutti gli agent;
+  - i **dollari** valgono solo dove sono attestati: la stima di claude e le API a consumo, con tetti separati per spesa misurata e stime, come in #165;
+  - i **token** sono un tetto opzionale per agent dove esistono (claude e codex), **mai sommati né confrontati fra agent diversi**: modelli diversi hanno prezzi e quote diversi;
+  - per **agy** valgono solo turni e tempo, con la dichiarazione `unmetered_quota`.
+- Per agy e codex la regola raccomandata è quindi `unmetered_quota` più i tetti di turni, non una `reserve_per_invocation` in USD, che sarebbe una stima inventata. Il valore dei tetti e la regola per ciascun agent restano decisioni dell'operatore (D2).
 - Fasi, issue figlie, tentativi, retry, fallback di modello e riavvii consumano lo stesso envelope. Niente rimborsa una prenotazione.
 - Un turno rimasto aperto o incompleto diventa un esito `uncertain` nel journal. Resta addebitato e blocca un nuovo turno **dello stesso tentativo** fino alla riconciliazione, che decide l'operatore o, quando ci sarà, la prova di terminazione del passo 4. È il comportamento di `OUTCOME_UNCERTAIN` (ssdlc_recovery.py:250-251) applicato a devloop. Si chiude così la lacuna L3: niente redispatch alla cieca.
 - I controlli sulle quote di #166 si possono abilitare per route, ma solo come rifiuto aggiuntivo, mai come conteggio.
@@ -259,7 +285,7 @@ In entrambi i casi alcuni consumi non sono attribuibili a un task: design, piano
 Ogni issue si apre dopo l'approvazione di questo ADR, una per area.
 
 - Le issue che toccano `devloop/` o `tests/test_devloop_boundary.py` richiedono il livello 2 di review: `devloop/` è in `sensitive_paths`, e l'allowlist del confine è un'autorità.
-- Quelle che toccano `docs/adr/` o `AGENTS.md` le mergia l'operatore (`operator_only_paths`).
+- Quelle che toccano `docs/adr/`, `AGENTS.md` o `CLAUDE.md` le mergia l'operatore (`operator_only_paths`, devloop/config.toml:141).
 - Ogni issue aggiorna i documenti che la mappa `[docs.map]` lega ai file che cambia.
 - Nessuna issue modifica i file fissati dalla baseline del replay gate né il comportamento del motore locale.
 - Le nuove funzioni restano spente finché l'operatore non le attiva (D8).
@@ -296,8 +322,8 @@ Questo ADR le elenca, con le alternative e le raccomandazioni, ma **non le prend
 
 - **D1. Approvazione di questo ADR,** con il merge della sua PR.
 - **D2. Budget.**
-  - I valori dell'envelope per storia: turni totali, per ruolo e per fase, tempo, dollari di spesa misurata e di stime. Possono avere default per livello di rischio, come i tetti di #165, oppure essere solo espliciti, come i profili del motore locale. Nessun valore è proposto qui.
-  - Le regole sui consumi ignoti per ogni agent e route di devloop, cioè la riserva per turno o `unmetered_quota`. Senza una regola, agy e codex vengono rifiutati.
+  - I valori dell'envelope per storia: turni totali, per ruolo e per fase, tempo, dollari di spesa misurata e di stime dove sono attestati, ed eventuali tetti di token per singolo agent. Possono avere default per livello di rischio, come i tetti di #165, oppure essere solo espliciti, come i profili del motore locale. Nessun valore è proposto qui.
+  - Le regole sui consumi ignoti per ogni agent e route di devloop, cioè la riserva per turno o `unmetered_quota`. Senza una regola, agy e codex vengono rifiutati. Per un agent che non esporta costi, come agy e codex, una riserva in USD è una stima inventata da chi la imposta ([sezione 3.3](#33-modello-di-prenotazione-del-budget)): per loro la raccomandazione è `unmetered_quota` più i tetti di turni.
   - Se le estensioni dell'envelope seguono il contratto di #162. La raccomandazione è sì: caso per caso, senza delega, come vuole la decisione 5 dell'ADR 0001.
 - **D3. Credenziali.**
   - Se devloop può leggere le quote in abbonamento (#166) con le credenziali degli agent, e in quale ambiente.
