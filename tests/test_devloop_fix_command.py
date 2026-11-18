@@ -5,8 +5,10 @@ import unittest
 
 import test_devloop_supervision as supervision_tests
 from devloop import markdown
-from devloop.dispatcher import (Action, Dispatcher, counted_rounds, fix_command,
-                                format_previous_rounds, plan)
+from devloop.context import format_previous_rounds
+from devloop.dispatch_supervision import fix_command
+from devloop.dispatcher import Dispatcher
+from devloop.planning import Action, counted_rounds, plan
 from test_devloop import (CFG, IMPL, IMPL_NAME, REV_NAME, SHA1, SHA2, FakeRunner, FakeWS,
                           SnapshotGH, finding, fixed, norm, pr, raw_review)
 from test_devloop_merge import SUPERVISOR, SUPERVISOR_LOGIN, Identities

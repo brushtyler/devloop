@@ -10,7 +10,8 @@ from unittest import mock
 
 import devloop.__main__ as cli_main
 from devloop import agents, config, markdown, unavailability
-from devloop.dispatcher import Dispatcher, Models, skipped_models
+from devloop.dispatch_actions import Models, skipped_models
+from devloop.dispatcher import Dispatcher
 from helpers.devloop_fakes import FakeGH
 from test_devloop import CFG, FakeRunner, FakeWS, implemented, pr
 from test_devloop_fallback import ARGON, DATA, HYDROGEN, QUOTA, FakeCLI, unavailable, with_agent

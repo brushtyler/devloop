@@ -6,7 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from devloop.dispatcher import Action, counted_rounds, synced_from
+from devloop.dispatch_actions import synced_from
+from devloop.planning import Action, counted_rounds
 from devloop.workspace import Workspace
 import test_devloop_supervision as supervision_tests
 from test_devloop import CFG, SHA1, SHA2, SHA3, finding, fixed, pr, raw_review

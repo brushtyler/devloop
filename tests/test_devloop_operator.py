@@ -14,9 +14,10 @@ import devloop.__main__ as cli
 from devloop import markdown, review
 from devloop.schema import load_schema
 from devloop.config import LEGACY_NEEDS_OPERATOR, Labels, MergePolicy
-from devloop.dispatcher import (Action, Dispatcher, Snapshot, Workers, ensure_labels,
-                                label_transition, plan)
+from devloop.context import label_transition
+from devloop.dispatcher import Dispatcher, Workers, ensure_labels
 from devloop.github import GitHub, GitHubError
+from devloop.planning import Action, Snapshot, plan
 from helpers.devloop_fakes import FakeGH
 from test_devloop import (CFG, REV_NAME, SHA1, SHA2, FakeRunner, FakeWS, norm, pr, raw_review,
                           ready)

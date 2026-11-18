@@ -7,8 +7,8 @@ of an issue (``_do_implement``), a failed CI (``_do_ci_failed``, ``_current_rece
 ``_full_suite_without_ci``), the fixes (``_do_fix``, ``_align_fix``, ``_publish_fix``,
 ``_do_requested_fix``) and the sync with the base branch (``_do_sync``). ``Dispatcher`` inherits
 the methods. The module-level helpers they need (``rerun_of``, ``synced_from``,
-``skipped_models``, ``Models``, ``ready_approval``) moved with them: ``devloop/dispatcher.py``
-re-exports them.
+``skipped_models``, ``Models``, ``ready_approval``) moved with them; since #297 (step S7) they are
+imported from here, not re-exported by ``devloop/dispatcher.py``.
 """
 
 import threading

@@ -1,13 +1,14 @@
 """devloop: planning and queue moved to ``devloop/planning.py`` (#291, step S1 of #261).
 
-The move changes no behaviour: the tests of ``plan``, the actions and the commands keep importing
-from ``devloop.dispatcher``, which re-exports the same objects. Here only what the move adds is
-checked: the re-exports and the documentation map of the new module.
+The move changes no behaviour. Since step S7 (#297) the tests of ``plan``, the actions and the
+commands import these names from ``devloop.planning``, and ``devloop.dispatcher`` no longer
+re-exports them. Here only what the move adds is checked: where the names live and the
+documentation map of the new module.
 """
 
 import unittest
 
-from devloop import config, dispatcher, planning
+from devloop import config, planning
 
 # Every name the move took out of devloop/dispatcher.py.
 MOVED = ('RECHECK_COMMAND', 'FIX_COMMAND', 'MERGING', 'RESYNC_AFTER_APPROVAL', 'BASE_CHANGED',
@@ -20,10 +21,10 @@ MOVED = ('RECHECK_COMMAND', 'FIX_COMMAND', 'MERGING', 'RESYNC_AFTER_APPROVAL', '
 
 
 class PlanningModuleTests(unittest.TestCase):
-    def test_the_dispatcher_re_exports_every_moved_name(self):
+    def test_every_moved_name_lives_in_the_module(self):
         for name in MOVED:
             with self.subTest(name=name):
-                self.assertIs(getattr(dispatcher, name), getattr(planning, name))
+                self.assertTrue(hasattr(planning, name))
                 if callable(getattr(planning, name)):
                     self.assertEqual(getattr(planning, name).__module__, 'devloop.planning')
 

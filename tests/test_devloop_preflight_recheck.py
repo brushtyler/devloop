@@ -6,8 +6,9 @@ import unittest
 from datetime import datetime, timedelta
 
 from devloop import markdown
-from devloop.dispatcher import Dispatcher, Snapshot, normalize_preflight, plan
-from devloop.planning import BASE_ADVANCED, preflight_state, repository_bound
+from devloop.dispatch_preflight import normalize_preflight
+from devloop.dispatcher import Dispatcher
+from devloop.planning import BASE_ADVANCED, Snapshot, plan, preflight_state, repository_bound
 from devloop.workspace import WorkspaceError
 from test_devloop import SHA2
 from test_devloop_preflight import checked, gap
@@ -210,7 +211,7 @@ class TextGapTests(Case):
                          [False, True])
 
     def test_the_prompt_asks_for_the_flag(self):
-        from devloop.dispatcher import PROMPT_DIR
+        from devloop.context import PROMPT_DIR
         self.assertIn('repository_dependent', (PROMPT_DIR / 'preflight.md').read_text())
 
 

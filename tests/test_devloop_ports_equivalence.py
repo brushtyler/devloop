@@ -9,7 +9,8 @@ refactoring; the bodies and the assertions must pass unchanged before and after 
 import unittest
 
 from devloop import markdown
-from devloop.dispatcher import Action, Dispatcher
+from devloop.dispatcher import Dispatcher
+from devloop.planning import Action
 
 from helpers.devloop_fakes import FakeGH, SnapshotGH
 from test_devloop import CFG, FakeRunner, FakeWS, implemented, norm, raw_review

@@ -13,8 +13,9 @@ from unittest import mock
 
 from devloop import activity, agents, config, follow
 from devloop.agents import AgentError
-from devloop.dispatcher import Action, Dispatcher, Snapshot, TickLog, schedule
+from devloop.dispatcher import Dispatcher, TickLog
 from devloop.ledger import Ledger
+from devloop.planning import Action, Snapshot, schedule
 from devloop.workspace import Workspace
 from helpers.devloop_fakes import FakeGH
 from test_devloop import CFG, FakeRunner, FakeWS, pr, raw_review

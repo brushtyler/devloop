@@ -1,9 +1,10 @@
 """devloop: the texts for prompts and comments moved to ``devloop/context.py`` (#292, step S2 of
 #261).
 
-The move changes no behaviour: the tests of the prompts, the comments and the label transition
-keep importing from ``devloop.dispatcher``, which re-exports the same objects. Here only what the
-move adds is checked: the re-exports and the documentation map of the new module.
+The move changes no behaviour. Since step S7 (#297) the tests of the prompts, the comments and
+the label transition import these names from ``devloop.context``, and ``devloop.dispatcher`` no
+longer re-exports them. Here only what the move adds is checked: where the names live and the
+documentation map of the new module.
 """
 
 import unittest
@@ -23,16 +24,16 @@ MOVED = ('PROMPT_DIR', 'REREVIEW_COMMAND', 'LABEL_STYLE', 'requested_fixes', 'op
 
 
 class ContextModuleTests(unittest.TestCase):
-    def test_the_dispatcher_re_exports_every_moved_name(self):
+    def test_every_moved_name_lives_in_the_module(self):
         for name in MOVED:
             with self.subTest(name=name):
-                self.assertIs(getattr(dispatcher, name), getattr(context, name))
+                self.assertTrue(hasattr(context, name))
                 if callable(getattr(context, name)):
                     self.assertEqual(getattr(context, name).__module__, 'devloop.context')
 
     def test_the_prompts_stay_where_they_were(self):
         self.assertEqual(context.PROMPT_DIR, Path(dispatcher.__file__).resolve().parent / 'prompts')
-        self.assertTrue((dispatcher.PROMPT_DIR / 'implement.md').is_file())
+        self.assertTrue((context.PROMPT_DIR / 'implement.md').is_file())
 
     def test_the_documentation_map_covers_the_module(self):
         docs = config.load_config().docs

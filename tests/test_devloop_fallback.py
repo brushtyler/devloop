@@ -10,7 +10,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from devloop import activity, agents, config, markdown, policy
-from devloop.dispatcher import Action, Dispatcher, Models, Snapshot
+from devloop.dispatch_actions import Models
+from devloop.dispatcher import Dispatcher
+from devloop.planning import Action, Snapshot
 from helpers.devloop_fakes import FakeGH, FakeIdentities
 from test_devloop import CFG, IMPL, SHA1, FakeRunner, FakeWS, implemented, pr, raw_review
 from test_devloop_quorum import FIRST, SECOND, Quorum

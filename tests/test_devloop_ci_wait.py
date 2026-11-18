@@ -9,8 +9,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from devloop import config, markdown
-from devloop.dispatcher import Action, Dispatcher, plan
+from devloop.dispatcher import Dispatcher
 from devloop.github import GitHub, GitHubError
+from devloop.planning import Action, plan
 from devloop.unavailability import iso
 
 from helpers.devloop_fakes import SHA1, SnapshotGH

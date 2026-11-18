@@ -10,7 +10,8 @@ import unittest
 from pathlib import Path
 
 from devloop import config, markdown, policy
-from devloop.dispatcher import Action, Dispatcher, Snapshot, counted_rounds, plan
+from devloop.dispatcher import Dispatcher
+from devloop.planning import Action, Snapshot, counted_rounds, plan
 from devloop.workspace import Workspace
 from helpers.devloop_fakes import FakeGH, SnapshotGH
 from test_devloop import (BASE, CFG, SHA1, FakeRunner, FakeWS, finding, fixed, norm, pr,

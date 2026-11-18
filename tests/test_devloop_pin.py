@@ -21,7 +21,8 @@ from unittest import mock
 import devloop.__main__ as cli
 from devloop import config, markdown, pin, runloop
 from devloop.config import ConfigError, MergePolicy, PinPolicy
-from devloop.dispatcher import Dispatcher, Snapshot
+from devloop.dispatcher import Dispatcher
+from devloop.planning import Snapshot
 from devloop.workspace import Workspace, WorkspaceError
 from test_devloop import (CFG, REV_NAME, SHA1, FakeRunner, FakeWS, norm, raw_review, receipt)
 from test_devloop_merge import Identities, MergeGH, header, records

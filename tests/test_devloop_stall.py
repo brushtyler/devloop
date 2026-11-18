@@ -12,7 +12,8 @@ from pathlib import Path
 from unittest import mock
 
 from devloop import activity, agents, config, follow, stall
-from devloop.dispatcher import Action, Dispatcher, Snapshot
+from devloop.dispatcher import Dispatcher
+from devloop.planning import Action, Snapshot
 from helpers.devloop_fakes import FakeGH
 from test_devloop import CFG, IMPL, FakeWS, implemented, ready
 

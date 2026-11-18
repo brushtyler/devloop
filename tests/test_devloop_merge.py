@@ -13,8 +13,10 @@ from unittest import mock
 import devloop.__main__ as devloop_main
 from devloop import apps, config, markdown, review
 from devloop.config import MergePolicy
-from devloop.dispatcher import Action, Dispatcher, Snapshot, ensure_labels, merge_command, plan
+from devloop.dispatch_supervision import merge_command
+from devloop.dispatcher import Dispatcher, ensure_labels
 from devloop.github import GitHub
+from devloop.planning import Action, Snapshot, plan
 from test_devloop import (CFG, IMPL_NAME, REV, REV_NAME, SHA1, SHA2, FakeRunner, FakeWS,
                           SnapshotGH, finding, norm, pr, raw_review, receipt)
 from test_devloop_zero import GRANT, SUCCESS, ZCFG, ZERO_LABELS, changes

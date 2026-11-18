@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from devloop.dispatcher import Action, counted_rounds, touched_by_base, waived_rounds
+from devloop.planning import Action, counted_rounds, touched_by_base, waived_rounds
 from devloop.workspace import Workspace, WorkspaceError
 from test_devloop import BASE, CFG, finding, raw_review, receipt
 from test_devloop_quorum import FIRST, SECOND, Quorum
