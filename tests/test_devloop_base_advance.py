@@ -37,7 +37,8 @@ class BaseAdvanceTests(Quorum):
         # The joining review records both bases and the check.
         self.assertEqual(second['bases'], [{'from': BASE, 'to': NEW, 'outcome': 'disjoint'}])
         self.assertNotIn('restarts', second)
-        self.assertIn('La base è avanzata durante il round', self.gh.comments[1][1])
+        # The second reviewer's native review, its record (#325).
+        self.assertIn('La base è avanzata durante il round', self.gh.native[1][1]['body'])
         # Promotion recomputes the receipt on NEW and admits the approval given on BASE only
         # after checking the commits in between again.
         self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
@@ -80,7 +81,7 @@ class BaseAdvanceTests(Quorum):
         self.assertEqual((restarted['round'], restarted['receipt']['base']), (2, NEW))
         self.assertEqual(restarted['restarts'], {'round': 1, 'bases': [
             {'from': BASE, 'to': NEW, 'outcome': 'touched', 'paths': [PR_FILE]}]})
-        self.assertIn('Il round 1 è stato abbandonato', self.gh.comments[-1][1])
+        self.assertIn('Il round 1 è stato abbandonato', self.gh.native[-1][1]['body'])
         self.assertEqual(self.gh.labels[100], {'agent:review'})
         self.d.tick()
         self.assertEqual(self.reviewed(), [FIRST, FIRST, SECOND])

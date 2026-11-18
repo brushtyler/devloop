@@ -380,7 +380,9 @@ record adds no label and blocks nothing by itself: the open blocks do.
 The [daily summary](guide.md#daily-summary) (#256) reads only records bound to identities: the
 `ledger`, `merged` and `notice` (escalation) records the dispatcher signed, the `review` records
 of a configured reviewer written with its identity (a CI round with the dispatcher's), and the
-`pr` marker of a PR opened by the implementer it names. On `[report] issue` it writes two kinds of
+`pr` marker of a PR opened by the implementer it names. It reads the comments of the repository,
+not the native reviews: a round whose reviews are native reviews is counted from its
+[round register](#round-register), once a review turn of it succeeded or its CI was recorded. On `[report] issue` it writes two kinds of
 `report` record, both with the day (`YYYY-MM-DD`, UTC):
 
 - `today`, at the end of the issue body: the day the body shows. It counts only when the
@@ -407,8 +409,45 @@ file, line and a suggested fix, and the status of every earlier blocking finding
 - an earlier finding the reviewer does not assess stays open.
 
 Findings get stable ids (`R<round>-<n>`). The fix step answers each one (`fixed`, `disputed`,
-`not_applicable`), and the next round sees those answers. The comment shows the review in
-readable form and carries the full record in a hidden base64 marker for the next tick.
+`not_applicable`), and the next round sees those answers. The review is published in readable
+form, with the full record in a hidden base64 marker for the next tick: as the body of a native
+GitHub review for an agent with an app of its own, as a comment for any other agent (see
+[Where a review is published](#where-a-review-is-published)).
+
+### Where a review is published
+
+Since #325 each review is **one element** of the PR's timeline:
+
+- **An agent with its own GitHub App** submits one native review on the reviewed commit, with
+  its app: `APPROVE`, `REQUEST_CHANGES` or `COMMENT` (for `needs_operator`) mirrors the verdict
+  for GitHub and branch protection, and its body is the whole review, header, readable text and
+  `review` marker. That native review is the record devloop reads, and no review comment is
+  written. Its submission is required: a failure is tried again, up to three attempts in all,
+  after a pause of 5 seconds and then 10. Before each new attempt the dispatcher reads the PR's
+  reviews again, and a review with the same body already published by that app (an answer lost
+  after GitHub accepted it) ends the retries. After the third failure the step escalates like
+  any failed write (`failure`); the verdicts of other reviewers already published stay recorded.
+- **An agent without an app** publishes with the operator's `gh` login, which may also be the
+  PR's author: it keeps the review comment, as before, and submits no native review.
+
+devloop reads the review records from the PR's conversation and, among its comments in the order
+of their times, from the native reviews whose body ends with a valid `review` marker (a pending
+review, not published, is left out; a native review dismissed later stays a record). A native
+review placed at the same second as a comment comes before it. A native review counts only as the
+record of an agent with an app of its own, written with that app, and never by the PR's
+implementer (see [Records bound to identities](#records-bound-to-identities)). Any other native
+review stays out of the conversation, as before.
+
+**Compatibility.** The review comments published before #325 stay records, read with the same
+rules as before: a PR opened during the change, with rounds of both forms, keeps every round and
+every finding, and counts them as if all its rounds were comments.
+
+**Length.** GitHub accepts at most 65 536 characters in the body of a comment or a review. A
+longer review keeps its header and its marker whole, with every finding, and only its readable
+text is cut, followed by a notice (`Testo troncato`). When header, notice and marker alone exceed
+the limit, nothing is published and the step escalates (`failure`): no finding is dropped and no
+other comment is written in its place. The same rule applies to the review comment of an agent
+without an app.
 
 ### Acceptance criteria coverage
 
@@ -594,8 +633,8 @@ them.
 ## Records bound to identities
 
 Records are bound to identities. A PR counts as a devloop PR with its marker only if it was opened
-by the app of the implementer the marker names; a review counts only if its comment was written by
-the app of the reviewer named in it, and never by the PR's implementer; a CI round and a finding
+by the app of the implementer the marker names; a review counts only if its native review or its
+comment was written by the app of the reviewer named in it, and never by the PR's implementer; a CI round and a finding
 closure only from the dispatcher's app; a fix only from the implementer's app. A readiness check
 (`preflight`) counts only if written by the app of the configured agent it names, the checker:
 the dispatcher sets the labels it implies, never the record. A `notice` counts only from the
@@ -609,8 +648,10 @@ decides who can start work with `agent:ready`, and it cannot contain bots. The o
 labels count is the supervisor's, on the issues described in
 [Labels from the supervisor](guide.md#labels-from-the-supervisor).
 
-The native review mirrors the verdict for GitHub and branch protection; devloop itself reads only
-the review comment, and a failed native review is logged without stopping the flow.
+For an agent with an app the review record is the body of its native review, which also mirrors
+the verdict for GitHub and branch protection; for an agent without an app it is the review
+comment (see [Where a review is published](#where-a-review-is-published)). The identity rule is
+the same for both: the app of the reviewer named in the record, never the PR's implementer.
 
 ## Evidence and telemetry
 
@@ -618,8 +659,9 @@ The dispatcher records the evidence and the telemetry of every step for itself (
 they no longer have to be pieced together from markers and logs. Each record is a dispatcher
 comment ending with a `ledger` marker, signed with the dispatcher's identity like its other
 records (only that identity's records count), on the issue for the implementation and the
-readiness check, on the PR for review, fix, sync and CI. The [PR receipt](#pr-receipt) (#135)
-gathers them at the promotion.
+readiness check, on the PR for review, fix, sync and CI. The turns of a review round and its
+`ci_round` event share one comment, the [round register](#round-register). The
+[PR receipt](#pr-receipt) (#135) gathers them at the promotion.
 
 | Record | When | Content |
 |---|---|---|
@@ -662,6 +704,35 @@ attempts that failed, or that no commit followed, have commit `null` too.
 **Earlier work.** PRs and issues started before these records have none of them. Missing data
 is declared missing (`request` null, no turns), and is never reconstructed from the summaries
 written by agents.
+
+### Round register
+
+Since #325 the review turns of a round and its `ci_round` event are not comments of their own:
+the dispatcher writes **one comment per round** on the PR, `## Registro devloop: round <n>`,
+ending with a `ledger` marker of type `round`. Its `records` hold every review turn of the round,
+retries and fallback models included, of every reviewer, and the `ci_round` event of the round
+(also of a CI failure round, and the one a promotion records later for that round), each in a
+section of its own with its number (`section`) and the same content as a record of its own.
+Together with the native reviews, a level-2 round leaves three elements in the PR's timeline:
+two reviews and one register.
+
+- **Persistence stays.** The register is created, or the turn's section added to it, before the
+  CLI starts, with the turn `open`; if that write fails the turn does not start. When the CLI
+  ends, the section is completed. A turn interrupted without that write stays `open` in the
+  register, and the next tick marks only its section `incomplete`, as described above.
+- **Writes are serialized.** Reviewers running in parallel (`max_parallel_actions` above 1) write
+  the same comment: every write of a register (a new section, a closed turn, a turn marked
+  incomplete) takes a lock of the dispatcher and reads the register again from GitHub right
+  before editing it, so no update of the other reviewer is lost. The dispatcher edits only a
+  register it signed; one written by any other identity is ignored, and a new one is created.
+- **Reading.** A register is read as its records, one by one: the receipt, the CI already
+  recorded, the open turns and the [daily summary](#daily-summary) see each turn and event as
+  before. A reviewer of the same round in a later action joins the round's register.
+
+The other records (`request`, `verification`, the turns of implement, fix, sync, readiness check
+and conclave, the `sync` and `ci_rerun` events, and the `ci_round` of a level-0 promotion, which
+has no round) keep a comment each. The records written before #325, one comment per turn and per
+CI round, stay valid and are read as before.
 
 ## PR receipt
 

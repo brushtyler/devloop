@@ -843,6 +843,7 @@ comment text are cut short and control characters removed. What it reports:
 | New head of a PR | `PR #N new head abc1234` |
 | CI turning `pass` or `fail` on the head (the checks the dispatcher reads) | `PR #N CI pass @abc1234` |
 | devloop review: the valid `review` record in the conversation, from the identity that may write it (its native review is not reported again) | `PR #N review codex approve round 2 @abc1234` |
+| devloop review in the body of the native review of an agent with its own app (#325), from that app | `PR #N review by brushtyler-devloop-codex-agent[bot]: approve round 2 @abc1234` |
 | Native `APPROVED` or `CHANGES_REQUESTED` review of a trusted user | `PR #N review by brushtyler: APPROVED @abc1234` |
 | Comment of a trusted user or of a devloop app; one a trusted user wrote in person (no attribution header) is an `operator comment` | `issue #N operator comment by brushtyler: first line` |
 
@@ -1114,7 +1115,10 @@ and writes nothing without `--publish`. The summary lists:
 - the escalations, with their class and whether they went to the operator or the supervisor;
 - the CI blocks (a failed CI round) and the re-runs of failed jobs;
 - the totals: PRs opened and merged that day, review rounds opened that day (each round once,
-  on the day of its first review record) and turns run with a fallback model.
+  on the day of its first review comment or of its [round register](protocol.md#round-register),
+  counted once a review turn of the round succeeded or its CI was recorded: the native reviews
+  of the agents with an app are not among the comments the summary reads) and turns run with a
+  fallback model.
 
 A turn belongs to the day it started, with its whole duration; any other record to the day it
 was written. A PR counts only with the marker of the implementer that opened it.

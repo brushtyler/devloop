@@ -61,7 +61,8 @@ class BaseRevocationTests(Quorum):
         self.assertNotIn('resync', first)
         self.assertEqual(second['max_rounds'], 2)
         self.assertIn('round 2 of at most 2', self.runner.calls[-1][3])
-        self.assertIn('questo round rivede lo stesso commit', self.gh.comments[-2][1])
+        # The reviewer's native review, its record (#325).
+        self.assertIn('questo round rivede lo stesso commit', self.gh.native[-1][1]['body'])
         reviews = self.d.snapshot().prs[0].reviews
         self.assertEqual((waived_rounds(reviews), counted_rounds(reviews)), ({2}, before))
         self.assertEqual(before, 1)

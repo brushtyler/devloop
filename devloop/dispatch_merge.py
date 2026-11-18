@@ -541,7 +541,7 @@ class MergeMixin:
                      commands=[], finding_problems=[], policy=[], zero_head=None,
                      zero_problem='', stale_receipt=False, revoked=None, operator_comments=[],
                      rereview=False, round_comments=[], acceptance=[], hold=None)
-        self._read_thread(pr, self.gh.pr_comments(pr.number))
+        self._read_thread(pr, self._pr_thread(pr.number))
         if pr.hold:
             return skip('a hold or release command waits to be applied')
         if pr.finding_problems:

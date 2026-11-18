@@ -21,7 +21,7 @@ from devloop import agents, conclave, config, markdown, planning, review, schema
 from devloop.dispatcher import Dispatcher  # noqa: E402
 from devloop.planning import Snapshot, plan  # noqa: E402
 from devloop.workspace import Workspace  # noqa: E402
-from helpers.devloop_fakes import SHA1, FakeGH, FakeIdentities  # noqa: E402
+from helpers.devloop_fakes import SHA1, FakeGH, FakeIdentities, at  # noqa: E402
 from test_devloop import CFG, FakeRunner, FakeWS, implemented, pr, receipt  # noqa: E402
 
 MEMBERS = ('claude', 'codex', 'agy')
@@ -250,6 +250,37 @@ class UnanimousTests(Base):
         self.assertEqual(found['outcome'], conclave.UNANIMOUS)
         self.assertEqual([c[0] for c in self.runner.calls], ['agy', 'claude', 'codex'])
         self.assertIn('Serve una scelta (agy).', self.runner.calls[0][3])
+
+    def test_a_needs_operator_in_a_native_review_runs_the_conclave(self):
+        # Since #325 the review of an agent with an app is the body of its native review: the
+        # conclave the snapshot plans from it must also run from it.
+        self.make(proposal(), vote(), vote())
+        self.gh.labels[100] = {NEEDS_OPERATOR}
+        record = review.normalize_review(
+            {'verdict': 'needs_operator', 'summary': 's', 'blocking_findings': [],
+             'non_blocking_findings': [], 'previous_findings': [],
+             'human_reason': 'Serve una scelta (codex).', 'checks_performed': []},
+            previous_open=[], round_no=1, max_rounds=3, head_sha=SHA1, ci='pass',
+            reviewer='codex')
+        self.gh.native_reviews = [
+            {'id': 77, 'login': LOGINS['codex'], 'state': 'CHANGES_REQUESTED',
+             'body': markdown.render_review(record, '> [!NOTE]\n'), 'submitted_at': at(1)}]
+        self.gh.next_id += 1
+        self.gh.thread.setdefault(100, []).append(
+            {'id': self.gh.next_id, 'author': {'login': LOGINS['dispatcher']},
+             'body': markdown.render_escalation('decisione', cls='reviewer_decision'),
+             'created_at': at(2)})
+        # Not a comment: only the native review carries the record.
+        self.assertIsNone(self.d._review_block(self.gh.pr_comments(100), self.target()))
+        items = self.d._conclave_items([self.target()])
+        self.assertEqual([(i['number'], i['calls']) for i in items], [(100, 3)])
+        self.run_conclave()
+        found = self.record()
+        self.assertEqual(found['block'], {'kind': 'review', 'round': 1, 'reviewer': 'codex',
+                                          'head': SHA1})
+        self.assertEqual(found['outcome'], conclave.UNANIMOUS)
+        self.assertEqual([c[0] for c in self.runner.calls], ['codex', 'claude', 'agy'])
+        self.assertIn('Serve una scelta (codex).', self.runner.calls[0][3])
 
     def needs_operator_by_codex(self):
         """The record of round 1 of PR #100 by codex, needs_operator, under a level 2 receipt

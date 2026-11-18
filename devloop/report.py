@@ -153,12 +153,28 @@ class Records:
                 return None
         return record if self.trust.wrote(comment.get('login'), actor) else None
 
+    def _register(self, comment):
+        """The round whose register (#325) ``comment`` is, when the dispatcher wrote it and the
+        round was evaluated: a review turn ended with success, or the CI of the round was
+        recorded. None otherwise. A review an agent publishes as a native review is not among
+        the comments the summary reads: its round is counted from the register."""
+        if not self._signed(comment):
+            return None
+        record = read_marker(comment.get('body') or '', 'ledger')
+        if record is None or record['type'] != 'round':
+            return None
+        evaluated = any(s['type'] == 'event' or s.get('outcome') == 'success'
+                        for s in record['records'])
+        return record['round'] if evaluated else None
+
     def _round_opened(self, number, round_no):
-        """When the first review record of round ``round_no`` of PR ``number`` was written."""
+        """When the first review record, or the register (#325), of round ``round_no`` of PR
+        ``number`` was written."""
         if number not in self._threads:
             self._threads[number] = self.gh.dated_comments(number=number)
         times = [c.get('created_at') for c in self._threads[number]
-                 if (r := self._review(c)) is not None and r['round'] == round_no]
+                 if ((r := self._review(c)) is not None and r['round'] == round_no)
+                 or self._register(c) == round_no]
         return min((t for t in times if isinstance(t, str)), default=None)
 
     def summary(self, day):
@@ -172,11 +188,16 @@ class Records:
             review = self._review(comment)
             if review is not None and _day_of(created) == day:
                 rounds.add((number, review['round']))
+            registered = self._register(comment)
+            if registered is not None and _day_of(created) == day:
+                rounds.add((number, registered))
             if not self._signed(comment):
                 continue
             ledger = read_marker(body, 'ledger')
             if ledger is not None:
-                self._ledger(out, day, number, ledger, created)
+                # A round's register (#325) holds the records of its turns and of its CI.
+                for record in ledger['records'] if ledger['type'] == 'round' else [ledger]:
+                    self._ledger(out, day, number, record, created)
                 continue
             merged = read_marker(body, 'merged')
             if merged is not None and _day_of(created) == day:

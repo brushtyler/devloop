@@ -30,7 +30,8 @@ CLAUDE_ENVELOPE = {
 
 
 def ledger_records(comments, kind=None):
-    found = [r for c in comments if (r := markdown.read_marker(c['body'], 'ledger'))]
+    """The ledger records of ``comments``, those of a round's register (#325) one by one."""
+    found = [r for _, r in ledger.entries(comments, lambda login: True)]
     return [r for r in found if kind is None or r['type'] == kind]
 
 
@@ -79,7 +80,8 @@ class LedgerGH(FakeGH):
         return self.next_id
 
     def edit_comment(self, comment_id, body):
-        if self.fail_edits:
+        # ``fail_edits``: True, or a predicate on the new body of the edits that fail.
+        if self.fail_edits is True or (callable(self.fail_edits) and self.fail_edits(body)):
             raise GitHubError('gh api -X PATCH: HTTP 502')
         for comments in self.thread.values():
             for c in comments:
@@ -347,7 +349,8 @@ class LedgerDispatcherTests(unittest.TestCase):
 
     def test_a_failed_closing_write_leaves_the_turn_incomplete(self):
         d = self.make(raw_review(), number=100)
-        self.gh.fail_edits = True
+        # The closing write of the turn fails; the CI event joins the round's register (#325).
+        self.gh.fail_edits = lambda body: 'ci_round' not in body
         p = pr()
         self.gh.labels[100] = set(p.labels)
         d._do_review(p)  # the review goes on

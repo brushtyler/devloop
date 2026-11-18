@@ -252,6 +252,35 @@ def _timestamp(value):
     return moment.timestamp() if moment.tzinfo is not None else None
 
 
+def with_native_reviews(comments, reviews):
+    """``comments`` with, among them, each native review of ``reviews`` (``pr_reviews``) that
+    carries a ``review`` record (#325), as a comment would be: ``{id: None, review_id, native:
+    True, author, body, created_at}``. A review goes before the first comment written at the
+    same time or later, so that the records written after it follow it; a pending review, not
+    published, is left out. Every other native review stays out of the conversation, as before.
+    ``comments`` without a time (``created_at``) never move a review."""
+    native = []
+    for review in reviews:
+        at = _timestamp(review.get('submitted_at'))
+        body = review.get('body') or ''
+        if (at is None or review.get('state') == 'PENDING'
+                or read_marker(body, 'review') is None):
+            continue
+        native.append((at, {'id': None, 'review_id': review.get('id'), 'native': True,
+                            'author': {'login': review.get('login')}, 'body': body,
+                            'created_at': review['submitted_at']}))
+    if not native:
+        return list(comments)
+    native.sort(key=lambda item: item[0])
+    merged = []
+    for comment in comments:
+        at = _timestamp(comment.get('created_at'))
+        while native and at is not None and native[0][0] <= at:
+            merged.append(native.pop(0)[1])
+        merged.append(comment)
+    return merged + [review for _, review in native]
+
+
 def rerun_waiting(record, details):
     """Whether the checks ``details`` of a head still fail with exactly the checks its re-run
     ``record`` replaces (#200): a re-run job is a new check run, with a new link."""
@@ -504,7 +533,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         self.log = log if isinstance(log, TickLog) else TickLog(log)
         self.identities = identities
         self.activity = activity
-        self.ledger = ledger
+        self.ledger = ledger  # bound to the dispatcher's signature (``ledger`` below)
         # The models found unavailable (``unavailability.Memory``, #151), or None: every turn
         # starts from the configured model.
         self.memory = memory
@@ -517,6 +546,17 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         # Whether a tick of this process already checked the rename of agent:needs-operator
         # (#248, ``_transition_labels``).
         self.labels_checked = False
+
+    @property
+    def ledger(self):
+        return self._ledger
+
+    @ledger.setter
+    def ledger(self, ledger):
+        """The ledger edits only the round registers the dispatcher signed (#325)."""
+        if ledger is not None:
+            ledger.signed = self._signed
+        self._ledger = ledger
 
     # Identities ------------------------------------------------------------
     def _as(self, actor, permissions) -> Backend:
@@ -546,6 +586,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
     def _marker_entries(self, pr, comments, kind, problems=None):
         """``(position in comments, record)`` for each record ``_markers`` accepts.
 
+        ``comments`` may hold native reviews (``_pr_thread``): one counts only as the
+        ``review`` record of an agent with an app of its own, written with that app (#325).
         A review counts only if each finding key it carries is ``round/owner/ID`` of the review
         itself. ``problems`` collects reviews that an identity allowed to write records wrote
         but whose findings have no reconstructible owner: a review without a reviewer, or with
@@ -576,6 +618,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 actor = record['reviewer']
             if not (actor and self._wrote(login, actor)):
                 continue
+            if comment.get('native') and not (kind == 'review' and record['source'] == 'agent'
+                                              and self._app_login(actor)):
+                # A native review is a record only for an agent with an app of its own, written
+                # with that app (#325); the other agents keep the review comment.
+                continue
             if kind == 'review':
                 owner = owner_of(record)
                 wrong = [f['key'] for f in record['blocking_findings']
@@ -588,6 +635,13 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                     continue
             found.append((position, record))
         return found
+
+    def _pr_thread(self, number):
+        """The conversation of PR ``number`` as the review records need it (#325): its comments
+        and, among them in the order of their times, the native reviews that carry a ``review``
+        record (``with_native_reviews``). Who may have written each record is checked by
+        ``_marker_entries``, as for a comment."""
+        return with_native_reviews(self.gh.pr_comments(number), self.gh.pr_reviews(number))
 
     def _writes_records(self, login):
         """Whether ``login`` may write some devloop record: an agent's, or the dispatcher's."""
@@ -800,7 +854,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         lb = self.cfg.labels
         if not pr.meta or pr.labels & {lb.review, lb.changes, lb.ready_to_merge}:
             return pr.reviews
-        comments = self.gh.pr_comments(pr.number)
+        comments = self._pr_thread(pr.number)
         return [record for _, record in self._marker_entries(pr, comments, 'review')]
 
     def snapshot(self):
@@ -811,7 +865,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             if pr is None:
                 continue
             if pr.meta and pr.labels & {lb.review, lb.changes, lb.ready_to_merge}:
-                self._read_thread(pr, self.gh.pr_comments(pr.number))
+                self._read_thread(pr, self._pr_thread(pr.number))
             # In agent:changes CI matters to close an open CI finding, and after a review that
             # asked for changes before the CI of the head was known: the fix waits for it, so
             # that a failure joins the same fix (#271, ``plan``).
@@ -1439,11 +1493,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         raises ``GitHubError``: the turn does not start."""
         if self.ledger is None or where is None:
             return None
-        number, kind = where
+        number, kind, *register = where
         return self.ledger.open_turn(
             number, kind=kind, agent=candidate.key, identity=self._app_login(candidate.key),
             mode=mode, model=candidate.model, effort=candidate.effort,
-            fallback_for=candidate.fallback_for, label=label)
+            fallback_for=candidate.fallback_for, label=label,
+            round_no=register[0] if register else None)
 
     def _close_turn(self, entry, outcome, error=None):
         """Close a turn's record with what the CLI attested and the last command its output
@@ -1528,7 +1583,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         when the log could not be read. Without ``jobs`` (a promotion after a review that saw
         the CI pending, a level-0 promotion) they are read now from ``details``, so that the
         event has them whatever path records it. The same checks read again for the same head
-        and round are not recorded twice."""
+        and round are not recorded twice. The event of a review round is a section of that
+        round's register (#325)."""
         if self.ledger is None or details is None:
             return
         checks = [{'name': c['name'], 'outcome': c.get('conclusion') or c['bucket'],
@@ -1545,8 +1601,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                  for j in jobs or () if j.get('tests') or j.get('log')]
         if tests:
             extra['tests'] = tests
-        self.ledger.event(pr.number, 'ci_round', head=head, state=state, **extra,
-                          checks=checks)
+        self.ledger.event(pr.number, 'ci_round', round_no=round_no, head=head, state=state,
+                          **extra, checks=checks)
         pr.ci_recorded.append(key)
 
     def _flag_incomplete(self, snap, dry_run, busy=()):

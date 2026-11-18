@@ -478,6 +478,18 @@ class ChangesTest(unittest.TestCase):
             'PR #10 comment by dl-claude[bot]: ## Review'])
         self.assertEqual(self.news(), [])
 
+    def test_an_agent_review_in_its_native_review(self):
+        # #325: the native review of an agent with its app is its record, whatever its state;
+        # one written by another app is not reported.
+        gh = self.h.gh
+        gh.reviews[10] = [
+            {'id': 4, 'login': CODEX, 'state': 'COMMENTED',
+             'body': review_comment('codex', 'needs_operator', 3)},
+            {'id': 5, 'login': CLAUDE, 'state': 'APPROVED', 'body': review_comment('codex')}]
+        self.assertEqual(self.news(), [
+            'PR #10 review by dl-codex[bot]: needs_operator round 3 @aaaaaaa'])
+        self.assertEqual(self.news(), [])
+
     def test_lines_are_single_lines_without_control_characters(self):
         gh = self.h.gh
         gh.comment(301, 10, OPERATOR, 'red \x1b[31mtext\x07 ' + 'x' * 200)
