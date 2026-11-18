@@ -879,8 +879,8 @@ lock, or the recorded process is gone, the action is reported as `interrupted`: 
 killed before it could clean up, and the next tick overwrites the record when it starts an action.
 While a restart from a new pinned copy waits for the running actions
 ([Pin after a merge](#pin-after-a-merge)), `state_dir/restart.json` records it, and
-`devloop status` shows `restart to <sha12> pending since <time> (<N> running)` as long as its
-dispatcher holds the lock.
+`devloop status` shows `restart to <sha12> pending since <time> (<N> running): no new implement
+until the restart` as long as its dispatcher holds the lock.
 
 devloop writes an agent's log only when its turn ends. To follow the agent while it works,
 `devloop follow issue-<N>` (implementer) or `devloop follow pr-<N>` (reviewer or fixer) prints
@@ -1159,9 +1159,9 @@ Why a merge may run alongside the other actions:
 - actions on the same PR or on its issue never run with its merge, as for any action.
 
 The [pin after a merge](#pin-after-a-merge) is not a global action either: the next tick pins
-at once, while the other actions run, and keeps planning with the code it loaded; the restart
-from the new copy waits for the first tick at which nothing runs, or for
-`[pin] restart_max_wait_minutes`, after which no new action starts until the restart. A merge
+at once, while the other actions run, and keeps planning with the code it loaded, except new
+implementations; the restart from the new copy waits for the first tick at which nothing runs,
+or for `[pin] restart_max_wait_minutes`, after which no new action starts until the restart. A merge
 that requests the pin while a tick reads GitHub does not stop that tick's actions: the next
 tick pins. In
 `devloop tick` a merge still runs alone, as a global action
@@ -1587,16 +1587,20 @@ from before is ignored.
 In the [continuous mode](#continuous-mode) of `devloop run` (#301) the pin does not wait for
 the running actions. The next tick runs `pin origin/main` at once, smoke test included, and
 moves `current`; the actions already running, and those the tick and the next ones start, run
-with the code the process loaded, as they would without `[pin] auto`. The log says
-`restart from pinned-<sha12> deferred`, and each tick while actions run says
-`restart to <sha12> pending since <time> (<N> running)`; `devloop status` shows the same line.
+with the code the process loaded, as they would without `[pin] auto`. While the restart is
+pending no new implementation (`implement`, the long action) starts (#342): a ready issue waits
+for the new copy, while the short actions (review, fix, sync, merge, readiness checks) still
+start, so that devloop reaches on its own a moment without long actions and restarts soon. The
+log says `restart from pinned-<sha12> deferred`, and each tick while actions run says
+`restart to <sha12> pending since <time> (<N> running): no new implement until the restart`;
+`devloop status` shows the same line.
 The restart from the new copy happens at the first tick at which nothing runs, from the copy
 `current` points at then (a pin by hand meanwhile counts; when that is the running copy, no
 restart). A further merge that requests a pin while the restart waits pins again, and the
 restart goes to the newer copy; the wait keeps counting from the first pin. After
-`[pin] restart_max_wait_minutes` (default 30; 0 drains at once) of a pending restart, no new
-action starts, the log says `… over [pin] restart_max_wait_minutes (<M>), no action starts until
-the restart`, and the restart follows the end of the running ones. The fetch of the pin waits for
+`[pin] restart_max_wait_minutes` (default 30; 0 drains at once) of a pending restart, the last
+resort, no new action starts, the log says `… (<N> running): over [pin] restart_max_wait_minutes
+(<M>), no action starts until the restart`, and the restart follows the end of the running ones. The fetch of the pin waits for
 the fetches of the running actions, and they for it. With one action at a time
 (`max_parallel_actions = 1`) and in `devloop tick` nothing runs between ticks, so the pin
 restarts at once, as above.

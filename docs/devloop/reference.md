@@ -33,7 +33,8 @@ another value stops devloop at startup.
 [merge modes](guide.md#merge-modes); an unknown mode, level or key stops devloop at startup.
 `[pin]` (`auto`, default `false`; `restart_max_wait_minutes`, default 30) sets the
 [pin after a merge](guide.md#pin-after-a-merge) and how long, in the continuous mode, the restart
-from the new copy may wait for the running actions while new ones still start; an `auto` that is
+from the new copy may wait for the running actions while new ones, except implementations, still
+start; an `auto` that is
 not a boolean, a `restart_max_wait_minutes` that is not a whole number of at least 0, or an
 unknown key, stops devloop at startup. `[run]` (`alert_issue`, unset by
 default) names the issue of the alert of the [continuous loop](guide.md#continuous-loop); a value that
