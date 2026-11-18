@@ -129,7 +129,7 @@
         "capability",
         "tasks"
       ],
-      "description": "Per-task caps on cumulative consumption (#163). The run caps stay the defaults and the overall limit; a task without an entry is bound by them only. The sum of the task caps of a dimension never exceeds the run cap. Calls no task owns stay on the shared run account.",
+      "description": "Per-task caps on cumulative consumption (#163). The run caps stay the defaults and the overall limit; a task without an entry is bound by them only. The sum of the task caps of a dimension never exceeds the run cap. Dollar task caps are decimals with at most six places. Calls no task owns stay on the shared run account.",
       "properties": {
         "schema_version": {
           "const": 1

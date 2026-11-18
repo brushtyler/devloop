@@ -104,11 +104,12 @@ def unwind(envelope, generation):
         raise LimitExtensionError('Invalid limit extension chain')
     while entries and isinstance(entries[-1], dict) and entries[-1].get('generation') == generation:
         entry = entries.pop()
-        if (set(entry) - {'deadline'} != ENTRY_FIELDS or entry['contract'] != CONTRACT
+        if (set(entry) - {'deadline', 'task_budget_sha256'} != ENTRY_FIELDS or entry['contract'] != CONTRACT
                 or entry['operation'] not in LIMIT_OPERATIONS or not _hex(entry['proposal_sha256'])
                 or not _hex(entry['authorization_sha256']) or not _hex(entry['source_policy_sha256'])
                 or not isinstance(entry['changes'], list) or not entry['changes']
-                or ('deadline' in entry) != (entry['operation'] == 'extend_deadline')):
+                or ('deadline' in entry) != (entry['operation'] == 'extend_deadline')
+                or ('task_budget_sha256' in entry) != (entry['operation'] == ALLOCATE)):
             raise LimitExtensionError('Limit extension entry differs from its contract')
         policy = current['policy']
         if entry['operation'] == 'extend_deadline':
@@ -125,9 +126,18 @@ def unwind(envelope, generation):
                 del binding['deadline_extensions']
             policy['wall_seconds'] = entry['deadline']['old_wall_seconds']
         elif entry['operation'] == ALLOCATE:
-            # The allocation added the whole section to a profile without one.
-            if not isinstance(policy.get('task_budget'), dict) or any(
-                    not isinstance(c, dict) or c.get('old') is not None for c in entry['changes']):
+            # The allocation added the whole section to a profile without one:
+            # before removing it, the section must be exactly the bound one
+            # (caps, dimensions and prior_invocations), not just any section.
+            from ssdlc_task_budget import allocation_changes
+            section = policy.get('task_budget')
+            try:
+                bound = (isinstance(section, dict) and _hex(entry['task_budget_sha256'])
+                         and digest(section) == entry['task_budget_sha256']
+                         and allocation_changes(section['tasks']) == entry['changes'])
+            except (KeyError, TypeError, AttributeError, ValueError):
+                bound = False
+            if not bound:
                 raise LimitExtensionError('Task budget allocation differs from the frozen profile')
             del policy['task_budget']
         elif entry['operation'] == REALLOCATE:
@@ -791,6 +801,9 @@ def _extended(source, proposal, authorization_sha, sha):
                                  source_policy_sha256=digest(source['envelope']))
         envelope['binding'].setdefault('deadline_extensions', []).append(copy.deepcopy(entry['deadline']))
         counters['deadline_at'] = d['new_deadline_at']
+    if proposal['operation'] == ALLOCATE:
+        # The whole allocated section, prior_invocations included, is bound in the chain.
+        entry['task_budget_sha256'] = digest(proposal['new_profile']['task_budget'])
     envelope['binding'].setdefault('limit_extensions', []).append(entry)
     counters['policy_sha256'] = digest(envelope)
     attempts = None

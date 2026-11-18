@@ -206,7 +206,11 @@ part of the donor's cap that is neither consumed nor committed moves: an open
 or uncertain reservation is committed, and so is a dollar reserve
 (`reserve_per_invocation`), which stays charged after the call. A transfer
 creates no budget and refunds nothing: the run caps and the sum of the task caps
-stay the same. Without an allocation, a transfer is refused: a run created
+stay the same. Dollar task caps and transfer amounts are decimals with at most
+six places (more is refused), so the donor loses exactly what the recipient
+gains. Recorded charges are compared at their exact value, never rounded: the
+views show consumption rounded up and availability rounded down, and a
+transfer is checked against the exact available amount. Without an allocation, a transfer is refused: a run created
 before this feature first needs `allocate_task_budget`. Raising the overall cap
 of the run stays an `extend_global_limit`.
 
@@ -336,7 +340,11 @@ extension is refused.
 
 The extended envelope keeps a bound chain in `binding.limit_extensions`: each
 entry records the operation, the old and new values, the proposal and
-authorization hashes and the hash of the parent envelope. Every load of the
+authorization hashes and the hash of the parent envelope. An
+`allocate_task_budget` entry also records the hash of the whole allocated
+`task_budget` section (`task_budget_sha256`, `prior_invocations` included):
+undoing it checks that hash and the recorded changes before removing the
+section, so an altered, added or dropped task cap is refused. Every load of the
 limits undoes the chain of the current limits root step by step and refuses a
 chain that does not restore its parent exactly. The selector of a reconciled run
 still binds the envelope its generation was authorized with: resolution accepts

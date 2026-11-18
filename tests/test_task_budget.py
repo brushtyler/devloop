@@ -322,6 +322,108 @@ class ExistingRunTests(unittest.TestCase):
         # The chain undoes both operations exactly.
         self.assertNotIn('task_budget', unwind(run.load()[0], None)['policy'])
 
+    def test_tampered_allocation_fails_integrity(self):
+        """The chain binds the whole allocated section: caps, dimensions and prior invocations."""
+        run = self.run
+        sha = run.propose(run.request('allocate_task_budget', allocation={
+            'T01': {'invocations': 1}, 'T02': {'invocations': 4, 'cli_estimate_usd': 3}}))
+        run.approve(sha)
+        run.activate(sha)
+        envelope, counters = run.load()
+        entry = envelope['binding']['limit_extensions'][-1]
+        self.assertEqual(entry['task_budget_sha256'], digest(envelope['policy']['task_budget']))
+        self.assertNotIn('task_budget', unwind(envelope, None)['policy'])
+
+        def raised_cap(section):
+            section['tasks']['T01']['invocations'] = 3
+
+        def added_dimension(section):
+            section['tasks']['T01']['metered_usd'] = 1
+
+        def dropped_prior(section):
+            section['prior_invocations'].remove(self.prior)
+
+        def changed_digest(section):
+            section['tasks']['T01']['invocations'] = 3
+            envelope_copy['binding']['limit_extensions'][-1]['changes'][0]['new'] = 3
+
+        for tamper in (raised_cap, added_dimension, dropped_prior, changed_digest):
+            with self.subTest(tamper=tamper.__name__):
+                envelope_copy = copy.deepcopy(envelope)
+                tamper(envelope_copy['policy']['task_budget'])
+                with self.assertRaisesRegex(LimitExtensionError, 'allocation differs from the frozen profile'):
+                    unwind(envelope_copy, None)
+        # With every local reference updated, the load still refuses the altered allocation.
+        envelope_copy = copy.deepcopy(envelope)
+        raised_cap(envelope_copy['policy']['task_budget'])
+        atomic_json(run.ticket / 'limits/policy.json', envelope_copy)
+        journal = TaskJournal(run.ticket / 'limits')
+        journal.load()
+        journal.append('FORGED', dict(counters, policy_sha256=digest(envelope_copy)))
+        mode = dict(kind='bounded-i2', policy_sha256=digest(envelope_copy))
+        atomic_json(run.ticket / 'execution-mode.json', dict(mode, status='ACTIVE'))
+        state = json.loads((run.ticket / 'state.json').read_text())
+        atomic_json(run.ticket / 'state.json', dict(state, bounded_execution=mode))
+        with self.assertRaisesRegex(DevelopmentBlocked, 'limit extension chain'):
+            run.load()
+
+
+class MoneyPrecisionTests(unittest.TestCase):
+    """Criterion 2: dollar amounts are exact; no rounding moves consumption or creates budget."""
+    def state(self, *charges, task_id='T01'):
+        rows = {}
+        for index, cost in enumerate(charges):
+            rows['c%d' % index] = dict(role='03-dev', phase='03-dev', engine='claude', status='returned',
+                                       usage={'metered_usd': None, 'cli_estimate_usd': cost},
+                                       account='task', task_id=task_id)
+        return {'invocations': rows}
+
+    def test_transfer_never_takes_unrounded_consumption(self):
+        p = budget_policy(T01={'cli_estimate_usd': 2}, T02={'cli_estimate_usd': 1})
+        state = self.state(1.0000004)
+        usage = tb.usage(p, state, 'T01')['cli_estimate_usd']
+        # Consumption is shown rounded up and availability down, never the reverse.
+        self.assertEqual((usage['consumed'], usage['available']), (1.000001, 0.999999))
+        with self.assertRaisesRegex(tb.TaskBudgetError, 'consumed or committed'):
+            tb.reallocate(p, state, dict(from_task='T01', to_task='T02', amounts={'cli_estimate_usd': 1}))
+        profile, _, _ = tb.reallocate(p, state, dict(from_task='T01', to_task='T02',
+                                                      amounts={'cli_estimate_usd': 0.999999}))
+        self.assertEqual(profile['task_budget']['tasks']['T01']['cli_estimate_usd'], 1.000001)
+        self.assertGreaterEqual(tb.amount(profile['task_budget']['tasks']['T01']['cli_estimate_usd']),
+                                tb.Fraction(1.0000004))
+
+    def test_transfer_conserves_the_sum_of_the_caps(self):
+        from decimal import Decimal
+        p = budget_policy(T01={'cli_estimate_usd': 1.234567}, T02={'cli_estimate_usd': 2.123456})
+        profile, changes, _ = tb.reallocate(p, self.state(), dict(from_task='T01', to_task='T02',
+                                                                  amounts={'cli_estimate_usd': 0.1}))
+        tasks = profile['task_budget']['tasks']
+        self.assertEqual((tasks['T01']['cli_estimate_usd'], tasks['T02']['cli_estimate_usd']), (1.134567, 2.223456))
+        self.assertEqual(Decimal(repr(tasks['T01']['cli_estimate_usd'])) + Decimal(repr(tasks['T02']['cli_estimate_usd'])),
+                         Decimal('3.358023'))
+        self.assertEqual([c['new'] for c in changes], [1.134567, 2.223456])
+
+    def test_more_than_six_decimals_are_refused(self):
+        with self.assertRaisesRegex(tb.TaskBudgetError, 'decimal places'):
+            tb.validate(budget_policy(T01={'cli_estimate_usd': 1.2345678}))
+        p = budget_policy(T01={'cli_estimate_usd': 2}, T02={'cli_estimate_usd': 1})
+        with self.assertRaisesRegex(tb.TaskBudgetError, 'decimal places'):
+            tb.reallocate(p, self.state(), dict(from_task='T01', to_task='T02', amounts={'cli_estimate_usd': 1e-7}))
+
+    def test_caps_and_residual_compare_exact_amounts(self):
+        p = budget_policy(T01={'cli_estimate_usd': 1})
+        # A tiny recorded charge plus a full reserve exceeds the cap; rounding would admit it.
+        candidate = dict(conservative_usage={'metered_usd': 1, 'cli_estimate_usd': 1})
+        self.assertIsNotNone(tb.exhausted(p, self.state(0.0000004), 'T01', '03-dev', '03-dev', candidate))
+        self.assertIsNone(tb.exhausted(p, self.state(), 'T01', '03-dev', '03-dev', candidate))
+        # The residual of the run is the cap less the exact consumption.
+        base = budget_policy()
+        with self.assertRaisesRegex(tb.TaskBudgetError, 'exceed the residual'):
+            tb.allocate(base, self.state(9.0000004, task_id='T02'), {'T01': {'cli_estimate_usd': 1}}, {'T01'})
+        _, _, facts = tb.allocate(base, self.state(9.0000004, task_id='T02'),
+                                  {'T01': {'cli_estimate_usd': 0.999999}}, {'T01'})
+        self.assertEqual(facts['residual']['cli_estimate_usd']['residual'], 0.999999)
+
 
 class EffectsTests(unittest.TestCase):
     """Criterion 4: overrides stay distinct from the run defaults; effects appear in proposal and status."""

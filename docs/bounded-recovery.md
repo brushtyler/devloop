@@ -61,7 +61,8 @@ Each reservation records its account: the task a developer call is made for
 (`account: task`, `task_id`), or the shared run account (`account: run`) for a
 call no task owns. A profile may declare per-task caps in its optional
 `task_budget` section: overrides of the cumulative dimensions on top of the run
-caps, which stay the defaults and the overall limit. The pre-flight check of a
+caps, which stay the defaults and the overall limit (dollar task caps have at
+most six decimal places). The pre-flight check of a
 task attempt and the reservation apply them. An existing run gets an allocation,
 and allocated tasks exchange unused cap, only through the operator-authorized
 [per-task budget operations](limit-extensions.md#per-task-budget-and-reallocation).

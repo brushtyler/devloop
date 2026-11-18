@@ -30,6 +30,8 @@ Pure functions: no I/O, no lock, no clock. The limit-extension contract
 import copy
 import math
 import re
+from decimal import Decimal
+from fractions import Fraction
 
 
 CAPABILITY = 'task-budget-v1'
@@ -38,7 +40,11 @@ MONEY = ('metered_usd', 'cli_estimate_usd')
 FAMILIES = ('role_invocations', 'phase_invocations')
 TASK = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')
 UNCONFIRMED = ('reserved', 'uncertain')
+# Dollar caps and transfer amounts are decimals with at most PLACES places, so a
+# transfer moves an exact amount and the sum of the caps is conserved. Recorded
+# charges are taken at their exact value and never rounded down.
 PLACES = 6
+SCALE = 10 ** PLACES
 
 
 class TaskBudgetError(ValueError):
@@ -49,8 +55,34 @@ def _number(value):
     return type(value) in (int, float) and math.isfinite(value)
 
 
-def _money(value):
-    return round(value, PLACES)
+def amount(value):
+    """Exact value of a dollar cap or transfer amount: a decimal with at most PLACES places."""
+    if type(value) is int:
+        return Fraction(value)
+    exact = Decimal(repr(value))
+    if exact.as_tuple().exponent < -PLACES:
+        raise TaskBudgetError('A dollar task cap or transfer has at most %d decimal places' % PLACES)
+    return Fraction(exact)
+
+
+def _decimal(value):
+    """The JSON number of an exact dollar cap; refused when a float cannot carry it exactly."""
+    if value.denominator == 1 and abs(value) < 2 ** 53:
+        return int(value)
+    result = float(value)
+    if Fraction(Decimal(repr(result))) != value:
+        raise TaskBudgetError('A dollar task cap cannot be represented exactly')
+    return result
+
+
+def _up(value):
+    """An exact dollar amount shown with PLACES places, never below it (consumption)."""
+    return float(Fraction(math.ceil(value * SCALE), SCALE))
+
+
+def _down(value):
+    """An exact dollar amount shown with PLACES places, never above it (availability)."""
+    return float(Fraction(math.floor(value * SCALE), SCALE))
 
 
 def flat(caps):
@@ -107,9 +139,9 @@ def validate(policy):
                     raise TaskBudgetError('A task cap needs the run cap of the same dimension: ' + dimension[:80])
                 if not _number(value) or value < 0 or dimension not in MONEY and type(value) is not int:
                     raise TaskBudgetError('Invalid task cap: ' + dimension[:80])
-                totals.setdefault(dimension, []).append(value)
+                totals.setdefault(dimension, []).append(amount(value) if dimension in MONEY else value)
         for dimension, values in totals.items():
-            if _money(math.fsum(values)) > run_cap(policy, dimension):
+            if sum(values) > Fraction(run_cap(policy, dimension)):
                 raise TaskBudgetError('Task caps exceed the run cap: ' + dimension[:80])
     except (KeyError, TypeError, AttributeError):
         raise TaskBudgetError('Malformed task budget') from None
@@ -134,8 +166,13 @@ def account(row):
 
 
 def _charge(row, kind):
-    from ssdlc_recovery import LimitsStore
-    return LimitsStore._kind_charge(row, kind)
+    """Exact dollar charge of ``row``: the rule of ``LimitsStore._kind_charge`` without float rounding."""
+    from ssdlc_recovery import RESERVE
+    observed = Fraction(row.get('usage', {}).get(kind) or 0)
+    reserve = Fraction(row.get('conservative_usage', {}).get(kind, 0))
+    if row.get('usage_model') == RESERVE:
+        return max(observed, reserve)
+    return observed + reserve
 
 
 def _counts(row, dimension, role=None, phase=None):
@@ -152,7 +189,8 @@ def _measure(rows, dimensions):
     """Consumed and committed amounts of ``rows`` in ``dimensions``.
 
     An open or uncertain reservation is committed. So is a dollar reserve that
-    stays charged after the call: an observation can only raise it.
+    stays charged after the call: an observation can only raise it. Dollar
+    amounts are exact fractions, never rounded.
     """
     consumed = {dimension: 0 for dimension in dimensions}
     committed = {dimension: 0 for dimension in dimensions}
@@ -161,7 +199,7 @@ def _measure(rows, dimensions):
         for dimension in dimensions:
             if dimension in MONEY:
                 charge = _charge(row, dimension)
-                reserve = min(row.get('conservative_usage', {}).get(dimension, 0), charge)
+                reserve = min(Fraction(row.get('conservative_usage', {}).get(dimension, 0)), charge)
                 if open_row:
                     committed[dimension] += charge
                 else:
@@ -169,10 +207,17 @@ def _measure(rows, dimensions):
                     consumed[dimension] += charge - reserve
             elif _counts(row, dimension):
                 (committed if open_row else consumed)[dimension] += 1
-    for dimension in MONEY:
-        if dimension in consumed:
-            consumed[dimension], committed[dimension] = _money(consumed[dimension]), _money(committed[dimension])
     return consumed, committed
+
+
+def _shown(values):
+    """Consumed or committed amounts for display: dollars rounded up, never down."""
+    return {d: _up(v) if d in MONEY else v for d, v in values.items()}
+
+
+def _available(cap, consumed, committed, dimension):
+    """Exact availability of a cap: what is neither consumed nor committed."""
+    return (amount(cap) if dimension in MONEY else cap) - consumed - committed
 
 
 def task_rows(policy, state, task_id):
@@ -186,11 +231,14 @@ def usage(policy, state, task_id):
     """Per dimension of the task's caps: cap, consumed, committed and available."""
     caps = flat(policy['task_budget']['tasks'][task_id])
     consumed, committed = _measure(task_rows(policy, state, task_id), caps)
+    shown_consumed, shown_committed = _shown(consumed), _shown(committed)
     result = {}
     for dimension, cap in sorted(caps.items()):
-        available = cap - consumed[dimension] - committed[dimension]
-        result[dimension] = dict(cap=cap, consumed=consumed[dimension], committed=committed[dimension],
-                                 available=_money(available) if dimension in MONEY else available)
+        available = _available(cap, consumed[dimension], committed[dimension], dimension)
+        # Dollars: consumption shown rounded up and availability down, so the
+        # view never offers more than the exact amount a transfer may take.
+        result[dimension] = dict(cap=cap, consumed=shown_consumed[dimension], committed=shown_committed[dimension],
+                                 available=_down(available) if dimension in MONEY else available)
     return result
 
 
@@ -213,21 +261,20 @@ def exhausted(policy, state, task_id, role, phase, candidate=None):
     for kind in MONEY:
         if kind not in caps:
             continue
-        total = math.fsum(_charge(row, kind) for row in rows)
+        total, cap = sum(_charge(row, kind) for row in rows), amount(caps[kind])
         if candidate is not None and candidate.get('conservative_usage'):
-            if _money(total + _charge(candidate, kind)) > caps[kind]:
+            if total + _charge(candidate, kind) > cap:
                 return 'Live unknown-usage reserve would exceed the ' + kind + ' cap of task ' + task_id
-        elif _money(total) >= caps[kind]:
+        elif total >= cap:
             return 'Task ' + task_id + ' exhausted its ' + kind + ' cap'
     return None
 
 
 def _run_used(policy, state):
-    """Run-wide consumed plus committed amounts in every dimension a task can be capped in."""
+    """Run-wide consumed plus committed amounts (exact) in every dimension a task can be capped in."""
     dimensions = list(SCALARS) + [family + '.' + name for family in FAMILIES for name in policy[family]]
     consumed, committed = _measure(list(state['invocations'].values()), dimensions)
-    return {d: _money(consumed[d] + committed[d]) if d in MONEY else consumed[d] + committed[d]
-            for d in dimensions}
+    return {d: consumed[d] + committed[d] for d in dimensions}
 
 
 def accounts(policy, state):
@@ -236,7 +283,7 @@ def accounts(policy, state):
     for name in ('run', 'unattributed'):
         rows = [row for row in state['invocations'].values() if account(row) == name]
         consumed, committed = _measure(rows, SCALARS)
-        result[name] = dict(invocations=len(rows), consumed=consumed, committed=committed)
+        result[name] = dict(invocations=len(rows), consumed=_shown(consumed), committed=_shown(committed))
     return result
 
 
@@ -317,6 +364,11 @@ def effects(before, after, state, tasks, plan, changed):
     return rows
 
 
+def allocation_changes(tasks):
+    """The changes an allocation of ``tasks`` records: one per task and dimension, ``old`` null."""
+    return _changes({}, tasks)
+
+
 def allocate(policy, state, allocation, plan_tasks):
     """The ``task_budget`` of an existing run without one, from the residual.
 
@@ -347,12 +399,16 @@ def allocate(policy, state, allocation, plan_tasks):
     used = _run_used(policy, state)
     residual = {}
     for dimension in sorted({d for caps in tasks.values() for d in flat(caps)}):
-        left = run_cap(policy, dimension) - used[dimension]
-        total = math.fsum(flat(caps).get(dimension, 0) for caps in tasks.values())
-        residual[dimension] = dict(run_cap=run_cap(policy, dimension), used=used[dimension],
-                                   residual=_money(left) if dimension in MONEY else left,
-                                   allocated=_money(total) if dimension in MONEY else int(total))
-        if _money(total) > _money(left):
+        money = dimension in MONEY
+        # Exact comparison: the run cap less everything consumed or committed.
+        left = (Fraction(run_cap(policy, dimension)) if money else run_cap(policy, dimension)) - used[dimension]
+        total = sum(amount(c[dimension]) if money else c[dimension]
+                    for c in map(flat, tasks.values()) if dimension in c)
+        residual[dimension] = dict(run_cap=run_cap(policy, dimension),
+                                   used=_up(used[dimension]) if money else used[dimension],
+                                   residual=_down(left) if money else left,
+                                   allocated=_decimal(total) if money else total)
+        if total > left:
             raise TaskBudgetError('Task quotas exceed the residual of the run: ' + dimension[:80])
     facts = dict(allocation=copy.deepcopy(tasks), residual=residual,
                  prior_invocations=len(state['invocations']), prior_accounts=accounts(policy, state),
@@ -383,18 +439,29 @@ def reallocate(policy, state, transfer):
     available = usage(policy, state, donor)
     tasks = copy.deepcopy(budget['tasks'])
     give, take = flat(tasks[donor]), flat(tasks[recipient])
-    for dimension, amount in transfer['amounts'].items():
+    consumed, committed = _measure(task_rows(policy, state, donor), give)
+    for dimension, value in transfer['amounts'].items():
         run_cap(policy, dimension)
         if dimension not in give or dimension not in take:
             raise TaskBudgetError('Both tasks need a cap in ' + str(dimension)[:80] + ' to transfer it')
         money = dimension in MONEY
-        if not _number(amount) or amount <= 0 or not money and type(amount) is not int:
+        if not _number(value) or value <= 0 or not money and type(value) is not int:
             raise TaskBudgetError('A transfer moves a positive amount of ' + dimension[:80])
-        if amount > available[dimension]['available']:
+        moved = amount(value) if money else value
+        # Against the exact cap that is neither consumed nor committed, never a rounded view.
+        if moved > _available(give[dimension], consumed[dimension], committed[dimension], dimension):
             raise TaskBudgetError('The transfer would take consumed or committed amounts of ' + donor
                                   + ' in ' + dimension[:80] + ': only %s is available' % available[dimension]['available'])
-        give[dimension] = _money(give[dimension] - amount) if money else give[dimension] - amount
-        take[dimension] = _money(take[dimension] + amount) if money else take[dimension] + amount
+        if money:
+            # Exact decimals: the donor loses exactly what the recipient gains.
+            before = amount(give[dimension]) + amount(take[dimension])
+            give[dimension] = _decimal(amount(give[dimension]) - moved)
+            take[dimension] = _decimal(amount(take[dimension]) + moved)
+            if amount(give[dimension]) + amount(take[dimension]) != before:
+                raise TaskBudgetError('The transfer would not conserve the ' + dimension[:80] + ' caps')
+        else:
+            give[dimension] -= moved
+            take[dimension] += moved
     tasks[donor], tasks[recipient] = nest(give), nest(take)
     profile = copy.deepcopy(policy)
     profile['task_budget']['tasks'] = tasks
