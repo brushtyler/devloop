@@ -7,14 +7,15 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import devloop
 from devloop import markdown
 from devloop.config import ConfigError, load_config, load_data, parse_config
 from devloop.dispatcher import Dispatcher
 from devloop.journal import JOURNAL, AttemptActive, JournalError, TurnJournal
-from devloop.ledger import Ledger, attempt_marker
-from devloop.planning import plan
+from devloop.ledger import Ledger, attempt_branch, attempt_marker, parse_branch
+from devloop.planning import Action, plan
 from helpers.devloop_fakes import META, SHA1
 from test_devloop import CFG, implemented
 from test_devloop_ledger import ReportingRunner, TreeWS
@@ -30,12 +31,25 @@ def journal_events(state_dir, *kinds):
             if e['event'] in kinds]
 
 
-def raw_pr(meta, state='OPEN', labels=()):
-    """PR 100 of issue 7 as `gh pr list` (and, with ``state``, `find_pr`) return it."""
-    return {'number': 100, 'title': 't', 'body': markdown.publishable('Why.', 'pr', meta),
-            'labels': [{'name': name} for name in labels], 'headRefName': 'agent/issue-7',
-            'headRefOid': SHA1, 'author': {'login': 'brushtyler'}, 'isCrossRepository': False,
-            'mergeable': 'MERGEABLE', 'mergeStateStatus': 'CLEAN', 'state': state}
+def raw_pr(meta, state='OPEN', labels=(), number=100, branch='agent/issue-7', created=None):
+    """PR 100 of issue 7 as `gh pr list` (and, with ``state``, `find_pr` and `branch_prs`)
+    return it; ``created``: its ``createdAt``."""
+    raw = {'number': number, 'title': 't', 'body': markdown.publishable('Why.', 'pr', meta),
+           'labels': [{'name': name} for name in labels], 'headRefName': branch,
+           'headRefOid': SHA1, 'author': {'login': 'brushtyler'}, 'isCrossRepository': False,
+           'mergeable': 'MERGEABLE', 'mergeStateStatus': 'CLEAN', 'state': state}
+    if created is not None:
+        raw['createdAt'] = created
+    return raw
+
+
+def concluded_attempt(state_dir, issue=7, pr=100):
+    """The marker of an attempt of issue ``issue`` whose PR ``pr`` was closed without merge."""
+    j = TurnJournal(state_dir)
+    attempt = j.open_attempt(j.story(CFG.repo, issue, 'h1')['story'], issue)['attempt']
+    j.bind_pr(attempt, pr)
+    j.conclude(attempt, 'closed', f'PR #{pr} CLOSED')
+    return attempt_marker(j.attempts()[attempt])
 
 
 def candidate(cfg):
@@ -55,8 +69,26 @@ class AttemptDispatcherTests(unittest.TestCase):
         self.logs = []
         runner = ReportingRunner(*(implemented() for _ in range(outputs)), gh=self.gh)
         self.ledger = Ledger(self.gh, state_dir=self.state)
-        return Dispatcher(cfg, self.gh, TreeWS(), runner, log=self.logs.append,
+        self.d_ws = TreeWS()
+        return Dispatcher(cfg, self.gh, self.d_ws, runner, log=self.logs.append,
                           ledger=self.ledger)
+
+    def restart(self, cfg=ATTEMPT, outputs=3):
+        """A new dispatcher on the same repository and state directory (a restart)."""
+        runner = ReportingRunner(*(implemented() for _ in range(outputs)), gh=self.gh)
+        self.ledger = Ledger(self.gh, state_dir=self.state)
+        return Dispatcher(cfg, self.gh, self.d_ws, runner, log=self.logs.append,
+                          ledger=self.ledger)
+
+    def numbered_prs(self, first=101):
+        """``create_pr`` answers with a new number from ``first`` on."""
+        created, numbers = self.gh.create_pr, iter(range(first, first + 10))
+
+        def create_pr(**kw):
+            created(**kw)
+            number = next(numbers)
+            return number, f'https://example/pr/{number}'
+        self.gh.create_pr = create_pr
 
     def pr_marker(self, index=-1):
         return markdown.read_marker(self.gh.created[index]['body'], 'pr')
@@ -130,6 +162,12 @@ class AttemptDispatcherTests(unittest.TestCase):
         self.assertEqual((old['outcome'], old['reason']), ('closed', 'PR #100 CLOSED'))
         self.assertEqual((new['n'], new['outcome'], new['story']), (2, None, first['story']))
         self.assertEqual(self.pr_marker()['attempt']['n'], 2)
+        # One branch per attempt (ADR 0004 §3.2 (i)): the first keeps the branch of today, the
+        # second has its own, and the branch of the first is never pushed again.
+        self.assertEqual([c['head'] for c in self.gh.created],
+                         ['agent/issue-7', 'agent/issue-7-attempt-2'])
+        self.assertEqual([branch for branch, _ in self.d_ws.pushes],
+                         ['agent/issue-7', 'agent/issue-7-attempt-2'])
 
     def test_the_journal_refuses_a_second_active_attempt(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -261,6 +299,187 @@ class AttemptDispatcherTests(unittest.TestCase):
         (pr,) = d.snapshot().prs
         self.assertEqual(pr.attempt_problem, '')
 
+    def test_a_pr_whose_marker_lost_its_attempt_is_escalated(self):
+        d = self.make()
+        d._do_implement(7)
+        mark = self.pr_marker()
+        (attempt,) = self.ledger.journal.attempts()
+        self.ledger.journal.conclude(attempt, 'closed', 'PR #100 CLOSED')
+        # Reopened with the field removed from its marker: the journal ties the PR to its
+        # attempt, concluded. It is not taken for a PR opened before.
+        bare = {k: v for k, v in mark.items() if k != 'attempt'}
+        self.gh.open = [raw_pr(bare, labels=('agent:review',))]
+        self.gh.labels[100] = {'agent:review'}
+        snap = d.snapshot()
+        (pr,) = snap.prs
+        self.assertIn('non ha il tentativo', pr.attempt_problem)
+        self.assertIn(attempt, pr.attempt_problem)
+        self.assertEqual([(a.kind, a.number) for a in plan(snap, ATTEMPT)], [('attempt', 100)])
+        with self.assertRaisesRegex(JournalError, 'non ha il tentativo'):
+            d._open_turn((100, 'review', 1), candidate(ATTEMPT), 'review', 'agent:review')
+        # Nor is a PR without the field while its issue has an active attempt without a
+        # recorded PR: it may be the PR of that attempt.
+        self.state = self.state / 'other'
+        d = self.make()
+        self.ledger.journal.story(CFG.repo, 7, 'h1')
+        active = d._take_attempt(7)
+        self.gh.open = [raw_pr(META, labels=('agent:review',))]
+        self.gh.labels[100] = {'agent:review'}
+        (pr,) = d.snapshot().prs
+        self.assertIn('senza PR registrata', pr.attempt_problem)
+        self.assertIn(active['attempt'], pr.attempt_problem)
+
+    def test_a_pr_not_recorded_is_found_before_the_attempt_resumes(self):
+        d = self.make()
+        # The PR is opened, the write that records it fails.
+        with mock.patch.object(self.ledger.journal, 'bind_pr',
+                               side_effect=JournalError('disk full')):
+            d._do_implement(7)
+        (first,) = self.ledger.journal.attempts().values()
+        self.assertIsNone(first['pr'])
+        self.assertTrue(any('not recorded' in line for line in self.logs))
+        # Closed before any turn on it, then a restart: the tick has nothing to settle, and the
+        # next implementation finds the PR on the attempt's branch, records it and its outcome,
+        # and only then opens the next attempt, on its own branch. An older PR of the branch,
+        # opened before the attempt without one in its marker, does not count.
+        self.gh.any_prs = {
+            90: raw_pr(META, state='CLOSED', number=90, created='2000-01-01T00:00:00Z'),
+            100: raw_pr(self.pr_marker(), state='CLOSED', created='2999-01-01T00:00:00Z')}
+        d = self.restart()
+        d._settle_attempts(types.SimpleNamespace(prs=[]), False)
+        self.assertIsNone(self.ledger.journal.attempts()[first['attempt']]['outcome'])
+        self.numbered_prs()
+        d._do_implement(7)
+        old, new = self.ledger.journal.attempts().values()
+        self.assertEqual((old['attempt'], old['pr'], old['outcome']),
+                         (first['attempt'], 100, 'closed'))
+        self.assertEqual((new['n'], new['pr'], new['outcome']), (2, 101, None))
+        self.assertEqual(self.gh.created[-1]['head'], 'agent/issue-7-attempt-2')
+        self.assertEqual(self.pr_marker()['attempt']['attempt'], new['attempt'])
+
+    def test_an_attempt_whose_pr_cannot_be_told_is_not_resumed(self):
+        d = self.make()
+        with mock.patch.object(self.ledger.journal, 'bind_pr',
+                               side_effect=JournalError('disk full')):
+            d._do_implement(7)
+        (first,) = self.ledger.journal.attempts().values()
+        # A PR of the attempt's branch, opened since the attempt, whose marker does not name it:
+        # it may be its PR with the field removed. No resume, no second PR, no new attempt.
+        bare = {k: v for k, v in self.pr_marker().items() if k != 'attempt'}
+        self.gh.any_prs = {100: raw_pr(bare, state='CLOSED', created='2999-01-01T00:00:00Z')}
+        created, pushes = len(self.gh.created), len(self.d_ws.pushes)
+        d = self.restart()
+        with self.assertRaisesRegex(JournalError, r'may be its own \(#100\)'):
+            d._do_implement(7)
+        self.assertEqual((len(self.gh.created), len(self.d_ws.pushes)), (created, pushes))
+        self.assertEqual(list(self.ledger.journal.attempts().values()), [first])
+
+    def test_the_branch_of_each_attempt(self):
+        self.assertEqual(attempt_branch('agent/issue-', 7, 1), 'agent/issue-7')
+        self.assertEqual(attempt_branch('agent/issue-', 7, 2), 'agent/issue-7-attempt-2')
+        for ref, parsed in (('agent/issue-7', (7, None)), ('agent/issue-7-attempt-2', (7, 2)),
+                            ('agent/issue-7-attempt-12', (7, 12)),
+                            ('agent/issue-7-attempt-1', None), ('agent/issue-7-attempt-02', None),
+                            ('agent/issue-7-attempt-', None), ('agent/issue-7-x', None),
+                            ('agent/issue-x', None), ('other/7', None)):
+            with self.subTest(ref=ref):
+                self.assertEqual(parse_branch('agent/issue-', ref), parsed)
+        # The branch of a later attempt holds only the PR of that attempt; that of today, only
+        # a PR of the first attempt or of none (opened before).
+        d = self.make()
+        first = dict(AttemptRecordTests.GOOD)
+        second = dict(AttemptRecordTests.GOOD, n=2)
+        for meta, branch, kept in ((dict(META, attempt=second), 'agent/issue-7-attempt-2', True),
+                                   (dict(META, attempt=first), 'agent/issue-7', True),
+                                   (META, 'agent/issue-7', True),
+                                   (META, 'agent/issue-7-attempt-2', False),
+                                   (dict(META, attempt=first), 'agent/issue-7-attempt-2', False),
+                                   (dict(META, attempt=second), 'agent/issue-7', False)):
+            with self.subTest(branch=branch, attempt=meta.get('attempt', {}).get('n')):
+                pr = d._devloop_pr(raw_pr(meta, branch=branch))
+                self.assertEqual((pr.issue, pr.head_ref, bool(pr.meta)), (7, branch, kept))
+        # A PR merged from the branch of a later attempt resolved the issue too.
+        j = self.ledger.journal
+        story = j.story(CFG.repo, 7, 'h1')['story']
+        j.conclude(j.open_attempt(story, 7)['attempt'], 'closed')
+        j.open_attempt(story, 7)
+        self.gh.merged_raw = [dict(raw_pr(dict(META, attempt=second), state='MERGED', number=101,
+                                          branch='agent/issue-7-attempt-2'),
+                                   mergeCommit={'oid': SHA1})]
+        self.assertEqual(d._merged_prs(7), [{'number': 101, 'merge_commit': SHA1}])
+        self.assertEqual(d._issue_branches(7), ['agent/issue-7', 'agent/issue-7-attempt-2'])
+        self.assertEqual(self.make(STORY)._issue_branches(7), ['agent/issue-7'])
+
+    def test_an_incomplete_attempt_in_the_marker_does_not_stop_the_snapshot(self):
+        d = self.make()
+        d._do_implement(7)
+        mark = self.pr_marker()
+        del mark['attempt']['revision']
+        self.gh.open = [raw_pr(mark, labels=('agent:review',)),
+                        raw_pr(dict(META, issue=8), labels=('agent:review',), number=101,
+                               branch='agent/issue-8')]
+        self.gh.labels.update({100: {'agent:review'}, 101: {'agent:review'}})
+        snap = d.snapshot()
+        prs = {pr.number: pr for pr in snap.prs}
+        # The marker does not hold: the PR is one whose marker was lost; the others are planned.
+        self.assertEqual((prs[100].meta, prs[101].attempt_problem), ({}, ''))
+        self.assertIn(('lost_meta', 100), [(a.kind, a.number) for a in plan(snap, ATTEMPT)])
+
+    def test_a_pr_whose_attempt_does_not_hold_gets_no_conclave(self):
+        from helpers.devloop_fakes import FakeIdentities
+        from test_devloop import pr as make_pr
+        from test_devloop_conclave import CCFG, ConclaveWS, HookRunner, ThreadGH, proposal
+        from test_devloop_conclave import Base as ConclaveBase
+        mark = concluded_attempt(self.state)
+        self.gh, self.logs = ThreadGH(), []
+        runner = HookRunner(proposal())
+        cfg = dataclasses.replace(CCFG, story_identity=True, attempt_identity=True)
+        d = Dispatcher(cfg, self.gh, ConclaveWS(), runner, log=self.logs.append,
+                       identities=FakeIdentities(self.gh),
+                       ledger=Ledger(self.gh, state_dir=self.state))
+        ConclaveBase.block_pr(self)  # PR #100 in agent:needs-operator, its fixer stopped
+        target = dataclasses.replace(make_pr(labels=('agent:needs-operator',)),
+                                     meta=dict(META, attempt=mark))
+        target.attempt_problem = d._attempt_problem(100, 7, mark)
+        self.assertIn('già concluso', target.attempt_problem)
+        # A conclave would be due, but the PR gets none.
+        self.assertIsNotNone(d._conclave_view(100, self.gh.pr_comments(100), target))
+        self.assertEqual(d._conclave_items([target]), [])
+        # Planned anyway (the snapshot of another tick): no call and nothing recorded, so no
+        # member a later tick would count as missing.
+        self.assertIsNone(d._run_action(Action('conclave', 100), {100: target}))
+        self.assertEqual((runner.calls, self.gh.conclaves(100)), ([], []))
+        self.assertTrue(any(line.startswith('  no conclave: ') for line in self.logs))
+        # A call reached all the same is refused before it is recorded as started.
+        with self.assertRaisesRegex(JournalError, 'già concluso'):
+            d._check_attempt(100, 7, mark)
+
+    def test_a_pr_whose_attempt_does_not_hold_gets_no_advisory_review(self):
+        from helpers.devloop_fakes import FakeIdentities
+        from test_devloop import FakeRunner
+        from test_devloop import pr as make_pr
+        from test_devloop_advisory import ON, AdvisoryWS, OperatorGH, answer
+        mark = concluded_attempt(self.state)
+        cfg = dataclasses.replace(ON, story_identity=True, attempt_identity=True)
+        self.gh = OperatorGH()
+        self.gh.labels[100] = {'agent:needs-operator'}
+        ws, runner, logs = AdvisoryWS(), FakeRunner(answer()), []
+        d = Dispatcher(cfg, self.gh, ws, runner, log=logs.append,
+                       identities=FakeIdentities(self.gh),
+                       ledger=Ledger(self.gh, state_dir=self.state))
+        target = dataclasses.replace(make_pr(labels=('agent:needs-operator',)),
+                                     meta=dict(META, attempt=mark))
+        target.attempt_problem = d._attempt_problem(100, 7, mark)
+        self.assertEqual(d._advisory_items([target]), [])
+        # Without the problem it would get one.
+        self.assertEqual(d._advisory_items([dataclasses.replace(target, attempt_problem='')]),
+                         [{'number': 100, 'head': SHA1}])
+        # Planned anyway: no turn, no checkout, and no failure recorded for a retry.
+        self.assertIsNone(d._do_advisory(target))
+        self.assertEqual((runner.calls, ws.copies), ([], []))
+        self.assertTrue(any(line.startswith('  no advisory review: ') for line in logs))
+        self.assertIsNone(d.advisory_failures.get(100, SHA1))
+
 
 class AttemptRecordTests(unittest.TestCase):
     GOOD = {'attempt': 'attempt-3-0123abcd', 'story': 'story-1-0123abcd',
@@ -274,7 +493,10 @@ class AttemptRecordTests(unittest.TestCase):
         for bad in (None, 'attempt-3-0123abcd', dict(self.GOOD, attempt='turn-3-0123abcd'),
                     dict(self.GOOD, story='x'), dict(self.GOOD, phase='design'),
                     dict(self.GOOD, n=0), dict(self.GOOD, revision=1),
-                    dict(self.GOOD, design='a' * 40)):
+                    dict(self.GOOD, design='a' * 40),
+                    # Every field is required, the null ones included.
+                    *({k: v for k, v in self.GOOD.items() if k != missing}
+                      for missing in self.GOOD)):
             with self.subTest(bad=bad):
                 self.assertIsNone(markdown.read_marker(
                     markdown.publishable('x', 'pr', dict(META, attempt=bad)), 'pr'))

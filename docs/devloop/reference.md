@@ -37,7 +37,8 @@ another value stops devloop at startup. `story_identity` (a boolean, default `fa
 records its story and the `request` record carries the dispatcher's `story` marker. Off, devloop
 records no story; another value stops devloop at startup. `attempt_identity` (a boolean, default
 `false`) turns on the [attempt identity](protocol.md#attempt-identity) (#384): one active attempt
-per phase, in the journal, in the PR marker and in the turn records. It needs
+per phase, in the journal, in the PR marker and in the turn records, with one branch per attempt
+(`<branch_prefix><issue>` for the first, `<branch_prefix><issue>-attempt-<k>` after). It needs
 `story_identity = true`; without it, or with another value, devloop stops at startup. Off,
 devloop records no attempt.
 `[merge]` (`mode`, `levels`, `operator_only_paths`) and `roles.supervisor` set the

@@ -47,6 +47,9 @@ Where a method went, when it was not obvious:
 - ``find_pr`` (#362) is in ``CodeReview``: the dispatcher reads, in any state, the PR of a
   legacy turn imported from ``ledger-open-turns.json`` that is not among the open ones, to
   link the turn to the issue of its work.
+- ``branch_prs`` (#384) is in ``CodeReview``: with ``attempt_identity``, before resuming an
+  attempt without a recorded PR, the dispatcher looks on its branch for a PR already published
+  for it, in any state.
 - ``issue_dependencies`` (#277) is in ``Tracker``: the native "blocked by" dependencies between
   issues, which the planner reads to hold back an issue while a trusted block is open.
 - ``repo_labels`` and ``rename_label`` (#248) are in ``Tracker`` next to ``ensure_label``:
@@ -141,6 +144,10 @@ class CodeReview(Protocol):
     def find_pr(self, number):
         """Pull request ``number`` in any state, as :meth:`open_prs` (the mergeability fields
         aside) with ``state``, or None when ``number`` is an issue."""
+
+    def branch_prs(self, branch):
+        """The pull requests from head branch ``branch`` in any state, as :meth:`open_prs`
+        (the mergeability fields aside) with ``state`` and ``createdAt``."""
 
     def merge_state(self, pr):
         """``clean``, ``conflict`` or ``unknown`` for ``pr`` as :meth:`open_prs` returns it."""

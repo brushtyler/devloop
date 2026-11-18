@@ -195,7 +195,7 @@ from .dispatch_supervision import SupervisionMixin, UntrustedChange
 from .github import GitHubError, author_login
 from .journal import (CLOSED, MERGED, RECONCILE_COMMAND, JournalError, TurnBlocked, blocked_text,
                       reconcile_command)
-from .ledger import comment_ref, fix_register, open_turns
+from .ledger import attempt_branch, comment_ref, fix_register, open_turns, parse_branch
 from .localtests import module_command, select_modules
 from .markdown import (RESUME, carries_record, dispatcher_header, publishable, read_marker,
                        render_cycle, render_escalation, render_operator_merge)
@@ -907,14 +907,28 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
     def _merged_prs(self, number):
         """The merged devloop PRs of issue ``number`` (#228), newest first, as ``{number,
         merge_commit}``: those from its branch that ``_devloop_pr`` recognises, whether or not
-        their body still ends with the marker. Who merged them does not matter."""
+        their body still ends with the marker. Who merged them does not matter. With
+        ``attempt_identity`` (#384) also those of the branch of each later attempt of the issue
+        that the journal holds (``attempt_branch``)."""
         found = []
-        for raw in self.gh.merged_prs(f'{self.cfg.branch_prefix}{number}'):
-            pr = self._devloop_pr(dict(raw, headRefOid=raw.get('headRefOid') or ''))
-            if pr is not None and pr.issue == number:
-                found.append({'number': pr.number,
-                              'merge_commit': (raw.get('mergeCommit') or {}).get('oid')})
-        return found
+        for branch in self._issue_branches(number):
+            for raw in self.gh.merged_prs(branch):
+                pr = self._devloop_pr(dict(raw, headRefOid=raw.get('headRefOid') or ''))
+                if pr is not None and pr.issue == number:
+                    found.append({'number': pr.number,
+                                  'merge_commit': (raw.get('mergeCommit') or {}).get('oid')})
+        return sorted(found, key=lambda p: -p['number'])
+
+    def _issue_branches(self, number):
+        """The devloop branches of issue ``number``: that of today and, with
+        ``attempt_identity`` (#384), that of each later attempt the journal holds."""
+        prefix = self.cfg.branch_prefix
+        branches = [attempt_branch(prefix, number, 1)]
+        if self.cfg.attempt_identity and self.ledger is not None:
+            branches += [attempt_branch(prefix, number, n) for n in sorted(
+                {a['n'] for a in self.ledger.journal.attempts().values()
+                 if a['repo'] == self.cfg.repo and a['issue'] == number and a['n'] > 1})]
+        return branches
 
     def _devloop_pr(self, raw):
         """A devloop PR is recognised by its branch, ``<branch_prefix><issue>``, so that it stays
@@ -926,14 +940,20 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         if raw.get('isCrossRepository') or (author not in self.cfg.trusted_users
                                             and author not in agents):
             return None
-        ref, prefix = raw['headRefName'], self.cfg.branch_prefix
-        suffix = ref[len(prefix):] if ref.startswith(prefix) else ''
-        if not (suffix.isascii() and suffix.isdigit()):
+        ref = raw['headRefName']
+        parsed = parse_branch(self.cfg.branch_prefix, ref)
+        if parsed is None:
             return None
-        issue = int(suffix)
+        issue, n = parsed
         meta = read_marker(raw.get('body', ''), 'pr')
         if meta is not None and (meta['issue'] != issue
                                  or not self._wrote(author, meta['implementer'])):
+            meta = None
+        if meta is not None and ('attempt' in meta or n is not None) and (
+                meta.get('attempt') or {}).get('n') != (n or 1):
+            # One branch per attempt (#384, ``attempt_branch``): the branch of today holds the
+            # first, that of a later attempt only the PR of that attempt. A marker of another
+            # number, or without the attempt on a later attempt's branch, does not hold.
             meta = None
         return PullRequest(number=raw['number'], issue=issue,
                            head_ref=ref, head_sha=raw['headRefOid'],
@@ -1690,9 +1710,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         A turn on a PR belongs to the attempt of its marker, which the journal must confirm
         (``_attempt_problem``): an attempt it does not hold, of another issue or PR, or already
         concluded (a PR reopened after its outcome) raises ``JournalError``, and the step
-        escalates. A PR opened before, without the attempt in its marker, has none. A turn on
-        the issue (implementation, retries, fallbacks) belongs to its active attempt, opened by
-        ``_take_attempt``. A readiness check belongs to none: it comes before the takeover."""
+        escalates. A PR opened before, without the attempt in its marker, has none, unless the
+        journal ties it to one: then the field was removed, and the turn is refused as well. A
+        turn on the issue (implementation, retries, fallbacks) belongs to its active attempt,
+        opened by ``_take_attempt``. A readiness check belongs to none: it comes before the
+        takeover."""
         if not self.cfg.attempt_identity or kind == 'preflight':
             return None
         journal = self.ledger.journal
@@ -1700,29 +1722,54 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             active = journal.active_attempt_of(self.cfg.repo, issue)
             return active['attempt'] if active is not None else None
         mark = self._pr_attempts.get(number)
+        self._check_attempt(number, issue, mark)
         if mark is None:
             return None
-        problem = self._attempt_problem(number, issue, mark)
-        if problem:
-            raise JournalError(problem)
         # Its PR not recorded yet (a write that failed after the PR was opened): recorded now.
         journal.bind_pr(mark['attempt'], number)
         return mark['attempt']
 
+    def _check_attempt(self, number, issue, mark):
+        """Raise ``JournalError`` when the attempt ``mark`` of PR ``number`` does not hold
+        (#384, ``_attempt_problem``): before a turn, or a step that records something, on it."""
+        problem = self._attempt_problem(number, issue, mark)
+        if problem:
+            self.log(f'  PR #{number}: {problem}')
+            raise JournalError(problem)
+
     def _attempt_problem(self, number, issue, mark):
         """Why the attempt ``mark`` of the marker of PR ``number``, of issue ``issue``, does not
-        hold (#384), in Italian; ``''`` when it holds, without ``attempt_identity`` and for a PR
-        whose marker has no attempt (opened before: handled as today). The journal is the
-        authority (ADR 0004, D7): the attempt must be one it holds, of the same story, phase,
-        number and issue, active, and of this PR or of none yet."""
-        if not self.cfg.attempt_identity or mark is None or self.ledger is None:
+        hold (#384), in Italian; ``''`` when it holds and without ``attempt_identity``. The
+        journal is the authority (ADR 0004, D7): the attempt must be one it holds, of the same
+        story, phase, number, key and issue, active, and of this PR or of none yet.
+
+        A PR whose marker has no attempt (opened before) is handled as today, unless the journal
+        ties it to an attempt: the attempt that has it as its PR, or an active attempt of its
+        issue without a recorded PR, whose PR this may be. Then the field was removed from the
+        marker, or its absence cannot be told from that, and the PR does not hold either."""
+        if not self.cfg.attempt_identity or self.ledger is None:
             return ''
         try:
-            current = self.ledger.journal.attempts().get(mark['attempt'])
+            attempts = self.ledger.journal.attempts()
         except JournalError as exc:
             return f'il journal dei turni non è leggibile: {exc}'
+        if mark is None:
+            mine = [a for a in attempts.values() if a['repo'] == self.cfg.repo]
+            bound = next((a for a in mine if a['pr'] == number), None)
+            unbound = next((a for a in mine if a['issue'] == issue and a['pr'] is None
+                            and a['outcome'] is None), None)
+            if bound is None and unbound is None:
+                return ''
+            return ('il marker della PR non ha il tentativo, ma il journal dei turni '
+                    + (f'le associa il tentativo `{bound["attempt"]}`' if bound is not None else
+                       f'ha il tentativo attivo `{unbound["attempt"]}` dell\'issue #{issue} '
+                       'senza PR registrata, che potrebbe essere questa')
+                    + ': il campo `attempt` è stato rimosso, o la sua assenza non si distingue '
+                    'da una rimozione')
+        current = attempts.get(mark['attempt'])
         if (current is None or current['repo'] != self.cfg.repo or current['issue'] != issue
-                or any(current[k] != mark[k] for k in ('story', 'phase', 'revision', 'n'))):
+                or any(current[k] != mark[k]
+                       for k in ('story', 'phase', 'revision', 'n', 'design', 'task'))):
             return (f'il tentativo `{mark["attempt"]}` del marker della PR non è confermato dal '
                     'journal dei turni, che ne è l\'autorità')
         if current['pr'] is not None and current['pr'] != number:
@@ -1775,7 +1822,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         merged or closed and its outcome recorded. While that PR is open, ``AttemptActive``: a
         second active attempt in the same phase is refused, and the step escalates. None when
         the identity is off and for an issue that is not the root of a story (a child has no
-        attempt of its own until step 3)."""
+        attempt of its own until step 3).
+
+        An active attempt without a recorded PR is not proof that no PR exists: the write that
+        records it may have failed after the PR was opened. Its PR is looked for first on its
+        branch (``_attempt_pr``), recorded, and concluded if no longer open; when it cannot be
+        told, ``JournalError``, and the step escalates instead of resuming."""
         if not self.cfg.attempt_identity or self.ledger is None:
             return None
         journal = self.ledger.journal
@@ -1784,6 +1836,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             return None
         story = found[0]['story']
         active = journal.active_attempt(story)
+        if active is not None and active['pr'] is None:
+            published = self._attempt_pr(active)
+            if published is not None:
+                self.log(f'  PR #{published} of attempt {active["attempt"]} recorded now')
+                active = journal.bind_pr(active['attempt'], published)
         if active is not None and active['pr'] is not None and self._conclude_attempt(active):
             active = None
         if active is not None and active['pr'] is None:
@@ -1792,6 +1849,32 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         attempt = journal.open_attempt(story, number)
         self.log(f'  attempt {attempt["attempt"]} (n. {attempt["n"]}) of #{number} opened')
         return attempt
+
+    def _attempt_branch(self, attempt):
+        """The branch of ``attempt`` (#384, ``attempt_branch``)."""
+        return attempt_branch(self.cfg.branch_prefix, attempt['issue'], attempt['n'])
+
+    def _attempt_pr(self, attempt):
+        """The PR already published for ``attempt``, active and without a recorded PR (#384),
+        in any state, or None when there is none: the devloop PR of its branch whose marker
+        names it. A devloop PR of that branch opened since the attempt (its ``at``) whose
+        marker does not name it may be its PR with the field removed: ``JournalError``, since
+        resuming could publish a second PR of the same attempt. So does more than one PR."""
+        named, unsure = [], []
+        for raw in self.gh.branch_prs(self._attempt_branch(attempt)):
+            pr = self._devloop_pr(dict(raw, headRefOid=raw.get('headRefOid') or ''))
+            if pr is None or pr.issue != attempt['issue']:
+                continue
+            if (pr.meta.get('attempt') or {}).get('attempt') == attempt['attempt']:
+                named.append(pr.number)
+            elif (raw.get('createdAt') or '') >= (attempt.get('at') or ''):
+                unsure.append(pr.number)
+        if len(named) > 1 or unsure:
+            prs = ', '.join(f'#{n}' for n in sorted(named + unsure))
+            raise JournalError(
+                f'attempt {attempt["attempt"]} has no PR recorded, and its branch has PRs that '
+                f'may be its own ({prs}): it is not resumed until the operator decides')
+        return named[0] if named else None
 
     def _do_attempt(self, pr):
         """A PR whose attempt does not hold (#384, ``_attempt_problem``): to the operator."""

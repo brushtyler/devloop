@@ -568,7 +568,8 @@ because GitHub closed it or a person merged, is left alone. A failure to close i
 dispatcher log and leaves the merge as it is.
 
 **Safety net in the planner.** An open issue in `agent:ready` with a merged devloop PR (a PR from
-its branch, `<branch_prefix><issue>`, by a trusted user or a devloop app, merged by anyone) is
+its branch, `<branch_prefix><issue>`, or with `attempt_identity` the branch of one of its later
+[attempts](protocol.md#attempt-identity), by a trusted user or a devloop app, merged by anyone) is
 never checked nor implemented again. It becomes a `merged_issue` escalation, non-critical: in
 `"auto"` it goes to `agent:needs-supervisor` and keeps `agent:ready`, otherwise to
 `agent:needs-operator` without `agent:ready`. `/devloop retry` is refused for it: closing the issue,
@@ -844,8 +845,11 @@ With `attempt_identity = true` too (#384, off by default) the implementation of 
 runs in an [attempt](protocol.md#attempt-identity), opened in the journal before its first turn:
 its PR marker and its turn records carry it. Retries before the PR resume the same attempt; a new
 one starts only once the PR of the previous one is merged or closed, and is refused while that PR
-is open. A PR reopened after its attempt concluded is escalated (`attempt`). PRs opened before,
-without an attempt in their marker, are handled as before.
+is open. Each attempt has its own branch and PR: the first keeps `agent/issue-<n>`, the next ones
+use `agent/issue-<n>-attempt-<k>`, so a new attempt never overwrites the branch of the previous
+one. A PR reopened after its attempt concluded, or whose marker lost the attempt the journal ties
+to it, is escalated (`attempt`). PRs opened before, without an attempt in their marker, are
+handled as before.
 
 ### Advisory review for the operator
 

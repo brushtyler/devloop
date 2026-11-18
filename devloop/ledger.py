@@ -88,6 +88,29 @@ def attempt_marker(attempt):
                                     'task')}
 
 
+# The branch of an attempt after the first (#384, ADR 0004 §3.2, recommendation (i)): the
+# branch of today followed by its number in the phase.
+_ATTEMPT_SUFFIX = re.compile(r'([0-9]+)(?:-attempt-([1-9][0-9]*))?')
+
+
+def attempt_branch(prefix, issue, n):
+    """The branch of attempt number ``n`` of issue ``issue`` (#384): one branch per attempt,
+    with its identity in the name. The first keeps the branch of today, ``<prefix><issue>``;
+    the next ones are ``<prefix><issue>-attempt-<n>``, so that a new attempt never overwrites
+    the branch of the previous one."""
+    return f'{prefix}{issue}' if n == 1 else f'{prefix}{issue}-attempt-{n}'
+
+
+def parse_branch(prefix, ref):
+    """``(issue, n)`` of a devloop branch ``ref`` (``attempt_branch``), ``n`` None for the
+    branch of today; None for any other branch."""
+    suffix = ref[len(prefix):] if ref.startswith(prefix) else ''
+    found = _ATTEMPT_SUFFIX.fullmatch(suffix) if suffix.isascii() else None
+    if found is None or (found[2] is not None and int(found[2]) < 2):
+        return None
+    return int(found[1]), int(found[2]) if found[2] is not None else None
+
+
 def comment_ref(comment):
     """A comment's id: the numeric id of its URL (``gh issue view``), else its ``id``, else
     None."""

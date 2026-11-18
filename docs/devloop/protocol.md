@@ -240,7 +240,9 @@ A CI already failed before the review is a CI round, as before: no review runs o
 
 ## PR marker
 
-A devloop PR is recognised by its branch, `agent/issue-<n>`, opened by a trusted user. Its body
+A devloop PR is recognised by its branch, `agent/issue-<n>` (or, with `attempt_identity`, the
+branch of a later [attempt](#attempt-identity), `agent/issue-<n>-attempt-<k>`), opened by a
+trusted user. Its body
 ends with a hidden marker that records the issue, implementer and reviewer: text may be edited
 above it, but the marker must stay the last line. With `attempt_identity` on (#384) it also
 records the [attempt](#attempt-identity) of the PR, which the journal must confirm.
@@ -1043,25 +1045,40 @@ records no attempt and behaves as before.
 - **One active attempt.** A new attempt of a phase is opened only once the previous one is
   concluded with a recorded outcome, and it consumes the same story budget. While the PR of the
   active attempt is open, a new one is refused (`AttemptActive`) before any turn, label or PR, and
-  the step escalates. A merged issue is still never implemented again (#228).
+  the step escalates. A merged issue is still never implemented again (#228), whichever attempt's
+  branch the merged PR came from.
+- **A PR not recorded.** An active attempt without a recorded PR is no proof that it has none:
+  the write that records the PR may fail after the PR was opened. Before resuming it, the
+  takeover looks on the attempt's branch, in any state, for the devloop PR whose marker names it:
+  found, it is recorded, and concluded if no longer open, before a new attempt is opened. A PR of
+  that branch opened since the attempt whose marker does not name it may be its PR with the field
+  removed: the attempt is not resumed and the step escalates, so that no attempt gets two PRs.
 - **Outcome.** A `concluded` event, once per attempt: `merged` or `closed` (its PR merged, or
   closed without merge), recorded by the tick that finds the PR no longer open (`find_pr`), or by
   the takeover that needs a new attempt; `abandoned`, with its reason, from an internal primitive
   (`TurnJournal.abandon`) that **no command and no flow calls yet**.
 - **PR.** The PR of the attempt is recorded with an `attempt_pr` event, one per attempt, and its
   [marker](#pr-marker) carries `attempt`: `{attempt, story, phase, revision, n, design, task}`.
-  The journal is the authority (D7): on each snapshot an attempt of a PR marker that the journal
-  does not hold, of another issue, phase or number, of another PR, or already concluded (a PR
-  reopened after it was merged or closed) does not hold: the PR gets no work nor merge, and is
-  escalated (`attempt`). A turn on such a PR is refused too.
+  Every field is required, the null ones included: a marker without one does not hold, and the
+  PR is one whose marker was lost. The journal is the authority (D7): on each snapshot an attempt
+  of a PR marker that the journal does not hold, of another issue, phase, number or key, of
+  another PR, or already concluded (a PR reopened after it was merged or closed) does not hold.
+  Nor does a marker without `attempt` on a PR the journal ties to an attempt: the attempt that
+  has it as its PR, or an active attempt of its issue without a recorded PR (the field may have
+  been removed). Such a PR gets no work, merge, conclave or advisory review, and is escalated
+  (`attempt`); a turn on it is refused too.
 - **Turns.** The intent of each turn of an attempt in the journal and its `turn` record on GitHub
   carry `attempt`, its id, with a "Tentativo" row in the text. A readiness check belongs to no
   attempt.
 
-Each attempt keeps the branch of today (`branch_prefix` and the issue number): with one active
-attempt per phase no two attempts of an issue are on GitHub at the same time, and a closed PR is
-never reused: the next attempt opens a new one. PRs opened before, or with the identity off, have
-no attempt in their marker: they are handled as before, and their turns belong to no attempt.
+**One branch and one PR per attempt**, with the identity of the attempt in the branch name: the
+first attempt keeps the branch of today (`branch_prefix` and the issue number, `agent/issue-<n>`),
+attempt number `k` from the second on has `agent/issue-<n>-attempt-<k>`. A new attempt never
+overwrites the branch of the previous one, and a closed PR is never reused. A PR of an attempt
+branch is a devloop PR of issue `<n>` only with the marker of attempt `k`; the branch of today
+holds the first attempt or a PR of none. Otherwise its marker does not hold, as when it is lost.
+PRs opened before, or with the identity off, have no attempt in their marker: they are handled as
+before, and their turns belong to no attempt.
 
 ## PR receipt
 
