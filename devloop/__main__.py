@@ -467,9 +467,11 @@ def main(argv=None):
         snap = dispatcher.snapshot()
         for pr in snap.prs:
             log(pr_status_line(pr, cfg, dispatcher.status_reviews(pr)))
-        log(pr_counts_line(snap, cfg))
-        for line in dispatcher.status_budget(snap):
+        # With the budget on (#393), the budget of the stories in progress; nothing when off.
+        for line in dispatcher.budget_status(list(snap.working_issues)
+                                             + [pr.issue for pr in snap.prs]):
             log(line)
+        log(pr_counts_line(snap, cfg))
         for line in queue_lines(snap):
             log(line)
         for action in plan(snap, cfg):

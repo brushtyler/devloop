@@ -3,8 +3,8 @@
 import dataclasses
 import unittest
 
-from devloop import markdown, receipt
-from devloop.config import MergePolicy
+from devloop import budget, markdown, receipt
+from devloop.config import BudgetPolicy, MergePolicy
 from devloop.dispatcher import Dispatcher
 from devloop.ledger import Ledger
 from helpers.devloop_fakes import FakeGH
@@ -284,6 +284,35 @@ class ReceiptPromotionTests(unittest.TestCase):
         self.assertIn('Nessun round di review (livello 0).', comment['body'])
         self.assertIn('Livello **0**.', comment['body'])
 
+    def test_the_receipt_has_the_budget_section_only_with_the_budget_on(self):
+        rule = (('model', 'unmetered_quota'), ('reason', 'the turn caps bound it'))
+        on = BudgetPolicy(
+            enabled=True, turns=10, phase_turns=(('implementation', 10),), wall_seconds=86400,
+            role_turns=tuple((role, 3) for role in ('implement', 'fix', 'review', 'sync')),
+            metered_usd=1.0, cli_estimate_usd=5.0,
+            usage=tuple((key, rule) for key, agent in CFG.agents.items()
+                        if agent.kind != 'claude'))
+        bodies = {}
+        for cfg in (CFG, dataclasses.replace(CFG, budget=on)):
+            with self.subTest(on=cfg.budget.enabled):
+                d = self.make()
+                d.cfg = cfg
+                story = self.ledger.journal.story(CFG.repo, 7, 'h1')['story']
+                self.seed_issue()
+                d.tick()
+                self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'}, self.logs)
+                ((comment, record),) = receipts(self.gh)
+                bodies[cfg.budget.enabled] = comment['body']
+        self.assertNotIn('### Budget della storia', bodies[False])
+        body = bodies[True]
+        self.assertIn('### Budget della storia', body)
+        self.assertIn(f'Storia `{story}` (radice #7)', body)
+        # The review turn, booked in the envelope; the implementation was not.
+        self.assertIn('| Turni | 1 | 0 | 9 | 10 |', body)
+        self.assertIn('| Turni `review` | 1 | 0 | 2 | 3 |', body)
+        self.assertIn('| `metered_usd` | non attestato (turni senza valore attestato: 1) |',
+                      body)
+
     def test_without_a_ledger_no_receipt_is_written(self):
         gh = ReceiptGH()
         gh.labels[100] = {'agent:review'}
@@ -400,6 +429,44 @@ class ReceiptContentTests(unittest.TestCase):
     def test_the_digest_binds_the_content(self):
         self.assertNotEqual(receipt.record(self.content())['digest'],
                             receipt.record(self.content(promotion=2))['digest'])
+
+    def test_the_budget_section_only_with_the_budget_on(self):
+        # Off (#393): no key, the same content and digest as before, no section.
+        off = self.content()
+        self.assertNotIn('budget', off)
+        self.assertEqual(off, self.content(budget=None))
+        self.assertNotIn('### Budget della storia', receipt.section(off))
+        self.assertNotIn('Budget', receipt.section(off))
+        # On: the state of the story's budget, a dollar value no turn reports as such.
+        policy = BudgetPolicy(enabled=True, turns=10, role_turns=(('implement', 3),),
+                              phase_turns=(('implementation', 10),), wall_seconds=3600,
+                              metered_usd=1.0, cli_estimate_usd=5.0)
+        row = {'role': 'implement', 'phase': 'implementation', 'engine': 'codex',
+               'status': 'returned', 'usage': {'metered_usd': None, 'cli_estimate_usd': None},
+               'usage_model': 'unmetered_quota'}
+        current = {'started_at': 1_800_000_000, 'deadline_at': 1_800_003_600,
+                   'invocations': {'t1': row}}
+        found = budget.view(policy, {'story': 'story-1-ab', 'issue': 7}, current,
+                            1_800_000_600)
+        on = self.content(budget=found)
+        self.assertEqual(on['budget'], found)
+        self.assertNotEqual(receipt.digest(on), receipt.digest(off))
+        text = receipt.section(on)
+        self.assertIn('### Budget della storia', text)
+        self.assertIn('Storia `story-1-ab` (radice #7), stato del journal al '
+                      '2027-01-15T08:10:00Z.', text)
+        self.assertIn('| Turni | 1 | 0 | 9 | 10 |', text)
+        self.assertIn('| Turni `implement` | 1 | 0 | 2 | 3 |', text)
+        self.assertIn('| Fase `implementation` | 1 | 0 | 9 | 10 |', text)
+        self.assertIn('| `metered_usd` | non attestato (turni senza valore attestato: 1) | '
+                      '0.00 USD | non attestato | 1.00 USD |', text)
+        self.assertIn('| `cli_estimate_usd` | non attestato (turni senza valore attestato: 1) | '
+                      '0.00 USD | non attestato | 5.00 USD |', text)
+        self.assertNotIn('| `metered_usd` | 0', text)
+        self.assertIn('| Tempo (s) | 600 | — | 3000 | 3600 |', text)
+        # On, for an issue of no story.
+        text = receipt.section(self.content(budget={'story': None}))
+        self.assertIn('L\'issue non appartiene a nessuna storia del journal', text)
 
     def test_superseded_keeps_the_text_and_marks_the_marker(self):
         content = self.content()
