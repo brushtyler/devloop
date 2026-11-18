@@ -570,7 +570,10 @@ one wins; without one, the latest that does not apply is answered.
 An escalation whose class is critical or unknown, or that was not routed to the supervisor,
 accepts no command: the command is refused and the item goes to `agent:needs-operator`. A command
 the class does not admit (`accept-defaults` or `decide` on a tool failure, `retry` on defaults) is refused
-and the escalation stays with the supervisor.
+and the escalation stays with the supervisor. The answer lists the commands that apply to the
+escalation (`retry` for `tool_failure` and `sync_failed`, `accept-defaults` and `decide` for
+`preflight_default`, none of them for an input changed since, `escalate` always) and the manual
+steps without the supervisor.
 
 **Trace.** Every command applied leaves a dispatcher record, described in
 [Supervision trace](protocol.md#supervision-trace).
@@ -579,14 +582,20 @@ and the escalation stays with the supervisor.
 
 On an issue or PR in `agent:needs-operator` (#321) a user in `trusted_users` may use the same
 commands, in every merge mode, written after the record that put the item there: the latest
-dispatcher notice (an escalation, an agent that stopped, an [operator merge](#ready-prs-whose-merge-is-the-operators))
-or readiness check. The commands valid there are:
+dispatcher notice (an escalation, an agent that stopped, an [operator merge](#ready-prs-whose-merge-is-the-operators),
+which counts from the promotion it was last written for), escalation of the review level
+(`review_level`, `level_zero`) or failed readiness check. When the item moved on after that
+record (a command applied, a passed readiness check, a review, a fix, a sync, a policy record
+that is no escalation), the label is no longer that record's, for example one added by hand:
+no command applies, and the answer gives the manual steps. The commands valid there are:
 
 - `/devloop retry`, when that record is an escalation that records the step that failed and the
   key of its input. Every escalation of a failed agent, `gh` or git step (`tool_failure`,
   `failure`, `untrusted`) and of a sync with conflicts that failed (`sync_failed`,
-  `sync_sensitive`, `tool_failure`) records it, also when it goes to the operator; so do `supervisor_escalated` and `supervisor_refused`, which keep
-  the step of the supervisor's escalation. Their comment says that `/devloop retry` applies. The
+  `sync_sensitive`, `tool_failure`) records it, also when it goes to the operator; so do `supervisor_escalated` and `supervisor_refused`
+  of a `tool_failure` or `sync_failed` escalation, which keep the step of the supervisor's
+  escalation. Their comment says that `/devloop retry` applies. An issue whose readiness check
+  failed this way keeps `agent:ready`, so that the check can run again. The
   class may be critical: a retry runs the step again and bypasses none of its checks. The
   conditions are the supervisor's: the input of the step must still be the one that failed (the
   same head, base and request), the issue must not be resolved by a merged devloop PR, a blocked
@@ -596,10 +605,13 @@ or readiness check. The commands valid there are:
   `agent:needs-supervisor`); a PR goes back to the label of its step and the next tick runs it,
   an issue's step runs at once.
 - `/devloop accept-defaults` and `/devloop decide <decisions>`, when that record is a failed
-  readiness check of class `preflight_default`, under the conditions of the supervisor's
-  commands above. devloop records the defaults or the decisions and removes
-  `agent:needs-operator`, and the issue goes back in the queue. An ordinary comment of a trusted
-  user with the decisions works as well ([Readiness check](#readiness-check-before-implementation)).
+  readiness check of class `preflight_default`, or the supervisor's escalation of one handed to
+  the operator (`supervisor_escalated`, `supervisor_refused`), under the conditions of the
+  supervisor's commands above. devloop records the defaults or the decisions and removes
+  `agent:needs-operator`, and the issue goes back in the queue. On a failed check, an ordinary
+  comment of a trusted user with the decisions works as well
+  ([Readiness check](#readiness-check-before-implementation)): the dispatcher's answers to
+  commands leave the block to the check.
 
 `/devloop escalate` never applies: the escalation is already the operator's. A command of the
 supervisor's identity on an escalation to the operator does not apply either. Every command that

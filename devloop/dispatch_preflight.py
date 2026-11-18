@@ -65,6 +65,12 @@ class PreflightMixin:
         return (read_marker(comment.get('body', ''), 'ledger') is not None
                 and self._signed((comment.get('author') or {}).get('login')))
 
+    def _supervision_record(self, comment):
+        """Whether ``comment`` is the dispatcher's trace of a command (#182, #321), signed by
+        it: an answer, a decision or a retry, never an escalation (that is a notice)."""
+        return (read_marker(comment.get('body', ''), 'supervision') is not None
+                and self._signed((comment.get('author') or {}).get('login')))
+
     def _automatic(self, comment):
         """Whether ``comment`` is one of devloop's own records: published text (``_published``)
         that ends with a valid devloop marker. Only these leave the readiness hash: any other
@@ -103,9 +109,11 @@ class PreflightMixin:
         if not records:
             return False
         position, record = records[-1]
-        # The dispatcher's ledger records (#133), such as the turn of a recheck, are no
+        # The dispatcher's ledger records (#133), such as the turn of a recheck, and its traces
+        # of commands (#321), such as the answer to a command that does not apply, are no
         # escalation: they leave the block's attribution as it is.
         if not record['blocked'] or any(self._published(c) and not self._ledger_record(c)
+                                        and not self._supervision_record(c)
                                         for c in comments[position + 1:]):
             return False
         labelers = self._operator_labelers(number)

@@ -454,6 +454,40 @@ class RetryTests(Case):
         self.assertEqual(self.decisions(100)[-1]['outcome'], 'refused')
         self.assertIn('input superato', self.gh.threads[100][-1]['body'])
 
+    def test_a_refused_command_says_how_to_resume(self):
+        retry_or_escalate = 'commento `/devloop retry` oppure `/devloop escalate <motivo>`.'
+        cases = {
+            'accept-defaults on a tool failure': ('/devloop accept-defaults', None,
+                                                  retry_or_escalate),
+            'retry on defaults': ('/devloop retry', None,
+                                  'commento `/devloop accept-defaults` oppure `/devloop decide '
+                                  '<decisioni>` oppure `/devloop escalate <motivo>`.'),
+            'retry of a superseded head': ('/devloop retry', SHA2,
+                                           'commento `/devloop escalate <motivo>`.'),
+        }
+        for name, (text, head, how) in cases.items():
+            with self.subTest(case=name):
+                if name == 'retry on defaults':
+                    number = 7
+                    d = self.make(PREFLIGHT_AUTO, checked(False, [gap('default_available')]),
+                                  has_pr=False)
+                    self.assertEqual(self.tick(d), [('preflight', 7)])
+                else:
+                    number = 100
+                    d = self.make(AUTO, crash())
+                    self.fail_review(d)
+                if head:
+                    self.gh.head = head
+                before = set(self.gh.labels[number])
+                self.gh.command(number, text)
+                self.assertEqual(self.tick(d), [('supervise', number)])
+                self.assertEqual(self.gh.labels[number], before)
+                self.assertEqual(self.decisions(number)[-1]['outcome'], 'refused')
+                body = self.gh.threads[number][-1]['body']
+                self.assertIn('l\'escalation resta al supervisore', body)
+                self.assertIn(how, ' '.join(body.split()))
+                self.assertIn('rimuovere `agent:needs-supervisor`', body)
+
     def test_commands_are_answered_and_not_applied_outside_auto(self):
         d = self.make(AUTO, crash())
         self.fail_review(d)
@@ -730,6 +764,114 @@ class OperatorCommandTests(Case):
         self.runner.outputs.append(checked(True))
         self.assertEqual(self.tick(d), [('preflight', 7)])
         self.assertIn('Accepted default: JSON', self.runner.calls[-1][3])
+
+    def test_a_refused_command_leaves_the_readiness_block_to_the_check(self):
+        cfg = dataclasses.replace(STRICT, preflight=REV)
+        resumes = {'recheck': '/devloop recheck', 'decision in a comment': 'Usa JSON.'}
+        for name, text in resumes.items():
+            with self.subTest(resume=name):
+                d = self.make(cfg, checked(False, [gap('default_available', 'JSON')]),
+                              has_pr=False)
+                self.assertEqual(self.tick(d), [('preflight', 7)])
+                self.assertEqual(self.gh.labels[7], {READY, HUMAN})
+                # The operator's command as written in person, without the attribution header.
+                self.gh.say(7, 'brushtyler', '/devloop retry')
+                self.assertEqual(self.tick(d), [('supervise', 7)])
+                self.assertIn('/devloop recheck', self.answer(7))
+                # The answer is no escalation: the block stays the check's.
+                self.assertTrue(d._preflight_view(7, self.gh.labels[7])['owned'])
+                self.gh.say(7, 'brushtyler', text)
+                self.runner.outputs.append(checked(True))
+                self.assertEqual(self.tick(d), [('preflight', 7)])
+                self.assertEqual(self.gh.labels[7], {READY})
+                self.assertTrue(self.gh.records(7, 'preflight')[-1]['ready'])
+                self.assertEqual([a.kind for a in plan(d.snapshot(), cfg)], ['implement'])
+
+    def test_an_operator_retry_runs_a_readiness_check_that_failed(self):
+        # To the operator at once (strict), or after the supervisor escalated it (auto).
+        def supervisor_escalates(d):
+            self.assertEqual(self.gh.labels[7], {READY, SUPER})
+            self.gh.command(7, '/devloop escalate serve l\'operatore')
+            self.assertEqual(self.tick(d), [('supervise', 7)])
+
+        cases = {'strict': (dataclasses.replace(STRICT, preflight=REV), lambda d: None),
+                 'auto': (PREFLIGHT_AUTO, supervisor_escalates)}
+        for name, (cfg, escalate) in cases.items():
+            with self.subTest(mode=name):
+                d = self.make(cfg, crash(), checked(True), has_pr=False)
+                self.assertEqual(self.tick(d), [('preflight', 7)])
+                escalate(d)
+                # The issue keeps agent:ready: the check runs again only with it.
+                self.assertEqual(self.gh.labels[7], {READY, HUMAN})
+                record = self.escalations(7)[-1]
+                self.assertEqual((record['to'], record['step']), ('operator', 'preflight'))
+                self.assertIn('/devloop retry', self.gh.threads[7][-1]['body'])
+                self.assertEqual(self.tick(d), [])  # it waits for the operator
+                self.gh.say(7, 'brushtyler', '/devloop retry')
+                self.assertEqual(self.tick(d), [('supervise', 7)])
+                self.assertEqual(self.decisions(7)[-1]['outcome'], 'applied')
+                self.assertTrue(self.gh.records(7, 'preflight')[-1]['ready'])
+                self.assertEqual(self.gh.labels[7], {READY})
+
+    def test_defaults_the_supervisor_handed_over_are_the_operators_to_decide(self):
+        d = self.make(PREFLIGHT_AUTO, checked(False, [gap('default_available', 'JSON')]),
+                      has_pr=False)
+        self.assertEqual(self.tick(d), [('preflight', 7)])
+        self.gh.command(7, '/devloop escalate serve l\'operatore')
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        self.assertEqual(self.gh.labels[7], {READY, HUMAN})
+        # The routing key of the defaults is no failed step: no retry is offered.
+        record = self.escalations(7)[-1]
+        self.assertEqual(record['class'], 'supervisor_escalated')
+        self.assertNotIn('step', record)
+        self.assertNotIn('/devloop retry', self.gh.threads[7][-1]['body'])
+        self.gh.say(7, 'brushtyler', '/devloop retry')
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        body = self.answer(7)
+        self.assertIn('che registri un passo da ripetere', body)
+        self.assertIn('`/devloop accept-defaults`', body)
+        self.assertEqual(len(self.runner.calls), 1)
+        self.gh.say(7, 'brushtyler', '/devloop accept-defaults')
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        self.assertEqual(self.decisions(7)[-1]['outcome'], 'accepted')
+        self.assertEqual(self.gh.labels[7], {READY})
+
+    def test_a_retry_answers_the_record_that_put_the_item_there(self):
+        # An escalation of the review level, a policy record, after a tool failure on the head.
+        d = self.make(STRICT, crash())
+        self.fail_review(d)
+        d._policy_comment(pr(), 'Livello', 'x', receipt(), 'level', cls='review_level')
+        self.gh.say(100, 'brushtyler', '/devloop retry')
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertIn('che registri un passo da ripetere', self.answer(100))
+        self.assertEqual(self.gh.labels[100], {HUMAN})
+        self.assertEqual(len(self.runner.calls), 1)
+        # A tool failure already resumed, then agent:needs-operator added by hand.
+        d = self.make(STRICT, crash(), raw_review())
+        self.fail_review(d)
+        self.gh.say(100, 'brushtyler', '/devloop retry')
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertEqual(self.tick(d), [('review', 100)])
+        self.gh.labels[100] = {HUMAN}
+        self.gh.say(100, 'brushtyler', '/devloop retry')
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertIn('che registri un passo da ripetere', self.answer(100))
+        self.assertEqual(self.gh.labels[100], {HUMAN})
+        self.assertEqual(len(self.runner.calls), 2)
+
+    def test_an_operator_merge_notice_counts_from_its_promotion(self):
+        d = self.make(STRICT)
+        promoted = {'event': 'promoted', 'receipt': receipt(), 'checks': []}
+        say = lambda kind, body, payload: self.gh.say(100, 'brushtyler', markdown.publishable(
+            markdown.dispatcher_header() + '\n' + body, kind, payload))
+        say('policy', 'Promossa', promoted)
+        # Written for the first promotion, edited in place for the second one.
+        self.gh.say(100, 'brushtyler', markdown.render_operator_merge(SHA1, 0, 2, 'x', HUMAN))
+        d._escalate_failure(Action('review', 100), pr(), crash())
+        say('policy', 'Promossa di nuovo', promoted)
+        start, anchor = d._operator_anchor(self.gh.pr_comments(100))
+        self.assertEqual(start, 3)
+        self.assertEqual(anchor['record']['event'], 'operator_merge')
 
 
 class AcceptDefaultsTests(Case):

@@ -189,6 +189,53 @@ class SupervisionMixin:
         return {'step': key.get('step'), 'base': self.ws.base_head(),
                 'request': self._request_hash(history, self.gh.issue_comments(number))}
 
+    def _operator_anchor(self, comments):
+        """``(start, anchor)`` of an item in ``agent:needs-operator`` (#321), from its
+        ``comments``: the position after which its commands count, and the record that put it
+        there, ``{kind, record}``. The record is the latest of the dispatcher's notices (an
+        operator merge counts from the promotion it was last written for, since a head promoted
+        again edits its notice), its policy records of an escalation (``review_level``,
+        ``level_zero``) and the failed readiness checks. When the item moved on after it (a
+        command applied, a passed check, a review, fix or sync, a policy record of no
+        escalation), the label is no longer that record's: ``kind`` is None and the commands
+        count after what moved it. ``origin``, for a supervisor's escalation handed to the
+        operator (``supervisor_escalated``, ``supervisor_refused``), is the class of the
+        escalation the supervisor had."""
+        policy = self._dispatcher_records(comments, 'policy')
+        promotions = [p for p, r in policy if r.get('event') == 'promoted']
+        anchors = []
+        for position, record in self._dispatcher_records(comments, 'notice'):
+            promotion = record.get('promotion')
+            if (record.get('event') == 'operator_merge' and isinstance(promotion, int)
+                    and not isinstance(promotion, bool) and 0 < promotion <= len(promotions)):
+                position = max(position, promotions[promotion - 1])
+            anchors.append((position, 'notice', record))
+        anchors += [(p, 'policy', r) for p, r in policy if r.get('class')]
+        checks = self._preflight_records(comments)
+        anchors += [(p, 'preflight', r) for p, r in checks if not r['ready']]
+        anchors.sort(key=lambda entry: entry[0])
+        start, kind, record = anchors[-1] if anchors else (-1, None, {})
+        moved = {p for p, r in checks if r['ready']}
+        moved |= {p for p, r in policy if not r.get('class')}
+        moved |= {p for p, r in self._dispatcher_records(comments, 'supervision')
+                  if r.get('outcome') in ('applied', 'accepted', 'decided')}
+        for position, comment in enumerate(comments):
+            body = comment.get('body', '')
+            if any(read_marker(body, kind) is not None for kind in ('review', 'fix', 'sync')) \
+                    and self._writes_records((comment.get('author') or {}).get('login')):
+                moved.add(position)
+        after = [p for p in moved if p > start]
+        if after:
+            return max(after), {'kind': None, 'record': {}}
+        anchor = {'kind': kind, 'record': record}
+        if kind == 'notice' and record.get('class') in ('supervisor_escalated',
+                                                        'supervisor_refused'):
+            handed = [r for p, r in self._dispatcher_records(comments, 'notice', 'escalation')
+                      if p < start and r.get('to') == 'supervisor']
+            if handed and isinstance(handed[-1].get('class'), str):
+                anchor['origin'] = handed[-1]['class']
+        return start, anchor
+
     def _supervisor_view(self, number, comments, operator=False):
         """The command still to apply on issue or PR ``number``, from its ``comments``:
         ``{command, reason, by, comment, step, anchor}`` or None. ``anchor`` is the record the
@@ -198,9 +245,9 @@ class SupervisionMixin:
         On an item in ``agent:needs-supervisor`` (``operator`` false) only a command written
         after the latest escalation of the dispatcher counts, in merge mode ``auto`` and from
         the supervisor's identity or a trusted user (``_may_hold``). On an item in
-        ``agent:needs-operator`` (#321) a command counts after the record that put it there,
-        the latest dispatcher notice or readiness check (from the start of the thread without
-        one), in any merge mode, from a trusted user; one from the supervisor's identity is
+        ``agent:needs-operator`` (#321) a command counts after the record that put it there
+        (``_operator_anchor``), in any merge mode, from a trusted user; one from the
+        supervisor's identity is
         answered as not applicable. A dispatcher ``supervision`` record spends the command it
         handled, whose comment id it carries, and every command before it. Among the commands
         still waiting the latest applicable one wins; without one, the latest not applicable
@@ -208,17 +255,14 @@ class SupervisionMixin:
         operator's escalation) gets an answer. A command from anyone else is ignored and only
         logged. devloop's own records are never commands."""
         if operator:
-            anchors = sorted([(p, 'notice', r) for p, r in self._dispatcher_records(comments,
-                                                                                     'notice')]
-                             + [(p, 'preflight', r) for p, r in self._preflight_records(comments)],
-                             key=lambda entry: entry[0])
-            start, kind, latest = anchors[-1] if anchors else (-1, None, {})
+            start, anchor = self._operator_anchor(comments)
+            latest = anchor['record']
         else:
             escalations = self._dispatcher_records(comments, 'notice', 'escalation')
             if not escalations:
                 return None
             (start, latest), kind = escalations[-1], 'notice'
-        anchor = {'kind': kind, 'record': latest}
+            anchor = {'kind': kind, 'record': latest}
         spent = None
         for position, record in self._dispatcher_records(comments, 'supervision'):
             applied = record.get('comment')
@@ -327,12 +371,19 @@ class SupervisionMixin:
         escalation = command['anchor']['record']
         cls = escalation.get('class')
         name, by = command['command'], command['by']
+        # The step a retry runs again stays recorded on the way to the operator (#321), only for
+        # the classes a retry admits: the key of a preflight_default or merged_issue escalation
+        # only routes it.
+        carry = ({k: escalation[k] for k in ('step', 'key', 'resume') if k in escalation}
+                 if cls in (TOOL_FAILURE, SYNC_FAILED) and self._retryable(escalation, is_pr)
+                 else None)
         # A tool failure of an issue loses agent:ready on its way to the operator, as any failed
-        # step does; the readiness check keeps it.
+        # step does; the readiness check keeps it, and so does a readiness check the operator
+        # may retry, which runs again only with agent:ready.
         keep_ready = is_pr or cls == PREFLIGHT_DEFAULT
         human_remove = [] if keep_ready else [lb.ready]
-        carry = ({k: escalation[k] for k in ('step', 'key', 'resume') if k in escalation}
-                 if self._retryable(escalation, is_pr) else None)
+        carried_remove = [] if keep_ready or (carry and carry['step'] == 'preflight') \
+            else [lb.ready]
 
         def trace(outcome, text, **extra):
             record = dict(command=name, by=by, reason=command['reason'] or '',
@@ -343,14 +394,13 @@ class SupervisionMixin:
                 OPERATOR_TITLE if operator else SUPERVISOR_TITLE))
             self.log(f'  {name} by {by}: {outcome}')
 
+        stays = 'Il comando è speso; l\'escalation resta al supervisore.'
         if command.get('refusal'):
             where = 'la PR' if is_pr else 'l\'issue'
             how = (f'Il comando è speso; {where} resta in `{lb.needs_operator}`.\n\n'
                    + self._operator_resume(command['anchor'], is_pr) if operator
                    else f'Il comando è speso; {where} resta in `{lb.needs_supervisor}`.\n\n'
-                   f'Per riprendere senza il supervisore: rimuovere `{lb.needs_supervisor}` e '
-                   'impostare la label del passo da eseguire (`agent:ready` sulla issue, '
-                   '`agent:review` o `agent:changes` sulla PR).')
+                   + self._supervisor_resume(escalation, is_pr))
             return trace('refused', f'non applicabile: {command["refusal"]}. {how}')
         if operator:
             return self._operator_command(target, number, labels, comments, command, trace)
@@ -359,24 +409,24 @@ class SupervisionMixin:
                   f'`{cls}`) o non è affidata al supervisore: decide l\'operatore.')
             return self._to_operator(number, f'Il supervisore non può decidere questa escalation '
                                      f'(classe `{cls}`): `/devloop {name}` di `{by}` è stato '
-                                     'rifiutato.', 'supervisor_refused', human_remove, carry)
+                                     'rifiutato.', 'supervisor_refused', carried_remove, carry)
         if name == ESCALATE:
             reason = ' '.join(command['reason'].split())
             trace('escalated', f'l\'escalation passa all\'operatore: {reason}')
             return self._to_operator(number, f'Il supervisore `{by}` passa all\'operatore '
                                      f'l\'escalation di classe `{cls}`: {reason}',
-                                     'supervisor_escalated', human_remove, carry)
+                                     'supervisor_escalated', carried_remove, carry)
         if name in (ACCEPT_DEFAULTS, DECIDE):
             if is_pr or cls != PREFLIGHT_DEFAULT:
                 return trace('refused', 'rifiutato: vale solo per un\'escalation `preflight_default` '
-                             'del controllo di prontezza. Il comando è speso; l\'escalation '
-                             'resta al supervisore.')
+                             f'del controllo di prontezza. {stays}\n\n'
+                             + self._supervisor_resume(escalation, is_pr))
             if name == DECIDE:
                 return self._decide(number, labels, comments, trace, command['reason'])
             return self._accept_defaults(number, labels, comments, trace)
         if cls not in (TOOL_FAILURE, SYNC_FAILED):
             return trace('refused', 'rifiutato: vale solo per le escalation `tool_failure` e '
-                         '`sync_failed`. Il comando è speso; l\'escalation resta al supervisore.')
+                         f'`sync_failed`. {stays}\n\n' + self._supervisor_resume(escalation, is_pr))
         # An issue a merged devloop PR already resolved is never checked nor implemented again
         # (#228), whatever escalation it waits in: the retry becomes a merged_issue escalation.
         merged = [] if is_pr else self._merged_prs(number)
@@ -398,8 +448,8 @@ class SupervisionMixin:
             return trace('refused', 'rifiutato: l\'input del passo è cambiato dopo '
                          'l\'escalation (' + ', '.join(f'`{k}`' for k in sorted(current)
                                                         if current[k] != key.get(k))
-                         + '), quindi il comando si riferisce a un input superato. Il comando è '
-                         'speso; l\'escalation resta al supervisore.')
+                         + f'), quindi il comando si riferisce a un input superato. {stays}\n\n'
+                         + self._supervisor_resume(escalation, is_pr, superseded=True))
 
         # What made the escalation non-critical is checked again, on data read now: a
         # phase:design label, an untrusted text or author, the PR's own merge mode or its
@@ -426,7 +476,7 @@ class SupervisionMixin:
             trace('refused', f'rifiutato: l\'escalation è diventata critica ({why}).')
             return self._to_operator(number, 'Il supervisore non può più decidere questa '
                                      f'escalation: {why}. `/devloop {name}` di `{by}` è stato '
-                                     'rifiutato.', 'supervisor_refused', human_remove, carry)
+                                     'rifiutato.', 'supervisor_refused', carried_remove, carry)
         if current != key:
             return superseded()
 
@@ -477,12 +527,38 @@ class SupervisionMixin:
             self.log(f'  failed: {exc}')
             self._escalate_failure(Action(step, number, 'retry'), None, exc)
 
+    def _supervisor_resume(self, escalation, is_pr, superseded=False):
+        """How an item in ``agent:needs-supervisor`` with ``escalation`` resumes, for the
+        answer to a command that does not apply (#321): the commands that apply to its class in
+        ``auto`` (none outside it; with ``superseded``, an input changed since the escalation,
+        no retry nor decision of that input) and the manual steps."""
+        lb = self.cfg.labels
+        manual = (f'rimuovere `{lb.needs_supervisor}` e impostare la label del passo da eseguire '
+                  '(`agent:ready` sulla issue, `agent:review` o `agent:changes` sulla PR).')
+        if self.cfg.merge.mode != 'auto':
+            return 'Per riprendere senza il supervisore: ' + manual
+        cls = escalation.get('class')
+        valid = []
+        if not superseded and not is_pr and cls == PREFLIGHT_DEFAULT:
+            valid = [f'`/devloop {ACCEPT_DEFAULTS}`', f'`/devloop {DECIDE} <decisioni>`']
+        elif (not superseded and cls in (TOOL_FAILURE, SYNC_FAILED)
+              and self._retryable(escalation, is_pr)):
+            valid = [f'`/devloop {RETRY}`']
+        valid.append(f'`/devloop {ESCALATE} <motivo>`')
+        return ('Per riprendere, il supervisore o un utente fidato scrive come prima riga di un '
+                'commento ' + ' oppure '.join(valid) + '. Per riprendere senza il supervisore: '
+                + manual)
+
     def _operator_resume(self, anchor, is_pr=None):
         """How the operator resumes an item in ``agent:needs-operator`` put there by
         ``anchor`` (``_supervisor_view``), for the answer to a command (#321)."""
         record = anchor['record']
         if anchor['kind'] == 'preflight':
             return PREFLIGHT_RESUME
+        if anchor.get('origin') == PREFLIGHT_DEFAULT and not is_pr:
+            return (RESUME + '\n\nIn alternativa, un utente fidato decide le lacune del '
+                    f'controllo di prontezza con `/devloop {ACCEPT_DEFAULTS}` o `/devloop '
+                    f'{DECIDE} <decisioni>` come prima riga di un commento.')
         if record.get('event') == 'operator_merge':
             return ('La PR è pronta e il merge spetta all\'operatore: si mergia a mano, come '
                     'spiega il commento «Il merge spetta all\'operatore».')
@@ -496,7 +572,8 @@ class SupervisionMixin:
         (#321), or answer why it does not apply and how to resume; the item stays with the
         operator unless a retry runs.
 
-        - ``retry``: only when the latest record that put the item there is an escalation that
+        - ``retry``: only when the latest record that put the item there (``_operator_anchor``)
+          is an escalation that
           records a step a retry runs again, with its key (``_retryable``), whatever its class,
           critical included: a retry repeats the step and bypasses none of its checks. As for
           the supervisor, only while the input of the step is the one that failed, at most
@@ -506,7 +583,8 @@ class SupervisionMixin:
           step, an issue's step runs now; the operator labels (and ``agent:needs-supervisor``)
           go.
         - ``accept-defaults`` and ``decide``: only on an issue whose latest record is a failed
-          readiness check of class ``preflight_default``, under the conditions of the
+          readiness check of class ``preflight_default``, or a ``preflight_default``
+          escalation the supervisor handed to the operator, under the conditions of the
           supervisor's commands (``_accept_defaults``, ``_decide``).
         - ``escalate``: never, the escalation is already the operator's."""
         lb = self.cfg.labels
@@ -523,18 +601,23 @@ class SupervisionMixin:
         if name == ESCALATE:
             return refuse('l\'escalation è già all\'operatore')
         if name in (ACCEPT_DEFAULTS, DECIDE):
-            if is_pr or kind != 'preflight' or record.get('ready') \
-                    or preflight_class(record) != PREFLIGHT_DEFAULT:
+            # The check itself, or a supervisor's escalation of it handed to the operator.
+            check = (kind == 'preflight' and preflight_class(record) == PREFLIGHT_DEFAULT
+                     or anchor.get('origin') == PREFLIGHT_DEFAULT)
+            if is_pr or not check:
                 return refuse('vale solo su un\'issue il cui ultimo controllo di prontezza è '
                               'fallito con lacune tutte `default_available` e nessuna '
                               'suddivisione')
             if name == DECIDE:
                 return self._decide(number, labels, comments, trace, command['reason'],
-                                    operator=True)
-            return self._accept_defaults(number, labels, comments, trace, operator=True)
+                                    operator=how)
+            return self._accept_defaults(number, labels, comments, trace, operator=how)
         if kind == 'preflight':
             return refuse('il controllo di prontezza non si ripete con `/devloop retry`')
-        if record.get('event') != 'escalation' or not self._retryable(record, is_pr):
+        # A supervisor's escalation of a check's defaults or of a resolved issue, handed to the
+        # operator, records no failed step, even when an earlier record kept its routing key.
+        if (record.get('event') != 'escalation' or not self._retryable(record, is_pr)
+                or anchor.get('origin') in (PREFLIGHT_DEFAULT, MERGED_ISSUE)):
             return refuse('quello che ha portato qui ' + ('la PR' if is_pr else 'l\'issue')
                           + ' non è un\'escalation che registri un passo da ripetere')
         key, step = record['key'], record['step']
@@ -631,7 +714,8 @@ class SupervisionMixin:
         ``refusal``; a superseded check leaves it to the supervisor. ``what``: what the command
         decides and its verb (``'i default si riferiscono'``), for the refusal of a superseded
         check. ``operator``: a command on an escalation to the operator (#321), refused with an
-        answer only, the issue staying in ``agent:needs-operator``."""
+        answer only, the issue staying in ``agent:needs-operator``; a string is how the answer
+        says to resume (``_operator_resume``), ``PREFLIGHT_RESUME`` otherwise."""
         history = self.gh.issue_history(number)
         records = self._preflight_records(comments)
         record = records[-1][1] if records else None
@@ -643,8 +727,10 @@ class SupervisionMixin:
                    else 'l\'issue non è stata aperta da un utente fidato né da un\'app di devloop'
                    if not self._devloop_author(history['author'])
                    else self._untrusted_change(history))
-        stays = (f'l\'issue resta in `{self.cfg.labels.needs_operator}`.\n\n{PREFLIGHT_RESUME}'
-                 if operator else 'l\'escalation resta al supervisore.')
+        stays = (f'l\'issue resta in `{self.cfg.labels.needs_operator}`.\n\n'
+                 + (operator if isinstance(operator, str) else PREFLIGHT_RESUME) if operator
+                 else 'l\'escalation resta al supervisore.\n\n'
+                 + self._supervisor_resume({'class': PREFLIGHT_DEFAULT}, False, superseded=True))
         if problem:
             if operator:
                 trace('refused', f'rifiutato: {problem}. Il comando è speso; {stays}')

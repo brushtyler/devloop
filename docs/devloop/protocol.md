@@ -226,7 +226,8 @@ one since. The check loses the block, which then stays until a person removes it
 was removed and applied again, if a comment starting with the attribution header, written by an
 identity allowed to write devloop records, came after the check (another escalation, or
 anything that may be one, marker or not; the dispatcher's [ledger records](#evidence-and-telemetry),
-such as the turn of a recheck, do not count), or if the attribution is uncertain. A comment from
+such as the turn of a recheck, and its [supervision traces](#supervision-trace), such as the
+answer to a command that does not apply, do not count), or if the attribution is uncertain. A comment from
 anyone else, header or not, never touches the attribution. A label already present when the
 check failed is never the check's.
 
@@ -323,7 +324,9 @@ supervisor's and the operator's.
 
 **Escalation.** The `notice` marker of an escalation to the operator records, as one to the
 supervisor does, the step that failed, the key of its input and, for a PR, the label a retry
-resumes from, when the step is one a retry runs again (#321).
+resumes from, when the step is one a retry runs again (#321). A supervisor's escalation handed to
+the operator (`supervisor_escalated`, `supervisor_refused`) keeps them only for `tool_failure` and
+`sync_failed`: the key of a `preflight_default` or `merged_issue` escalation only routes it.
 
 ## Dependency cycles
 

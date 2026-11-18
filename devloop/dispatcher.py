@@ -1364,6 +1364,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
             supervised, why = self._supervised(number, cls, action.kind, pr, reviewer, key=key)
             # To the operator the step stays recorded too, for a trusted user's retry (#321).
             retry = None if supervised else self._retry_payload(action.kind, pr, reviewer, key)
+            if retry and retry['step'] == 'preflight':
+                # A readiness check runs again only on an issue with agent:ready: one the
+                # operator may retry keeps it, as a failed check does.
+                remove = [label for label in remove if label != lb.ready]
             self._escalate(number, reason, getattr(exc, 'tail', ''), remove=remove, cls=cls,
                            supervised=supervised, why=why, retry=retry)
         except GitHubError as gh_exc:
