@@ -625,8 +625,11 @@ record and before the label. The comment has two forms of the same receipt:
   declared `missing`, and `state` (`current` or `superseded`).
 
 **Content.** It comes only from the dispatcher's ledger records and from the markers, never from
-text written by agents: no summary, no finding title, no `reason` nor test name of the
-acceptance map, no error text of a turn.
+text written by agents: no summary, no finding title, no error text of a turn. The one part an
+agent declared is the final acceptance map, which the dispatcher recorded in its markers: its
+test references and reasons are kept as they are, in the content and in the digest, and shown
+only as inert code spans (one line, `|` escaped), so no Markdown, link, mention or HTML of them
+renders.
 
 | Section | Source |
 |---|---|
@@ -638,7 +641,7 @@ acceptance map, no error text of a turn.
 | Rounds and verdicts | The `review` markers: each round with its head and the verdict of each reviewer (`ci` for a CI round) |
 | Findings | Every blocking finding ever opened (`round/reviewer/ID`) and who closed it: its owner in a later round, `ci` or `operator` with the author (`finding` records). One closed under the rules [before #110](#markers-written-before-110) has no recorded closer |
 | Policy | The policy receipt recomputed for the promotion: level, version, base, head, reasons, required reviewers |
-| Acceptance criteria | The latest map: for each entry, the criterion as the issue text states it now (not quoted when someone outside `trusted_users` changed the text), the status, how many tests it declares and whether it gives a reason |
+| Acceptance criteria | The latest map: for each entry, the criterion as the issue text states it now (not quoted when someone outside `trusted_users` changed the text), the status, the tests it declares (`file` and `name`) and its reason |
 
 **Totals:** the number of rounds (and of those that count against `max_review_rounds`) and of
 turns, the summed duration of the turns, the known tokens (input, output, cache read, cache
@@ -671,8 +674,10 @@ edited: a warning "Ricevuta superata" with the time and the reason goes before i
 its marker gets `state: superseded`, `superseded_at` and `reason`. This happens when a ready PR
 is [revoked](#merge-directives-and-record) (a new head, CI running again, the acceptance map or
 level 0 that no longer hold), when the recomputed policy receipt is `stale`, when a CI round
-fails on a ready PR, and when a sync moves the head of a ready PR. A new promotion first marks
-every receipt still current, whatever revoked it (an escalation, for example), then writes a new
+fails on a ready PR, when a sync moves the head of a ready PR, and with every escalation that
+takes `agent:ready-to-merge` away (the round limit reached by a CI failure, open findings, a
+failed action, a lost marker, the level that requires the operator). A new promotion first marks
+every receipt still current, whatever revoked it, then writes a new
 one with the next promotion number: only the latest promotion's receipt is `current`. A failed
 edit at a revocation is logged and marked again at the next promotion; at the promotion it stops
 the promotion before its label, as any `gh` failure.

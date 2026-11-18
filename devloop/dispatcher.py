@@ -1327,12 +1327,17 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
             self.gh.comment(number, render_escalation(reason, detail, cls, supervised))
             self.gh.edit_labels(number, add=[lb.needs_supervisor],
                                 remove=[label for label in remove if label != lb.ready])
-            return
-        if why:
-            reason = (reason.rstrip() + f'\n\nIn modalità di merge `auto` questa escalation '
-                      f'andrebbe al supervisore, ma resta all\'operatore: {why}.')
-        self.gh.comment(number, render_escalation(reason, detail, cls))
-        self.gh.edit_labels(number, add=[lb.needs_operator], remove=remove)
+        else:
+            if why:
+                reason = (reason.rstrip() + f'\n\nIn modalità di merge `auto` questa '
+                          f'escalation andrebbe al supervisore, ma resta all\'operatore: {why}.')
+            self.gh.comment(number, render_escalation(reason, detail, cls))
+            self.gh.edit_labels(number, add=[lb.needs_operator], remove=remove)
+        if lb.ready_to_merge in remove:
+            # An escalation that takes the readiness away voids the receipt of the promotion
+            # (#135), whatever its path: round limit, failure, open findings, lost marker.
+            label = lb.needs_supervisor if supervised else lb.needs_operator
+            self._supersede_receipts(number, f'escalation `{cls}`: la PR è passata a `{label}`')
 
     def _log_hint(self, exc):
         log = getattr(exc, 'log', None)
@@ -1901,7 +1906,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
             self.gh.edit_labels(pr.number, add=[lb.review],
                                 remove=[lb.changes, lb.ready_to_merge, *self._released(pr)])
             # A receipt of an earlier promotion no longer holds (#135).
-            self._supersede_receipts(pr, 'la ricevuta di policy ricalcolata non coincide più '
+            self._supersede_receipts(pr.number, 'la ricevuta di policy ricalcolata non coincide più '
                                          'con quella dell\'approvazione')
             return None
         return bases
@@ -1916,7 +1921,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
         verdict = round_verdict(records)
         if verdict != 'approve' and lb.ready_to_merge in pr.labels:
             # A CI round on a ready PR (#248) voids the receipt of its promotion (#135).
-            self._supersede_receipts(pr, f'il round {records[0]["round"]} non approva il '
+            self._supersede_receipts(pr.number, f'il round {records[0]["round"]} non approva il '
                                          f'commit `{records[0]["head_sha"][:12]}`')
         if verdict == 'approve':
             left = open_findings(reviews, pr.closures)

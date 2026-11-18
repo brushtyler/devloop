@@ -201,6 +201,8 @@ class MergeMixin:
             receipt, 'level', cls='review_level')
         self.gh.edit_labels(pr.number, add=[lb.needs_operator],
                             remove=[lb.review, lb.changes, lb.ready_to_merge])
+        if lb.ready_to_merge in pr.labels:
+            self._supersede_receipts(pr.number, f'il livello {level} richiede l\'operatore')
 
     def _promote(self, pr, records, reviews=None):
         """Promote a round whose approvals reach the quorum: every reviewer the receipt
@@ -337,35 +339,38 @@ class MergeMixin:
         if prepared is None:
             return
         content, thread = prepared
-        self._supersede_receipts(pr, f'la promozione n. {content["promotion"]} la sostituisce',
+        self._supersede_receipts(pr.number,
+                                 f'la promozione n. {content["promotion"]} la sostituisce',
                                  thread, strict=True)
         self.gh.comment(pr.number, pr_receipt.render(content))
         self.log(f'  receipt of promotion {content["promotion"]} written')
 
-    def _supersede_receipts(self, pr, why, comments=None, strict=False):
-        """Mark superseded, because ``why``, every receipt of ``pr`` still current: the
+    def _supersede_receipts(self, number, why, comments=None, strict=False):
+        """Mark superseded, because ``why``, every receipt of PR ``number`` still current: the
         dispatcher's ``receipt`` records read from ``comments`` (read now when None). An
-        approval revoked leaves no receipt current. Without ``strict`` a failure is logged: the
-        next promotion marks it again before writing its own."""
+        approval revoked leaves no receipt current: a revocation, a new head, a stale policy
+        receipt, a failed round and every escalation that takes ``agent:ready-to-merge`` away
+        (``_escalate``) come here. Without ``strict`` a failure is logged: the next promotion
+        marks it again before writing its own."""
         if self.ledger is None:
             return
         try:
             if comments is None:
-                comments = self.gh.pr_comments(pr.number)
+                comments = self.gh.pr_comments(number)
             at = ledger_timestamp(self.clock)
             for position, record in self._dispatcher_records(comments, 'receipt'):
                 if record['state'] != 'current':
                     continue
                 comment = comments[position]
                 if comment.get('id') is None:
-                    raise GitHubError(f'receipt on #{pr.number}: comment id unknown, not edited')
+                    raise GitHubError(f'receipt on #{number}: comment id unknown, not edited')
                 self.gh.edit_comment(comment['id'], pr_receipt.superseded(
                     comment['body'], record, why, at))
                 self.log(f'  receipt of promotion {record["promotion"]} marked superseded')
         except GitHubError as exc:
             if strict:
                 raise
-            self.log(f'  receipts of #{pr.number} not marked superseded: {exc}')
+            self.log(f'  receipts of #{number} not marked superseded: {exc}')
 
     def _zero_problem(self, pr):
         """Why a PR ready at level 0 no longer is, or ``''``: on every tick its receipt is
@@ -430,6 +435,8 @@ class MergeMixin:
                        'class': 'level_zero'}))
         self.gh.edit_labels(pr.number, add=[lb.needs_operator],
                             remove=[lb.review, lb.changes, lb.ready_to_merge])
+        if lb.ready_to_merge in pr.labels:
+            self._supersede_receipts(pr.number, 'il livello 0 non vale più per il head')
 
     # Actions -------------------------------------------------------------
     def _do_revoke(self, pr):
@@ -474,7 +481,7 @@ class MergeMixin:
                         publishable(dispatcher_header() + f'\n## {title}\n\n' + reason + '.'))
         self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.ready_to_merge, *released])
         # The receipt of the promotion no longer holds (#135).
-        self._supersede_receipts(pr, title)
+        self._supersede_receipts(pr.number, title)
 
     def _do_hold(self, pr):
         """Apply a hold or release command (#172): add or remove ``agent:merge-hold``, then

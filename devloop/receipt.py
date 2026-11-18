@@ -9,9 +9,10 @@ issue, head, base, policy version, level, number of the promotion, digest of the
 totals and the data declared missing. Only the dispatcher's identity writes it.
 
 Its content comes **only** from the dispatcher's ledger records (#133) and from the markers,
-never from text written by agents: no summary, no finding title, no reason of the acceptance
-map. A value that was not attested is ``None`` in the data and ``non riportato`` in the text,
-never 0.
+never from text written by agents: no summary, no finding title, no error text. The final
+acceptance map is the one part an agent declared: the dispatcher recorded it in its markers, and
+the receipt keeps its test references and reasons as they are, shown only as inert code. A value
+that was not attested is ``None`` in the data and ``non riportato`` in the text, never 0.
 
 Before the promotion the content is checked against the markers (:func:`contradictions`). A
 contradiction blocks the promotion; data that is simply missing, as in PRs started before #133,
@@ -129,12 +130,16 @@ def _findings(reviews, closures):
 
 
 def _acceptance(criteria, acceptance_map):
-    """The final map, without the text agents wrote: each criterion as the issue states it,
-    its status, how many tests the map declares and whether it gives a reason."""
+    """The final map (#134) as the markers record it: each criterion as the issue states it,
+    and for each entry its status, the test references ``{file, name}`` and the reason. The
+    references and the reason are data the dispatcher recorded in its markers, kept as they
+    are and shown only as inert code (:func:`_literal`); the criterion text the agent repeated
+    is left out, the issue's own text stands for it."""
     if acceptance_map is None:
         return {'criteria': criteria, 'map': None}
-    entries = [{'status': e['status'], 'tests': len(e['tests']),
-                'reason': bool(e['reason'].strip())} for e in acceptance_map]
+    entries = [{'status': e['status'],
+                'tests': [{'file': t['file'], 'name': t['name']} for t in e['tests']],
+                'reason': e['reason']} for e in acceptance_map]
     return {'criteria': criteria, 'map': entries}
 
 
@@ -280,6 +285,23 @@ def _cell(value):
     return ' '.join(str(value).split()).replace('|', '\\|')
 
 
+def _literal(value):
+    """``value``, data recorded in a marker but written by an agent, as an inert code span for
+    a table cell: one line, a fence longer than any run of backticks it holds, ``|`` escaped
+    (GFM tables unescape it inside code spans). No Markdown, link, mention or HTML of it
+    renders; ``—`` when empty."""
+    text = ' '.join(str(value).split())
+    if not text:
+        return '—'
+    longest = run = 0
+    for char in text:
+        run = run + 1 if char == '`' else 0
+        longest = max(longest, run)
+    fence = '`' * (longest + 1)
+    pad = ' ' if text[0] == '`' or text[-1] == '`' else ''
+    return f'{fence}{pad}{text}{pad}{fence}'.replace('|', '\\|')
+
+
 def _sha(value):
     return f'`{value[:12]}`' if isinstance(value, str) and value else NOT_REPORTED
 
@@ -409,15 +431,17 @@ def _acceptance_text(acceptance):
         return [f'Mappa {NOT_REPORTED}: la PR non registra una mappa di copertura.']
     if not entries:
         return ['Mappa vuota: nessun criterio di accettazione riconoscibile nell\'issue.']
-    lines = ['Criteri come li riporta il testo dell\'issue; stato e numero di test come li '
-             'registra l\'ultima mappa (il dettaglio è nella descrizione della PR o '
-             'nell\'ultima correzione).', '',
+    lines = ['Criteri come li riporta il testo dell\'issue; stato, test e motivo come li '
+             'registra l\'ultima mappa. Test e motivo sono dichiarati dall\'agent che ha scritto '
+             'la mappa: sono riportati come codice, senza interpretarli.', '',
              '| # | Criterio | Stato | Test dichiarati | Motivo dichiarato |', '|---|---|---|---|---|']
     for i, e in enumerate(entries, 1):
         text = (_cell(criteria[i - 1]) if criteria is not None and i <= len(criteria)
                 else NOT_REPORTED)
+        tests = '<br>'.join(f'{_literal(t["file"])}: {_literal(t["name"])}'
+                            for t in e['tests']) or '—'
         lines.append(f'| {i} | {text} | {_MAP_STATUS.get(e["status"], _cell(e["status"]))} | '
-                     f'{e["tests"]} | {"sì" if e["reason"] else "no"} |')
+                     f'{tests} | {_literal(e["reason"])} |')
     return lines
 
 

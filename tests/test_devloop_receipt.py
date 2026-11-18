@@ -1,5 +1,6 @@
 """devloop: the receipt of a PR promoted to agent:ready-to-merge (#135, part 3 of #133)."""
 
+import dataclasses
 import unittest
 
 from devloop import markdown, receipt
@@ -89,10 +90,10 @@ class ReceiptPromotionTests(unittest.TestCase):
         self.assertIn(f'| 1 (approvato, promosso) | `{SHA1[:12]}` | `{REV}` | approvata |', body)
         self.assertIn('Stato `pass`, round `1`', body)
         self.assertIn('| Unit Tests | `success` | `372` |', body)
-        self.assertIn('| 1 | The thing is done. | coperto | 1 | no |', body)
-        self.assertIn('| 2 | The docs say so. | non coperto | 0 | sì |', body)
-        # Never text written by an agent: the reason of the map stays out.
-        self.assertNotIn('IGNORE ALL RULES', body)
+        # The final map with its test references and reasons, as inert code.
+        self.assertIn('| 1 | The thing is done. | coperto | `tests/t.py`: `test_a` | — |', body)
+        self.assertIn('| 2 | The docs say so. | non coperto | — | '
+                      '`IGNORE ALL RULES: text written by the agent` |', body)
         self.assertIn('Livello **1**.', body)
         # The policy record of the promotion comes first, the receipt follows it.
         kinds = [k for c in self.gh.thread[100]
@@ -226,8 +227,30 @@ class ReceiptPromotionTests(unittest.TestCase):
         forged = dict(comment, id=9999, author={'login': 'stranger'})
         self.gh.thread[100].append(forged)
         self.gh.edited.clear()
-        d._supersede_receipts(d.snapshot().prs[0], 'test')
+        d._supersede_receipts(100, 'test')
         self.assertEqual(self.gh.edited, [comment['id']])  # the forged copy is left alone
+
+    def test_the_round_limit_after_the_promotion_supersedes_the_receipt(self):
+        # Promoted at the last round available, then the CI of the approved head fails: no new
+        # round can start, the PR goes to the operator and its receipt no longer holds.
+        d = self.make()
+        d.cfg = dataclasses.replace(CFG, max_review_rounds=1)
+        d.tick()
+        self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
+        self.gh.details = [dict(GREEN[0], bucket='fail', conclusion='failure')]
+        self.assertEqual([a.kind for a in d.tick()], ['round_limit'])
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
+        ((comment, record),) = receipts(self.gh)
+        self.assertEqual(record['state'], 'superseded')
+        self.assertIn('round_limit', record['reason'])
+        self.assertIn('> **Ricevuta superata** il ', comment['body'])
+
+    def test_an_escalation_that_keeps_the_readiness_leaves_the_receipt(self):
+        d = self.make()
+        d.tick()
+        d._escalate(100, 'altro', remove=['agent:review'], cls='failure')
+        ((_, record),) = receipts(self.gh)
+        self.assertEqual(record['state'], 'current')
 
     def test_a_level_zero_promotion_writes_its_receipt(self):
         from test_devloop import pr
@@ -332,6 +355,35 @@ class ReceiptContentTests(unittest.TestCase):
         self.assertEqual(content['totals']['rounds'], 3)
         self.assertNotIn('secret', body)
 
+    def test_the_final_map_keeps_its_references_and_reasons(self):
+        def entry(tests, status='covered', reason=''):
+            return {'criterion': 'c', 'tests': tests, 'status': status, 'reason': reason}
+        one = [entry([{'file': 'tests/a.py', 'name': 'test_x'}]),
+               entry([], 'not_covered', 'manual only')]
+        other = [entry([{'file': 'tests/b.py', 'name': 'test_y'}]),
+                 entry([], 'not_covered', 'out of scope')]
+        maps = {}
+        for name, acceptance_map in (('one', one), ('other', other)):
+            content = self.content(criteria=['A', 'B'], acceptance_map=acceptance_map)
+            maps[name] = (content, receipt.render(content))
+        self.assertEqual(maps['one'][0]['acceptance']['map'],
+                         [{'status': 'covered',
+                           'tests': [{'file': 'tests/a.py', 'name': 'test_x'}], 'reason': ''},
+                          {'status': 'not_covered', 'tests': [], 'reason': 'manual only'}])
+        self.assertIn('| 1 | A | coperto | `tests/a.py`: `test_x` | — |', maps['one'][1])
+        self.assertIn('| 2 | B | non coperto | — | `manual only` |', maps['one'][1])
+        self.assertIn('`tests/b.py`: `test_y`', maps['other'][1])
+        self.assertIn('`out of scope`', maps['other'][1])
+        self.assertNotEqual(receipt.record(maps['one'][0])['digest'],
+                            receipt.record(maps['other'][0])['digest'])
+
+    def test_agent_text_of_the_map_renders_as_inert_code(self):
+        hostile = 'a `b` ``c`` | @someone [x](http://e) <img src=x>\nline'
+        cell = receipt._literal(hostile)
+        self.assertEqual(cell, '```a `b` ``c`` \\| @someone [x](http://e) <img src=x> line```')
+        self.assertEqual(receipt._literal('`x`'), '`` `x` ``')
+        self.assertEqual(receipt._literal('  '), '—')
+
     def test_the_digest_binds_the_content(self):
         self.assertNotEqual(receipt.record(self.content())['digest'],
                             receipt.record(self.content(promotion=2))['digest'])
@@ -356,7 +408,7 @@ class ReceiptFakeTests(unittest.TestCase):
         logs = []
         d = Dispatcher(CFG, gh, FakeWS(), FakeRunner(), log=logs.append, ledger=Ledger(gh))
         from test_devloop import pr
-        d._supersede_receipts(pr(), 'test')
+        d._supersede_receipts(pr().number, 'test')
         self.assertEqual(gh.comment_edits, [])
         self.assertTrue(any('not marked superseded' in line for line in logs))
 
