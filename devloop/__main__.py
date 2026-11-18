@@ -112,9 +112,13 @@ def build(args):
                              agent.key, prompt, agent.model if agent.fallback_for else None),
                          stall=stall)
     gh = identities.github(DISPATCHER)
-    ledger = Ledger(gh, state_dir=state)
     # Merges (#172) run with the merger's app (#201), the only one that gets contents=write,
     # or without it with the local gh login devloop runs with.
+    # Without the dispatcher lock, status and a dry run read the journal of the turns and never
+    # write it (#362): the running dispatcher keeps its chain in memory.
+    command = getattr(args, 'command', None)
+    read_only = command == 'status' or (command == 'tick' and getattr(args, 'dry_run', False))
+    ledger = Ledger(gh, state_dir=state, read_only=read_only)
     dispatcher = Dispatcher(cfg, gh, ws, runner, log=tick_log, identities=identities,
                             activity=current, ledger=ledger,
                             merger=identities.merger(),

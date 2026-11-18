@@ -53,7 +53,9 @@ CRITICAL = {
     'supervisor_escalated': 'passata all\'operatore dal supervisore',
     'supervisor_refused': 'comando del supervisore non ammesso per questa escalation',
     'conclave_veto': 'decisione del conclave annullata da un utente fidato con `/devloop veto`',
+    'uncertain_turn': 'turni senza esito da riconciliare con `/devloop reconcile`',
 }
+UNCERTAIN_TURN = 'uncertain_turn'  # a turn refused by the block on uncertain outcomes (#362)
 
 # The steps a ``retry`` can run again, and the PR label each one resumes from.
 RETRY_STEPS = ('preflight', 'implement', 'review', 'fix', 'sync')

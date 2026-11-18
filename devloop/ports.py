@@ -37,6 +37,9 @@ Where a method went, when it was not obvious:
 - ``close_issue`` (#228) is in ``Tracker`` and ``merged_prs`` in ``CodeReview``: after a merge
   the dispatcher closes the PR's issue itself, and the planner never starts an issue that a
   merged devloop PR already resolved.
+- ``find_pr`` (#362) is in ``CodeReview``: the dispatcher reads, in any state, the PR of a
+  legacy turn imported from ``ledger-open-turns.json`` that is not among the open ones, to
+  link the turn to the issue of its work.
 - ``issue_dependencies`` (#277) is in ``Tracker``: the native "blocked by" dependencies between
   issues, which the planner reads to hold back an issue while a trusted block is open.
 - ``repo_labels`` and ``rename_label`` (#248) are in ``Tracker`` next to ``ensure_label``:
@@ -125,6 +128,10 @@ class CodeReview(Protocol):
     def merged_prs(self, branch):
         """The merged pull requests from head branch ``branch``, as :meth:`open_prs` with
         ``mergeCommit``."""
+
+    def find_pr(self, number):
+        """Pull request ``number`` in any state, as :meth:`open_prs` (the mergeability fields
+        aside) with ``state``, or None when ``number`` is an issue."""
 
     def merge_state(self, pr):
         """``clean``, ``conflict`` or ``unknown`` for ``pr`` as :meth:`open_prs` returns it."""
