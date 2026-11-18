@@ -379,7 +379,9 @@ class ActionsMixin:
             self.log(f'  checks of {pr.head_sha[:12]} not readable for the CI summary: {exc}')
             return format_ci_summary(pr.head_sha, pr.checks, None), None
         jobs = self._ci_jobs(details)
-        return format_ci_summary(pr.head_sha, summarize_checks(details)[0], jobs), jobs
+        conflict = self.cfg.base_branch if pr.merge_state == 'conflict' else None
+        return format_ci_summary(pr.head_sha, summarize_checks(details)[0], jobs,
+                                 conflict_base=conflict), jobs
 
     def _last_round_allowed(self, reviews):
         """The number of the last round ``max_review_rounds`` allows, given the waived rounds

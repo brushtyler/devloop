@@ -87,16 +87,22 @@ def _plain(text):
     return ' '.join(str(text).replace('`', "'").split())
 
 
-def format_ci_summary(head, state, jobs):
+def format_ci_summary(head, state, jobs, conflict_base=None):
     """The section of the review and fix prompts with the CI of ``head`` (#300): each check
     with its outcome and duration, and for a job whose log holds the final lines of
     ``scripts/run-tests.py`` (``localtests.suite_summary``) those lines. ``jobs`` as
     ``Dispatcher._ci_jobs`` returns them; None when the checks could not be read. A job log
-    that could not be read is reported as such: the summary is not available, nothing more."""
+    that could not be read is reported as such: the summary is not available, nothing more.
+    ``conflict_base``: the base branch ``head`` conflicts with (#392); without checks the
+    section says that GitHub runs no CI on such a head, so there is no summary to give."""
     title = '## CI of the head\n\n'
     if jobs is None:
         return (title + f'The summary of the CI of `{head[:12]}` is not available: its checks '
                         'could not be read.')
+    if not jobs and conflict_base:
+        return (title + f'There is no CI summary of `{head[:12]}`: the head conflicts with '
+                        f'`{conflict_base}`, and GitHub runs no CI on a pull request in '
+                        'conflict. The CI runs on the head your fix produces.')
     if not jobs:
         return title + f'GitHub reports no CI check on `{head[:12]}` yet.'
     lines = [title + f'The checks of `{head[:12]}` as GitHub reports them (CI state: **{state}**), '
