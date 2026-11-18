@@ -6,8 +6,9 @@ The PR is in `agent:needs-operator`: $why A person now decides on it. Your revie
 reading for that person, published as a GitHub review of type `COMMENT` under the title "Review
 consultiva: non conta per il quorum". It is not binding: it does not count for the quorum nor for
 the round limit, it opens no finding, it changes no label, and devloop never reads it to decide.
-You may be the same agent that wrote the change ($implementer): you do not have its context, and
-you judge the change as you find it.
+You are not the author of this change: a separate session (the implementer) wrote it, and you do
+not see its reasoning. Judge it as someone else's code. The repository metadata (`git log`, the
+commit trailers) may name an agent or a model: that does not make you the author.
 
 The working directory is a disposable checkout of commit `$head`, the PR head, removed
 afterwards. Inspect the change with `git diff origin/$base_branch...HEAD` and read whatever
