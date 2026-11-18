@@ -31,6 +31,13 @@ change to a path reserved to the operator (`operator_only_paths` in `[merge]`: b
 `docs/adr/`, `AGENTS.md` and `CLAUDE.md`). In merge mode `auto` a supervisor may accept
 `default_available` gaps on the operator's behalf, so classify conservatively.
 
+A decision recorded as decided by the operator ("Decise dall'operatore") in an ADR under
+`docs/adr/` on `$base_branch` is an operator decision for the issues that cite it, and is not a
+gap: `docs/adr/` reaches `$base_branch` only through the operator's merge. Read the ADR section
+the issue cites. A point the ADR still leaves open (for example a value "da fissare" or a choice
+"da decidere"), or an ADR that is only proposed, settles nothing: such a gap stays
+`operator_decision`.
+
 A choice the repository or the issue already prescribes is not a gap, and neither is a proposed
 default that a comment below has accepted, nor a gap that a decision of the supervisor recorded
 by devloop below settles. In `code_refs` list the files (`path` or `path:line`)
