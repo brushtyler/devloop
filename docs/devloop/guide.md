@@ -832,6 +832,13 @@ user reconciles them, with a comment whose first line is
 reason, mandatory. The outcome is recorded once, also with the block off; then the step resumes
 as from any escalation to the operator.
 
+With `story_identity = true` (#363, off by default) the takeover of an issue also records its
+[story](protocol.md#story-identity), the unit of the future budget: the journal assigns one to
+the issue, or adds the hash of the new request to the one it has, and the comment of the
+`request` record carries the dispatcher's `story` marker. An issue belongs to another's story
+only through that marker of the dispatcher, never through what its text, an agent or a user
+writes. With it off, and for issues taken over before, nothing changes.
+
 ### Advisory review for the operator
 
 With `[review_policy] advisory_reviewer` set (#369; empty, and so off, by default: the local
