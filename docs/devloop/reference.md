@@ -32,12 +32,15 @@ another value stops devloop at startup. `block_uncertain_turns` (a boolean, defa
 turns on the block on uncertain turns of the [turn journal](protocol.md#turn-journal) (#362): a
 turn left without outcome refuses every new turn of its work, with an escalation, until a trusted
 user reconciles it with `/devloop reconcile`. Off, the journal records the turns all the same;
-another value stops devloop at startup. `publication_outbox` (a boolean, default `false`) turns on
-the [publication outbox](protocol.md#publication-outbox) (#385): every comment and comment edit
-of the dispatcher's and the agents' clients is saved in the turn journal before it is sent, an
-uncertain outcome is reconciled on the exact comment of the same author before any new POST, and
-each tick resumes what a restart left half published. Off, devloop publishes as before; another
-value stops devloop at startup. It applies at the next start.
+another value stops devloop at startup. `story_identity` (a boolean, default `false`) turns on the
+[story identity](protocol.md#story-identity) (#363): at the takeover of an issue the journal
+records its story and the `request` record carries the dispatcher's `story` marker. Off, devloop
+records no story; another value stops devloop at startup. `publication_outbox` (a boolean, default
+`false`) turns on the [publication outbox](protocol.md#publication-outbox) (#385): every comment
+and comment edit of the dispatcher's and the agents' clients is saved in the turn journal before
+it is sent, an uncertain outcome is reconciled on the exact comment of the same author before any
+new POST, and each tick resumes what a restart left half published. Off, devloop publishes as
+before; another value stops devloop at startup. It applies at the next start.
 `[merge]` (`mode`, `levels`, `operator_only_paths`) and `roles.supervisor` set the
 [merge modes](guide.md#merge-modes); an unknown mode, level or key stops devloop at startup.
 `[pin]` (`auto`, default `false`; `restart_max_wait_minutes`, default 30) sets the

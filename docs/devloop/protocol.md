@@ -741,7 +741,8 @@ hash of the [readiness check](#readiness-check-records) like any text devloop pu
 the [conclave](#conclave-records) reads it, and only when written by the app of the agent it
 names. A `conclave` record counts only from the dispatcher's app. An `advisory` record (#369)
 counts in a native review only from the identity of the agent of `advisory_reviewer`, and in a
-comment only from the dispatcher's app. `trusted_users`
+comment only from the dispatcher's app. A `story` record (#363) counts only from the dispatcher's
+app, and only when the [turn journal](#story-identity) confirms it. `trusted_users`
 stays for people: it
 decides who can start work with `agent:ready`, and it cannot contain bots. The only app whose
 labels count is the supervisor's, on the issues described in
@@ -906,7 +907,8 @@ their format does not change. The journal is append-only, one JSON event per lin
   stays counted: nothing refunds it.
 - `reconciled` and `refused`: see below. `unsettled` and `settled`: a record on GitHub left open
   after a failed edit, and the tick that checked it. `linked`: the issue of the work of a legacy
-  turn (see the migration).
+  turn (see the migration). `story`, `request` and `child`: the stories, with `story_identity`
+  on (see [Story identity](#story-identity)).
 
 **Integrity.** Every read verifies the whole chain. An incomplete last line (a write cut short),
 or a last line that is not JSON, is set aside in `turn-journal-tail-<sha256>.bin` and cut off: the
@@ -975,6 +977,48 @@ that thread. A command from outside `trusted_users` is only logged. Commands are
 turn waits for reconciliation, on each tick. No automatic evidence is accepted in its place: the
 proof of termination comes with step 4 of ADR 0001. After the reconciliation the step resumes as
 any escalation to the operator does.
+
+### Story identity
+
+Since #363 (ADR 0004, P2-3a, recommendation (b) of section 3.2) the journal can hold the
+**stories**, the unit of the budget of step 2: an issue and, from step 3, its child issues. It is
+off by default (`story_identity = false`, ADR 0004, D8): with it off devloop records no story and
+behaves as before.
+
+- **Identity.** At the takeover of an issue (`agent:ready` to `agent:working`) the journal
+  records a `story` event: the id the dispatcher assigns (`story-<n>-<8 hex digits>`), the
+  repository and number of the issue, its root, and the `hash` of the [`request`](#evidence-and-telemetry)
+  record of that takeover, the snapshot of the text the readiness check judged ready and
+  devloop runs. It is written before the record on GitHub: if it cannot be, no record is
+  written and the step escalates like any `gh` failure.
+- **Later requests.** A new takeover of the root writes a new `request` record, as before. When
+  its hash differs from the story's last one (a trusted user changed the issue), the journal
+  adds it with a `request` event: the story keeps its id, repository and root, and its earlier
+  hashes. The same text adds nothing. A change by an untrusted author still stops devloop.
+- **Root marker.** The comment of the `request` record of the root ends with the `ledger` marker
+  followed by a `story` marker, `{story, repo, root, issue, hashes}`, with every hash recorded so
+  far, oldest first, and a "Storia" section in its text. A marker missing because a write failed
+  is written again at the next takeover, from the journal. The journal must confirm the root's
+  latest marker too: its `hashes` must be a prefix of the story's. A marker behind the journal
+  (a write that failed after the journal recorded the hash) is valid; one that diverges from it,
+  or goes beyond it (a journal restored from before), contradicts it: an integrity error, and the
+  step escalates without recording the new hash.
+- **Children.** A child issue inherits the story **only** from a `story` marker the dispatcher
+  wrote on it, `{story, repo, root, issue}` without hashes (D7). A story declared in the text of
+  the issue, by an agent or by a user, the operator included, or in a marker written by any
+  other identity, is not inherited: at its takeover that issue becomes the root of a story of its
+  own. The marker is read only from the dispatcher's identity, and the journal must confirm it: a
+  dispatcher's marker for another issue, of a story the journal does not hold, or of an issue
+  that is neither the root nor a child of that story is an integrity error, and the step
+  escalates. A child is taken over without a story of its own and is never made a root.
+- **Writing the marker of a child.** The dispatcher has the function (`Ledger.mark_child`): it
+  records a `child` event in the journal, then writes the marker on the issue. **No flow calls
+  it yet**: which act authorizes the association of a child is decided with step 3 of ADR 0001,
+  and until then no issue gets the marker of a child.
+
+Issues taken over before, or with the identity off, have no marker and are handled as before.
+The identity of the attempt and the rule of one active attempt per phase are the second part of
+P2-3.
 
 ### Publication outbox
 

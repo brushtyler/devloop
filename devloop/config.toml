@@ -28,6 +28,12 @@ ci_rerun_unrelated = true
 # and its PRs), with an escalation, until a trusted user reconciles it with
 # `/devloop reconcile`. Off here: turning it on is the operator's decision (ADR 0004, D8).
 block_uncertain_turns = false
+# The story identity (issue #363, ADR 0004, P2-3a): at the takeover of an issue the journal of
+# state_dir assigns it a story, or adds the new request hash to the story it already has, and the
+# comment of its `request` record carries the dispatcher's `story` marker. An issue inherits the
+# story of another only from that marker, never from text. Off here: turning it on is the
+# operator's decision (ADR 0004, D8).
+story_identity = false
 # The outbox of the publications (issue #385): every comment and comment edit devloop writes
 # (ledger records, agent outputs, receipts, escalations) is saved in the journal of the turns
 # before it is sent. An uncertain outcome (timeout, 5xx) is reconciled on the exact comment of
