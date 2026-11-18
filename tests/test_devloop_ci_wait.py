@@ -313,9 +313,10 @@ class ReviewDuringCITests(unittest.TestCase):
         self.assertEqual(counted_rounds(snap.prs[0].reviews), 1)
         self.assertEqual([a.kind for a in plan(snap, cfg)], ['fix'])
 
-    def changes(self, ci='pending', committed=NOW - 6 * 60):
+    def changes(self, ci='pending', committed=NOW - 6 * 60, required=()):
         """PR #100 after a review that asked for changes before its CI was known."""
         d = self.make(ci=ci, committed=committed)
+        self.gh.required = list(required)
         self.runner.outputs = [raw_review('request_changes', [finding('reviewer bug')]),
                                fixed()]
         self.assertEqual(self.step(d), ['review'])
@@ -377,6 +378,57 @@ class ReviewDuringCITests(unittest.TestCase):
         self.now += 5 * 60
         self.assertEqual(self.step(d), ['fix'])
         self.assertEqual(self.ws.commands.count(SUITE), 0)
+
+    def conflict(self):
+        """PR #100 conflicts with main from now on: GitHub runs no pull_request workflow on its
+        head (#392)."""
+        raw = SnapshotGH.open_prs(self.gh)
+        self.gh.open_prs = lambda: [dict(r, mergeable='CONFLICTING', mergeStateStatus='DIRTY')
+                                    for r in raw]
+
+    def test_changes_on_a_conflicting_head_start_the_fix_without_waiting_for_the_ci(self):
+        d = self.changes(ci='none', committed=NOW - 6 * 60, required=['Unit Tests (Python 3.12)'])
+        # Without conflict the fix waits for the required checks, as before.
+        self.assertEqual(self.step(d), [])
+        self.assertIn(f'{WAITING}: main requires Unit Tests (Python 3.12)', self.lines[-1])
+        self.assertEqual(len(self.runner.calls), 1)
+        # main moved and the PR conflicts: its CI never comes, so the fix starts at once.
+        self.conflict()
+        waited = len(self.lines)
+        self.assertEqual(self.step(d), ['fix'])
+        self.assertIn(f'  PR #100: no CI expected on {SHA1[:12]}: it conflicts with main, and '
+                      'GitHub runs no pull_request workflow on it', self.lines[waited:])
+        self.assertFalse([line for line in self.lines[waited:] if WAITING in line])
+        self.assertEqual(len(self.runner.calls), 2)
+        prompt = self.prompt()
+        self.assertIn('reviewer bug', prompt)  # the findings of the review, as always
+        self.assertIn(f'There is no CI summary of `{SHA1[:12]}`: the head conflicts with '
+                      '`main`, and GitHub runs no CI on a pull request in conflict.', prompt)
+        self.assertNotIn('ci_missing', [n['class'] for n in CIWaitTests.notices(self)])
+
+    def test_a_conflicting_head_is_never_escalated_as_ci_missing(self):
+        for label in ('agent:review', 'agent:changes'):
+            with self.subTest(label):
+                if label == 'agent:review':
+                    d = self.make(committed=NOW - 31 * 60)
+                    self.gh.required = ['Unit Tests (Python 3.12)']
+                else:
+                    # Reviewed while the required checks were awaited, before the timeout.
+                    d = self.changes(ci='none', committed=NOW - 6 * 60,
+                                     required=['Unit Tests (Python 3.12)'])
+                    self.now += 25 * 60
+                self.conflict()
+                snap = d.snapshot()
+                [p] = snap.prs
+                self.assertEqual((p.merge_state, p.ci_wait, p.ci_missing), ('conflict', '', []))
+                kinds = [a.kind for a in plan(snap, self.cfg)]
+                self.assertNotIn('ci_missing', kinds)
+                self.assertEqual(kinds, ['sync'] if label == 'agent:review' else ['fix'])
+        # The same head without conflict, past the timeout, is escalated as before.
+        d = self.make(committed=NOW - 31 * 60)
+        self.gh.required = ['Unit Tests (Python 3.12)']
+        [p] = d.snapshot().prs
+        self.assertEqual(p.ci_missing, ['Unit Tests (Python 3.12)'])
 
     def test_a_ci_failed_before_the_review_takes_the_path_of_today(self):
         d = self.make(ci='fail')

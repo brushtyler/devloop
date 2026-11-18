@@ -241,6 +241,13 @@ joins the same fix (see [Approval and CI](protocol.md#approval-and-ci)).
   window: with `grace_minutes = 60` and `required_timeout_minutes = 30` the PR is escalated 30
   minutes after the push. If the required checks cannot be read, the
   dispatcher writes a line to the tick log and counts them as none.
+- **Head in conflict.** GitHub runs no `pull_request` workflow on a PR that conflicts with
+  `base_branch`, so the CI of such a head never comes (#392). It is neither waited for nor
+  escalated as `ci_missing`: in `agent:review` the PR is synced as usual, and in `agent:changes`
+  the fix starts at once, aligns the branch with the base, and the CI runs on its new head. The
+  fix still gets the open findings of the review; its prompt says that there is no CI summary of
+  the head because of the conflict. The tick log says `PR #388: no CI expected on 9ac03f72ed71:
+  it conflicts with main, and GitHub runs no pull_request workflow on it`.
 
 The tick log says why the head waits for its CI, for example `PR #257: waiting for CI on
 9ef3336dfbe6: pushed 12 s ago, within [ci] grace_minutes = 5`, and an approval not promoted yet
@@ -311,7 +318,8 @@ a **CI of the head** section that the dispatcher reads with its own identity (#3
   checks that cannot be read at all leave the section saying the summary is not available. The
   review and the fix never wait for, nor fail on, the summary.
 
-The fix prompt shows the CI of the head the reviewer saw, the PR's head before the fix. The
+The fix prompt shows the CI of the head the reviewer saw, the PR's head before the fix. A head
+without checks that conflicts with the base has no CI to show (#392): the section says so. The
 same values go to the `ci_round` event of the [ledger](protocol.md#evidence-and-telemetry).
 
 ### Documentation map

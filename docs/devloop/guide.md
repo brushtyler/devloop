@@ -57,8 +57,10 @@ the reviewers, from the PR's marker.
 A head just pushed, without CI yet, is reviewed as if its CI were pending: with `local_tests`
 other than `full` no full suite runs locally in place of the CI for `[ci] grace_minutes`, and as
 long as `main` requires checks up to `[ci] required_timeout_minutes` (see
-[CI of a new head](reference.md#ci-of-a-new-head)). The ruleset of `main` still requires its
-checks for any merge on GitHub.
+[CI of a new head](reference.md#ci-of-a-new-head)). A head in conflict with `main` gets no CI
+from GitHub, so it is never waited for (#392): the fix of a PR in `agent:changes` starts at once
+and aligns the branch with `main`. The ruleset of `main` still requires its checks for any merge
+on GitHub.
 
 Readiness belongs to the approved commit. Every tick re-checks ready PRs:
 
