@@ -61,6 +61,14 @@ holds also only until someone who may admit the issue adds agent:ready again, an
 depends on the base branch, only for the commit it ran on (#270). An issue that is
 not ready goes to agent:needs-operator; the check removes that label only if it added it itself.
 
+Conclave (#141, with ``conclave`` configured): an issue or PR in agent:needs-operator whose latest
+escalation is a block (an implementer or fixer that stopped as ``blocked``, a review round whose
+verdict is ``needs_operator``) gets one conclave of three distinct agents: the one that stopped
+proposes one resolution, the other two vote on exactly that text, bound by its hash. Each call is
+a ``conclave`` action with a slot of its own; the outcome (``UNANIMOUS``, ``BLOCKED``,
+``RESERVED``) is a dispatcher ``conclave`` record bound to the block, the content and the head.
+The labels stay: the escalation is still the operator's (``dispatch_conclave``).
+
 Start order (#146): ready issues start by priority (``priority:high``, ``normal``, ``low``; a
 ``priority_labels`` label counts as high), then by the oldest current ``agent:ready``, then by
 number. A priority label counts only if a trusted user added it.
@@ -168,6 +176,7 @@ from .context import (LABEL_STYLE, _describe_bases, _failure_text, _open_finding
                       _render_issue_comments, both_labels_warning, label_transition,
                       transition_labels)
 from .dispatch_actions import ActionsMixin, Models, ready_approval, rerun_of
+from .dispatch_conclave import ConclaveMixin
 from .dispatch_merge import MergeMixin
 from .dispatch_preflight import PreflightMixin
 from .dispatch_supervision import SupervisionMixin, UntrustedChange
@@ -224,6 +233,12 @@ FALLBACK_NOTE = {
                   'unavailable. The checkout may contain files that attempt left: they are not '
                   'part of the base branch, which is what `git status` and `git diff` show '
                   'against it.\n'),
+    # The conclave (#141): a review-mode turn on a checkout of the block's commit.
+    'conclave': ('\n\n## Previous attempt on another model\n\nAn earlier attempt at this '
+                 'conclave call, on another model, stopped because that model was unavailable. '
+                 'The checkout may contain files that attempt left: they are not part of the '
+                 'commit of reference, which is what `git status` and `git diff` show against '
+                 'it.\n'),
 }
 
 
@@ -462,7 +477,7 @@ def untrusted_change(history, ready_label, trusted_users, admitters=None):
     return None
 
 
-class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
+class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, ConclaveMixin):
     """``gh`` acts as the dispatcher: it implements the ports of ``ports.Backend`` (tracker,
     code review and CI), and the dispatcher uses nothing else of it. ``identities``
     (``apps.Identities``) gives each agent its own GitHub identity; without it every actor uses
@@ -874,7 +889,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
                                                           base_head)
         working = [raw['number'] for raw in self.gh.issues_with_label(lb.working)]
         return Snapshot(prs=prs, ready_issues=ready, working_issues=working,
-                        supervised=self._supervised_items(prs))
+                        supervised=self._supervised_items(prs),
+                        conclaves=self._conclave_items(prs))
 
     def _pushed(self, path):
         """Record that the head of worktree ``path`` was pushed now (#263): the wait for its CI
@@ -1362,7 +1378,15 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
         """Escalate a failed action. Its class (#182): ``tool_failure`` when the agent or its
         model produced no result (``AgentError``: a crash, a timeout, a stall, an unavailable
         model, a denied permission), ``untrusted`` for an issue text no longer trusted,
-        ``failure`` for anything else (``gh``, git, the dispatcher itself)."""
+        ``failure`` for anything else (``gh``, git, the dispatcher itself).
+
+        A conclave (#141) is never escalated, whatever failed and however it ran
+        (``_run_action``, or ``_run_lane`` for an unexpected error): it runs on an item already
+        with the operator, and another escalation would end its block, leaving a call started
+        without a result unsettled. It resumes from its record on a later tick."""
+        if action.kind == 'conclave':
+            self.log('  conclave: no escalation, it resumes from its record')
+            return
         lb = self.cfg.labels
         reason = f'Il passo `{action.kind}` è fallito: {_failure_text(exc)}{self._log_hint(exc)}'
         cls = (TOOL_FAILURE if isinstance(exc, AgentError)
@@ -1837,12 +1861,19 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin):
             message += f'\n{agent.commit_trailer}\n'
         return message
 
-    def _blocked(self, number, agent, reason, remove, on_pr):
+    def _blocked(self, number, agent, reason, remove, on_pr, step=None, head=None):
+        """An agent that stopped as ``blocked`` in ``step``, which started from commit
+        ``head``: its notice, written with its identity, then ``agent:needs-operator``. The
+        marker records the agent, the step, the commit and the reason, the block a conclave
+        (#141) works on."""
         author = self._as(agent.key, PR_COMMENT if on_pr else ISSUE_COMMENT)
+        payload = {'event': 'blocked', 'class': 'blocked', 'critical': True, 'to': 'operator',
+                   'agent': agent.key, 'reason': reason.strip()}
+        if step:
+            payload.update(step=step, head=head)
         author.comment(number, publishable(self.runner.header(agent) + '\n## Lavoro bloccato\n\n'
                                            + reason.strip() + '\n\n' + RESUME,
-                                           'notice', {'event': 'blocked', 'class': 'blocked',
-                                                      'critical': True, 'to': 'operator'}))
+                                           'notice', payload))
         self.gh.edit_labels(number, add=[self.cfg.labels.needs_operator], remove=remove)
 
     def _protected_changes(self, path, since=None):

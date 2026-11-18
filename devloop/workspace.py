@@ -1,6 +1,7 @@
 """Git worktrees for agent work. The main checkout's working tree is never touched."""
 
 import base64
+import hashlib
 import os
 import re
 import shutil
@@ -84,6 +85,47 @@ def run_in_group(argv, *, timeout=None, input=None, watch=None, watch_interval=3
                 pass
             raise
     return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
+# A new file beyond this size is shown in a pending diff by its size and hash only (#141).
+MAX_NEW_FILE = 256 * 1024
+
+
+def _new_file_diff(root, name):
+    """New file ``name`` of worktree ``root``, not tracked, as a diff that adds it (#141): its
+    lines when it is UTF-8 text up to ``MAX_NEW_FILE`` bytes, otherwise its size only; the
+    target of a symbolic link. The sha256 of the exact bytes is always in the header, so two
+    contents differ in the text, and so in its hash, even where the lines look alike. Lines are
+    split at LF only, as git does: CR, U+2028 and every other separator stay in the line where
+    the file has them. Deterministic: the same content gives the same text."""
+    path = root / name
+    head = f'diff --git a/{name} b/{name}\nnew file, not tracked'
+    tail = f'\n--- /dev/null\n+++ b/{name}\n'
+    try:
+        if path.is_symlink():
+            target = os.readlink(path)
+            digest = hashlib.sha256(os.fsencode(target)).hexdigest()
+            return (head + f', symbolic link, sha256 {digest}' + tail
+                    + f'@@ -0,0 +1 @@\n+{target}\n\\ No newline at end of file\n')
+        data = path.read_bytes()
+    except OSError as exc:
+        return head + tail + f'(not readable: {type(exc).__name__})\n'
+    head += f', {len(data)} bytes, sha256 {hashlib.sha256(data).hexdigest()}' + tail
+    try:
+        text = data.decode('utf-8') if b'\0' not in data and len(data) <= MAX_NEW_FILE else None
+    except UnicodeDecodeError:
+        text = None
+    if text is None:
+        return head + f'(binary or larger than {MAX_NEW_FILE} bytes)\n'
+    if not text:
+        return head + '(empty)\n'
+    lines = text.split('\n')
+    last = lines.pop()  # '' when the file ends with LF
+    body = ''.join(f'+{line}\n' for line in lines)
+    if last:
+        lines.append(last)
+        body += f'+{last}\n\\ No newline at end of file\n'
+    return head + f'@@ -0,0 +1,{len(lines)} @@\n' + body
 
 
 def git_config_env(pairs):
@@ -221,6 +263,35 @@ class Workspace:
         part of the key of the supervisor's retries (#182)."""
         self._git('fetch', 'origin', self.base_branch)
         return self._git('rev-parse', f'origin/{self.base_branch}').strip()
+
+    def commit_copy(self, name, commit, branch=None):
+        """A disposable worktree detached at ``commit``, for a read-only turn of the conclave
+        (#141); removed with :meth:`remove`. ``branch``: the PR branch to fetch with the base,
+        where the commit is."""
+        refs = [f'+refs/heads/{branch}:refs/remotes/origin/{branch}'] if branch else []
+        self._git('fetch', 'origin', self.base_branch, *refs)
+        path = self.path(name)
+        self._fresh(path)
+        self._git('worktree', 'add', '--force', '--detach', str(path), commit)
+        return path
+
+    def pending_diff(self, name, commit):
+        """What worktree ``name`` holds beyond ``commit`` (#141): ``git diff`` of the tracked
+        files against it, then each new file git does not ignore, in name order, as a diff
+        that adds it with its content (``_new_file_diff``): the members cannot read it in the
+        checkout of the commit, and a change to it changes the diff and its hash. ``''`` when
+        the worktree does not exist; nothing is written to it."""
+        path = self.path(name)
+        if not path.is_dir():
+            return ''
+        diff = self._git('diff', '--no-color', commit, cwd=path)
+        new = [n for n in self._git('ls-files', '--others', '--exclude-standard', '-z',
+                                    cwd=path).split('\0') if n]
+        for new_name in sorted(new):
+            if diff and not diff.endswith('\n'):
+                diff += '\n'
+            diff += _new_file_diff(path, new_name)
+        return diff
 
     def review_copy(self, path, reviewer=None):
         """``(name, path)`` of a disposable worktree for a reviewer, detached at the HEAD of
