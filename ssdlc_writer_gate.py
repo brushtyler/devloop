@@ -5,9 +5,11 @@ Writers hold ``LOCK_SH`` for their whole life and recheck the generation after
 acquiring it; a transition takes a non-blocking ``LOCK_EX`` only from source
 revalidation to selector publication. Only the kernel flock is evidence: the
 registry beside the gate never authorizes anything. A host command marks its
-generation before it executes, and that mark refuses automatic fencing for the
-generation (``HOST_TREE_UNVERIFIABLE``), because no kernel mechanism here proves
-that its process tree has ended. Process scans are never used as evidence.
+generation and records its tree before it executes, and runs under a supervisor
+that is a child subreaper (#132): only the supervisor's record that the kernel left
+it no child (``ECHILD``) proves the tree ended. Any tree without that proof, or run
+without the mechanism, refuses automatic fencing for the generation
+(``HOST_TREE_UNVERIFIABLE``). Process scans are never used as evidence.
 
 Role containers of admitted runs take the gate through their PID 1 holder
 (``ssdlc_role_fencing``, part c1); native transitions of those runs take ``LOCK_EX``
@@ -22,13 +24,16 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import secrets
+import select
 import shutil
 import signal
 import stat
 import subprocess
 import sys
 import time
+import types
 
 from ssdlc_locks import current_lock, record_lock
 
@@ -43,6 +48,12 @@ KIND = 'ssdlc-writer-gate-v1'
 RECORD_MAX = 4096
 MAX_WAIT = 300.0
 HOST_TREE_UNVERIFIABLE = 'HOST_TREE_UNVERIFIABLE'
+# Host markers written with per-command tree records (#132). A current-generation
+# marker without it was written before host trees could be proven and always refuses.
+TREE_PROTOCOL = 'host-tree-v1'
+TREE_MECHANISM = 'subreaper'
+PR_SET_CHILD_SUBREAPER, PR_GET_CHILD_SUBREAPER = 36, 37
+SUPERVISOR_START = 30.0
 LOG = logging.getLogger(__name__)
 
 # Host-local filesystems whose flock is enforced by this kernel for every opener.
@@ -412,7 +423,7 @@ def _read_entry(rfd, name):
 def _mark_host(gate, key, leader, controller):
     """Durably mark that a host command runs in generation ``key``. Never removed here."""
     name = host_marker_name(key)
-    created = _publish(gate, name, dict(role='host', generation=key, identity=leader,
+    created = _publish(gate, name, dict(role='host', generation=key, identity=leader, trees=TREE_PROTOCOL,
                                         controller=controller, recorded_at=time.time()))
     if not created:
         # An existing marker is accepted only if it is a valid marker of this very
@@ -425,6 +436,38 @@ def _mark_host(gate, key, leader, controller):
         if (not isinstance(record, dict) or record.get('role') != 'host'
                 or _historical_key(record, name) != key):
             raise GateError('registry_invalid', f'host marker {name} exists but is not a valid marker of this generation')
+
+
+_TREE_ID = re.compile(r'[0-9a-f]{32}')
+
+
+def tree_record_name(tree):
+    return f't-{tree}.json'
+
+
+def tree_conclusion_name(tree):
+    return f'c-{tree}.json'
+
+
+def _tree_key(record):
+    """The generation of a well-formed tree record, or None when it cannot be trusted."""
+    tree, key = record.get('tree'), record.get('generation')
+    if not isinstance(tree, str) or not _TREE_ID.fullmatch(tree) or record.get('name') != tree_record_name(tree):
+        return None
+    if not isinstance(key, str):
+        return None
+    try:
+        return key if generation_key(json.loads(key)) == key else None
+    except (ValueError, GateError):
+        return None
+
+
+def _record_tree(gate, tree, key, supervisor, controller, mechanism, reason):
+    """Durably record one host command's tree before it executes. Never removed here."""
+    record = dict(role='host-tree', tree=tree, generation=key, mechanism=mechanism, reason=reason,
+                  supervisor=supervisor, controller=controller, recorded_at=time.time())
+    if not _publish(gate, tree_record_name(tree), record):
+        raise GateError('registry_invalid', f'host tree record {tree_record_name(tree)} already exists')
 
 
 def _records(gate):
@@ -441,6 +484,10 @@ def _records(gate):
                 found.append(dict(record, name=name, live=is_live(record.get('identity'))))
             elif role == 'host' and name.startswith('h-'):
                 found.append(dict(record, name=name, live=is_live(record.get('identity'))))
+            elif role == 'host-tree' and name.startswith('t-'):
+                found.append(dict(record, name=name, live=is_live(record.get('supervisor'))))
+            elif role == 'host-tree-concluded' and name.startswith('c-'):
+                found.append(dict(record, name=name, live=False))
             else:
                 LOG.warning('writer-gate malformed registry entry ticket=%s name=%s', gate.ticket_root, name)
                 malformed.append(name)
@@ -482,7 +529,12 @@ def holders(gate):
         identity = observed[0] if observed else None
         registered = any(r['role'] == 'writer' and r['live'] and r['identity'] == identity for r in records)
         kernel.append(dict(held, identity=identity, registered=registered))
+    concluded = _conclusions(records)
     return dict(kernel=kernel, malformed=malformed,
+                host_trees=[dict(tree=r.get('tree'), generation=r.get('generation'), mechanism=r.get('mechanism'),
+                                 supervisor=r.get('supervisor'), supervisor_live=r['live'],
+                                 concluded=_concluded(r, concluded))
+                            for r in records if r['role'] == 'host-tree'],
                 stale_records=[r['name'] for r in records if r['role'] == 'writer' and not r['live']],
                 host_markers=[dict(generation=r.get('generation'), leader=r.get('identity'), leader_live=r['live'])
                               for r in records if r['role'] == 'host'])
@@ -602,18 +654,69 @@ class TransitionProof:
         return dict(kind='writer-gate-exclusive-v1', **self.identity, holder=self_identity()[0])
 
 
+def _conclusions(records):
+    """Supervisor conclusions by tree id; a record whose name does not match its tree is none."""
+    found = {}
+    for record in records:
+        tree = record.get('tree') if record['role'] == 'host-tree-concluded' else None
+        if isinstance(tree, str) and _TREE_ID.fullmatch(tree) and record['name'] == tree_conclusion_name(tree):
+            found[tree] = record
+    return found
+
+
+def _concluded(tree, conclusions):
+    """Whether the tree's own subreaper recorded that the kernel left it no child."""
+    done = conclusions.get(tree.get('tree'))
+    return (tree.get('mechanism') == TREE_MECHANISM and done is not None
+            and done.get('generation') == tree.get('generation') and is_identity(tree.get('supervisor'))
+            and done.get('supervisor') == tree.get('supervisor'))
+
+
+def _unproven_host_trees(records, key):
+    """Why the host trees of generation ``key`` are not proven finished; empty when they are.
+
+    A host marker or tree record whose generation cannot be read counts as current. A
+    current-generation marker written before tree records existed, a tree run without
+    the subreaper, and a tree without its supervisor's conclusion all refuse. Records
+    of a well-formed earlier generation are history.
+    """
+    reasons = []
+    for record in records:
+        if record['role'] != 'host':
+            continue
+        marked = _historical_key(record, record['name'])
+        if marked is None:
+            reasons.append(f'host marker {record["name"]} has no readable generation')
+        elif marked == key and record.get('trees') != TREE_PROTOCOL:
+            reasons.append(f'host marker {record["name"]} has no tree records')
+    conclusions = _conclusions(records)
+    for record in records:
+        if record['role'] != 'host-tree':
+            continue
+        tree = _tree_key(record)
+        if tree is None:
+            reasons.append(f'tree record {record["name"]} has no readable generation')
+        elif tree != key:
+            continue
+        elif record.get('mechanism') != TREE_MECHANISM:
+            reasons.append(f'tree {record["tree"]} ran without a kernel mechanism: '
+                           f'{record.get("reason") or "no reason recorded"}')
+        elif not _concluded(record, conclusions):
+            state = 'still running' if record['live'] else 'ended without recording the proof'
+            reasons.append(f'tree {record["tree"]} has no subreaper conclusion (supervisor {state})')
+    return reasons
+
+
 def _refuse_uncovered(gate, key, coverage):
     records, malformed = _records(gate)
     if malformed:
         raise GateError('registry_corrupt', f'unreadable registry entries {malformed}; an operator must inspect them')
-    # Only a well-formed marker of another generation is history; a marker whose
-    # generation is missing, not canonical or inconsistent with its name refuses.
-    marked = [r for r in records if r['role'] == 'host' and _historical_key(r, r['name']) in (None, key)]
-    if marked:
-        # A host tree's end is not provable by the kernel here: no process scan stands in.
+    unproven = _unproven_host_trees(records, key)
+    if unproven:
+        # Only the subreaper's recorded ECHILD proves a host tree ended: no process scan stands in.
         raise GateError(HOST_TREE_UNVERIFIABLE,
-                        f'{len(marked)} host command marker(s) in the current generation; '
-                        'their process trees cannot be proven finished, use the manual path')
+                        f'{len(unproven)} host process tree(s) of the current generation cannot be proven '
+                        f'finished ({"; ".join(unproven)}); use the manual path')
     reasons = []
     for probe in coverage:
         try:
@@ -687,16 +790,39 @@ def handoff(lease, publish, *, held=(), coverage=()):
 
 
 # ---------------------------------------------------------------------------
-# Trusted host commands: run inside a live writer lease, in their own session,
-# without the gate descriptor. The generation is marked before the command
-# executes and the mark is never cleared by watching processes, so a command,
-# its descendants or a controller killed at any point can never yield a proof.
+# Trusted host commands (#132): run inside a live writer lease, without the gate
+# descriptor, under a supervisor in its own session that is a child subreaper.
+# The generation is marked and the tree recorded before the command executes;
+# neither is ever cleared. A tree is proven finished only by its supervisor's
+# conclusion, written after the kernel answered ECHILD to waitpid(-1): every
+# orphaned descendant is reparented to the subreaper before its parent's exit is
+# reported, so no descendant can be missed the way a /proc scan misses one. A
+# supervisor that dies first never writes it, and the generation stays refused.
 
-# The barrier reads one line from the command's stdin pipe, which only the
-# controller can write, once the marker is published. EOF (the controller died
-# or refused) exits without executing the command. ``read`` consumes exactly that
-# line, so the command then sees the caller's input, or EOF.
-_BARRIER = 'IFS= read -r _ || exit 125; exec "$@"'
+SUPERVISOR = os.path.abspath(__file__)
+_libc_prctl = None
+
+
+def _prctl(option, arg):
+    global _libc_prctl
+    if _libc_prctl is None:
+        _libc_prctl = ctypes.CDLL(None, use_errno=True)
+    if _libc_prctl.prctl(ctypes.c_int(option), ctypes.c_ulong(arg), ctypes.c_ulong(0), ctypes.c_ulong(0),
+                         ctypes.c_ulong(0)) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
+def host_tree_support():
+    """None when host trees can be proven here, else why they cannot (the reason refuses)."""
+    if not sys.platform.startswith('linux'):
+        return 'child subreapers need Linux'
+    value = ctypes.c_int(-1)
+    try:
+        _prctl(PR_GET_CHILD_SUBREAPER, ctypes.addressof(value))
+    except (OSError, AttributeError) as exc:
+        return f'PR_GET_CHILD_SUBREAPER unavailable: {getattr(exc, "strerror", None) or exc}'
+    return None
 
 
 def _resolve(program, env):
@@ -709,35 +835,224 @@ def _resolve(program, env):
     return found
 
 
+def _read_report(fd):
+    """The supervisor's one-line start report, or '' if it ended or stalled before writing it."""
+    data, deadline = b'', time.monotonic() + SUPERVISOR_START
+    while not data.endswith(b'\n'):
+        left = deadline - time.monotonic()
+        if left <= 0 or not select.select([fd], [], [], left)[0]:
+            return ''
+        chunk = os.read(fd, 4096)
+        if not chunk:
+            return ''
+        data += chunk
+    return data.decode(errors='replace').strip()
+
+
 def run_host(lease, argv, *, cwd=None, env=None, input=None, timeout=None, capture_output=False, text=False):
+    """Run a trusted host command; return once its whole process tree has ended.
+
+    On ``timeout`` the supervisor kills the whole tree, records its conclusion and
+    ``TimeoutExpired`` is raised. Without the subreaper the command still runs, but
+    its tree record names the reason and refuses automatic fencing.
+    """
     lease.check()
     key = generation_key(lease.generation)
     argv = [os.fspath(arg) for arg in argv]
     program = _resolve(argv[0], env)
+    unavailable = host_tree_support()
+    tree = secrets.token_hex(16)
     pipe = subprocess.PIPE if capture_output else None
-    child = subprocess.Popen(['/bin/sh', '-c', _BARRIER, 'ssdlc-host', program, *argv[1:]],
-                             cwd=cwd, env=env, text=text, stdout=pipe, stderr=pipe, stdin=subprocess.PIPE,
-                             close_fds=True, start_new_session=True)
+    report_r, report_w = os.pipe()
     try:
-        # Not reaped and still waiting on the barrier, so /proc/<pid> describes our child.
+        child = subprocess.Popen(
+            [sys.executable, '-E', '-s', SUPERVISOR, '--host-tree', str(lease._gate.ticket_root), tree, key,
+             unavailable or TREE_MECHANISM, str(report_w), program, *argv[1:]],
+            cwd=cwd, env=env, text=text, stdout=pipe, stderr=pipe, stdin=subprocess.PIPE,
+            close_fds=True, pass_fds=(report_w,), start_new_session=True)
+    except BaseException:
+        os.close(report_r)
+        raise
+    finally:
+        os.close(report_w)
+    mechanism = None
+    try:
+        report = _read_report(report_r)
+        if not report:
+            raise GateError(HOST_TREE_UNVERIFIABLE, 'host tree supervisor did not start')
+        # Not reaped and still waiting on its barrier, so /proc/<pid> describes our child.
         observed = process_identity(child.pid)
         if observed is None or observed[1] != child.pid:
             raise GateError(HOST_TREE_UNVERIFIABLE, 'host command session could not be identified')
-        # Published before the command runs: it outlives a SIGKILL of this controller.
-        _mark_host(lease._gate, key, observed[0], self_identity()[0])
+        if report == TREE_MECHANISM:
+            mechanism, reason = TREE_MECHANISM, None
+        else:
+            reason = report.removeprefix('unavailable').strip() or 'the supervisor reported no mechanism'
+            LOG.warning('writer-gate host tree unprovable ticket=%s tree=%s reason=%s',
+                        lease.ticket_root, tree, reason)
+        controller = self_identity()[0]
+        # Both published before the command runs: they outlive a SIGKILL of this controller.
+        _mark_host(lease._gate, key, observed[0], controller)
+        _record_tree(lease._gate, tree, key, observed[0], controller, mechanism, reason)
         with contextlib.suppress(BrokenPipeError):
             _write_all(child.stdin.fileno(), b'\n')
     except BaseException:
-        child.communicate()  # EOF on the barrier: the command is never executed
+        # EOF on the barrier: the command is never executed.
+        try:
+            child.communicate(timeout=SUPERVISOR_START)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(child.pid, signal.SIGKILL)
+            child.communicate()
         raise
-    LOG.info('writer-gate host command started ticket=%s session=%s generation=%s',
-             lease.ticket_root, child.pid, key)
+    finally:
+        os.close(report_r)
+    LOG.info('writer-gate host command started ticket=%s supervisor=%s tree=%s mechanism=%s generation=%s',
+             lease.ticket_root, child.pid, tree, mechanism, key)
     try:
         out, err = child.communicate(input, timeout=timeout)
     except subprocess.TimeoutExpired:
         with contextlib.suppress(ProcessLookupError):
-            os.killpg(child.pid, signal.SIGKILL)
+            if mechanism == TREE_MECHANISM:
+                os.kill(child.pid, signal.SIGTERM)  # the supervisor kills its whole tree, then concludes
+            else:
+                os.killpg(child.pid, signal.SIGKILL)
         child.communicate()
         raise
     lease.check()
     return subprocess.CompletedProcess(argv, child.returncode, out, err)
+
+
+# ---------------------------------------------------------------------------
+# The host tree supervisor: ``python3 ssdlc_writer_gate.py --host-tree ...``,
+# started by run_host() in its own session. It becomes a child subreaper, reports
+# on a private pipe, waits for the controller's line on stdin (the barrier), runs
+# the command in its own process group and reaps every descendant. Only then does
+# it publish ``c-<tree>.json``. It never holds the gate.
+
+_STOPPING = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+
+
+def _initial_environ():
+    """The environment exactly as the controller passed it, before Python touched it."""
+    try:
+        raw = Path('/proc/self/environ').read_bytes()
+    except OSError:
+        return os.environb
+    return dict(item.split(b'=', 1) for item in raw.split(b'\0') if b'=' in item)
+
+
+def _barrier():
+    """Read exactly one line from stdin; False on EOF (the controller died or refused)."""
+    while True:
+        byte = os.read(0, 1)
+        if not byte:
+            return False
+        if byte == b'\n':
+            return True
+
+
+def _children():
+    try:
+        return [int(pid) for pid in Path(f'/proc/self/task/{os.getpid()}/children').read_text().split()]
+    except (OSError, ValueError):
+        return []
+
+
+def _conclude(dirfd, tree, key, supervisor, status):
+    record = dict(role='host-tree-concluded', tree=tree, generation=key, supervisor=supervisor,
+                  status=status, concluded_at=time.time())
+    with contextlib.suppress(OSError, GateError):
+        # Without this record the tree stays unproven: failing here only refuses.
+        _publish(types.SimpleNamespace(dirfd=dirfd), tree_conclusion_name(tree), record)
+
+
+def _supervise(args):
+    ticket_root, tree, key, mechanism, report_fd, *command = args
+    report_fd = int(report_fd)
+    state = dict(stop=False, group=None)
+
+    def kill_tree():
+        # Only to stop the tree: listing children here is never evidence.
+        if state['group'] is not None:  # still unreaped, so its group id is not reused
+            with contextlib.suppress(OSError):
+                os.killpg(state['group'], signal.SIGKILL)
+        for pid in _children():  # unreaped children: their PIDs cannot be reused
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+
+    def stop(signum, frame):
+        state['stop'] = True
+        kill_tree()
+    for sig in _STOPPING:
+        signal.signal(sig, stop)
+
+    reason, dirfd = (None if mechanism == TREE_MECHANISM else mechanism), None
+    if reason is None:
+        try:
+            dirfd = os.open(ticket_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError as exc:
+            reason = f'ticket directory unreachable for the conclusion: {exc.strerror}'
+    if reason is None:
+        try:
+            _prctl(PR_SET_CHILD_SUBREAPER, 1)
+            supervisor = self_identity()[0]
+        except Exception as exc:
+            reason = f'PR_SET_CHILD_SUBREAPER failed: {getattr(exc, "strerror", None) or type(exc).__name__}'
+    reason = None if reason is None else ' '.join(reason.split())
+    _write_all(report_fd, (TREE_MECHANISM if reason is None else f'unavailable {reason}').encode() + b'\n')
+    os.close(report_fd)
+    env = _initial_environ()
+    default = (signal.SIGPIPE, signal.SIGXFSZ, *_STOPPING)
+    if not _barrier():
+        if reason is None:
+            _conclude(dirfd, tree, key, supervisor, 'not_started')
+        os._exit(125)
+    if reason is not None:  # no mechanism: behave like the plain barrier, the record already refuses
+        for sig in default:
+            signal.signal(sig, signal.SIG_DFL)
+        try:
+            os.execve(command[0], command, env)
+        finally:
+            os._exit(127)
+    status = None
+    try:
+        state['group'] = child = os.posix_spawn(command[0], command, env, setpgroup=0, setsigdef=default)
+    except OSError:
+        child = None
+    if state['stop']:
+        kill_tree()
+    null = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):  # never keep the caller's pipes open past the command
+        os.dup2(null, fd)
+    os.close(null)
+    while True:
+        try:
+            pid, waited = os.waitpid(-1, os.WNOHANG if state['stop'] else 0)
+        except ChildProcessError:
+            break  # ECHILD: the kernel reparents every orphan here, so the whole tree has ended
+        if pid == 0:
+            kill_tree()
+            time.sleep(0.05)
+        elif pid == child:
+            status, state['group'] = waited, None
+    if status is None:
+        _conclude(dirfd, tree, key, supervisor, 'not_executed')
+        os._exit(127)
+    if os.WIFSIGNALED(status):
+        sig = os.WTERMSIG(status)
+        _conclude(dirfd, tree, key, supervisor, f'signal {sig}')
+        import resource
+        with contextlib.suppress(OSError, ValueError):  # end like the command, without a core dump
+            resource.setrlimit(resource.RLIMIT_CORE, (0, resource.getrlimit(resource.RLIMIT_CORE)[1]))
+        with contextlib.suppress(OSError, ValueError):  # SIGKILL and SIGSTOP keep their action
+            signal.signal(sig, signal.SIG_DFL)
+        os.kill(os.getpid(), sig)
+        os._exit(128 + sig)
+    code = os.waitstatus_to_exitcode(status)
+    _conclude(dirfd, tree, key, supervisor, f'exit {code}')
+    os._exit(code)
+
+
+if __name__ == '__main__' and sys.argv[1:2] == ['--host-tree']:
+    _supervise(sys.argv[2:])

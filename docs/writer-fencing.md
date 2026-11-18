@@ -12,7 +12,9 @@ of the canonical ticket is running. This page describes the protocol implemented
 > Part (c2), #158, lets the native transitions of an admitted run replace the operator's
 > "writers stopped" attestation with a versioned automatic proof (see
 > [Native transitions](#native-transitions-the-automatic-proof)). Other runs, the
-> supervisor and the feedback recording authority keep the manual path.
+> supervisor and the feedback recording authority keep the manual path. Host command
+> trees can be proven finished by a child subreaper (#132, [Host writers](#host-writers));
+> `run_host()` is not yet used by the controller, so nothing changes for real runs.
 
 ## Invariants
 
@@ -34,8 +36,9 @@ of the canonical ticket is running. This page describes the protocol implemented
    writer lease and needs a transition uses the explicit handoff below. No second lock
    file is used to close admission early: the non-blocking exclusive attempt needs none.
 6. **Automatic fencing applies only when every writer is covered by the gate**, holding
-   `LOCK_SH` for its whole life. A writer whose end the kernel cannot prove, such as the
-   process tree of a host command, makes the transition refuse
+   `LOCK_SH` for its whole life, or by a kernel proof that it ended. A writer whose end
+   the kernel cannot prove, such as the process tree of a host command run without the
+   subreaper or not yet concluded, makes the transition refuse
    (`HOST_TREE_UNVERIFIABLE`, `uncovered_execution`); the manual path stays available.
 7. **Every refusal is diagnosable** through a `GateError` with a stable `code`. A refusal
    never yields a proof.
@@ -79,7 +82,7 @@ Every opening verifies the gate's identity:
 | Gate file is empty or holds a foreign record | `gate_corrupt` |
 | Ticket directory is a symlink or a relative path | `ticket_root_invalid` |
 | Filesystem without host-local kernel flock | `unsupported_filesystem` |
-| A host command ran in the current generation | `HOST_TREE_UNVERIFIABLE` |
+| A host command tree of the current generation is not proven finished | `HOST_TREE_UNVERIFIABLE` |
 | A coverage probe reports an execution tree outside the gate | `uncovered_execution` |
 | A registry entry cannot be read as a record | `registry_corrupt` |
 
@@ -92,8 +95,9 @@ A refused gate is never repaired automatically: an operator decides what happene
   (`ssdlc_locks.record_lock`), which are thread-local and non-reentrant.
 - **Release is `close()`**, never `LOCK_UN`. An explicit `LOCK_UN` acts on the open file
   description, so it would also unlock for any process sharing it.
-- Descriptors are never passed to children (`close_fds=True`, no `pass_fds`). A process
-  that shares the descriptor can close or unlock it for everybody.
+- Gate descriptors are never passed to children (`close_fds=True`; the only `pass_fds`
+  is the host tree supervisor's report pipe). A process that shares the descriptor can
+  close or unlock it for everybody.
 - `LockLease.validate()` reads `/proc/self/fdinfo`: an exclusive lease must show
   `FLOCK ADVISORY WRITE`, a shared lease `FLOCK ADVISORY READ`. Neither mode satisfies
   the other, and a shared lease cannot be borrowed through `transition_lock`.
@@ -129,9 +133,10 @@ Holding it never substitutes for `LOCK_EX` on the gate.
 1. opens and verifies the gate, then takes `LOCK_EX | LOCK_NB` (`writers_active` if a
    writer holds `LOCK_SH`);
 2. verifies the gate again and reads the current generation under the lock;
-3. refuses if a host marker names that generation (`HOST_TREE_UNVERIFIABLE`), if a
-   registry entry is unreadable (`registry_corrupt`), or if a coverage probe reports an
-   uncovered execution tree (`uncovered_execution`);
+3. refuses if a host command tree of that generation is not proven finished
+   (`HOST_TREE_UNVERIFIABLE`, see [Host writers](#host-writers)), if a registry entry is
+   unreadable (`registry_corrupt`), or if a coverage probe reports an uncovered
+   execution tree (`uncovered_execution`);
 4. yields the proof (`writer-gate-exclusive-v1`) to the caller, which revalidates the
    source and publishes the selector, then closes the descriptor.
 
@@ -152,8 +157,9 @@ its own controller is a writer. `handoff(lease, publish, held=...)`:
 If another writer is active, or the transition refuses for any other reason, the
 handoff refuses and the lease resumes on the unchanged generation. If publication failed
 after the selector moved, the old lease does not restart. No step waits, so the handoff
-cannot deadlock. A controller that ran host commands in the current generation cannot
-hand off automatically: its transition refuses with `HOST_TREE_UNVERIFIABLE`.
+cannot deadlock. A controller whose host commands of the current generation are not all
+proven finished cannot hand off automatically: its transition refuses with
+`HOST_TREE_UNVERIFIABLE`.
 
 ## Host writers
 
@@ -161,33 +167,84 @@ Trusted host commands of the controller (Git, which also runs on the host in the
 path, and the commands of local mode) run through `run_host(lease, argv)`:
 
 - the controller holds a live writer lease, checked before and after the command;
-- the command runs in a new session, without the gate descriptor;
+- the command runs under a **host tree supervisor** (`python3 ssdlc_writer_gate.py
+  --host-tree`), started in a new session and without the gate descriptor. The
+  supervisor makes itself a child subreaper with `prctl(PR_SET_CHILD_SUBREAPER)`, opens
+  the ticket directory and reports on a private pipe whether the mechanism is in place;
 - **before the command executes**, the registry gets a host marker for the lease's
-  generation (`h-<digest>.json`, one per generation, published with `link(2)`). The
-  child starts as a `/bin/sh` barrier that waits for one line on its stdin pipe, which
-  only the controller writes after the marker is published, and then `exec`s the
-  command. If the controller dies or the marker cannot be published first, the barrier
-  reads EOF and exits without executing anything;
-- the marker is **never removed** by the gate, whatever happens to the command, its
-  descendants or the controller.
+  generation (`h-<digest>.json`, one per generation) and a tree record for this command
+  (`t-<tree>.json`: generation, supervisor identity, and the mechanism or the reason it
+  is missing), both published with `link(2)`. The supervisor waits as a barrier for one
+  line on its stdin pipe, which only the controller writes after both are published, and
+  then starts the command in its own process group. If the controller dies or a record
+  cannot be published first, the barrier reads EOF and the command never runs;
+- the supervisor closes its copies of the caller's pipes and reaps every child with
+  `waitpid(-1)` until the kernel answers `ECHILD`. Only then does it publish the
+  conclusion `c-<tree>.json` (generation, its own identity, the command's status) and
+  exit with the command's status. `run_host()` therefore returns when the **whole tree**
+  has ended, not just the command;
+- on `timeout` the controller sends `SIGTERM` to the supervisor, which kills the
+  command's group and then every child it still has, including orphans reparented to it
+  from other sessions, until `ECHILD`; it concludes and `TimeoutExpired` is raised;
+- markers, tree records and conclusions are **never removed** by the gate, whatever
+  happens to the command, its descendants, the supervisor or the controller.
 
-No kernel mechanism used here proves that a host command's process tree has ended: a
-descendant can fork and its parent exit between any two reads of `/proc`, so a scan
-that lists PIDs and then reads their states can miss a grandchild that is still
-writing. **Process scans are never quiescence evidence**: they appear only in
-diagnostics (`holders()`). A transition therefore refuses automatic fencing with
-`HOST_TREE_UNVERIFIABLE` whenever the current generation has a host marker, or a marker
-whose generation cannot be read, even after the command and every process it started
-are gone. A generation is readable only if it is the canonical encoding produced by
-`generation_key()` and the marker's name is the one derived from it: a missing, empty,
-non-canonical or mismatched generation refuses like the current one. If `run_host` finds
-its marker name already taken by anything but a valid marker of its own generation, it
-refuses (`registry_invalid`) before the command executes. The manual path stays available. Covering host trees with a kernel mechanism
-(cgroup v2 `cgroup.events` `populated 0`, or a subreaper) is issue #132.
+**Why the subreaper is a kernel proof and a scan is not.** A descendant can fork and its
+parent exit between any two reads of `/proc`, so a scan that lists PIDs and then reads
+their states can miss a grandchild that is still writing (the race of PR #127).
+**Process scans are never quiescence evidence**: they appear only in diagnostics
+(`holders()`), and the supervisor lists its children only to kill them on timeout. A
+subreaper does not look for its descendants: when a process exits, the kernel
+reparents its children to the nearest subreaper ancestor *before* the exit is reported
+to the parent. So when `waitpid(-1)` returns `ECHILD` to the supervisor, no process of
+the tree exists, not even one that changed session or process group, and none can be
+added: the tree has no member left to fork.
 
-A well-formed marker of an earlier generation no longer refuses: the generation could only have
-moved through a path that accounted for every writer, the manual one with its operator
-attestation that every writer is stopped. The marker stays as a diagnostic.
+A transition refuses automatic fencing with `HOST_TREE_UNVERIFIABLE`, naming every
+reason in the detail, unless every host tree of the current generation is proven:
+
+| Registry state for the current generation | Detail |
+| --- | --- |
+| Tree record without the mechanism | `ran without a kernel mechanism: <reason>` |
+| Tree record without its conclusion, supervisor alive | `no subreaper conclusion (supervisor still running)` |
+| Tree record without its conclusion, supervisor gone | `no subreaper conclusion (supervisor ended without recording the proof)` |
+| Conclusion of another supervisor or generation | as a missing conclusion |
+| Host marker written before tree records existed (no `trees: host-tree-v1`) | `has no tree records` |
+| Host marker or tree record whose generation cannot be read | `has no readable generation` |
+
+A generation is readable only if it is the canonical encoding produced by
+`generation_key()` and the record's name is the one derived from it (the marker's digest,
+the tree id): a missing, empty, non-canonical or mismatched generation refuses like the
+current one. If `run_host` finds its marker name already taken by anything but a valid
+marker of its own generation, or its tree record name taken, it refuses
+(`registry_invalid`) before the command executes. A marker with no tree record means
+that no command was released past the barrier.
+
+**If the mechanism is not available** (not Linux, `prctl` refused, or the supervisor
+cannot reach the ticket directory), the command still runs, as with the plain barrier
+of #115, but its tree record names the reason, and automatic fencing stays refused for
+the generation; a later proven tree does not clear it. `host_tree_support()` reports the
+reason checked by the controller.
+
+**If the supervisor dies** before `ECHILD` (killed, or crashed), its orphans are
+reparented to the next subreaper above it or to init, so the tree can no longer be
+proven: no conclusion is ever written, and the generation stays refused even after the
+remaining processes end. Only the manual path moves it. A supervisor that dies after
+writing the conclusion changes nothing, since the tree had already ended.
+
+**cgroup v2 was not chosen.** A dedicated cgroup per command, with `cgroup.events`
+`populated 0`, would also be a kernel proof, but on this host it needs a cgroup
+delegated to the controller's user (not available to unprivileged sessions, and under
+systemd only for units with `Delegate=`), a child of the controller's own cgroup that
+systemd does not manage, and, for a root controller, trust that no descendant moves
+itself out through `cgroup.procs`, which root can do. The subreaper needs no privilege,
+no configuration and no delegation, a descendant cannot leave it, and its failure, the
+supervisor's death, fails closed.
+
+A well-formed marker or tree record of an earlier generation no longer refuses: the
+generation could only have moved through a path that accounted for every writer, the
+manual one with its operator attestation that every writer is stopped. The records stay
+as diagnostics.
 
 A transition also refuses automatic fencing (`uncovered_execution`) whenever a caller's
 coverage probe reports an execution tree not covered by the gate, for example a role
@@ -507,8 +564,9 @@ or a transition:
 - a record left by a killed writer, or a record whose PID now belongs to another
   process, is reported as stale and ignored;
 - a record of a live process that does not hold the lock admits nothing;
-- only host markers of the current generation, and unreadable registry entries, refuse
-  automatic fencing. Neither depends on whether a PID is alive.
+- only host trees of the current generation that are not proven finished, and
+  unreadable registry entries, refuse automatic fencing. Neither depends on whether a
+  PID is alive: a live supervisor only changes the wording of the detail.
 
 Contention is logged by the `ssdlc_writer_gate` logger with the kernel holders from
 `/proc/locks`.
@@ -542,9 +600,15 @@ an authorized I2 generation without `state.json` is refused before anything is c
 - **Controllers are serialized, not gated.** A transition still holds `ticket.lock` and
   the source `scheduler.lock`, which exclude cooperating controllers; the controller's
   own host processes do not hold the gate. The proof covers the role containers (the
-  gate and the Docker check) and refuses on host markers.
-- **Host commands disable automatic fencing for their generation** until #132 covers
-  their process trees with a kernel mechanism.
+  gate and the Docker check) and refuses on host command trees not proven finished.
+- **Host commands are covered only through `run_host()` and its subreaper** (#132).
+  Without the subreaper, or with a tree not concluded, they disable automatic fencing
+  for their generation. `run_host()` is not yet wired into the controller: real runs
+  keep using the manual path. Work a host command delegates over IPC to another
+  service (the Docker daemon, systemd, an agent socket) is not part of its tree; it
+  needs its own coverage probe. The supervisor runs with the controller's identity, so
+  a host command could kill it or forge a conclusion: host commands are trusted, and a
+  killed supervisor fails closed. Each host command leaves two small registry records.
 - A deleted or replaced gate is detected through its anchor, the registry, a bound
   identity or an open lease, and is never recreated. Only deleting the gate, its anchor
   and the whole `writer-gate.d/` registry together makes the ticket look never
