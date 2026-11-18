@@ -332,11 +332,14 @@ Each check is an agent action: it takes a slot of `max_actions_per_tick`, and a 
 issue that may start also takes one of the free PR slots of the tick. It runs under
 `agent_timeout_seconds`. A check that fails or times out sends the issue to
 `agent:needs-operator` with a comment, removing `agent:ready` like any failed step, and the
-implementer does not start. An agy check stopped on a denied permission is first run once more,
-told what was denied and which commands it may run ([agy permissions](reference.md#agy-permissions),
-#180, #319). An agy review whose model is denied twice moves to the next fallback model, and
-the denied model is skipped for `denied_cooldown_hours`; without another model it escalates
-naming the model and the command.
+implementer does not start. The check runs on the checker's chain of
+[fallback models](reference.md#fallback-models) like any other turn (#148): an unavailable model
+(a quota exhausted, for example) leaves the check to the next one, and the issue goes to
+`agent:needs-operator` only when no model is left. An agy check stopped on a denied permission
+is first run once more, told what was denied and which commands it may run
+([agy permissions](reference.md#agy-permissions), #180, #319). An agy check or review whose
+model is denied twice moves to the next fallback model, and the denied model is skipped for
+`denied_cooldown_hours`; without another model it escalates naming the model and the command.
 
 ## Merge modes
 

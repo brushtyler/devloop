@@ -510,9 +510,14 @@ class PreflightPermissionRetryTests(unittest.TestCase):
         self.assertTrue(record['ready'])
 
     def test_a_second_denial_escalates_citing_the_permission(self):
-        log = self.tick(self.denied(), self.denied())
-        self.assertEqual(len(self.runner.calls), 2)
-        self.assertEqual(self.labels, ['issue-7-preflight', 'issue-7-preflight-retry'])
+        # The check runs on the chain of models (#148): after two denials on the primary the
+        # fallback runs, with its own retry; denied there too, the check escalates.
+        log = self.tick(*[self.denied() for _ in range(4)])
+        self.assertEqual(len(self.runner.calls), 4)
+        fallback = CFG.agent('agy').chain()[1].model
+        self.assertEqual(self.labels, ['issue-7-preflight', 'issue-7-preflight-retry',
+                                       f'issue-7-preflight-{fallback}',
+                                       f'issue-7-preflight-{fallback}-retry'])
         self.assertIn('agent:needs-operator', self.gh.labels[7])
         body = self.gh.thread[-1]['body']
         self.assertIn(f'agy stopped without output: {READ_JETSKI}', body)
@@ -521,9 +526,10 @@ class PreflightPermissionRetryTests(unittest.TestCase):
         self.assertIn('issue-7-preflight', self.ws.removed)
 
     def test_other_failures_of_the_check_are_not_retried(self):
+        # An unavailable model is not retried either: the fallback runs instead (#148,
+        # test_devloop_preflight.PreflightFallbackTests).
         for error in (agents.AgentError(f'agy exited with 3: {READ_JETSKI}'),
-                      agents.AgentError('agy stopped without output: no output'),
-                      agents.ModelUnavailable('agy model unavailable', None, 'quota')):
+                      agents.AgentError('agy stopped without output: no output')):
             with self.subTest(error=str(error)):
                 log = self.tick(error)
                 self.assertEqual(len(self.runner.calls), 1)
