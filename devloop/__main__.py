@@ -21,6 +21,7 @@ from .dispatcher import (Dispatcher, TickLog, Workers, ensure_labels, pr_counts_
                          pr_status_line)
 from .github import GitHub, GitHubError
 from .housekeeping import Housekeeping
+from .journal import MIB
 from .ledger import Ledger
 from .outbox import for_identities
 from .planning import plan, queue_lines
@@ -118,7 +119,8 @@ def build(args):
     # write it (#362): the running dispatcher keeps its chain in memory.
     command = getattr(args, 'command', None)
     read_only = command == 'status' or (command == 'tick' and getattr(args, 'dry_run', False))
-    ledger = Ledger(None, state_dir=state, read_only=read_only)
+    ledger = Ledger(None, state_dir=state, read_only=read_only,
+                    journal_max_bytes=cfg.journal_max_mib * MIB)
     # With publication_outbox (#385), every client's comments, native reviews and pull requests
     # are in that journal before they are sent; never from status or a dry run, which do not
     # write it.
@@ -139,6 +141,19 @@ def build(args):
                             housekeeping=Housekeeping(state, ws, gh, ledger=ledger,
                                                       log=tick_log))
     return cfg, state, dispatcher
+
+
+def hold_lock(dispatcher, lock_fd):
+    """With the outbox of the publications (#385), the `gh` of each write holds the dispatcher
+    lock ``lock_fd`` too, under a timeout of its own (``GitHub.KILL_AFTER``): no next dispatcher
+    starts while one of them may still publish, even after this process stopped. Without it
+    (#397, ADR 0004, D8) no `gh` gets the lock: a dispatcher killed while a `gh` of its runs
+    leaves the lock free at once, as before #385. Returns whether the lock was passed on."""
+    identities = getattr(dispatcher, 'identities', None)
+    if getattr(identities, 'outbox', None) is None:
+        return False
+    identities.hold(lock_fd)
+    return True
 
 
 def keep_pins(cfg):
@@ -469,11 +484,7 @@ def main(argv=None):
             dispatcher.tick(dry_run=True)
         return
     with single_instance(state / 'dispatcher.lock') as lock:
-        # The `gh` of each write holds the lock too: no next dispatcher starts while one of them
-        # may still publish, even after this process stopped (#385).
-        identities = getattr(dispatcher, 'identities', None)
-        if identities is not None:
-            identities.hold(lock.fileno())
+        hold_lock(dispatcher, lock.fileno())
         if args.command == 'cleanup':
             for name in dispatcher.ws.names():
                 dispatcher.ws.remove(name)

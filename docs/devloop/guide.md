@@ -882,13 +882,26 @@ half published, without duplicates: a write cut short is sent again only when it
 from when the write was recorded). The `gh` of each write holds the dispatcher lock while it
 runs: if the dispatcher is killed while one of them runs, the next dispatcher does not start
 (`another dispatcher is running (lock held)`) until that `gh` has ended, so that it never sends
-again a write the `gh` may still publish. A `gh` left stopped keeps devloop from starting until
-it is ended (`pgrep -a gh` lists it).
+again a write the `gh` may still publish. That `gh` runs under coreutils `timeout` (#397): it
+ends at most about 5 minutes after it started, even with its dispatcher gone, and so does the
+wait; a `gh` left stopped (SIGSTOP) is not counted by that clock, and keeps devloop from
+starting until it is ended (`pgrep -a gh` lists it). With the outbox off, no `gh` holds the lock,
+and a killed dispatcher restarts at once, as before #385.
 A native review whose outcome stays uncertain is not retried by the review step: the outbox
 settles it. A line `publication <id> ... not settled` in
 the log is a write that could not be checked on GitHub yet, or not conclusively: the next tick
 tries again, and nothing new is sent on that issue or PR until it is settled. If the journal
-cannot take an outcome, nothing is sent until it does.
+cannot take an outcome, nothing is sent until it does. A write the outbox dropped, never to be
+published, is reported to the operator (#397): a `WARNING: publication <id> ... dropped` line in
+the log at each start and, with `[run].alert_issue`, one alert on that issue, once per write; its
+body stays in the journal.
+
+The journal has a limit, `journal_max_mib` (64 MiB by default, #397). From 80% of it devloop
+warns the operator with the current size, once per threshold on `[run].alert_issue`, or with a
+`WARNING: the journal of the turns is <n> bytes` line in the log at each start without it; the
+turns go on. Beyond the limit the journal is not loaded and takes no event: no turn starts, and
+devloop removes nothing from it and has no compaction of its own: raise the limit in the local
+overlay before it gets there.
 
 ### Advisory review for the operator
 

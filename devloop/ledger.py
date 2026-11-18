@@ -46,7 +46,8 @@ from dataclasses import dataclass, field
 from .agents import TELEMETRY_FIELDS
 from .budget import observed
 from .github import GitHubError
-from .journal import FAILED, LEGACY, NOT_DISPATCHED, RETURNED, JournalError, TurnJournal
+from .journal import (FAILED, LEGACY, MAX_BYTES, NOT_DISPATCHED, RETURNED, JournalError,
+                      TurnJournal)
 from .markdown import dispatcher_header, publishable, read_marker
 from .ports import Tracker
 
@@ -177,11 +178,12 @@ class Ledger:
     edited. The dispatcher sets it to its own check; without it every author counts."""
 
     def __init__(self, gh: Tracker, clock=time.time, monotonic=time.monotonic, state_dir=None,
-                 signed=None, read_only=False):
+                 signed=None, read_only=False, journal_max_bytes=MAX_BYTES):
         self.gh = gh
         self._clock = clock
         self._monotonic = monotonic
-        self.journal = TurnJournal(state_dir, clock=clock, read_only=read_only)
+        self.journal = TurnJournal(state_dir, clock=clock, read_only=read_only,
+                                   max_bytes=journal_max_bytes)
         self.signed = signed
         # Reviewers in parallel write the same register (#325): one write at a time, each on
         # the register as GitHub has it right before.

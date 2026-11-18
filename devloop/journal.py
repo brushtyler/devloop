@@ -30,6 +30,9 @@ before it (``previous``) and its own (``sha256``), like the journal of the local
   native review and pull request devloop writes on GitHub is here, body included, before it is
   sent. The turns ignore them. An outcome the outbox already acted on and the journal could not
   take is written before any later event (``publication``, ``defer``).
+- ``size_warning``: the operator was warned on ``[run].alert_issue`` that the journal reached
+  ``WARN_RATIO`` of its limit (#397), with its ``size``, the ``threshold`` and the ``limit``, in
+  bytes: once per threshold.
 
 With ``story_identity`` on (#363, ADR 0004, P2-3a) it also holds the stories, the unit of the
 budget:
@@ -70,6 +73,13 @@ the journal a snapshot (``turn-journal-state.json``) keeps the sequence and hash
 event: a snapshot without its journal, or a journal shorter than it or diverging from it, is
 refused (ADR 0001, constraint 3). The chain is not keyed: it gives integrity, not provenance.
 
+The file has a limit (#397, ``journal_max_mib``, 64 MiB by default, ``max_bytes``): its size is
+checked before it is loaded and before each append. A journal beyond the limit is not loaded,
+and an event that would take it beyond is not written: ``JournalError``, as for any journal that
+cannot be read or written. Nothing is ever removed, cut or replaced to stay under it, and the
+checks of the chain and of the snapshot stay the same. From ``WARN_RATIO`` of the limit
+(``warn_bytes``) the dispatcher warns the operator.
+
 Only the dispatcher that holds ``dispatcher.lock`` writes the journal. ``devloop status`` and
 ``devloop tick --dry-run`` run beside it without the lock: they read it ``read_only``, with no
 effect on the files. They neither set aside a tail nor import or remove the old trace, and what
@@ -98,6 +108,13 @@ OUTCOMES = (RETURNED, FAILED, UNCERTAIN, NOT_DISPATCHED)
 RECONCILED_OUTCOMES = (RETURNED, FAILED, NOT_DISPATCHED)
 RECONCILE_COMMAND = '/devloop reconcile'
 PUBLICATION = 'publication'  # the prefix of the events of the outbox (#385, ``outbox``)
+MIB = 1024 * 1024
+# The limit of the journal's file (#397, ``journal_max_mib``): a journal beyond it is not loaded,
+# and an event that would take it beyond is not written. Nothing is ever removed to stay under.
+MAX_BYTES = 64 * MIB
+# The share of the limit at which devloop warns the operator, once per threshold (#397).
+WARN_RATIO = 0.8
+SIZE_WARNING = 'size_warning'  # the event of that warning
 # A turn's id: its sequence (or, for a legacy one, its number) and 8 hex digits that differ
 # between journals, so that a command written for the turns of a journal since lost never
 # reconciles a turn of a new one.
@@ -207,9 +224,10 @@ class TurnJournal:
     not set aside; the old trace is imported in memory, under ids of its own, and stays on
     disk; every other record stays in memory. No turn starts from it (``intent``)."""
 
-    def __init__(self, state_dir=None, clock=time.time, read_only=False):
+    def __init__(self, state_dir=None, clock=time.time, read_only=False, max_bytes=MAX_BYTES):
         self.dir = Path(state_dir) if state_dir is not None else None
         self.read_only = read_only
+        self.max_bytes = max_bytes
         self._clock = clock
         self._lock = threading.RLock()
         self._loaded = False
@@ -230,6 +248,29 @@ class TurnJournal:
 
     def _now(self):
         return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(self._clock()))
+
+    def size(self):
+        """The size of the journal's file in bytes: 0 without one, or without ``state_dir``."""
+        if self.dir is None:
+            return 0
+        try:
+            return self.path.stat().st_size
+        except FileNotFoundError:
+            return 0
+        except OSError as exc:
+            raise JournalError(f'{self.path}: size not readable: {exc}') from exc
+
+    def warn_bytes(self):
+        """The size from which devloop warns the operator (``WARN_RATIO`` of the limit), or None
+        without a limit."""
+        return int(self.max_bytes * WARN_RATIO) if self.max_bytes is not None else None
+
+    def _over(self, size):
+        return self.max_bytes is not None and size > self.max_bytes
+
+    def _limit_text(self, size):
+        return (f'{size} bytes, beyond the limit of {self.max_bytes} bytes (journal_max_mib): '
+                'nothing is removed from it, and no turn starts until the limit is raised')
 
     def _read(self):
         """The events of the file, verified; an incomplete or unreadable last line is set
@@ -317,6 +358,10 @@ class TurnJournal:
         if self._loaded:
             return
         if self.dir is not None:
+            # Its size before anything is read (#397): a journal beyond the limit is not loaded.
+            size = self.size()
+            if self._over(size):
+                raise JournalError(f'{self.path}: not loaded: {self._limit_text(size)}')
             # The snapshot first: the dispatcher writes it after the journal, so a process that
             # reads beside it (``read_only``) never finds the journal behind it.
             head = self._read_snapshot()
@@ -375,6 +420,12 @@ class TurnJournal:
                 self.dir.mkdir(parents=True, exist_ok=True)
                 created = not self.path.exists()
                 size = 0 if created else self.path.stat().st_size
+                after = size + len(line)
+                if self._over(after):
+                    # Refused whole, before a byte is written: nothing to cut back (#397).
+                    size = None
+                    raise JournalError(f'{self.path}: {kind} not written: the journal would be '
+                                       f'{self._limit_text(after)}')
                 with self.path.open('ab') as stream:
                     stream.write(line)
                     stream.flush()
@@ -764,6 +815,25 @@ class TurnJournal:
         with self._lock:
             self._load()
             return [e for e in self._events if e['event'].startswith(PUBLICATION)]
+
+    # Size (#397) ------------------------------------------------------------
+    def size_warned(self, threshold):
+        """Whether the operator was warned already that the journal reached ``threshold``
+        bytes (``warn_bytes``): a ``size_warning`` of that threshold."""
+        with self._lock:
+            self._load()
+            return any(e['event'] == SIZE_WARNING and e['data'].get('threshold') == threshold
+                       for e in self._events)
+
+    def size_warning(self, size, threshold):
+        """Record that the operator was warned that the journal, ``size`` bytes, reached
+        ``threshold``: once per threshold. Raises ``JournalError`` if it cannot be written."""
+        if self.read_only:
+            raise JournalError(f'{self.path}: read-only journal: no warning is recorded in it')
+        with self._lock:
+            self._load()
+            self._append(SIZE_WARNING, {'size': size, 'threshold': threshold,
+                                        'limit': self.max_bytes})
 
     # Attempts (#384) -------------------------------------------------------
     def _attempts(self):

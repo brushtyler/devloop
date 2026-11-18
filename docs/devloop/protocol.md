@@ -933,7 +933,9 @@ their format does not change. The journal is append-only, one JSON event per lin
   turn (see the migration). `story`, `request` and `child`: the stories, with `story_identity`
   on (see [Story identity](#story-identity)). `attempt`, `attempt_pr` and `concluded`: the
   attempts, with `attempt_identity` on (see [Attempt identity](#attempt-identity)), and an
-  intent of a turn of an attempt carries its id.
+  intent of a turn of an attempt carries its id. `size_warning`: the operator was warned that
+  the journal reached 80% of its limit (see below). The events of the
+  [publication outbox](#publication-outbox) start with `publication`.
 - With the [budget envelope](reference.md#budget-envelope) on (`[budget] enabled`, #365), the
   intent of a turn charged to a story carries its booking, `budget`: `{story, role, phase,
   engine}` (the role is the kind of the turn, the engine the kind of the agent's CLI) and, when
@@ -955,6 +957,24 @@ is an explicit error, never ignored: the journal is not used and no turn starts.
 `turn-journal-state.json` keeps the sequence and hash of the latest event; a snapshot without its
 journal, or a journal shorter than it or off it (cut, replaced, rolled back) is refused (ADR 0001,
 constraint 3). The chain is not keyed: it gives integrity, not provenance.
+
+**Limit.** Since #397 the journal's file has a limit, `journal_max_mib` (64 MiB by default),
+which bounds the bodies the [publication outbox](#publication-outbox) keeps in it too. Its size
+is checked before the journal is loaded and before each event is appended. A journal beyond the
+limit is not loaded, by the dispatcher nor by `devloop status` or `tick --dry-run`, and an event
+that would take it beyond is refused whole, before a byte is written: an explicit `JournalError`,
+handled like any journal that cannot be read or written, so no turn starts.
+Nothing is removed, cut or replaced to stay under the limit: the events, the bodies, the snapshot
+and the checks of the chain stay as they are. A journal that is already beyond the limit when
+devloop starts (an older one, or a lowered limit) is kept as it is and refused the same way, until
+the operator raises the limit: devloop has no compaction of its own. Before that, once the journal reaches 80% of the
+limit, where nothing is refused yet, each tick of the dispatcher warns the operator, with the
+current size: with `[run].alert_issue`, one alert per threshold, which the journal records
+(`size_warning`) so that it is not repeated after a restart (a new limit is a new threshold); a
+failed alert is tried again at the next tick. With `publication_outbox`, an alert with an
+uncertain outcome is only reconciled, never sent again (see the outbox below). Without `[run].alert_issue` the warning is a line
+of the log, `WARNING: the journal of the turns is <n> bytes, ...`, once per start of devloop while
+the size stays beyond the threshold. Either way the turns go on as usual until the limit itself.
 
 **Who writes it.** Only the dispatcher that holds `dispatcher.lock` writes the journal: it keeps
 the chain in memory and appends to it. `devloop status` and `devloop tick --dry-run`, which run
@@ -1137,7 +1157,8 @@ the same hash chain; the turns ignore them:
 - `publication_sent`, with the id of what was published (the comment's, the review's when known,
   the pull request's number) and how it was known (`response` or `reconciliation`);
   `publication_failed`, a failure reported to the caller, with its time, certain (final: GitHub
-  wrote nothing) or `uncertain`; `publication_dropped`, never to be published, with why.
+  wrote nothing) or `uncertain`; `publication_dropped`, never to be published, with why;
+  `publication_signalled`, the operator was told of that drop (see below).
 
 **No POST repeated on an uncertain outcome.** A write whose outcome is uncertain (a timeout, a
 connection lost after sending, a 5xx answer: `GitHubUncertain`, #364; for a native review and a
@@ -1156,10 +1177,14 @@ end is unknown because the process stopped, it is when the restarted dispatcher 
 journal, under the dispatcher lock, provided the attempt is `held`: devloop passes the lock to
 the `gh` of each write, which keeps it open while it runs, so the lock is free only once that
 `gh` has ended, also one that outlived the dispatcher that started it. The timeout of a `gh`
-call proves nothing after a stop: the parent that applied it is gone, and the `gh` may run on
-(stopped and resumed, for instance) with no limit. A `gh` still running after its dispatcher
-stopped therefore keeps the next one from starting (`another dispatcher is running (lock
-held)`) until it ends. An attempt not `held` has no proof of its end: it is never sent again,
+call that the dispatcher applies proves nothing after a stop: the parent that applied it is
+gone. A `gh` still running after its dispatcher stopped therefore keeps the next one from
+starting (`another dispatcher is running (lock held)`) until it ends; so that this never lasts
+for ever, that `gh` runs under coreutils `timeout` (#397), a limit of its own that survives the
+dispatcher: SIGTERM once the call's timeout (300 seconds) is spent, SIGKILL 5 seconds later. A
+write stopped so is uncertain. Only with the outbox on does devloop pass the lock to `gh` (#397,
+ADR 0004, D8): with it off, a dispatcher killed while a `gh` of its runs leaves the lock free,
+and the next one starts at once, as before #385. An attempt not `held` has no proof of its end: it is never sent again,
 only reconciled, and dropped if it is still absent 300 seconds (the timeout of a `gh` call)
 plus 30 after the restart. The write that got the
 uncertain answer waits for that moment and reads again; only a conclusive absence sends it once
@@ -1194,6 +1219,24 @@ reconciled: found, it is recorded as published; conclusively absent, it is dropp
 step already handled it as not published. A pending edit followed by a later write on the same
 comment is dropped: the later one was built from GitHub as it was. What cannot be settled is
 logged (`publication <id> (... on #<n>) not settled`) and waits for the next tick.
+
+**Dropped writes reach the operator** (#397). After settling, each tick reports the writes the
+outbox dropped, here or in an action since: each is logged once per start of devloop
+(`WARNING: publication <id> (... on #<n>) dropped, never published: <why>`), and with
+`[run].alert_issue` the dispatcher publishes one alert there for those not reported yet, with
+their id, operation, issue or PR, actor and reason, never their body, which stays in the journal.
+The journal then records each as reported (`publication_signalled`): it is never reported
+again, not even after a restart. A failed alert is tried again at the next tick. Without
+`[run].alert_issue` the log alone reports them, at each start.
+
+The alert is itself a write of the outbox, and its `publication` names what it reports, in
+`covers`: the ids of the drops, or `journal_size:<threshold>` for the alert on the size of the
+journal. So an alert whose outcome is uncertain is never followed by a second one about the same
+drops or threshold: while it is pending they count as reported, also after a restart, and the
+outbox only reconciles it. Once it is found published, the dispatcher writes the
+`publication_signalled` of its drops, or the `size_warning` of its threshold, without sending
+anything. Dropped in its turn, absent from GitHub, it covers nothing: the next alert reports its
+drops again, and the dropped alert with them.
 
 A reconciliation is as precise as the body: devloop's comments, reviews and pull requests carry
 times, heads and digests, so two writes with the same body by the same author are not expected. The key applies at the next

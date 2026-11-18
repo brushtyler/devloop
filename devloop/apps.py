@@ -230,13 +230,24 @@ class Identities:
 
     # The outbox of the publications (#385, ``outbox.Outbox``), set by devloop when
     # ``publication_outbox`` is on: the clients write their comments, native reviews and pull
-    # requests through it.
-    outbox = None
+    # requests through it, and their reviews and pull requests tell an uncertain outcome apart
+    # (``GitHub.uncertain_publications``), the clients created before it included.
+    _outbox = None
+
+    @property
+    def outbox(self):
+        return self._outbox
+
+    @outbox.setter
+    def outbox(self, value):
+        self._outbox = value
+        for client in (self._ambient, *list(self._clients)):
+            client.uncertain_publications = value is not None
 
     def hold(self, lock_fd):
         """The dispatcher lock is held on ``lock_fd``: the `gh` of each write of the clients
         keeps it open while it runs (``GitHub.lock_fd``, #385), the clients created before
-        this call included."""
+        this call included. devloop calls it only with the outbox on (#397)."""
         self._lock_fd = lock_fd
         self._ambient.lock_fd = lock_fd
         for client in list(self._clients):
@@ -260,6 +271,7 @@ class Identities:
         client = GitHub(self.repo, run=self._run,
                         token=lambda: app.token(permissions, time_left=client.time_left))
         client.lock_fd = self._lock_fd
+        client.uncertain_publications = self._outbox is not None
         self._clients.add(client)
         return client
 

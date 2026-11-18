@@ -196,7 +196,7 @@ from .dispatch_conclave import ConclaveMixin
 from .dispatch_merge import MergeMixin
 from .dispatch_preflight import PreflightMixin
 from .dispatch_supervision import SupervisionMixin, UntrustedChange
-from .github import GitHubError, author_login
+from .github import GitHubError, GitHubUncertain, author_login
 from .journal import (CLOSED, MERGED, RECONCILE_COMMAND, JournalError, TurnBlocked, blocked_text,
                       reconcile_command)
 from .ledger import attempt_branch, comment_ref, fix_register, open_turns, parse_branch
@@ -204,6 +204,7 @@ from .localtests import module_command, select_modules
 from .markdown import (RESUME, carries_record, dispatcher_header, publishable, read_marker,
                        render_cycle, render_escalation, render_operator_merge)
 from .activity import iso, restart_line
+from .outbox import SENT as PUBLISHED, describe as outbox_describe
 from .pin import PREFIX, PinError, Repinned, SmokeError
 from .planning import (BASE_CHANGED, MERGE_LANE, MERGING, RESYNC_AFTER_APPROVAL, PullRequest,
                        Snapshot,
@@ -224,6 +225,8 @@ LEVEL_LABEL_STYLE = ('5319e7', 'devloop: la PR richiede una review di livello 2'
 # How many prerequisites outside the queue a snapshot reads at most to follow the dependencies
 # of the ready issues (#277): beyond them, cycles are not looked for.
 MAX_DEPENDENCY_READS = 50
+# The dropped publications one alert lists at most (#397): the others are in the local log.
+MAX_DROPS_LISTED = 30
 PRIORITY_LABEL_STYLE = {
     'priority:high': ('b60205', 'devloop: priorità alta, parte prima delle altre issue pronte'),
     'priority:normal': ('c2e0c6', 'devloop: priorità normale (implicita)'),
@@ -646,6 +649,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         # Whether a tick of this process already checked the rename of agent:needs-operator
         # (#248, ``_transition_labels``).
         self.labels_checked = False
+        # Whether this process already warned of the size of the journal (#397,
+        # ``_watch_journal``), and the dropped publications it already logged
+        # (``_signal_dropped``).
+        self._journal_warned = False
+        self._drops_logged = set()
 
     @property
     def ledger(self):
@@ -1274,7 +1282,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         self._auto_pin(dry_run)
         if not dry_run:
             self._housekeeping()
+            self._watch_journal()
             self._resume_publications()
+            self._signal_dropped()
         self._transition_labels(dry_run)
         snap = self.snapshot()
         self._flag_incomplete(snap, dry_run)
@@ -1327,7 +1337,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             if self._restart_wait_over(running):
                 return []
             self.log(restart_line(self._restart[0], iso(self._restart[1]), len(running)))
+        self._watch_journal()
         self._resume_publications()
+        self._signal_dropped()
         self._transition_labels(False)
         snap = self.snapshot()
         prs = {pr.number: pr for pr in snap.prs}
@@ -1711,6 +1723,165 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             lines = [f'  outbox of the publications not readable: {exc}']
         for line in lines:
             self.log(line)
+
+    def _signal_dropped(self):
+        """With ``publication_outbox`` (#385), tell the operator of each write the outbox
+        dropped (#397): never published, and never to be. Each is logged once per process; with
+        ``[run].alert_issue`` the dispatcher also publishes one alert for those not reported
+        yet, and the journal records them reported (``publication_signalled``): each is
+        reported once. A failed alert is tried again at the next tick.
+
+        The alert names in its publication the drops it reports (``OutboxClient.alert``): while
+        it is pending, its outcome uncertain, they are not reported again, also after a
+        restart; once the outbox finds it published, they are recorded reported
+        (``Outbox.record_alerted``) without a second alert. Dropped itself, it reports nothing:
+        its drops are reported again, with it."""
+        outbox = getattr(self.identities, 'outbox', None)
+        if outbox is None:
+            return
+        try:
+            outbox.record_alerted()
+        except GitHubError as exc:
+            self.log(f'  the alert of the dropped publications is not recorded in the journal: '
+                     f'{exc}')
+        try:
+            dropped = outbox.unsignalled()
+        except GitHubError as exc:
+            self.log(f'  dropped publications not readable: {exc}')
+            return
+        issue = self.cfg.run.alert_issue
+        for entry in dropped:
+            if entry['pub'] in self._drops_logged:
+                continue
+            self._drops_logged.add(entry['pub'])
+            self.log(f'  WARNING: publication {entry["pub"]} ({outbox_describe(entry)}) dropped, '
+                     f'never published: {entry.get("reason")}'
+                     + ('' if issue else '; no [run].alert_issue is configured: only this log '
+                                         'reports it'))
+        if not issue or not dropped:
+            return
+        listed = ''.join(f'\n- `{e["pub"]}`: {outbox_describe(e)}, di `{e["actor"]}`: '
+                         f'{e.get("reason")}' for e in dropped[:MAX_DROPS_LISTED])
+        more = len(dropped) - MAX_DROPS_LISTED
+        if more > 0:
+            listed += f'\n- … e altre {more}, elencate nel log locale'
+        body = publishable(
+            dispatcher_header()
+            + '\n## Pubblicazioni abbandonate\n\n'
+            + 'L\'outbox delle pubblicazioni ha abbandonato queste scritture: non sono state '
+              'pubblicate su GitHub e non lo saranno.' + listed + '\n\n'
+            + 'Il corpo di ognuna resta nel journal dei turni (`turn-journal.jsonl` nella '
+              'directory di stato), con il suo id: va pubblicato a mano, se serve ancora.')
+        covers = [e['pub'] for e in dropped]
+        try:
+            self._alert(issue, body, covers)
+        except Exception as exc:  # one attempt per tick: its class, never its output
+            self._alert_failed('the alert of the dropped publications', issue, exc, covers)
+            return
+        try:
+            outbox.signalled([e['pub'] for e in dropped])
+        except GitHubError as exc:
+            self.log(f'  the alert of the dropped publications is not recorded in the journal: '
+                     f'{exc}')
+        self.log(f'  alert of {len(dropped)} dropped publications published on #{issue}')
+
+    def _watch_journal(self):
+        """The size of the journal of the turns (#397): from ``WARN_RATIO`` of its limit
+        (``journal_max_mib``), where nothing is refused yet, the operator is warned before the
+        limit stops the turns. With ``[run].alert_issue``, one alert per threshold, recorded in
+        the journal (``size_warning``); without it, a warning in the log at each start of
+        devloop while the size stays beyond. The turns go on as usual; only beyond the limit
+        is the journal refused (``journal.TurnJournal``)."""
+        journal = getattr(self.ledger, 'journal', None)
+        if journal is None or journal.read_only or self._journal_warned:
+            return
+        threshold = journal.warn_bytes()
+        try:
+            size = journal.size()
+        except JournalError as exc:
+            self.log(f'  {exc}')
+            return
+        if threshold is None or size < threshold:
+            return
+        issue = self.cfg.run.alert_issue
+        percent = size * 100 // journal.max_bytes
+        self.log(f'WARNING: the journal of the turns is {size} bytes, {percent}% of its limit of '
+                 f'{journal.max_bytes} bytes (journal_max_mib): beyond it no turn starts'
+                 + ('' if issue else '; no [run].alert_issue is configured: this warning is '
+                                     'only in the log, at each start'))
+        if not issue:
+            self._journal_warned = True
+            return
+        key = f'journal_size:{threshold}'
+        outbox = getattr(self.identities, 'outbox', None)
+        try:
+            if journal.size_warned(threshold):
+                self._journal_warned = True
+                return
+            # With the outbox, an alert of this threshold names it in its publication: once
+            # published it is recorded, never sent twice; while its outcome is uncertain it is
+            # only reconciled, and a new one follows only if it turns out dropped.
+            state = outbox.alerts().get(key) if outbox is not None else None
+            if state == PUBLISHED:
+                self._journal_warned = True
+                journal.size_warning(size, threshold)
+                self.log(f'  alert of the size of the journal found published on #{issue}: '
+                         'recorded in the journal')
+                return
+            if state is not None:
+                self.log(f'  the alert of the size of the journal on #{issue} has an uncertain '
+                         'outcome: the outbox reconciles it, and no other alert is published '
+                         'meanwhile')
+                return
+        except JournalError as exc:
+            self.log(f'  the alert of the size of the journal cannot be checked: {exc}')
+            self._journal_warned = True
+            return
+        body = publishable(
+            dispatcher_header()
+            + '\n## Journal dei turni vicino al limite\n\n'
+            + f'Il journal dei turni (`turn-journal.jsonl` nella directory di stato) è di '
+              f'{size} byte, il {percent}% del limite di {journal.max_bytes} byte '
+              '(`journal_max_mib`). Oltre il limite il journal non si carica e non accetta '
+              'eventi: nessun turno parte finché l\'operatore non alza il limite. devloop non '
+              'ne rimuove nulla e non lo compatta. Questo avviso si pubblica una volta per '
+              'soglia.')
+        try:
+            self._alert(issue, body, [key])
+        except Exception as exc:  # one attempt per tick: its class, never its output
+            self._alert_failed('the alert of the size of the journal', issue, exc, [key])
+            return
+        self._journal_warned = True
+        try:
+            journal.size_warning(size, threshold)
+        except JournalError as exc:
+            self.log(f'  the alert of the size of the journal is not recorded in it: {exc}')
+        self.log(f'  alert of the size of the journal published on #{issue}')
+
+    def _alert(self, issue, body, covers):
+        """Publish an alert on ``issue`` (#397). With the outbox, its publication names what it
+        reports, ``covers`` (``OutboxClient.alert``): an uncertain outcome is never followed by
+        a second alert about the same drops or threshold. Without it, a comment as before."""
+        alert = getattr(self.gh, 'alert', None)
+        if getattr(self.identities, 'outbox', None) is None or not callable(alert):
+            return self.gh.comment(issue, body)
+        return alert(issue, body, covers=covers)
+
+    def _alert_failed(self, what, issue, exc, covers):
+        """Log an alert that raised ``exc``: tried again at the next tick when it certainly was
+        not published; only reconciled by the outbox when its outcome is uncertain (its
+        publication still pending covers ``covers``)."""
+        outbox = getattr(self.identities, 'outbox', None)
+        try:
+            pending = outbox is not None and any(k in outbox.alerts() for k in covers)
+        except GitHubError:
+            pending = isinstance(exc, GitHubUncertain)
+        if pending:
+            self.log(f'  {what} on #{issue} has an uncertain outcome ({type(exc).__name__}): '
+                     'the outbox reconciles it, and no other alert is published meanwhile')
+        else:
+            self.log(f'  {what} on #{issue} could not be published ({type(exc).__name__}): '
+                     'tried again at the next tick')
 
     def _signed(self, login):
         """Whether ``login`` signs as the dispatcher, as its other records do."""

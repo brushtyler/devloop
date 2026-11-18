@@ -26,7 +26,18 @@ it says so, the ``time`` of the clock it happened at:
 - ``publication_failed``: the caller was told the write failed, with ``time``. With
   ``uncertain`` false it was certainly not published, and that is final; with ``uncertain``
   true the outcome is unknown and still to reconcile, never to send again;
-- ``publication_dropped``: not published and never to be, with the ``reason``. Final.
+- ``publication_dropped``: not published and never to be, with the ``reason``. Final;
+- ``publication_signalled``: the operator was told of the drop (#397): the dispatcher reports
+  each dropped write once, on ``[run].alert_issue`` (``unsignalled``, ``signalled``).
+
+An alert of the dispatcher on ``[run].alert_issue`` (#397) is a ``comment`` whose
+``publication`` also names what it reports, in ``covers`` (``OutboxClient.alert``): the ids of
+the dropped writes, or ``journal_size:<threshold>`` for the size of the journal. While that
+alert is published or still pending, what it covers counts as reported (``alerts``): an alert
+with an uncertain outcome is only reconciled, never followed by a second one about the same
+drops or threshold, also after a restart; once it is published, ``record_alerted`` writes the
+``publication_signalled`` its drops are still missing. Failed for certain or dropped, it covers
+nothing: what it named is reported again, the dropped alert among the drops.
 
 The rules, on the model of ``ProjectionOutbox`` (ssdlc_feedback_delivery.py):
 
@@ -97,9 +108,9 @@ IN_FLIGHT_SECONDS = 30
 # attempt cut short that did not hold the dispatcher lock is reconciled this much later, then
 # dropped if absent: its `gh` may have outlived the dispatcher, with no timeout left.
 ATTEMPT_SECONDS = GitHub.timeout
-SENDING_EVENT, SENT_EVENT, FAILED_EVENT, DROPPED_EVENT = (
+SENDING_EVENT, SENT_EVENT, FAILED_EVENT, DROPPED_EVENT, SIGNALLED_EVENT = (
     f'{PUBLICATION}_sending', f'{PUBLICATION}_sent', f'{PUBLICATION}_failed',
-    f'{PUBLICATION}_dropped')
+    f'{PUBLICATION}_dropped', f'{PUBLICATION}_signalled')
 
 
 def _held(tracker):
@@ -154,7 +165,8 @@ class Outbox:
     def _apply(self, entries, kind, data):
         if kind == PUBLICATION:
             entries[data['pub']] = dict(data, status=SENDING, sends=1, sent_id=None,
-                                        started=data.get('time'), ended=None)
+                                        started=data.get('time'), ended=None, reason=None,
+                                        signalled=False)
             if data['op'] == EDIT and data.get('number') is not None:
                 self._numbers[data['comment_id']] = data['number']
             return
@@ -173,7 +185,9 @@ class Outbox:
             entry.update(status=UNCERTAIN if data['uncertain'] else FAILED,
                          ended=data.get('time'))
         elif kind == DROPPED_EVENT:
-            entry['status'] = DROPPED
+            entry.update(status=DROPPED, reason=data.get('reason'))
+        elif kind == SIGNALLED_EVENT:
+            entry['signalled'] = True
 
     def _record(self, kind, data, defer=False):
         """Write an event in the journal, then apply it. With ``defer`` (an outcome already
@@ -199,6 +213,48 @@ class Outbox:
         """The writes still to settle, oldest first: sent without an answer, or failed with an
         uncertain outcome."""
         return [e for e in self.entries().values() if e['status'] in PENDING]
+
+    def alerts(self):
+        """What the alerts of the dispatcher cover (#397): each key of their ``covers``, with
+        ``SENT`` when one of them is published, otherwise ``UNCERTAIN`` when one is still
+        pending (its outcome unknown, to reconcile). An alert failed for certain or dropped
+        covers nothing."""
+        covered = {}
+        for entry in self.entries().values():
+            if entry['status'] == SENT:
+                state = SENT
+            elif entry['status'] in PENDING:
+                state = UNCERTAIN
+            else:
+                continue
+            for key in entry.get('covers') or ():
+                if covered.get(key) != SENT:
+                    covered[key] = state
+        return covered
+
+    def unsignalled(self):
+        """The writes dropped that the operator was not told of yet (#397), oldest first: not
+        ``publication_signalled``, nor covered by an alert published or still pending
+        (``alerts``)."""
+        covered = self.alerts()
+        return [e for e in self.entries().values()
+                if e['status'] == DROPPED and not e['signalled'] and e['pub'] not in covered]
+
+    def record_alerted(self):
+        """Record ``publication_signalled`` for each dropped write that an alert, now
+        published, reported without it: its outcome was uncertain, or the journal did not take
+        the record. Returns their ids; raises ``JournalError`` if the journal cannot take it."""
+        covered = self.alerts()
+        pubs = [e['pub'] for e in self.entries().values()
+                if e['status'] == DROPPED and not e['signalled'] and covered.get(e['pub']) == SENT]
+        self.signalled(pubs)
+        return pubs
+
+    def signalled(self, pubs):
+        """Record that the operator was told of the drop of each write of ``pubs``: it is never
+        reported again. Raises ``JournalError`` if the journal cannot take it."""
+        for pub in pubs:
+            self._record(SIGNALLED_EVENT, {'pub': pub})
 
     def seen(self, number, comments):
         """Remember the issue or PR of the comments read, to reconcile their edits."""
@@ -520,6 +576,11 @@ class Outbox:
             self._attempt(entry, tracker)
 
 
+def describe(entry):
+    """What a write of ``Outbox.entries`` is, for a person: its ``op`` and where."""
+    return f'{entry["op"]} {Outbox._where(entry)}'
+
+
 def for_identities(identities, journal, trusted_users, log=None):
     """The outbox of ``identities`` (``apps.Identities``) over ``journal``: an actor with an app
     writes as the app's login, one without it as the ambient ``gh`` login, the operator's, one
@@ -552,6 +613,12 @@ class OutboxClient:
 
     def comment(self, number, body):
         return self._write(COMMENT, body, number=number)
+
+    def alert(self, number, body, *, covers):
+        """An alert of the dispatcher on ``number`` (#397): a ``comment`` whose publication
+        names what it reports, ``covers``: ids of dropped writes, or
+        ``journal_size:<threshold>`` (``Outbox.alerts``)."""
+        return self._write(COMMENT, body, number=number, covers=list(covers))
 
     def edit_comment(self, comment_id, body):
         self._write(EDIT, body, comment_id=comment_id)
