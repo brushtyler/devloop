@@ -823,7 +823,8 @@ class ActionsMixin:
                 supervised, why = self._supervised(pr.number, cls, 'sync', pr)
                 self._escalate(pr.number, f'Sincronizzazione con `{cfg.base_branch}` non '
                                           f'riuscita. {reason}\n\nFile in conflitto:\n\n{listed}',
-                               detail, remove=remove, cls=cls, supervised=supervised, why=why)
+                               detail, remove=remove, cls=cls, supervised=supervised, why=why,
+                               retry=None if supervised else self._retry_payload('sync', pr))
             prompt = _template('sync', repo=cfg.repo, pr_number=pr.number, issue_number=pr.issue,
                                issue_title=issue['title'], issue_body=issue.get('body') or '',
                                base_branch=cfg.base_branch, conflicts=listed,

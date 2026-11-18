@@ -169,9 +169,11 @@ class Snapshot:
     # without one) and ``cycle_reported`` (whether the dispatcher already reported that cycle).
     ready_issues: list
     working_issues: list  # issue numbers
-    # Issues and PRs in agent:needs-supervisor with a supervisor command to apply (#182):
-    # dicts ``{number, command, by, step, pr}`` (``_supervisor_view``); a retry of an issue's
-    # step has ``blocked_by`` too, its open blocks (#277), and waits while it is not empty.
+    # Issues and PRs in agent:needs-supervisor with a supervisor command to apply (#182), or in
+    # agent:needs-operator with a trusted user's command (#321): dicts ``{number, command, by,
+    # step, pr, anchor}`` (``_supervisor_view``), with ``refusal`` for a command only to answer;
+    # a retry of an issue's step has ``blocked_by`` too, its open blocks (#277), and waits
+    # while it is not empty.
     supervised: list = field(default_factory=list)
 
 
@@ -386,7 +388,9 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
         # A supervisor command (#182). A retry of an issue's step runs that step, and takes a
         # free PR slot as the step itself would; without one it waits for a later tick. While
         # the issue is blocked by an open issue (#277) it waits too, and takes no slot.
-        if item['command'] == RETRY and not item['pr'] and item['step'] in ISSUE_STEPS:
+        # A command only to answer (#321) takes no slot.
+        if (item['command'] == RETRY and not item['pr'] and item['step'] in ISSUE_STEPS
+                and not item.get('refusal')):
             if item.get('blocked_by') or free <= 0:
                 continue
             free -= 1

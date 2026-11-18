@@ -20,7 +20,7 @@ from .acceptance import render_map
 from .config import INSTALL_ROOT
 from .policy import EVENTS, valid_receipt
 from .review import LEGACY_VERDICT, current_verdict
-from .supervision import COMMANDS, OUTCOMES, critical, describe
+from .supervision import COMMANDS, MAX_RETRIES, OUTCOMES, critical, describe
 
 UNKNOWN = 'non noto'
 UNKNOWN_VERSION = 'non nota'
@@ -580,21 +580,36 @@ SUPERVISOR_RESUME = (
     '- `/devloop escalate <motivo>`: passa l\'escalation all\'operatore (`agent:needs-operator`).')
 
 
-def render_escalation(reason, detail='', cls='failure', supervised=None):
+def operator_retry_text(step):
+    """How a trusted user runs again the step ``step`` of an escalation to the operator
+    (#321)."""
+    return (f'In alternativa, un utente fidato può ripetere il passo `{step}` con un commento che '
+            'abbia `/devloop retry` come prima riga: devloop toglie `agent:needs-operator` e '
+            f'ripete il passo, al massimo {MAX_RETRIES} volte per passo e input (contando anche i '
+            'retry del supervisore).')
+
+
+def render_escalation(reason, detail='', cls='failure', supervised=None, retry=None):
     """An escalation (#182: of class ``cls``). ``supervised``, for a non-critical one the
     supervisor decides, holds the step, the key of its input and what a retry resumes; without
-    it the escalation goes to the operator."""
+    it the escalation goes to the operator. ``retry``, for an escalation to the operator, holds
+    the same for a step that a trusted user may run again with ``/devloop retry`` (#321)."""
     title = 'Escalation al supervisore' if supervised else 'Serve un intervento dell\'operatore'
+    resume = SUPERVISOR_RESUME if supervised else RESUME
+    if retry and not supervised:
+        resume += '\n\n' + operator_retry_text(retry['step'])
     body = (dispatcher_header() + f'\n## {title}\n\n' + reason.strip() + '\n\n'
             + f'**Classe:** `{cls}` ({describe(cls)}), '
             + ('critica' if critical(cls) else 'non critica') + '.\n\n'
-            + (SUPERVISOR_RESUME if supervised else RESUME) + '\n')
+            + resume + '\n')
     if detail:
         body += '\n```text\n' + detail.strip()[-6000:].replace('```', "'''") + '\n```\n'
     payload = {'event': 'escalation', 'class': cls, 'critical': critical(cls),
                'to': 'supervisor' if supervised else 'operator'}
     if supervised:
         payload.update(supervised)
+    elif retry:
+        payload.update(retry)
     return publishable(body, 'notice', payload)
 
 
@@ -625,8 +640,9 @@ def render_operator_merge(head, labeled, promotion, reasons, label):
                                         'labeled': labeled, 'promotion': promotion})
 
 
-def render_supervision(record, text):
-    """The dispatcher's trace of a supervisor command (#182): what was asked, by whom, and the
-    outcome, in a ``supervision`` marker."""
-    return publishable(dispatcher_header() + f'\n## Decisione del supervisore\n\n{text.strip()}',
+def render_supervision(record, text, title='Decisione del supervisore'):
+    """The dispatcher's trace of a supervisor command (#182), or of a command on an escalation
+    to the operator (#321, with its own ``title``): what was asked, by whom, and the outcome,
+    in a ``supervision`` marker."""
+    return publishable(dispatcher_header() + f'\n## {title}\n\n{text.strip()}',
                        'supervision', record)
