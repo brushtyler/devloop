@@ -41,8 +41,9 @@ FAMILIES = ('role_invocations', 'phase_invocations')
 TASK = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')
 UNCONFIRMED = ('reserved', 'uncertain')
 # Dollar caps and transfer amounts are decimals with at most PLACES places, so a
-# transfer moves an exact amount and the sum of the caps is conserved. Recorded
-# charges are taken at their exact value and never rounded down.
+# transfer moves an exact amount and the sum of the caps is conserved. Run caps
+# and recorded charges are read as the decimal their JSON number writes, every
+# digit kept and never rounded, so equal recorded numbers compare equal.
 PLACES = 6
 SCALE = 10 ** PLACES
 
@@ -55,14 +56,23 @@ def _number(value):
     return type(value) in (int, float) and math.isfinite(value)
 
 
-def amount(value):
-    """Exact value of a dollar cap or transfer amount: a decimal with at most PLACES places."""
+def exact(value):
+    """Exact value of a recorded dollar amount: the decimal the JSON number writes, every digit kept.
+
+    Run caps, observations and reserves take the same conversion as the task
+    caps, so equal recorded numbers compare equal: ``0.3`` is 3/10, never the
+    binary approximation of the float.
+    """
     if type(value) is int:
         return Fraction(value)
-    exact = Decimal(repr(value))
-    if exact.as_tuple().exponent < -PLACES:
+    return Fraction(Decimal(repr(value)))
+
+
+def amount(value):
+    """Exact value of a dollar cap or transfer amount: a decimal with at most PLACES places."""
+    if type(value) is not int and Decimal(repr(value)).as_tuple().exponent < -PLACES:
         raise TaskBudgetError('A dollar task cap or transfer has at most %d decimal places' % PLACES)
-    return Fraction(exact)
+    return exact(value)
 
 
 def _decimal(value):
@@ -70,7 +80,7 @@ def _decimal(value):
     if value.denominator == 1 and abs(value) < 2 ** 53:
         return int(value)
     result = float(value)
-    if Fraction(Decimal(repr(result))) != value:
+    if exact(result) != value:
         raise TaskBudgetError('A dollar task cap cannot be represented exactly')
     return result
 
@@ -141,7 +151,7 @@ def validate(policy):
                     raise TaskBudgetError('Invalid task cap: ' + dimension[:80])
                 totals.setdefault(dimension, []).append(amount(value) if dimension in MONEY else value)
         for dimension, values in totals.items():
-            if sum(values) > Fraction(run_cap(policy, dimension)):
+            if sum(values) > (exact(run_cap(policy, dimension)) if dimension in MONEY else run_cap(policy, dimension)):
                 raise TaskBudgetError('Task caps exceed the run cap: ' + dimension[:80])
     except (KeyError, TypeError, AttributeError):
         raise TaskBudgetError('Malformed task budget') from None
@@ -168,8 +178,8 @@ def account(row):
 def _charge(row, kind):
     """Exact dollar charge of ``row``: the rule of ``LimitsStore._kind_charge`` without float rounding."""
     from ssdlc_recovery import RESERVE
-    observed = Fraction(row.get('usage', {}).get(kind) or 0)
-    reserve = Fraction(row.get('conservative_usage', {}).get(kind, 0))
+    observed = exact(row.get('usage', {}).get(kind) or 0)
+    reserve = exact(row.get('conservative_usage', {}).get(kind, 0))
     if row.get('usage_model') == RESERVE:
         return max(observed, reserve)
     return observed + reserve
@@ -199,7 +209,7 @@ def _measure(rows, dimensions):
         for dimension in dimensions:
             if dimension in MONEY:
                 charge = _charge(row, dimension)
-                reserve = min(Fraction(row.get('conservative_usage', {}).get(dimension, 0)), charge)
+                reserve = min(exact(row.get('conservative_usage', {}).get(dimension, 0)), charge)
                 if open_row:
                     committed[dimension] += charge
                 else:
@@ -401,7 +411,7 @@ def allocate(policy, state, allocation, plan_tasks):
     for dimension in sorted({d for caps in tasks.values() for d in flat(caps)}):
         money = dimension in MONEY
         # Exact comparison: the run cap less everything consumed or committed.
-        left = (Fraction(run_cap(policy, dimension)) if money else run_cap(policy, dimension)) - used[dimension]
+        left = (exact(run_cap(policy, dimension)) if money else run_cap(policy, dimension)) - used[dimension]
         total = sum(amount(c[dimension]) if money else c[dimension]
                     for c in map(flat, tasks.values()) if dimension in c)
         residual[dimension] = dict(run_cap=run_cap(policy, dimension),

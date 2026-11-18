@@ -424,6 +424,54 @@ class MoneyPrecisionTests(unittest.TestCase):
                                   {'T01': {'cli_estimate_usd': 0.999999}}, {'T01'})
         self.assertEqual(facts['residual']['cli_estimate_usd']['residual'], 0.999999)
 
+    def test_recorded_amounts_are_read_as_their_decimal(self):
+        # 0.3 as a float is below 3/10 and 0.1 above 1/10: every amount is read as the decimal it writes.
+        self.assertEqual((tb.exact(0.3), tb.exact(0.1), tb.exact(2)),
+                         (tb.Fraction(3, 10), tb.Fraction(1, 10), tb.Fraction(2)))
+
+    def test_consumption_equal_to_the_task_cap_exhausts_it(self):
+        p = budget_policy(T01={'cli_estimate_usd': 0.3})
+        self.assertIsNotNone(tb.exhausted(p, self.state(0.3), 'T01', '03-dev', '03-dev'))
+        run = Run(self, p)
+        run.call('T01', cost=0.3)
+        with self.assertRaisesRegex(RecoveryStop, 'T01 exhausted its cli_estimate_usd cap'):
+            run.store.reserve('03-dev', '03-dev', 'claude', 'T01')
+
+    def test_reserve_equal_to_the_task_cap_is_admitted(self):
+        p = budget_policy(T01={'metered_usd': 0.1})
+        p['live_unknown_usage']['agy'] = dict(RESERVE, metered_usd=0.1, cli_estimate_usd=0.1)
+        candidate = dict(conservative_usage={'metered_usd': 0.1, 'cli_estimate_usd': 0.1})
+        self.assertIsNone(tb.exhausted(p, self.state(), 'T01', '03-dev', '03-dev', candidate))
+        run = Run(self, p)
+        run.call('T01', engine='agy')
+        with self.assertRaisesRegex(RecoveryStop, 'metered_usd cap of task T01'):
+            run.store.reserve('03-dev', '03-dev', 'agy', 'T01')
+
+    def test_allocation_equal_to_the_run_cap_is_valid(self):
+        p = budget_policy(T01={'cli_estimate_usd': 0.1}, T02={'cli_estimate_usd': 0.2})
+        p['cli_estimate_usd'] = 0.3
+        tb.validate(p)
+        tb.validate(dict(budget_policy(T01={'cli_estimate_usd': 0.3}), cli_estimate_usd=0.3))
+        with self.assertRaisesRegex(tb.TaskBudgetError, 'exceed the run cap'):
+            tb.validate(dict(budget_policy(T01={'cli_estimate_usd': 0.300001}), cli_estimate_usd=0.3))
+        base = dict(budget_policy(), cli_estimate_usd=0.3)
+        _, _, facts = tb.allocate(base, self.state(), {'T01': {'cli_estimate_usd': 0.1},
+                                                       'T02': {'cli_estimate_usd': 0.2}}, {'T01', 'T02'})
+        self.assertEqual(facts['residual']['cli_estimate_usd']['residual'], 0.3)
+        # The residual after a recorded 0.1 is exactly 0.2.
+        _, _, facts = tb.allocate(base, self.state(0.1, task_id='T03'), {'T01': {'cli_estimate_usd': 0.2}}, {'T01'})
+        self.assertEqual(facts['residual']['cli_estimate_usd']['residual'], 0.2)
+
+    def test_availability_after_consumption_is_exact(self):
+        p = budget_policy(T01={'cli_estimate_usd': 1.1}, T02={'cli_estimate_usd': 1})
+        state = self.state(0.1)
+        usage = tb.usage(p, state, 'T01')['cli_estimate_usd']
+        self.assertEqual((usage['consumed'], usage['available']), (0.1, 1.0))
+        profile, _, _ = tb.reallocate(p, state, dict(from_task='T01', to_task='T02', amounts={'cli_estimate_usd': 1.0}))
+        tasks = profile['task_budget']['tasks']
+        self.assertEqual((tasks['T01']['cli_estimate_usd'], tasks['T02']['cli_estimate_usd']), (0.1, 2))
+        self.assertIsNotNone(tb.exhausted(profile, state, 'T01', '03-dev', '03-dev'))
+
 
 class EffectsTests(unittest.TestCase):
     """Criterion 4: overrides stay distinct from the run defaults; effects appear in proposal and status."""

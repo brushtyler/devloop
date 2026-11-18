@@ -208,7 +208,9 @@ or uncertain reservation is committed, and so is a dollar reserve
 creates no budget and refunds nothing: the run caps and the sum of the task caps
 stay the same. Dollar task caps and transfer amounts are decimals with at most
 six places (more is refused), so the donor loses exactly what the recipient
-gains. Recorded charges are compared at their exact value, never rounded: the
+gains. Run caps and recorded charges are read as the decimal their JSON number
+writes (`0.3` is three tenths, not the nearest binary float), so a charge equal
+to a cap fills it exactly. They are compared at that exact value, never rounded: the
 views show consumption rounded up and availability rounded down, and a
 transfer is checked against the exact available amount. Without an allocation, a transfer is refused: a run created
 before this feature first needs `allocate_task_budget`. Raising the overall cap
