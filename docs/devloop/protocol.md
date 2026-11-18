@@ -254,7 +254,7 @@ while the receipt of the round still waits for other reviewers.
 | `step` | `implement`, `fix` or `review` |
 | `issue`, `issue_hash` | the issue and the hash of its request (title, body and trusted comments, as for the [readiness check](#readiness-check-records)) when the conclave opened |
 | `commit`, `head` | the commit of the block, which every call checks out; on a PR its head when the conclave opened (null on an issue) |
-| `diff_hash` | SHA-256 of the uncommitted changes of the agent that stopped, attached to the prompts: the tracked files as `git diff`, the new untracked files with their content |
+| `diff_hash` | SHA-256 of the uncommitted changes of the agent that stopped, attached to the prompts: the tracked files as `git diff`, the new untracked files with their content (split at LF only, every other separator kept as it is) and the SHA-256 of their bytes |
 | `proposal` | the proposer (`agent`), `state` (`pending`, `started`, `done`, `missing`), `missing` (the reason, when missing), the `resolution` and its `hash`, the reserved fields (`reserved`, `reserved_reason`, `operator_question`, `options`) and `profile`, the profile the contribution was given with (identity, kind, model, effort and arguments, a fallback model included; null until it is done) |
 | `votes` | the two voters, each with `state`, `missing`, `vote` (`APPROVA`, `BLOCCA`), `reason`, the reserved fields, `profile` and `proposal_hash`, the hash of the text it voted on |
 | `hash` | SHA-256 of the proposal's text: the content evaluated |

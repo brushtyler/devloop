@@ -4,6 +4,7 @@ The agents are simulated (``FakeRunner``): the tests check the protocol, the dur
 its binding, not the models."""
 
 import dataclasses
+import hashlib
 import os
 import subprocess
 import sys
@@ -16,7 +17,7 @@ _TESTS_DIR = str(Path(__file__).resolve().parent)
 if _TESTS_DIR not in sys.path:
     sys.path.insert(0, _TESTS_DIR)
 
-from devloop import agents, conclave, config, markdown, planning, review, schema  # noqa: E402
+from devloop import agents, conclave, config, markdown, planning, review, schema, workspace  # noqa: E402,E501
 from devloop.dispatcher import Dispatcher  # noqa: E402
 from devloop.planning import Snapshot, plan  # noqa: E402
 from devloop.workspace import Workspace  # noqa: E402
@@ -507,6 +508,28 @@ class ResumeTests(Base):
         self.assertEqual(record['outcome'], conclave.BLOCKED)
         self.assertIn('issue', record['stale'])
 
+    def test_a_new_file_that_changes_during_the_last_vote_makes_it_blocked(self):
+        # Two contents of a new file that splitlines() would make alike: U+2028 inside a JSON
+        # string (valid) and a LF in its place (invalid JSON).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'new.json').write_bytes('{"a": "x y"}\n'.encode())
+
+            class FileWS(ConclaveWS):
+                def pending_diff(self, name, commit):
+                    return workspace._new_file_diff(root, 'new.json')
+
+            self.make(proposal(), vote(), vote(), ws=FileWS(),
+                      hooks={3: lambda: (root / 'new.json').write_bytes(b'{"a": "x\ny"}\n')})
+            self.block_pr()
+            self.run_conclave()
+        record = self.record()
+        # The content as it is, separator included, reached the members.
+        self.assertIn('+{"a": "x y"}\n', self.runner.calls[0][3])
+        self.assertEqual(record['outcome'], conclave.BLOCKED)
+        self.assertIn('non committate', record['stale'])
+        self.assertEqual([v['state'] for v in record['votes']], ['done', 'done'])
+
     def test_a_reserved_flag_in_the_last_vote_prevails_over_a_context_that_changed(self):
         self.make(proposal(), vote(), vote(reserved=True, question='Chi mergia?'),
                   hooks={3: lambda: setattr(self.gh, 'head', SHA2)})
@@ -720,6 +743,19 @@ class WorkspaceTests(unittest.TestCase):
             changed = ws.pending_diff('issue-7', commit)
             self.assertIn('+m\n', changed)
             self.assertNotEqual(conclave.text_hash(changed), conclave.text_hash(diff))
+            # Separators other than LF stay as the file has them, and contents that would look
+            # alike line by line still differ, by the sha256 of their bytes.
+            seen = set()
+            for data in (b'x\r\ny\n', b'x\ny\n', 'x y\n'.encode(), b'x\ry\n', b'x\ny'):
+                (path / 'new.py').write_bytes(data)
+                shown = ws.pending_diff('issue-7', commit)
+                self.assertIn(hashlib.sha256(data).hexdigest(), shown)
+                lines = data.decode().removesuffix('\n').split('\n')
+                self.assertIn(''.join(f'+{line}\n' for line in lines), shown)
+                seen.add(conclave.text_hash(shown))
+            self.assertEqual(len(seen), 5)
+            self.assertIn('+y\n\\ No newline at end of file\n', shown)
+            (path / 'new.py').write_text('m\n')
             (path / 'blob.bin').write_bytes(b'\0\1\2')
             self.assertIn('binary or larger', ws.pending_diff('issue-7', commit))
             (path / 'blob.bin').unlink()

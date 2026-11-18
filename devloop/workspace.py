@@ -93,29 +93,38 @@ MAX_NEW_FILE = 256 * 1024
 
 def _new_file_diff(root, name):
     """New file ``name`` of worktree ``root``, not tracked, as a diff that adds it (#141): its
-    lines when it is UTF-8 text up to ``MAX_NEW_FILE`` bytes, otherwise its size and sha256;
-    the target of a symbolic link. Deterministic: the same content gives the same text."""
+    lines when it is UTF-8 text up to ``MAX_NEW_FILE`` bytes, otherwise its size only; the
+    target of a symbolic link. The sha256 of the exact bytes is always in the header, so two
+    contents differ in the text, and so in its hash, even where the lines look alike. Lines are
+    split at LF only, as git does: CR, U+2028 and every other separator stay in the line where
+    the file has them. Deterministic: the same content gives the same text."""
     path = root / name
-    head = f'diff --git a/{name} b/{name}\nnew file, not tracked\n--- /dev/null\n+++ b/{name}\n'
+    head = f'diff --git a/{name} b/{name}\nnew file, not tracked'
+    tail = f'\n--- /dev/null\n+++ b/{name}\n'
     try:
         if path.is_symlink():
-            return head + f'@@ -0,0 +1 @@\n+{os.readlink(path)}\n\\ symbolic link\n'
+            target = os.readlink(path)
+            digest = hashlib.sha256(os.fsencode(target)).hexdigest()
+            return (head + f', symbolic link, sha256 {digest}' + tail
+                    + f'@@ -0,0 +1 @@\n+{target}\n\\ No newline at end of file\n')
         data = path.read_bytes()
     except OSError as exc:
-        return head + f'(not readable: {type(exc).__name__})\n'
+        return head + tail + f'(not readable: {type(exc).__name__})\n'
+    head += f', {len(data)} bytes, sha256 {hashlib.sha256(data).hexdigest()}' + tail
     try:
         text = data.decode('utf-8') if b'\0' not in data and len(data) <= MAX_NEW_FILE else None
     except UnicodeDecodeError:
         text = None
     if text is None:
-        return head + (f'(binary or larger than {MAX_NEW_FILE} bytes: {len(data)} bytes, sha256 '
-                       f'{hashlib.sha256(data).hexdigest()})\n')
-    lines = text.splitlines()
-    if not lines:
+        return head + f'(binary or larger than {MAX_NEW_FILE} bytes)\n'
+    if not text:
         return head + '(empty)\n'
+    lines = text.split('\n')
+    last = lines.pop()  # '' when the file ends with LF
     body = ''.join(f'+{line}\n' for line in lines)
-    if not text.endswith(('\n', '\r')):
-        body += '\\ No newline at end of file\n'
+    if last:
+        lines.append(last)
+        body += f'+{last}\n\\ No newline at end of file\n'
     return head + f'@@ -0,0 +1,{len(lines)} @@\n' + body
 
 
