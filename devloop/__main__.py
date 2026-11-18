@@ -22,6 +22,7 @@ from .dispatcher import (Dispatcher, TickLog, Workers, ensure_labels, pr_counts_
 from .github import GitHub, GitHubError
 from .housekeeping import Housekeeping
 from .ledger import Ledger
+from .outbox import for_identities
 from .planning import plan, queue_lines
 from .stall import StallWatch
 from .workspace import Workspace
@@ -111,14 +112,20 @@ def build(args):
                          on_turn=lambda agent, prompt: current.turn(
                              agent.key, prompt, agent.model if agent.fallback_for else None),
                          stall=stall)
-    gh = identities.github(DISPATCHER)
     # Merges (#172) run with the merger's app (#201), the only one that gets contents=write,
     # or without it with the local gh login devloop runs with.
     # Without the dispatcher lock, status and a dry run read the journal of the turns and never
     # write it (#362): the running dispatcher keeps its chain in memory.
     command = getattr(args, 'command', None)
     read_only = command == 'status' or (command == 'tick' and getattr(args, 'dry_run', False))
-    ledger = Ledger(gh, state_dir=state, read_only=read_only)
+    ledger = Ledger(None, state_dir=state, read_only=read_only)
+    # With publication_outbox (#385), every client's comments are in that journal before they
+    # are sent; never from status or a dry run, which do not write it.
+    if cfg.publication_outbox and not read_only:
+        identities.outbox = for_identities(identities, ledger.journal, cfg.trusted_users,
+                                           log=tick_log)
+    gh = identities.github(DISPATCHER)
+    ledger.gh = gh
     dispatcher = Dispatcher(cfg, gh, ws, runner, log=tick_log, identities=identities,
                             activity=current, ledger=ledger,
                             merger=identities.merger(),

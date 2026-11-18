@@ -223,8 +223,20 @@ class Identities:
                 for actor, app in cfg.apps.items()}
         return cls(cfg.repo, apps, run=run)
 
+    # The outbox of the publications (#385, ``outbox.Outbox``), set by devloop when
+    # ``publication_outbox`` is on: the clients write their comments through it.
+    outbox = None
+
     def github(self, actor, permissions=None) -> Backend:
-        """The client ``actor`` acts with: the ports, on GitHub, holding only ``permissions``."""
+        """The client ``actor`` acts with: the ports, on GitHub, holding only ``permissions``;
+        with an outbox, its ``comment`` and ``edit_comment`` pass through it (#385)."""
+        client = self.direct(actor, permissions)
+        if self.outbox is None:
+            return client
+        return self.outbox.client(client, actor, permissions)
+
+    def direct(self, actor, permissions=None) -> Backend:
+        """The client of ``actor`` as ``github`` returns it, without the outbox."""
         app = self.apps.get(actor)
         if app is None:
             return self._ambient

@@ -102,9 +102,15 @@ as uncertain. `GitHubUncertain` is a `GitHubError`: the dispatcher still handles
 write. `ports.reconcile_comment` tells whether an uncertain write took effect: it reads the
 comments of the issue or PR back and returns the one written by the same login whose body is
 exactly the one written, or that contains a given marker (for an edit, only the edited
-comment), or None when the write was not published. Nothing calls it yet: the outbox of
-[ADR 0004](adr/0004-passo-2-budget-stato-durevole.md) will. The other writes and the reads
-report every failure as a `GitHubError`, as before.
+comment), or None when the write was not published. The login may also be a set of logins (the
+ambient `gh` login is known only as one of `trusted_users`), and `exclude` skips comments already
+known as the publication of another write. The
+[publication outbox](devloop/protocol.md#publication-outbox) of
+[ADR 0004](adr/0004-passo-2-budget-stato-durevole.md) (#385, `devloop/outbox.py`) calls it
+before any new POST when `publication_outbox` is on; it wraps the clients of
+`Identities.github` and is itself a `Backend`. Without it the dispatcher still handles an
+uncertain outcome as a failed write. The other writes and the reads report every failure as a
+`GitHubError`, as before.
 
 The ports hold only the methods the dispatcher calls, with their current names and signatures,
 and return normalized data. `GitHub` (`devloop/github.py`) implements all three, and `Identities`

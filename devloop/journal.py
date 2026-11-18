@@ -24,7 +24,10 @@ before it (``previous``) and its own (``sha256``), like the journal of the local
 - ``linked``: the issue of the work of a legacy turn, as the dispatcher recognises it from the
   branch and marker of its PR, open or closed (the number itself for an issue), kept so that
   the turn blocks the whole work also after a restart. Until it is linked, a legacy turn may
-  be on a PR of any work, and with the block it blocks every new turn.
+  be on a PR of any work, and with the block it blocks every new turn;
+- ``publication`` and the other events whose kind starts with it: the outbox of the
+  publications (``outbox.Outbox``, #385), with ``publication_outbox`` on. Each comment and edit
+  devloop writes on GitHub is here, body included, before it is sent. The turns ignore them.
 
 Reads verify the whole chain. An incomplete or unreadable last line (a write cut short) is set
 aside in ``turn-journal-tail-<sha256>.bin`` and removed, and the valid records before it stay; a
@@ -60,6 +63,7 @@ OUTCOMES = (RETURNED, FAILED, UNCERTAIN, NOT_DISPATCHED)
 # The outcomes a trusted user may give an uncertain turn: never ``uncertain`` again.
 RECONCILED_OUTCOMES = (RETURNED, FAILED, NOT_DISPATCHED)
 RECONCILE_COMMAND = '/devloop reconcile'
+PUBLICATION = 'publication'  # the prefix of the events of the outbox (#385, ``outbox``)
 # A turn's id: its sequence (or, for a legacy one, its number) and 8 hex digits that differ
 # between journals, so that a command written for the turns of a journal since lost never
 # reconciles a turn of a new one.
@@ -545,3 +549,22 @@ class TurnJournal:
             self._load()
             self._append('refused', {'comment': comment, 'by': by, 'turn': turn,
                                      'reason': reason})
+
+    # Publications (#385) -----------------------------------------------------
+    def publication(self, kind, data):
+        """Append an event of the outbox of the publications (``outbox.Outbox``), durable
+        before it returns: its kind starts with ``publication``, and the turns ignore it.
+        Raises ``JournalError`` if it cannot be written, and from a ``read_only`` journal."""
+        if not kind.startswith(PUBLICATION):
+            raise ValueError(f'not an event of the outbox: {kind!r}')
+        if self.read_only:
+            raise JournalError(f'{self.path}: read-only journal: nothing is published from it')
+        with self._lock:
+            self._load()
+            return self._append(kind, data)
+
+    def publications(self):
+        """The events of the outbox of the publications, oldest first."""
+        with self._lock:
+            self._load()
+            return [e for e in self._events if e['event'].startswith(PUBLICATION)]

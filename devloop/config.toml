@@ -28,6 +28,12 @@ ci_rerun_unrelated = true
 # and its PRs), with an escalation, until a trusted user reconciles it with
 # `/devloop reconcile`. Off here: turning it on is the operator's decision (ADR 0004, D8).
 block_uncertain_turns = false
+# The outbox of the publications (issue #385): every comment and comment edit devloop writes
+# (ledger records, agent outputs, receipts, escalations) is saved in the journal of the turns
+# before it is sent. An uncertain outcome (timeout, 5xx) is reconciled on the exact comment of
+# the same author before any new POST, and a restart resumes what was left half published.
+# Off here: turning it on is the operator's decision (ADR 0004, D8).
+publication_outbox = false
 # Language of the text that agents write for GitHub.
 language = "Italian"
 

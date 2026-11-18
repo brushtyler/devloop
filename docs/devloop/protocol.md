@@ -976,6 +976,51 @@ turn waits for reconciliation, on each tick. No automatic evidence is accepted i
 proof of termination comes with step 4 of ADR 0001. After the reconciliation the step resumes as
 any escalation to the operator does.
 
+### Publication outbox
+
+Since #385 (ADR 0004, P2-4), with `publication_outbox = true` (off by default: ADR 0004, D8),
+every comment and comment edit devloop writes on GitHub passes through an outbox
+(`devloop/outbox.py`): ledger records, agents' outputs, receipts and every other comment written
+with the dispatcher's or an agent's client. Without it devloop publishes as before. The outbox
+keeps its events in the [turn journal](#turn-journal), in the same hash chain; the turns ignore
+them:
+
+- `publication`: a write about to be sent, with its id (`pub-<16 hex digits>`), `op` (`comment` or
+  `edit`), the issue or PR, the comment of an edit, the actor and permissions of its client and
+  the **whole body**. It is durable before anything is sent: if it cannot be written, nothing is
+  sent and the write fails like any `gh` failure.
+- `publication_sending`: an attempt about to be sent. Until an answer is recorded, its outcome is
+  unknown.
+- `publication_sent`, with the comment's id and how it was known (`response` or
+  `reconciliation`); `publication_failed`, a failure reported to the caller, certain (final:
+  GitHub wrote nothing) or `uncertain`; `publication_dropped`, never to be published, with why.
+
+**No POST repeated on an uncertain outcome.** A write whose outcome is uncertain (a timeout, a
+connection lost after sending, a 5xx answer: `GitHubUncertain`, #364) is reconciled at once with
+`ports.reconcile_comment`: the comment of the same author (the app's login; for the ambient `gh`
+login, one of `trusted_users`) with exactly that body, skipping the comments the outbox already
+knows as another write's publication; for an edit, on the edited comment only. Found, the write
+is published. Not found, it is sent once more: at most two sends, each after a reconciliation that
+did not find it. Otherwise, or when the comments cannot be read, the caller gets the uncertain
+failure, as before the outbox.
+
+**Before every new write** on an issue or PR, the writes of that issue or PR still pending, and
+not running in another action, are settled first; if one cannot be, the new write is not sent and
+fails like any `gh` failure.
+
+**Restart.** Each tick starts by settling every pending write, before it reads GitHub: a write
+recorded and never sent is sent; one cut short while sending is reconciled, and sent once more
+only when it is not found. A write whose caller was already told it failed with an uncertain
+outcome is only reconciled: found, it is recorded as published; not found, it is dropped,
+because its step already handled it as not published. A pending edit followed by a later write
+on the same comment is dropped: the later one was built from GitHub as it was. What cannot be
+settled is logged (`publication <id> (... on #<n>) not settled`) and waits for the next tick.
+
+A reconciliation is as precise as the body: devloop's comments carry times, heads and digests,
+so two writes with the same body by the same author are not expected. The key applies at the next
+start of devloop, like the other keys outside the reloaded ones; `devloop status` and `tick
+--dry-run` never use the outbox.
+
 ## PR receipt
 
 When a PR goes to `agent:ready-to-merge`, at level 1 or 2 and at level 0, the dispatcher writes

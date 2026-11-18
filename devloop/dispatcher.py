@@ -1232,6 +1232,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         self._auto_pin(dry_run)
         if not dry_run:
             self._housekeeping()
+            self._resume_publications()
         self._transition_labels(dry_run)
         snap = self.snapshot()
         self._flag_incomplete(snap, dry_run)
@@ -1283,6 +1284,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             if self._restart_wait_over(running):
                 return []
             self.log(restart_line(self._restart[0], iso(self._restart[1]), len(running)))
+        self._resume_publications()
         self._transition_labels(False)
         snap = self.snapshot()
         prs = {pr.number: pr for pr in snap.prs}
@@ -1647,6 +1649,21 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                                               for c in accepted])
 
     # Ledger (#133) -----------------------------------------------------------
+    def _resume_publications(self):
+        """With ``publication_outbox`` (#385), settle the writes left pending in the outbox
+        (``outbox.Outbox.resume``), before the tick reads GitHub: a restart resumes what was
+        left half published, without duplicates. What cannot be settled is logged and waits;
+        a new write on the same issue or PR settles it first, or is not sent."""
+        outbox = getattr(self.identities, 'outbox', None)
+        if outbox is None:
+            return
+        try:
+            lines = outbox.resume()
+        except GitHubError as exc:
+            lines = [f'  outbox of the publications not readable: {exc}']
+        for line in lines:
+            self.log(line)
+
     def _signed(self, login):
         """Whether ``login`` signs as the dispatcher, as its other records do."""
         return self._wrote(login, DISPATCHER)

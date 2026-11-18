@@ -32,7 +32,12 @@ another value stops devloop at startup. `block_uncertain_turns` (a boolean, defa
 turns on the block on uncertain turns of the [turn journal](protocol.md#turn-journal) (#362): a
 turn left without outcome refuses every new turn of its work, with an escalation, until a trusted
 user reconciles it with `/devloop reconcile`. Off, the journal records the turns all the same;
-another value stops devloop at startup.
+another value stops devloop at startup. `publication_outbox` (a boolean, default `false`) turns on
+the [publication outbox](protocol.md#publication-outbox) (#385): every comment and comment edit
+of the dispatcher's and the agents' clients is saved in the turn journal before it is sent, an
+uncertain outcome is reconciled on the exact comment of the same author before any new POST, and
+each tick resumes what a restart left half published. Off, devloop publishes as before; another
+value stops devloop at startup. It applies at the next start.
 `[merge]` (`mode`, `levels`, `operator_only_paths`) and `roles.supervisor` set the
 [merge modes](guide.md#merge-modes); an unknown mode, level or key stops devloop at startup.
 `[pin]` (`auto`, default `false`; `restart_max_wait_minutes`, default 30) sets the
@@ -793,7 +798,10 @@ disables credential helpers, askpass programs and preconfigured authentication h
 header is keyed on the exact push URL, so that no `http.<url>.extraHeader` in a config file is
 more specific, and `git -c` settings inherited through `GIT_CONFIG_PARAMETERS` are dropped. An actor
 without an app uses the ambient `gh` login and its records must come from `trusted_users`, as
-before. An app that is configured but whose key is missing stops devloop at startup instead of
+before. With `publication_outbox` on (#385), `Identities.github` hands out each client with its
+`comment` and `edit_comment` through the [publication outbox](protocol.md#publication-outbox),
+which reconciles an uncertain write on the app's login, or on `trusted_users` for the ambient
+login; `Identities.direct` gives the client without it. An app that is configured but whose key is missing stops devloop at startup instead of
 silently falling back to the operator's login: remove it from `[apps]` (or use `--config`) to run
 that actor without it. `python3 -m devloop apps` checks each app, its installation and its
 permissions.

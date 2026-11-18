@@ -832,6 +832,15 @@ user reconciles them, with a comment whose first line is
 reason, mandatory. The outcome is recorded once, also with the block off; then the step resumes
 as from any escalation to the operator.
 
+With `publication_outbox = true` (#385, off by default), every comment devloop writes is saved in
+the same journal before it is sent, through the
+[publication outbox](protocol.md#publication-outbox). A comment whose outcome is uncertain (a
+timeout, a 5xx answer) is looked for on GitHub before anything else is sent: found, it is not
+sent again; not found, it is sent once more. After a restart, the first tick finishes what was
+left half published, without duplicates. A line `publication <id> ... not settled` in the log is
+a write that could not be checked on GitHub yet: the next tick tries again, and no new comment is
+sent on that issue or PR until it is settled.
+
 ### Advisory review for the operator
 
 With `[review_policy] advisory_reviewer` set (#369; empty, and so off, by default: the local
@@ -921,6 +930,7 @@ prevents two dispatchers from running at once live under `state_dir` (default `.
 in the main checkout. `tick --dry-run` writes nothing and does not take that lock, so the
 [smoke test of a pin](#pin) runs it while `run` is active. Like `status`, it reads the
 [turn journal](protocol.md#turn-journal) without writing it: the running dispatcher alone does.
+For the same reason they never use the [publication outbox](protocol.md#publication-outbox).
 Not even its git commands write to the repository: it does not fetch, so it plans from the remote branches as last fetched (a
 branch never fetched leaves its merge mode not computable), and the objects that `git
 merge-tree` writes go to a temporary directory. In daily use run it from the pinned copy, through

@@ -402,6 +402,20 @@ class ReconciliationTests(unittest.TestCase):
         with self.assertRaises(GitHubNotFound):
             gh.edit_comment(FIRST_COMMENT_ID + 5, 'v4')
 
+    def test_several_authors_and_excluded_comments(self):
+        gh = FakeGH()
+        gh.with_ids = True
+        first, second = gh.comment(7, 'record'), gh.comment(7, 'record')
+        # One of several logins counts (#385: the ambient login, one of the trusted users).
+        self.assertEqual(
+            ports.reconcile_comment(gh, 7, ['someone', 'brushtyler'], 'record')['id'], first)
+        self.assertIsNone(ports.reconcile_comment(gh, 7, ['someone'], 'record'))
+        # A comment known as another write's publication is skipped.
+        self.assertEqual(
+            ports.reconcile_comment(gh, 7, 'brushtyler', 'record', exclude={first})['id'], second)
+        self.assertIsNone(
+            ports.reconcile_comment(gh, 7, 'brushtyler', 'record', exclude={first, second}))
+
     def test_an_actor_client_reports_the_uncertain_outcome(self):
         fake = FakeGH()
         fake.uncertain_writes = ['applied']

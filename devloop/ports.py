@@ -15,8 +15,9 @@ dispatcher takes them. The ports raise ``github.GitHubError`` when the backend f
 "Porta del tracker"): success, failure (``github.GitHubError``: nothing was written) and
 **uncertain** (``github.GitHubUncertain``, a ``GitHubError``: a timeout, a connection lost
 after sending, a 5xx answer, so the write may have taken effect). :func:`reconcile_comment`
-tells, by reading the comments back, whether an uncertain write took effect. Nothing calls it
-yet, and the dispatcher handles an uncertain outcome as a failure, as it did before.
+tells, by reading the comments back, whether an uncertain write took effect. The outbox of the
+publications (``outbox.Outbox``, #385) calls it before any new POST when ``publication_outbox``
+is on; without it the dispatcher handles an uncertain outcome as a failure, as it did before.
 
 Where a method went, when it was not obvious:
 
@@ -212,23 +213,32 @@ def port_methods(port):
             if callable(value) and not name.startswith('_')]
 
 
-def reconcile_comment(tracker, number, author, body, *, comment_id=None, marker=None):
+def reconcile_comment(tracker, number, author, body, *, comment_id=None, marker=None,
+                      exclude=()):
     """Whether a write on issue or PR ``number`` that raised ``github.GitHubUncertain`` took
     effect (#364): the comment that carries it, or None when the write was not published.
 
     Only a comment of ``author``, the login that wrote, counts: an identical comment of anyone
-    else never does. A comment carries the write when its body is exactly ``body`` or, with a
-    non-empty ``marker``, contains ``marker``. For a ``comment``, the oldest such comment is returned;
-    for an ``edit_comment``, ``comment_id`` restricts the search to the edited comment.
+    else never does. ``author`` may also be a collection of logins, when the writer is known
+    only as one of them (#385: the ambient ``gh`` login, one of the trusted users). A comment
+    carries the write when its body is exactly ``body`` or, with a non-empty ``marker``,
+    contains ``marker``. For a ``comment``, the oldest such comment is returned; for an
+    ``edit_comment``, ``comment_id`` restricts the search to the edited comment. A comment whose
+    id is in ``exclude`` never counts: the outbox (#385) passes the comments it already knows
+    as the publication of another write.
 
     The answer is only as precise as what identifies the write: an identical body that
     ``author`` posted before also counts, and so does a marker that the comment carried before
     an edit. Give a ``marker`` unique to the write when either can happen. A failed read
     raises ``github.GitHubError``, and the outcome stays uncertain."""
+    authors = {author} if isinstance(author, str) else set(author)
+    excluded = set(exclude)
     for comment in tracker.issue_comments(number):
-        if (comment.get('author') or {}).get('login') != author:
+        if (comment.get('author') or {}).get('login') not in authors:
             continue
         if comment_id is not None and comment.get('id') != comment_id:
+            continue
+        if comment.get('id') is not None and comment.get('id') in excluded:
             continue
         text = comment.get('body') or ''
         if text == body or (marker and marker in text):
