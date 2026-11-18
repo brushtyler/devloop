@@ -516,9 +516,9 @@ note, and the finding stays open. When every reviewer of a round approves but a 
 owner outside the round (CI, or an earlier reviewer) is still open, the round is not promoted:
 the PR goes to `agent:needs-operator` with a comment that lists the open findings (`open_findings`).
 The exception is a PR whose open findings are all `ci` findings while the CI of the approved head
-is still running, or has not appeared yet within the wait of a just pushed head (#334): the CI
-can still close them, so the approval stays recorded and the PR waits in `agent:review`. When the
-CI passes, its findings are closed and the approval is applied without a new review; when it
+is still running, has not appeared yet within the wait of a just pushed head, or has passed while
+the review ran (#334): the CI can still close them, so the approval stays recorded and the PR
+waits in `agent:review`. When the CI passes, the next tick closes its findings and the approval is applied without a new review; when it
 fails, a new CI round opens as usual. A `ci` finding whose head CI has already concluded without
 passing goes to the operator. When a reviewer
 of the round asks for changes, the fix receives every open finding, whoever owns it.

@@ -243,6 +243,33 @@ class CiClosureTests(Flow, unittest.TestCase):
         self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
         self.assertEqual(len(self.runner.calls), 1)
 
+    def test_an_approval_with_a_ci_finding_and_the_ci_passed_during_the_review_is_ready(self):
+        # The snapshot saw the CI running; it passed while the reviewer worked.
+        flow = self
+
+        class GreenDuringReview(FakeRunner):
+            def run(self, *args, **kwargs):
+                flow.gh.ci = 'pass'
+                return super().run(*args, **kwargs)
+
+        self.make([review_comment(ci_round()), fix_comment(1)], ci='pending',
+                  runner=GreenDuringReview(raw_review('approve')))
+        self.assertEqual([a.kind for a in self.planned()], ['review'])
+        self.d.tick()
+        (approval,) = self.published('review')
+        self.assertEqual((approval['round'], approval['verdict']), (2, 'approve'))
+        # No escalation: the next tick closes the CI finding, then the approval is applied.
+        self.assertEqual(self.gh.labels[100], {'agent:review'})
+        self.assertNotIn('open_findings', '\n'.join(body for _, body in self.gh.comments))
+        self.assertEqual(self.planned(), [Action('findings', 100, 'CI passed on the head')])
+        self.d.tick()
+        (closed,) = self.published('finding')
+        self.assertEqual([(c['key'], c['by']) for c in closed['closed']], [('1/ci/R1-1', 'ci')])
+        self.assertEqual([a.kind for a in self.planned()], ['apply_review'])
+        self.d.tick()
+        self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
+        self.assertEqual(len(self.runner.calls), 1)
+
     def test_an_approval_with_a_ci_finding_opens_a_ci_round_when_the_ci_fails(self):
         # A round limit with room for the new CI round, which the limit would escalate otherwise.
         self.approved_with_ci_running(dataclasses.replace(CFG, max_review_rounds=4))
