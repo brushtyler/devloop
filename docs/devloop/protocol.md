@@ -231,6 +231,41 @@ answer to a command that does not apply, do not count), or if the attribution is
 anyone else, header or not, never touches the attribution. A label already present when the
 check failed is never the check's.
 
+## Conclave records
+
+The [conclave on a block](guide.md#conclave-on-a-block) (#141) works on two records.
+
+**The block.** The `notice` of an agent that stopped (`event: blocked`) records, since #141, the
+agent's key (`agent`), its reason (`reason`), the step (`step`: `implement`, `fix` or `sync`)
+and the commit the step started from (`head`: the base commit of the branch for an
+implementation, the PR's head for a fix or a sync). A notice without them, written before #141,
+convenes no conclave. The durable reference of a block is `{kind: "blocked", comment, agent,
+step}`, `comment` being the id of the notice's comment, or, for a review round whose verdict is
+`needs_operator`, `{kind: "review", round, reviewer, head}` of the first `needs_operator` record
+of the round.
+
+**The conclave.** One dispatcher comment per block, edited as the conclave goes on, ending with a
+`conclave` marker:
+
+| Field | Content |
+|---|---|
+| `block` | the durable reference of the block, as above |
+| `step` | `implement`, `fix` or `review` |
+| `issue`, `issue_hash` | the issue and the hash of its request (title, body and trusted comments, as for the [readiness check](#readiness-check-records)) when the conclave opened |
+| `commit`, `head` | the commit of the block, which every call checks out; on a PR its head when the conclave opened (null on an issue) |
+| `diff_hash` | SHA-256 of the uncommitted changes of the agent that stopped, attached to the prompts |
+| `proposal` | the proposer (`agent`), `state` (`pending`, `started`, `done`, `missing`), `missing` (the reason, when missing), the `resolution` and its `hash`, and the reserved fields (`reserved`, `reserved_reason`, `operator_question`, `options`) |
+| `votes` | the two voters, each with `state`, `missing`, `vote` (`APPROVA`, `BLOCCA`), `reason`, the reserved fields and `proposal_hash`, the hash of the text it voted on |
+| `hash` | SHA-256 of the proposal's text: the content evaluated |
+| `stale` | why the frozen context stopped holding, `""` otherwise |
+| `outcome` | `UNANIMOUS`, `BLOCKED` or `RESERVED`; `""` while the conclave is open |
+
+A record is read back only from the dispatcher's identity and with a valid structure, and it must
+hold together: `hash` is the hash of the recorded text, every vote was given on that hash, and the
+recorded outcome is the one its contributions give. A record that does not hold is logged and
+left to the operator: the block gets no other conclave. Each call is also a ledger `turn` of kind
+`conclave` ([Evidence and telemetry](#evidence-and-telemetry)).
+
 ## Receipts
 
 Every agent review, CI round and promotion records a **receipt** in its marker:
@@ -557,9 +592,10 @@ closure only from the dispatcher's app; a fix only from the implementer's app. A
 (`preflight`) counts only if written by the app of the configured agent it names, the checker:
 the dispatcher sets the labels it implies, never the record. A `notice` counts only from the
 dispatcher's app: the escalations and the operator-merge notices are its own; the `notice` of an
-agent that stopped (`Lavoro bloccato`) is published with that agent's app and is never read as
-a record, it only stays out of the hash of the
-[readiness check](#readiness-check-records) like any text devloop published. `trusted_users`
+agent that stopped (`Lavoro bloccato`) is published with that agent's app and stays out of the
+hash of the [readiness check](#readiness-check-records) like any text devloop published. Only
+the [conclave](#conclave-records) reads it, and only when written by the app of the agent it
+names. A `conclave` record counts only from the dispatcher's app. `trusted_users`
 stays for people: it
 decides who can start work with `agent:ready`, and it cannot contain bots. The only app whose
 labels count is the supervisor's, on the issues described in
@@ -580,7 +616,7 @@ gathers them at the promotion.
 | Record | When | Content |
 |---|---|---|
 | `request` | The issue goes from `agent:ready` to `agent:working` | SHA-256 of title and body, author and time of the trusted `labeled` event of `agent:ready`, ids of the trusted comments given to the implementer, time of the takeover. It is a snapshot **at the takeover**, not at the time of the label |
-| `turn` | Every invocation of an agent CLI, retries, fallback models and failures included: implement, fix, sync with an agent, review, readiness check | Kind, agent, GitHub identity (none: the operator's `gh` login), configured model and effort (for a fallback, the fallback model and the model it replaces), real model, start, end, duration, outcome (`success`, `failure`, `unavailable`), the error if any, telemetry, and the last command the turn ran or started when the CLI exposes it (`last_command`: only codex, from the `command_execution` items of `--json`; cleaned like the tail of a timeout, on one line, at most 200 characters; absent otherwise), also for a turn that timed out |
+| `turn` | Every invocation of an agent CLI, retries, fallback models and failures included: implement, fix, sync with an agent, review, readiness check, conclave call | Kind, agent, GitHub identity (none: the operator's `gh` login), configured model and effort (for a fallback, the fallback model and the model it replaces), real model, start, end, duration, outcome (`success`, `failure`, `unavailable`), the error if any, telemetry, and the last command the turn ran or started when the CLI exposes it (`last_command`: only codex, from the `command_execution` items of `--json`; cleaned like the tail of a timeout, on one line, at most 200 characters; absent otherwise), also for a turn that timed out |
 | `verification` | Every test command the dispatcher runs after a writing turn (none when the [local tests](reference.md#local-tests) select nothing), and the full suite it runs before a review of a head without CI, or before the promotion of an approval given while no CI was known | Command, outcome, duration, the tree hash before and after the test, and the commit (none before a review) |
 | `event` | The CI of a head (`ci_round`): a failed CI round, the checks a review round saw whatever its verdict (`approve`, `request_changes` or `needs_operator`), or the passing checks read again just before the PR is promoted to `agent:ready-to-merge` (also at level 0); a sync without an agent, or the merge of `main` before a fix (`sync`) | For the CI, the head, the state (`fail`, `pass`, or `none` without checks), the review round (none at level 0) and each check with its outcome, the id of its GitHub Actions run (none for a commit status or a check outside Actions) and its duration in seconds (`duration_s`: none while it runs and for a commit status, #300). Every CI round also records `tests`, the [summary of the suite](reference.md#summary-of-the-ci-in-the-prompts) that the dispatcher reads for the review and fix prompts (read again from the job logs when a promotion records the round, for instance after a review that saw the CI pending): for each job whose log holds the final lines of `scripts/run-tests.py`, its name with `ran` and `slowest`, and for a job whose log could not be read, its name with `log: unavailable`; absent when no job has either. The same checks read again for the same head and round are not recorded twice, a new run is. For a sync, the merged base commit and the old and new heads |
 

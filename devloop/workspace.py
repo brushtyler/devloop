@@ -222,6 +222,31 @@ class Workspace:
         self._git('fetch', 'origin', self.base_branch)
         return self._git('rev-parse', f'origin/{self.base_branch}').strip()
 
+    def commit_copy(self, name, commit, branch=None):
+        """A disposable worktree detached at ``commit``, for a read-only turn of the conclave
+        (#141); removed with :meth:`remove`. ``branch``: the PR branch to fetch with the base,
+        where the commit is."""
+        refs = [f'+refs/heads/{branch}:refs/remotes/origin/{branch}'] if branch else []
+        self._git('fetch', 'origin', self.base_branch, *refs)
+        path = self.path(name)
+        self._fresh(path)
+        self._git('worktree', 'add', '--force', '--detach', str(path), commit)
+        return path
+
+    def pending_diff(self, name, commit):
+        """What worktree ``name`` holds beyond ``commit`` (#141): ``git diff`` of the tracked
+        files against it, then the new files git does not ignore, by name. ``''`` when the
+        worktree does not exist; nothing is written to it."""
+        path = self.path(name)
+        if not path.is_dir():
+            return ''
+        diff = self._git('diff', '--no-color', commit, cwd=path)
+        new = [n for n in self._git('ls-files', '--others', '--exclude-standard', '-z',
+                                    cwd=path).split('\0') if n]
+        if new:
+            diff += '\n# New files, not tracked:\n' + '\n'.join(f'#   {n}' for n in sorted(new))
+        return diff
+
     def review_copy(self, path, reviewer=None):
         """``(name, path)`` of a disposable worktree for a reviewer, detached at the HEAD of
         ``path`` and sharing its refs, so that ``origin/<base>`` resolves. What the reviewer and

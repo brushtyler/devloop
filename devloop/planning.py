@@ -27,7 +27,8 @@ RESYNC_AFTER_APPROVAL = 'resync_after_approval'
 # dispatcher revoked that approval because the base branch touched the PR's files.
 BASE_CHANGED = 'base_changed'
 # Actions that take a slot of ``max_actions_per_tick``.
-EXPENSIVE = ('review', 'fix', 'implement', 'sync', 'preflight', 'merge', 'supervise')
+EXPENSIVE = ('review', 'fix', 'implement', 'sync', 'preflight', 'merge', 'supervise',
+             'conclave')
 # Actions that write to the whole repository or to devloop itself (the pin of #174): with
 # ``max_parallel_actions`` above 1 each runs alone, after the actions planned before it and
 # before those planned after it (#176), and in continuous mode only when nothing runs (#227).
@@ -175,6 +176,10 @@ class Snapshot:
     # a retry of an issue's step has ``blocked_by`` too, its open blocks (#277), and waits
     # while it is not empty.
     supervised: list = field(default_factory=list)
+    # With ``conclave`` (#141), the issues and PRs in agent:needs-operator whose block still
+    # needs its conclave: dicts ``{number, calls, reason}``, ``calls`` being the calls left
+    # (``conclave.calls_left``), one action each.
+    conclaves: list = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -555,6 +560,10 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
                           if pr.checks == 'pending' or pr.ci_wait
                           else '')
                 actions.append(Action('review', pr.number, reason))
+    # The conclave on a block (#141): one action per call still due, each taking a slot of
+    # max_actions_per_tick; those beyond it run on a later tick, from the recorded point.
+    for item in snapshot.conclaves:
+        actions += [Action('conclave', item['number'], item['reason'])] * item['calls']
     # A ready issue that a merged devloop PR already resolved is never checked nor implemented
     # again (#228): it is escalated, once, and waits for whoever decides it.
     held_back = set()

@@ -112,7 +112,8 @@ class ActionsMixin:
         path = self.ws.new_branch(name, branch)
         # The input the turn runs on (#182), bound before it runs: the commit its branch starts
         # from and the request its prompt gets.
-        key = self._issue_key('implement', self.ws.head(path), issue['request'])
+        start = self.ws.head(path)
+        key = self._issue_key('implement', start, issue['request'])
         criteria = acceptance_criteria(issue.get('body'))
 
         def prompt(attempt):
@@ -134,7 +135,7 @@ class ActionsMixin:
             raise
         if result['status'] == 'blocked':
             return self._blocked(number, used, result['blocked_reason'], remove=[lb.working],
-                                 on_pr=False)
+                                 on_pr=False, step='implement', head=start)
         if failure:
             return self._escalate(number, failure[0], failure[1], remove=[lb.working],
                                   cls='tests_failed')
@@ -662,7 +663,7 @@ class ActionsMixin:
         result, failure, used, tested, local = turn
         if result['status'] == 'blocked':
             return self._blocked(pr.number, used, result['blocked_reason'], remove=remove,
-                                 on_pr=True)
+                                 on_pr=True, step='fix', head=pr.head_sha)
         if failure:
             return self._escalate(pr.number, failure[0], failure[1], remove=remove,
                                   cls='tests_failed')
@@ -842,7 +843,8 @@ class ActionsMixin:
             if result['status'] == 'blocked':
                 return self._blocked(pr.number, used, result['blocked_reason'].strip()
                                      + f'\n\nFile in conflitto con `{cfg.base_branch}`:\n\n'
-                                     + listed, remove=remove, on_pr=True)
+                                     + listed, remove=remove, on_pr=True, step='sync',
+                                     head=pr.head_sha)
             if failure:
                 return fail(failure[0], failure[1])
             # The dispatcher started the merge and concludes it: an agent that committed, reset

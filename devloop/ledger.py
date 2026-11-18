@@ -38,7 +38,7 @@ from .ports import Tracker
 
 NOT_REPORTED = 'non riportato'
 PENDING = 'ledger-open-turns.json'  # in state_dir: issues and PRs with turns not closed
-TURN_KINDS = ('implement', 'fix', 'sync', 'review', 'preflight')
+TURN_KINDS = ('implement', 'fix', 'sync', 'review', 'preflight', 'conclave')
 _COMMENT_URL = re.compile(r'#issuecomment-(\d+)$')
 
 
