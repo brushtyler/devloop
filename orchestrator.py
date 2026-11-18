@@ -481,7 +481,10 @@ def _supervised_dispatch(fn):
             prepaid['consumed'] = True
             role, phase = prepaid['role'], 'feedback'
             fields['phase'] = phase
-        reservation = (prepaid['invocation'] if prepaid else limits.reserve(role, phase, engine)) if limits is not None else None
+        # A call made for a task is charged to that task (#163); any other call,
+        # prepaid feedback included, stays on the shared run account.
+        reservation = ((prepaid['invocation'] if prepaid else limits.reserve(role, phase, engine, fields.get('task_id')))
+                       if limits is not None else None)
         dispatch_id = uuid.uuid4().hex
         if supervised and not _supervision_event('dispatch_started', dispatch_id=dispatch_id, engine=engine, **fields):
             if limits is not None:
@@ -4492,6 +4495,9 @@ class SSDLCOrchestrator:
                 return self.check_budget_circuit_breaker()
             self.check_budget_circuit_breaker()
             limits.require_capacity('03-dev', '03-dev', engine)
+        def task_budget(task_id, engine=None):
+            # The caps of the task in the profile's allocation (#163), before the attempt starts.
+            limits.require_capacity('03-dev', '03-dev', engine, task_id=task_id)
         def dispatch_engine(task, attempt):
             # The same selection develop() makes for this attempt.
             return SquadDispatcher.dispatch_role(
@@ -4505,6 +4511,7 @@ class SSDLCOrchestrator:
         scheduler = TaskScheduler(
             wt, self.dir_dev / "tasks", plan, quality, context, develop,
             verify, guard, verification_budget, dispatch_budget=dispatch_budget, dispatch_engine=dispatch_engine,
+            task_budget=task_budget if limits is not None else None,
             historical_task_floors=(limits._load(repair=False)[0]['binding'].get('task_floors', {}) if limits else {}),
             historical_capture_authority=history_authority,
             scope_reconciliations=(limits._load(repair=False)[0]['binding'].get('scope_reconciliations', {}) if limits else {}),

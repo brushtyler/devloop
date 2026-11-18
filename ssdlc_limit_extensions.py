@@ -17,6 +17,12 @@ follow it (``feedback_lineage``); recording allowances and scope stay separate.
 The specialized contracts (verification repair, deadline extension, operator
 recovery) and their receipts are untouched. No model is called.
 
+``allocate_task_budget`` and ``reallocate_task_budget`` (#163) change only the
+per-task caps of the profile (``task_budget``, see ``ssdlc_task_budget``): the
+explicit allocation of an existing run from its residual, and the transfer of
+unconsumed, uncommitted cap between two allocated tasks. Neither changes a run
+cap or a counter; the proposal lists the effects on every task.
+
 ``reverify_after_timeout`` (#167) changes no limit: it authorizes one more
 verification of the same captured candidate after a verifier timeout, with
 longer timeouts for the timed-out checks only. Activation records the grant in
@@ -39,9 +45,14 @@ from ssdlc_tasks import TaskError, TaskJournal, atomic_json, digest, ticket_lock
 # historical accounting anchor of reconciled runs follow the extended deadline.
 CONTRACT = 'operator-limit-extension-v1'
 REVERIFY = 'reverify_after_timeout'
+# Per-task budget (#163): the explicit allocation of an existing run and the
+# transfer between allocated tasks. Neither raises a run cap (ssdlc_task_budget).
+ALLOCATE, REALLOCATE = 'allocate_task_budget', 'reallocate_task_budget'
+BUDGET_OPERATIONS = (ALLOCATE, REALLOCATE)
 # Operations that change the frozen profile and join the bound chain.
-LIMIT_OPERATIONS = ('extend_global_limit', 'extend_deadline')
+LIMIT_OPERATIONS = ('extend_global_limit', 'extend_deadline') + BUDGET_OPERATIONS
 OPERATIONS = LIMIT_OPERATIONS + (REVERIFY,)
+EVENTS = {ALLOCATE: 'TASK_BUDGET_ALLOCATED', REALLOCATE: 'TASK_BUDGET_REALLOCATED'}
 CHECK_TIMEOUT = 'check_timeout.'
 MONEY = ('metered_usd', 'cli_estimate_usd')
 COUNTS = ('invocations', 'development_attempts')
@@ -113,6 +124,24 @@ def unwind(envelope, generation):
             if not mirrored:
                 del binding['deadline_extensions']
             policy['wall_seconds'] = entry['deadline']['old_wall_seconds']
+        elif entry['operation'] == ALLOCATE:
+            # The allocation added the whole section to a profile without one.
+            if not isinstance(policy.get('task_budget'), dict) or any(
+                    not isinstance(c, dict) or c.get('old') is not None for c in entry['changes']):
+                raise LimitExtensionError('Task budget allocation differs from the frozen profile')
+            del policy['task_budget']
+        elif entry['operation'] == REALLOCATE:
+            from ssdlc_task_budget import TaskBudgetError, locate
+            for change in reversed(entry['changes']):
+                if not isinstance(change, dict) or set(change) != {'dimension', 'old', 'new'}:
+                    raise LimitExtensionError('Limit extension change is malformed')
+                try:
+                    container, key = locate(policy, change['dimension'])
+                except TaskBudgetError:
+                    raise LimitExtensionError('Task budget reallocation differs from the frozen profile') from None
+                if container.get(key) != change['new']:
+                    raise LimitExtensionError('Task budget reallocation differs from the frozen profile')
+                container[key] = change['old']
         else:
             for change in reversed(entry['changes']):
                 if not isinstance(change, dict) or set(change) != {'dimension', 'old', 'new'}:
@@ -503,6 +532,48 @@ def _changes(source, operation, requested, now, task_id=None):
     return changes, policy
 
 
+def _plan(source):
+    path = source['root'] / '02-design/plan.json'
+    if path.is_symlink() or path.exists() and not path.is_file():
+        raise LimitExtensionError('Unsafe run input: 02-design/plan.json')
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def budget_view(policy, counters, scheduler, plan):
+    """Per-task budget of the run: run defaults, task overrides and both accounts."""
+    from ssdlc_task_budget import view
+    return view(policy, counters, (scheduler or {}).get('tasks'), plan)
+
+
+def _budget(source, operation, payload):
+    """Changes, resulting profile and reviewed facts of a task budget operation.
+
+    The facts list every task with its caps and availability before and after,
+    whether the operation changes it or a task it depends on, and both accounts:
+    the operator authorizes these effects with the proposal hash.
+    """
+    from ssdlc_task_budget import TaskBudgetError, allocate, effects, reallocate, view
+    policy, counters = source['envelope']['policy'], source['counters']
+    plan = _plan(source)
+    tasks = (source['scheduler'] or {}).get('tasks')
+    try:
+        if operation == ALLOCATE:
+            names = {t.get('task_id') for t in (plan or {}).get('tasks', []) if isinstance(t, dict)}
+            profile, changes, facts = allocate(policy, counters, payload, names)
+        else:
+            profile, changes, facts = reallocate(policy, counters, payload)
+    except TaskBudgetError as exc:
+        raise LimitExtensionError(str(exc)[:240]) from None
+    if not changes or len(changes) > 32:
+        raise LimitExtensionError('A task budget operation changes between 1 and 32 task caps')
+    _schema('recovery-limits', profile)
+    changed = sorted({c['dimension'].split('.')[1] for c in changes})
+    facts.update(defaults=view(profile, counters)['defaults'],
+                 effects=effects(policy, profile, counters, tasks, plan, changed),
+                 accounts=view(profile, counters)['accounts'])
+    return changes, profile, facts
+
+
 def _evidence(value):
     if not isinstance(value, list):
         raise LimitExtensionError('Evidence is a list')
@@ -512,7 +583,8 @@ def _evidence(value):
 def build(source, request, now):
     """Pure host-computed proposal; grants nothing."""
     if not isinstance(request, dict) or set(request) - {'schema_version', 'operation', 'changes', 'cause',
-                                                        'evidence', 'actor', 'task_id', 'profile'}:
+                                                        'evidence', 'actor', 'task_id', 'profile',
+                                                        'allocation', 'transfer'}:
         raise LimitExtensionError('Unknown field in the extension request')
     if request.get('schema_version', 1) != 1:
         raise LimitExtensionError('Unsupported extension request version')
@@ -520,7 +592,18 @@ def build(source, request, now):
     task = request.get('task_id')
     if operation == REVERIFY and task is None:
         raise LimitExtensionError('A reverification names its task')
-    changes, profile = _changes(source, operation, request.get('changes'), now, task)
+    payload = {ALLOCATE: 'allocation', REALLOCATE: 'transfer'}.get(operation)
+    if any(key in request for key in ('allocation', 'transfer') if key != payload):
+        raise LimitExtensionError('Only allocate_task_budget names an allocation and only '
+                                  'reallocate_task_budget a transfer')
+    facts = None
+    if payload is not None:
+        if 'changes' in request or payload not in request:
+            raise LimitExtensionError('A task budget request names its ' + payload
+                                      + '; the host computes the changes')
+        changes, profile, facts = _budget(source, operation, request[payload])
+    else:
+        changes, profile = _changes(source, operation, request.get('changes'), now, task)
     if 'profile' in request and request['profile'] != profile:
         raise LimitExtensionError('The requested profile changes dimensions it does not name; '
                                   'no implicit increase is allowed')
@@ -545,6 +628,8 @@ def build(source, request, now):
                                     expired_at_proposal=now >= changes[0]['old'])
     if operation == REVERIFY:
         proposal['reverification'] = reverification(source, task)
+    if facts is not None:
+        proposal['task_budget'] = facts
     _schema('limit-extension-proposal', proposal)
     return proposal
 
@@ -570,8 +655,15 @@ def validate(proposal, source, now):
         raise LimitExtensionError('Generation, inputs or consumption changed since the proposal')
     if proposal['consumption'] != consumption(source['envelope'], source['counters'], source['scheduler']):
         raise LimitExtensionError('Consumption changed since the proposal')
-    changes, profile = _changes(source, proposal['operation'], [dict(dimension=c['dimension'], old=c['old'],
-                                new=c['new']) for c in proposal['changes']], now, proposal['run']['task_id'])
+    if proposal['operation'] in BUDGET_OPERATIONS:
+        facts = proposal['task_budget']
+        changes, profile, expected = _budget(source, proposal['operation'],
+                                             facts['allocation' if proposal['operation'] == ALLOCATE else 'transfer'])
+        if facts != expected:
+            raise LimitExtensionError('The task budget effects differ from the run')
+    else:
+        changes, profile = _changes(source, proposal['operation'], [dict(dimension=c['dimension'], old=c['old'],
+                                    new=c['new']) for c in proposal['changes']], now, proposal['run']['task_id'])
     if changes != proposal['changes']:
         raise LimitExtensionError('Proposal changes differ from the frozen profile')
     if proposal['new_profile'] != profile:
@@ -881,7 +973,7 @@ def _complete(ticket, root, intent, fault):
         extended['deadline_at'] = intent['deadline_at']
         if not _conserved(state, extended):
             raise LimitExtensionError('Extension would change consumption')
-        journal.append('LIMITS_EXTENDED', extended)
+        journal.append(EVENTS.get(intent.get('operation'), 'LIMITS_EXTENDED'), extended)
     elif state.get('policy_sha256') != new_sha or state.get('deadline_at') != intent['deadline_at']:
         raise LimitExtensionError('Limit journal differs from the authorized extension')
     fault('journal_appended')
@@ -984,6 +1076,7 @@ def activate(ticket, sha, *, clock=time.time, guard=lambda: None, fault=lambda p
                 else:
                     envelope, counters, attempts, feedback = _extended(source, proposal, digest(authorization), sha)
                 intent = dict(schema_version=1, contract=CONTRACT, proposal_sha256=sha, reverification=grant,
+                              operation=proposal['operation'],
                               authorization_sha256=digest(authorization), generation=generation,
                               parent_envelope_sha256=digest(source['envelope']), new_envelope=envelope,
                               parent_limits_journal=source['limits_head'],
@@ -1059,6 +1152,9 @@ def status(ticket, *, clock=time.time):
             record.update(operation=proposal['operation'], changes=proposal['changes'],
                           generation=proposal['run']['generation'], actor=proposal['actor'],
                           valid=digest(proposal) == folder.name)
+            if proposal['operation'] in BUDGET_OPERATIONS:
+                # The effects on every task, as the operator reviewed and authorized them.
+                record['task_budget_effects'] = proposal['task_budget']['effects']
             state = 'PROPOSED'
             if (folder / 'authorization.json').exists():
                 authorization = _json(folder / 'authorization.json')
@@ -1072,7 +1168,7 @@ def status(ticket, *, clock=time.time):
         except (LimitExtensionError, OSError, ValueError, KeyError, TypeError):
             record['state'] = 'INVALID'
         records.append(record)
-    chain, refusal = None, None
+    chain, refusal, envelope = None, None, None
     try:
         envelope = _json(root / 'limits/policy.json')
         chain = entries(envelope)
@@ -1080,16 +1176,21 @@ def status(ticket, *, clock=time.time):
             unwind(envelope, generation)
     except (TaskError, OSError, ValueError, KeyError, TypeError) as exc:
         refusal = str(exc)[:240]
-    deadline_at = None
+    deadline_at, budget = None, None
     try:
         path = root / 'limits/task-journal.jsonl'
         if not path.is_symlink():
-            deadline_at = _peek(path)['deadline_at']
-    except (TaskError, OSError, ValueError, KeyError, TypeError):
+            counters = _peek(path)
+            deadline_at = counters['deadline_at']
+            scheduler_path = root / '03-dev/tasks/task-journal.jsonl'
+            scheduler = _peek(scheduler_path) if scheduler_path.is_file() and not scheduler_path.is_symlink() else None
+            if envelope is not None:
+                budget = budget_view(envelope['policy'], counters, scheduler, _plan(dict(root=root)))
+    except (TaskError, OSError, ValueError, KeyError, TypeError, AttributeError):
         pass
     return dict(ticket=ticket.name, source=kind, generation=generation,
                 pending=None if pending is None else pending['proposal_sha256'],
-                proposals=records, chain=chain, integrity_error=refusal,
+                proposals=records, chain=chain, integrity_error=refusal, task_budget=budget,
                 **expiries(ticket, deadline_at, clock()), model_dispatches=0)
 
 
@@ -1105,6 +1206,8 @@ def describe(source, *, clock=time.time):
                 profile=source['envelope']['policy'], parent=parent(source),
                 consumption=consumption(source['envelope'], source['counters'], source['scheduler']),
                 chain=entries(source['envelope']),
+                task_budget=budget_view(source['envelope']['policy'], source['counters'], source['scheduler'],
+                                        _plan(source)),
                 **expiries(source['ticket'], source['counters']['deadline_at'], clock()), model_dispatches=0)
 
 
@@ -1123,7 +1226,8 @@ def main(argv=None):
         command.add_argument('--repo', '-r', default='.')
         command.add_argument('--ticket', required=True)
         if name == 'propose':
-            command.add_argument('--request', required=True, help='JSON: operation, changes, cause, evidence, actor')
+            command.add_argument('--request', required=True,
+                                 help='JSON: operation, changes (or allocation / transfer), cause, evidence, actor')
         if name in ('approve', 'activate'):
             command.add_argument('--proposal', required=True, help='SHA-256 printed by limits propose')
         if name == 'approve':

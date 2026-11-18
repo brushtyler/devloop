@@ -57,6 +57,15 @@ policy digest. Every load then validates the bound extension chain in
 (`limits/extension-pending.json`) is still pending. Relaunching a native run with
 its original `--limits-profile` keeps the extended envelope.
 
+Each reservation records its account: the task a developer call is made for
+(`account: task`, `task_id`), or the shared run account (`account: run`) for a
+call no task owns. A profile may declare per-task caps in its optional
+`task_budget` section: overrides of the cumulative dimensions on top of the run
+caps, which stay the defaults and the overall limit. The pre-flight check of a
+task attempt and the reservation apply them. An existing run gets an allocation,
+and allocated tasks exchange unused cap, only through the operator-authorized
+[per-task budget operations](limit-extensions.md#per-task-budget-and-reallocation).
+
 `metered_usd` sums positive API usage observations;
 `cli_estimate_usd` sums positive CLI estimates. They are independent thresholds,
 not interchangeable charges. Missing/default-zero telemetry remains `null`;
