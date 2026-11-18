@@ -339,10 +339,21 @@ How devloop merges in the `"strict"` and `"auto"` [merge modes](guide.md#merge-m
   after the actions planned before it and before those planned after it
   ([Parallel actions](reference.md#parallel-actions)); in `devloop run` it runs in the
   [merge lane](guide.md#the-merge-lane), one merge at a time, alongside the actions on other numbers.
-- **Record.** A dispatcher comment with a `merged` marker records the head, the receipt, the
+- **Record.** A `merged` marker of the dispatcher records the head, the receipt, the
   level and the mode, and in `merged_by` the login of the merger app when it merged (none with
-  the local login). Its text says that devloop decided the merge and names who ran it: the
-  merger app (its login without `[bot]`) or the local `gh` login.
+  the local login). Its text, the section "Mergiata da devloop", says that devloop decided the
+  merge and names who ran it: the merger app (its login without `[bot]`) or the local `gh`
+  login. Since #338 they go in the comment of the promotion the merge concludes, which the
+  dispatcher edits: the latest `promoted` record it signed, read just before the merge, for the
+  merged head and with its [receipt](#pr-receipt), if any, still `current`. The section follows
+  the text of the promotion and its receipt, with the policy receipt recomputed for the merge
+  only when it reads differently from the promotion's, and the `merged` marker follows the
+  `policy` and `receipt` ones. A promotion that devloop does not merge (the merge is the
+  operator's, or a hold stops it) keeps its comment of promotion and receipt. Without such a
+  comment, when the edited one would exceed the limit of GitHub or when the edit fails, the
+  record is a comment of its own, as before #338. The [daily summary](#daily-summary) counts a
+  `merged` record on the day GitHub reports for the merge of its PR, when known, not on the day
+  of its comment.
 
 ## Supervision trace
 
@@ -563,9 +574,11 @@ the review and the decision on the merge are up to a person.
 
 Markers are control records, while the rest of each comment is text written by a model, and both
 are published by the same account. So the dispatcher neutralizes HTML comments in all published
-text, and reads a marker only from the last line of a comment, of the expected kind and with a
-valid structure. Text from an implementer or a reviewer cannot record a review, a fix or a PR
-link.
+text, and reads a marker only from the block of marker lines that ends a comment, of the expected
+kind and with a valid structure. That block is usually the last line alone; the comment of a
+promotion carries its records there, one per line (see [PR receipt](#pr-receipt)). A marker
+anywhere else is text, and a block with two markers of the same kind holds no record of that
+kind. Text from an implementer or a reviewer cannot record a review, a fix or a PR link.
 
 ## Attribution
 
@@ -740,12 +753,15 @@ When a PR goes to `agent:ready-to-merge`, at level 1 or 2 and at level 0, the di
 its **receipt** (#135): a comment for the operator who merges, bound to the approved head and to
 the promotion, that tells what was asked, who did what with which model and at which cost, what
 was verified on which commit, how the findings were closed and how the criteria are covered. It
-is written only with a [ledger](#evidence-and-telemetry), right after the `promoted` policy
-record and before the label. The comment has two forms of the same receipt:
+is written only with a [ledger](#evidence-and-telemetry), before the label, in the comment of the
+promotion itself (#338): one dispatcher comment holds the promotion ("Pronta per il merge") and
+its receipt ("Ricevuta della PR #N"), and ends with the `policy` record of the promotion
+followed by the `receipt` record, one marker per line. The receipt has two forms in it:
 
-- the readable text, with the dispatcher's [header](#attribution);
+- the readable text, under the promotion's and with the dispatcher's [header](#attribution);
 - a `receipt` marker, read like the other dispatcher records: only from the dispatcher's
-  identity, only as the last line, only with a valid structure. It records the identity of the
+  identity, only in the block of markers that ends the comment, only with a valid structure.
+  It records the identity of the
   receipt (`pr`, `issue`, the approved `head`, `base`, the `policy` version, `level`, the number
   of the `promotion` on the PR and the SHA-256 `digest` of its content), the `totals`, the data
   declared `missing`, and `state` (`current` or `superseded`).
@@ -796,14 +812,22 @@ under "Dati storici mancanti" (`missing`: `request`, `turns`, `implement`, `ci`,
 `acceptance_map`, `criteria`) and reconstructs none of it.
 
 **Invalidation.** When the approval is revoked the receipt no longer holds, and its comment is
-edited: a warning "Ricevuta superata" with the time and the reason goes before its title, and
-its marker gets `state: superseded`, `superseded_at` and `reason`. This happens when a ready PR
+edited: a warning "Ricevuta superata" with the time and the reason goes before its first title,
+and its marker gets `state: superseded`, `superseded_at` and `reason`; the `policy` record of
+the promotion in the same comment stays as it is. This happens when a ready PR
 is [revoked](#merge-directives-and-record) (a new head, CI running again, the acceptance map or
 level 0 that no longer hold), when the recomputed policy receipt is `stale`, when a CI round
 fails on a ready PR, when a sync moves the head of a ready PR, and with every escalation that
 takes `agent:ready-to-merge` away (the round limit reached by a CI failure, open findings, a
 failed action, a lost marker, the level that requires the operator). A new promotion first marks
-every receipt still current, whatever revoked it, then writes a new
-one with the next promotion number: only the latest promotion's receipt is `current`. A failed
-edit at a revocation is logged and marked again at the next promotion; at the promotion it stops
-the promotion before its label, as any `gh` failure.
+every receipt still current, whatever revoked it, then writes a new comment, with the
+promotion and a receipt with the next promotion number: only the latest promotion's receipt is
+`current`. A failed edit at a revocation is logged and marked again at the next promotion; at
+the promotion it stops the promotion before its comment and its label, as any `gh` failure.
+
+**One comment per promotion** (#338). When promotion and receipt together exceed the 65 536
+characters of a GitHub comment, they are written as two comments, the promotion and then the
+receipt, as before #338. The comments written before #338 keep that form and are read as they
+are: a promotion with its `policy` record, then a receipt with its `receipt` record, then, after
+a merge, a comment of its own with the `merged` record. When devloop merges the PR, the
+[`merged` record](#merge-directives-and-record) goes in the comment of the promotion.

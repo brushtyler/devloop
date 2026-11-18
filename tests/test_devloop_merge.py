@@ -63,6 +63,14 @@ class MergeGH(SnapshotGH):
     def pr_comments(self, number):
         return [dict(c) for c in self.thread]
 
+    def edit_comment(self, comment_id, body):
+        """Edit the comment in the thread and among those devloop published (#338)."""
+        super().edit_comment(comment_id, body)
+        for c in self.thread:
+            if c['id'] == comment_id:
+                self.comments = [(n, body if b == c['body'] else b) for n, b in self.comments]
+                c['body'] = body
+
     def open_prs(self):
         return [dict(raw, headRefOid=self.head, mergeable=self.mergeable,
                      mergeStateStatus=self.status) for raw in super().open_prs()]

@@ -715,7 +715,7 @@ At level 0 the dispatcher runs no reviewer. Before promoting it re-reads the hea
 
 The promotion is a dispatcher comment with a `policy` marker that records the receipt (level 0,
 the label, who added it and when, the allowlist outcome) and the state of each expected check,
-followed, as for any promotion, by the [receipt of the PR](protocol.md#pr-receipt).
+with, as for any promotion, the [receipt of the PR](protocol.md#pr-receipt) in the same comment.
 The merge stays the operator's, unless a [merge mode](guide.md#merge-modes) other than `"off"` applies to
 level 0, and then these same checks are repeated just before the merge. While the PR is ready, every tick
 checks that the head is still the promoted one, that `reviews:0` is still on the PR and
@@ -833,5 +833,6 @@ lists `merger` with its installation and permissions; without the app it reports
 the ambient `gh` login. Each merge asks for a new token, limited to `contents=write` and
 `pull_requests=write`, when it runs; `--match-head-commit` binds it to the approved head as
 before, and the `merged` record carries in `merged_by` the app's login. The text of the
-"Mergiata da devloop" comment names the app that ran the merge; without the app, the local `gh`
-login.
+"Mergiata da devloop" section, which the dispatcher adds to the comment of the promotion
+([record](protocol.md#merge-directives-and-record)), names the app that ran the merge; without
+the app, the local `gh` login.

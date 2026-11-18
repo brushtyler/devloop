@@ -5,7 +5,8 @@ The sources are the records the dispatcher reads, never a local log: the ``ledge
 records of the configured reviewers, and the ``pr`` marker of the PRs opened by an implementer.
 Days are UTC days:
 
-- a turn belongs to the day of its ``started_at``, with its whole duration; any other record to
+- a turn belongs to the day of its ``started_at``, with its whole duration; a ``merged`` record
+  to the day GitHub reports for the merge of its PR (#338), when known; any other record to
   the day of its own time (``at``) or, without one, of the creation of its comment;
 - the totals count the PRs opened that day, the PRs merged that day (by devloop or by a person),
   the review rounds opened that day (the first review record of the round) and the turns run
@@ -182,6 +183,9 @@ class Records:
         day = day.isoformat()
         out = Summary(day)
         rounds = set()
+        # A ``merged`` record belongs to the day of the merge: since #338 it is added to the
+        # comment of the promotion, which may have been written on an earlier day.
+        merged_at = {number: merged for number, _, merged in self.merged if merged}
         for comment in self.comments:
             body, created = comment.get('body') or '', comment.get('created_at')
             number = comment.get('number')
@@ -200,8 +204,10 @@ class Records:
                     self._ledger(out, day, number, record, created)
                 continue
             merged = read_marker(body, 'merged')
-            if merged is not None and _day_of(created) == day:
-                out.merges.append((_hour(created), number, merged['mode'], merged['level']))
+            if merged is not None:
+                at = merged_at.get(number) or created
+                if _day_of(at) == day:
+                    out.merges.append((_hour(at), number, merged['mode'], merged['level']))
                 continue
             notice = read_marker(body, 'notice')
             if (notice is not None and notice.get('event') == 'escalation'

@@ -5,8 +5,10 @@ by models (summaries, findings, notes, PR bodies, logs). Two rules keep the two 
 
 - every published body goes through ``publishable``, which neutralizes HTML comments in the
   text, so the text cannot contain a marker at all;
-- ``read_marker`` accepts one marker per body, only as its last line, only of the expected kind
-  and only with a valid structure.
+- ``read_marker`` accepts markers only in the block of lines that ends a body, one marker per
+  line and at most one per kind, only of the expected kind and only with a valid structure. A
+  body usually ends with one marker; the comment of a promotion ends with its records, one per
+  line (#338).
 """
 
 import base64
@@ -148,13 +150,39 @@ def neutralize(text):
     return (text or '').replace('<!--', '&lt;!--')
 
 
-def publishable(body, kind=None, payload=None):
+def publishable(body, kind=None, payload=None, records=()):
     """The only way devloop builds a body for GitHub: neutralized text plus, optionally, the
-    controller's marker as the last line."""
+    controller's marker as the last line, or its markers as the last lines: ``kind`` with
+    ``payload``, then each ``(kind, payload)`` of ``records``, one per line (#338)."""
     body = neutralize(body).rstrip('\n') + '\n'
-    if kind is not None:
-        body += '\n' + marker(kind, payload) + '\n'
+    pairs = ([(kind, payload)] if kind is not None else []) + list(records)
+    if pairs:
+        body += '\n' + ''.join(marker(k, p) + '\n' for k, p in pairs)
     return body
+
+
+def split_markers(text):
+    """``(text, markers)``: ``text`` without the block of marker lines that ends it, and the
+    lines of that block, in order. Only that block carries records: a marker anywhere else is
+    text."""
+    lines = (text or '').strip().splitlines()
+    end = len(lines)
+    while end and _MARKER.fullmatch(lines[end - 1].strip()):
+        end -= 1
+    return '\n'.join(lines[:end]).rstrip(), [line.strip() for line in lines[end:]]
+
+
+def with_record(body, kind, payload, text=None):
+    """``body``, a published comment, with its record of ``kind`` set to ``payload``: the marker
+    of that kind replaced where it is, or added after the others, which stay as they are.
+    ``text``, when given, replaces the readable text, neutralized as by ``publishable`` (#338)."""
+    readable, lines = split_markers(body)
+    line = marker(kind, payload)
+    kept = [line if _MARKER.fullmatch(old).group('kind') == kind else old for old in lines]
+    if line not in kept:
+        kept.append(line)
+    return (neutralize(readable if text is None else text).rstrip('\n') + '\n\n'
+            + ''.join(f'{k}\n' for k in kept))
 
 
 def _is_int(value, minimum=0):
@@ -396,12 +424,16 @@ _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy':
 def read_marker(text, kind):
     """The record of ``kind`` carried by ``text``, or None.
 
-    Only the last non-empty line counts, so a marker quoted or embedded in the text is ignored.
+    Only the block of marker lines that ends the text counts, so a marker quoted or embedded in
+    the text is ignored. Usually the block is the last line alone; the comment of a promotion
+    carries its ``policy`` and ``receipt`` records there, and after a merge its ``merged`` one
+    (#338). Two markers of ``kind`` in the block are no record.
     """
-    lines = (text or '').strip().splitlines()
-    match = _MARKER.fullmatch(lines[-1].strip()) if lines else None
-    if not match or match.group('kind') != kind:
+    found = [match for match in map(_MARKER.fullmatch, split_markers(text)[1])
+             if match.group('kind') == kind]
+    if len(found) != 1:
         return None
+    match = found[0]
     try:
         data = json.loads(base64.b64decode(match.group('payload'), validate=True))
     except (ValueError, json.JSONDecodeError):

@@ -6,7 +6,9 @@ which commit, how the findings were closed and how the acceptance criteria are c
 bound to the approved head and to the promotion, and it has two forms in one comment: the
 readable text, with the dispatcher's header, and a ``receipt`` marker with its identity (PR,
 issue, head, base, policy version, level, number of the promotion, digest of the content), the
-totals and the data declared missing. Only the dispatcher's identity writes it.
+totals and the data declared missing. Only the dispatcher's identity writes it. Since #338 that
+comment is the promotion's own: it carries the ``policy`` record of the promotion and the
+``receipt`` record, and a merge by devloop adds its section and its ``merged`` record to it.
 
 Its content comes **only** from the dispatcher's ledger records (#133) and from the markers,
 never from text written by agents: no summary, no finding title, no error text. The final
@@ -27,7 +29,7 @@ import hashlib
 import json
 
 from .agents import TELEMETRY_FIELDS
-from .markdown import dispatcher_header, publishable
+from .markdown import dispatcher_header, publishable, split_markers, with_record
 from .planning import counted_rounds
 from .policy import describe as describe_policy
 from .review import CI, CLOSING, OPERATOR, finding_key, finding_state, owner_of
@@ -446,9 +448,17 @@ def _acceptance_text(acceptance):
 
 
 def render(content, marker=None):
-    """The comment of a receipt: the dispatcher's header, every section, the ``receipt``
-    marker."""
-    marker = marker or record(content)
+    """The comment of a receipt on its own: the dispatcher's header, every section, the
+    ``receipt`` marker. A promotion carries it in its own comment instead (:func:`section`,
+    #338); this form is the one of the receipts written before, and of a promotion too long for
+    one comment."""
+    return publishable(dispatcher_header() + '\n' + section(content), 'receipt',
+                       marker or record(content))
+
+
+def section(content):
+    """The readable text of a receipt, without header nor marker: its title and every
+    section."""
     head, promotion = content['head'], content['promotion']
     parts = [f'## Ricevuta della PR #{content["pr"]}', '',
              f'Promozione n. {promotion} in `agent:ready-to-merge`, legata al commit approvato '
@@ -468,18 +478,19 @@ def render(content, marker=None):
               '', '### Policy', '', f'Livello **{content["policy"]["level"]}**.', '',
               describe_policy(content['policy']),
               '', '### Criteri di accettazione', '', *_acceptance_text(content['acceptance'])]
-    return publishable(dispatcher_header() + '\n' + '\n'.join(parts), 'receipt', marker)
+    return '\n'.join(parts)
 
 
 def superseded(body, marker, why, at):
     """``body``, the comment of a current receipt with ``marker``, marked as superseded at
-    ``at`` because ``why``: a warning before its title, and the marker with ``state:
-    superseded``."""
-    lines = (body or '').rstrip().splitlines()[:-1]  # the last line is the marker
+    ``at`` because ``why``: a warning before its first title, and the marker with ``state:
+    superseded``. The other records of the comment, such as the ``policy`` record of the
+    promotion that carries the receipt (#338), stay as they are."""
+    lines = split_markers(body)[0].splitlines()
     title = next((i for i, line in enumerate(lines) if line.startswith('## ')), len(lines))
     warning = ['> [!WARNING]',
                f'> **Ricevuta superata** il {at}: {" ".join(why.split())}. Non vale più per il '
                'merge; una nuova promozione scrive una nuova ricevuta.', '']
     text = '\n'.join(lines[:title] + warning + lines[title:])
-    return publishable(text, 'receipt', dict(marker, state='superseded', superseded_at=at,
-                                             reason=' '.join(why.split())))
+    return with_record(body, 'receipt', dict(marker, state='superseded', superseded_at=at,
+                                             reason=' '.join(why.split())), text=text)

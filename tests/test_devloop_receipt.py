@@ -4,6 +4,7 @@ import dataclasses
 import unittest
 
 from devloop import markdown, receipt
+from devloop.config import MergePolicy
 from devloop.dispatcher import Dispatcher
 from devloop.ledger import Ledger
 from helpers.devloop_fakes import FakeGH
@@ -398,6 +399,203 @@ class ReceiptContentTests(unittest.TestCase):
                          ('superseded', 'nuovo head', '2026-11-18T10:00:00Z'))
         self.assertIn('## Ricevuta della PR #100', marked)
         self.assertLess(marked.index('Ricevuta superata'), marked.index('## Ricevuta della PR'))
+
+
+RECORDS = ('policy', 'receipt', 'merged')
+STRICT = dataclasses.replace(CFG, merge=MergePolicy(mode='strict'))
+
+
+def records_of(body):
+    """The records of the promotion and of the merge ``body`` carries, by kind."""
+    return {k: r for k in RECORDS if (r := markdown.read_marker(body, k)) is not None}
+
+
+class PromotionCommentTests(unittest.TestCase):
+    """One comment for the promotion, its receipt and the merge (#338)."""
+
+    def make(self, cfg=STRICT):
+        self.gh = ReceiptGH()
+        self.gh.labels[100] = {'agent:review'}
+        return Dispatcher(cfg, self.gh, FakeWS(), FakeRunner(*[raw_review()] * 3),
+                          log=lambda m: None, ledger=Ledger(self.gh))
+
+    def carrying(self):
+        """The comments of PR #100 that carry a record of the promotion or of the merge."""
+        return [c for c in self.gh.thread[100] if records_of(c['body'])]
+
+    def test_a_promotion_merged_by_devloop_is_one_comment_with_three_records(self):
+        auto = dataclasses.replace(CFG, merge=MergePolicy(mode='auto'), supervisor='agy')
+        for cfg in (STRICT, auto):
+            with self.subTest(mode=cfg.merge.mode):
+                d = self.make(cfg)
+                d.tick()
+                self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
+                (promotion,) = self.carrying()
+                self.assertEqual(set(records_of(promotion['body'])), {'policy', 'receipt'})
+                written, edits = len(self.gh.thread[100]), len(self.gh.edited)
+                self.assertEqual([a.kind for a in d.tick()], ['merge'])
+                self.assertEqual(self.gh.merged, [(100, SHA1)])
+                # No new comment: the merge edited the one of the promotion.
+                self.assertEqual(len(self.gh.thread[100]), written)
+                self.assertEqual(self.gh.edited[edits:], [promotion['id']])
+                (comment,) = self.carrying()
+                self.assertEqual(comment['id'], promotion['id'])
+                found = records_of(comment['body'])
+                self.assertEqual(found['policy']['event'], 'promoted')
+                self.assertEqual(found['policy']['receipt']['head'], SHA1)
+                self.assertEqual((found['receipt']['promotion'], found['receipt']['state'],
+                                  found['receipt']['head']), (1, 'current', SHA1))
+                self.assertEqual({k: found['merged'][k] for k in ('head', 'level', 'mode')},
+                                 {'head': SHA1, 'level': 1, 'mode': cfg.merge.mode})
+                self.assertEqual(found['merged']['receipt'], found['policy']['receipt'])
+                body = comment['body']
+                self.assertEqual(body.count('> **Bot:** devloop dispatcher'), 1)
+                titles = ['## Pronta per il merge', '## Ricevuta della PR #100',
+                          '## Mergiata da devloop']
+                self.assertEqual([body.index(t) for t in titles],
+                                 sorted(body.index(t) for t in titles))
+                # The policy receipt of the merge is the promotion's: it is not repeated.
+                self.assertNotIn('Ricevuta di policy ricalcolata per il merge', body)
+                # The dispatcher's own readers find the three records in that comment.
+                thread = self.gh.pr_comments(100)
+                self.assertEqual(
+                    [p for p, _ in d._dispatcher_records(thread, 'policy', 'promoted')]
+                    + [p for p, _ in d._dispatcher_records(thread, 'receipt')]
+                    + [p for p, _ in d._dispatcher_records(thread, 'merged')],
+                    [thread.index(next(c for c in thread if c['id'] == comment['id']))] * 3)
+
+    def test_a_promotion_without_a_merge_stays_promotion_and_receipt(self):
+        for case in ('operator', 'hold'):
+            with self.subTest(case=case):
+                d = self.make(CFG if case == 'operator' else STRICT)
+                d.tick()
+                (promotion,) = self.carrying()
+                if case == 'hold':
+                    self.gh.labels[100].add('agent:merge-hold')
+                kinds = [a.kind for a in d.tick()]
+                self.assertEqual(kinds, ['operator_merge'] if case == 'operator' else [])
+                self.assertEqual(getattr(self.gh, 'merged', []), [])
+                (comment,) = self.carrying()
+                self.assertEqual(comment, promotion)  # neither edited nor followed
+                self.assertEqual(set(records_of(comment['body'])), {'policy', 'receipt'})
+                self.assertNotIn('Mergiata da devloop', comment['body'])
+
+    def test_a_merge_after_a_new_promotion_edits_only_the_valid_one(self):
+        d = self.make()
+        self.gh.details = [dict(GREEN[0], bucket='pending', conclusion='in_progress')]
+        d.tick()
+        # The approval waits for the CI; it passes, the PR is promoted, then the CI runs again.
+        self.gh.details = [dict(c) for c in GREEN]
+        d.tick()
+        self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
+        self.gh.details = [dict(GREEN[0], bucket='pending', conclusion='in_progress')]
+        self.assertEqual([a.kind for a in d.tick()], ['revoke'])
+        self.gh.details = [dict(c) for c in GREEN]
+        d.tick()
+        self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
+        self.assertEqual([a.kind for a in d.tick()], ['merge'])
+        first, second = self.carrying()
+        self.assertEqual(set(records_of(first['body'])), {'policy', 'receipt'})
+        self.assertEqual(records_of(first['body'])['receipt']['state'], 'superseded')
+        self.assertNotIn('Mergiata da devloop', first['body'])
+        found = records_of(second['body'])
+        self.assertEqual(set(found), set(RECORDS))
+        self.assertEqual((found['receipt']['promotion'], found['receipt']['state']),
+                         (2, 'current'))
+
+    def test_a_promotion_written_before_338_gets_its_merge_record(self):
+        # Promoted in the old form: the receipt in a comment of its own, after the promotion.
+        d = self.make()
+        d.tick()
+        (combined,) = self.carrying()
+        text, _ = markdown.split_markers(combined['body'])
+        found = records_of(combined['body'])
+        title = text.index('## Ricevuta della PR')
+        old_policy = markdown.publishable(text[:title], 'policy', found['policy'])
+        old_receipt = markdown.publishable(markdown.dispatcher_header() + '\n' + text[title:],
+                                           'receipt', found['receipt'])
+        thread = self.gh.thread[100]
+        at = thread.index(combined)
+        thread[at:at + 1] = [dict(combined, body=old_policy),
+                             dict(combined, id=combined['id'] + 500, body=old_receipt)]
+        snap = d.snapshot().prs[0]
+        self.assertEqual((snap.promotions, snap.labels), (1, {'agent:ready-to-merge'}))
+        self.assertEqual([a.kind for a in d.tick()], ['merge'])
+        promotion, receipt_comment = self.carrying()
+        self.assertEqual(set(records_of(promotion['body'])), {'policy', 'merged'})
+        self.assertIn('## Mergiata da devloop', promotion['body'])
+        self.assertEqual(records_of(receipt_comment['body']),
+                         {'receipt': found['receipt']})
+
+    def test_without_a_promotion_comment_the_merge_writes_its_own(self):
+        # A ready PR whose promotion comment cannot be edited: the record of #172 as before.
+        d = self.make()
+        d.tick()
+        (promotion,) = self.carrying()
+        self.gh.fail_edits = lambda body: markdown.read_marker(body, 'merged') is not None
+        self.assertEqual([a.kind for a in d.tick()], ['merge'])
+        promotion_after, merged = self.carrying()
+        self.assertEqual(promotion_after, promotion)
+        self.assertEqual(set(records_of(merged['body'])), {'merged'})
+        self.assertTrue(merged['body'].startswith('> [!NOTE]\n> **Bot:** devloop dispatcher'))
+        self.assertIn('## Mergiata da devloop', merged['body'])
+
+
+class MarkerBlockTests(unittest.TestCase):
+    """The records of a comment are the block of marker lines that ends it (#338)."""
+
+    POLICY = {'event': 'promoted', 'receipt': {
+        'pr': 100, 'base': 'b' * 40, 'head': SHA1, 'policy': 'p', 'level': 1,
+        'reviewers': ['codex'], 'reasons': []}}
+
+    def test_each_record_of_the_block_is_read_and_the_old_form_still_is(self):
+        merged = {'head': SHA1, 'level': 1, 'mode': 'strict', 'receipt': self.POLICY['receipt']}
+        content = ReceiptContentTests().content()
+        record = receipt.record(content)
+        combined = markdown.publishable('## Pronta per il merge', 'policy', self.POLICY,
+                                        records=[('receipt', record), ('merged', merged)])
+        self.assertEqual(records_of(combined),
+                         {'policy': self.POLICY, 'receipt': record, 'merged': merged})
+        # The forms written before #338: one record per comment, as its last line.
+        for body, kind, expected in (
+                (markdown.publishable('x', 'policy', self.POLICY), 'policy', self.POLICY),
+                (receipt.render(content), 'receipt', record),
+                (markdown.publishable('x', 'merged', merged), 'merged', merged)):
+            self.assertEqual(records_of(body), {kind: expected})
+
+    def test_only_the_final_block_counts_and_once_per_kind(self):
+        line = markdown.marker('policy', self.POLICY)
+        merged = markdown.marker('merged', {'head': SHA1, 'level': 1, 'mode': 'strict',
+                                            'receipt': self.POLICY['receipt']})
+        self.assertIsNone(markdown.read_marker(f'{line}\ntext\n{merged}', 'policy'))
+        self.assertIsNone(markdown.read_marker(f'text\n{line}\n\n{merged}', 'policy'))
+        self.assertIsNone(markdown.read_marker(f'text\n{line}\n{line}', 'policy'))
+        self.assertEqual(markdown.read_marker(f'text\n{line}\n{merged}', 'policy'), self.POLICY)
+        self.assertIsNone(markdown.read_marker(f'text\n> {line}\n{merged}', 'policy'))
+
+    def test_with_record_adds_or_replaces_and_keeps_the_others(self):
+        body = markdown.publishable('text', 'policy', self.POLICY)
+        merged = {'head': SHA1, 'level': 1, 'mode': 'auto', 'receipt': self.POLICY['receipt']}
+        added = markdown.with_record(body, 'merged', merged, text='text\n\nmore <!-- x')
+        self.assertEqual(records_of(added), {'policy': self.POLICY, 'merged': merged})
+        self.assertIn('more &lt;!-- x', added)
+        replaced = markdown.with_record(added, 'merged', dict(merged, mode='strict'))
+        self.assertEqual(records_of(replaced)['merged']['mode'], 'strict')
+        self.assertEqual(markdown.split_markers(replaced)[0],
+                         markdown.split_markers(added)[0])
+        self.assertEqual(len(markdown.split_markers(replaced)[1]), 2)
+
+    def test_superseding_the_receipt_of_a_promotion_keeps_its_policy_record(self):
+        content = ReceiptContentTests().content()
+        body = markdown.publishable('## Pronta per il merge\n\n' + receipt.section(content),
+                                    'policy', self.POLICY,
+                                    records=[('receipt', receipt.record(content))])
+        marked = receipt.superseded(body, markdown.read_marker(body, 'receipt'), 'nuovo head',
+                                    '2026-11-18T10:00:00Z')
+        found = records_of(marked)
+        self.assertEqual(found['policy'], self.POLICY)
+        self.assertEqual(found['receipt']['state'], 'superseded')
+        self.assertLess(marked.index('Ricevuta superata'), marked.index('## Pronta per il merge'))
 
 
 class ReceiptFakeTests(unittest.TestCase):
