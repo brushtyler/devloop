@@ -215,6 +215,7 @@ required_timeout_minutes = 30
 "ssdlc_role_fencing.py" = ["docs/writer-fencing.md"]
 "ssdlc_container_holder.py" = ["docs/writer-fencing.md"]
 "ssdlc_telemetry.py" = ["docs/cost-telemetry.md", "docs/bounded-recovery.md"]
+"ssdlc_quota.py" = ["docs/cost-telemetry.md"]
 "ssdlc_recovery.py" = ["docs/cost-telemetry.md", "docs/bounded-recovery.md"]
 "ssdlc_feedback.py" = ["docs/developer-feedback.md"]
 "ssdlc_feedback_admission.py" = ["docs/developer-feedback.md"]
