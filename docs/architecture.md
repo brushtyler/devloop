@@ -18,7 +18,8 @@ layout, controller contract and integrity model.
 Both components share the test suite in `tests/` (run by `scripts/run-tests.py` and by the CI,
 see the [development guide](development.md)) and the documentation in `docs/`, with the
 decisions in `docs/adr/`. The `core` package (`core/`) holds pure validators and calculations
-written for both; neither uses it yet (see [Future `core` package](#future-core-package)).
+written for both; devloop uses it for the budget envelope (#365), the engine not yet (see
+[Future `core` package](#future-core-package)).
 
 devloop's modules, by part:
 
@@ -27,7 +28,7 @@ devloop's modules, by part:
 | Dispatcher | `devloop/dispatcher.py` (reads the GitHub state, plans the next steps of a tick, runs them), `devloop/runloop.py` (the continuous loop), `devloop/supervision.py` (escalation classes and supervisor commands), `devloop/localtests.py` (the tests run after a writing turn), `devloop/watch.py`, `devloop/activity.py`, `devloop/stall.py`, `devloop/follow.py` |
 | GitHub | `devloop/ports.py`, `devloop/github.py`, `devloop/apps.py`: see [Ports and adapters](#ports-and-adapters) |
 | Agents | `devloop/agents.py` (headless invocation of the agent CLIs), `devloop/schema.py` with `devloop/schemas/` (structured output), `devloop/prompts/`, `devloop/workspace.py` (Git worktrees), `devloop/unavailability.py` (models found unavailable) |
-| Records and rules | `devloop/markdown.py` (attribution header and markers), `devloop/ledger.py` (evidence and telemetry), `devloop/policy.py` (review level and policy receipt), `devloop/review.py` (review records and findings), `devloop/acceptance.py` (acceptance criteria) |
+| Records and rules | `devloop/markdown.py` (attribution header and markers), `devloop/ledger.py` (evidence and telemetry), `devloop/policy.py` (review level and policy receipt), `devloop/review.py` (review records and findings), `devloop/acceptance.py` (acceptance criteria), `devloop/budget.py` (the [budget envelope](devloop/reference.md#budget-envelope) of each story, with `core.budget`) |
 | Installation | `devloop/config.py` with `devloop/config.toml`, `devloop/pin.py` and `scripts/devloop-pinned` (the [pinned installation](devloop/guide.md#run-from-a-pinned-installation)) |
 
 The operator's view of devloop is in the [guide](devloop/guide.md), its configuration in the
@@ -175,9 +176,10 @@ added to the allowlist of `tests/test_devloop_boundary.py`. Its conditions:
 
 The package exists since step 2 of ADR 0001
 ([ADR 0004](adr/0004-passo-2-budget-stato-durevole.md#34-riuso-del-pacchetto-core-e-confine-di-devloop),
-P2-1), with the budget validators. It is written **next to** the engine, not extracted from it,
-and **neither the engine nor devloop uses it yet**: devloop will use it for the budget envelope
-(P2-5), the engine only when it converges (step 6). Its modules:
+P2-1), with the budget validators. It is written **next to** the engine, not extracted from it.
+devloop uses `core.budget` for the [budget envelope](devloop/reference.md#budget-envelope) of
+each story (#365, P2-5a); **the engine does not use it yet**, and will only when it converges
+(step 6). Its modules:
 
 | Module | What it holds | Engine counterpart |
 |---|---|---|
@@ -205,8 +207,10 @@ including every variant of reference profiles and records with one value deleted
 and requires the same answers: acceptance or refusal, refusal category and message, booked rows
 and figures. The engine and its tests are unchanged.
 
-When devloop imports `core`, its pinned copy will have to include it: today `devloop pin`
-extracts `devloop/` and the sensitive-path lists only.
+Since devloop imports `core` (#365), its pinned copy includes it: `devloop pin` extracts
+`devloop/`, `core/` when the commit has it, and the sensitive-path lists, and a merge by devloop
+that touches `core/` triggers the [pin after a merge](devloop/guide.md#pin-after-a-merge) as one
+that touches `devloop/` does.
 
 ## Phases
 

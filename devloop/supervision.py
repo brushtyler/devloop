@@ -55,6 +55,7 @@ CRITICAL = {
     'conclave_veto': 'decisione del conclave annullata da un utente fidato con `/devloop veto`',
     'uncertain_turn': 'turni senza esito da riconciliare con `/devloop reconcile`',
     'attempt': 'tentativo della PR non confermato dal journal, o già concluso',
+    'budget': 'turno non coperto dall\'envelope di budget della storia',
 }
 UNCERTAIN_TURN = 'uncertain_turn'  # a turn refused by the block on uncertain outcomes (#362)
 

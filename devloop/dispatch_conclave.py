@@ -362,8 +362,9 @@ class ConclaveMixin:
         turn in a disposable checkout of the block's commit, recorded as started before it
         runs. A failure or a timeout of the agent is a missing contribution. Returns the
         comment id of the record. A call refused by the block on uncertain turns
-        (``TurnBlocked``, #362), or on a PR whose attempt does not hold (``JournalError``,
-        #384), raises before anything is recorded."""
+        (``TurnBlocked``, #362), on a PR whose attempt does not hold (``JournalError``,
+        #384), or not covered by the budget envelope of its story (``BudgetRefused``, #365),
+        raises before anything is recorded."""
         cfg = self.cfg
         proposal = which == 'proposal'
         member = record['proposal'] if proposal else record['votes'][which]
@@ -392,6 +393,9 @@ class ConclaveMixin:
         if pr is not None:
             # Nor is a call on a PR whose attempt does not hold (#384): ``JournalError``.
             self._check_attempt(pr.number, pr.issue, pr.meta.get('attempt'))
+        # Nor, with the budget on (#365), one the envelope of the story would not cover
+        # (``BudgetRefused``); the booking itself stays in the turn's intent, under the lock.
+        self._check_budget(number, 'conclave', cfg.agent(member['agent']))
         kind = 'pr' if pr is not None else 'issue'
         name = f'{kind}-{number}-conclave'
         path = self.ws.commit_copy(name, record['commit'],

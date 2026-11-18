@@ -936,6 +936,19 @@ their format does not change. The journal is append-only, one JSON event per lin
   intent of a turn of an attempt carries its id. `size_warning`: the operator was warned that
   the journal reached 80% of its limit (see below). The events of the
   [publication outbox](#publication-outbox) start with `publication`.
+- With the [budget envelope](reference.md#budget-envelope) on (`[budget] enabled`, #365), the
+  intent of a turn charged to a story carries its booking, `budget`: `{story, role, phase,
+  engine}` (the role is the kind of the turn, the engine the kind of the agent's CLI) and, when
+  the agent has a declared rule for unknown usage, `usage_model` and, for
+  `reserve_per_invocation`, `conservative_usage` (the reserve in `metered_usd` and
+  `cli_estimate_usd`), and `envelope`, the limits of the story (`turns`, `role_turns`,
+  `phase_turns`, `wall_seconds`, `deadline_at`, `metered_usd`, `cli_estimate_usd`): those of its
+  first booking, which the later ones keep, across restarts and configuration changes. The
+  check and the booking are one step under the journal's lock; a turn the
+  envelope does not cover writes no intent. The `outcome` of every turn, a readiness check
+  included, then carries `usage`: `{metered_usd, cli_estimate_usd}`, what its CLI reported, `null`
+  where it reported nothing (today only claude's estimate). With the budget off neither field is
+  written.
 
 **Integrity.** Every read verifies the whole chain. An incomplete last line (a write cut short),
 or a last line that is not JSON, is set aside in `turn-journal-tail-<sha256>.bin` and cut off: the
