@@ -307,14 +307,22 @@ How devloop merges in the `"strict"` and `"auto"` [merge modes](guide.md#merge-m
 
 ## Supervision trace
 
-The trace of the commands of the [escalations to the supervisor](guide.md#escalations-to-the-supervisor):
+The trace of the commands of the [escalations to the supervisor](guide.md#escalations-to-the-supervisor)
+and of the [escalations to the operator](guide.md#commands-on-escalations-to-the-operator):
 
 **Trace.** Every command applied leaves a dispatcher comment with a `supervision` marker: the
 command, its author, its reason, the id of the comment that carried it, the class and the outcome
 (`applied`, `accepted`, `decided`, `escalated`, `refused` or `limit`), with the key and the
 attempt for a retry, the defaults for an acceptance and, for a decision, its text (in `reason`)
 and the gaps it answers. The record is written before the labels change, so a
-lost label change never runs a retry twice.
+lost label change never runs a retry twice. A command that does not apply (#321) gets the same
+record, `refused`, with the reason and how to resume in the comment: it spends the command, which
+is answered once. The applied retries counted against the limit are those of both records, the
+supervisor's and the operator's.
+
+**Escalation.** The `notice` marker of an escalation to the operator records, as one to the
+supervisor does, the step that failed, the key of its input and, for a PR, the label a retry
+resumes from, when the step is one a retry runs again (#321).
 
 ## Dependency cycles
 

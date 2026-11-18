@@ -6,6 +6,7 @@ import unittest
 from devloop import agents, markdown, supervision
 from devloop.config import MergePolicy
 from devloop.dispatcher import PROMPT_DIR, Action, Dispatcher, plan
+from devloop.github import GitHubError
 from test_devloop import (CFG, REV, SHA1, SHA2, FakeRunner, FakeWS, SnapshotGH, implemented,
                           norm, pr, raw_review, receipt)
 from test_devloop_preflight import checked, gap
@@ -235,7 +236,10 @@ class RoutingTests(Case):
                 self.assertEqual(self.gh.labels[100], {HUMAN})
                 record = self.escalations(100)[-1]
                 self.assertEqual((record['class'], record['to']), ('tool_failure', 'operator'))
-                self.assertNotIn('key', record)
+                # The step stays recorded, for a trusted user's retry (#321).
+                self.assertEqual(record['key'], {'step': 'review', 'head': SHA1,
+                                                 'reviewer': REV})
+                self.assertIn('`/devloop retry`', self.gh.threads[100][-1]['body'])
                 d._do_round_limit(pr())
                 self.assertEqual(self.escalations(100)[-1]['class'], 'round_limit')
                 self.assertEqual(self.gh.labels[100], {HUMAN})
@@ -448,13 +452,17 @@ class RetryTests(Case):
         self.assertEqual(self.decisions(100)[-1]['outcome'], 'refused')
         self.assertIn('input superato', self.gh.threads[100][-1]['body'])
 
-    def test_commands_are_ignored_outside_auto(self):
+    def test_commands_are_answered_and_not_applied_outside_auto(self):
         d = self.make(AUTO, crash())
         self.fail_review(d)
-        d.cfg = STRICT
+        d.cfg = dataclasses.replace(AUTO, merge=MergePolicy(mode='strict'))
         self.gh.command(100, '/devloop retry')
-        self.assertEqual(self.tick(d), [])
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertIn('la modalità di merge è `strict`', self.gh.threads[100][-1]['body'])
         self.assertEqual(self.gh.labels[100], {SUPER})
+        self.assertEqual(self.decisions(100)[-1]['outcome'], 'refused')
+        self.assertEqual(len(self.runner.calls), 1)  # not run again
+        self.assertEqual(self.tick(d), [])
 
     def test_an_issue_step_is_retried_on_the_same_base_and_request(self):
         d = self.make(AUTO, crash(), implemented(), has_pr=False)
@@ -538,8 +546,13 @@ class EscalateTests(Case):
     def test_escalate_hands_the_escalation_to_the_operator(self):
         d = self.make(AUTO, crash())
         self.tick(d)
-        self.gh.command(100, '/devloop escalate')  # without a reason: ignored
-        self.assertEqual(self.tick(d), [])
+        # Without a reason it is not applied, but answered (#321): the escalation stays.
+        self.gh.command(100, '/devloop escalate')
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertEqual(self.gh.labels[100], {SUPER})
+        self.assertEqual(self.decisions(100)[-1]['outcome'], 'refused')
+        self.assertIn('`/devloop escalate <testo>`', self.gh.threads[100][-1]['body'])
+        self.assertEqual(self.tick(d), [])  # answered once
         self.gh.command(100, '/devloop escalate il modello è instabile')
         self.assertEqual(self.tick(d), [('supervise', 100)])
         self.assertEqual(self.gh.labels[100], {HUMAN})
@@ -549,6 +562,172 @@ class EscalateTests(Case):
         record = self.escalations(100)[-1]
         self.assertEqual((record['class'], record['to']), ('supervisor_escalated', 'operator'))
         self.assertIn('il modello è instabile', self.gh.threads[100][-1]['body'])
+        # The step stays recorded, for the operator's retry (#321).
+        self.assertEqual((record['step'], record['resume']), ('review', REVIEW))
+        self.assertIn('/devloop retry', self.gh.threads[100][-1]['body'])
+
+
+class OperatorCommandTests(Case):
+    """Commands on the escalations to the operator (#321)."""
+
+    # The case of PR #318: in "auto", but the supervisor implemented the PR.
+    OWN = dataclasses.replace(AUTO, supervisor=CFG.implementer)
+
+    def fail_review(self, d):
+        self.assertEqual(self.tick(d), [('review', 100)])
+        self.assertEqual(self.gh.labels[100], {HUMAN})
+        record = self.escalations(100)[-1]
+        self.assertEqual((record['class'], record['to']), ('tool_failure', 'operator'))
+
+    def answer(self, number):
+        """The body of the dispatcher's answer to the latest command, which it spent."""
+        decision = self.decisions(number)[-1]
+        self.assertEqual(decision['outcome'], 'refused')
+        self.assertEqual(decision['comment'], self.gh.threads[number][-2]['id'])
+        return self.gh.threads[number][-1]['body']
+
+    def test_a_trusted_users_retry_resumes_a_tool_failure_escalated_to_the_operator(self):
+        for cfg in (self.OWN, STRICT, CFG):
+            with self.subTest(mode=cfg.merge.mode, supervisor=cfg.supervisor):
+                d = self.make(cfg, crash(), raw_review())
+                self.fail_review(d)
+                self.assertEqual(self.tick(d), [])  # nothing runs until someone decides
+                self.gh.command(100, '/devloop retry', login='brushtyler')
+                self.assertEqual(self.tick(d), [('supervise', 100)])
+                self.assertEqual(self.gh.labels[100], {REVIEW})
+                (decision,) = self.decisions(100)
+                self.assertEqual({k: decision[k] for k in ('command', 'by', 'outcome', 'attempt')},
+                                 {'command': 'retry', 'by': 'brushtyler', 'outcome': 'applied',
+                                  'attempt': 1})
+                self.assertIn('## Comando su un\'escalation all\'operatore',
+                              self.gh.threads[100][-1]['body'])
+                # The review runs again, as round 1: the failed attempt counted no round.
+                self.assertEqual(self.tick(d), [('review', 100)])
+                (review,) = self.gh.records(100, 'review')
+                self.assertEqual(review['round'], 1)
+                self.assertNotIn(('supervise', 100), self.tick(d))
+
+    def test_the_operators_retries_share_the_limit(self):
+        d = self.make(STRICT, crash(), crash(), crash())
+        self.fail_review(d)
+        for attempt in (1, 2):
+            self.gh.command(100, '/devloop retry', login='brushtyler')
+            self.assertEqual(self.tick(d), [('supervise', 100)])
+            self.assertEqual(self.decisions(100)[-1]['attempt'], attempt)
+            self.fail_review(d)
+        self.gh.command(100, '/devloop retry', login='brushtyler')
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertEqual(len(self.runner.calls), 3)  # not run a fourth time
+        self.assertEqual(self.gh.labels[100], {HUMAN})
+        self.assertEqual(self.decisions(100)[-1]['outcome'], 'limit')
+        self.assertIn('rimuovere `agent:needs-operator`', self.gh.threads[100][-1]['body'])
+
+    def test_the_operator_may_retry_a_critical_escalation(self):
+        # The supervisor may not decide it; a trusted user may run the step again.
+        d = self.make(AUTO, crash(), raw_review())
+        d._escalate_failure(Action('review', 100), pr(), GitHubError('gh timed out'))
+        record = self.escalations(100)[-1]
+        self.assertEqual((record['class'], record['critical'], record['step']),
+                         ('failure', True, 'review'))
+        self.assertEqual(self.gh.labels[100], {HUMAN})
+        self.gh.command(100, '/devloop retry', login='brushtyler')
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertEqual(self.gh.labels[100], {REVIEW})
+        self.assertEqual(self.decisions(100)[-1]['outcome'], 'applied')
+
+    def test_the_operator_retries_after_the_supervisor_escalated(self):
+        d = self.make(AUTO, crash(), raw_review())
+        self.assertEqual(self.tick(d), [('review', 100)])
+        self.gh.command(100, '/devloop escalate serve l\'operatore')
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertEqual(self.gh.labels[100], {HUMAN})
+        self.gh.command(100, '/devloop retry', login='brushtyler')
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertEqual(self.gh.labels[100], {REVIEW})
+        self.assertEqual(self.decisions(100)[-1]['outcome'], 'applied')
+
+    def test_an_operator_retry_of_an_issue_runs_its_step(self):
+        d = self.make(STRICT, crash(), implemented(), has_pr=False)
+        self.assertEqual(self.tick(d), [('implement', 7)])
+        self.assertEqual(self.gh.labels[7], {HUMAN})
+        self.assertEqual(self.escalations(7)[-1]['key']['step'], 'implement')
+        self.gh.command(7, '/devloop retry', login='brushtyler')
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        self.assertEqual(len(self.gh.created), 1)
+        self.assertNotIn(HUMAN, self.gh.labels[7])
+        self.assertEqual(self.decisions(7)[-1]['outcome'], 'applied')
+
+    def test_a_retry_of_a_superseded_head_is_answered(self):
+        d = self.make(STRICT, crash())
+        self.fail_review(d)
+        self.gh.head = SHA2
+        self.gh.command(100, '/devloop retry', login='brushtyler')
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertEqual(self.gh.labels[100], {HUMAN})
+        body = self.answer(100)
+        self.assertIn('input superato', body)
+        self.assertIn('rimuovere `agent:needs-operator`', body)
+        self.assertEqual(len(self.runner.calls), 1)
+
+    def test_a_command_that_does_not_apply_is_answered_with_how_to_resume(self):
+        cases = {
+            # An escalation that records no step to run again.
+            'retry, round limit': (lambda d: d._do_round_limit(pr()), '/devloop retry',
+                                   'brushtyler', 'che registri un passo da ripetere'),
+            'escalate': (lambda d: self.fail_review(d), '/devloop escalate x', 'brushtyler',
+                         'già all\'operatore'),
+            'accept-defaults on a PR': (lambda d: self.fail_review(d),
+                                        '/devloop accept-defaults', 'brushtyler',
+                                        '`default_available`'),
+            'decide without text': (lambda d: self.fail_review(d), '/devloop decide',
+                                    'brushtyler', '`/devloop decide <testo>`'),
+            # The supervisor's identity does not decide an escalation to the operator.
+            'supervisor': (lambda d: d._do_round_limit(pr()), '/devloop retry',
+                           SUPERVISOR_LOGIN, 'affidata all\'operatore'),
+        }
+        for name, (escalate, text, login, why) in cases.items():
+            with self.subTest(case=name):
+                d = self.make(AUTO if name == 'supervisor' else STRICT, crash())
+                escalate(d)
+                self.assertEqual(self.gh.labels[100], {HUMAN})
+                self.gh.command(100, text, login=login)
+                self.assertEqual(self.tick(d), [('supervise', 100)])
+                self.assertEqual(self.gh.labels[100], {HUMAN})
+                body = self.answer(100)
+                self.assertIn('non applicabile', body)
+                self.assertIn(why, body)
+                self.assertIn('rimuovere `agent:needs-operator`', body)
+                self.assertIn('resta in `agent:needs-operator`', body)
+                self.assertEqual(len(self.runner.calls),
+                                 0 if name in ('retry, round limit', 'supervisor') else 1)
+                # Answered once: the command is spent.
+                self.assertEqual(self.tick(d), [])
+
+    def test_a_command_from_an_untrusted_author_is_only_logged(self):
+        d = self.make(STRICT, crash())
+        self.fail_review(d)
+        self.gh.command(100, '/devloop retry', login='stranger')
+        self.assertEqual(self.tick(d), [])
+        self.assertEqual(self.decisions(100), [])
+        self.assertTrue(any('ignored `/devloop retry` by stranger' in line for line in self.logs))
+
+    def test_a_command_on_a_failed_readiness_check_of_the_operator(self):
+        cfg = dataclasses.replace(STRICT, preflight=REV)
+        d = self.make(cfg, checked(False, [gap('default_available', 'JSON')]), has_pr=False)
+        self.assertEqual(self.tick(d), [('preflight', 7)])
+        self.assertEqual(self.gh.labels[7], {READY, HUMAN})
+        # A retry does not run a readiness check again: the answer says how.
+        self.gh.command(7, '/devloop retry', login='brushtyler')
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        self.assertIn('/devloop recheck', self.answer(7))
+        # The defaults are accepted as the supervisor would in "auto".
+        self.gh.command(7, '/devloop accept-defaults', login='brushtyler')
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        self.assertEqual(self.decisions(7)[-1]['outcome'], 'accepted')
+        self.assertEqual(self.gh.labels[7], {READY})
+        self.runner.outputs.append(checked(True))
+        self.assertEqual(self.tick(d), [('preflight', 7)])
+        self.assertIn('Accepted default: JSON', self.runner.calls[-1][3])
 
 
 class AcceptDefaultsTests(Case):
@@ -654,14 +833,18 @@ class DecideTests(Case):
         self.assertEqual([a.kind for a in plan(d.snapshot(), PREFLIGHT_AUTO)], ['implement'])
         self.assertEqual(len(self.decisions(7)), 1)
 
-    def test_a_decision_without_text_is_ignored(self):
+    def test_a_decision_without_text_is_answered_and_not_applied(self):
         d = self.blocked(gap('default_available', 'JSON'))
         self.gh.command(7, '/devloop decide')
-        self.assertEqual(self.tick(d), [])
+        # Not applied, but answered (#321): the issue stays with the supervisor.
+        self.assertEqual(self.tick(d), [('supervise', 7)])
         self.assertEqual(self.gh.labels[7], {READY, SUPER})
-        self.assertEqual(self.decisions(7), [])
+        (decision,) = self.decisions(7)
+        self.assertEqual((decision['outcome'], decision['reason']), ('refused', ''))
+        self.assertIn('`/devloop decide <testo>`', self.gh.threads[7][-1]['body'])
         self.assertTrue(any('malformed, expected `/devloop decide <text>`' in line
                             for line in self.logs))
+        self.assertEqual(self.tick(d), [])  # answered once
 
     def test_a_decision_from_someone_not_allowed_is_ignored(self):
         d = self.blocked(gap('default_available', 'JSON'))
@@ -671,11 +854,16 @@ class DecideTests(Case):
         self.assertEqual(self.decisions(7), [])
         self.assertTrue(any('ignored `/devloop decide` by stranger' in line
                             for line in self.logs))
-        # Outside "auto" not even the supervisor decides.
+        # Outside "auto" not even the supervisor decides: the command is answered (#321).
         d.cfg = dataclasses.replace(PREFLIGHT_AUTO, merge=MergePolicy(mode='strict'))
         self.gh.command(7, DECISION)
-        self.assertEqual(self.tick(d), [])
-        self.assertEqual(self.decisions(7), [])
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        (decision,) = self.decisions(7)
+        self.assertEqual(decision['outcome'], 'refused')
+        body = self.gh.threads[7][-1]['body']
+        self.assertIn('la modalità di merge è `strict`, non `auto`', body)
+        self.assertIn('rimuovere `agent:needs-supervisor`', body)
+        self.assertEqual(self.gh.labels[7], {READY, SUPER})
         # A trusted user may decide as the supervisor does.
         d.cfg = PREFLIGHT_AUTO
         self.gh.command(7, DECISION, login='brushtyler')
@@ -770,6 +958,22 @@ class DocsTests(unittest.TestCase):
         start = text.index('### Escalations to the supervisor')
         end = text.index('\n## ', start)
         return text[start:end]
+
+    def test_the_commands_on_escalations_to_the_operator_are_documented(self):
+        text = self.section()
+        start = text.index('### Commands on escalations to the operator')
+        operator = ' '.join(text[start:].split())
+        self.assertIn('- `/devloop retry`, when', text[start:])
+        self.assertIn('- `/devloop accept-defaults` and `/devloop decide <decisions>`, when',
+                      operator)
+        self.assertIn('`/devloop escalate` never applies', operator)
+        self.assertIn('in `trusted_users`', operator)
+        self.assertIn('**two** retries run for the same key, the supervisor\'s and the '
+                      'operator\'s together', operator)
+        self.assertIn('Every command that does not apply gets a dispatcher comment with the '
+                      'reason and how to resume', operator)
+        # The supervisor's commands that do not apply are answered too.
+        self.assertIn('always gets an answer', ' '.join(text.split()))
 
     def test_the_classes_are_documented_with_whether_they_are_critical(self):
         rows = {}
