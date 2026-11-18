@@ -46,6 +46,13 @@ _FAILED_STATUSES = {'failure', 'error'}
 # What `gh` reports for an issue or PR that does not exist (deleted, transferred): GraphQL for
 # `gh pr view` and `gh issue view`, the HTTP status for `gh api`.
 _NOT_FOUND = re.compile(r'Could not resolve to an? (?:PullRequest|issue)\b|\(HTTP (?:404|410)\)')
+# A failed write whose outcome is unknown (#364): GitHub answered 5xx, or the connection failed
+# without proof that the request was never sent. An answer 4xx, and a failure before the
+# connection opened (`dial tcp`: a name that does not resolve, a refused connection; gh's
+# `error connecting to` for a name that does not resolve; a failed TLS handshake), are certain:
+# nothing was written.
+_HTTP_STATUS = re.compile(r'\bHTTP (\d{3})\b')
+_NOT_SENT = re.compile(r'\bdial tcp\b|\berror connecting to\b|\bTLS handshake\b')
 
 
 class GitHubError(RuntimeError):
@@ -55,6 +62,23 @@ class GitHubError(RuntimeError):
 class GitHubNotFound(GitHubError):
     """GitHub answered that the object asked for does not exist: an explicit result, unlike a
     failed call."""
+
+
+class GitHubUncertain(GitHubError):
+    """A ``comment`` or ``edit_comment`` whose outcome is unknown (#364, ADR 0001 "Porta del
+    tracker"): a timeout, a connection lost after sending, a 5xx answer. Unlike any other
+    ``GitHubError``, the write may have taken effect: ``ports.reconcile_comment`` tells whether
+    it did. Being a ``GitHubError``, it is handled as a failed write wherever nothing reconciles
+    it."""
+
+
+def _uncertain(stderr):
+    """Whether a write that `gh` reported as failed with ``stderr`` may still have taken
+    effect: an answer 5xx, or a transport failure not known to precede the request."""
+    status = _HTTP_STATUS.search(stderr)
+    if status:
+        return int(status.group(1)) >= 500
+    return not _NOT_SENT.search(stderr)
 
 
 def _login(who):
@@ -106,7 +130,9 @@ class GitHub:
     def time_left(self, value):
         self._local.time_left = value
 
-    def _gh(self, *args, stdin=None, check=True):
+    def _gh(self, *args, stdin=None, check=True, write=False):
+        """Run `gh` with ``args``. ``write``: the call is a ``comment`` or ``edit_comment``,
+        whose timeout or uncertain failure raises ``GitHubUncertain`` (#364)."""
         kwargs = {}
         self._time_left(args)  # no token is minted once the time is spent
         if self._token is not None:
@@ -120,12 +146,19 @@ class GitHub:
             done = self._run(['gh', *args], input=stdin, capture_output=True, text=True,
                              timeout=timeout, **kwargs)
         except subprocess.TimeoutExpired as exc:
-            raise GitHubError(f'gh {" ".join(args[:3])}: timed out after {exc.timeout}s') from exc
+            error = GitHubUncertain if write else GitHubError
+            raise error(f'gh {" ".join(args[:3])}: timed out after {exc.timeout}s') from exc
         except OSError as exc:
             raise GitHubError(f'gh could not start: {exc}') from exc
         if check and done.returncode != 0:
-            error = GitHubNotFound if _NOT_FOUND.search(done.stderr or '') else GitHubError
-            raise error(f'gh {" ".join(args[:3])}: {done.stderr.strip()[:500]}')
+            stderr = done.stderr or ''
+            if _NOT_FOUND.search(stderr):
+                error = GitHubNotFound
+            elif write and _uncertain(stderr):
+                error = GitHubUncertain
+            else:
+                error = GitHubError
+            raise error(f'gh {" ".join(args[:3])}: {stderr.strip()[:500]}')
         return done
 
     def _time_left(self, args):
@@ -455,9 +488,11 @@ class GitHub:
                 raise GitHubError(f'remove label {label} from #{number}: {done.stderr.strip()[:500]}')
 
     def comment(self, number, body):
-        """Post a comment; returns its id, or None if the response does not carry one."""
+        """Post a comment; returns its id, or None if the response does not carry one. Raises
+        ``GitHubUncertain`` when the outcome is unknown (#364), any other ``GitHubError`` when
+        the comment was certainly not posted."""
         done = self._gh('api', '-X', 'POST', f'repos/{self.repo}/issues/{number}/comments',
-                        '-F', 'body=@-', stdin=body)
+                        '-F', 'body=@-', stdin=body, write=True)
         try:
             created = json.loads(done.stdout or 'null')
         except json.JSONDecodeError:
@@ -470,9 +505,11 @@ class GitHub:
                  '-f', 'state=closed', '-f', 'state_reason=completed')
 
     def edit_comment(self, comment_id, body):
-        """Replace the body of comment ``comment_id`` of an issue or a PR."""
+        """Replace the body of comment ``comment_id`` of an issue or a PR. Raises
+        ``GitHubUncertain`` when the outcome is unknown (#364), any other ``GitHubError`` when
+        the body was certainly not replaced."""
         self._gh('api', '-X', 'PATCH', f'repos/{self.repo}/issues/comments/{int(comment_id)}',
-                 '-F', 'body=@-', stdin=body)
+                 '-F', 'body=@-', stdin=body, write=True)
 
     def create_pr(self, *, base, head, title, body):
         """``(number, url)`` of the new PR. Labels are the dispatcher's job, not the author's."""
