@@ -176,7 +176,9 @@ it offline; the live validation in the isolated runtime is the operator's.
 ### Reading a quota
 
 No quota read runs a model. Each read has a time limit (30 seconds) and runs as
-the engine would run, in its role container with the same authentication.
+the engine would run, in its role container with the same authentication and no
+other: agy gets only its OAuth copy, Codex only its `auth.json`, `version.json`
+and isolated `CODEX_HOME`, without API keys or the stores of the other engines.
 
 | Engine | Read | Buckets |
 | --- | --- | --- |
@@ -190,8 +192,9 @@ else is an `unavailable` snapshot, never a guess. A value missing or out of rang
 is `null`, never 0; an explicit 0% is a value. Credits and plans are not read.
 
 A snapshot is cached per engine and account and reused only while it is younger
-than the maximum age the control accepts. The snapshot after the call is always
-read again.
+than the maximum age the control accepts and none of its resets has passed.
+Without a verified account identity nothing is cached. The snapshot after the
+call is always read again.
 
 ### Deltas
 
@@ -240,7 +243,8 @@ Before the reservation and the launch, the call is refused with `LIMIT_REACHED`
 
 - a control's snapshot cannot be verified: the read failed, timed out or ran a
   model, the snapshot is too old or from the future, its bucket is missing,
-  disabled or `null`, or its reset has already passed. A `claude_cli` control
+  disabled or `null`, its window or reset is missing or malformed, or its reset
+  has already passed. A `claude_cli` control
   always blocks, because the Claude quota is `unknown`;
 - a control's reserve is reached;
 - the variable is malformed (missing field, unknown route, duplicate control):
@@ -252,8 +256,12 @@ blocked. Without a control nothing is read and nothing is blocked.
 
 ### Privacy
 
-The account identity is the authentication location of the engine, kept as a
-digest keyed with a secret of the process that is never written. The snapshots
+The account identity is derived from the credentials the engine itself uses
+(the subject of their `id_token`, else their refresh token, else their whole
+content), read again for every snapshot: credentials changed in the same file are
+another account, so the cache is not reused and the deltas stay
+`account_not_verified`, as they do when no credential can be read. It is kept
+only as a digest keyed with a secret of the process that is never written. The snapshots
 in telemetry, ledgers and the Evidence Pack hold no account identifier, email,
 plan, conversation identifier or authentication payload, and a container that
 carries one is refused.

@@ -264,10 +264,46 @@ def _admit_route(engine, bound, limits, *, reserved=False):
 _quota_inflight, _quota_lock = {}, threading.Lock()
 
 
+def _quota_credentials(provider, cwd, container):
+    """The authentication file the engine itself uses for ``provider`` (see
+    ``_wrap_in_role_container``), or ``None``. It is only read to derive the private account
+    identity of the quota snapshots."""
+    prepaid = getattr(_dispatch_local, 'prepaid', None)
+    if provider == 'agy':
+        host = Path.home() / '.gemini' / 'antigravity-cli' / 'antigravity-oauth-token'
+        if not container:
+            return host
+        repo_root = cwd.resolve() if prepaid else EngineRunner._find_repo_root(cwd)
+        copy = repo_root / '.ssdlc' / '.runtime' / 'agy_auth' / 'antigravity-cli' / 'antigravity-oauth-token'
+        # The role container refreshes its copy from a newer host token before running.
+        if safe_is_file(host) and (not safe_is_file(copy) or host.stat().st_mtime > copy.stat().st_mtime):
+            return host
+        return copy
+    if provider == 'codex':
+        codex_home = os.environ.get('CODEX_HOME', '')
+        if codex_home and not (container and prepaid):
+            return Path(codex_home) / 'auth.json'
+        return Path.home() / '.codex' / 'auth.json'
+    return None
+
+
+def _quota_account(provider, cwd, container):
+    """The private account identity behind the engine's credentials, ``None`` if not verifiable."""
+    path = _quota_credentials(provider, cwd, container)
+    if path is None or not safe_is_file(path):
+        return None
+    try:
+        text = path.read_text(encoding='utf-8')
+    except (OSError, UnicodeDecodeError):
+        return None
+    return quota_schema.credential_identity(provider, text)
+
+
 def _quota_snapshot(provider, cwd, max_age):
     """One quota read of ``provider`` (``ssdlc_quota.collect``), run as the engine itself runs:
-    in its role container with the same authentication when the engine would use one. No model
-    is called. The account identity is the authentication location, kept private."""
+    in its role container with only its own authentication when the engine would use one (the
+    ``agy`` and ``codex`` profiles). No model is called. The account identity is derived from
+    those credentials and kept private."""
     cwd = Path(cwd) if cwd else Path.cwd()
     container = provider in ('agy', 'codex') and EngineRunner._should_spawn_role_container()
 
@@ -275,14 +311,11 @@ def _quota_snapshot(provider, cwd, max_age):
         cmd = list(argv)
         if container:
             cmd = EngineRunner._wrap_in_role_container(cmd, cwd=cwd, writable_worktree=None, pass_ai_keys=False,
-                                                       stdin=stdin is not None,
-                                                       auth_profile='agy' if provider == 'agy' else None)
+                                                       stdin=stdin is not None, auth_profile=provider)
         proc = EngineRunner._run_role_command(cmd, cwd=str(cwd), env=os.environ.copy(), timeout=timeout,
                                               input=stdin)
         return proc.returncode, proc.stdout
-    account = '\0'.join((provider, 'container' if container else 'host',
-                         str(EngineRunner._find_repo_root(cwd)) if container else str(Path.home()),
-                         os.environ.get('CODEX_HOME', '') if provider == 'codex' else ''))
+    account = _quota_account(provider, cwd, container) if provider in ('agy', 'codex') else None
     return quota_schema.collect(provider, run, account=account, max_age=max_age)
 
 
@@ -415,7 +448,13 @@ def _supervised_dispatch(fn):
         # An enabled quota control (#166) is checked here too, on a snapshot read before launch.
         _, gate = _admit(engine, bound, limits, reserved=getattr(_dispatch_local, 'prepaid', None) is not None)
         if not supervised and limits is None:
-            return _quota_call(fn, gate, args, kwargs)
+            # A nested dispatch (invoke_role -> run_agy, the CLI fallback of call_openrouter)
+            # belongs to this one: it is not admitted, gated or counted a second time.
+            _dispatch_local.depth = 1
+            try:
+                return _quota_call(fn, gate, args, kwargs)
+            finally:
+                _dispatch_local.depth = 0
         fields = dict(getattr(_dispatch_local, 'context', {}))
         if 'phase' in bound:
             from ssdlc_supervisor import PHASES
@@ -1639,7 +1678,7 @@ class EngineRunner:
           - Strips AI API keys when pass_ai_keys=False (e.g., when running untrusted unit tests).
         """
         repo_root = cwd.resolve() if getattr(_dispatch_local, 'prepaid', None) else EngineRunner._find_repo_root(cwd)
-        if auth_profile not in (None, "agy"):
+        if auth_profile not in (None, "agy", "codex"):
             raise TaskError("Unsupported role authentication profile")
         # Automatic fencing only for a run admitted at creation (docs/writer-fencing.md).
         fencing_run = getattr(_dispatch_local, 'fencing', None)
@@ -1773,14 +1812,22 @@ class EngineRunner:
                 "--tmpfs", "/root/.claude/sessions:rw",
             ])
 
-        # Codex Plus/Pro auth
+        # Codex Plus/Pro auth. The "codex" profile (the quota read, #166) receives only the
+        # Codex authentication the engine itself uses, without the other keys and stores.
+        codex_auth = pass_ai_keys or auth_profile == "codex"
         host_codex_auth = Path.home() / ".codex" / "auth.json"
-        if (pass_ai_keys and safe_is_file(host_codex_auth)
+        if (codex_auth and safe_is_file(host_codex_auth)
                 and (not getattr(_dispatch_local, 'prepaid', None) or _dispatch_local.prepaid['engine'] == 'codex')):
             docker_cmd.extend(["-v", f"{host_codex_auth}:/root/.codex/auth.json:ro"])
         host_codex_ver = Path.home() / ".codex" / "version.json"
-        if pass_ai_keys and safe_is_file(host_codex_ver):
+        if codex_auth and safe_is_file(host_codex_ver):
             docker_cmd.extend(["-v", f"{host_codex_ver}:/root/.codex/version.json:ro"])
+        if auth_profile == "codex" and not pass_ai_keys and not getattr(_dispatch_local, 'prepaid', None):
+            # The isolated CODEX_HOME (normally .ssdlc/.runtime/codex_home, masked above) is the
+            # engine's: mount it alone, writable for a token refresh as for the engine.
+            codex_home = os.environ.get("CODEX_HOME", "")
+            if codex_home and Path(codex_home).is_absolute() and Path(codex_home).is_dir():
+                docker_cmd.extend(["-v", f"{codex_home}:{codex_home}:rw", "-e", f"CODEX_HOME={codex_home}"])
 
         # agy Gemini Flash auth & ephemeral tmpfs mounts
         host_gemini = Path.home() / ".gemini"

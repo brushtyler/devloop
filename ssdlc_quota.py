@@ -10,7 +10,7 @@ Reading a quota never runs a model:
 - Claude: no headless collector. Its quota is ``unknown``.
 
 Each read has a time limit and is cached; a cached snapshot is reused only while it is younger
-than the maximum age the caller accepts.
+than the maximum age the caller accepts and none of its resets has passed.
 
 A snapshot is compared with another only for the same account identity, bucket, window and
 reset. The delta is in percentage points of the bucket used (from 20% to 23% used: +3 pp). It is
@@ -23,10 +23,14 @@ reserve and a mandatory maximum snapshot age. An enabled control blocks the call
 snapshot cannot be verified (missing, too old, invalid) or when the reserve is reached. Credits,
 overage and paid routes are never used to avoid a block.
 
-The account identity stays private: it is kept as a digest keyed with a secret of this process,
-which is never written. The public form of a snapshot, the one that goes to ledgers and evidence,
+The account identity is derived from the credentials the engine itself uses (changed
+credentials in the same file are another account) and stays private: it is kept as a digest
+keyed with a secret of this process, which is never written. Without a verifiable identity no
+snapshot is cached and every delta is unknown. The public form of a snapshot, the one that goes to ledgers and evidence,
 holds no account identifier, email, plan or authentication payload.
 """
+import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -99,6 +103,46 @@ def account_ref(key):
     if not isinstance(key, str) or not key:
         return None
     return hmac.new(_SECRET, key.encode(), hashlib.sha256).hexdigest()
+
+
+def _jwt_claims(token):
+    """The claims of a JWT (payload only, signature not checked), else None."""
+    if not isinstance(token, str) or token.count('.') != 2:
+        return None
+    payload = token.split('.')[1]
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(payload + '=' * (-len(payload) % 4)))
+    except (ValueError, binascii.Error):
+        return None
+    return claims if isinstance(claims, dict) else None
+
+
+def credential_identity(provider, text):
+    """The private identity of the account behind the credentials the engine itself uses
+    (``text``: the content of its authentication file), else ``None`` (not verifiable).
+
+    In order: the subject of the ``id_token`` (with its issuer and, for Codex, the ChatGPT
+    account), the ``refresh_token``, the whole content. Changed credentials in the same file
+    therefore give another identity: the cache is not reused and the delta stays unknown. The
+    result is only ever passed to ``account_ref``; it is never written."""
+    if not isinstance(text, str) or not text.strip():
+        return None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        data = None
+    if isinstance(data, dict):
+        tokens = data.get('tokens') if isinstance(data.get('tokens'), dict) else data
+        claims = _jwt_claims(tokens.get('id_token')) or {}
+        subject = claims.get('sub')
+        if isinstance(subject, str) and subject:
+            auth = claims.get('https://api.openai.com/auth')
+            account = tokens.get('account_id') or (auth.get('chatgpt_account_id') if isinstance(auth, dict) else None)
+            return '\0'.join((provider, 'subject', str(claims.get('iss') or ''), subject, str(account or '')))
+        refresh = tokens.get('refresh_token')
+        if isinstance(refresh, str) and refresh:
+            return '\0'.join((provider, 'refresh_token', refresh))
+    return '\0'.join((provider, 'credentials', text))
 
 
 def _snapshot(provider, status, *, buckets=(), observed_at=None, account=None, reason=None, source=None,
@@ -247,15 +291,19 @@ def _codex_response(stdout):
 def collect(provider, run, *, account=None, max_age=None, timeout=DEFAULT_TIMEOUT, now=None):
     """One snapshot of ``provider`` through ``run(argv, stdin_text, timeout) -> (rc, stdout)``.
 
-    A cached snapshot of the same provider and account is reused while it is at most
-    ``max_age`` seconds old (``None``: never reused). A failed, timed out or unreadable read is
-    an ``unavailable`` snapshot, never an exception and never a guess."""
+    A cached snapshot of the same provider and verified account is reused while it is at most
+    ``max_age`` seconds old (``None``: never reused) and no reset of its buckets has passed.
+    Without a verified account (``account`` is ``None``) nothing is cached or reused. A failed,
+    timed out or unreadable read is an ``unavailable`` snapshot, never an exception and never a
+    guess."""
     now = now or utc_now()
     key = (provider, account_ref(account))
-    if max_age is not None:
+    if max_age is not None and key[1] is not None:
         with _cache_lock:
             cached = _cache.get(key)
-        if cached is not None and 0 <= (now - _instant(cached['observed_at'])).total_seconds() <= max_age:
+        if (cached is not None and 0 <= (now - _instant(cached['observed_at'])).total_seconds() <= max_age
+                and not any(b['reset_time'] is not None and _instant(b['reset_time']) <= now
+                            for b in cached['buckets'])):
             return dict(cached, cached=True)
     observed_at = _iso(now)
     if provider == 'claude':
@@ -278,7 +326,7 @@ def collect(provider, run, *, account=None, max_age=None, timeout=DEFAULT_TIMEOU
         snapshot = from_agy_usage(envelope, observed_at=observed_at, account=account)
     else:
         snapshot = from_codex_rate_limits(_codex_response(stdout), observed_at=observed_at, account=account)
-    if snapshot['status'] == 'collected':
+    if snapshot['status'] == 'collected' and key[1] is not None:
         with _cache_lock:
             _cache[key] = snapshot
     return snapshot
@@ -395,8 +443,8 @@ def check(controls, snapshot, *, now=None):
 
     Returns the evidence of each control when all pass. Raises ``QuotaBlocked`` when the
     snapshot cannot be verified for a control (not collected, too old, from the future, bucket
-    missing, disabled or null, reset already passed) or when its reserve is reached. Nothing is
-    ever offset by credits, overage or another route."""
+    missing, disabled or null, window or reset missing or malformed, reset already passed) or
+    when its reserve is reached. Nothing is ever offset by credits, overage or another route."""
     now = now or utc_now()
     evidence, blocked = [], []
     for control in controls:
@@ -417,7 +465,11 @@ def check(controls, snapshot, *, now=None):
                 reason = 'bucket disabled'
             elif bucket['remaining_percent'] is None:
                 reason = 'bucket value null'
-            elif bucket['reset_time'] is not None and _instant(bucket['reset_time']) <= now:
+            elif bucket['window'] is None:
+                reason = 'bucket window not verifiable'
+            elif bucket['reset_time'] is None:
+                reason = 'bucket reset not verifiable'
+            elif _instant(bucket['reset_time']) <= now:
                 reason = 'bucket reset passed, snapshot outdated'
             else:
                 entry['remaining_percent'] = bucket['remaining_percent']
