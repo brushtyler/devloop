@@ -857,10 +857,13 @@ their format does not change. The journal is append-only, one JSON event per lin
   edit fails, the journal keeps the issue or PR for the next tick.
 - `uncertain`: a turn left without an outcome, because the dispatcher stopped while it ran or the
   outcome could not be written. The next tick, with no action running on that issue or PR, records
-  it so and logs `uncertain turn <id> on #<n>` (only logs it with `--dry-run`). An uncertain turn
-  is **never** run again automatically, and stays counted: nothing refunds it.
+  it so and logs `uncertain turn <id> on #<n>` (only logs it with `--dry-run`). The issue or PR
+  stays in the journal's trace until a tick has checked its records on GitHub: a read that fails
+  is tried again on the next tick. An uncertain turn is **never** run again automatically, and
+  stays counted: nothing refunds it.
 - `reconciled` and `refused`: see below. `unsettled` and `settled`: a record on GitHub left open
-  after a failed edit, and the tick that checked it.
+  after a failed edit, and the tick that checked it. `linked`: the issue of the work of a legacy
+  turn on a PR (see the migration).
 
 **Integrity.** Every read verifies the whole chain. An incomplete last line (a write cut short),
 or a last line that is not JSON, is set aside in `turn-journal-tail-<sha256>.bin` and cut off: the
@@ -874,15 +877,23 @@ constraint 3). The chain is not keyed: it gives integrity, not provenance.
 imported once, at the first read, as one legacy turn per issue or PR (`legacy-<n>-<8 hex
 digits>`), explicitly `uncertain`, with its number and count and no outcome made up; then the
 file is removed, and one that comes back is not imported again. The next tick checks those issues
-and PRs on GitHub as before.
+and PRs on GitHub as before. A legacy turn on a PR the dispatcher recognises by branch and marker
+is linked to the issue of its work (a `linked` event), so that it stays part of that work after a
+restart, also once the PR is closed.
 
 **Block on uncertain turns.** With `block_uncertain_turns = true` (off by default: ADR 0004, D8),
 a turn whose work has uncertain turns not reconciled is refused before its intent, with an
 escalation of class `uncertain_turn` that lists them and how to reconcile them. The work is the
 repository and the issue: the issue and its devloop PRs, which the dispatcher recognises by
 branch and marker. Every new turn of it is refused, whatever its kind, agent, model, reviewer or
-round; a legacy turn blocks the issue or PR of its number. With the block off devloop behaves as
-before: the journal records the turns all the same.
+round. A legacy turn blocks the issue or PR of its number and, when that number is a PR, its
+issue and the other PRs of the same issue. A turn that ended without a durable outcome (its write
+failed), or that a tick could not record as `uncertain`, blocks the work in the same way: a retry
+or a fallback of the same step is refused, and the turn becomes `uncertain`, to reconcile, at the
+next tick. Turns still running in parallel actions never block. A conclave call refused this way
+is not recorded as started: the conclave of that block ends with the `uncertain_turn` escalation
+and the item stays with the operator. With the block off devloop behaves as before: the journal
+records the turns all the same.
 
 **Reconciliation.** Only the operator decides the outcome of an uncertain turn. A user in
 `trusted_users`, never the supervisor nor an agent, writes on the issue or PR of the turn, on the

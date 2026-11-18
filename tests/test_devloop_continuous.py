@@ -812,6 +812,7 @@ class ContinuousTickTests(unittest.TestCase):
             f'turn-{n}': {'turn': f'turn-{n}', 'number': n, 'outcome': None, 'kind': 'implement',
                           'agent': 'claude', 'at': '2026-11-18T10:00:00Z'} for n in (9, 10)}
         ledger.journal.waiting.return_value = []
+        ledger.journal.link.return_value = []
         d = self.make(ledger=ledger)
         d.snapshot = lambda: Snapshot([], [ready(9)], [])
         checked = []

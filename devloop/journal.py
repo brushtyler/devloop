@@ -16,10 +16,13 @@ before it (``previous``) and its own (``sha256``), like the journal of the local
   Nothing is refunded: the turn stays counted;
 - ``refused``: a reconciliation command not applied, with why, so that it is answered once;
 - ``unsettled`` and ``settled``: an issue or PR whose ``turn`` record on GitHub was left open
-  (its closing edit failed), and its check by a later tick (``Ledger.pending``);
+  (its closing edit failed), and its check by a later tick (``Ledger.pending``). A turn that
+  becomes ``uncertain`` keeps its number in that trace too, until a tick checks it (``settle``);
 - ``migrated``: the counts of ``ledger-open-turns.json``, the trace this journal replaces,
   imported once as legacy turns explicitly ``uncertain`` (``legacy-<number>-<hex>``), with
-  number and count and no outcome made up.
+  number and count and no outcome made up;
+- ``linked``: the issue of the work of a legacy turn on a PR, as the dispatcher recognises it
+  from its markers, kept so that the turn blocks the whole work also after a restart.
 
 Reads verify the whole chain. An incomplete or unreadable last line (a write cut short) is set
 aside in ``turn-journal-tail-<sha256>.bin`` and removed, and the valid records before it stay; a
@@ -98,15 +101,20 @@ def describe_turn(turn):
     if turn.get('legacy') is not None:
         return (f'`{turn["turn"]}`: turni aperti importati da `{LEGACY}` su #{turn["number"]} '
                 f'({turn["legacy"]}), senza esito noto')
-    return (f'`{turn["turn"]}`: turno `{turn["kind"]}` di `{turn["agent"]}` su '
+    text = (f'`{turn["turn"]}`: turno `{turn["kind"]}` di `{turn["agent"]}` su '
             f'#{turn["number"]}, iniziato {turn["at"]}')
+    if turn.get('outcome') is None:
+        text += (', terminato senza che il suo esito sia stato scritto: diventa '
+                 f'`{UNCERTAIN}` al prossimo tick, e da lì si riconcilia')
+    return text
 
 
 def blocked_text(issue, turns):
     """Why a new turn of the work of issue ``issue`` is refused, in Italian: its uncertain
     ``turns`` and how a trusted user reconciles them."""
     listed = ''.join(f'\n- {describe_turn(t)}' for t in turns)
-    return (f'il lavoro dell\'issue #{issue} ha turni senza esito registrato (`{UNCERTAIN}`), e '
+    return (f'il lavoro dell\'issue #{issue} ha turni senza esito registrato (`{UNCERTAIN}`, o '
+            'terminati senza che il loro esito sia stato scritto), e '
             'il blocco sugli esiti incerti (`block_uncertain_turns`) è attivo. Nessun nuovo turno '
             'parte, e nessuno viene ripetuto in automatico, finché un utente fidato non li '
             f'riconcilia:{listed}\n\nPer ognuno, un commento con prima riga '
@@ -119,7 +127,11 @@ class TurnJournal:
 
     It is loaded and verified on first use; then it keeps its state in memory and appends to
     the file, one event at a time under a lock: parallel actions (#176) write it from several
-    threads. One dispatcher runs at a time (its lock), so no other process writes it."""
+    threads. One dispatcher runs at a time (its lock), so no other process writes it.
+
+    It also knows, in memory, the turns of this process still running (``_live``): from their
+    intent until their outcome is recorded or attempted. A turn without outcome that is not
+    running ended without a durable one, or a previous process left it."""
 
     def __init__(self, state_dir=None, clock=time.time):
         self.dir = Path(state_dir) if state_dir is not None else None
@@ -127,6 +139,7 @@ class TurnJournal:
         self._lock = threading.RLock()
         self._loaded = False
         self._events = []
+        self._live = set()  # the turns of this process whose outcome was not attempted yet
 
     # Files -----------------------------------------------------------------
     @property
@@ -300,10 +313,16 @@ class TurnJournal:
                         'repo': None, 'legacy': count, 'outcome': UNCERTAIN, 'at': d['at'],
                         'reconciled': None}
                     trace[int(number)] = True
+            elif kind == 'linked' and d['turn'] in turns:
+                turns[d['turn']].update(issue=d['issue'], repo=d['repo'])
             elif kind == 'intent':
                 turns[d['turn']] = dict(d, outcome=None, reconciled=None)
             elif kind == 'outcome' and d['turn'] in turns:
                 turns[d['turn']]['outcome'] = d['outcome']
+                if d['outcome'] == UNCERTAIN:
+                    # Its records on GitHub are still to check: the number stays traced until a
+                    # tick has checked them (``settle``).
+                    trace[turns[d['turn']]['number']] = True
             elif kind == 'reconciled' and d['turn'] in turns:
                 turns[d['turn']]['reconciled'] = d
             elif kind == 'unsettled':
@@ -340,15 +359,32 @@ class TurnJournal:
         return [t for t in self.turns().values()
                 if t['outcome'] == UNCERTAIN and t['reconciled'] is None]
 
-    def blocking(self, repo, issue, number):
-        """The uncertain turns not reconciled of the work of issue ``issue`` of ``repo``, whose
-        turn is about to start on ``number`` (the issue or one of its PRs): every turn of that
-        work, whatever its kind, agent or round, and the legacy ones on the issue or on
-        ``number``."""
+    def blocking(self, repo, issue, number, issue_of=None):
+        """The turns that block the work of issue ``issue`` of ``repo``, whose turn is about to
+        start on ``number`` (the issue or one of its PRs): every uncertain turn not reconciled
+        of that work, whatever its kind, agent or round, and every turn of it without outcome
+        that is not running in this process (``_live``): it ended without a durable outcome
+        (the write failed), or a previous process left it and the tick could not make it
+        uncertain.
+
+        A legacy turn has only its number: it belongs to the work of ``issue`` when it is on
+        the issue or on ``number``, or on a PR of that issue as its ``linked`` event or
+        ``issue_of`` (``{PR: issue}``, the dispatcher's map) say."""
+        issue_of = issue_of or {}
+        with self._lock:
+            self._load()
+            turns = self._state()[0]
+            live = set(self._live)
         found = []
-        for t in self.waiting():
+        for t in turns.values():
+            if t['outcome'] == UNCERTAIN:
+                if t['reconciled'] is not None:
+                    continue
+            elif t['outcome'] is not None or t['turn'] in live:
+                continue
             if t.get('legacy') is not None:
-                if t['number'] in (issue, number):
+                work = t['issue'] if t['issue'] is not None else issue_of.get(t['number'])
+                if t['number'] in (issue, number) or work == issue:
                     found.append(t)
             elif t.get('repo') == repo and (t.get('issue') == issue or t['number'] == number):
                 found.append(t)
@@ -365,23 +401,28 @@ class TurnJournal:
             self._append('intent', {'turn': turn, 'number': number, 'issue': issue,
                                     'repo': repo, 'kind': kind, 'agent': agent, 'model': model,
                                     'label': label})
+            self._live.add(turn)
             return turn
 
     def outcome(self, turn, outcome, error=None):
-        """Record how ``turn`` ended; one outcome per turn."""
+        """Record how ``turn`` ended; one outcome per turn. Whether or not it can be written,
+        the turn no longer runs (``_live``): without a durable outcome it blocks its work."""
         if outcome not in OUTCOMES:
             raise ValueError(f'unknown outcome {outcome!r}')
         with self._lock:
-            self._load()
-            current = self._state()[0].get(turn)
-            if current is None:
-                raise JournalError(f'turn {turn} not in the journal')
-            if current['outcome'] is not None:
-                raise JournalError(f'turn {turn} already has outcome {current["outcome"]}')
-            data = {'turn': turn, 'outcome': outcome}
-            if error:
-                data['error'] = str(error)[:300]
-            self._append('outcome', data)
+            try:
+                self._load()
+                current = self._state()[0].get(turn)
+                if current is None:
+                    raise JournalError(f'turn {turn} not in the journal')
+                if current['outcome'] is not None:
+                    raise JournalError(f'turn {turn} already has outcome {current["outcome"]}')
+                data = {'turn': turn, 'outcome': outcome}
+                if error:
+                    data['error'] = str(error)[:300]
+                self._append('outcome', data)
+            finally:
+                self._live.discard(turn)
 
     def unsettled(self, number):
         """A ``turn`` record on GitHub on ``number`` was left open: check it next tick."""
@@ -391,7 +432,8 @@ class TurnJournal:
 
     def uncertain(self, number):
         """Each turn on ``number`` without outcome becomes ``uncertain``: a tick found it so,
-        with no action running there. Returns those turns."""
+        with no action running there. Returns those turns. ``number`` stays in the trace
+        (``pending``) until a tick has checked it (``settle``)."""
         with self._lock:
             self._load()
             flagged = [t for t in self._state()[0].values()
@@ -399,6 +441,24 @@ class TurnJournal:
             for t in flagged:
                 self._append('outcome', {'turn': t['turn'], 'outcome': UNCERTAIN})
             return flagged
+
+    def link(self, issue_of, repo):
+        """Record the work of each legacy turn not reconciled on a PR of ``issue_of``
+        (``{PR: issue}``, as the dispatcher recognises them from their markers), so that it
+        blocks the whole work also after a restart, once the PR is closed. Returns the turns
+        linked."""
+        with self._lock:
+            self._load()
+            linked = []
+            for t in self._state()[0].values():
+                work = issue_of.get(t['number'])
+                if (t.get('legacy') is None or t['reconciled'] is not None
+                        or t['issue'] is not None or work is None or work == t['number']):
+                    continue
+                self._append('linked', {'turn': t['turn'], 'number': t['number'],
+                                        'issue': work, 'repo': repo})
+                linked.append(t['turn'])
+            return linked
 
     def settle(self, number):
         """Close the trace of ``number`` once a tick checked its records on GitHub."""

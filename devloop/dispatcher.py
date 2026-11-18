@@ -1462,8 +1462,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         A conclave (#141) is never escalated, whatever failed and however it ran
         (``_run_action``, or ``_run_lane`` for an unexpected error): it runs on an item already
         with the operator, and another escalation would end its block, leaving a call started
-        without a result unsettled. It resumes from its record on a later tick."""
-        if action.kind == 'conclave':
+        without a result unsettled. It resumes from its record on a later tick. Except a call
+        refused by the block on uncertain turns (``TurnBlocked``, #362): it escalates as
+        ``uncertain_turn``, and the conclave of that block ends there, the item staying with the
+        operator. The call was refused before being recorded as started (``_conclave_call``)."""
+        if action.kind == 'conclave' and not isinstance(exc, TurnBlocked):
             self.log('  conclave: no escalation, it resumes from its record')
             return
         lb = self.cfg.labels
@@ -1522,19 +1525,14 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         round of a review turn (#325) or the ``FixRegister`` of a fix turn (#355) after them.
 
         With ``block_uncertain_turns`` (#362) a turn of a work, the issue and its PRs, with
-        uncertain turns not reconciled is refused before its intent (``TurnBlocked``): the step
-        escalates to the operator."""
+        turns that block it (``_check_turns``) is refused before its intent (``TurnBlocked``):
+        the step escalates to the operator."""
         if self.ledger is None or where is None:
             return None
         number, kind, *place = where
         fix = fix_register(where)
         issue = self._work_issue(number)
-        if self.cfg.block_uncertain_turns:
-            held = self.ledger.journal.blocking(self.cfg.repo, issue, number)
-            if held:
-                self.log(f'  turn refused on #{number}: uncertain turns of issue #{issue} not '
-                         'reconciled: ' + ', '.join(t['turn'] for t in held))
-                raise TurnBlocked(blocked_text(issue, held), held)
+        self._check_turns(number)
         return self.ledger.open_turn(
             number, kind=kind, agent=candidate.key, identity=self._app_login(candidate.key),
             mode=mode, model=candidate.model, effort=candidate.effort,
@@ -1547,10 +1545,27 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         ``number`` itself."""
         return self._issue_of.get(number, number)
 
+    def _check_turns(self, number):
+        """With ``block_uncertain_turns`` (#362), raise ``TurnBlocked`` when the work of
+        ``number`` has turns that block it (``TurnJournal.blocking``): uncertain turns not
+        reconciled, turns that ended without a durable outcome or that a tick could not make
+        uncertain, and legacy turns of the issue or of its PRs. Turns still running in this
+        process, in parallel actions, never block. Without a ledger or the block, nothing."""
+        if self.ledger is None or not self.cfg.block_uncertain_turns:
+            return
+        issue = self._work_issue(number)
+        held = self.ledger.journal.blocking(self.cfg.repo, issue, number, dict(self._issue_of))
+        if held:
+            self.log(f'  turn refused on #{number}: turns of issue #{issue} without a reconciled '
+                     'outcome: ' + ', '.join(t['turn'] for t in held))
+            raise TurnBlocked(blocked_text(issue, held), held)
+
     def _close_turn(self, entry, outcome, error=None):
         """Close a turn's record with what the CLI attested and the last command its output
         exposes (#215). A failed write leaves the turn open, and the next tick marks it
-        incomplete."""
+        incomplete. If its outcome cannot be written in the journal (#362), with
+        ``block_uncertain_turns`` no other turn of its work starts (``_check_turns``): the next
+        one of this step, a retry or a fallback, is refused and the step escalates."""
         if entry is None:
             return
         try:
@@ -1679,7 +1694,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         In the journal (#362), before reading GitHub, every turn left without an outcome on a
         traced number becomes ``uncertain``, logged with its id: it is never run again
         automatically, and with ``block_uncertain_turns`` it blocks the work until a trusted
-        user reconciles it (``_reconcile_turns``)."""
+        user reconciles it (``_reconcile_turns``). The number stays traced until its records
+        on GitHub are checked. The legacy turns on a PR the dispatcher recognises are linked to
+        the issue of its work (``TurnJournal.link``)."""
         if self.ledger is None:
             return
         lb = self.cfg.labels
@@ -1689,6 +1706,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             self.log(f'  trace of the open turns not readable: {exc}')
             traced = []
         journal = self.ledger.journal
+        if not dry_run:
+            try:
+                for turn in journal.link(dict(self._issue_of), self.cfg.repo):
+                    self.log(f'  legacy turn {turn} linked to the work of its issue')
+            except GitHubError as exc:
+                self.log(f'  legacy turns not linked to their issue: {exc}')
         for number in traced:
             if number in busy:
                 continue

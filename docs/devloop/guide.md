@@ -813,7 +813,10 @@ identity is only logged. The trace is the one of the supervisor's commands, unde
 A turn left without an outcome, because devloop stopped while it ran, becomes `uncertain` in the
 [turn journal](protocol.md#turn-journal) and is never run again automatically. With
 `block_uncertain_turns = true` (off by default) it also refuses every new turn of the same issue
-and its PRs, with an escalation of class `uncertain_turn` that lists the turns. Only a trusted
+and its PRs, with an escalation of class `uncertain_turn` that lists the turns; so does a turn
+whose outcome could not be written, from the next turn of the same step (a retry, a fallback)
+onwards, and a legacy turn imported from `ledger-open-turns.json` on the issue or on one of its
+PRs. A conclave call refused this way ends that conclave with the escalation. Only a trusted
 user reconciles them, with a comment whose first line is
 `/devloop reconcile <turn id> <returned|failed|not_dispatched>` and whose next lines give the
 reason, mandatory. The outcome is recorded once, also with the block off; then the step resumes

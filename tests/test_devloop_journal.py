@@ -133,6 +133,41 @@ class JournalChainTests(unittest.TestCase):
         second = intent(j, number=9, issue=9)
         self.assertEqual(list(TurnJournal(self.dir).turns()), [first, second])
 
+    def test_a_turn_that_ended_without_a_durable_outcome_blocks_its_work(self):
+        j = TurnJournal(self.dir)
+        running = intent(j)
+        # Running in this process, in a parallel action: it blocks nothing.
+        self.assertEqual(j.blocking(CFG.repo, 7, 7), [])
+        with mock.patch.object(journal_mod.os, 'fsync', side_effect=OSError('EIO')):
+            with self.assertRaisesRegex(JournalError, 'outcome not written'):
+                j.outcome(running, 'failed')
+        # Ended, without a durable outcome: it blocks the work, here and in a new process.
+        self.assertEqual([t['turn'] for t in j.blocking(CFG.repo, 7, 100)], [running])
+        self.assertEqual([t['turn'] for t in TurnJournal(self.dir).blocking(CFG.repo, 7, 7)],
+                         [running])
+        self.assertEqual(j.blocking(CFG.repo, 8, 8), [])  # not another work
+        self.assertIn('terminato senza che il suo esito sia stato scritto',
+                      journal_mod.describe_turn(j.turns()[running]))
+
+    def test_a_turn_the_recovery_cannot_make_uncertain_blocks_its_work(self):
+        left = intent(TurnJournal(self.dir))  # the process that wrote it stopped
+        restarted = TurnJournal(self.dir)
+        with mock.patch.object(journal_mod.os, 'fsync', side_effect=OSError('EIO')):
+            with self.assertRaisesRegex(JournalError, 'outcome not written'):
+                restarted.uncertain(7)
+        self.assertIsNone(restarted.turns()[left]['outcome'])
+        self.assertEqual([t['turn'] for t in restarted.blocking(CFG.repo, 7, 7)], [left])
+
+    def test_an_uncertain_number_stays_traced_until_it_is_settled(self):
+        j = TurnJournal(self.dir)
+        intent(j)
+        restarted = TurnJournal(self.dir)
+        self.assertEqual(restarted.pending(), [7])
+        restarted.uncertain(7)
+        self.assertEqual(TurnJournal(self.dir).pending(), [7])
+        restarted.settle(7)
+        self.assertEqual(TurnJournal(self.dir).pending(), [])
+
     def test_an_outcome_is_recorded_once(self):
         j = TurnJournal()
         turn = intent(j)
@@ -164,6 +199,24 @@ class MigrationTests(unittest.TestCase):
             self.assertFalse((folder / LEGACY).exists())
             events = [json.loads(line)['event'] for line in lines(folder / JOURNAL)]
             self.assertEqual(events, ['migrated'])
+
+    def test_a_legacy_turn_on_a_pr_is_linked_to_its_issue_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / LEGACY).write_text(json.dumps({'100': 1, '8': 1}))
+            j = TurnJournal(tmp)
+            (turn,) = [t for t, v in j.turns().items() if v['number'] == 100]
+            # Before the link, only the dispatcher's map ties #100 to issue #7.
+            self.assertEqual(j.blocking(CFG.repo, 7, 7), [])
+            self.assertEqual([t['turn'] for t in j.blocking(CFG.repo, 7, 7, {100: 7})], [turn])
+            self.assertEqual(j.link({100: 7, 8: 8}, CFG.repo), [turn])
+            self.assertEqual(j.link({100: 7}, CFG.repo), [])  # once
+            again = TurnJournal(tmp)
+            self.assertEqual((again.turns()[turn]['issue'], again.turns()[turn]['repo']),
+                             (7, CFG.repo))
+            # The issue and its other PRs, without the map: a restart, the PR closed.
+            for number in (7, 101):
+                self.assertEqual([t['turn'] for t in again.blocking(CFG.repo, 7, number)], [turn])
+            self.assertEqual([t['number'] for t in again.blocking(CFG.repo, 9, 9)], [])
 
     def test_an_unreadable_old_trace_stops_the_turn(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -347,6 +400,105 @@ class DispatcherJournalTests(unittest.TestCase):
             d._do_implement(7)
         self.assertRegex(caught.exception.turns[0]['turn'], r'^legacy-7-[0-9a-f]{8}$')
         self.assertEqual(self.runner.calls, [])
+
+    def test_with_the_block_a_legacy_turn_on_a_pr_blocks_its_whole_work(self):
+        (self.state / LEGACY).write_text(json.dumps({'100': 1}))
+        d = self.make(implemented(), cfg=BLOCKING)
+        d._issue_of[100] = 7  # PR #100 of issue #7, as the snapshot recognises it
+        with self.assertRaises(journal_mod.TurnBlocked):
+            d._do_implement(7)
+        d._flag_incomplete(EMPTY, dry_run=False)
+        # A new process, the old PR closed: no map ties #100 to #7 any more, the journal does.
+        restarted = Dispatcher(BLOCKING, self.gh, self.ws, self.runner, log=self.logs.append,
+                               ledger=Ledger(self.gh, state_dir=self.state))
+        with self.assertRaises(journal_mod.TurnBlocked) as caught:
+            restarted._do_implement(7)
+        self.assertRegex(caught.exception.turns[0]['turn'], r'^legacy-100-[0-9a-f]{8}$')
+        restarted._issue_of[101] = 7  # another PR of the same work
+        with self.assertRaises(journal_mod.TurnBlocked):
+            restarted._check_turns(101)
+        restarted._check_turns(8)  # another work is not blocked
+        self.assertEqual(self.runner.calls, [])
+
+    def test_with_the_block_a_turn_whose_outcome_is_not_written_stops_the_step(self):
+        from devloop.agents import NoOutput
+        for cfg, calls in ((BLOCKING, 1), (CFG, 2)):
+            with self.subTest(block=cfg.block_uncertain_turns), \
+                    tempfile.TemporaryDirectory() as tmp:
+                self.state = Path(tmp)
+                d = self.make(NoOutput('agy: run ended with no output'), raw_review(), cfg=cfg,
+                              number=100)
+                journal = d.ledger.journal
+                append = journal._append
+
+                def no_outcome(kind, data):
+                    if kind == 'outcome':
+                        raise JournalError('turn-journal.jsonl: outcome not written: EIO')
+                    return append(kind, data)
+                p = pr()
+                self.gh.labels[100] = set(p.labels)
+                d._issue_of[100] = 7
+                with mock.patch.object(journal, '_append', side_effect=no_outcome):
+                    error = d._run_action(Action('review', 100), {100: p})
+                # With the block the retry of the same model never starts, and the step
+                # escalates; without it the retry runs as before.
+                self.assertEqual(len(self.runner.calls), calls)
+                if cfg.block_uncertain_turns:
+                    self.assertIsInstance(error, journal_mod.TurnBlocked)
+                    (escalation,) = self.escalations(100)
+                    self.assertEqual(escalation['class'], 'uncertain_turn')
+                    (first,) = self.journal().turns().values()
+                    self.assertIsNone(first['outcome'])
+                    self.assertIn(first['turn'], self.gh.thread[100][-1]['body'])
+
+    def test_a_failed_check_on_github_is_tried_again_at_the_next_tick(self):
+        d = self.make(Crash('dispatcher killed'))
+        with self.assertRaises(Crash):
+            d._do_implement(7)
+        restarted = Dispatcher(CFG, self.gh, self.ws, self.runner, log=self.logs.append,
+                               ledger=Ledger(self.gh, state_dir=self.state))
+        with mock.patch.object(self.gh, 'issue_comments', side_effect=GitHubError('HTTP 502')):
+            restarted._flag_incomplete(EMPTY, dry_run=False)
+        (turn,) = self.journal().turns().values()
+        self.assertEqual(turn['outcome'], 'uncertain')
+        self.assertEqual(self.gh.records(7, 'turn')[0]['state'], 'open')
+        self.assertEqual(self.journal().pending(), [7])  # kept for the next tick
+        again = Dispatcher(CFG, self.gh, self.ws, self.runner, log=self.logs.append,
+                           ledger=Ledger(self.gh, state_dir=self.state))
+        again._flag_incomplete(EMPTY, dry_run=False)
+        self.assertEqual(self.gh.records(7, 'turn')[0]['state'], 'incomplete')
+        self.assertEqual(self.journal().pending(), [])
+
+    def test_with_the_block_a_conclave_call_is_refused_before_it_starts(self):
+        from test_devloop_conclave import CCFG, ConclaveWS, HookRunner, ThreadGH
+        from test_devloop_conclave import Base as ConclaveBase
+        from test_devloop_conclave import proposal
+        from helpers.devloop_fakes import FakeIdentities
+        j = TurnJournal(self.state)
+        left = intent(j)
+        j.uncertain(7)  # a turn of issue 7's work, not reconciled
+        self.gh = ThreadGH()
+        self.runner = HookRunner(proposal())
+        self.logs = []
+        cfg =dataclasses.replace(CCFG, block_uncertain_turns=True)
+        d = Dispatcher(cfg, self.gh, ConclaveWS(), self.runner, log=self.logs.append,
+                       identities=FakeIdentities(self.gh),
+                       ledger=Ledger(self.gh, state_dir=self.state))
+        d._issue_of[100] = 7
+        ConclaveBase.block_pr(self)  # PR #100 in agent:needs-operator, its fixer stopped
+        target = pr(labels=('agent:needs-operator',))
+        self.assertIsNotNone(d._conclave_view(100, self.gh.pr_comments(100), target))
+        error = d._run_action(Action('conclave', 100), {100: target})
+        self.assertIsInstance(error, journal_mod.TurnBlocked)
+        self.assertEqual(self.runner.calls, [])
+        # Nothing recorded as started, so nothing a later tick would count as missing.
+        self.assertEqual(self.gh.conclaves(100), [])
+        (escalation,) = self.escalations(100)
+        self.assertEqual(escalation['class'], 'uncertain_turn')
+        self.assertIn(left, self.gh.thread[100][-1]['body'])
+        # The conclave of that block ends there: the item stays with the operator.
+        self.assertIsNone(d._conclave_view(100, self.gh.pr_comments(100), target))
+        self.assertIn('agent:needs-operator', self.gh.labels[100])
 
     def test_without_the_block_legacy_turns_are_checked_as_before(self):
         (self.state / LEGACY).write_text(json.dumps({'100': 1}))
