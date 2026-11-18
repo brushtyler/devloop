@@ -1589,7 +1589,8 @@ the running actions. The next tick runs `pin origin/main` at once, smoke test in
 moves `current`; the actions already running, and those the tick and the next ones start, run
 with the code the process loaded, as they would without `[pin] auto`. While the restart is
 pending no new implementation (`implement`, the long action) starts (#342): a ready issue waits
-for the new copy, while the short actions (review, fix, sync, merge, readiness checks) still
+for the new copy, without taking a slot of `max_open_prs` or `max_actions_per_tick` from the
+other actions, while the short actions (review, fix, sync, merge, readiness checks) still
 start, so that devloop reaches on its own a moment without long actions and restarts soon. The
 log says `restart from pinned-<sha12> deferred`, and each tick while actions run says
 `restart to <sha12> pending since <time> (<N> running): no new implement until the restart`;

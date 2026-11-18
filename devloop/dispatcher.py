@@ -1197,13 +1197,13 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                        or action.kind == 'supervise' and action.number not in prs
                        or action.kind == 'conclave' and action.opens)
         merging = any(action.kind in MERGE_LANE for action, _ in running)
-        actions = plan(snap, self.cfg, busy, reserved, merging)
+        # #342: no new implementation, the long action, while the restart waits; the plan
+        # leaves its slots to the other actions.
+        pending = bool(running) and self._restart is not None
+        actions = plan(snap, self.cfg, busy, reserved, merging, implement=not pending)
         # The limit may pass while the snapshot reads GitHub: checked again before any start.
-        if running and self._restart is not None:
-            if self._restart_wait_over(running):
-                return []
-            # #342: no new implementation, the long action, while the restart waits.
-            actions = [action for action in actions if action.kind != 'implement']
+        if pending and self._restart_wait_over(running):
+            return []
         started = admit(actions, issue_of, running, workers.free())
         self.log(f'{pr_counts_line(snap, self.cfg)}; running: '
                  + (', '.join(f'{a.kind} #{a.number}' for a, _ in running) or 'none'))

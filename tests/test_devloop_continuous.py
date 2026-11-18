@@ -820,6 +820,30 @@ class ContinuousTickTests(unittest.TestCase):
         ledger.settle.assert_called_once_with(10)
         self.release.set()
 
+    def test_with_a_restart_pending_a_checked_issue_leaves_its_slot_to_a_check(self):
+        # #342: max_open_prs = 2 and #9 is implemented, so one PR slot is free. #10 passed its
+        # readiness check and comes before #11, which has none: with a restart pending #10 is
+        # not implemented and takes no slot, so the check of #11 starts on a free worker.
+        d = self.make()
+        self.addCleanup(self.release.set)
+        d.snapshot = lambda: Snapshot([], [ready(9)], [])
+        self.assertEqual(d.tick(), [Action('implement', 9)])
+        d.cfg = dataclasses.replace(PCFG, max_open_prs=2, preflight=CFG.reviewer)
+        d.clock = lambda: 1_000_000
+        d._restart = ('0123456789ab', 1_000_000)
+        d._do_preflight = lambda number: self.ran.append(('preflight', number))
+        checked = {'hash': 'h', 'record': {'hash': 'h', 'ready': True, 'gaps': []},
+                   'recheck': False, 'owned': True}
+        unchecked = {'hash': 'h', 'record': None, 'recheck': False, 'owned': False}
+        issues = [dict(ready(10), preflight=checked), dict(ready(11), preflight=unchecked)]
+        d.snapshot = lambda: Snapshot([], issues, [])
+        self.assertEqual(d.tick(), [Action('preflight', 11, 'no readiness check yet')])
+        # Without the restart #10 takes the slot, as before #342.
+        self.assertEqual([(a.kind, a.number) for a in plan(d.snapshot(), d.cfg, {9}, 1)],
+                         [('implement', 10)])
+        # Without the readiness check no issue starts either while the restart waits.
+        self.assertEqual(plan(Snapshot([], [ready(10)], []), PCFG, implement=False), [])
+
     def test_a_pending_auto_pin_pins_at_once_and_the_tick_still_plans(self):
         # #301: the pin runs while #9 runs, the restart waits, the review of #101 starts but
         # not the implementation of #10 (#342); `status` shows it.
