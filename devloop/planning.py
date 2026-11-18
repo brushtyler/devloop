@@ -365,7 +365,7 @@ def pr_counts(snapshot, cfg):
     return len(snapshot.prs) - held, held
 
 
-def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
+def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=True):
     """Pure planning: the actions one tick should take, in order.
 
     In continuous mode (#227) ``busy`` holds the numbers of the issues and PRs that actions
@@ -378,7 +378,10 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
     runs, takes a slot of ``max_actions_per_tick``. The others stay in the plan, where ``admit``
     holds them back with their numbers, and take no slot from the actions that can start now.
     A merge that finds the limit already spent is dropped and does not take the lane: so is
-    every merge after it, which would otherwise start in its place past the limit."""
+    every merge after it, which would otherwise start in its place past the limit.
+    Without ``implement`` (a restart pending in continuous mode, #342) no implementation is
+    planned, and an issue that would start one takes no slot of ``max_open_prs`` nor of
+    ``max_actions_per_tick``: they stay to the other actions, readiness checks included."""
     lb = cfg.labels
     actions = []
     issue_of = {pr.number: pr.issue for pr in snapshot.prs}
@@ -613,8 +616,8 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
                   '(max_parked_prs)')
         free = slots
     if cfg.preflight:
-        actions += _plan_preflight(snapshot, cfg, pr_issues | held_back, free, urgent)
-    elif free > 0:
+        actions += _plan_preflight(snapshot, cfg, pr_issues | held_back, free, urgent, implement)
+    elif free > 0 and implement:
         blocked = set(cfg.blocked_labels) | lb.operator() | {lb.working, lb.needs_supervisor}
         candidates = [i for i in snapshot.ready_issues
                       if not (i['labels'] & blocked) and i['number'] not in pr_issues
@@ -641,7 +644,7 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
     return capped
 
 
-def _plan_preflight(snapshot, cfg, pr_issues, free, urgent=''):
+def _plan_preflight(snapshot, cfg, pr_issues, free, urgent='', implement=True):
     """New work with the readiness check (#114), for the ready issues not in ``pr_issues`` (an
     open PR, a merged one, #228, or an open block, #277). Issues start in the usual order, up to
     ``free``: one whose check for its current text passed is implemented, one without a valid
@@ -653,7 +656,8 @@ def _plan_preflight(snapshot, cfg, pr_issues, free, urgent=''):
     for it or someone who may admit it added ``agent:ready`` again (#270); when the base branch
     advanced past a failure that depends on it (#270), only within ``free``, as any check. Any
     other ``agent:needs-operator`` (or its name before #248) is left alone. An issue in
-    ``agent:needs-supervisor`` waits for the supervisor (#182)."""
+    ``agent:needs-supervisor`` waits for the supervisor (#182). Without ``implement`` (#342) an
+    issue whose check passed waits, and takes no slot from the checks of the others."""
     lb = cfg.labels
     excluded = set(cfg.blocked_labels) | {lb.working, lb.needs_supervisor}
     issues = [i for i in snapshot.ready_issues
@@ -677,6 +681,8 @@ def _plan_preflight(snapshot, cfg, pr_issues, free, urgent=''):
         elif state == 'not_ready':
             actions.append(Action('preflight_block', issue['number'],
                                   'the readiness check of the current text failed'))
+        elif state == 'ready' and not implement:
+            continue  # a restart is pending (#342): implemented after it
         elif taken < free and (not urgent or issue.get('priority') == 'high'):
             taken += 1
             actions.append(Action('implement', issue['number'], urgent) if state == 'ready'

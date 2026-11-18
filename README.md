@@ -48,6 +48,7 @@ The steps of [ADR 0001](docs/adr/0001-prodotto-unico-fasi-su-tracker.md), in ord
 | [Architecture](docs/architecture.md) | Components, engine and dispatcher, ports and adapters, the devloop boundary and the future `core` package; phases, tiers, isolation, run layout, controller contract, integrity model |
 | [Task mode](docs/task-mode.md) | PO validation, design sessions, task planning, scheduler, repair, gate reports |
 | [Supervision](docs/supervision.md) | Detached runs, resume, cancel, recovery matrix |
+| [Workflow snapshot](docs/workflow-status.md) | Read-only, coherent snapshot of a run: generation, task DAG, feedback, persisted metrics with their coverage |
 | [Cost telemetry](docs/cost-telemetry.md) | Charges, API-equivalent estimates and tokens per provider; Evidence Pack breakdown |
 | [Troubleshooting](docs/troubleshooting.md) | Memory/OOM, resuming, deploy keys, common stops |
 

@@ -443,7 +443,8 @@ class PinRestartTests(ContinuousLoopCase):
         self.assertLess(fix[0], 13 * MINUTE)
         self.assertLess(fix[1], implement[1])
         self.assertTrue(any(line.startswith('restart to 000000000001 pending since ')
-                            and line.endswith('(1 running)') for line in d.logs), d.logs)
+                            and line.endswith('(1 running): no new implement until the restart')
+                            for line in d.logs), d.logs)
         # ... and the restart came at the first tick with nothing running, from the new copy.
         (when, still), = restarts
         self.assertEqual(still, [])
@@ -452,9 +453,41 @@ class PinRestartTests(ContinuousLoopCase):
         self.assertIn('nothing runs: restart from pinned-000000000001', d.logs)
         self.assertIsNone(d._restart)
 
+    def test_with_a_restart_pending_no_implementation_starts_but_review_and_fix_do(self):
+        # #342: #12 is ready 2 minutes in, after the pin of the merge of #100, while #9 is
+        # implemented for 12 minutes: it is not implemented while the restart waits, the review
+        # of #101 (5 minutes in) and the fix of #102 (10 minutes in) start, and the restart
+        # follows the end of the last running action, the fix, within the limit.
+        self.world.issues[12] = 2 * MINUTE
+        d, pinner, restarts = self.sim({'implement': 12 * MINUTE})
+        self.run_loop(d, ends=Repinned)
+        (moment, _, _), = pinner.pins
+        self.assertLess(moment, 2 * MINUTE)
+        self.assertNotIn(('implement', 12), d.spans)
+        self.assertEqual(set(d.spans), {('merge', 100), ('implement', 9), ('review', 101),
+                                        ('fix', 102)})
+        review, fix = d.spans[('review', 101)], d.spans[('fix', 102)]
+        implement = d.spans[('implement', 9)]
+        self.assertGreater(review[0], moment)
+        self.assertGreater(fix[0], moment)
+        self.assertGreater(fix[1], implement[1])  # the fix is the last action to end
+        (when, still), = restarts
+        self.assertEqual(still, [])
+        self.assertGreaterEqual(when, fix[1])
+        self.assertLess(when, fix[1] + 2 * MINUTE)
+        self.assertLess(when, moment + 30 * MINUTE)
+        self.assertTrue(any(line.endswith(': no new implement until the restart')
+                            for line in d.logs), d.logs)
+        self.assertFalse(any('over [pin] restart_max_wait_minutes' in line for line in d.logs),
+                         d.logs)
+        self.assertIn('nothing runs: restart from pinned-000000000001', d.logs)
+        self.assertIsNone(d._restart)
+        self.assertEqual(d.violations, [])
+
     def test_over_the_limit_no_action_starts_until_the_restart(self):
         # The limit is 3 minutes: the review of #101 (in review after 5) and the fix of #102
-        # (after 10) do not start while #9 is implemented for 45 minutes.
+        # (after 10) do not start while #9 is implemented for 45 minutes, nor does #12.
+        self.world.issues[12] = 2 * MINUTE
         d, pinner, restarts = self.sim({'implement': 45 * MINUTE}, wait=3)
         self.run_loop(d, ends=Repinned)
         self.assertEqual(set(d.spans), {('merge', 100), ('implement', 9)})
@@ -467,7 +500,9 @@ class PinRestartTests(ContinuousLoopCase):
 
     def test_a_copy_refused_by_the_smoke_test_leaves_everything_as_before(self):
         # #260: the request is dropped, current stays, no restart waits, and the planning goes
-        # on with the running copy: the review and the fix start, the loop ends at the STOP.
+        # on with the running copy: the review and the fix start, and so does the implementation
+        # of #12 (#342), the loop ends at the STOP.
+        self.world.issues[12] = 2 * MINUTE
         d, pinner, restarts = self.sim({'implement': 45 * MINUTE}, refuse=True,
                                        stop_after=('implement', 9), stop_file=self.stop)
         self.run_loop(d)
@@ -479,6 +514,7 @@ class PinRestartTests(ContinuousLoopCase):
         self.assertEqual(restarts, [])
         self.assertIn(('review', 101), d.spans)
         self.assertIn(('fix', 102), d.spans)
+        self.assertIn(('implement', 12), d.spans)
         self.assertTrue(any(line.startswith('auto-pin of origin/main refused, the pinned copy '
                                             'is unchanged and the request is dropped')
                             for line in d.logs), d.logs)
@@ -784,13 +820,43 @@ class ContinuousTickTests(unittest.TestCase):
         ledger.settle.assert_called_once_with(10)
         self.release.set()
 
+    def test_with_a_restart_pending_a_checked_issue_leaves_its_slot_to_a_check(self):
+        # #342: max_open_prs = 2 and #9 is implemented, so one PR slot is free. #10 passed its
+        # readiness check and comes before #11, which has none: with a restart pending #10 is
+        # not implemented and takes no slot, so the check of #11 starts on a free worker.
+        d = self.make()
+        self.addCleanup(self.release.set)
+        d.snapshot = lambda: Snapshot([], [ready(9)], [])
+        self.assertEqual(d.tick(), [Action('implement', 9)])
+        d.cfg = dataclasses.replace(PCFG, max_open_prs=2, preflight=CFG.reviewer)
+        d.clock = lambda: 1_000_000
+        d._restart = ('0123456789ab', 1_000_000)
+        d._do_preflight = lambda number: self.ran.append(('preflight', number))
+        checked = {'hash': 'h', 'record': {'hash': 'h', 'ready': True, 'gaps': []},
+                   'recheck': False, 'owned': True}
+        unchecked = {'hash': 'h', 'record': None, 'recheck': False, 'owned': False}
+        issues = [dict(ready(10), preflight=checked), dict(ready(11), preflight=unchecked)]
+        d.snapshot = lambda: Snapshot([], issues, [])
+        self.assertEqual(d.tick(), [Action('preflight', 11, 'no readiness check yet')])
+        # Without the restart #10 takes the slot, as before #342.
+        self.assertEqual([(a.kind, a.number) for a in plan(d.snapshot(), d.cfg, {9}, 1)],
+                         [('implement', 10)])
+        # Without the readiness check no issue starts either while the restart waits.
+        self.assertEqual(plan(Snapshot([], [ready(10)], []), PCFG, implement=False), [])
+
     def test_a_pending_auto_pin_pins_at_once_and_the_tick_still_plans(self):
-        # #301: the pin runs while #9 runs, the restart waits, #10 starts; `status` shows it.
+        # #301: the pin runs while #9 runs, the restart waits, the review of #101 starts but
+        # not the implementation of #10 (#342); `status` shows it.
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp)
         pinner = mock.Mock()
         pinner.pending.return_value = None
         d = self.make(pinner=pinner)
+
+        def review(target):
+            self.ran.append(('review', target.number))
+            self.release.wait(timeout=10)
+        d._do_review = review
         d.activity = activity.Activity(tmp, pid=4242)
         d.clock = lambda: 1_000_000
         d.cfg = dataclasses.replace(PCFG, pin=dataclasses.replace(PCFG.pin, auto=True))
@@ -798,22 +864,27 @@ class ContinuousTickTests(unittest.TestCase):
         self.assertEqual(d.tick(), [Action('implement', 9)])
         pinner.pending.return_value = {'pr': 100}
         pinner.pin.return_value = tmp / 'pinned-0123456789ab'
-        d.snapshot = lambda: Snapshot([], [ready(9), ready(10)], [])
+        d.snapshot = lambda: Snapshot([pr(101, issue=8, labels=['agent:review'])],
+                                      [ready(9), ready(10)], [])
         logs = []
         d.log.sink = logs.append
-        self.assertEqual(d.tick(), [Action('implement', 10)])
+        self.assertEqual(d.tick(), [Action('review', 101)])
         pinner.pin.assert_called_once_with('origin/main')
         self.assertEqual(d._restart, ('0123456789ab', 1_000_000))
         line = 'restart to 0123456789ab pending since 1970-01-12T13:46:40Z'
-        self.assertIn(f'{line} (1 running)', logs)
+        self.assertIn(f'{line} (1 running): no new implement until the restart', logs)
         # `devloop status` reads it while this dispatcher runs; nothing once it is gone.
         deadline = time.monotonic() + 10
-        while self.ran != [9, 10] and time.monotonic() < deadline:
+        while self.ran != [9, ('review', 101)] and time.monotonic() < deadline:
             time.sleep(0.01)
+        self.assertEqual(self.ran, [9, ('review', 101)])
         self.assertEqual(len(json.loads((tmp / activity.FILE).read_text())['actions']), 2)
         self.assertEqual(activity.describe_restart(tmp, alive=lambda pid: pid == 4242,
                                                    held=lambda path: True),
-                         f'{line} (2 running)')
+                         f'{line} (2 running): no new implement until the restart')
+        # A later tick while they run starts no implementation either.
+        d.snapshot = lambda: Snapshot([], [ready(9), ready(10)], [])
+        self.assertEqual(d.tick(), [])
         self.assertIsNone(activity.describe_restart(tmp, alive=lambda pid: False,
                                                     held=lambda path: True))
         self.release.set()
