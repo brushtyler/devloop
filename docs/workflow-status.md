@@ -4,12 +4,85 @@
 selected generation, the task DAG, the feedback ledger, the metrics already persisted, the
 [cost projections](#accounting-and-projections) and the [status](#liveness-and-next-action):
 liveness observed in the kernel, its coverage, the activity, the native classification of a stop
-and the next action. It covers parts 1, 2 and 3 of the `workflow-status` CLI
+and the next action, and the tail of the [last persisted log](#last-log). The
+[`workflow-status` command](#the-workflow-status-command) prints it in four sections or as JSON
 ([#46](https://github.com/brushtyler/ssdlc/issues/46),
 [#346](https://github.com/brushtyler/ssdlc/issues/346),
 [#347](https://github.com/brushtyler/ssdlc/issues/347),
-[#348](https://github.com/brushtyler/ssdlc/issues/348)). The command itself, exit codes and
-`--watch` come in another part. Today the snapshot is a Python API, with no command of its own.
+[#348](https://github.com/brushtyler/ssdlc/issues/348),
+[#349](https://github.com/brushtyler/ssdlc/issues/349)).
+
+## The `workflow-status` command
+
+```bash
+./ssdlc workflow-status --ticket <ticket>                 # four text sections
+./ssdlc workflow-status --ticket <ticket> --json          # the snapshot, one JSON document
+./ssdlc workflow-status --ticket <ticket> --watch         # refreshed every 2 seconds until Ctrl-C
+./ssdlc workflow-status --ticket <ticket> --watch --json --interval 5   # JSON Lines
+```
+
+Like the snapshot, the command never writes under `.ssdlc/`. The text output has four sections:
+
+1. **Run, generation and liveness**: native state and outcome, phase and step, generation and
+   `dispatch_fenced`, liveness with its writers, the coverage components that are missing and why,
+   the activity.
+2. **Tasks and feedback**: task counts and each task of the plan (status, attempts, ready or what it
+   waits on), tasks outside the plan, the journal position, the feedback ledger, its rounds and
+   recorded interventions.
+3. **Metrics, budget and projections**: every metric with its coverage and, when not complete, the
+   reason; the projection of each measure, the frozen budget and the scenario, the warnings.
+4. **Next action, prerequisites and last log**: the stop, the action, its mode, the command when
+   there is one, the prerequisites, and the tail of the last log.
+
+When the read is not `COHERENT`, each section says so and carries no data.
+
+**JSON.** `--json` prints the [contract](#contract-schema_version-1) of the snapshot unchanged,
+with the `log` field. With `--watch`, each snapshot is one line (JSON Lines): one write per line,
+nothing else on stdout.
+
+**Watch.** `--watch` takes a snapshot every `--interval` seconds: 2 by default, at least 1
+(`--interval` without `--watch` is an invalid argument). It keeps sampling after a terminal,
+`TORN`, `UNVERIFIABLE` or failed snapshot: only SIGINT (Ctrl-C) ends it, with exit code 130 and
+no traceback. On a terminal, the text watch clears the screen before each snapshot.
+
+**Sanitization.** Every string of the text output, from state fields to the log tail, is
+sanitized: escape sequences (CSI, OSC and the others), control characters, carriage returns and
+invisible format characters such as bidirectional overrides become U+FFFD; a tab or a no-break
+space becomes a space. The log tail keeps its line feeds and tabs. JSON escapes every control
+character.
+
+### Exit codes
+
+The first rule that applies gives the code:
+
+| Code | When |
+| --- | --- |
+| `2` | Invalid arguments: missing or invalid ticket name, an `--interval` below 1 second or not a number, `--interval` without `--watch`, an unknown option. Nothing is read |
+| `5` | `read.status` is `TORN` |
+| `6` | `read.status` is `UNVERIFIABLE` (missing ticket, data that does not verify) or the read failed: a failed read is reported as an `UNVERIFIABLE` snapshot whose `reason` starts with `read error:` |
+| `4` | `status.liveness` is `STALE` |
+| `3` | `status.outcome` is `stopped`, or `generation.dispatch_fenced` is true |
+| `0` | `status.outcome` is `completed` |
+| `6` | `status.liveness` is `UNVERIFIED`, or `status.outcome` is `absent` or `unknown` |
+| `0` | Every other operational case: a run in progress with a writer, paused, ready, awaiting sign-off |
+| `130` | SIGINT, with or without `--watch` |
+
+Metrics with only partial coverage never change the code. A stopped run whose liveness is not
+verified is `3`, not `6`; a completed run is `0` even when its liveness is `UNVERIFIED`. Until the
+controller declares its coverage ([#345](https://github.com/brushtyler/ssdlc/issues/345)), a run
+in progress with no process holding its locks is `UNVERIFIED`, hence `6`. In `--watch` the code of
+each snapshot does not end the command; JSON consumers compute it from each line with the rules
+above.
+
+## Evidence Pack
+
+When the Evidence Pack is compiled, the controller takes a snapshot of the run and keeps it next
+to the pack as `workflow-status.json`, a registered artifact with its SHA-256. The pack links it,
+with the read status, liveness, outcome and exit code, on the line
+`Workflow status at compilation`. It stays local, like the rest of the ticket: nothing is
+published. The controller compiling the pack holds the run's locks, so liveness there is normally
+`RUNNING`. A failed read is recorded as an `UNVERIFIABLE` snapshot with its reason; it never fails
+the pack.
 
 ## Read without writing
 
@@ -58,8 +131,9 @@ coherent with. The mtime is only a change signal; it is never reported as a time
 | `metrics` | See below |
 | `projection` | See [Accounting and projections](#accounting-and-projections) |
 | `status` | See [Liveness and next action](#liveness-and-next-action) |
+| `log` | See [Last log](#last-log) |
 
-Only `COHERENT` fills `run` to `status`; otherwise they are `null`.
+Only `COHERENT` fills `run` to `log`; otherwise they are `null`.
 
 **Generation.** The snapshot reads the generation the published selectors name, with the same
 precedence as the engine (`execution/active.json`, then `continuations/active.json`, else the
@@ -224,3 +298,32 @@ missing in `prerequisites`: an authorization, a limit value (none is proposed), 
 resume, which are never reconstructed from files (a pause names its `--from-phase`, nothing else).
 `RUNNING` asks to wait; `UNVERIFIED` first asks to confirm that no process of the run still runs, with
 the coverage reasons.
+
+## Last log
+
+`log` ([#349](https://github.com/brushtyler/ssdlc/issues/349)) is the last log the run persisted, chosen
+in the selected generation from the coherent data, never from a file's mtime:
+
+1. the log of the last task journal event that introduces or updates a log reference (`log_ref`,
+   `developer_log_ref`, `output_ref`, relative to `03-dev/tasks/`); within one event, the last in
+   the order of the record;
+2. without one, the `.log` registered in the `artifacts` of `state.json` with the latest
+   `recorded_at`, the path breaking ties.
+
+A reference that is not a plain relative path (`..`, an absolute path, other characters) is
+skipped and counted in the reason, and so is a registered log without a valid `recorded_at`.
+
+| Field | Content |
+| --- | --- |
+| `ref` | The log, relative to the ticket; `null` when no reference can be ordered |
+| `source`, `sequence`, `event`, `recorded_at` | `task journal` with the event's `sequence` and name, or `artifacts` with its `recorded_at` |
+| `size_bytes`, `tail_bytes`, `truncated` | The file's size, the bytes read, whether the tail starts after the beginning |
+| `text` | The last 8192 bytes at most, decoded as UTF-8 (invalid bytes replaced) and sanitized like the text output, line feeds and tabs kept; `null` when not read |
+| `coverage`, `reason` | `partial` when a log is chosen, `none` with `ref: null` |
+
+Coverage is never complete: only logs the task journal references or the run registers as artifacts
+are seen, and the stdout and stderr of the detached controller are not kept. The tail is read after
+the coherence check, without following any symlink (`O_NOFOLLOW` on each path component) and with a
+single read of at most 8192 bytes; the log is not one of the `sources`. A log that is missing, a
+symlink or not a regular file keeps its `ref`, with `text: null` and the reason; it does not change
+the read status or the exit code.
