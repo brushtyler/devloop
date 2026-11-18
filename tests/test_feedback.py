@@ -212,6 +212,57 @@ class FeedbackTests(unittest.TestCase):
             expired.submit(self.source, self.request, a('developer'))
         self.assertEqual((expired.root / 'task-journal.jsonl').read_bytes(), before)
 
+    def test_expired_recording_blocks_only_dependent_operations_with_explicit_reason(self):
+        """#168: dependent operations stop with an explicit reason; the others proceed."""
+        from ssdlc_feedback import RECORDING_EXPIRED, RecordingExpired
+        from ssdlc_feedback_delivery import metrics
+        row = self.authorized()
+        call = self.store.reserve_role(row['request_id'], 'planner', a('planner'))
+        expired = FeedbackStore(self.ticket, clock=lambda: 200)
+        journal = expired.root / 'task-journal.jsonl'
+        before = journal.read_bytes()
+        blocked = {
+            'request': lambda: expired.submit(self.source, self.request, a('developer:codex:invocation-37')),
+            'proposal': lambda: expired.propose(row['request_id'], dict(route='INCONCLUSIVE', requested_files=[],
+                                                reason_code='uncertain'), a('planner'), self.source),
+            'consultation': lambda: expired.reserve_role(row['request_id'], 'diagnosis', a('diagnosis')),
+        }
+        for name, operation in blocked.items():
+            with self.subTest(operation=name):
+                with self.assertRaises(RecordingExpired) as caught:
+                    operation()
+                self.assertEqual(caught.exception.expires_at, 200)
+                self.assertIn(RECORDING_EXPIRED, str(caught.exception))
+                self.assertIn('expired at 200', str(caught.exception))
+                self.assertEqual(journal.read_bytes(), before)
+        # Operations that do not depend on a live recording proceed.
+        expired.record_role_result(call['operation_id'], dict(route='INCONCLUSIVE'))
+        self.assertEqual(expired.inspect()['role_calls'][0]['status'], 'RETURNED')
+        self.assertEqual(expired.disposition(row['request_id']), 'WAITING')
+        recording = expired.public_projection()['recording']
+        self.assertEqual(recording, dict(status='EXPIRED', expires_at=200, reason=RECORDING_EXPIRED,
+                                         blocked_operations=recording['blocked_operations'],
+                                         renewal='SEPARATE_CONTRACT_REQUIRED'))
+        self.assertIn('consultation', recording['blocked_operations'])
+        self.assertEqual(metrics(expired)['recording'], recording)
+        self.assertEqual(self.store.public_projection()['recording'],
+                         dict(status='ACTIVE', expires_at=200, reason=None, blocked_operations=[],
+                              renewal='SEPARATE_CONTRACT_REQUIRED'))
+
+    def test_expired_recording_is_never_renewed_or_recreated(self):
+        """#168: neither the same nor a renewed policy reopens an expired ledger."""
+        from ssdlc_feedback import RecordingExpired
+        self.authorized()
+        expired = FeedbackStore(self.ticket, clock=lambda: 201)
+        files = {path.name: path.read_bytes() for path in expired.root.iterdir() if path.is_file()}
+        with self.assertRaises(RecordingExpired):
+            expired.authorize(self.policy, self.authorization)
+        renewed = dict(self.policy, expires_at=400)
+        with self.assertRaisesRegex(FeedbackError, 'cannot be replaced'):
+            expired.authorize(renewed, dict(self.authorization, policy_sha256=digest(renewed)))
+        self.assertEqual({path.name: path.read_bytes() for path in expired.root.iterdir() if path.is_file()}, files)
+        self.assertEqual(expired.recording()['status'], 'EXPIRED')
+
     def test_public_projection_excludes_paths_evidence_and_role_output(self):
         self.proposed()
         text = json.dumps(self.store.public_projection())

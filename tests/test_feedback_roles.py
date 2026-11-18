@@ -77,6 +77,31 @@ class FundedFeedbackRoleTests(unittest.TestCase):
         with self.assertRaisesRegex(FeedbackError, 'already reserved'):
             self.run_role()
 
+    def test_captured_response_reconciles_after_recording_expiry_without_redispatch(self):
+        """#168: expiry blocks new consultations, never the reconciliation of a captured return."""
+        from ssdlc_feedback import RecordingExpired
+        self.response['tokens'] = {'input_tokens': 7, 'output_tokens': 3}
+        def fault(point):
+            if point == 'response_captured':
+                raise OSError('crash')
+        with self.assertRaises(OSError):
+            self.run_role(fault=fault)
+        operation = self.fixture.store.inspect()['role_calls'][0]['operation_id']
+        invocation = next(iter(self.limits._load(repair=False)[1]['invocations']))
+        self.assertEqual(self.limits._load(repair=False)[1]['invocations'][invocation]['status'], 'reserved')
+        self.fixture.store.clock = lambda: self.fixture.policy['expires_at']
+        self.assertEqual(self.fixture.store.recording()['status'], 'EXPIRED')
+        with self.assertRaises(RecordingExpired):
+            self.roles.run(self.row['request_id'], 'reviewer', dict(records.a('reviewer'), engine='codex'),
+                           self.runner)
+        for _ in range(2):
+            self.assertEqual(self.roles.resume_response(operation), self.response['response'])
+        rows = self.limits._load(repair=False)[1]['invocations']
+        self.assertEqual(list(rows), [invocation])
+        self.assertEqual(rows[invocation]['status'], 'returned')
+        self.assertEqual(rows[invocation]['reported_tokens'], self.response['tokens'])
+        self.assertEqual(len(self.calls), 1)
+
     def test_reported_tokens_reach_the_row_and_survive_replay_without_duplication(self):
         tokens = {'input_tokens': 120, 'output_tokens': 30}
         self.response['tokens'] = tokens

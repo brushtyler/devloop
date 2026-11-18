@@ -126,6 +126,16 @@ controller, the supervisor and every other writer.
 5. `./ssdlc limits status --ticket TICKET` lists the proposals (`PROPOSED`,
    `AUTHORIZED`, `EXPIRED`, `ACTIVATING`, `ACTIVE`) and the bound chain.
 
+`limits inspect` and `limits status` also show the run deadline
+(`run_deadline`: `deadline_at` and `ACTIVE` or `EXPIRED`) and the dependent
+authorizations that an extension does not renew (`dependent_authorizations`).
+Today this is the feedback recording of a run with a feedback ledger: its
+status, its own `expires_at` and reason, and `renewed_by_run_extension: false`.
+Extending the deadline of a run whose recording has expired leaves the
+recording `EXPIRED`: the operations that depend on it stay blocked (see
+[Expired recording](developer-feedback.md#expired-recording)), the others
+proceed.
+
 Resume the run as usual. A native run resumes with or without its original
 `--limits-profile`; the extended envelope stays in force.
 
