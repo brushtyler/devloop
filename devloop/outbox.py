@@ -34,11 +34,16 @@ The rules, on the model of ``ProjectionOutbox`` (ssdlc_feedback_delivery.py):
   what the outbox already knows as another write's publication; an edit on its comment; a review
   among the PR's native reviews; a pull request among the open ones, from its head branch. Found:
   it is published. **Absence alone proves nothing** while the attempt may still take effect: a
-  read counts as conclusive only when it starts ``IN_FLIGHT_SECONDS`` after the attempt ended
-  or, for an attempt whose end is unknown (a crash), ``ATTEMPT_SECONDS`` (the longest a ``gh``
-  call lasts) plus ``IN_FLIGHT_SECONDS`` after it started. The write that got the uncertain
+  read counts as conclusive only when it starts ``IN_FLIGHT_SECONDS`` after a time at which the
+  attempt is known to have ended, never counted from the time recorded before the send (a
+  pause of the process may come between the two). In the process that sent it, that time is the
+  end of the call, measured once the call returned (its ``gh`` ended, killed at its timeout).
+  For an attempt cut short by a stop, whose end is unknown, it is ``ATTEMPT_SECONDS`` (the
+  longest a ``gh`` call lasts) after this process first read the journal, under the dispatcher
+  lock: the process that made the attempt had ended by then. The write that got the uncertain
   answer waits for that time and reads again; only a conclusive absence lets it be sent once
-  more, at most ``MAX_SENDS`` sends in all. A failed read leaves it uncertain.
+  more, at most ``MAX_SENDS`` sends in all. A failed read leaves it uncertain, and so does an
+  exception of the client that is not a ``GitHubError``.
 - **Before every new write** on an issue or PR (on a comment, a head branch), the writes of the
   same one left pending (not running in this process) are settled first (``settle``): reconciled,
   and sent or dropped on a conclusive absence. If one cannot be settled (unreadable, or not
@@ -51,7 +56,9 @@ The rules, on the model of ``ProjectionOutbox`` (ssdlc_feedback_delivery.py):
   is published, its comment and issue are kept in memory, and no later write, an edit of that
   comment included, is sent before it is durable.
 - **A restart resumes** (``resume``, at the start of each tick): a write cut short, its caller
-  stopped with the process, is reconciled, and sent once more only on a conclusive absence. A
+  stopped with the process, is reconciled, and sent once more only on a conclusive absence,
+  read ``ATTEMPT_SECONDS`` plus ``IN_FLIGHT_SECONDS`` after the restart read the journal;
+  until then it blocks the writes about the same issue, PR, comment or branch. A
   write whose caller was told it failed with an uncertain outcome is only reconciled: found, it
   is recorded as published; conclusively absent, it is dropped. A pending edit superseded by a
   later write on the same comment is dropped: the later one was built from GitHub as it was.
@@ -111,6 +118,9 @@ class Outbox:
         self._entries = None  # the writes, by ``pub``, in journal order
         self._numbers = {}  # comment id -> issue or PR, from the writes and the reads
         self._live = set()  # the writes this process is sending or settling
+        # When this process first read the journal (``_load``), under the dispatcher lock: any
+        # previous dispatcher had ended, and none of its attempts could start later (R2-2).
+        self._since = None
 
     def client(self, tracker, actor, permissions=None):
         """``tracker``, the client of ``actor``, with its writes through the outbox."""
@@ -120,6 +130,7 @@ class Outbox:
     def _load(self):
         if self._entries is not None:
             return
+        self._since = self._clock()
         entries = {}
         for event in self.journal.publications():
             self._apply(entries, event['event'], event['data'])
@@ -247,7 +258,7 @@ class Outbox:
                 result = self._call(entry, tracker)
             except GitHubUncertain as exc:
                 with self._lock:
-                    entry['ended'] = self._clock()
+                    entry['ended'] = self._clock()  # after the call: its `gh` has ended
                 try:
                     found, conclusive = self._look(entry, tracker, wait=True)
                 except GitHubError:
@@ -271,13 +282,30 @@ class Outbox:
             except GitHubError as exc:
                 self._failed(entry, exc, uncertain=False)
                 raise
+            except Exception as exc:
+                # Not an answer of the client (an answer it could not parse, a bug): the
+                # write may have been sent. Its caller is told it failed: only reconciled.
+                with self._lock:
+                    entry['ended'] = self._clock()
+                self._failed(entry, exc, uncertain=True)
+                raise
             return self._answered(entry, result)
 
     def _quiet_at(self, entry):
-        """The time from which the last attempt of ``entry`` can no longer take effect."""
+        """The time from which the last attempt of ``entry`` can no longer take effect: what
+        GitHub may still apply (``IN_FLIGHT_SECONDS``) after a time at which the attempt is
+        known to have ended. Never from the time recorded before the send, which a pause of
+        the process may separate from the send by any amount (R2-2).
+
+        In this process that time is the end of the call, measured once it returned, or the
+        ``time`` of its ``publication_failed``. An attempt cut short by a stop has no known
+        end: its process was gone when this one first read the journal (``_since``, under the
+        dispatcher lock), so it cannot have started after that, and ``ATTEMPT_SECONDS``, the
+        longest a `gh` call lasts, covers a `gh` it left running."""
         if entry['ended'] is not None:
             return entry['ended'] + IN_FLIGHT_SECONDS
-        return (entry['started'] or 0) + ATTEMPT_SECONDS + IN_FLIGHT_SECONDS
+        since = self._since if self._since is not None else self._clock()
+        return max(entry['started'] or 0, since) + ATTEMPT_SECONDS + IN_FLIGHT_SECONDS
 
     def _look(self, entry, tracker, wait=False):
         """``(found, conclusive)``: what carries ``entry`` on GitHub, or None, and whether that

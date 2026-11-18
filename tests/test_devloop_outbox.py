@@ -2,16 +2,18 @@
 
 import inspect
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from devloop import outbox as outbox_mod
 from devloop import ports
 from devloop.apps import Identities
 from devloop.config import ConfigError, parse_config, load_data
 from devloop.dispatcher import Dispatcher
-from devloop.github import GitHubError, GitHubUncertain
+from devloop.github import GitHub, GitHubError, GitHubUncertain
 from devloop.journal import JOURNAL, JournalError, TurnJournal
 from devloop.ledger import Ledger
 from devloop.outbox import (DROPPED, FAILED, IN_FLIGHT_SECONDS, SENT, UNCERTAIN, Outbox,
@@ -46,20 +48,32 @@ class Clock:
 class OutboxGH(FakeGH):
     """FakeGH with comment ids, whose writes may crash the process (``crash``: ``'applied'``,
     ``'lost'`` or ``'late'``: GitHub applies it 10 seconds later) and whose reads may fail
-    (``read_fails``). An uncertain ``comment`` may also be ``'late'``. It records each body
-    sent; the pull requests it opens are open."""
+    (``read_fails``). An uncertain ``comment``, ``submit_review`` or ``create_pr``
+    (``uncertain_writes``) may be ``'applied'``, ``'lost'`` or ``'late'`` too. ``pause``: the
+    process stalls that many seconds right before the next POST. It records each body sent;
+    the pull requests it opens are open."""
 
     def __init__(self):
         super().__init__()
         self.with_ids = True
         self.clock = Clock()
         self.crash = None
+        self.pause = 0
         self.read_fails = 0
         self.sent = []
         self.in_flight = []  # (time it takes effect, how): writes GitHub still serves
 
     def _write(self, body, apply):
+        self.clock.now += self.pause
+        self.pause = 0
         self.sent.append(body)
+        if self.uncertain_writes:
+            outcome, *self.uncertain_writes = self.uncertain_writes
+            if outcome == 'applied':
+                apply()
+            elif outcome == 'late':
+                self.in_flight.append((self.clock() + 10, apply))
+            raise GitHubUncertain(f'write: outcome unknown ({outcome})')
         how, self.crash = self.crash, None
         if how is None:
             return apply()
@@ -75,13 +89,10 @@ class OutboxGH(FakeGH):
             item[1]()
 
     def comment(self, number, body):
-        if self.uncertain_writes and self.uncertain_writes[0] == 'late':
-            self.uncertain_writes = list(self.uncertain_writes[1:])
-            self.sent.append(body)
-            self.in_flight.append((self.clock() + 10,
-                                   lambda: self.comments.append((number, body))))
-            raise GitHubUncertain(f'comment on #{number}: timed out')
-        return self._write(body, lambda: FakeGH.comment(self, number, body))
+        def apply():
+            self.comments.append((number, body))
+            return FIRST_COMMENT_ID + len(self.comments) - 1
+        return self._write(body, apply)
 
     def edit_comment(self, comment_id, body):
         self.sent.append(body)
@@ -140,6 +151,7 @@ def make(gh, state=None, journal=None):
     journal = journal if journal is not None else TurnJournal(state)
     box = Outbox(journal, lambda actor, permissions: gh, lambda actor: ['brushtyler'],
                  clock=gh.clock, sleep=gh.clock.sleep)
+    box.entries()  # the process reads the journal as it starts, under the dispatcher lock
     return box, box.client(gh, 'dispatcher', {'issues': 'write'})
 
 
@@ -154,6 +166,63 @@ def journal_events(state):
 def open_turn(ledger):
     return ledger.open_turn(7, kind='implement', agent='claude', identity=None, mode='write',
                             model='m', effort=None, fallback_for=None, label='l', repo=REPO)
+
+
+class GhServer:
+    """`gh` on a simulated GitHub, for the real ``GitHub`` adapter: the native reviews and the
+    open pull requests it holds. Each POST takes the next of ``answers``: ``'ok'``;
+    ``'timeout'`` or ``'5xx'`` after GitHub applied it; ``'lost'``, a 5xx without it; ``'4xx'``,
+    refused. It counts the POSTs and the reads."""
+
+    def __init__(self):
+        self.reviews = []
+        self.prs = []
+        self.answers = []
+        self.posts = 0
+        self.reads = 0
+
+    @staticmethod
+    def _fields(args):
+        return dict(args[i + 1].split('=', 1) for i, a in enumerate(args) if a == '-f')
+
+    def _apply(self, path, fields, body):
+        if path.endswith('/reviews'):
+            self.reviews.append({'id': 7000 + len(self.reviews), 'login': 'brushtyler',
+                                 'state': 'COMMENTED', 'body': body,
+                                 'submitted_at': '2026-11-18T15:30:00Z'})
+            return {'id': self.reviews[-1]['id']}
+        number = 200 + len(self.prs)
+        self.prs.append({'number': number, 'title': fields['title'], 'body': body, 'labels': [],
+                         'headRefName': fields['head'], 'headRefOid': 'a' * 40,
+                         'author': {'login': 'brushtyler', 'is_bot': False},
+                         'isCrossRepository': False, 'mergeable': 'MERGEABLE',
+                         'mergeStateStatus': 'CLEAN'})
+        return {'number': number, 'html_url': f'https://github.com/{REPO}/pull/{number}'}
+
+    def __call__(self, cmd, input=None, timeout=None, **kwargs):
+        args = cmd[1:]
+        if args[:3] == ['api', '-X', 'POST']:
+            self.posts += 1
+            answer = self.answers.pop(0) if self.answers else 'ok'
+            created = None
+            if answer in ('ok', 'timeout', '5xx'):
+                created = self._apply(args[3], self._fields(args), input)
+            if answer == 'timeout':
+                raise subprocess.TimeoutExpired(cmd, timeout)
+            if answer in ('5xx', 'lost'):
+                return SimpleNamespace(returncode=1, stdout='',
+                                       stderr='gh: Server Error (HTTP 502)')
+            if answer == '4xx':
+                return SimpleNamespace(returncode=1, stdout='',
+                                       stderr='gh: Validation Failed (HTTP 422)')
+            return SimpleNamespace(returncode=0, stdout=json.dumps(created), stderr='')
+        self.reads += 1
+        if args[:2] == ['pr', 'list']:
+            return SimpleNamespace(returncode=0, stdout=json.dumps(self.prs), stderr='')
+        if args[:2] == ['api', '--paginate'] and args[2].split('?')[0].endswith('/reviews'):
+            lines = '\n'.join(json.dumps(r) for r in self.reviews)
+            return SimpleNamespace(returncode=0, stdout=lines, stderr='')
+        raise AssertionError(f'unexpected gh call: {args}')
 
 
 class Refusing(OutboxGH):
@@ -457,6 +526,149 @@ class UncertainPostTests(unittest.TestCase):
         self.assertEqual(gh.bodies(7), ['v3'])
         self.assertEqual(statuses(box), [SENT, SENT, SENT])
 
+    def test_an_uncertain_review_or_pull_request_is_reconciled(self):
+        # R2-1: the native reviews and the pull requests too, applied at once, while the
+        # outbox reads (in flight) or never.
+        for op in ('review', 'pr'):
+            for how, sends in (('applied', 1), ('late', 1), ('lost', 2)):
+                with self.subTest(op=op, how=how):
+                    gh = OutboxGH()
+                    box, _ = make(gh)
+                    agent = box.client(gh, 'claude', {'pull_requests': 'write'})
+                    gh.uncertain_writes = [how]
+                    if op == 'review':
+                        self.assertIsNone(agent.submit_review(100, commit=SHA1, event='APPROVE',
+                                                              body='review'))
+                        self.assertEqual([r['body'] for _, r in gh.native], ['review'])
+                    else:
+                        self.assertEqual(agent.create_pr(base='main', head='agent/issue-7',
+                                                         title='t', body='pr')[0], 100)
+                        self.assertEqual([p['head'] for p in gh.created], ['agent/issue-7'])
+                    self.assertEqual(len(gh.sent), sends)
+                    self.assertEqual(gh.clock.slept, [] if how == 'applied'
+                                     else [IN_FLIGHT_SECONDS])
+                    self.assertEqual(statuses(box), [SENT])
+
+    def test_an_exception_of_the_client_leaves_the_write_uncertain(self):
+        # Applied, but the client fails on the answer with an error that is not a GitHubError:
+        # the caller is told it failed, the write is never sent again, only found.
+        class Unparsable(OutboxGH):
+            def create_pr(self, **kwargs):
+                super().create_pr(**kwargs)
+                raise KeyError('number')
+        gh = Unparsable()
+        box, _ = make(gh)
+        agent = box.client(gh, 'claude', {'pull_requests': 'write'})
+        with self.assertRaises(KeyError):
+            agent.create_pr(base='main', head='agent/issue-7', title='t', body='pr')
+        self.assertEqual(statuses(box), [UNCERTAIN])
+        gh.clock.now += IN_FLIGHT_SECONDS
+        self.assertEqual(box.resume(), [])
+        self.assertEqual((len(gh.sent), len(gh.created), statuses(box)), (1, 1, [SENT]))
+
+
+class AdapterTests(unittest.TestCase):
+    """R2-1: the real ``GitHub`` adapter on a simulated `gh`: a native review or a pull request
+    whose answer times out or is a 5xx is uncertain, reconciled, and never duplicated."""
+
+    def make(self, answers):
+        server = GhServer()
+        server.answers = list(answers)
+        gh = GitHub(REPO, run=server)
+        clock = Clock()
+        box = Outbox(TurnJournal(), lambda actor, permissions: gh, lambda actor: ['brushtyler'],
+                     clock=clock, sleep=clock.sleep)
+        return server, box, box.client(gh, 'claude', {'pull_requests': 'write'})
+
+    @staticmethod
+    def write(op, client):
+        if op == 'review':
+            return client.submit_review(100, commit=SHA1, event='COMMENT', body='review')
+        return client.create_pr(base='main', head='agent/issue-7', title='t', body='pr')
+
+    @staticmethod
+    def published(op, server):
+        return len(server.reviews if op == 'review' else server.prs)
+
+    def test_an_applied_write_whose_answer_is_lost_is_found_and_not_sent_again(self):
+        for op in ('review', 'pr'):
+            for answer in ('timeout', '5xx'):
+                with self.subTest(op=op, answer=answer):
+                    server, box, client = self.make([answer])
+                    result = self.write(op, client)
+                    if op == 'pr':
+                        self.assertEqual(result, (200, f'https://github.com/{REPO}/pull/200'))
+                    self.assertEqual((server.posts, self.published(op, server)), (1, 1))
+                    self.assertGreater(server.reads, 0)  # reconciled
+                    [entry] = box.entries().values()
+                    self.assertEqual((entry['status'], entry['sends']), (SENT, 1))
+
+    def test_a_lost_write_is_sent_once_more(self):
+        for op in ('review', 'pr'):
+            with self.subTest(op=op):
+                server, box, client = self.make(['lost'])
+                self.write(op, client)
+                self.assertEqual((server.posts, self.published(op, server)), (2, 1))
+                self.assertEqual(statuses(box), [SENT])
+
+    def test_a_refused_write_is_certain_and_not_reconciled(self):
+        for op in ('review', 'pr'):
+            with self.subTest(op=op):
+                server, box, client = self.make(['4xx'])
+                with self.assertRaises(GitHubError) as raised:
+                    self.write(op, client)
+                self.assertNotIsInstance(raised.exception, GitHubUncertain)
+                self.assertEqual((server.posts, server.reads), (1, 0))
+                self.assertEqual(statuses(box), [FAILED])
+
+
+class ReviewRetryTests(unittest.TestCase):
+    """R2-2 (agy): the retries of ``_submit_review`` never resubmit a native review whose
+    outcome the outbox left uncertain."""
+
+    def run_submit(self, outbox, errors, reviewer_gh=None):
+        calls = []
+
+        def submit(number, **kwargs):
+            calls.append(number)
+            if errors:
+                raise errors.pop(0)
+        stub = SimpleNamespace(identities=SimpleNamespace(outbox=outbox), review_retry_pause=0,
+                               log=lambda line: None, _app_login=lambda key: 'rev[bot]',
+                               gh=SimpleNamespace(pr_reviews=lambda number: []))
+        reviewer_gh = reviewer_gh or SimpleNamespace(submit_review=submit)
+        pr = SimpleNamespace(number=100, head_sha=SHA1)
+        try:
+            Dispatcher._submit_review(stub, reviewer_gh, pr, 'codex',
+                                      {'event': 'COMMENT', 'body': 'review'})
+            return calls, None
+        except GitHubError as exc:
+            return calls, exc
+
+    def test_an_uncertain_outcome_ends_the_retries_with_the_outbox(self):
+        calls, error = self.run_submit(object(), [GitHubUncertain('timed out')] * 3)
+        self.assertEqual(len(calls), 1)
+        self.assertIn('uncertain', str(error))
+
+    def test_a_certain_failure_is_still_retried_with_the_outbox(self):
+        calls, error = self.run_submit(object(), [GitHubError('HTTP 422')])
+        self.assertEqual((len(calls), error), (2, None))
+
+    def test_without_the_outbox_the_retries_are_as_before(self):
+        calls, error = self.run_submit(None, [GitHubUncertain('timed out')] * 3)
+        self.assertEqual(len(calls), 3)
+        self.assertIn('failed 3 times', str(error))
+
+    def test_through_the_outbox_a_lost_review_is_sent_at_most_twice(self):
+        gh = OutboxGH()
+        box, _ = make(gh)
+        gh.uncertain_writes = ['lost', 'lost']
+        calls, error = self.run_submit(box, [], box.client(gh, 'codex',
+                                                           {'pull_requests': 'write'}))
+        self.assertIsNotNone(error)
+        self.assertEqual(len(gh.sent), outbox_mod.MAX_SENDS)
+        self.assertEqual(statuses(box), [UNCERTAIN])
+
 
 class RestartTests(unittest.TestCase):
     """Criterion 3: a restart in the middle resumes from the outbox, without duplicates."""
@@ -515,6 +727,29 @@ class RestartTests(unittest.TestCase):
                 client.comment(7, 'next')
             self.assertEqual(gh.sent, ['record'])
             gh.clock.now += AFTER_A_CRASH  # it landed meanwhile
+            client.comment(7, 'next')
+            self.assertEqual(gh.bodies(7), ['record', 'next'])
+            self.assertEqual(gh.sent, ['record', 'next'])
+            self.assertEqual(statuses(box), [SENT, SENT])
+
+    def test_a_pause_between_the_record_and_the_post_does_not_shorten_the_wait(self):
+        # R2-2: recorded at START, the process stalls 400 seconds, then sends the POST, which
+        # GitHub applies 10 seconds later; the process stops and restarts at once. The time
+        # recorded before the send proves nothing: the wait counts from the restart.
+        gh = OutboxGH()
+        with tempfile.TemporaryDirectory() as state:
+            _, client = make(gh, state)
+            gh.pause, gh.crash = 400, 'late'
+            with self.assertRaises(Crash):
+                client.comment(7, 'record')
+            self.assertGreater(gh.clock.now, START + AFTER_A_CRASH)
+            box, client = make(gh, state)
+            self.assertEqual(len(box.resume()), 1)
+            with self.assertRaises(GitHubUncertain):
+                client.comment(7, 'next')
+            self.assertEqual(gh.sent, ['record'])
+            gh.clock.now += AFTER_A_CRASH
+            self.assertEqual(box.resume(), [])
             client.comment(7, 'next')
             self.assertEqual(gh.bodies(7), ['record', 'next'])
             self.assertEqual(gh.sent, ['record', 'next'])

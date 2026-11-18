@@ -99,11 +99,12 @@ not to open a second PR of the same attempt
 checks the base branch requires, for the wait for the
 [CI of a new head](devloop/reference.md#ci-of-a-new-head).
 
-`Tracker.comment` and `Tracker.edit_comment` tell three outcomes apart (#364): success, a
+`Tracker.comment` and `Tracker.edit_comment` tell three outcomes apart (#364), and so do
+`CodeReview.submit_review` and `CodeReview.create_pr` (#385): success, a
 failure (`GitHubError`: nothing was written) and an **uncertain** outcome (`GitHubUncertain`):
 a timeout, a connection lost after sending, a 5xx answer, so the write may have taken effect.
 The adapter treats a 4xx answer and a failure before the connection opened (`dial tcp`, `error
-connecting to`, a failed TLS handshake) as certain, and any other failure of these two writes
+connecting to`, a failed TLS handshake) as certain, and any other failure of these four writes
 as uncertain. `GitHubUncertain` is a `GitHubError`: the dispatcher still handles it as a failed
 write. `ports.reconcile_comment` tells whether an uncertain write took effect: it reads the
 comments of the issue or PR back and returns the one written by the same login whose body is
@@ -113,8 +114,10 @@ ambient `gh` login is known only as one of `trusted_users`), and `exclude` skips
 known as the publication of another write. The
 [publication outbox](devloop/protocol.md#publication-outbox) of
 [ADR 0004](adr/0004-passo-2-budget-stato-durevole.md) (#385, `devloop/outbox.py`) calls it
-before any new POST when `publication_outbox` is on, and sends a write again only on an
-absence read when the uncertain attempt could no longer take effect; it wraps the `comment`,
+before any new POST when `publication_outbox` is on (for a review or a pull request it reads
+the PR's native reviews or the open pull requests), and sends a write again only on an absence
+read when the uncertain attempt could no longer take effect, counted from a time the attempt is
+known to have ended, never from the time recorded before the send; it wraps the `comment`,
 `edit_comment`, `submit_review` and `create_pr` of the clients of `Identities.github` and is
 itself a `Backend`. Without it the dispatcher still handles an
 uncertain outcome as a failed write. The other writes and the reads report every failure as a

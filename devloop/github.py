@@ -65,11 +65,12 @@ class GitHubNotFound(GitHubError):
 
 
 class GitHubUncertain(GitHubError):
-    """A ``comment`` or ``edit_comment`` whose outcome is unknown (#364, ADR 0001 "Porta del
-    tracker"): a timeout, a connection lost after sending, a 5xx answer. Unlike any other
-    ``GitHubError``, the write may have taken effect: ``ports.reconcile_comment`` tells whether
-    it did. Being a ``GitHubError``, it is handled as a failed write wherever nothing reconciles
-    it."""
+    """A ``comment``, ``edit_comment``, ``submit_review`` or ``create_pr`` whose outcome is
+    unknown (#364, ADR 0001 "Porta del tracker"; the last two since #385): a timeout, a
+    connection lost after sending, a 5xx answer. Unlike any other ``GitHubError``, the write may
+    have taken effect: ``ports.reconcile_comment`` tells whether a comment did, the outbox of
+    the publications (``outbox.Outbox``) whether any of them did. Being a ``GitHubError``, it is
+    handled as a failed write wherever nothing reconciles it."""
 
 
 def _uncertain(stderr):
@@ -131,8 +132,9 @@ class GitHub:
         self._local.time_left = value
 
     def _gh(self, *args, stdin=None, check=True, write=False):
-        """Run `gh` with ``args``. ``write``: the call is a ``comment`` or ``edit_comment``,
-        whose timeout or uncertain failure raises ``GitHubUncertain`` (#364)."""
+        """Run `gh` with ``args``. ``write``: the call is a ``comment``, ``edit_comment``,
+        ``submit_review`` or ``create_pr``, whose timeout or uncertain failure raises
+        ``GitHubUncertain`` (#364, #385)."""
         kwargs = {}
         self._time_left(args)  # no token is minted once the time is spent
         if self._token is not None:
@@ -521,16 +523,22 @@ class GitHub:
                  '-F', 'body=@-', stdin=body, write=True)
 
     def create_pr(self, *, base, head, title, body):
-        """``(number, url)`` of the new PR. Labels are the dispatcher's job, not the author's."""
+        """``(number, url)`` of the new PR. Labels are the dispatcher's job, not the author's.
+        Raises ``GitHubUncertain`` when the outcome is unknown (#385), any other
+        ``GitHubError`` when the PR was certainly not opened."""
         created = json.loads(self._gh(
             'api', '-X', 'POST', f'repos/{self.repo}/pulls', '-f', f'title={title}',
-            '-f', f'head={head}', '-f', f'base={base}', '-F', 'body=@-', stdin=body).stdout)
+            '-f', f'head={head}', '-f', f'base={base}', '-F', 'body=@-', stdin=body,
+            write=True).stdout)
         return created['number'], created['html_url']
 
     def submit_review(self, number, *, commit, event, body):
-        """A native PR review (APPROVE, REQUEST_CHANGES or COMMENT) on ``commit``."""
+        """A native PR review (APPROVE, REQUEST_CHANGES or COMMENT) on ``commit``. Raises
+        ``GitHubUncertain`` when the outcome is unknown (#385), any other ``GitHubError`` when
+        the review was certainly not submitted."""
         self._gh('api', '-X', 'POST', f'repos/{self.repo}/pulls/{number}/reviews',
-                 '-f', f'commit_id={commit}', '-f', f'event={event}', '-F', 'body=@-', stdin=body)
+                 '-f', f'commit_id={commit}', '-f', f'event={event}', '-F', 'body=@-', stdin=body,
+                 write=True)
 
     def merge_pr(self, number, head):
         """Merge PR ``number`` with a merge commit, only if its head is still ``head``. The
