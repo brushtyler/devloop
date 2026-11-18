@@ -4,13 +4,14 @@ Moved from ``devloop/dispatcher.py`` without changes (#295, step S5 of #261): th
 approval before its promotion (``_approval_current``), the policy receipt of a PR
 (``_receipt``, ``_receipt_and_paths``), the checks of an advanced base (``_base_check``,
 ``_base_checks``, ``_merge_check``), the choice of the reviewers (``_select``), the policy
-records and the escalation of a level (``_policy_comment``, ``_escalate_level``), the promotion
-(``_promote``, ``_promote_zero``) and its level-0 and acceptance checks (``_zero_problem``,
-``_acceptance_problems``, ``_refuse_zero``), the receipt of a promoted PR (#135:
-``_checked_receipt``, ``_publish_receipt``, ``_supersede_receipts``), the revocation of a
+records and the escalation of a level (``_policy_comment``, ``_publish_policy``,
+``_escalate_level``), the promotion (``_promote``, ``_promote_zero``) and its level-0 and
+acceptance checks (``_zero_problem``, ``_acceptance_problems``, ``_refuse_zero``), the receipt
+of a promoted PR (#135: ``_checked_receipt``, ``_supersede_receipts``), the revocation of a
 readiness (``_do_revoke``), the
-merge commands and the merge (``_do_hold``, ``_do_merge``) and the issues a merge resolved
-(``_close_merged_issue``, ``_do_merged_issue``). ``Dispatcher`` inherits the methods.
+merge commands and the merge (``_do_hold``, ``_do_merge``, ``_record_merge``) and the issues a
+merge resolved (``_close_merged_issue``, ``_do_merged_issue``). Since #338 one comment carries a
+promotion, its receipt and the merge that follows it. ``Dispatcher`` inherits the methods.
 """
 
 import itertools
@@ -24,7 +25,8 @@ from . import receipt as pr_receipt
 from .github import GitHubError
 from .ledger import collect as ledger_collect
 from .ledger import timestamp as ledger_timestamp
-from .markdown import dispatcher_header, publishable
+from .markdown import (MAX_BODY, dispatcher_header, publishable, read_marker, split_markers,
+                       with_record)
 from .planning import MERGING, label_names, pending_reviewers, touched_by_base
 from .policy import describe as describe_receipt
 from .policy import (MAX_LISTED_PATHS, ZERO_LEVEL, changes_requested, check_outcome,
@@ -175,17 +177,43 @@ class MergeMixin:
                     '(kind, model, effort, review_args), e nessuno può avere l\'identità o il '
                     'modello (kind, model, effort) dell\'implementer o di chi ha corretto la PR')
 
-    def _policy_comment(self, pr, title, text, receipt, event, bases=(), cls=None):
+    def _policy_comment(self, pr, title, text, receipt, event, bases=(), cls=None,
+                        prepared=None):
         """A dispatcher ``policy`` record; ``bases``: the base checks it relied on (#160);
-        ``cls``: the class of the escalation it records, if any (#182)."""
+        ``cls``: the class of the escalation it records, if any (#182); ``prepared``: the
+        receipt of a promotion, written in the same comment (``_publish_policy``)."""
         payload = {'event': event, 'receipt': receipt}
         if bases:
             payload['bases'] = list(bases)
         if cls:
             payload['class'] = cls
-        self.gh.comment(pr.number, publishable(
-            dispatcher_header() + f'\n## {title}\n\n{text.strip()}\n\n'
-            + describe_receipt(receipt), 'policy', payload))
+        self._publish_policy(pr, dispatcher_header() + f'\n## {title}\n\n{text.strip()}\n\n'
+                             + describe_receipt(receipt), payload, prepared)
+
+    def _publish_policy(self, pr, text, payload, prepared=None):
+        """Write the ``policy`` record ``payload`` with ``text``. With ``prepared``, the receipt
+        of a promotion (#135, ``_checked_receipt``), every receipt still current on the PR is
+        marked superseded first, so that only the latest promotion's holds; then one comment
+        carries both (#338): the receipt's section after ``text``, its ``receipt`` record after
+        the ``policy`` one. When the two do not fit one comment of GitHub they are written as
+        two, the promotion and then its receipt, as before #338. A failure raises: the promotion
+        stops before its label, as for any ``gh`` failure."""
+        if prepared is None:
+            self.gh.comment(pr.number, publishable(text, 'policy', payload))
+            return
+        content, thread = prepared
+        self._supersede_receipts(pr.number,
+                                 f'la promozione n. {content["promotion"]} la sostituisce',
+                                 thread, strict=True)
+        body = publishable(text.rstrip() + '\n\n' + pr_receipt.section(content), 'policy',
+                           payload, records=[('receipt', pr_receipt.record(content))])
+        if len(body) <= MAX_BODY:
+            self.gh.comment(pr.number, body)
+        else:
+            self.log('  promotion and receipt too long for one comment: written apart')
+            self.gh.comment(pr.number, publishable(text, 'policy', payload))
+            self.gh.comment(pr.number, pr_receipt.render(content))
+        self.log(f'  receipt of promotion {content["promotion"]} written')
 
     def _escalate_level(self, pr, receipt):
         """Not enough independent reviewers for the level: no review, no promotion, the
@@ -233,8 +261,7 @@ class MergeMixin:
             f'Approvazione del commit `{records[0]["head_sha"][:12]}` da parte di {by} '
             'confermata: la ricevuta di policy ricalcolata coincide con quella della review'
             + (', a parte la base' if bases else '') + '.' + revalidated,
-            current, 'promoted', bases)
-        self._publish_receipt(pr, prepared)
+            current, 'promoted', bases, prepared=prepared)
         self.gh.edit_labels(pr.number, add=[lb.ready_to_merge], remove=[lb.review, lb.changes])
         return None
 
@@ -280,14 +307,13 @@ class MergeMixin:
         coherent, prepared = self._checked_receipt(pr, receipt, head, None, pr.reviews)
         if not coherent:
             return None
-        self.gh.comment(pr.number, publishable(
-            dispatcher_header() + '\n## Pronta per il merge (livello 0)\n\n'
+        self._publish_policy(
+            pr, dispatcher_header() + '\n## Pronta per il merge (livello 0)\n\n'
             f'Il commit `{head[:12]}` non richiede review: la label di livello 0 è stata messa da '
             'un utente fidato, il diff è interamente nell\'allowlist e tutti i controlli attesi '
             'si sono conclusi con `success`. Il merge resta un\'azione dell\'operatore.\n\n'
             + listed + '\n\n' + describe_receipt(receipt),
-            'policy', {'event': 'promoted', 'receipt': receipt, 'checks': states}))
-        self._publish_receipt(pr, prepared)
+            {'event': 'promoted', 'receipt': receipt, 'checks': states}, prepared)
         self.gh.edit_labels(pr.number, add=[lb.ready_to_merge], remove=[lb.review, lb.changes])
         return None
 
@@ -331,19 +357,6 @@ class MergeMixin:
                 cls=RECEIPT_CONFLICT)
             return False, None
         return True, (content, thread)
-
-    def _publish_receipt(self, pr, prepared):
-        """Write the receipt of a promotion, after marking superseded every receipt still
-        current on the PR: only the latest promotion's holds. A failure raises: the promotion
-        stops before its label, as for any ``gh`` failure."""
-        if prepared is None:
-            return
-        content, thread = prepared
-        self._supersede_receipts(pr.number,
-                                 f'la promozione n. {content["promotion"]} la sostituisce',
-                                 thread, strict=True)
-        self.gh.comment(pr.number, pr_receipt.render(content))
-        self.log(f'  receipt of promotion {content["promotion"]} written')
 
     def _supersede_receipts(self, number, why, comments=None, strict=False):
         """Mark superseded, because ``why``, every receipt of PR ``number`` still current: the
@@ -542,7 +555,8 @@ class MergeMixin:
                      commands=[], finding_problems=[], policy=[], zero_head=None,
                      zero_problem='', stale_receipt=False, revoked=None, operator_comments=[],
                      rereview=False, round_comments=[], acceptance=[], hold=None)
-        self._read_thread(pr, self._pr_thread(pr.number))
+        thread = self._pr_thread(pr.number)
+        self._read_thread(pr, thread)
         if pr.hold:
             return skip('a hold or release command waits to be applied')
         if pr.finding_problems:
@@ -609,22 +623,54 @@ class MergeMixin:
         # The comment names who wrote to the base (#323): the dispatcher only decides the merge.
         executor = (f'con l\'app `{merged_by.removesuffix("[bot]")}`' if merged_by
                     else 'con il login `gh` locale')
+        section = (
+            '## Mergiata da devloop\n\n'
+            f'devloop ha deciso il merge e l\'ha eseguito {executor}: commit `{head[:12]}` '
+            'con un merge commit, legato a quel '
+            f'head (`--match-head-commit`), in modalità `{mode}`, al livello '
+            f'{current["level"]}. Subito prima ha ricontrollato le direttive di merge: CI '
+            '`pass`, `MERGEABLE` e `CLEAN`, nessun finding aperto, nessuna label '
+            f'`{lb.needs_operator}` o `{lb.merge_hold}`, e le condizioni della promozione con la '
+            'ricevuta di policy ricalcolata. Il branch resta.')
         try:
-            self.gh.comment(pr.number, publishable(
-                dispatcher_header() + '\n## Mergiata da devloop\n\n'
-                f'devloop ha deciso il merge e l\'ha eseguito {executor}: commit `{head[:12]}` '
-                'con un merge commit, legato a quel '
-                f'head (`--match-head-commit`), in modalità `{mode}`, al livello '
-                f'{current["level"]}. Subito prima ha ricontrollato le direttive di merge: CI '
-                '`pass`, `MERGEABLE` e `CLEAN`, nessun finding aperto, nessuna label '
-                f'`{lb.needs_operator}` o `{lb.merge_hold}`, e le condizioni della promozione con la '
-                'ricevuta di policy ricalcolata. Il branch resta.\n\n' + describe_receipt(current),
-                'merged', payload))
+            self._record_merge(pr, thread, head, current, section, payload)
         except GitHubError as exc:
             # The PR is merged: escalating it would only label a closed PR.
             self.log(f'  the merged record could not be written: {exc}')
         self._close_merged_issue(pr, head, mode)
         return None
+
+    def _record_merge(self, pr, thread, head, receipt, section, payload):
+        """Write the ``merged`` record ``payload`` of the merge of ``head``, with ``section``,
+        its text, in the comment of the promotion it concludes (#338): the latest ``promoted``
+        record the dispatcher signed in ``thread``, read just before the merge, for the merged
+        head and with no receipt superseded. The comment is edited: the section follows its
+        text, with the policy receipt recomputed for the merge only when it reads differently
+        from the promotion's, and the ``merged`` record follows its other records. Without such
+        a comment, when the edited one would not fit GitHub or when the edit fails, the record
+        is a comment of its own, as before #338."""
+        alone = dispatcher_header() + '\n' + section + '\n\n' + describe_receipt(receipt)
+        promoted = self._dispatcher_records(thread, 'policy', 'promoted')
+        if promoted:
+            position, record = promoted[-1]
+            comment = thread[position]
+            body = comment.get('body') or ''
+            carried = read_marker(body, 'receipt')
+            if (comment.get('id') is not None and record['receipt']['head'] == head
+                    and (carried is None or carried['state'] == 'current')):
+                text = split_markers(body)[0] + '\n\n' + section
+                if describe_receipt(receipt) != describe_receipt(record['receipt']):
+                    text += '\n\nRicevuta di policy ricalcolata per il merge:\n\n' \
+                            + describe_receipt(receipt)
+                edited = with_record(body, 'merged', payload, text=text)
+                try:
+                    if len(edited) <= MAX_BODY:
+                        self.gh.edit_comment(comment['id'], edited)
+                        self.log('  merged record added to the comment of the promotion')
+                        return
+                except GitHubError as exc:
+                    self.log(f'  the comment of the promotion could not be edited: {exc}')
+        self.gh.comment(pr.number, publishable(alone, 'merged', payload))
 
     def _close_merged_issue(self, pr, head, mode):
         """Close the issue of ``pr``, the one its marker names, after devloop merged it (#228),

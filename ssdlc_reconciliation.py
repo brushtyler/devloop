@@ -118,12 +118,18 @@ def _authorization(authorization, proposal):
     required = {'schema_version', 'transition_id', 'proposal_sha256', 'profile_sha256', 'decisions_sha256',
                 'authorized', 'source_fenced', 'old_controller_sha256', 'new_controller_sha256',
                 'accept_unknown_history', 'authorize_extensions'}
+    # Without the operator's source_fenced attestation, publication needs the automatic
+    # fencing proof of an admitted run (ssdlc_fencing_proof), or refuses.
+    automatic = isinstance(authorization, dict) and 'source_fenced' not in authorization
+    if automatic:
+        required.discard('source_fenced')
     if any(v['added'] for v in proposal.get('scope_diff', {}).values()):
         required.add('scope_diff_sha256')
     if not isinstance(authorization, dict) or set(authorization) != required:
         raise TransitionError('Reconciliation needs exact explicit authorization fields')
     if (type(authorization['schema_version']) is not int or authorization['schema_version'] != 1
-            or authorization['authorized'] is not True or authorization['source_fenced'] is not True
+            or authorization['authorized'] is not True
+            or not automatic and authorization['source_fenced'] is not True
             or authorization['transition_id'] != proposal['transition_id']
             or authorization['proposal_sha256'] != digest(proposal)
             or authorization['profile_sha256'] != proposal['profile_sha256']
@@ -403,6 +409,7 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
         if (store.root / 'active.json').exists():
             selected = store.load()
             if selected != projection: raise TransitionError('Another execution generation is already selected')
+            store.replayed(proposal, normalized)
             resolve_execution(ticket)
             from ssdlc_preparations import update, clear_pending
             update(ticket, proposal['transition_id'], namespace='execution', status='ACTIVE')

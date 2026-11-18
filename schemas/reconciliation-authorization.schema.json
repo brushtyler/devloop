@@ -11,7 +11,6 @@
     "schema_version",
     "transition_id",
     "authorized",
-    "source_fenced",
     "accept_unknown_history",
     "authorize_extensions"
   ],
