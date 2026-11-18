@@ -866,7 +866,9 @@ of its story: turns in total, per role and per phase, time, and dollars where a 
 A turn the envelope does not cover is refused before it starts, with an escalation of class
 `budget` that says which limit and how much the story has used; so is a turn of an issue with no
 story. Consumption is cumulative across child issues, attempts, fallback models, retries and
-restarts, and nothing refunds a booking. The readiness check stays outside the envelope. With it
+restarts, and nothing refunds a booking. A story keeps the limits of its first booking, recorded
+in the journal: a later change of `[budget]` applies to new stories only. agy and codex accept
+only `unmetered_quota`, with the turn caps. The readiness check stays outside the envelope. With it
 off, devloop books nothing and behaves as before.
 
 ### Advisory review for the operator
@@ -924,7 +926,9 @@ issue and the PR description without attribution headers and markers (see
   block on [uncertain turns](protocol.md#turn-journal) (`block_uncertain_turns`): it
   escalates as `uncertain_turn`, with the turns to reconcile, once for those turns (taking
   `agent:ready-to-merge` away, as every escalation does), and the PR gets no other advisory
-  action until they are reconciled.
+  action until they are reconciled. So does a turn the [budget envelope](reference.md#budget-envelope)
+  refuses: it escalates as `budget` once for that refusal, and the PR gets no other advisory
+  action while the story does not cover the turn.
 - **Cost.** One turn per head, recorded in the [ledger](protocol.md#evidence-and-telemetry) as a
   `turn` of kind `advisory`, and counted in the totals of the receipt.
 

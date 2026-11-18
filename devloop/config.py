@@ -800,7 +800,8 @@ def parse_budget(table, agents, roles=BUDGET_BASE_ROLES, story_identity=False):
     then every value is required, with no default (D2): ``turns`` and ``wall_seconds`` (at least
     1), ``metered_usd`` and ``cli_estimate_usd`` (dollars, above 0), ``role_turns`` with each
     of ``roles``, ``phase_turns`` with each kind of phase, and in ``usage`` a rule for each agent
-    whose kind reports no dollar figure (codex, agy). A story is the unit of the envelope: it
+    whose kind reports no dollar figure (codex, agy): only ``unmetered_quota`` (D2), while a
+    ``reserve_per_invocation`` is accepted only for claude. A story is the unit of the envelope: it
     needs ``story_identity``. A token cap is refused, on or off: not supported yet."""
     where = 'budget'
     if not isinstance(table, dict):
@@ -839,14 +840,22 @@ def parse_budget(table, agents, roles=BUDGET_BASE_ROLES, story_identity=False):
     for agent, rule in usage.items():
         if agent not in agents:
             raise ConfigError(f'{where}.usage.{agent}: unknown agent {agent!r}')
-        rules.append((agent, _budget_rule(rule, f'{where}.usage.{agent}')))
+        parsed = _budget_rule(rule, f'{where}.usage.{agent}')
+        if (agents[agent].kind not in BUDGET_REPORTED_COST
+                and dict(parsed)['model'] != 'unmetered_quota'):
+            # D2: an agent whose CLI reports no cost (agy, codex) is bounded by the turn caps
+            # alone, never by a reserve in USD that nothing attests.
+            raise ConfigError(f'{where}.usage.{agent}.model: {agents[agent].kind} reports no '
+                              'dollar cost: only unmetered_quota, with the turn caps, and no '
+                              'reserve in USD (ADR 0004, D2)')
+        rules.append((agent, parsed))
     if enabled:
         declared = dict(rules)
         for key, agent in agents.items():
             if agent.kind not in BUDGET_REPORTED_COST and key not in declared:
                 raise ConfigError(f'{where}.usage.{key}: missing: {agent.kind} reports no dollar '
-                                  'cost, and its turns need a declared rule (unmetered_quota or '
-                                  'reserve_per_invocation)')
+                                  'cost, and its turns need a declared rule: unmetered_quota, '
+                                  'with the turn caps (ADR 0004, D2)')
     values['usage'] = tuple(rules)
     return BudgetPolicy(**values)
 

@@ -399,7 +399,7 @@ when one is missing or invalid:
 | `metered_usd`, `cli_estimate_usd` | Dollar caps above 0, kept apart as in the engine: measured spend and estimates. A cap is exhausted at equality, so 0 would refuse every turn. No CLI of devloop reports a measured spend; claude reports an estimate |
 | `role_turns` | A whole number of at least 0 for each role: `implement`, `fix`, `review`, `sync`, and `conclave` and `advisory` when the [conclave](guide.md#conclave-on-a-block) or the [advisory review](guide.md#advisory-review-for-the-operator) is configured. The role of a turn is its kind |
 | `phase_turns` | A whole number of at least 0 for each kind of phase: `implementation`, the only one of the current flow |
-| `usage.<agent>` | The rule for unknown usage of an agent whose CLI reports no cost (codex, agy), required for each: `model = "unmetered_quota"` (no reserve in USD: only the turn caps bound it, the rule ADR 0004 recommends for them, D2) or `"reserve_per_invocation"` with `metered_usd` and `cli_estimate_usd` above 0 (a reserve booked before each turn), and a `reason`. claude may have one too; without one its estimate is charged |
+| `usage.<agent>` | The rule for unknown usage of an agent whose CLI reports no cost (codex, agy), required for each: `model = "unmetered_quota"` (no reserve in USD: only the turn caps bound it, D2), the only rule they accept, and a `reason`. claude may have one too: `unmetered_quota`, or `"reserve_per_invocation"` with `metered_usd` and `cli_estimate_usd` above 0 (a reserve booked before each turn); without one its estimate is charged |
 
 Also on: a story is the unit of the envelope, so `enabled = true` needs `story_identity = true`.
 A token cap (any key with `token` in its name, in the table, in `role_turns` or in a rule) stops
@@ -426,10 +426,21 @@ before its intent, its ledger record and its CLI, when:
 - its issue belongs to no story, for example one taken over before `story_identity` was on
   (`SCOPE_REQUIRED`).
 
-The step then escalates to the operator (class `budget`, critical), with the limit and what the
-story used: turns in total, of the role and of the phase, the dollars charged and the deadline.
-A conclave call or an advisory review refused this way escalates as for the block on uncertain
-turns.
+**The envelope of a story is frozen** at its first booking: every booking records the limits of
+its story (`envelope`: the turn caps, the dollar caps, `wall_seconds` and the deadline), and the
+later turns are checked against them, across restarts. A changed `[budget]` applies to new
+stories only: it neither extends nor shrinks one already booked, and the refusal says so when the
+configuration differs. Extending a story is an operator's decision, case by case, not available
+yet. The rule of an agent for unknown usage is read from the configuration at each booking, which
+records it.
+
+The step then escalates to the operator (class `budget`, critical, with the `category` of the
+refusal), with the limit and what the story used: turns in total, of the role and of the phase,
+the dollars charged and the deadline. A conclave call or an advisory review refused this way
+escalates as for the block on uncertain turns: the check runs before the conclave records the call
+as started, and before the checkout of the advisory review. An advisory review whose refusal a
+`budget` escalation of the PR already names, with the same category, is not planned again, and
+escalates no more, until the story covers the turn again.
 
 **Consumption** is cumulative: every turn booked for a story counts, whatever its issue, attempt,
 model, outcome or process, and nothing refunds a booking. A failed turn, one not dispatched and

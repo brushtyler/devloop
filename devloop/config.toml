@@ -232,9 +232,10 @@ required_timeout_minutes = 30
 # cap is exhausted at equality: 0 would refuse every turn), role_turns for
 # implement, fix, review and sync (conclave and advisory too when configured), phase_turns for
 # implementation, and in [budget.usage.<agent>] a rule for each agent whose CLI reports no cost
-# (codex, agy): model = "unmetered_quota" (no reserve in USD, only the turn caps) or
-# "reserve_per_invocation" (with metered_usd and cli_estimate_usd), and a reason. Token caps are
-# refused: not supported yet. Off here: the values and turning it on are the operator's decisions
+# (codex, agy): model = "unmetered_quota" (no reserve in USD, only the turn caps, D2) and a
+# reason; "reserve_per_invocation" (with metered_usd and cli_estimate_usd) only for claude. The
+# limits a story gets at its first booking stay its own: a later change applies to new stories.
+# Token caps are refused: not supported yet. Off here: the values and turning it on are the operator's decisions
 # (ADR 0004, D2 and D8).
 # The shape, with no value: the values are not decided yet (D2).
 [budget]

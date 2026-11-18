@@ -1663,9 +1663,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 # A readiness check runs again only on an issue with agent:ready: one the
                 # operator may retry keeps it, as a failed check does.
                 remove = [label for label in remove if label != lb.ready]
-            extra = ({'turns': [t['turn'] for t in exc.turns]}
-                     if isinstance(exc, TurnBlocked) and not isinstance(exc, BudgetRefused)
-                     else None)
+            extra = ({'category': exc.category} if isinstance(exc, BudgetRefused)
+                     else {'turns': [t['turn'] for t in exc.turns]}
+                     if isinstance(exc, TurnBlocked) else None)
             self._escalate(number, reason, getattr(exc, 'tail', ''), remove=remove, cls=cls,
                            supervised=supervised, why=why, retry=retry, extra=extra)
         except GitHubError as gh_exc:
@@ -1740,7 +1740,25 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                      f'({exc.category})')
             raise
 
-    # Attempts (#384) ---------------------------------------------------------
+    def _check_budget(self, number, kind, agent):
+        """With the budget on (#365), raise ``BudgetRefused`` when the envelope of the story of
+        the work of ``number`` would not cover a turn of ``kind`` of ``agent`` (``AgentConfig``)
+        now: the check of the booking, read only, for a step that records something before its
+        turn (a conclave call recorded as started) or that must not plan a turn already refused
+        and escalated (the advisory review). The booking itself stays in ``_open_turn``, under
+        the journal's lock. Without a ledger, or with the budget off, nothing."""
+        budget = self.cfg.budget
+        if self.ledger is None or not budget.enabled or kind in OUTSIDE:
+            return
+        try:
+            budget_reserve(budget, self.ledger.journal, repo=self.cfg.repo,
+                           issue=self._work_issue(number), kind=kind, agent=agent)
+        except BudgetRefused as exc:
+            self.log(f'  turn {kind} refused on #{number}: not covered by the budget envelope '
+                     f'({exc.category})')
+            raise
+
+    # Attempts (#384)---------------------------------------------------------
     def _turn_attempt(self, number, issue, kind):
         """With ``attempt_identity`` (#384), the id of the attempt a turn of ``kind`` on
         ``number`` belongs to, of the work of issue ``issue``; None without one, as before.
