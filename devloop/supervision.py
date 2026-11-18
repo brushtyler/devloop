@@ -15,6 +15,11 @@ the attribution header:
 - ``/devloop decide <text>``: decide the gaps of the readiness check otherwise (#258): the text,
   the rest of the comment, reaches the next check through the dispatcher's record;
 - ``/devloop escalate <reason>``: hand the escalation to the operator.
+
+A trusted user may use the same commands on an escalation to the operator (#321), in any merge
+mode: ``retry`` of a step it records, critical classes included, and ``accept-defaults`` or
+``decide`` on a ``preflight_default`` readiness check. A command that does not apply is always
+answered, with how to resume.
 """
 
 # Non-critical classes: the supervisor decides them in ``auto``.
