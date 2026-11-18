@@ -934,6 +934,17 @@ class AcceptDefaultsTests(Case):
         self.assertIn('**always**\n`operator_decision`, never `default_available`', text)
         self.assertIn('operator_only_paths', text)
 
+    def test_the_prompt_counts_decisions_recorded_in_an_adr_on_the_base_branch(self):
+        # #367: a decision recorded in an ADR on the base branch is the operator's; a point the
+        # ADR leaves open is still a gap.
+        text = (PROMPT_DIR / 'preflight.md').read_text(encoding='utf-8')
+        self.assertIn('"Decise dall\'operatore"', text)
+        self.assertIn('`docs/adr/` reaches `$base_branch` only through the operator\'s merge', text)
+        self.assertIn('stays\n`operator_decision`', text)
+        cycle = (PROMPT_DIR.parent.parent / 'docs' / 'adr' / 'README.md').read_text(encoding='utf-8')
+        self.assertIn('Decise dall\'operatore il <data>', cycle)
+        self.assertIn('**citano la sezione dell\'ADR su `main`**', cycle)
+
 
 DECISION = ('/devloop decide Formato: YAML invece di JSON.\n\n'
             '- Il resto dei default va bene.')
