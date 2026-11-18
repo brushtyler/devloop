@@ -121,6 +121,20 @@
       },
       "description": "Explicit per-engine rule for live invocations that report no dollar cost. Absent is not zero: an engine that never reports cost is refused before launch, and a returned live row with null usage blocks the next dispatch."
     },
+    "credit_caps": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "enum": [
+          "codex",
+          "agy"
+        ]
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/credit_cap"
+      },
+      "description": "Explicit per-engine cap in credits for the subscription CLI route of an engine that charges in credits (#214). Each call books its declared credit reserve against the cap. A credit cap adds to the USD caps and never replaces the USD obligation of the route, unless an operator-authorized transition (substitute_credit_cap of operator-limit-extension-v1) sets replaces_usd."
+    },
     "task_budget": {
       "type": "object",
       "additionalProperties": false,
@@ -404,6 +418,44 @@
           }
         }
       ]
+    },
+    "credit_cap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unit",
+        "cap",
+        "per_invocation",
+        "reason"
+      ],
+      "properties": {
+        "unit": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,39}$",
+          "not": {
+            "enum": [
+              "usd"
+            ]
+          },
+          "description": "The credit unit the route charges in; never USD, and never converted to or from it."
+        },
+        "cap": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "per_invocation": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Credits booked before each call of the engine; the booking stays charged."
+        },
+        "reason": {
+          "$ref": "#/$defs/live_usage_reason"
+        },
+        "replaces_usd": {
+          "const": true,
+          "description": "Set only by the operator-authorized transition substitute_credit_cap, bound in binding.limit_extensions; refused in a new profile."
+        }
+      }
     },
     "task_caps": {
       "type": "object",

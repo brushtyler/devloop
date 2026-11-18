@@ -393,10 +393,13 @@ def _admit(engine, bound, limits, *, reserved=False):
     the proven non-dispatch ``NotDispatched`` rather than a stop."""
     from ssdlc_recovery import NotDispatched, RecoveryStop
     refuse = NotDispatched if reserved else RecoveryStop
+    credit_caps = None
     if limits is not None:
         policy = limits._load(repair=False)[0]['policy']
         spend_cap = estimate_cap = True
         declarations = policy.get('live_unknown_usage', {})
+        # Caps in credits exist only in a frozen profile, configured explicitly (#214).
+        credit_caps = policy.get('credit_caps', {})
     else:
         # Only an explicit zero disables a cap; a malformed value leaves it in force.
         try:
@@ -414,7 +417,7 @@ def _admit(engine, bound, limits, *, reserved=False):
     provider, route = _admission_target(engine, bound, limits)
     try:
         telemetry_schema.admit(provider, route, spend_cap=spend_cap, estimate_cap_active=estimate_cap,
-                               declarations=declarations)
+                               declarations=declarations, credit_caps=credit_caps)
     except telemetry_schema.AdmissionRefused as exc:
         raise refuse('LIMIT_REACHED', str(exc)) from None
     gate = _quota_admission(route, bound, refuse) if route in quota_schema.ROUTES else None
