@@ -22,7 +22,7 @@ from .context import (_failure_text, _format_conflicts, _format_findings, _revie
                       _start_failure, _template, _trusted_comments, docs_diff_section,
                       docs_map_section, docs_review_section, format_ci_summary,
                       format_fix_requests, format_operator_comments, format_previous_rounds)
-from .github import GitHubError, job_id
+from .github import GitHubError, GitHubUncertain, job_id
 from .ledger import attempt_branch, attempt_marker, fix_register
 from .localtests import failed_modules, select_modules, suite_summary
 from .markdown import (dispatcher_header, publishable, render_fix, render_native_review,
@@ -630,7 +630,13 @@ class ActionsMixin:
         each new attempt the reviews are read again, and a review already published with the
         same body by the reviewer's app ends the retries. After the last failure it raises
         ``GitHubError``: the step escalates like any failed write, and the verdicts already
-        published stay recorded."""
+        published stay recorded.
+
+        With the outbox of the publications (#385) an uncertain outcome (``GitHubUncertain``)
+        ends the retries at once: the outbox already reconciled it, and only it may decide
+        whether the review is sent again. A certain failure is still tried again: nothing was
+        written."""
+        outbox = getattr(self.identities, 'outbox', None) is not None
         login = self._app_login(key)
         error = None
         for attempt in range(1, REVIEW_ATTEMPTS + 1):
@@ -652,6 +658,12 @@ class ActionsMixin:
                 error = exc
                 self.log(f'  native review of {key} not submitted (attempt {attempt} of '
                          f'{REVIEW_ATTEMPTS}): {exc}')
+                if outbox and isinstance(exc, GitHubUncertain):
+                    # Left pending in the outbox, which settles it before any later write
+                    # on this PR: a new submission here could duplicate it.
+                    raise GitHubError(f'the review of {key} was not published: the outcome of '
+                                      f'its native review, the record devloop reads, is '
+                                      f'uncertain, left to the outbox ({exc})') from exc
         raise GitHubError(f'the review of {key} was not published: its native review, the '
                           f'record devloop reads, failed {REVIEW_ATTEMPTS} times ({error})')
 

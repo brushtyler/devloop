@@ -513,6 +513,9 @@ Since #325 each review is **one element** of the PR's timeline:
   reviews again, and a review with the same body already published by that app (an answer lost
   after GitHub accepted it) ends the retries. After the third failure the step escalates like
   any failed write (`failure`); the verdicts of other reviewers already published stay recorded.
+  With the [publication outbox](#publication-outbox) an uncertain outcome the outbox could not
+  settle ends the retries at once, and the step escalates the same way: only the outbox may send
+  that review again (#385).
 - **An agent without an app** publishes with the operator's `gh` login, which may also be the
   PR's author: it keeps the review comment, as before, and submits no native review.
 
@@ -1096,6 +1099,93 @@ branch is a devloop PR of issue `<n>` only with the marker of attempt `k`; the b
 holds the first attempt or a PR of none. Otherwise its marker does not hold, as when it is lost.
 PRs opened before, or with the identity off, have no attempt in their marker: they are handled as
 before, and their turns belong to no attempt.
+
+### Publication outbox
+
+Since #385 (ADR 0004, P2-4), with `publication_outbox = true` (off by default: ADR 0004, D8),
+every comment, comment edit, native review and pull request devloop writes on GitHub passes
+through an outbox (`devloop/outbox.py`): ledger records, agents' outputs (the implementer's pull
+request, the native review of a reviewer with an app, the review comment of one without),
+receipts and every other comment written with the dispatcher's or an agent's client. Without it
+devloop publishes as before. The outbox keeps its events in the [turn journal](#turn-journal), in
+the same hash chain; the turns ignore them:
+
+- `publication`: a write about to be sent, its first attempt, with its id (`pub-<16 hex
+  digits>`), `op` (`comment`, `edit`, `review` or `pr`), its arguments (the issue or PR, the
+  comment of an edit, the commit and event of a review, the base, head and title of a pull
+  request), the actor and permissions of its client, the **whole body**, the time and `held`
+  (whether its `gh` holds the dispatcher lock, see below). It is
+  durable before anything is sent, and nothing else is written before the send: if it cannot be
+  written, nothing is sent, nothing is left for a restart to send, and the write fails like any
+  `gh` failure.
+- `publication_sending`: a later attempt about to be sent, with its time and `held`. From
+  `publication` or
+  here until an answer is recorded, the outcome is unknown.
+- `publication_sent`, with the id of what was published (the comment's, the review's when known,
+  the pull request's number) and how it was known (`response` or `reconciliation`);
+  `publication_failed`, a failure reported to the caller, with its time, certain (final: GitHub
+  wrote nothing) or `uncertain`; `publication_dropped`, never to be published, with why.
+
+**No POST repeated on an uncertain outcome.** A write whose outcome is uncertain (a timeout, a
+connection lost after sending, a 5xx answer: `GitHubUncertain`, #364; for a native review and a
+pull request too, since #385) is reconciled: a comment
+with `ports.reconcile_comment`, the comment of the same author (the app's login; for the ambient
+`gh` login, one of `trusted_users`) with exactly that body, skipping the comments the outbox
+already knows as another write's publication; an edit on the edited comment only; a review among
+the PR's native reviews of the same author; a pull request among the open ones, from its head
+branch, title and body. Found, the write is published. **Absence alone is no proof** while the
+attempt may still take effect: a read counts as conclusive only when it starts 30 seconds after
+a time the attempt is known to have ended (GitHub ends the requests it takes more than 10
+seconds to serve). The time recorded before the send never counts: a pause of the process may
+come between it and the send. In the process that sent it, that time is the end of the call,
+measured once the call returned (its `gh` ended, killed at its timeout). For an attempt whose
+end is unknown because the process stopped, it is when the restarted dispatcher first read the
+journal, under the dispatcher lock, provided the attempt is `held`: devloop passes the lock to
+the `gh` of each write, which keeps it open while it runs, so the lock is free only once that
+`gh` has ended, also one that outlived the dispatcher that started it. The timeout of a `gh`
+call proves nothing after a stop: the parent that applied it is gone, and the `gh` may run on
+(stopped and resumed, for instance) with no limit. A `gh` still running after its dispatcher
+stopped therefore keeps the next one from starting (`another dispatcher is running (lock
+held)`) until it ends. An attempt not `held` has no proof of its end: it is never sent again,
+only reconciled, and dropped if it is still absent 300 seconds (the timeout of a `gh` call)
+plus 30 after the restart. The write that got the
+uncertain answer waits for that moment and reads again; only a conclusive absence sends it once
+more, at most two sends in all. Otherwise, or when GitHub cannot be read, the caller gets the
+uncertain failure, as before the outbox; so does an error of the client that is not a `gh`
+failure (an answer it cannot read), and the write is then only reconciled. A native review
+whose outcome stays uncertain is not submitted again by the review's own retries: the outbox
+settles it before any later write on the PR.
+
+**Before every new write** on an issue or PR (on a comment for an edit, on a head branch for a
+pull request), the writes about the same one still pending, and not running in another action,
+are settled first; if one cannot be (GitHub not readable, or its absence not conclusive yet), the
+new write is not sent and fails like any `gh` failure.
+
+**What the caller was told holds.** A write whose caller was told it failed is never sent again:
+at most a reconciliation finds it, published by an attempt already made. Its failure, like the
+`publication_sent` of a write published, is an outcome devloop already acted on: if the journal
+cannot take it, it is kept in memory and written before any later event of the journal, of the
+outbox or of the turns (a turn's `not_dispatched` included), and no write is sent before it is.
+A published comment whose confirmation is not durable yet keeps its id and issue in memory, so
+that its edit waits for it too. If the process stops before the journal takes it, nothing
+written after it is durable either, and the restart handles the write as cut short.
+
+**Restart.** Each tick starts by writing what the journal could not take, then by settling every
+pending write, before it reads GitHub. A write cut short by the stop, its caller gone with the
+process, is reconciled: found, it is recorded as published; conclusively absent (30 seconds
+after the restart read the journal, whatever time the write was recorded at), it is sent once
+more if its `gh` held the dispatcher lock, dropped otherwise; until then it blocks the new
+writes on the same issue, PR, comment or branch.
+A write whose caller was already told it failed with an uncertain outcome is only
+reconciled: found, it is recorded as published; conclusively absent, it is dropped, because its
+step already handled it as not published. A pending edit followed by a later write on the same
+comment is dropped: the later one was built from GitHub as it was. What cannot be settled is
+logged (`publication <id> (... on #<n>) not settled`) and waits for the next tick.
+
+A reconciliation is as precise as the body: devloop's comments, reviews and pull requests carry
+times, heads and digests, so two writes with the same body by the same author are not expected. The key applies at the next
+start of devloop, like the other keys outside the reloaded ones; `devloop status` and `tick
+--dry-run` never use the outbox.
 
 ## PR receipt
 
