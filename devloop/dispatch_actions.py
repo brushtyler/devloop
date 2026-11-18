@@ -23,7 +23,7 @@ from .context import (_failure_text, _format_conflicts, _format_findings, _revie
                       docs_map_section, docs_review_section, format_ci_summary,
                       format_fix_requests, format_operator_comments, format_previous_rounds)
 from .github import GitHubError, job_id
-from .ledger import fix_register
+from .ledger import attempt_branch, attempt_marker, fix_register
 from .localtests import failed_modules, select_modules, suite_summary
 from .markdown import (dispatcher_header, publishable, render_fix, render_native_review,
                        render_review, without_attribution)
@@ -132,8 +132,13 @@ class ActionsMixin:
                                                            cfg.trusted_users)
                                 + issue['accepted'],
                                 story_repo=self._story_root(number, issue['thread']))
+        # The attempt (#384), before the first turn: a second active one is refused.
+        attempt = self._take_attempt(number)
         self.gh.edit_labels(number, add=[lb.working], remove=[lb.ready])
-        name, branch = f'issue-{number}', f'{cfg.branch_prefix}{number}'
+        # One branch per attempt (#384, ADR 0004 §3.2 (i)): the first keeps that of today, a
+        # later one has its own, and never overwrites the branch of the previous attempt.
+        name = f'issue-{number}'
+        branch = attempt_branch(cfg.branch_prefix, number, attempt['n'] if attempt else 1)
         path = self.ws.new_branch(name, branch)
         # The input the turn runs on (#182), bound before it runs: the commit its branch starts
         # from and the request its prompt gets.
@@ -190,11 +195,21 @@ class ActionsMixin:
                 'local_tests': local, **skipped_models(used)}
         if decision is not None:
             meta['conclave'] = decision  # the resolution its prompt had (#142)
+        if attempt is not None:
+            meta['attempt'] = attempt_marker(attempt)  # the PR of this attempt (#384)
         body = publishable(self.runner.header(used) + '\n' + result['pr_body'].strip()
                            + '\n\n' + render_map(result['acceptance_map'])
                            + f'\n\nCloses #{number}', 'pr', meta)
         pr_number, url = self._as(agent.key, IMPLEMENT).create_pr(
             base=cfg.base_branch, head=branch, title=result['pr_title'], body=body)
+        if attempt is not None:
+            try:
+                self.ledger.journal.bind_pr(attempt['attempt'], pr_number)
+            except GitHubError as exc:
+                # The PR is open: the first turn on it records it (``_turn_attempt``), and so
+                # does a new implementation of the issue before resuming the attempt
+                # (``_take_attempt``), whatever the state of the PR by then.
+                self.log(f'  PR #{pr_number} of attempt {attempt["attempt"]} not recorded: {exc}')
         self.gh.edit_labels(pr_number, add=[lb.review])
         self.gh.edit_labels(number, remove=[lb.working])
         self.ws.remove(name)

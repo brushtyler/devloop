@@ -278,8 +278,9 @@ class AdvisoryMixin:
         lb = self.cfg.labels
         found = []
         for pr in prs:
-            if (not pr.meta or lb.needs_supervisor in pr.labels
+            if (not pr.meta or pr.attempt_problem or lb.needs_supervisor in pr.labels
                     or not operator_blocked(pr.labels, lb)):
+                # A PR whose attempt does not hold (#384) gets no work, nor an advisory review.
                 continue
             comments = self.gh.pr_comments(pr.number)
             if self._advisory_record(comments, pr.head_sha) is not None:
@@ -428,6 +429,12 @@ class AdvisoryMixin:
         head = pr.head_sha
         labels = self._advisory_open(pr.number, head, 'since the snapshot')
         if labels is None:
+            return
+        problem = self._attempt_problem(pr.number, pr.issue, pr.meta.get('attempt'))
+        if problem:
+            # The attempt of the PR does not hold (#384): no turn and nothing published, nor a
+            # failure recorded: the PR is the operator's (``_do_attempt``).
+            self.log(f'  no advisory review: {problem}')
             return
         if self._advisory_done(pr.number, head):
             self.log('  the head already has its advisory review')

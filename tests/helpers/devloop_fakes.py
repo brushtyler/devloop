@@ -196,6 +196,11 @@ class FakeGH:
         raw = self.any_prs.get(number)
         return dict(raw) if raw is not None else None
 
+    def branch_prs(self, branch):
+        """The PRs of ``any_prs`` from head branch ``branch``, newest first (#384)."""
+        return [dict(raw) for _, raw in sorted(self.any_prs.items(), reverse=True)
+                if raw.get('headRefName') == branch]
+
     def merge_state(self, pr):
         return merge_state(pr.get('mergeable'), pr.get('mergeStateStatus'))
 
