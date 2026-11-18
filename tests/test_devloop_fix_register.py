@@ -14,8 +14,9 @@ from test_devloop_ledger import LedgerGH, ReportingRunner, TreeWS
 from test_devloop_report import DISPATCHER, TRUST, ReportGH
 
 
-class Crash(Exception):
-    """The dispatcher killed while a CLI runs."""
+class Crash(BaseException):
+    """The dispatcher killed while a CLI runs: not an ``Exception``, which closes the turn as
+    a failure (#381)."""
 
 
 def changes_requested():

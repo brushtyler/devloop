@@ -4,24 +4,28 @@ The agents are simulated (``FakeRunner``): the tests check when the advisory rev
 is published and that it changes nothing devloop decides on."""
 
 import dataclasses
+import json
 import sys
 import tempfile
 import tomllib
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 _TESTS_DIR = str(Path(__file__).resolve().parent)
 if _TESTS_DIR not in sys.path:
     sys.path.insert(0, _TESTS_DIR)
 
 from devloop import config, markdown, receipt  # noqa: E402
-from devloop.agents import AgentError  # noqa: E402
-from devloop.dispatch_advisory import (ADVISORY_TITLE, AdvisoryResults,  # noqa: E402
+from devloop.agents import AgentError, AgentRunner  # noqa: E402
+from devloop.dispatch_advisory import (ADVISORY_TITLE, MAX_ATTEMPTS,  # noqa: E402
+                                       RETRY_SECONDS, AdvisoryFailures, AdvisoryResults,
                                        normalize_advisory)
 from devloop.dispatcher import Dispatcher  # noqa: E402
 from devloop.github import GitHubError  # noqa: E402
 from devloop.ledger import Ledger  # noqa: E402
 from devloop.planning import counted_rounds, plan  # noqa: E402
+from devloop.workspace import Workspace  # noqa: E402
 from helpers.devloop_fakes import SHA1, FakeIdentities  # noqa: E402
 from test_devloop import CFG, IMPL, META, REV, FakeRunner, FakeWS, raw_review  # noqa: E402
 from test_devloop import receipt as policy_receipt  # noqa: E402
@@ -486,6 +490,242 @@ class ReceiptTests(unittest.TestCase):
         self.assertNotIn('Review consultiva', receipt.section(content))
         self.assertEqual(receipt.digest(content),
                          receipt.digest(receipt.build(**args, advisory=None)))
+
+
+def ledger_turns(gh, number=100, kind='advisory'):
+    """``(comment, record)`` of the ledger's turns of ``kind`` on ``number``."""
+    return [(c, r) for c, r in records(gh, 'ledger', number)
+            if r.get('type') == 'turn' and r.get('kind') == kind]
+
+
+def cli(advisory):
+    """The ``run`` of a real ``AgentRunner``, as the agent CLIs answer: ``advisory`` for the
+    turn in the advisory checkout, a review otherwise, in the envelope of each kind of CLI."""
+    def run(argv, **kw):
+        if argv[-1] == '--version':
+            return SimpleNamespace(returncode=0, stdout='2.1.322 (Claude Code)', stderr='')
+        out = advisory if str(kw['cwd']).endswith('pr-100-advisory') else raw_review()
+        for arg in argv:  # codex writes its final message in a file
+            if str(arg).endswith('.last.json'):
+                Path(arg).write_text(json.dumps(out), encoding='utf-8')
+        return SimpleNamespace(returncode=0, stderr='', stdout=json.dumps(
+            {'is_error': False, 'status': 'SUCCESS', 'structured_output': out}))
+    return run
+
+
+class EndToEndTests(unittest.TestCase):
+    """The advisory action as devloop runs it (#381): the real ``AgentRunner``, with its
+    schema, and the ledger."""
+
+    def test_the_advisory_action_runs_its_turn_closes_it_and_completes_the_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # A PR promoted, then given to the operator for its merge (#248, merge mode off).
+            gh = ReceiptGH()
+            gh.labels[100] = {'agent:review'}
+            logs = []
+            runner = AgentRunner(Path(tmp) / 'logs', 10, run=cli(answer('ok')))
+            d = Dispatcher(ON, gh, AdvisoryWS(), runner, log=logs.append, ledger=Ledger(gh))
+            d.tick()
+            d.tick()
+            self.assertEqual(gh.labels[100], {READY, NEEDS_OPERATOR})
+            self.assertEqual(ledger_turns(gh), [])
+            d.tick()
+            self.assertFalse([line for line in logs if 'unexpected error' in line], logs)
+            # The turn is opened, the agent answers against the advisory schema, and the turn
+            # is closed.
+            ((_, turn),) = ledger_turns(gh)
+            self.assertEqual((turn['state'], turn['outcome'], turn['agent'], turn['mode']),
+                             ('closed', 'success', IMPL, 'review'))
+            self.assertTrue(list((Path(tmp) / 'logs').glob(f'*-pr-100-advisory-{IMPL}.log')))
+            # One native COMMENT review with the agent's opinion, the receipt of the head and
+            # the summary for the operator.
+            (review,) = advisory_reviews(gh)
+            self.assertEqual(review['event'], 'COMMENT')
+            self.assertEqual(markdown.read_marker(review['body'], 'advisory')['opinion'], 'ok')
+            ((after, _),) = receipts(gh)
+            self.assertIn('### Review consultiva', after['body'])
+            ((_, record),) = records(gh, 'advisory')
+            self.assertEqual((record['outcome'], record['opinion']), ('done', 'ok'))
+            self.assertEqual(gh.labels[100], {READY, NEEDS_OPERATOR})
+            # Done: the next tick plans nothing for the head.
+            snap = d.snapshot()
+            self.assertEqual(snap.advisories, [])
+
+
+class Clock:
+    def __init__(self, now=1_000_000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+class FailureBase(unittest.TestCase):
+    """A dispatcher with the ledger and the advisory state in ``state``, on a clock."""
+
+    def make(self, state, *outputs, ws=None):
+        self.gh = OperatorGH()
+        self.gh.labels[100] = {NEEDS_OPERATOR}
+        self.ws = ws or AdvisoryWS()
+        self.runner = FakeRunner(*outputs)
+        self.logs = []
+        self.clock = Clock()
+        self.d = Dispatcher(ON, self.gh, self.ws, self.runner, log=self.logs.append,
+                            identities=FakeIdentities(self.gh),
+                            ledger=Ledger(self.gh, state_dir=state), clock=self.clock,
+                            advisory_results=AdvisoryResults(state),
+                            advisory_failures=AdvisoryFailures(state))
+        return self.d
+
+    def tick(self):
+        """Snapshot, plan and run the advisory actions as a lane runs them: an unexpected
+        error is reported, not raised. Returns the snapshot and the outcomes."""
+        snap = self.d.snapshot()
+        prs = {p.number: p for p in snap.prs}
+        lane = [(n, a) for n, a in enumerate(plan(snap, ON)) if a.kind == 'advisory']
+        outcomes = {}
+        self.d._run_lane(lane, prs, outcomes)
+        return snap, list(outcomes.values())
+
+
+class FailureTests(FailureBase):
+    """A failed advisory action (#381): one retry per head, after a pause, the turn always
+    closed, and no record written twice."""
+
+    def test_a_failed_action_is_tried_once_more_after_a_pause_and_then_no_more(self):
+        with tempfile.TemporaryDirectory() as state:
+            self.make(state, KeyError('advisory'), KeyError('advisory'), answer())
+            snap, outcomes = self.tick()
+            self.assertEqual(snap.advisories, [{'number': 100, 'head': SHA1}])
+            self.assertEqual(outcomes, ["unexpected error: KeyError: 'advisory'"])
+            # The turn is closed as a failure, never left open; nothing else is published.
+            ((_, turn),) = ledger_turns(self.gh)
+            self.assertEqual((turn['state'], turn['outcome']), ('closed', 'failure'))
+            self.assertIn('KeyError', turn['error'])
+            self.assertEqual(self.d.ledger.pending(), [])
+            self.assertEqual((self.gh.native, records(self.gh, 'advisory')), ([], []))
+            self.assertEqual(self.gh.labels[100], {NEEDS_OPERATOR})
+            comments = len(self.gh.thread[100])
+            # Within the pause the head is not planned, not even after a restart.
+            self.clock.now += RETRY_SECONDS - 1
+            self.d.advisory_failures = AdvisoryFailures(state)
+            snap, outcomes = self.tick()
+            self.assertEqual((snap.advisories, outcomes), ([], []))
+            self.assertEqual(len(self.runner.calls), 1)
+            self.assertEqual(len(self.gh.thread[100]), comments)
+            # After it, the one retry: a new turn, closed as a failure too.
+            self.clock.now += 1
+            snap, outcomes = self.tick()
+            self.assertEqual(snap.advisories, [{'number': 100, 'head': SHA1}])
+            self.assertEqual(len(self.runner.calls), MAX_ATTEMPTS)
+            self.assertEqual([(r['state'], r['outcome']) for _, r in ledger_turns(self.gh)],
+                             [('closed', 'failure')] * MAX_ATTEMPTS)
+            self.assertIn('no new turn on this head', ' '.join(self.logs))
+            comments = len(self.gh.thread[100])
+            # Then the head gets no turn again, however long it waits, and nothing is written.
+            for _ in range(3):
+                self.clock.now += 3600
+                snap, outcomes = self.tick()
+                self.assertEqual((snap.advisories, outcomes), ([], []))
+            self.d._do_advisory(snap.prs[0])  # an action planned earlier does nothing either
+            self.assertEqual(len(self.runner.calls), MAX_ATTEMPTS)
+            self.assertEqual(len(self.gh.thread[100]), comments)
+            self.assertEqual(len(ledger_turns(self.gh)), MAX_ATTEMPTS)
+            # A new head starts over, and its review forgets the failures.
+            self.gh.head = SHA2
+            snap, outcomes = self.tick()
+            self.assertEqual(outcomes, ['done'])
+            self.assertEqual(ledger_turns(self.gh)[-1][1]['outcome'], 'success')
+            self.assertEqual(records(self.gh, 'advisory')[-1][1]['head'], SHA2)
+            self.assertIsNone(self.d.advisory_failures.get(100, SHA2))
+
+    def test_a_kept_result_is_published_after_the_failures_without_a_new_turn(self):
+        with tempfile.TemporaryDirectory() as state:
+            self.make(state, answer())
+            comment = no_summary(self.gh)
+            for _ in range(MAX_ATTEMPTS + 1):
+                _, outcomes = self.tick()
+                self.assertEqual(outcomes, ['failed: HTTP 502'])
+            self.assertEqual(self.d.advisory_failures.get(100, SHA1)['failures'],
+                             MAX_ATTEMPTS + 1)
+            # The turn ran once; its result is still published, and the failures forgotten.
+            self.gh.comment = comment
+            _, outcomes = self.tick()
+            self.assertEqual(outcomes, ['done'])
+            self.assertEqual(len(self.runner.calls), 1)
+            self.assertEqual(len(advisory_reviews(self.gh)), 1)
+            self.assertEqual(len(records(self.gh, 'advisory')), 1)
+            self.assertIsNone(self.d.advisory_failures.get(100, SHA1))
+
+    def test_a_failure_that_cannot_be_recorded_does_not_hide_the_error(self):
+        with tempfile.TemporaryDirectory() as state:
+            self.make(state, KeyError('advisory'))
+
+            def broken(*args):
+                raise OSError('disk full')
+            self.d.advisory_failures.record = broken
+            _, outcomes = self.tick()
+            self.assertEqual(outcomes, ["unexpected error: KeyError: 'advisory'"])
+            self.assertIn('#100   advisory failure of #100 not recorded: disk full', self.logs)
+
+    def test_the_failures_of_a_head_survive_a_restart(self):
+        with tempfile.TemporaryDirectory() as state:
+            failures = AdvisoryFailures(state)
+            self.assertEqual(failures.record(100, SHA1, 10.0),
+                             {'head': SHA1, 'failures': 1, 'retry_at': 10.0 + RETRY_SECONDS})
+            self.assertEqual(AdvisoryFailures(state).record(100, SHA1, 20.0)['failures'], 2)
+            self.assertEqual(AdvisoryFailures(state).get(100, SHA1)['failures'], 2)
+            self.assertIsNone(AdvisoryFailures(state).get(100, SHA2))
+            # Another head replaces the entry and starts over.
+            self.assertEqual(AdvisoryFailures(state).record(100, SHA2, 30.0)['failures'], 1)
+            AdvisoryFailures(state).drop(100)
+            self.assertIsNone(AdvisoryFailures(state).get(100, SHA2))
+
+
+class LogsWS(AdvisoryWS):
+    """AdvisoryWS with the dispatcher's logs of a real ``Workspace`` in ``state``."""
+
+    save_evidence = Workspace.save_evidence
+
+    def __init__(self, state):
+        super().__init__()
+        self.root = Path(state) / 'worktrees'
+
+
+class TracebackTests(FailureBase):
+    """The traceback of an unexpected error of an action, in the local logs (#381)."""
+
+    def test_an_unexpected_error_writes_its_traceback_in_the_logs(self):
+        with tempfile.TemporaryDirectory() as state:
+            self.make(state, KeyError('advisory'), ws=LogsWS(state))
+            self.tick()
+            (line,) = [line for line in self.logs if 'unexpected error' in line]
+            (path,) = (Path(state) / 'logs').glob('*-advisory-100-traceback.txt')
+            self.assertEqual(line, f"#100   unexpected error: KeyError: 'advisory' "
+                                   f'(traceback in {path})')
+            text = path.read_text(encoding='utf-8')
+            self.assertTrue(text.startswith('Traceback (most recent call last):'), text)
+            self.assertIn('_advisory_turn', text)
+            self.assertIn("KeyError: 'advisory'", text)
+            # Never on GitHub.
+            self.assertFalse([c for c in self.gh.thread.get(100, [])
+                              if 'Traceback' in c['body']])
+
+    def test_the_sequential_tick_writes_it_too(self):
+        with tempfile.TemporaryDirectory() as state:
+            self.make(state, KeyError('advisory'), ws=LogsWS(state))
+            with self.assertRaises(KeyError):
+                self.d.tick()
+            (path,) = (Path(state) / 'logs').glob('*-advisory-100-traceback.txt')
+            self.assertIn(f'(traceback in {path})', ' '.join(self.logs))
+
+    def test_a_traceback_that_cannot_be_written_does_not_hide_the_error(self):
+        with tempfile.TemporaryDirectory() as state:
+            self.make(state, KeyError('advisory'))  # AdvisoryWS keeps no logs
+            _, outcomes = self.tick()
+            self.assertEqual(outcomes, ["unexpected error: KeyError: 'advisory'"])
+            self.assertIn("#100   unexpected error: KeyError: 'advisory' (traceback not "
+                          'written: AttributeError)', self.logs)
 
 
 if __name__ == '__main__':

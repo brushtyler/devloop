@@ -834,7 +834,8 @@ quorum anyway.
   [`devloop/schemas/advisory.json`](../../devloop/schemas/advisory.json): a summary of the PR,
   the residual risks, what the operator should look at, points the reviewers of the quorum may
   have missed, and a non-binding opinion (`ok`, `dubbi`, `contrario`). A head gets one turn,
-  even when it failed or its publication did; a new head gets its own while the PR is still in
+  even when it failed or its publication did (an action that failed before its result was kept
+  gets one retry, see below); a new head gets its own while the PR is still in
   `agent:needs-operator`. The PR is read again before the turn and after it: when it is no
   longer open, its head moved, or it left `agent:needs-operator` or went to
   `agent:needs-supervisor` before the turn ended, nothing is published.
@@ -843,6 +844,14 @@ quorum anyway.
   summary, last: a head is done once it has that summary. When a write fails, a later tick
   publishes what is missing from the kept result, or from the native review already published,
   without a new turn; a PR back to the operator on the same head gets the result kept for it.
+- **Failed actions** (#381). An action that fails before the result of its turn is kept (an
+  unexpected error of the dispatcher, a git or GitHub failure) is recorded for its head in
+  `<state_dir>/advisory-failures.json`, so that the limit holds across a restart: the head is
+  not planned again for 60 seconds, then gets **one** more turn, and after a second failure no
+  turn again (`no new turn on this head` in the tick log). A new head starts over. The turn of
+  a failed action is always closed in the ledger, with outcome `failure`, never left `open`;
+  each attempt writes its own turn record and nothing else. A result already kept, or a native
+  review already published, is still published by the next ticks, without a turn.
 - **Where.** A native GitHub review of type `COMMENT` on the head, never `APPROVE` nor
   `REQUEST_CHANGES` (GitHub accepts a `COMMENT` from the PR's author too), with the agent's
   identity and the title "Review consultiva: non conta per il quorum". The dispatcher then adds

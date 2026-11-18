@@ -172,6 +172,7 @@ import json
 import re
 import threading
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
@@ -186,7 +187,7 @@ from .context import (LABEL_STYLE, _describe_bases, _failure_text, _open_finding
                       _render_issue_comments, both_labels_warning, label_transition,
                       transition_labels)
 from .dispatch_actions import ActionsMixin, Models, ready_approval, rerun_of
-from .dispatch_advisory import AdvisoryMixin, AdvisoryResults
+from .dispatch_advisory import AdvisoryFailures, AdvisoryMixin, AdvisoryResults
 from .dispatch_conclave import ConclaveMixin
 from .dispatch_merge import MergeMixin
 from .dispatch_preflight import PreflightMixin
@@ -590,7 +591,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
     def __init__(self, cfg, gh: Backend, ws, runner, log=print, identities=None, activity=None,
                  ledger=None, merger=None, pinner=None, memory=None, clock=time.time,
-                 advisory_results=None):
+                 advisory_results=None, advisory_failures=None):
         self.cfg = cfg
         # Wall-clock seconds, and since when each head waits for its CI (#263): the time of
         # the dispatcher's own push, else its commit date, read once.
@@ -617,6 +618,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         # ``state_dir`` from ``devloop``, in memory without it.
         self.advisory_results = (advisory_results if advisory_results is not None
                                  else AdvisoryResults())
+        # The failed advisory actions of each head (#381, ``AdvisoryFailures``): in
+        # ``state_dir`` from ``devloop``, in memory without it.
+        self.advisory_failures = (advisory_failures if advisory_failures is not None
+                                  else AdvisoryFailures())
         # Continuous mode (#227): set by ``devloop run`` with parallel actions, a tick starts
         # its actions in these ``Workers`` and does not wait for them.
         self.workers = None
@@ -1234,7 +1239,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                      + (f': {action.reason}' if action.reason else ''))
             if dry_run:
                 continue
-            self._run_action(action, prs)
+            try:
+                self._run_action(action, prs)
+            except Exception as exc:  # the tick fails as before, with its traceback kept
+                self.log(f'  unexpected error: {type(exc).__name__}: {exc}'
+                         + self._keep_traceback(action, exc))
+                raise
         return actions
 
     def _tick_continuous(self):
@@ -1480,7 +1490,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                     failed = self._run_action(action, prs)
                 except Exception as exc:  # reported and escalated, never lost
                     outcomes[position] = f'unexpected error: {type(exc).__name__}: {exc}'
-                    self.log(f'  unexpected error: {type(exc).__name__}: {exc}')
+                    self.log(f'  unexpected error: {type(exc).__name__}: {exc}'
+                             + self._keep_traceback(action, exc))
                     try:
                         self._escalate_failure(action, prs.get(action.number), RuntimeError(
                             f'errore inatteso del dispatcher ({type(exc).__name__}: {exc})'))
@@ -1489,6 +1500,18 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                     continue
                 first = (str(failed).strip().splitlines() or [type(failed).__name__])[0]
                 outcomes[position] = f'failed: {first}' if failed else 'done'
+
+    def _keep_traceback(self, action, exc):
+        """Write the traceback of ``exc``, an unexpected error of ``action``, in the local logs
+        (``<state_dir>/logs``, #381), never on GitHub; return what the run log line adds: the
+        file, or why it could not be written."""
+        name = f'{time.strftime("%Y%m%dT%H%M%S")}-{action.kind}-{action.number}-traceback.txt'
+        text = ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        try:
+            path = self.ws.save_evidence(name, text)
+        except Exception as again:  # the error itself is still reported
+            return f' (traceback not written: {type(again).__name__})'
+        return f' (traceback in {path})'
 
     # Helpers -------------------------------------------------------------
     def _escalate(self, number, reason, detail='', remove=(), cls='failure', supervised=None,
@@ -1855,7 +1878,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         label; a second empty run fails as any other error.
 
         ``where``, ``(number, kind)``, is the issue or PR whose ledger records each CLI
-        invocation as a turn (#133): written before the CLI starts, closed when it ends.
+        invocation as a turn (#133): written before the CLI starts, closed when it ends. An
+        exception that is not an ``AgentError`` closes it too, ``failure``, and propagates
+        (#381): a turn is never left ``open`` by an error of the dispatcher.
 
         With a memory (#151), an agent with fallback models records each model found
         unavailable, and skips a remembered one until its record expires, without running it:
@@ -1955,6 +1980,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                                           last_failed=True)
                 error.tail, error.timed_out = exc.tail, exc.timed_out
                 raise error from exc
+            except Exception as exc:  # not the agent's failure: the turn is closed all the same
+                self._close_turn(entry, 'failure', f'{type(exc).__name__}: {exc}')
+                raise
             self._close_turn(entry, 'success')
             models.left.insert(0, candidate)  # available: later attempts of the action use it
             self._forget(models.agent, candidate)
