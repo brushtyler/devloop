@@ -28,7 +28,11 @@ quality checks and completed-owner verification obligations.
 
 The operator must stop and fence the source controller, supervisor and other
 writers. Cooperative locks, Docker mount inspection and repeated hashes detect
-cooperating writers; `source_fenced: true` remains an operator attestation.
+cooperating writers; `source_fenced: true` remains an operator attestation. For
+a run admitted to automatic fencing, the authorization may omit `source_fenced`:
+activation then proves it with the writer gate and Docker and records the
+versioned proof beside the authorization, or refuses
+([Writer fencing](writer-fencing.md#native-transitions-the-automatic-proof)).
 Hashes bind host-owned references; they are not authentication against a host
 user able to replace both payload and authorization.
 

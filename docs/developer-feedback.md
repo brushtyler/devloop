@@ -346,6 +346,15 @@ Controller/environment migration is deliberately outside this contract.
 These are observations at guard boundaries under the existing trusted-host
 model, not authentication or continuous containment against a hostile host.
 
+For a run admitted to automatic writer fencing, the delegated publication (and
+the in-scope repair return) also needs the host's automatic fencing proof under
+`LOCK_EX` on the writer gate, recorded beside the delegated authorization: the
+delegated proof is strengthened, never replaced. The operator contracts of this
+page (profile admission, operator repair return, operator owner amendments) can
+omit `source_fenced` for such a run and get the same proof, or a refusal. The F1
+recording initialization keeps its manual `source_fenced: true`. See
+[Writer fencing](writer-fencing.md#native-transitions-the-automatic-proof).
+
 `prepare(session, repo, plan, request_id)` requires an eligible independent
 recorded approval, the exact captured funded planner and reviewer responses,
 unchanged technical inputs, and an exact allowed accounting advance. Only target

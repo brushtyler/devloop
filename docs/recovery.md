@@ -24,7 +24,7 @@ Never edit journals, attempts, limits or selectors by hand to continue a run: th
 | Rejected feedback decision, and the existing implementation should be repaired | `feedback-repair-prepare` and `feedback-repair-activate` (`feedback-operator-repair-return-v1`) | [Developer feedback](developer-feedback.md#explicit-recovery-of-an-already-rejected-decision) |
 | Existing I2 profile without a feedback grant | `feedback-profile-prepare` and `feedback-profile-activate` (`feedback-profile-admission-v1`) | [Developer feedback](developer-feedback.md#existing-i2-profile-admission) |
 | A Review, QA or AppSec rejection that a targeted bounce could repair | `bounce-preview` (read-only); the corrective executor repairs and reruns the gates | [Bounce preview](bounce-preview.md), [Native gate convergence](native-gate-convergence.md) |
-| Any transition while an old controller, supervisor or other writer may still run | Stop and fence every writer before preparing; `source_fenced: true` is the operator's attestation. Automatic fencing through the writer gate, and how far it is in use, is described in its own document | [Continuations](continuations.md), [Writer fencing](writer-fencing.md) |
+| Any transition while an old controller, supervisor or other writer may still run | Stop and fence every writer before preparing; `source_fenced: true` is the operator's attestation. For a run admitted to automatic fencing, omit `source_fenced` and the host proves it with the writer gate and Docker, or refuses; how far it is in use is described in its own document | [Continuations](continuations.md), [Writer fencing](writer-fencing.md) |
 
 The other stops of the local engine, and what to do about them, are listed in [Troubleshooting](troubleshooting.md#common-stops). The supervisor classes and the action each allows are in the [recovery matrix](supervision.md#recovery-matrix).
 
@@ -35,8 +35,8 @@ The transitions above follow the same steps. Which steps a transition has, and w
 1. **Inspect** the stopped run, where the transition has an inspection command. Inspection is read-only and never repairs a journal.
 2. **Preview and review**, for continuations and scope amendments: the controller prints the subject without running repository code, and an independent review is bound to its hash.
 3. **Prepare** a new generation. Preparation calls no model.
-4. **Authorize** the exact proposal in a separate file that binds its hash and, where the transition requires it, the operator's own `source_fenced: true` attestation and every extension being approved.
-5. **Activate**: the controller checks everything again and selects the new generation atomically. After an interruption, retry the exact same command.
+4. **Authorize** the exact proposal in a separate file that binds its hash and, where the transition requires it, the operator's own `source_fenced: true` attestation and every extension being approved. For a run admitted to automatic fencing the attestation can be left out: activation then records the host's versioned proof beside the authorization, or refuses ([Writer fencing](writer-fencing.md#native-transitions-the-automatic-proof)).
+5. **Activate**: the controller checks everything again and selects the new generation atomically. After an interruption, retry the exact same command, with the same authorization.
 6. **Resume** the run on the new generation.
 
 A transition never refunds attempts or charged calls, and never raises a limit unless the authorization explicitly approves that extension. Hashes bind host-owned files: they are not authentication against a host user who can replace both the payload and the authorization.

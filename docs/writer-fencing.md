@@ -4,14 +4,15 @@ Automatic fencing (#45) lets a transition prove, with a kernel lock, that no wri
 of the canonical ticket is running. This page describes the protocol implemented in
 `ssdlc_writer_gate.py`.
 
-> **Status: parts (a), (b) and (c1) of #45.** The gate, its protocol and the
+> **Status: parts (a), (b), (c1) and (c2) of #45.** The gate, its protocol and the
 > in-container holder (`ssdlc_container_holder.py`, see
 > [Containers](#containers-the-pid-1-holder)) exist, and the operator's host passed the
 > Docker test of the holder on 2026-11-16. Part (c1) runs the role containers of
 > **admitted runs** under the holder (see [Role containers](#role-containers-activation-and-admission)).
-> Transitions, the supervisor and the delegated feedback handoff still use the manual
-> path: the versioned proof in the contracts, historical compatibility and the crash
-> tests are part (c2), #158.
+> Part (c2), #158, lets the native transitions of an admitted run replace the operator's
+> "writers stopped" attestation with a versioned automatic proof (see
+> [Native transitions](#native-transitions-the-automatic-proof)). Other runs, the
+> supervisor and the feedback recording authority keep the manual path.
 
 ## Invariants
 
@@ -379,6 +380,112 @@ start their roles for the same run. Verification containers
 of the transition commands (`continuation-prepare`, I2 limits preparation) belong to
 the manual transition path and start as before.
 
+## Native transitions: the automatic proof
+
+Part (c2) of #45 (`ssdlc_fencing_proof.py`). The native transitions that publish a
+selector through `ssdlc_transitions.TransitionStore` (continuation, scope amendment,
+operator recovery, verification repair, profile and live-usage admission, operator
+repair return, cumulative-limits reconciliation) normally need the operator's
+attestation `source_fenced: true`. For an **admitted run** the host can prove it instead.
+
+### Asking for it
+
+The operator writes the same exact authorization **without** `source_fenced`. Every
+other field stays required and is checked exactly as before: transition and proposal
+hashes, old and new controller, profile, plan or scope diff, budget and extension
+decisions. The proof replaces only the statement "every writer is stopped"; an
+authorization that carries both `source_fenced` and a proof is refused.
+
+With `source_fenced: true` the transition takes the manual path, unchanged: it never
+opens the gate nor asks Docker, also for an admitted run.
+
+### What the host checks
+
+In `TransitionStore.publish`, after the authorization and the preserved counters are
+checked and before the source is revalidated:
+
+1. the source run must be admitted: its `state.json` has `"writer_fencing": "v1"` and
+   no `writer_fencing_refusal` ([Admission](#admission)). Otherwise the transition is
+   refused with `RUN_NOT_ADMITTED`, before the gate is opened or created;
+2. it takes `LOCK_EX | LOCK_NB` on the canonical ticket's gate through `transition()`:
+   `writers_active` while a role container's holder (or any writer) holds `LOCK_SH`;
+3. under the lock it reads the generation that the published selectors name
+   (`execution/active.json`, then `continuations/active.json`, else the ticket itself),
+   without the pending fences of `runtime_root()`: the preparation being activated is
+   pending by definition. The source must be that generation (`stale_generation`
+   otherwise, `generation_invalid` if a selector does not validate);
+4. host markers of that generation and unreadable registry entries refuse as in
+   [Transitions](#transitions);
+5. Docker must show no container that is created, restarting, running or paused and
+   mounts the canonical ticket or a path inside it, or mounts a directory containing it
+   read-write. Nothing is signalled. A Docker failure or an unreadable answer refuses
+   (`uncovered_execution`).
+
+Each refusal is a `FencingRefused` (`Automatic fencing refused (<code>: <detail>)`) and
+publishes nothing; the operator can still use the manual path. An unsupported platform
+or filesystem refuses with the gate's own code (`unsupported_platform`,
+`unsupported_filesystem`).
+
+The lock is held from the source revalidation to the selector publication, and checked
+again right before the selector moves.
+
+### The proof
+
+The proof is a versioned object, `ssdlc-automatic-fencing-proof` version 1, recorded in
+the generation's `intent.json` under `"fencing"`, **beside** the operator's
+`"authorization"`, never inside it:
+
+| Field | Content |
+| --- | --- |
+| `gate` | `device` and `inode` of `writer.gate` |
+| `generation` | the source generation, relative to the canonical ticket (`.`, `runtime-generations/<id>`, `execution-runtimes/<id>`) |
+| `lock` | `operation: LOCK_EX\|LOCK_NB`, `acquired: true`, the gate receipt kind and the holder's identity (PID, boot id, start time) |
+| `docker` | the statuses listed, how many containers Docker listed, and `ticket_containers: 0` |
+| `verified_at` | when the check ran |
+
+`ssdlc_fencing_proof.evidence(intent)` reads the two apart: `operator_attested` is the
+operator's own `source_fenced: true`, `automatic` is the host's proof, and `mode` is
+`manual`, `automatic` or `delegated`.
+
+### Historical intents
+
+Intents written before part (c2) have no `"fencing"`. They keep validating in
+`load_pointer` exactly as before, as manual attestations, and are never rewritten or
+reclassified: `evidence()` reports them as `manual` with no automatic proof. An intent
+without `source_fenced` and without a valid proof is refused, never read as automatic.
+
+### Delegated contracts
+
+`feedback-scope-delegation-v1` and `feedback-in-scope-return-v1` already carry their own
+host proof (`native-exclusive-quiescence-v1`) instead of an operator file. They are
+strengthened, not equated: for an admitted run their publication also needs the
+automatic proof, recorded beside their authorization; their own proof stays required.
+For other runs nothing changes.
+
+### Replay after a crash
+
+- **Before the selector is published** (after the intent, the staged generation, or
+  just before activation): the crash closed the descriptor, so the kernel released the
+  lock. A replay with the same proposal and authorization takes a fresh proof, which
+  must name the same gate and source generation, and finishes the publication. The
+  intent written first, with its proof, is kept byte for byte; staged files are checked,
+  not rewritten. A replay while a writer is active refuses and publishes nothing.
+- **After the selector is published**: the replay finds the selector naming its own
+  generation, checks that the stored intent has the same proposal and authorization, and
+  returns the validated projection without taking a new proof (the source is no longer
+  the selected generation, and its writers may already run).
+
+Neither case dispatches anything, resets task attempts, ledgers or counters (still
+checked by `preserve_allowances`), or touches the source journal or the captured
+artifacts. A replay cannot switch between the manual and the automatic form: the inputs
+differ, and it is refused.
+
+### Not covered
+
+The feedback recording authority (`FeedbackStore.authorize`, F1) publishes no selector
+and keeps its manual `source_fenced: true`. So do the operator approval of limit
+extensions (`limits approve --source-fenced`) and the supervisor.
+
 ## Historical and non-conforming writers
 
 The gate only excludes writers that take it. Runs started before the gate existed, and
@@ -430,7 +537,12 @@ an authorized I2 generation without `state.json` is refused before anything is c
   Role containers get it from `SSDLC_CONTAINER_PAYLOAD_USER`, and the operator gives it
   access to the files the role uses ([Accesses](#accesses)).
 - **New runs only.** Runs created before part (c1), and runs refused once, stay on the
-  manual path ([Admission](#admission)).
+  manual path ([Admission](#admission)); their transitions still need the operator's
+  `source_fenced: true` ([Native transitions](#native-transitions-the-automatic-proof)).
+- **Controllers are serialized, not gated.** A transition still holds `ticket.lock` and
+  the source `scheduler.lock`, which exclude cooperating controllers; the controller's
+  own host processes do not hold the gate. The proof covers the role containers (the
+  gate and the Docker check) and refuses on host markers.
 - **Host commands disable automatic fencing for their generation** until #132 covers
   their process trees with a kernel mechanism.
 - A deleted or replaced gate is detected through its anchor, the registry, a bound
