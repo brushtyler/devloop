@@ -560,6 +560,61 @@ class DispatcherJournalTests(unittest.TestCase):
         self.assertIsNone(d._conclave_view(100, self.gh.pr_comments(100), target))
         self.assertIn('agent:needs-operator', self.gh.labels[100])
 
+    def test_with_the_block_an_advisory_review_escalates_once_and_waits(self):
+        from test_devloop_advisory import ON, AdvisoryWS, OperatorGH, answer
+        from helpers.devloop_fakes import FakeIdentities
+        from devloop.planning import plan
+        from test_devloop import FakeRunner
+        j = TurnJournal(self.state)
+        left = intent(j)
+        j.uncertain(7)  # a turn of issue 7's work, not reconciled
+        cfg = dataclasses.replace(ON, block_uncertain_turns=True)
+        # A ready PR whose merge is the operator's: the escalation takes the readiness away.
+        self.gh = OperatorGH()
+        self.gh.labels[100] = {'agent:needs-operator', 'agent:ready-to-merge'}
+        ws, runner = AdvisoryWS(), FakeRunner(answer())
+        d = Dispatcher(cfg, self.gh, ws, runner, log=lambda m: None,
+                       identities=FakeIdentities(self.gh),
+                       ledger=Ledger(self.gh, state_dir=self.state))
+
+        def tick():
+            snap = d.snapshot()
+            prs = {p.number: p for p in snap.prs}
+            errors = [d._run_action(a, prs) for a in plan(snap, cfg) if a.kind == 'advisory']
+            return snap, errors
+
+        snap, (error,) = tick()
+        self.assertIsInstance(error, journal_mod.TurnBlocked)
+        self.assertEqual((runner.calls, ws.copies), ([], []))  # refused before the checkout
+        (escalation,) = self.escalations(100)
+        self.assertEqual((escalation['class'], escalation['turns']), ('uncertain_turn', [left]))
+        body = [c['body'] for c in self.gh.thread[100]
+                if markdown.read_marker(c['body'], 'notice')][-1]
+        self.assertIn(left, body)
+        self.assertIn('/devloop reconcile', body)
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
+        # The turns already escalated: no other action nor escalation until they are reconciled.
+        snap, errors = tick()
+        self.assertEqual((snap.advisories, errors), ([], []))
+        self.assertEqual(len(self.escalations(100)), 1)
+        self.assertEqual(d._do_advisory(snap.prs[0]), None)
+        self.assertEqual((runner.calls, ws.copies, len(self.escalations(100))), ([], [], 1))
+        # A new uncertain turn of the same work is escalated in its turn.
+        journal = d.ledger.journal  # the dispatcher's own: it keeps the journal it read
+        other = intent(journal, number=100, kind='review')
+        journal.uncertain(100)
+        snap, (error,) = tick()
+        self.assertIsInstance(error, journal_mod.TurnBlocked)
+        self.assertEqual([e['turns'] for e in self.escalations(100)], [[left], [left, other]])
+        # Reconciled, the advisory review runs.
+        for turn in (left, other):
+            journal.reconcile(turn, 'failed', by='brushtyler', comment=1,
+                              note='la CLI non è partita')
+        snap, errors = tick()
+        self.assertEqual(errors, [None])
+        self.assertEqual(len(runner.calls), 1)
+        self.assertEqual(len(self.escalations(100)), 2)
+
     def test_without_the_block_legacy_turns_are_checked_as_before(self):
         (self.state / LEGACY).write_text(json.dumps({'100': 1}))
         d = self.make(number=100)

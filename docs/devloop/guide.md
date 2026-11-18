@@ -824,7 +824,9 @@ and its PRs, with an escalation of class `uncertain_turn` that lists the turns; 
 whose outcome could not be written, from the next turn of the same step (a retry, a fallback)
 onwards, and a legacy turn imported from `ledger-open-turns.json` on the issue or on one of its
 PRs, open or closed (read on GitHub to find its issue; until it can be read, it blocks every
-work). A conclave call refused this way ends that conclave with the escalation. Only a trusted
+work). A conclave call refused this way ends that conclave with the escalation; an advisory
+review refused this way escalates once for those turns and waits for their reconciliation.
+Only a trusted
 user reconciles them, with a comment whose first line is
 `/devloop reconcile <turn id> <returned|failed|not_dispatched>` and whose next lines give the
 reason, mandatory. The outcome is recorded once, also with the block off; then the step resumes
@@ -866,7 +868,11 @@ quorum anyway.
 - **No effect.** It opens no round and does not count against `max_review_rounds`, creates no
   finding, changes no label and no promotion; devloop reads it only to know whether a head
   already has one and to show its opinion, never to decide. A failed action is never escalated:
-  the PR is already the operator's.
+  the PR is already the operator's. The exception is a turn refused by the
+  block on [uncertain turns](protocol.md#turn-journal) (`block_uncertain_turns`): it
+  escalates as `uncertain_turn`, with the turns to reconcile, once for those turns (taking
+  `agent:ready-to-merge` away, as every escalation does), and the PR gets no other advisory
+  action until they are reconciled.
 - **Cost.** One turn per head, recorded in the [ledger](protocol.md#evidence-and-telemetry) as a
   `turn` of kind `advisory`, and counted in the totals of the receipt.
 

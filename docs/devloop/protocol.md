@@ -916,8 +916,12 @@ failed), or that a tick could not record as `uncertain`, blocks the work in the 
 or a fallback of the same step is refused, and the turn becomes `uncertain`, to reconcile, at the
 next tick. Turns still running in parallel actions never block. A conclave call refused this way
 is not recorded as started: the conclave of that block ends with the `uncertain_turn` escalation
-and the item stays with the operator. With the block off devloop behaves as before: the journal
-records the turns all the same.
+and the item stays with the operator. An [advisory review](guide.md#advisory-review-for-the-operator)
+refused this way, before its checkout, escalates too, although its other failures never do: the
+escalation's marker records the ids of the turns it lists (`turns`), and while every turn that
+blocks the work is among those already escalated on the PR, the PR gets no advisory action; a
+new blocking turn gets its own escalation, and after the reconciliation the review runs. With
+the block off devloop behaves as before: the journal records the turns all the same.
 
 **Reconciliation.** Only the operator decides the outcome of an uncertain turn. A user in
 `trusted_users`, never the supervisor nor an agent, writes on the issue or PR of the turn, on the

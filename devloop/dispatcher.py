@@ -1483,11 +1483,16 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         operator. The call was refused before being recorded as started (``_conclave_call``).
 
         Nor is an advisory review (#369): the PR is already the operator's, and the advisory
-        review changes no label. A head without its summary gets it on a later tick."""
+        review changes no label. A head without its summary gets it on a later tick. Except,
+        again, a turn refused by ``TurnBlocked``: it escalates as ``uncertain_turn``, and while
+        the turns it names still block the work the PR gets no other advisory action
+        (``_advisory_held``).
+
+        The escalation of a ``TurnBlocked`` records the ids of the turns it names (``turns``)."""
         if action.kind == 'conclave' and not isinstance(exc, TurnBlocked):
             self.log('  conclave: no escalation, it resumes from its record')
             return
-        if action.kind == 'advisory':
+        if action.kind == 'advisory' and not isinstance(exc, TurnBlocked):
             self.log('  advisory review: no escalation, the PR is already the operator\'s')
             return
         lb = self.cfg.labels
@@ -1507,8 +1512,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 # A readiness check runs again only on an issue with agent:ready: one the
                 # operator may retry keeps it, as a failed check does.
                 remove = [label for label in remove if label != lb.ready]
+            extra = ({'turns': [t['turn'] for t in exc.turns]} if isinstance(exc, TurnBlocked)
+                     else None)
             self._escalate(number, reason, getattr(exc, 'tail', ''), remove=remove, cls=cls,
-                           supervised=supervised, why=why, retry=retry)
+                           supervised=supervised, why=why, retry=retry, extra=extra)
         except GitHubError as gh_exc:
             self.log(f'  could not escalate: {gh_exc}')
 
