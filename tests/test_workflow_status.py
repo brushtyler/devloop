@@ -187,7 +187,8 @@ class ContractTest(Case):
         self.assertEqual(set(result['sources']), {
             'state.json', '02-design/plan.json', '03-dev/tasks/task-journal.jsonl', 'execution/active.json',
             'execution/pending.json', 'continuations/active.json', 'continuations/pending.json',
-            'feedback/authority.json', 'feedback/task-journal.jsonl'})
+            'feedback/authority.json', 'feedback/task-journal.jsonl', 'limits/policy.json',
+            'limits/task-journal.jsonl', 'limits/extension-pending.json'})
         self.assertIsNone(result['sources']['execution/active.json'])
         self.assertEqual(result['sources']['state.json'],
                          hashlib.sha256((self.ticket / 'state.json').read_bytes()).hexdigest())
