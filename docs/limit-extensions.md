@@ -2,9 +2,11 @@
 
 `operator-limit-extension-v1` is the common contract for extending the frozen
 limits of a stopped bounded run, case by case, without a controller change for
-each extension. It covers three operations: raising named global limits, moving
-the run's absolute deadline, and
-[verifying the same candidate again after a verifier timeout](#reverification-after-a-verifier-timeout).
+each extension. It covers raising named global limits, moving the run's
+absolute deadline,
+[verifying the same candidate again after a verifier timeout](#reverification-after-a-verifier-timeout),
+and the [per-task budget](#per-task-budget-and-reallocation): the allocation of
+an existing run and the transfer of unused cap from one task to another.
 Every extension needs an explicit operator
 authorization; there is no automatic or delegated path (decision A5 of
 [ADR 0001](adr/0001-prodotto-unico-fasi-su-tracker.md)). No command calls a model.
@@ -61,8 +63,11 @@ allowance of the ledger.
 | `extend_global_limit` | Exactly the named dimensions: `metered_usd`, `cli_estimate_usd`, `invocations`, an existing `role_invocations.<role>` or `phase_invocations.<phase>` cap, `development_attempts` | Every other profile field; `combined_reported_usd_cap`; the deadline |
 | `extend_deadline` | The absolute deadline (`deadline_at`); `wall_seconds` grows by exactly the same integral number of seconds | `started_at`, every other profile field |
 | `reverify_after_timeout` | One more verification of the same captured candidate; the timeout of each named timed-out check (`check_timeout.<check_id>`), for that verification only | The whole profile, the limits journal and the chain; check commands, criteria and the other checks; the plan and quality contract |
+| `allocate_task_budget` | Adds the per-task caps (`task_budget`) to a profile without them, from the residual of the run | Every run cap, counters, consumption; nothing consumed before is charged to a task |
+| `reallocate_task_budget` | Moves available cap of one dimension from one allocated task to another | Every run cap and the sum of the task caps; counters, consumption, other tasks' caps |
 
-Each change records the old and the new value and must increase it. An unknown
+For the extensions and the reverification, each change records the old and the
+new value and must increase it. An unknown
 operation, a dimension outside this list, a decrease, a duplicate or a value that
 breaks `schemas/recovery-limits.schema.json` is refused. There is no implicit
 increase: the proposal carries the exact resulting profile, and any difference
@@ -156,6 +161,96 @@ the run stops; the grant is spent. If the reverification is interrupted, the
 next resume marks it `INTERRUPTED` and rolls the candidate back without running
 it again: the verification stays counted, and continuing needs a new proposal.
 
+## Per-task budget and reallocation
+
+Issue #163, with the operator's decision D4 of
+[ADR 0004](adr/0004-passo-2-budget-stato-durevole.md#35-budget-per-task-e-trasferimenti-domande-di-163).
+
+**Attribution.** Every reservation in the limits journal records its account,
+and keeps it when the outcome is reconciled: `account: task` with the
+`task_id` for a developer call made for a task, `account: run` for a call no
+task owns (design, plan, diagnosis, gates, feedback). The shared run account is
+always counted in the run caps and is never transferred to a task. Rows recorded
+before this attribution have neither field and are listed as `unattributed`.
+
+**Allocation.** The optional `task_budget` section of the profile
+(`schemas/recovery-limits.schema.json`, `capability: task-budget-v1`) gives
+some tasks a cap on their own cumulative consumption in the transferable
+dimensions only: `invocations`, `role_invocations.<role>`,
+`phase_invocations.<phase>`, `metered_usd` and `cli_estimate_usd`. Each
+dimension stays separate. `development_attempts` stays a per-task cap of the
+scheduler, and the deadline moves only with `extend_deadline`.
+
+- The run caps stay the **defaults** and the overall limit. A task cap is an
+  **override** on top of them: a task without one is bound by the run caps only,
+  and an override never changes a run cap. A task cap needs the run cap of the
+  same dimension, and the task caps of a dimension never add up to more than the
+  run cap.
+- A new profile declares its allocation, so it is part of the profile hash.
+- An existing run gets one only through `allocate_task_budget`, an explicit
+  transition on the model of `live-usage-profile-admission-v1`: it adds only
+  the `task_budget` section, the quotas of a dimension must fit the residual of
+  the run (the run cap less everything consumed or reserved), and the proposal
+  lists the residual, the calls already made per task and on the shared and
+  unattributed accounts. Nothing is reattributed: the invocations recorded
+  before the allocation (`prior_invocations`) never count against a task cap.
+  It names tasks of `02-design/plan.json`.
+
+The pre-flight check before a task attempt and the atomic check at the
+reservation, under the limits lock, both apply the task's caps. A task that
+exhausts one stops the run with `LIMIT_REACHED`, as a run cap does.
+
+**Transfer.** `reallocate_task_budget` moves cap from a donor task to a
+recipient task. Both must have a cap in each transferred dimension. Only the
+part of the donor's cap that is neither consumed nor committed moves: an open
+or uncertain reservation is committed, and so is a dollar reserve
+(`reserve_per_invocation`), which stays charged after the call. A transfer
+creates no budget and refunds nothing: the run caps and the sum of the task caps
+stay the same. Dollar task caps and transfer amounts are decimals with at most
+six places (more is refused), so the donor loses exactly what the recipient
+gains. Run caps and recorded charges are read as the decimal their JSON number
+writes (`0.3` is three tenths, not the nearest binary float), so a charge equal
+to a cap fills it exactly. They are compared at that exact value, never rounded: the
+views show consumption rounded up and availability rounded down, and a
+transfer is checked against the exact available amount. Without an allocation, a transfer is refused: a run created
+before this feature first needs `allocate_task_budget`. Raising the overall cap
+of the run stays an `extend_global_limit`.
+
+```json
+{
+  "operation": "reallocate_task_budget",
+  "transfer": {"from_task": "T01", "to_task": "T02",
+               "amounts": {"invocations": 2, "cli_estimate_usd": 1.5}},
+  "cause": "T01 completed with part of its cap unused; T02 needs one more attempt.",
+  "evidence": [{"description": "limits inspect output", "sha256": "<sha256 of the saved output>"}],
+  "actor": "<operator>"
+}
+```
+
+An allocation request names `"operation": "allocate_task_budget"` and
+`"allocation": {"T01": {"invocations": 3, "cli_estimate_usd": 4}, ...}`. The
+host computes the `changes`, one per task and dimension
+(`task_budget.<task>.<dimension>`, with `old: null` for an allocation), and the
+resulting profile; a request that names `changes` is refused.
+
+**Effects.** The proposal carries a `task_budget` object with the request, the
+run defaults, both accounts and the `effects` on every task of the allocation,
+the scheduler and the plan: its status, its override and available amounts
+before and after, whether the operation changes it, and whether it depends on a
+changed task (`depends_on_changed`). The operator authorizes these effects with
+the proposal hash. `limits status` repeats them for each budget proposal
+(`task_budget_effects`), and `limits inspect` and `limits status` show the
+current `task_budget` view: defaults, per-task overrides and usage, accounts,
+and whether transfers are enabled.
+
+Activation is the one of the other operations: the new `limits/policy.json`, a
+`TASK_BUDGET_ALLOCATED` or `TASK_BUDGET_REALLOCATED` event in the limits
+journal with unchanged counters, the bound chain entry and the receipt. The
+pending intent fences every reservation until the activation completes. Two
+proposals built on the same parent cannot both apply: the ticket and limits
+locks serialize activations, and the second one finds that its parent changed.
+A replay completes the published effects once.
+
 ## Workflow
 
 Run the commands with a pinned controller, after stopping and fencing the
@@ -247,7 +342,11 @@ extension is refused.
 
 The extended envelope keeps a bound chain in `binding.limit_extensions`: each
 entry records the operation, the old and new values, the proposal and
-authorization hashes and the hash of the parent envelope. Every load of the
+authorization hashes and the hash of the parent envelope. An
+`allocate_task_budget` entry also records the hash of the whole allocated
+`task_budget` section (`task_budget_sha256`, `prior_invocations` included):
+undoing it checks that hash and the recorded changes before removing the
+section, so an altered, added or dropped task cap is refused. Every load of the
 limits undoes the chain of the current limits root step by step and refuses a
 chain that does not restore its parent exactly. The selector of a reconciled run
 still binds the envelope its generation was authorized with: resolution accepts

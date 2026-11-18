@@ -5,6 +5,7 @@ import time
 import uuid
 
 from ssdlc_tasks import DevelopmentBlocked, TaskJournal, atomic_json, digest, ticket_lock, validate_document, TaskError
+import ssdlc_task_budget
 
 
 STOPS = {
@@ -113,6 +114,7 @@ class LimitsStore:
         if not all(math.isfinite(policy[k]) for k in ('metered_usd', 'cli_estimate_usd')):
             raise ValueError('Nonfinite limit')
         validate_live_usage(policy)
+        ssdlc_task_budget.validate(policy)
         envelope ={'policy': policy, 'binding': binding}
         with ticket_lock(self.root / 'limits/limits.lock'):
             if self._extended_from(envelope):
@@ -192,6 +194,7 @@ class LimitsStore:
             validate_document('recovery-limits', envelope['policy'])
             validate_feedback_profile(envelope['policy'])
             validate_live_usage(envelope['policy'])
+            ssdlc_task_budget.validate(envelope['policy'])
             state = self.journal.load() if repair else self.journal.peek()
         except (TaskError, KeyError, TypeError, ValueError, AttributeError):
             raise DevelopmentBlocked('INTEGRITY', 'Frozen limits policy/journal integrity failed') from None
@@ -350,17 +353,20 @@ class LimitsStore:
         if allowed is not None and name not in allowed:
             raise DevelopmentBlocked('SCOPE_REQUIRED', 'Reconciled continuation cannot restart earlier planning/design phases')
 
-    def require_capacity(self, role, phase, engine=None):
+    def require_capacity(self, role, phase, engine=None, task_id=None):
         envelope, state = self._load(repair=False)
-        return self.check_capacity(envelope, state, role, phase, engine)
+        return self.check_capacity(envelope, state, role, phase, engine, task_id)
 
-    def check_capacity(self, envelope, state, role, phase, engine=None):
+    def check_capacity(self, envelope, state, role, phase, engine=None, task_id=None):
         """Pure validation of the imminent call, also used on an unselected proposal.
 
         With the selected engine it is the same validation reserve() applies:
         the engine needs a reported cost or a declared live unknown-usage model,
         and its candidate reserve must fit the separate and combined dollar
         caps. It returns that candidate row and writes nothing.
+
+        With ``task_id``, the caps of that task in the allocation of the profile
+        (``task_budget``, #163) apply as well; the run caps stay the limit.
         """
         p = envelope['policy']
         self.check(state, p)
@@ -375,6 +381,7 @@ class LimitsStore:
                 or sum(row['phase'] == phase for row in rows) >= p['phase_invocations'][phase]):
             raise RecoveryStop('LIMIT_REACHED', 'Frozen invocation allowance exhausted')
         if engine is None:
+            self._check_task(p, state, task_id, role, phase, None)
             return None
         rule = p.get('live_unknown_usage', {}).get(engine)
         if rule is None and engine not in REPORTED_COST:
@@ -387,14 +394,31 @@ class LimitsStore:
         if rule is not None and rule['model'] == RESERVE:
             row['conservative_usage'] = {kind: rule[kind] for kind in COST_KINDS}
             self._check_dollars(state, p, [*rows, row], reserving=True)
+        self._check_task(p, state, task_id, role, phase, row)
         return row
 
-    def reserve(self, role, phase, engine):
+    @staticmethod
+    def _check_task(policy, state, task_id, role, phase, row):
+        reason = ssdlc_task_budget.exhausted(policy, state, task_id, role, phase, row)
+        if reason is not None:
+            raise RecoveryStop('LIMIT_REACHED', reason)
+
+    def reserve(self, role, phase, engine, task_id=None):
+        """Reserve one invocation for ``task_id``, or for the shared run account when None.
+
+        The row records its account (``account: task`` with ``task_id``, or
+        ``account: run``) and keeps it when the outcome is reconciled.
+        """
+        try:
+            attribution = ssdlc_task_budget.attribute(task_id)
+        except ValueError as exc:
+            raise TaskError(str(exc)) from None
         with ticket_lock(self.root / 'limits/limits.lock'):
             envelope, state = self._load()
             # The atomic check at the dispatch boundary: the same validation as
             # the pre-flight one, under the lock, on the repaired journal.
-            row = self.check_capacity(envelope, state, role, phase, engine)
+            row = self.check_capacity(envelope, state, role, phase, engine, task_id)
+            row.update(attribution)
             identity = uuid.uuid4().hex
             state['invocations'][identity] = row
             self.journal.append('INVOCATION_RESERVED', state)
