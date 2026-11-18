@@ -288,23 +288,28 @@ class UncertainOutcomeTests(unittest.TestCase):
 
     def test_reviews_and_pull_requests_tell_uncertain_writes_apart(self):
         # #385: a native review and a pull request, whose outbox reconciles them, have an
-        # uncertain outcome like a comment.
+        # uncertain outcome like a comment; only for the outbox (#397): without it, every
+        # failure of theirs is a failed write, as before it.
         for stderr, uncertain in [*((s, True) for s in UNCERTAIN),
                                   *((s, False) for s in CERTAIN)]:
             def run(cmd, timeout=None, stderr=stderr, **kwargs):
                 if stderr == 'timeout':
                     raise subprocess.TimeoutExpired(cmd, timeout)
                 return SimpleNamespace(returncode=1, stdout='', stderr=stderr)
-            gh = GitHub('o/r', run=run)
-            for name, write in (
-                    ('submit_review', lambda: gh.submit_review(7, commit='a', event='COMMENT',
-                                                               body='b')),
-                    ('create_pr', lambda: gh.create_pr(base='main', head='h', title='t',
-                                                       body='b'))):
-                with self.subTest(stderr=stderr, write=name):
-                    with self.assertRaises(GitHubError) as raised:
-                        write()
-                    self.assertIs(isinstance(raised.exception, GitHubUncertain), uncertain)
+            for outbox in (True, False):
+                gh = GitHub('o/r', run=run)
+                self.assertFalse(gh.uncertain_publications)
+                gh.uncertain_publications = outbox
+                for name, write in (
+                        ('submit_review', lambda: gh.submit_review(7, commit='a', event='COMMENT',
+                                                                   body='b')),
+                        ('create_pr', lambda: gh.create_pr(base='main', head='h', title='t',
+                                                           body='b'))):
+                    with self.subTest(stderr=stderr, write=name, outbox=outbox):
+                        with self.assertRaises(GitHubError) as raised:
+                            write()
+                        self.assertIs(isinstance(raised.exception, GitHubUncertain),
+                                      uncertain and outbox)
 
     def test_other_calls_keep_their_errors(self):
         # Only comment, edit_comment (#364), submit_review and create_pr (#385) have an

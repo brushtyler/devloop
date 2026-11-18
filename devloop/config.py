@@ -312,6 +312,9 @@ class Config:
     # journal, in the PR marker and in the turn records. It needs ``story_identity``. Off by
     # default (ADR 0004, D8): devloop behaves as before.
     attempt_identity: bool = False
+    # The limit of the journal of the turns, in MiB (#397, ``journal.TurnJournal``): beyond it
+    # the journal is not loaded and no event is written; from 80% of it the operator is warned.
+    journal_max_mib: int = 64
     agent_timeout_seconds: int = 3600
     test_timeout_seconds: int = 3600
     agent_command_timeout_seconds: int = 600
@@ -852,7 +855,7 @@ def parse_config(data, root=INSTALL_ROOT):
     ints = {}
     for key in ('max_open_prs', 'max_parked_prs', 'max_review_rounds', 'max_actions_per_tick',
                 'max_parallel_actions', 'implement_test_retries', 'agent_timeout_seconds', 'test_timeout_seconds',
-                'agent_command_timeout_seconds', 'agent_stall_seconds'):
+                'agent_command_timeout_seconds', 'agent_stall_seconds', 'journal_max_mib'):
         if key in data:
             value = _require(data, key, int, 'config')
             if value < (0 if key == 'implement_test_retries' else 1):
@@ -931,7 +934,7 @@ _AGENT_KEYS = dict.fromkeys(('kind', 'display_name', 'model', 'model_label', 'ef
 OVERLAY_KEYS = {
     **dict.fromkeys(('repo', 'base_branch', 'branch_prefix', 'state_dir', 'test_cmd',
                      'local_tests', 'ci_rerun_unrelated', 'block_uncertain_turns', 'story_identity',
-                     'publication_outbox', 'attempt_identity',
+                     'publication_outbox', 'attempt_identity', 'journal_max_mib',
                      'language', 'trusted_users', 'preflight',
                      'conclave', 'max_open_prs',
                      'max_parked_prs', 'max_review_rounds', 'max_actions_per_tick',

@@ -23,6 +23,7 @@ from devloop.journal import JOURNAL, JournalError, TurnJournal
 from devloop.ledger import Ledger
 from devloop.outbox import (DROPPED, FAILED, IN_FLIGHT_SECONDS, SENT, UNCERTAIN, Outbox,
                             OutboxClient, for_identities)
+from devloop.planning import Snapshot
 from helpers.devloop_fakes import FIRST_COMMENT_ID, SHA1, ActingAs, FakeGH, FakeIdentities
 
 REPO = 'brushtyler/ssdlc'
@@ -170,6 +171,12 @@ def make(gh, state=None, journal=None):
 
 def statuses(box):
     return [e['status'] for e in box.entries().values()]
+
+
+def gh_command(cmd):
+    """The `gh` command of ``cmd``, without the ``timeout`` that wraps a write holding the
+    dispatcher lock (#397)."""
+    return cmd[cmd.index('gh'):] if cmd[0] == 'timeout' else cmd
 
 
 def journal_events(state):
@@ -588,6 +595,7 @@ class AdapterTests(unittest.TestCase):
         server = GhServer()
         server.answers = list(answers)
         gh = GitHub(REPO, run=server)
+        gh.uncertain_publications = True  # as ``Identities`` sets it with the outbox (#397)
         clock = Clock()
         box = Outbox(TurnJournal(), lambda actor, permissions: gh, lambda actor: ['brushtyler'],
                      clock=clock, sleep=clock.sleep)
@@ -1074,7 +1082,8 @@ class WiringTests(unittest.TestCase):
         calls = []
 
         def run(cmd, **kwargs):
-            calls.append((cmd[1:4], kwargs.get('pass_fds')))
+            calls.append((cmd[:cmd.index('gh')], gh_command(cmd)[1:4], kwargs.get('pass_fds'),
+                          kwargs.get('timeout')))
             return SimpleNamespace(returncode=0, stdout='{"id": 1}', stderr='')
         app = SimpleNamespace(token=lambda permissions, time_left=None: 'tok')
         identities = Identities('o/r', {'claude': app}, run=run)
@@ -1087,9 +1096,12 @@ class WiringTests(unittest.TestCase):
                 self.assertEqual(client.lock_fd, 9)
                 client.comment(7, 'x')
                 client.issue_comments(7)
-                self.assertEqual(calls, [(['api', '-X', 'POST'], (9,)),
-                                         (['api', '--paginate', 'repos/o/r/issues/7/comments'],
-                                          None)])
+                # The write runs under a timeout of its own (#397), which this process
+                # outlasts: SIGTERM at 300 s, SIGKILL 5 s later. A read is not wrapped.
+                self.assertEqual(calls, [
+                    (['timeout', '-k', '5', '300'], ['api', '-X', 'POST'], (9,),
+                     300 + GitHub.WRAPPED_GRACE),
+                    ([], ['api', '--paginate', 'repos/o/r/issues/7/comments'], None, 300)])
 
     def test_off_by_default(self):
         self.assertFalse(load_data()['publication_outbox'])
@@ -1158,7 +1170,7 @@ class WiringTests(unittest.TestCase):
         posts, comments = [], []
 
         def run(cmd, **kwargs):
-            if cmd[1:4] == ['api', '-X', 'POST']:
+            if gh_command(cmd)[1:4] == ['api', '-X', 'POST']:
                 posts.append(kwargs.get('pass_fds'))
                 if len(posts) == 1:
                     raise Crash  # the dispatcher stops before GitHub applied it
@@ -1180,7 +1192,7 @@ class WiringTests(unittest.TestCase):
                     mock.patch.object(devloop_main.Identities, 'from_config',
                                       return_value=Identities(cfg.repo, apps, run=run)):
                 _, state, d = devloop_main.build(args)
-            d.identities.hold(9)  # as main() does, once it holds the lock
+            self.assertTrue(devloop_main.hold_lock(d, 9))  # as main() does, once it holds it
             self.assertEqual((d.gh.lock_fd, d.merger.lock_fd), (9, 9))
             with self.assertRaises(Crash):
                 d.gh.comment(7, 'record')
@@ -1226,6 +1238,276 @@ class WiringTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             journal.publication('outcome', {})
         self.assertEqual(outbox_mod.MAX_SENDS, 2)
+
+
+# A dispatcher of real processes (#397): it takes the lock, passes it on as main() does
+# (``hold_lock``), with the outbox ``on`` or ``off``, and writes one comment, whose `gh` (FAKE_GH)
+# waits while ``hold`` exists. Its calls time out after ``argv[3]`` seconds.
+HOLDING_DISPATCHER = '''
+import pathlib, sys
+from types import SimpleNamespace
+sys.path.insert(0, {root!r})
+from devloop.__main__ import hold_lock, single_instance
+from devloop.apps import Identities
+from devloop.github import GitHub
+from devloop.journal import TurnJournal
+from devloop.outbox import for_identities
+state = pathlib.Path(sys.argv[1])
+GitHub.timeout = int(sys.argv[3])
+with single_instance(state / 'dispatcher.lock') as lock:
+    identities = Identities('o/r', {{}})
+    if sys.argv[2] == 'on':
+        identities.outbox = for_identities(identities, TurnJournal(state), ['brushtyler'])
+    hold_lock(SimpleNamespace(identities=identities), lock.fileno())
+    identities.github('dispatcher').comment(7, 'record')
+'''
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+class LockAndTimeoutTests(unittest.TestCase):
+    """#397: with the outbox off no `gh` gets the dispatcher lock, so a dispatcher killed while
+    one of its `gh` runs restarts at once; with it on, a `gh` of a write that holds the lock
+    has a timeout of its own, so it does not hold it for ever after its dispatcher died."""
+
+    def setUp(self):
+        import devloop.__main__ as devloop_main
+        self.main = devloop_main
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        tmp = Path(tmp.name)
+        self.state, self.fake, bindir = tmp / 'state', tmp / 'github', tmp / 'bin'
+        for d in (self.state, self.fake, bindir):
+            d.mkdir()
+        gh_path = bindir / 'gh'
+        gh_path.write_text(FAKE_GH.format(python=sys.executable))
+        gh_path.chmod(0o755)
+        (self.fake / 'hold').touch()
+        # Never leave a `gh` waiting.
+        self.addCleanup(lambda: (self.fake / 'go').touch())
+        self.env = dict(os.environ, PATH=f'{bindir}{os.pathsep}{os.environ.get("PATH", "")}',
+                        GH_FAKE_DIR=str(self.fake))
+        self.env.pop(devloop_main.LOCK_FD, None)
+        self.lock = self.state / 'dispatcher.lock'
+
+    def start(self, outbox, timeout):
+        dispatcher = subprocess.Popen(
+            [sys.executable, '-c', HOLDING_DISPATCHER.format(root=str(ROOT)), str(self.state),
+             outbox, str(timeout)], env=self.env, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL)
+
+        def stop():
+            if dispatcher.poll() is None:
+                dispatcher.kill()
+                dispatcher.wait()
+        self.addCleanup(stop)
+        OrphanGhTests.wait_for(self, lambda: (self.fake / 'started').exists(), 'the POST')
+        return dispatcher, int((self.fake / 'started').read_text())
+
+    def test_with_the_outbox_off_a_killed_dispatcher_restarts_at_once(self):
+        dispatcher, gh_pid = self.start('off', 300)
+        dispatcher.kill()
+        dispatcher.wait()
+        # Its `gh` runs on, stuck: it does not hold the lock, and the next dispatcher starts.
+        self.assertTrue(alive(gh_pid))
+        self.assertTrue(OrphanGhTests.lock_free(self.lock))
+        with mock.patch.dict(os.environ, self.env), self.main.single_instance(self.lock):
+            pass
+        self.assertTrue(alive(gh_pid))
+        self.assertFalse((self.fake / 'posts').exists())
+
+    def test_with_the_outbox_on_the_gh_of_a_write_has_a_timeout_of_its_own(self):
+        dispatcher, gh_pid = self.start('on', 2)
+        dispatcher.kill()
+        dispatcher.wait()
+        # The `gh` holds the lock while it runs, its dispatcher gone...
+        with mock.patch.dict(os.environ, self.env), \
+                self.assertRaisesRegex(SystemExit, 'another dispatcher is running'):
+            with self.main.single_instance(self.lock):
+                pass
+        # ... until its own timeout stops it, with nobody to let it go on: the lock is free.
+        OrphanGhTests.wait_for(self, lambda: OrphanGhTests.lock_free(self.lock),
+                               'the timeout of the orphan gh')
+        self.assertFalse(alive(gh_pid))
+        self.assertFalse((self.fake / 'posts').exists())
+        with mock.patch.dict(os.environ, self.env), self.main.single_instance(self.lock):
+            pass
+
+    def test_a_write_stopped_by_its_own_timeout_is_uncertain(self):
+        with open(self.lock, 'w') as lock, mock.patch.dict(os.environ, self.env):
+            gh = GitHub('o/r')
+            gh.timeout = 1
+            gh.lock_fd = lock.fileno()
+            started = time.monotonic()
+            with self.assertRaisesRegex(GitHubUncertain, 'timed out after 1s'):
+                gh.comment(7, 'x')
+            self.assertLess(time.monotonic() - started, gh.WRAPPED_GRACE)
+        self.assertFalse((self.fake / 'posts').exists())
+
+    def test_hold_lock_only_with_the_outbox(self):
+        for outbox in (None, object()):
+            with self.subTest(outbox=outbox):
+                identities = Identities('o/r', {})
+                identities.outbox = outbox
+                self.assertIs(self.main.hold_lock(SimpleNamespace(identities=identities), 9),
+                              outbox is not None)
+                self.assertEqual(identities.direct('dispatcher').lock_fd,
+                                 9 if outbox is not None else None)
+        self.assertFalse(self.main.hold_lock(SimpleNamespace(identities=None), 9))
+
+    def test_with_the_outbox_off_devloop_writes_as_before_it(self):
+        # build() and main() with publication_outbox = false: no lock, no wrapper, and a review
+        # or pull request whose outcome is unknown is a failed write, not an uncertain one.
+        import dataclasses
+
+        from test_devloop import CFG
+        calls = []
+
+        def run(cmd, **kwargs):
+            calls.append((cmd, kwargs.get('pass_fds'), kwargs.get('timeout')))
+            if cmd[1:4] == ['api', '-X', 'POST'] and cmd[4].endswith(('/pulls', '/reviews')):
+                return SimpleNamespace(returncode=1, stdout='',
+                                       stderr='gh: Server Error (HTTP 502)')
+            return SimpleNamespace(returncode=0, stdout='{"id": 1}', stderr='')
+        app = SimpleNamespace(token=lambda permissions, time_left=None: 'tok',
+                              login='devloop-dispatcher[bot]')
+        cfg = dataclasses.replace(CFG, publication_outbox=False)
+        args = SimpleNamespace(config=None, local_config=None, command='run', dry_run=False)
+        with mock.patch.object(self.main, 'load_config', return_value=cfg), \
+                mock.patch.object(self.main, 'main_checkout', return_value=self.state), \
+                mock.patch.object(self.main.Identities, 'from_config',
+                                  return_value=Identities(cfg.repo, {'dispatcher': app},
+                                                          run=run)):
+            _, _, d = self.main.build(args)
+        self.assertFalse(self.main.hold_lock(d, 9))
+        for client in (d.gh, d.merger, d.identities.github('claude')):
+            self.assertIsNone(client.lock_fd)
+            self.assertFalse(client.uncertain_publications)
+        d.gh.comment(7, 'x')
+        self.assertEqual(calls[-1][0][0], 'gh')
+        self.assertEqual(calls[-1][1:], (None, GitHub.timeout))
+        for write in (lambda: d.gh.submit_review(7, commit='a', event='COMMENT', body='b'),
+                      lambda: d.gh.create_pr(base='main', head='h', title='t', body='b')):
+            with self.assertRaises(GitHubError) as raised:
+                write()
+            self.assertNotIsInstance(raised.exception, GitHubUncertain)
+        # With it on, the same clients tell an uncertain outcome apart.
+        d.identities.outbox = object()
+        self.assertTrue(d.gh.uncertain_publications)
+        self.assertTrue(d.identities.direct('claude').uncertain_publications)
+
+
+class DroppedSignalTests(unittest.TestCase):
+    """#397: a write the outbox dropped reaches the operator: once on ``[run].alert_issue``,
+    recorded in the journal; without it, a warning in the log of each process."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.state = Path(tmp.name)
+
+    def dropped(self):
+        """An outbox over the journal of ``state`` with one write dropped: uncertain twice,
+        then absent once nothing could take effect."""
+        gh = OutboxGH()
+        gh.uncertain_writes = ['lost', 'lost']
+        box, client = make(gh, self.state)
+        with self.assertRaises(GitHubUncertain):
+            client.comment(7, 'the body of the write')
+        gh.clock.now += IN_FLIGHT_SECONDS
+        self.assertEqual(box.resume(), [])
+        self.assertEqual(statuses(box), [DROPPED])
+        return gh, box, client
+
+    def dispatcher(self, box, client, alert_issue):
+        import dataclasses
+
+        from devloop.config import RunPolicy
+        from test_devloop import CFG
+        lines = []
+        cfg = dataclasses.replace(CFG, run=RunPolicy(alert_issue=alert_issue))
+        return Dispatcher(cfg, client, None, None, log=lines.append,
+                          identities=SimpleNamespace(outbox=box)), lines
+
+    def test_a_dropped_write_is_reported_once_on_the_alert_issue(self):
+        gh, box, client = self.dropped()
+        [pub] = box.entries()
+        d, lines = self.dispatcher(box, client, 76)
+        d._signal_dropped()
+        [alert] = gh.bodies(76)
+        self.assertIn('## Pubblicazioni abbandonate', alert)
+        self.assertIn(f'`{pub}`: comment on #7, di `dispatcher`', alert)
+        self.assertIn('turn-journal.jsonl', alert)
+        self.assertNotIn('the body of the write', alert)  # never the body
+        self.assertTrue(any(f'publication {pub} (comment on #7) dropped' in line
+                            for line in lines))
+        self.assertIn('  alert of 1 dropped publications published on #76', lines)
+        self.assertEqual(box.unsignalled(), [])
+        self.assertIn('publication_signalled', [e['event'] for e in journal_events(self.state)])
+        # Never again: not at the next tick, nor from the journal after a restart.
+        d._signal_dropped()
+        self.assertEqual(len(gh.bodies(76)), 1)
+        again = Outbox(TurnJournal(self.state), lambda actor, permissions: gh,
+                       lambda actor: ['brushtyler'])
+        self.assertEqual(again.unsignalled(), [])
+        d2, _ = self.dispatcher(again, again.client(gh, 'dispatcher'), 76)
+        d2._signal_dropped()
+        self.assertEqual(len(gh.bodies(76)), 1)
+
+    def test_a_failed_alert_is_tried_again(self):
+        gh, box, client = self.dropped()
+        d, lines = self.dispatcher(box, client, 76)
+        with mock.patch.object(gh, 'comment', side_effect=GitHubError('down')):
+            d._signal_dropped()
+        self.assertEqual(len(box.unsignalled()), 1)
+        self.assertTrue(any('could not be published (GitHubError)' in line for line in lines))
+        d._signal_dropped()
+        self.assertEqual(len(gh.bodies(76)), 1)
+        self.assertEqual(box.unsignalled(), [])
+
+    def test_without_an_alert_issue_the_log_reports_it_at_each_start(self):
+        gh, box, client = self.dropped()
+        [pub] = box.entries()
+        for start in range(2):
+            with self.subTest(start=start):
+                d, lines = self.dispatcher(box, client, 0)
+                d._signal_dropped()
+                d._signal_dropped()  # once per process
+                warnings = [line for line in lines if f'publication {pub}' in line]
+                self.assertEqual(len(warnings), 1)
+                self.assertIn('no [run].alert_issue is configured', warnings[0])
+                self.assertEqual(gh.bodies(76), [])
+                self.assertEqual(len(box.unsignalled()), 1)
+
+    def test_nothing_without_the_outbox_or_without_drops(self):
+        gh = OutboxGH()
+        box, client = make(gh, self.state)
+        client.comment(7, 'record')
+        for identities in (None, SimpleNamespace(outbox=None), SimpleNamespace(outbox=box)):
+            d, lines = self.dispatcher(box, client, 76)
+            d.identities = identities
+            d._signal_dropped()
+            self.assertEqual((lines, gh.bodies(76)), ([], []))
+
+    def test_each_tick_reports_the_drops_after_settling(self):
+        calls = []
+        d, _ = self.dispatcher(None, FakeGH(), 76)
+        for name in ('_housekeeping', '_watch_journal', '_resume_publications',
+                     '_signal_dropped'):
+            setattr(d, name, (lambda name: lambda: calls.append(name))(name))
+        d.snapshot = lambda: Snapshot([], [], [])
+        d.tick()
+        self.assertEqual(calls, ['_housekeeping', '_watch_journal', '_resume_publications',
+                                 '_signal_dropped'])
+        calls.clear()
+        d.tick(dry_run=True)
+        self.assertEqual(calls, [])
 
 
 if __name__ == '__main__':

@@ -47,6 +47,11 @@ publication_outbox = false
 # merged or closed). It needs story_identity = true. Off here: turning it on is the operator's
 # decision (ADR 0004, D8).
 attempt_identity = false
+# The limit of the journal of the turns in state_dir, in MiB (issue #397). Its size is checked
+# before it is loaded and before each event: beyond the limit it is not loaded and no event is
+# written, so no turn starts, and nothing is ever removed from it. From 80% of the limit devloop
+# warns the operator, once, on [run].alert_issue, or at each start in the log without one.
+journal_max_mib = 64
 # Language of the text that agents write for GitHub.
 language = "Italian"
 

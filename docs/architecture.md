@@ -100,7 +100,8 @@ checks the base branch requires, for the wait for the
 [CI of a new head](devloop/reference.md#ci-of-a-new-head).
 
 `Tracker.comment` and `Tracker.edit_comment` tell three outcomes apart (#364), and so do
-`CodeReview.submit_review` and `CodeReview.create_pr` (#385): success, a
+`CodeReview.submit_review` and `CodeReview.create_pr` with the publication outbox on (#385;
+`GitHub.uncertain_publications`, #397: off, their failures are all certain): success, a
 failure (`GitHubError`: nothing was written) and an **uncertain** outcome (`GitHubUncertain`):
 a timeout, a connection lost after sending, a 5xx answer, so the write may have taken effect.
 The adapter treats a 4xx answer and a failure before the connection opened (`dial tcp`, `error
@@ -119,7 +120,8 @@ the PR's native reviews or the open pull requests), and sends a write again only
 read when the uncertain attempt could no longer take effect, counted from a time the attempt is
 known to have ended, never from the time recorded before the send (after a stop, from the start
 of the next dispatcher, only for an attempt whose `gh` held the dispatcher lock:
-`GitHub.lock_fd`, passed to the `gh` of each write); it wraps the `comment`,
+`GitHub.lock_fd`, passed to the `gh` of each write only with the outbox on, which then runs
+under coreutils `timeout`, #397); it wraps the `comment`,
 `edit_comment`, `submit_review` and `create_pr` of the clients of `Identities.github` and is
 itself a `Backend`. Without it the dispatcher still handles an
 uncertain outcome as a failed write. The other writes and the reads report every failure as a

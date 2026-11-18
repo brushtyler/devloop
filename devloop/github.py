@@ -10,6 +10,7 @@ an issue's ``stateReason``) is read with REST instead.
 """
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -53,6 +54,9 @@ _NOT_FOUND = re.compile(r'Could not resolve to an? (?:PullRequest|issue)\b|\(HTT
 # nothing was written.
 _HTTP_STATUS = re.compile(r'\bHTTP (\d{3})\b')
 _NOT_SENT = re.compile(r'\bdial tcp\b|\berror connecting to\b|\bTLS handshake\b')
+# The exit codes of coreutils ``timeout`` once it stopped its command (#397): 124 after SIGTERM,
+# 137 (128 + 9) after SIGKILL.
+_TIMED_OUT = (124, 137)
 
 
 class GitHubError(RuntimeError):
@@ -66,7 +70,8 @@ class GitHubNotFound(GitHubError):
 
 class GitHubUncertain(GitHubError):
     """A ``comment``, ``edit_comment``, ``submit_review`` or ``create_pr`` whose outcome is
-    unknown (#364, ADR 0001 "Porta del tracker"; the last two since #385): a timeout, a
+    unknown (#364, ADR 0001 "Porta del tracker"; the last two since #385, only for the outbox of
+    the publications, ``GitHub.uncertain_publications``): a timeout, a
     connection lost after sending, a 5xx answer. Unlike any other ``GitHubError``, the write may
     have taken effect: ``ports.reconcile_comment`` tells whether a comment did, the outbox of
     the publications (``outbox.Outbox``) whether any of them did. Being a ``GitHubError``, it is
@@ -115,6 +120,13 @@ class GitHub:
     the same client (#227)."""
 
     timeout = 300  # seconds, for each call
+    # A write whose `gh` holds the dispatcher lock (``lock_fd``, #397) runs under ``timeout``
+    # (coreutils), a limit of its own that does not die with the dispatcher: SIGTERM once the
+    # call's timeout is spent, SIGKILL this many seconds later. The call's own timeout, applied
+    # by this process, comes ``WRAPPED_GRACE`` seconds after that: killing ``timeout`` first
+    # would leave its `gh` running, and holding the lock, with no limit.
+    KILL_AFTER = 5
+    WRAPPED_GRACE = KILL_AFTER + 10
 
     def __init__(self, repo, run=subprocess.run, token=None, time_left=None):
         self.repo = repo
@@ -122,12 +134,18 @@ class GitHub:
         self._token = token
         self._local = threading.local()
         self.time_left = time_left
-        # The descriptor of the dispatcher lock, set by devloop once it holds it
-        # (``apps.Identities.hold``, #385). The `gh` of each write gets it open: no other
-        # dispatcher takes the lock while a `gh` of this one runs, even one that outlived it, so
-        # the outbox of the publications (``outbox.Outbox``) knows that the attempts a stop cut
-        # short had ended when the next dispatcher started.
+        # The descriptor of the dispatcher lock, set by devloop once it holds it, only with the
+        # outbox of the publications on (``apps.Identities.hold``, #385, #397). The `gh` of each
+        # write gets it open: no other dispatcher takes the lock while a `gh` of this one runs,
+        # even one that outlived it, so the outbox (``outbox.Outbox``) knows that the attempts
+        # a stop cut short had ended when the next dispatcher started. That `gh` runs under a
+        # timeout of its own (``KILL_AFTER``): a `gh` stuck on the network never holds the lock
+        # for ever.
         self.lock_fd = None
+        # Whether a ``submit_review`` or ``create_pr`` whose outcome is unknown raises
+        # ``GitHubUncertain`` (#385): only for the outbox of the publications, which reconciles
+        # it; without it they fail as any failed write, as before it (#397, ADR 0004, D8).
+        self.uncertain_publications = False
 
     @property
     def time_left(self):
@@ -140,27 +158,37 @@ class GitHub:
     def _gh(self, *args, stdin=None, check=True, write=False):
         """Run `gh` with ``args``. ``write``: the call is a ``comment``, ``edit_comment``,
         ``submit_review`` or ``create_pr``, whose timeout or uncertain failure raises
-        ``GitHubUncertain`` (#364, #385), and whose `gh` holds the dispatcher lock open
-        (``lock_fd``)."""
+        ``GitHubUncertain`` (#364, #385), and whose `gh`, with ``lock_fd`` set, holds the
+        dispatcher lock open and runs under ``timeout`` (#397)."""
         kwargs = {}
         self._time_left(args)  # no token is minted once the time is spent
         if self._token is not None:
             env = {k: v for k, v in os.environ.items() if k not in ('GITHUB_TOKEN', 'GH_TOKEN')}
             kwargs['env'] = dict(env, GH_TOKEN=self._token())
-        if write and self.lock_fd is not None:
+        held = write and self.lock_fd is not None
+        if held:
             kwargs['pass_fds'] = (self.lock_fd,)
         timeout = self.timeout
         left = self._time_left(args)  # what the mint of the token left
         if left is not None:
             timeout = min(timeout, left)
+        command = ['gh', *args]
+        if held:
+            command = ['timeout', '-k', str(self.KILL_AFTER), str(max(1, math.ceil(timeout))),
+                       *command]
         try:
-            done = self._run(['gh', *args], input=stdin, capture_output=True, text=True,
-                             timeout=timeout, **kwargs)
+            done = self._run(command, input=stdin, capture_output=True, text=True,
+                             timeout=timeout + self.WRAPPED_GRACE if held else timeout,
+                             **kwargs)
         except subprocess.TimeoutExpired as exc:
             error = GitHubUncertain if write else GitHubError
             raise error(f'gh {" ".join(args[:3])}: timed out after {exc.timeout}s') from exc
         except OSError as exc:
-            raise GitHubError(f'gh could not start: {exc}') from exc
+            raise GitHubError(f'{command[0]} could not start: {exc}') from exc
+        if held and (done.returncode in _TIMED_OUT or done.returncode < 0):
+            # Stopped by its own timeout (124, 137 after SIGKILL), or killed: never an answer.
+            raise GitHubUncertain(f'gh {" ".join(args[:3])}: timed out after '
+                                  f'{max(1, math.ceil(timeout))}s (exit {done.returncode})')
         if check and done.returncode != 0:
             stderr = done.stderr or ''
             if _NOT_FOUND.search(stderr):
@@ -533,21 +561,23 @@ class GitHub:
 
     def create_pr(self, *, base, head, title, body):
         """``(number, url)`` of the new PR. Labels are the dispatcher's job, not the author's.
-        Raises ``GitHubUncertain`` when the outcome is unknown (#385), any other
-        ``GitHubError`` when the PR was certainly not opened."""
+        With ``uncertain_publications`` (the outbox of the publications, #385, #397) it raises
+        ``GitHubUncertain`` when the outcome is unknown, any other ``GitHubError`` when the PR
+        was certainly not opened; without it, any failure is a ``GitHubError``."""
         created = json.loads(self._gh(
             'api', '-X', 'POST', f'repos/{self.repo}/pulls', '-f', f'title={title}',
             '-f', f'head={head}', '-f', f'base={base}', '-F', 'body=@-', stdin=body,
-            write=True).stdout)
+            write=self.uncertain_publications).stdout)
         return created['number'], created['html_url']
 
     def submit_review(self, number, *, commit, event, body):
-        """A native PR review (APPROVE, REQUEST_CHANGES or COMMENT) on ``commit``. Raises
-        ``GitHubUncertain`` when the outcome is unknown (#385), any other ``GitHubError`` when
-        the review was certainly not submitted."""
+        """A native PR review (APPROVE, REQUEST_CHANGES or COMMENT) on ``commit``. With
+        ``uncertain_publications`` (#385, #397) it raises ``GitHubUncertain`` when the outcome
+        is unknown, any other ``GitHubError`` when the review was certainly not submitted;
+        without it, any failure is a ``GitHubError``."""
         self._gh('api', '-X', 'POST', f'repos/{self.repo}/pulls/{number}/reviews',
                  '-f', f'commit_id={commit}', '-f', f'event={event}', '-F', 'body=@-', stdin=body,
-                 write=True)
+                 write=self.uncertain_publications)
 
     def merge_pr(self, number, head):
         """Merge PR ``number`` with a merge commit, only if its head is still ``head``. The

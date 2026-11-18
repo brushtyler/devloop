@@ -46,7 +46,13 @@ comment edit, native review and pull request of the dispatcher's and the agents'
 in the turn journal before it is sent, an uncertain outcome is reconciled on the exact comment of
 the same author before any new POST and sent again only on an absence that is conclusive, and
 each tick resumes what a restart left half published. Off, devloop publishes as
-before; another value stops devloop at startup. It applies at the next start.
+before (#397): no `gh` gets the dispatcher lock, and a review or pull request whose outcome is
+unknown is a failed write; another value stops devloop at startup. It applies at the next start.
+`journal_max_mib` (an integer of at least 1, default 64) is the
+[limit of the turn journal](protocol.md#turn-journal) (#397): beyond it the journal is not loaded
+and no event is written, so no turn starts, and nothing is ever removed from it; from 80% of it
+devloop warns the operator, once per threshold on `[run].alert_issue`, or in the log at each
+start without it. Another value stops devloop at startup; it applies at the next start.
 `[merge]` (`mode`, `levels`, `operator_only_paths`) and `roles.supervisor` set the
 [merge modes](guide.md#merge-modes); an unknown mode, level or key stops devloop at startup.
 `[pin]` (`auto`, default `false`; `restart_max_wait_minutes`, default 30) sets the
@@ -819,11 +825,16 @@ before. With `publication_outbox` on (#385), `Identities.github` hands out each 
 `comment`, `edit_comment`, `submit_review` and `create_pr` through the
 [publication outbox](protocol.md#publication-outbox),
 which reconciles an uncertain write on the app's login, or on `trusted_users` for the ambient
-login; `Identities.direct` gives the client without it. Under the dispatcher lock,
-`Identities.hold` gives its descriptor to every client (`GitHub.lock_fd`), those created before
-it included, such as the dispatcher's and the merger's that devloop builds before taking the
-lock: the `gh` of each
+login; `Identities.direct` gives the client without it. Under the dispatcher lock, and only
+with the outbox on (#397), `Identities.hold` gives its descriptor to every client
+(`GitHub.lock_fd`), those created before it included, such as the dispatcher's and the merger's
+that devloop builds before taking the lock: the `gh` of each
 write keeps the lock open while it runs, so no next dispatcher starts while it may still publish.
+That `gh` runs under coreutils `timeout`, a limit of its own that outlives the dispatcher: SIGTERM
+once the call's timeout (300 seconds) is spent, SIGKILL 5 seconds later, so a `gh` stuck on the
+network never holds the lock for ever; stopped so, the write is uncertain. With the outbox on,
+and only then, the clients' `submit_review` and `create_pr` tell an uncertain outcome apart
+(`GitHub.uncertain_publications`), as `comment` and `edit_comment` always do.
 An app that is configured but whose key is missing stops devloop at startup instead of
 silently falling back to the operator's login: remove it from `[apps]` (or use `--config`) to run
 that actor without it. `python3 -m devloop apps` checks each app, its installation and its
