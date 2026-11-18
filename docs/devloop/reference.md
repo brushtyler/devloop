@@ -240,8 +240,10 @@ the suite fails only in modules not pertinent to the PR and another job fails wi
   review, no merge. A ready PR stays in `agent:ready-to-merge` meanwhile, and goes back to
   `agent:review` as for any CI running again on the approved commit.
 - **Second failure.** One re-run per head: if the re-run fails too, the failure is a normal
-  `ci_failed`, which counts as a round, and its comment cites the re-run (runs and modules). A new
-  head starts again from its first failure.
+  `ci_failed`, which counts as a round, and its comment cites the re-run (runs and modules). On a
+  head whose review round asked for changes the failure joins that round instead, without a round
+  of its own ([one head, one round](protocol.md#approval-and-ci), #352). A new head starts again
+  from its first failure.
 
 The rerun needs **`actions: write`** on the dispatcher's app. Its token is minted with only that
 permission. Without it (GitHub answers 403, or refuses to mint the token; also when the

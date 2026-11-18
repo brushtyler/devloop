@@ -341,6 +341,75 @@ class RegisterTests(Quorum):
                           for s in register['records']],
                          [('turn', FIRST), ('event', 'ci_round'), ('turn', SECOND)])
 
+    def pending_ci(self):
+        """The CI of the head runs."""
+        self.gh.ci = 'pending'
+        self.gh.details = [dict(c, bucket='pending', conclusion=None, duration_s=None)
+                           for c in GREEN]
+
+    def fail_ci(self):
+        """The CI of the head, until now pending, fails."""
+        self.gh.ci = 'fail'
+        self.gh.details = LedgerGH(ci='fail').check_details(SHA1)
+
+    def round_items(self):
+        ((_, register),) = self.registers()
+        return [(s['type'], s.get('agent') or s.get('event'), s.get('state'))
+                for s in register['records']]
+
+    def test_a_ci_failure_after_a_request_for_changes_joins_its_round_and_register(self):
+        # One head, one round (#352): the review asked for changes with the CI pending, the CI
+        # then failed. The failure is a ci finding of round 1, its event in round 1's register.
+        self.make_register(cfg=CFG, outputs={REV: [raw_review('request_changes',
+                                                              [finding('a')])]})
+        self.ws.diff = list(LEVEL1)
+        self.pending_ci()
+        self.d.tick()
+        self.assertEqual(self.gh.labels[100], {'agent:changes'})
+        self.assertEqual(self.d.tick(), [])  # the fix waits for the CI of the head
+        self.fail_ci()
+        self.assertEqual(self.d.tick(), [Action('ci_failed', 100, 'CI failed after the review: '
+                                                'it joins its round')])
+        self.assertEqual([(r['source'], r['round']) for r in self.records('review')],
+                         [('agent', 1), ('ci', 1)])
+        self.assertEqual(self.round_items(), [('turn', REV, 'closed'),
+                                              ('event', 'ci_round', 'fail')])
+        snap = self.d.snapshot()
+        self.assertEqual(counted_rounds(snap.prs[0].reviews), 1)
+        self.assertEqual(self.planned(), [Action('fix', 100)])
+
+    def test_a_ci_failure_joins_a_round_still_waiting_for_a_reviewer(self):
+        # Level 2: the first reviewer asked for changes with the CI pending, the CI failed
+        # before the second reviewed. The failure joins the round, which waits for the second;
+        # then one fix answers the reviewers' findings and the CI's.
+        self.make_register(cfg=CFG, outputs={FIRST: [raw_review('request_changes',
+                                                                [finding('a')])],
+                                             SECOND: [raw_review()]})
+        self.pending_ci()
+        self.d.tick()
+        self.assertEqual(self.gh.labels[100], {'agent:review'})
+        self.fail_ci()
+        self.assertEqual(self.planned(), [Action('ci_failed', 100, 'CI failed during the '
+                                                 'review: it joins its round')])
+        self.d.tick()
+        self.assertEqual(self.gh.labels[100], {'agent:review'})
+        self.assertIn(f'  CI failure joins round 1, which waits for {SECOND}', self.logs)
+        self.assertEqual(self.planned(), [Action('review', 100,
+                                                 f'the round waits for {SECOND}')])
+        self.d.tick()
+        self.assertEqual(self.reviewed(), [FIRST, SECOND])
+        self.assertEqual(self.gh.labels[100], {'agent:changes'})
+        self.assertEqual([(r['reviewer'], r['round']) for r in self.records('review')],
+                         [(FIRST, 1), ('ci', 1), (SECOND, 1)])
+        self.assertEqual(self.round_items(), [('turn', FIRST, 'closed'),
+                                              ('event', 'ci_round', 'fail'),
+                                              ('turn', SECOND, 'closed')])
+        snap = self.d.snapshot()
+        self.assertEqual(counted_rounds(snap.prs[0].reviews), 1)
+        self.assertEqual(sorted(f['key'] for f in open_findings(snap.prs[0].reviews)),
+                         sorted([f'1/{FIRST}/R1-1', '1/ci/R1-1']))
+        self.assertEqual(self.planned(), [Action('fix', 100)])
+
     def test_an_interrupted_turn_stays_open_in_the_register(self):
         self.make_register(outputs={SECOND: [RuntimeError('dispatcher killed')]})
         self.d.tick()

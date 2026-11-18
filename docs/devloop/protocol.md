@@ -181,9 +181,15 @@ same head decides what the approval is worth:
   before the promotion; if it fails, the PR goes to `agent:needs-operator`.
 
 A round that asks for changes while the CI is pending, or within the window, sends the PR to
-`agent:changes`, and the fix waits for the CI of the same head. If that CI fails, the failure
-becomes a CI round first, as above (or its failed jobs are re-run once), and the one fix that
-follows answers the reviewer's findings and the CI failure together. If it passes, or the
+`agent:changes`, and the fix waits for the CI of the same head. If that CI fails (after the
+re-run of its failed jobs, when there is one), **one head, one round** (#352): the failure does
+not open a round of its own. The dispatcher adds a `ci` record to the round that asked for
+changes, with the failed checks as its `ci` finding; the round's register gets the `ci_round`
+event, the round still counts once against `max_review_rounds`, and the one fix that follows
+answers the reviewer's findings and the CI failure together. The same holds for a round still
+waiting for other reviewers when one of them already asked for changes: the failure joins it,
+and the round waits for the others as before. A round that has only approved so far does not
+take the failure: it becomes a CI round of its own, as above. If it passes, or the
 window ends without CI, the fix starts with the reviewer's findings; checks the base branch
 requires and that never appeared are not escalated then: the fix pushes a new head, which gets
 its own CI.
