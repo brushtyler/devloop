@@ -76,13 +76,18 @@ The dispatcher reaches GitHub through three ports, declared in `devloop/ports.py
 | Port | Methods |
 |---|---|
 | `Tracker` | issues and their history, comments of issues and PRs, labels: `issues_with_label`, `issue`, `issue_history`, `issue_comments`, `pr_comments`, `labelers`, `label_events`, `labeled_events`, `edit_labels`, `comment`, `close_issue`, `edit_comment`, `ensure_label`, `repo_labels`, `rename_label` |
-| `CodeReview` | PRs and reviews: `open_prs`, `merged_prs`, `merge_state` (`clean`, `conflict` or `unknown`), `pr_head`, `pr_state`, `merge_pr`, `pr_reviews`, `create_pr`, `submit_review` |
+| `CodeReview` | PRs and reviews: `open_prs`, `merged_prs`, `find_pr` (#362), `merge_state` (`clean`, `conflict` or `unknown`), `pr_head`, `pr_state`, `merge_pr`, `pr_reviews`, `create_pr`, `submit_review` |
 | `CI` | checks of a commit: `checks` (summarized by `summarize_checks`), `check_details`, `check_runs`, `failed_log`, `job_log` (#300), `rerun_failed_jobs` (#200) |
 
 `Tracker` also has `issue_dependencies` (#277): the native "blocked by" dependencies of an
 issue, with the state of each blocking issue and who added each block, read with GraphQL (one
 query, more only when the events of an open block are older than the latest 100)
 ([Dependencies between issues](devloop/guide.md#dependencies-between-issues)).
+
+`CodeReview.find_pr` (#362) reads a PR in any state, or None when the number is an issue: the
+dispatcher uses it for a legacy turn imported from `ledger-open-turns.json` whose PR is not among
+the open ones, to link the turn to the issue of its work
+([Turn journal](devloop/protocol.md#turn-journal)).
 
 `CI` also has `commit_date` and `required_checks` (#263): the commit date of a head and the
 checks the base branch requires, for the wait for the
