@@ -730,6 +730,18 @@ an identity that may not write devloop records is no record. `operator_comments`
 with any of these headers, and the `/devloop` commands are read on the first line after any of
 them.
 
+**What the reviewers read** (#389). The review prompt and the
+[advisory](guide.md#advisory-review-for-the-operator) one are blind to the author: they name
+neither the implementer's key nor its model, and tell the reviewer that it is not the author of
+the change, which a separate session wrote, and that a `git log` or a commit trailer naming an
+agent or a model does not change that. The texts they pass on, the issue body, the PR
+description, the trusted users' comments and the implementer's responses to the findings, lose
+every attribution block (a `> [!NOTE]` followed only by `Bot`, `Version`, `Agent`, `Model` and
+`Reasoning Level` lines, outside fenced code) and the markers that end them
+(`markdown.without_attribution`). Everything else stays, technical text that names an agent or a
+model included. The originals on GitHub, the PR's marker, the ledger and the commit trailers do
+not change: devloop still reads the implementer from the marker to keep it out of the reviewers.
+
 ## Records bound to identities
 
 Records are bound to identities. A PR counts as a devloop PR with its marker only if it was opened

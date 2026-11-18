@@ -26,7 +26,7 @@ from .github import GitHubError, job_id
 from .ledger import attempt_branch, attempt_marker, fix_register
 from .localtests import failed_modules, select_modules, suite_summary
 from .markdown import (dispatcher_header, publishable, render_fix, render_native_review,
-                       render_review)
+                       render_review, without_attribution)
 from .planning import (BASE_CHANGED, FIX_COMMAND, RESYNC_AFTER_APPROVAL, ci_joins_round,
                        counted_rounds, pending_reviewers, preflight_state, voided_approval,
                        waived_rounds, waiting_reviewers)
@@ -484,12 +484,14 @@ class ActionsMixin:
         ci_summary, ci_jobs = self._ci_summary(pr)
         # The verified resolution of a unanimous conclave on the issue or the PR (#142).
         decision, _, resolution = self._resolution_for(pr.issue, issue, pr, pr.head_sha)
+        # Blind to the author (#389): no implementer key, no attribution header, no marker. The
+        # key stays in the PR's marker and in the ledger, for the selection of the reviewers.
         prompt = _template('review', repo=cfg.repo, base_branch=cfg.base_branch,
                            pr_number=pr.number, round=round_no, max_rounds=max_rounds,
-                           implementer=pr.meta.get('implementer', cfg.implementer),
                            ci=ci, ci_summary=ci_summary, test_cmd=cfg.test_cmd,
                            issue_number=pr.issue, issue_title=issue['title'],
-                           issue_body=issue.get('body') or '', pr_body=pr.body,
+                           issue_body=without_attribution(issue.get('body')),
+                           pr_body=without_attribution(pr.body),
                            acceptance_criteria=format_criteria(criteria),
                            acceptance_map=format_map(acceptance_map),
                            docs=docs_review_section(self._mapped_docs(path)),

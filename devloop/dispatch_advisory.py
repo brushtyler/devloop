@@ -43,7 +43,7 @@ from .dispatch_actions import Models
 from .journal import JournalError, TurnBlocked
 from .ledger import timestamp as ledger_timestamp
 from .markdown import (ADVISORY_OPINIONS, MAX_BODY, dispatcher_header, fitted, publishable,
-                       read_marker)
+                       read_marker, without_attribution)
 from .planning import label_names, operator_blocked
 from .policy import ZERO_LEVEL
 from .supervision import UNCERTAIN_TURN
@@ -492,9 +492,10 @@ class AdvisoryMixin:
         try:
             prompt = _template('advisory', repo=cfg.repo, pr_number=pr.number, head=head,
                                base_branch=cfg.base_branch, why=why,
-                               implementer=pr.meta.get('implementer', cfg.implementer),
                                issue_number=pr.issue, issue_title=issue['title'],
-                               issue_body=issue.get('body') or '', pr_body=pr.body,
+                               # Blind to the author, as the review (#389).
+                               issue_body=without_attribution(issue.get('body')),
+                               pr_body=without_attribution(pr.body),
                                diff_stat=self.ws.diff_stat(path),
                                previous=format_previous_rounds(pr.reviews, pr.fixes,
                                                                pr.closures),
