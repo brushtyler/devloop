@@ -110,6 +110,13 @@ sensitive_paths = ["devloop/", "AGENTS.md", "CLAUDE.md", ".github/", "schemas/",
 # JSON files whose "files" object lists more sensitive paths, read at startup relative to the
 # root of the running devloop installation (a pinned checkout); a missing file stops devloop.
 sensitive_path_lists = ["schemas/recovery-grader-baseline.json"]
+# Advisory review (issue #369): the agent that writes one more review, as a native `COMMENT`
+# review with its own identity, of each head of a PR in agent:needs-operator. It may be the
+# implementer: it never counts for the quorum nor for the round limit, opens no finding and
+# changes no label; devloop never reads it to decide. Empty (the default) turns it off; the
+# local overlay turns it on, e.g. advisory_reviewer = "claude". It is not part of the policy
+# version.
+advisory_reviewer = ""
 
 # Level 0 (issue #107): no review. It applies only when a trusted user added `label` to the PR
 # (the latest event of that label added it), the level computed above is 1, and the PR's full

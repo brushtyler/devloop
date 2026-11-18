@@ -54,7 +54,7 @@ NOT_REPORTED = 'non riportato'
 PENDING = LEGACY
 # The journal's outcome of a turn closed as ``close_turn`` says.
 JOURNAL_OUTCOME = {'success': RETURNED, 'failure': FAILED, 'unavailable': FAILED}
-TURN_KINDS = ('implement', 'fix', 'sync', 'review', 'preflight', 'conclave')
+TURN_KINDS = ('implement', 'fix', 'sync', 'review', 'preflight', 'conclave', 'advisory')
 REGISTERS = ('round', 'fix')  # the records whose ``records`` hold sections (#325, #355)
 FIX = 'fix'  # the ``register`` of the sections of a fix register, as reads expand them
 _COMMENT_URL = re.compile(r'#issuecomment-(\d+)$')

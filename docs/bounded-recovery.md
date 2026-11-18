@@ -103,7 +103,11 @@ hash. It is never applied implicitly, and absent means "no rule", not zero:
   invocation counts per role and phase and the deadline. Any reported dollar
   value still counts.
 - No rule: `codex` and `agy` never report a cost, so their dispatch is refused
-  with `LIMIT_REACHED` before launch. `claude` and OpenRouter may still run, but
+  with `LIMIT_REACHED` before launch. A cap in credits of the profile
+  (`credit_caps`, [issue #214](https://github.com/brushtyler/ssdlc/issues/214))
+  does not change this: credits add to the dollar caps, and replace the rule
+  only after the operator's explicit `substitute_credit_cap` transition
+  ([Cost telemetry](cost-telemetry.md#caps-in-credits-and-existing-profiles)). `claude` and OpenRouter may still run, but
   a returned or terminated call with no cost (including a reported 0) blocks the
   next dispatch with `LIMIT_REACHED`.
 

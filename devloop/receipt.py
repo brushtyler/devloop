@@ -56,6 +56,8 @@ _VERDICT = {'approve': 'approvata', 'request_changes': 'modifiche richieste',
             'needs_operator': 'decisione dell\'operatore'}
 _CLOSED = {'resolved': 'risolto', 'withdrawn': 'ritirato'}
 _MAP_STATUS = {'covered': 'coperto', 'not_covered': 'non coperto'}
+# What a receipt keeps of the advisory review of its head (#369).
+ADVISORY_FIELDS = ('head', 'reviewer', 'outcome', 'opinion')
 
 
 # Content -------------------------------------------------------------------
@@ -167,7 +169,7 @@ def totals(turns, verifications, ci, reviews):
 
 
 def build(*, pr, issue, head, promotion, policy, request, issue_records, pr_records, reviews,
-          closures, approved_round, criteria, acceptance_map):
+          closures, approved_round, criteria, acceptance_map, advisory=None):
     """The content of the receipt of PR ``pr`` (issue ``issue``) promoted on ``head``.
 
     ``policy``: the policy receipt recomputed for the promotion; ``request``: the latest
@@ -175,7 +177,9 @@ def build(*, pr, issue, head, promotion, policy, request, issue_records, pr_reco
     ``ledger.collect`` reads on the issue and on the PR; ``reviews`` and ``closures``: the
     review markers and the dispatcher's finding closures; ``approved_round``: the number of the
     approved round (None at level 0); ``criteria``: the criteria of the issue text (None when it
-    cannot be trusted); ``acceptance_map``: the latest map (None when none is recorded)."""
+    cannot be trusted); ``acceptance_map``: the latest map (None when none is recorded);
+    ``advisory``: the dispatcher's record of the advisory review of ``head`` (#369), or None.
+    Without one the content has no ``advisory`` key, and its digest is the one before #369."""
     turns = ([_turn(t, 'issue') for t in issue_records['turns']]
              + [_turn(t, 'pr') for t in pr_records['turns']])
     events = [_event(e) for e in pr_records['events']]
@@ -197,6 +201,9 @@ def build(*, pr, issue, head, promotion, policy, request, issue_records, pr_reco
         'acceptance': _acceptance(criteria, acceptance_map),
         'totals': totals(turns, verifications, ci, reviews),
     }
+    if advisory is not None:
+        # Only the identity and the opinion, never the text the agent wrote (#369).
+        content['advisory'] = {k: advisory.get(k) for k in ADVISORY_FIELDS}
     content['missing'] = missing(content)
     return content
 
@@ -479,7 +486,38 @@ def section(content):
               '', '### Policy', '', f'Livello **{content["policy"]["level"]}**.', '',
               describe_policy(content['policy']),
               '', '### Criteri di accettazione', '', *_acceptance_text(content['acceptance'])]
+    if content.get('advisory') is not None:
+        parts += ['', '### Review consultiva', '', *_advisory_text(content['advisory'])]
     return '\n'.join(parts)
+
+
+def _advisory_text(advisory):
+    """The advisory review of the head (#369): who wrote it and its opinion, never its text."""
+    who, head = _v(advisory['reviewer']), _sha(advisory['head'])
+    if advisory['outcome'] != 'done':
+        return [f'La review consultiva di {who} sul commit {head} non è riuscita.']
+    return [f'Parere non vincolante di {who} sul commit {head}: **{advisory["opinion"]}**. '
+            'Non conta per il quorum né per il limite dei round, non apre finding e non '
+            'cambia label né promozione: il testo è nella review GitHub di tipo `COMMENT` '
+            '"Review consultiva: non conta per il quorum".']
+
+
+def with_advisory(body, content):
+    """``body``, the comment of the current receipt of ``content``'s head, with its receipt
+    rewritten from ``content``, which carries the advisory review of that head (#369): the
+    section and the ``receipt`` record, with digest and totals recomputed, while promotion,
+    policy and state stay. The text before the receipt's title and the other records of the
+    comment stay as they are. None when the comment has no such title."""
+    lines = split_markers(body)[0].splitlines()
+    title = f'## Ricevuta della PR #{content["pr"]}'
+    start = next((i for i, line in enumerate(lines) if line.strip() == title), None)
+    if start is None:
+        return None
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith('## ')),
+               len(lines))
+    text = '\n'.join(lines[:start] + section(content).splitlines()
+                     + [''] * (end < len(lines)) + lines[end:])
+    return with_record(body, 'receipt', record(content), text=text)
 
 
 def superseded(body, marker, why, at):

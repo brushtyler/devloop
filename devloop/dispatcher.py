@@ -69,6 +69,13 @@ a ``conclave`` action with a slot of its own; the outcome (``UNANIMOUS``, ``BLOC
 ``RESERVED``) is a dispatcher ``conclave`` record bound to the block, the content and the head.
 The labels stay: the escalation is still the operator's (``dispatch_conclave``).
 
+Advisory review (#369, with ``review_policy.advisory_reviewer``): a devloop PR in
+agent:needs-operator gets, once per head, one ``advisory`` action: a read-only turn of that agent,
+published as a native ``COMMENT`` review with its identity, and the dispatcher's summary with the
+opinion, also added to the current receipt of the same head. No round, no finding, no label, no
+promotion; a failure is never escalated, and a publication left halfway resumes on a later tick
+without a new turn (``dispatch_advisory``).
+
 Start order (#146): ready issues start by priority (``priority:high``, ``normal``, ``low``; a
 ``priority_labels`` label counts as high), then by the oldest current ``agent:ready``, then by
 number. A priority label counts only if a trusted user added it.
@@ -178,6 +185,7 @@ from .context import (LABEL_STYLE, _describe_bases, _failure_text, _open_finding
                       _render_issue_comments, both_labels_warning, label_transition,
                       transition_labels)
 from .dispatch_actions import ActionsMixin, Models, ready_approval, rerun_of
+from .dispatch_advisory import AdvisoryMixin, AdvisoryResults
 from .dispatch_conclave import ConclaveMixin
 from .dispatch_merge import MergeMixin
 from .dispatch_preflight import PreflightMixin
@@ -510,7 +518,8 @@ def untrusted_change(history, ready_label, trusted_users, admitters=None):
     return None
 
 
-class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, ConclaveMixin):
+class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, ConclaveMixin,
+                 AdvisoryMixin):
     """``gh`` acts as the dispatcher: it implements the ports of ``ports.Backend`` (tracker,
     code review and CI), and the dispatcher uses nothing else of it. ``identities``
     (``apps.Identities``) gives each agent its own GitHub identity; without it every actor uses
@@ -518,7 +527,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
     status``. ``ledger`` (``ledger.Ledger``) records evidence and telemetry of each step (#133)."""
 
     def __init__(self, cfg, gh: Backend, ws, runner, log=print, identities=None, activity=None,
-                 ledger=None, merger=None, pinner=None, memory=None, clock=time.time):
+                 ledger=None, merger=None, pinner=None, memory=None, clock=time.time,
+                 advisory_results=None):
         self.cfg = cfg
         # Wall-clock seconds, and since when each head waits for its CI (#263): the time of
         # the dispatcher's own push, else its commit date, read once.
@@ -544,6 +554,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         # The models found unavailable (``unavailability.Memory``, #151), or None: every turn
         # starts from the configured model.
         self.memory = memory
+        # The advisory turns run and not yet published (#369, ``AdvisoryResults``): in
+        # ``state_dir`` from ``devloop``, in memory without it.
+        self.advisory_results = (advisory_results if advisory_results is not None
+                                 else AdvisoryResults())
         # Continuous mode (#227): set by ``devloop run`` with parallel actions, a tick starts
         # its actions in these ``Workers`` and does not wait for them.
         self.workers = None
@@ -958,7 +972,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         working = [raw['number'] for raw in self.gh.issues_with_label(lb.working)]
         return Snapshot(prs=prs, ready_issues=ready, working_issues=working,
                         supervised=self._supervised_items(prs),
-                        conclaves=self._conclave_items(prs))
+                        conclaves=self._conclave_items(prs),
+                        advisories=self._advisory_items(prs))
 
     def _pushed(self, path):
         """Record that the head of worktree ``path`` was pushed now (#263): the wait for its CI
@@ -1465,9 +1480,15 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         without a result unsettled. It resumes from its record on a later tick. Except a call
         refused by the block on uncertain turns (``TurnBlocked``, #362): it escalates as
         ``uncertain_turn``, and the conclave of that block ends there, the item staying with the
-        operator. The call was refused before being recorded as started (``_conclave_call``)."""
+        operator. The call was refused before being recorded as started (``_conclave_call``).
+
+        Nor is an advisory review (#369): the PR is already the operator's, and the advisory
+        review changes no label. A head without its summary gets it on a later tick."""
         if action.kind == 'conclave' and not isinstance(exc, TurnBlocked):
             self.log('  conclave: no escalation, it resumes from its record')
+            return
+        if action.kind == 'advisory':
+            self.log('  advisory review: no escalation, the PR is already the operator\'s')
             return
         lb = self.cfg.labels
         reason = f'Il passo `{action.kind}` è fallito: {_failure_text(exc)}{self._log_hint(exc)}'

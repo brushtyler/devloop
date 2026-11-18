@@ -419,12 +419,27 @@ def _valid_conclave(c):
     return valid_record(c)
 
 
+# The non-binding opinions of an advisory review (#369).
+ADVISORY_OPINIONS = ('ok', 'dubbi', 'contrario')
+
+
+def _valid_advisory(a):
+    """The advisory review of a head (#369): in the native review of the advisory agent, and in
+    the dispatcher's summary for the operator. ``opinion`` is one of ``ADVISORY_OPINIONS`` when
+    the review was written (``done``), null when it failed."""
+    return (isinstance(a.get('head'), str) and bool(a['head'])
+            and isinstance(a.get('reviewer'), str) and bool(a['reviewer'])
+            and (a.get('outcome') == 'done' and a.get('opinion') in ADVISORY_OPINIONS
+                 or a.get('outcome') == 'failed' and a.get('opinion') is None))
+
+
 _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy': _valid_policy,
           'finding': _valid_finding, 'sync': _valid_sync, 'preflight': _valid_preflight,
           'notice': _valid_notice, 'ledger': _valid_ledger, 'merged': _valid_merged,
           'hold': _valid_hold, 'supervision': _valid_supervision, 'rerun': _valid_rerun,
           'closed': _valid_closed, 'cycle': _valid_cycle, 'report': _valid_report,
-          'receipt': _valid_pr_receipt, 'conclave': _valid_conclave}
+          'receipt': _valid_pr_receipt, 'conclave': _valid_conclave,
+          'advisory': _valid_advisory}
 
 
 def read_marker(text, kind):

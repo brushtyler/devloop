@@ -456,10 +456,11 @@ def _listed_files(name, root):
     return tuple(files)
 
 
-def parse_review_policy(table, root, reviewers=()):
+def parse_review_policy(table, root, reviewers=(), agents=None):
     """The policy of ``[review_policy]``. A list file that cannot be read stops devloop: the
     policy never runs with fewer sensitive paths than configured. ``reviewers`` is the pool
-    as ``ReviewPolicy.reviewers`` records it."""
+    as ``ReviewPolicy.reviewers`` records it; ``agents``, the configured agents, among which
+    ``advisory_reviewer`` must be (#369), when given."""
     if not isinstance(table, dict):
         raise ConfigError('review_policy: expected a table')
     where = 'review_policy'
@@ -477,9 +478,15 @@ def parse_review_policy(table, root, reviewers=()):
     for name in _str_list(table, 'sensitive_path_lists', where, DEFAULT_SENSITIVE_LISTS):
         files += _listed_files(name, root)
     zero_label, allowlist, checks = _zero_policy(table.get('zero', {}), label, default)
+    advisory = table.get('advisory_reviewer', default.advisory_reviewer)
+    if not isinstance(advisory, str):
+        raise ConfigError(f'{where}.advisory_reviewer: expected a string')
+    if advisory and agents is not None and advisory not in agents:
+        raise ConfigError(f'{where}.advisory_reviewer: unknown agent {advisory!r}')
     return ReviewPolicy(default_level=level, label=label, sensitive_paths=paths,
                         sensitive_files=tuple(files), reviewers=tuple(reviewers),
-                        zero_label=zero_label, zero_allowlist=allowlist, zero_checks=checks)
+                        zero_label=zero_label, zero_allowlist=allowlist, zero_checks=checks,
+                        advisory_reviewer=advisory)
 
 
 def _zero_policy(table, level_label, default):
@@ -831,7 +838,7 @@ def parse_config(data, root=INSTALL_ROOT):
             [(k, apps[k].slug if k in apps else None, agents[k].kind, agents[k].model,
               agents[k].effort, agents[k].review_args,
               tuple((f.model, f.effort) for f in agents[k].fallback_models),
-              agents[k].review_commands) for k in pool]),
+              agents[k].review_commands) for k in pool], agents),
         **ints)
 
 
@@ -861,7 +868,7 @@ OVERLAY_KEYS = {
                      'agent_stall_action', 'blocked_labels', 'priority_labels',
                      'protected_paths')),
     'review_policy': {**dict.fromkeys(('default_level', 'label', 'sensitive_paths',
-                                       'sensitive_path_lists')),
+                                       'sensitive_path_lists', 'advisory_reviewer')),
                       'zero': dict.fromkeys(('label', 'allowlist', 'checks'))},
     'merge': {'mode': None, 'operator_only_paths': None, 'levels': {'*': None}},
     'roles': dict.fromkeys(('implementer', 'reviewer', 'reviewers', 'supervisor')),
