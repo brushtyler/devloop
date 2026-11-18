@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import ssdlc_workflow_status as ws  # noqa: E402
 from ssdlc_tasks import digest  # noqa: E402
 import ssdlc_telemetry as telemetry  # noqa: E402
+from ssdlc_transitions import TransitionStore, source_binding  # noqa: E402
 
 TICKET = 'T-346'
 PLAN = {'schema_version': '1.0', 'plan_revision': 2, 'ticket_id': TICKET, 'tasks': [
@@ -90,6 +91,31 @@ class Case(unittest.TestCase):
 
     def snap(self, **kw):
         return ws.snapshot(self.repo, TICKET, clock=lambda: 1_800_000_000, **kw)
+
+    def publish(self, namespace, runtimes, *, ledger=(), authorized=False):
+        """A real generation published by ``TransitionStore`` and its runtime; returns both."""
+        identity = 'e' * 32
+        binding = {'generation': identity}
+        if authorized:
+            binding['model_dispatch_authorized'] = True
+        source = self.repo / 'source'
+        source.mkdir(exist_ok=True)
+        (source / 'journal.jsonl').write_text('historical journal\n')
+        old = {'ledger': list(ledger), 'tasks': {}}
+        new = dict(old, transition_id=identity, runtime_binding=binding)
+        artifacts = {'original-state.json': b'original bytes'}
+        proposal = {'transition_id': identity, 'old_controller_sha256': 'b' * 64,
+                    'new_controller_sha256': 'c' * 64, 'projection_sha256': digest(new),
+                    'source_files': source_binding(source, ['journal.jsonl']),
+                    'artifacts': {k: hashlib.sha256(v).hexdigest() for k, v in artifacts.items()}}
+        authorization = {'schema_version': 1, 'transition_id': identity, 'proposal_sha256': digest(proposal),
+                         'authorized': True, 'source_fenced': True, 'old_controller_sha256': 'b' * 64,
+                         'new_controller_sha256': 'c' * 64}
+        TransitionStore(self.ticket / namespace).publish(source, proposal, authorization, old, new, artifacts)
+        runtime = self.ticket / runtimes / identity
+        self.make_run(runtime, ledger=list(ledger))
+        (runtime / 'generation.json').write_text(json.dumps(binding))
+        return identity, runtime
 
 
 class ReadOnlyTest(Case):
@@ -197,6 +223,69 @@ class ContractTest(Case):
         self.assertEqual(result['read']['status'], ws.UNVERIFIABLE)
         self.assertIn('binding changed', result['read']['reason'])
 
+    def test_a_real_generation_is_read_with_every_file_it_seals(self):
+        identity, _ = self.publish('continuations', 'runtime-generations')
+        result = self.snap()
+        self.assertEqual(result['read']['status'], ws.COHERENT)
+        self.assertEqual((result['generation']['kind'], result['generation']['transition_id']),
+                         ('continuation', identity))
+        for name in ('intent.json', 'manifest.json', 'projection.json', 'original-state.json'):
+            self.assertIn(f'continuations/{identity}/{name}', result['sources'], name)
+
+    def test_a_null_selector_is_refused_not_read_as_absent(self):
+        for store in ('execution', 'continuations'):
+            for name in ('active', 'pending'):
+                with self.subTest(selector=f'{store}/{name}.json'):
+                    directory = self.ticket / store
+                    directory.mkdir(exist_ok=True)
+                    (directory / f'{name}.json').write_text('null')
+                    try:
+                        result = self.snap()
+                    finally:
+                        (directory / f'{name}.json').unlink()
+                    self.assertEqual(result['read']['status'], ws.UNVERIFIABLE)
+                    self.assertIn(f'{store}/{name}.json: selector does not validate', result['read']['reason'])
+                    self.assertIsNone(result['generation'])
+
+    def test_the_historical_ledger_prefix_is_compared_row_by_row(self):
+        rows = [{'engine': 'claude', 'cost_usd': 1.0}, {'engine': 'codex', 'cost_usd': 2.0}]
+        _, runtime = self.publish('execution', 'execution-runtimes', ledger=rows, authorized=True)
+        def with_ledger(ledger):
+            state = json.loads((runtime / 'state.json').read_text())
+            (runtime / 'state.json').write_text(json.dumps(dict(state, ledger=ledger)))
+            return self.snap()
+        extended = with_ledger(rows + [{'engine': 'claude', 'cost_usd': 4.0}])
+        self.assertEqual(extended['read']['status'], ws.COHERENT)
+        self.assertEqual(extended['generation']['ledger_prefix'], 2)
+        self.assertEqual(extended['metrics']['unclassified_usd']['value'], 7.0)
+        for label, ledger in (('replaced', [{'engine': 'claude', 'cost_usd': 0.0}, rows[1]]),
+                              ('reordered', [rows[1], rows[0]]), ('truncated', rows[:1])):
+            with self.subTest(label):
+                result = with_ledger(ledger)
+                self.assertEqual(result['read']['status'], ws.UNVERIFIABLE)
+                self.assertIn('historical ledger prefix', result['read']['reason'])
+                self.assertIsNone(result['metrics'])
+
+    def test_malformed_journal_records_are_unverifiable(self):
+        path = self.ticket / '03-dev/tasks/task-journal.jsonl'
+        cases = {
+            'null record': lambda: path.write_bytes(path.read_bytes() + b'null\n'),
+            'state not an object': lambda: Journal(path).append([], 'INITIALIZED'),
+            'record not an object': lambda: Journal(path).append({'tasks': {'A': None}}, 'INITIALIZED'),
+            'status not a string': lambda: Journal(path).append({'tasks': {'A': {'status': ['X']}}}, 'INITIALIZED'),
+            'attempts not a number': lambda: Journal(path).append(
+                {'tasks': {'A': {'status': 'PENDING', 'attempts': 'one'}}}, 'INITIALIZED'),
+        }
+        for label, write in cases.items():
+            with self.subTest(label):
+                self.make_run(self.ticket)
+                if label != 'null record':
+                    path.unlink()
+                write()
+                result = self.snap()
+                self.assertEqual((result['read']['status'], result['read']['attempts']), (ws.UNVERIFIABLE, 1))
+                self.assertIsNone(result['tasks'])
+
 
 class ConcurrencyTest(Case):
     def journal(self):
@@ -230,6 +319,29 @@ class ConcurrencyTest(Case):
             path.write_bytes(data)
         result = self.snap(fault=fault)
         self.assertEqual(result['read']['status'], ws.TORN)
+
+    def test_a_sealed_artifact_replaced_during_collection_is_retried(self):
+        identity, _ = self.publish('continuations', 'runtime-generations')
+        artifact = self.ticket / 'continuations' / identity / 'original-state.json'
+        def fault(point, attempt):
+            if attempt == 1:  # The same bytes in a new file: only the final check can see it.
+                data = artifact.read_bytes()
+                artifact.unlink()
+                artifact.write_bytes(data)
+        result = self.snap(fault=fault)
+        self.assertEqual((result['read']['status'], result['read']['attempts']), (ws.COHERENT, 2))
+
+    def test_a_projection_changed_during_collection_is_never_coherent(self):
+        identity, _ = self.publish('continuations', 'runtime-generations')
+        projection = self.ticket / 'continuations' / identity / 'projection.json'
+        def fault(point, attempt):
+            if attempt == 1:
+                value = json.loads(projection.read_text())
+                projection.write_text(json.dumps(dict(value, ledger=[{'cost_usd': 9.0}]), sort_keys=True) + '\n')
+        result = self.snap(fault=fault)
+        # The retry reads the changed projection, which the engine's loader refuses.
+        self.assertEqual((result['read']['status'], result['read']['attempts']), (ws.UNVERIFIABLE, 2))
+        self.assertIn('selector does not validate', result['read']['reason'])
 
     def test_files_that_keep_changing_are_torn_after_three_attempts(self):
         journal, calls = self.journal(), []
@@ -326,6 +438,17 @@ class MetricsTest(Case):
         self.assert_coverage(result['metrics'])
         for name in ('tasks_total', 'task_attempts', 'invocations', 'spend_usd', 'tokens_total'):
             self.assertEqual(result['metrics'][name]['coverage'], ws.NONE, name)
+
+    def test_a_ledger_without_any_duration_has_no_duration(self):
+        self.make_run(self.ticket, ledger=[{'engine': 'claude', 'cost_usd': 0.5}, {'engine': 'codex'}])
+        metrics = self.snap()['metrics']
+        self.assert_coverage(metrics)
+        duration = metrics['model_duration_sec']
+        self.assertEqual((duration['value'], duration['coverage']), (None, ws.NONE))
+        self.assertIn('2 ledger rows', duration['reason'])
+        self.make_run(self.ticket, ledger=[])
+        duration = self.snap()['metrics']['model_duration_sec']
+        self.assertEqual((duration['value'], duration['coverage']), (0, ws.COMPLETE))
 
     def test_feedback_interventions_are_only_the_recorded_ones(self):
         projection = {'requests': [{'rounds': 2}, {'rounds': 1}], 'operator_owner_amendments': 1,

@@ -111,18 +111,27 @@ class Reader:
         self.seen[relative] = fingerprint
         return data
 
-    def json(self, relative):
+    def document(self, relative):
+        """``(present, value)`` of a JSON file: a file holding ``null`` is present, not absent."""
         data = self.read(relative)
         if data is None:
-            return None
+            return False, None
         try:
-            return json.loads(data)
+            return True, json.loads(data)
         except ValueError:
             raise Unverifiable(f'{relative}: invalid JSON') from None
 
     def note(self, relative):
         """Fingerprint a file read by another, read-only, reader of the engine."""
         self.read(relative)
+
+    def observe(self, path):
+        """``observe`` hook of the engine's readers: fingerprint each absolute path they read."""
+        try:
+            relative = Path(path).relative_to(self.ticket)
+        except ValueError:
+            raise Unverifiable(f'path outside the ticket: {path}') from None
+        self.note(relative.as_posix())
 
     def stable(self):
         """Whether every file read so far still has the fingerprint it had when read."""
@@ -139,8 +148,9 @@ class Reader:
 
 
 def _transition_id(value):
-    if isinstance(value, dict) and isinstance(value.get('transition_id'), str):
-        return value['transition_id']
+    identity = value.get('transition_id') if isinstance(value, dict) else None
+    if isinstance(identity, str) and re.fullmatch(r'[a-f0-9]{32}', identity):
+        return identity
     return None
 
 
@@ -154,12 +164,16 @@ def _generation(reader):
     from ssdlc_tasks import TaskError
     selectors = {}
     for kind, store, _ in STORES:
-        active = reader.json(f'{store}/active.json')
-        pending = reader.json(f'{store}/pending.json')
-        selectors[kind] = dict(active=_transition_id(active) if active is not None else None,
-                               active_present=active is not None,
-                               pending=_transition_id(pending) if pending is not None else None,
-                               pending_present=pending is not None)
+        entry = {}
+        for name in ('active', 'pending'):
+            # Presence is the file's, never its value's: a selector holding ``null``
+            # or any other structure without a generation is refused, not absent.
+            present, value = reader.document(f'{store}/{name}.json')
+            identity = _transition_id(value)
+            if present and identity is None:
+                raise Unverifiable(f'{store}/{name}.json: selector does not validate: it names no generation')
+            entry.update({name: identity, f'{name}_present': present})
+        selectors[kind] = entry
     execution, continuation = selectors['execution'], selectors['continuation']
     # The first published selector wins, as in ``ssdlc_fencing_proof.selected_generation``;
     # a pending one does not hide it, it fences dispatch (``dispatch_fenced``).
@@ -172,10 +186,12 @@ def _generation(reader):
         fenced = not continuation['active_present'] and continuation['pending_present']
     result = dict(selectors=selectors, dispatch_fenced=fenced, kind='base', transition_id=None, root='.')
     if selected is None:
-        return result, '.'
+        return result, '.', None
     kind, store, runtimes = selected
     try:
-        projection = TransitionStore(reader.ticket / store).load()
+        # Every file ``load`` reads (pointer, intent, manifest, projection and sealed
+        # artifacts) is fingerprinted, so the final check covers the generation too.
+        projection = TransitionStore(reader.ticket / store, observe=reader.observe).load()
     except (TransitionError, TaskError, OSError, ValueError, KeyError, TypeError) as exc:
         raise Unverifiable(f'{store} selector does not validate: {type(exc).__name__}: {exc}') from None
     identity = projection.get('transition_id') if isinstance(projection, dict) else None
@@ -184,13 +200,16 @@ def _generation(reader):
     if identity != selectors[kind]['active']:
         raise Unverifiable(f'{store} projection names another generation')
     root = f'{runtimes}/{identity}'
-    marker = reader.json(f'{root}/generation.json')
-    if marker is None or marker != projection.get('runtime_binding'):
+    present, marker = reader.document(f'{root}/generation.json')
+    if not present or not isinstance(marker, dict) or marker != projection.get('runtime_binding'):
         raise Unverifiable(f'{kind} generation binding changed')
     if kind == 'execution' and marker.get('model_dispatch_authorized') is not True:
         raise Unverifiable('execution generation is not authorized for dispatch')
-    result.update(kind=kind, transition_id=identity, root=root, ledger_prefix=len(projection.get('ledger') or []))
-    return result, root
+    history = projection.get('ledger', [])
+    if not isinstance(history, list):
+        raise Unverifiable(f'{store} projection has no ledger list')
+    result.update(kind=kind, transition_id=identity, root=root, ledger_prefix=len(history))
+    return result, root, history
 
 
 def _journal(reader, root):
@@ -202,8 +221,11 @@ def _journal(reader, root):
     boundary = data.rfind(b'\n') + 1
     try:
         state, sequence, sha = TaskJournal._replay(data[:boundary])
-    except TaskError:
+    except (TaskError, AttributeError, TypeError, KeyError, ValueError):
+        # ``_replay`` lets some malformed records through as raw errors (a ``null`` line).
         raise Unverifiable('task journal hash chain does not verify') from None
+    if state is not None and not isinstance(state, dict):
+        raise Unverifiable('task journal state is not an object')
     return dict(sequence=sequence, sha256=sha or None, interrupted_tail_bytes=len(data) - boundary), state
 
 
@@ -213,15 +235,23 @@ def _dag(plan, journal_state):
     records = (journal_state or {}).get('tasks') or {}
     if not isinstance(records, dict):
         raise Unverifiable('task journal state has no task map')
-    status = {tid: rec.get('status') for tid, rec in records.items() if isinstance(rec, dict)}
+    for tid, rec in records.items():
+        attempts = rec.get('attempts') if isinstance(rec, dict) else None
+        if (not isinstance(rec, dict) or not isinstance(rec.get('status'), str)
+                or not (attempts is None or (isinstance(attempts, int) and not isinstance(attempts, bool)))):
+            raise Unverifiable(f'task journal record {tid!r} is malformed')
+    status = {tid: rec['status'] for tid, rec in records.items()}
     nodes, counts = [], {}
     for task in plan['tasks']:
         if not isinstance(task, dict) or not isinstance(task.get('task_id'), str):
             raise Unverifiable('plan task without task_id')
         tid = task['task_id']
-        record = records.get(tid) if isinstance(records.get(tid), dict) else None
-        native = record.get('status') if record else None
-        depends = list(task.get('depends_on') or [])
+        record = records.get(tid)
+        native = record['status'] if record else None
+        depends = task.get('depends_on') or []
+        if not isinstance(depends, list) or not all(isinstance(d, str) for d in depends):
+            raise Unverifiable(f'plan task {tid!r} has malformed dependencies')
+        depends = list(depends)
         waiting = [d for d in depends if status.get(d) != 'COMPLETED']
         nodes.append(dict(task_id=tid, title=task.get('title'), depends_on=depends, status=native,
                           recorded=record is not None, attempts=record.get('attempts') if record else None,
@@ -289,9 +319,14 @@ def _metrics(state, dag, feedback):
                                     'invocations', f'{legacy} legacy rows without telemetry are not counted' if legacy else None)
         durations = [r.get('duration_sec') for r in rows]
         timed = [d for d in durations if isinstance(d, (int, float)) and not isinstance(d, bool)]
-        out['model_duration_sec'] = metric(
-            sum(timed), COMPLETE if len(timed) == len(rows) else PARTIAL, 'state.json ledger duration_sec', 'seconds',
-            None if len(timed) == len(rows) else f'{len(rows) - len(timed)} ledger rows without a duration')
+        if len(timed) == len(rows):
+            out['model_duration_sec'] = metric(sum(timed), COMPLETE, 'state.json ledger duration_sec', 'seconds')
+        elif timed:
+            out['model_duration_sec'] = metric(sum(timed), PARTIAL, 'state.json ledger duration_sec', 'seconds',
+                                               f'{len(rows) - len(timed)} ledger rows without a duration')
+        else:  # No persisted duration at all: there is nothing to add up, not zero seconds.
+            out['model_duration_sec'] = metric(None, NONE, 'state.json ledger duration_sec', 'seconds',
+                                               f'none of the {len(rows)} ledger rows has a duration')
         measures = ledger_measures(rows)
         unmeasured, unestimated = len(measures['unmeasured_spend']), len(measures['unmeasured_estimate'])
         out['spend_usd'] = metric(measures['spend_usd'], PARTIAL if unmeasured else COMPLETE,
@@ -328,18 +363,20 @@ def _metrics(state, dag, feedback):
 
 
 def _collect(reader):
-    generation, root = _generation(reader)
+    generation, root, history = _generation(reader)
     prefix = '' if root == '.' else root + '/'
-    state = reader.json(prefix + 'state.json')
-    if state is not None and not isinstance(state, dict):
+    present, state = reader.document(prefix + 'state.json')
+    if present and not isinstance(state, dict):
         raise Unverifiable('state.json is not an object')
     if generation['kind'] == 'execution':
+        # The same check as ``ssdlc_reconciliation._selected_execution_root``: the
+        # historical rows themselves, not only their number, are still in place.
         ledger = (state or {}).get('ledger')
-        if not isinstance(ledger, list) or len(ledger) < generation['ledger_prefix']:
+        if not isinstance(ledger, list) or ledger[:len(history)] != history:
             raise Unverifiable('executed state lost its historical ledger prefix')
     journal, journal_state = _journal(reader, root)
-    plan = reader.json(prefix + PLAN)
-    dag = _dag(plan, journal_state) if plan is not None else None
+    plan_present, plan = reader.document(prefix + PLAN)
+    dag = _dag(plan, journal_state) if plan_present else None
     if dag is None and journal_state is not None:
         raise Unverifiable('task journal without its plan')
     feedback = _feedback(reader)
