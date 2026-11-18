@@ -353,7 +353,8 @@ class ConclaveMixin:
         """Run call ``which`` (``'proposal'`` or a voter's index) of ``record``: a read-only
         turn in a disposable checkout of the block's commit, recorded as started before it
         runs. A failure or a timeout of the agent is a missing contribution. Returns the
-        comment id of the record."""
+        comment id of the record. A call refused by the block on uncertain turns
+        (``TurnBlocked``, #362) raises before anything is recorded."""
         cfg = self.cfg
         proposal = which == 'proposal'
         member = record['proposal'] if proposal else record['votes'][which]
@@ -376,6 +377,9 @@ class ConclaveMixin:
                 return comment
             prompt = _template('conclave_vote', proposer=record['proposal']['agent'],
                                proposal=text, proposal_hash=record['hash'], **values)
+        # With the block on uncertain turns (#362), a call of a work with turns to reconcile is
+        # refused before it is recorded as started: a later tick would count it as missing.
+        self._check_turns(number)
         kind = 'pr' if pr is not None else 'issue'
         name = f'{kind}-{number}-conclave'
         path = self.ws.commit_copy(name, record['commit'],

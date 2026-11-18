@@ -672,6 +672,7 @@ check, and the `policy` marker of a level that cannot be reviewed or promoted. A
 | `receipt_conflict` | The [receipt of the PR](protocol.md#pr-receipt) contradicts the markers at its promotion | Yes |
 | `retry_limit`, `supervisor_escalated`, `supervisor_refused` | The supervisor's retries are spent, it handed the escalation over, or it gave a command the escalation does not admit | Yes |
 | `conclave_veto` | A trusted user annulled the latest decision of a [conclave](#conclave-on-a-block) with `/devloop veto` | Yes |
+| `uncertain_turn` | With `block_uncertain_turns` on, a turn refused because its work has [uncertain turns](protocol.md#turn-journal) a trusted user has not reconciled with `/devloop reconcile` | Yes |
 
 Any other class, or none (escalations written before #182), is critical.
 
@@ -816,6 +817,21 @@ item stays in `agent:needs-operator`. A command from outside `trusted_users` and
 identity is only logged. The trace is the one of the supervisor's commands, under the title
 "Comando su un'escalation all'operatore".
 
+A turn left without an outcome, because devloop stopped while it ran, becomes `uncertain` in the
+[turn journal](protocol.md#turn-journal) and is never run again automatically. With
+`block_uncertain_turns = true` (off by default) it also refuses every new turn of the same issue
+and its PRs, with an escalation of class `uncertain_turn` that lists the turns; so does a turn
+whose outcome could not be written, from the next turn of the same step (a retry, a fallback)
+onwards, and a legacy turn imported from `ledger-open-turns.json` on the issue or on one of its
+PRs, open or closed (read on GitHub to find its issue; until it can be read, it blocks every
+work). A conclave call refused this way ends that conclave with the escalation; an advisory
+review refused this way escalates once for those turns and waits for their reconciliation.
+Only a trusted
+user reconciles them, with a comment whose first line is
+`/devloop reconcile <turn id> <returned|failed|not_dispatched>` and whose next lines give the
+reason, mandatory. The outcome is recorded once, also with the block off; then the step resumes
+as from any escalation to the operator.
+
 ### Advisory review for the operator
 
 With `[review_policy] advisory_reviewer` set (#369; empty, and so off, by default: the local
@@ -861,7 +877,11 @@ quorum anyway.
 - **No effect.** It opens no round and does not count against `max_review_rounds`, creates no
   finding, changes no label and no promotion; devloop reads it only to know whether a head
   already has one and to show its opinion, never to decide. A failed action is never escalated:
-  the PR is already the operator's.
+  the PR is already the operator's. The exception is a turn refused by the
+  block on [uncertain turns](protocol.md#turn-journal) (`block_uncertain_turns`): it
+  escalates as `uncertain_turn`, with the turns to reconcile, once for those turns (taking
+  `agent:ready-to-merge` away, as every escalation does), and the PR gets no other advisory
+  action until they are reconciled.
 - **Cost.** One turn per head, recorded in the [ledger](protocol.md#evidence-and-telemetry) as a
   `turn` of kind `advisory`, and counted in the totals of the receipt.
 
@@ -895,8 +915,9 @@ python3 -m devloop fallback reset agy  # forget the models agy remembers unavail
 Run it from any checkout of this repository. Worktrees, agent prompts and logs, and the lock that
 prevents two dispatchers from running at once live under `state_dir` (default `.ssdlc/devloop`)
 in the main checkout. `tick --dry-run` writes nothing and does not take that lock, so the
-[smoke test of a pin](#pin) runs it while `run` is active. Not even its git commands write to
-the repository: it does not fetch, so it plans from the remote branches as last fetched (a
+[smoke test of a pin](#pin) runs it while `run` is active. Like `status`, it reads the
+[turn journal](protocol.md#turn-journal) without writing it: the running dispatcher alone does.
+Not even its git commands write to the repository: it does not fetch, so it plans from the remote branches as last fetched (a
 branch never fetched leaves its merge mode not computable), and the objects that `git
 merge-tree` writes go to a temporary directory. In daily use run it from the pinned copy, through
 `scripts/devloop-pinned` ([Run from a pinned installation](#run-from-a-pinned-installation)).

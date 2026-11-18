@@ -22,6 +22,12 @@ local_tests = "changed"
 # local_tests = "changed", is re-run once instead of becoming a round (issue #200). It needs
 # `actions: write` on the dispatcher's app; without it the failure is a round, as before.
 ci_rerun_unrelated = true
+# The journal of the turns in state_dir (issue #362) records each turn's intent before its CLI
+# starts, and its outcome. A turn left without outcome becomes `uncertain` and is never re-run
+# automatically. With this key on, it also refuses every new turn of the same work (the issue
+# and its PRs), with an escalation, until a trusted user reconciles it with
+# `/devloop reconcile`. Off here: turning it on is the operator's decision (ADR 0004, D8).
+block_uncertain_turns = false
 # Language of the text that agents write for GitHub.
 language = "Italian"
 
