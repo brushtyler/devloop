@@ -4,8 +4,9 @@ import dataclasses
 import unittest
 
 from devloop import markdown
-from devloop.dispatcher import (BASE_CHANGED, RESYNC_AFTER_APPROVAL, Action, base_revocation,
-                                counted_rounds, plan, waived_rounds)
+from devloop.dispatcher import base_revocation
+from devloop.planning import (BASE_CHANGED, RESYNC_AFTER_APPROVAL, Action, counted_rounds, plan,
+                              waived_rounds)
 from helpers.devloop_fakes import FakeIdentities
 from test_devloop import BASE, CFG, IMPL, SHA1, SHA2, finding, raw_review, receipt
 from test_devloop_quorum import FIRST, Quorum

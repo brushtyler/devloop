@@ -54,9 +54,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .apps import DISPATCHER, MERGER, AppAuth, Identities
-from .dispatcher import label_names, ready_approval
+from .dispatch_actions import ready_approval
 from .github import GitHubError, GitHubNotFound, author_login
 from .markdown import read_marker
+from .planning import label_names
 
 STATE_VERSION = 3
 # In the state's ``closed``: an issue of an untrusted author, whose admission is read again.

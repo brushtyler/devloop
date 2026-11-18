@@ -1,10 +1,11 @@
 """devloop: supervision and commands moved to ``devloop/dispatch_supervision.py`` (#293, step S3
 of #261).
 
-The move changes no behaviour: the tests of supervision, hold, release and fix commands keep
-importing from ``devloop.dispatcher`` and calling the methods on ``Dispatcher``, which inherits
-them from the mixin. Here only what the move adds is checked: the re-exports, the composition of
-``Dispatcher`` and the documentation map of the new module.
+The move changes no behaviour: the tests of supervision, hold, release and fix commands call the
+methods on ``Dispatcher``, which inherits them from the mixin. Since step S7 (#297) they import
+the module-level names from ``devloop.dispatch_supervision``, and ``devloop.dispatcher`` no
+longer re-exports them. Here only what the move adds is checked: where the names live, the
+composition of ``Dispatcher`` and the documentation map of the new module.
 """
 
 import unittest
@@ -21,10 +22,10 @@ METHODS = ('_supervised', '_issue_key', '_current_key', '_supervisor_view', '_to
 
 
 class DispatchSupervisionModuleTests(unittest.TestCase):
-    def test_the_dispatcher_re_exports_every_moved_name(self):
+    def test_every_moved_name_lives_in_the_module(self):
         for name in MOVED:
             with self.subTest(name=name):
-                self.assertIs(getattr(dispatcher, name), getattr(dispatch_supervision, name))
+                self.assertTrue(hasattr(dispatch_supervision, name))
                 if callable(getattr(dispatch_supervision, name)):
                     self.assertEqual(getattr(dispatch_supervision, name).__module__,
                                      'devloop.dispatch_supervision')

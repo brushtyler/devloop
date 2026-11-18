@@ -8,7 +8,8 @@ import unittest
 from pathlib import Path
 
 from devloop import agents, config, markdown, unavailability
-from devloop.dispatcher import Action, Dispatcher, Snapshot
+from devloop.dispatcher import Dispatcher
+from devloop.planning import Action, Snapshot
 from helpers.devloop_fakes import FakeGH
 from test_devloop import CFG, FakeWS, pr
 from test_devloop_agy_permissions import (DENIED, DENIED_ENVELOPE, JETSKI, NO_FALLBACK,

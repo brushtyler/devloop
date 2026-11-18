@@ -6,9 +6,11 @@ import unittest
 from types import SimpleNamespace
 
 import doc_contracts as docs
-from devloop.dispatcher import (Dispatcher, UntrustedChange, label_admitters, plan,
-                                ready_approval, untrusted_change)
+from devloop.dispatch_actions import ready_approval
+from devloop.dispatch_supervision import UntrustedChange
+from devloop.dispatcher import Dispatcher, label_admitters, untrusted_change
 from devloop.github import _ISSUE_HISTORY, GitHub, graphql_login
+from devloop.planning import plan
 from test_devloop import CFG, FakeGH, FakeIdentities, FakeRunner, FakeWS, implemented
 
 READY, HIGH, LOW = 'agent:ready', 'priority:high', 'priority:low'

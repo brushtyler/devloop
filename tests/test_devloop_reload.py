@@ -15,7 +15,8 @@ from unittest import mock
 import devloop.__main__ as cli
 from devloop import config
 from devloop.config import DEFAULT_CONFIG, LIVE_KEYS, Reloader
-from devloop.dispatcher import Action, Dispatcher, Snapshot
+from devloop.dispatcher import Dispatcher
+from devloop.planning import Action, Snapshot
 from devloop.watch import NOTHING_NEW
 from helpers.devloop_fakes import FakeGH
 from test_devloop import FakeRunner, FakeWS, ready

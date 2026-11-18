@@ -9,7 +9,8 @@ from pathlib import Path
 from unittest import mock
 
 from devloop import agents, config, markdown, policy, schema
-from devloop.dispatcher import Action, Dispatcher, Snapshot, plan
+from devloop.dispatcher import Dispatcher
+from devloop.planning import Action, Snapshot, plan
 from helpers.devloop_fakes import FakeGH
 from test_devloop import CFG, FakeRunner, FakeWS, norm, pr, raw_review
 from test_devloop_fallback import ARGON, DATA, HYDROGEN, QUOTA, FakeCLI, with_agent

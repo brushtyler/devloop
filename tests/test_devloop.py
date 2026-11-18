@@ -12,9 +12,10 @@ from types import SimpleNamespace
 from unittest import mock
 
 from devloop import agents, apps, config, markdown, policy, review, schema
-from devloop.dispatcher import (Action, Dispatcher, PullRequest, Snapshot, UntrustedChange, plan,
-                                untrusted_change)
+from devloop.dispatch_supervision import UntrustedChange
+from devloop.dispatcher import Dispatcher, untrusted_change
 from devloop.github import GitHub, GitHubError, author_login, normalize_checks, summarize_checks
+from devloop.planning import Action, PullRequest, Snapshot, plan
 from devloop.workspace import Workspace, WorkspaceError
 
 # CI runs this module as `python3 -m unittest tests.test_devloop` from the repository root,
@@ -135,7 +136,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(allowed, ['Bash(python3 -m unittest *)', 'Bash(git status *)',
                                    'Bash(git diff *)', 'Bash(git log *)', 'Bash(git show *)'])
         patterns = [re.fullmatch(r'Bash\((.*)\)', rule).group(1) for rule in allowed]
-        from devloop.dispatcher import PROMPT_DIR
+        from devloop.context import PROMPT_DIR
         form = "python3 -m unittest discover -s tests -p 'test_name.py'"
         for name in ('implement', 'fix', 'sync'):
             with self.subTest(prompt=name):
@@ -1846,7 +1847,7 @@ class CredentialIsolationTests(unittest.TestCase):
     def test_write_prompts_run_tests_in_the_foreground(self):
         # Issue #96: an implementer started tests in the background and waited with
         # `until grep -qE "^(OK|FAILED)" ...; do sleep 5; done`; one output never had that line.
-        from devloop.dispatcher import PROMPT_DIR
+        from devloop.context import PROMPT_DIR
         for name in ('implement', 'fix', 'sync'):
             with self.subTest(prompt=name):
                 text = ' '.join((PROMPT_DIR / f'{name}.md').read_text().split())
@@ -1856,7 +1857,7 @@ class CredentialIsolationTests(unittest.TestCase):
     def test_write_prompts_forbid_background_work(self):
         # Issue #219: an implementer split its work among background sub-agents and gave its
         # final answer before they ended; the headless turn does not wait for them.
-        from devloop.dispatcher import PROMPT_DIR
+        from devloop.context import PROMPT_DIR
         for name in ('implement', 'fix'):
             with self.subTest(prompt=name):
                 text = ' '.join((PROMPT_DIR / f'{name}.md').read_text().split())

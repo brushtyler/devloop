@@ -9,10 +9,11 @@ from types import SimpleNamespace
 
 from devloop import agents, ledger, markdown
 from devloop.agents import AgentError
-from devloop.dispatcher import Dispatcher, Snapshot
+from devloop.dispatcher import Dispatcher
 from devloop.github import GitHub, GitHubError, normalize_checks
 from devloop.ledger import Ledger
 from devloop.localtests import module_command
+from devloop.planning import Snapshot
 from devloop.workspace import Workspace
 from helpers.devloop_fakes import FakeGH
 from test_devloop import (CFG, IMPL, META, REV, SHA1, SHA2, FakeRunner, FakeWS, finding,

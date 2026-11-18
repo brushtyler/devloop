@@ -5,8 +5,10 @@ import unittest
 
 from devloop import agents, markdown, supervision
 from devloop.config import MergePolicy
-from devloop.dispatcher import PROMPT_DIR, Action, Dispatcher, plan
+from devloop.context import PROMPT_DIR
+from devloop.dispatcher import Dispatcher
 from devloop.github import GitHubError
+from devloop.planning import Action, plan
 from test_devloop import (CFG, REV, SHA1, SHA2, FakeRunner, FakeWS, SnapshotGH, implemented,
                           norm, pr, raw_review, receipt)
 from test_devloop_preflight import checked, gap

@@ -10,8 +10,9 @@ from unittest import mock
 import doc_contracts as docs
 import test_devloop_supervision as supervision
 from devloop import markdown
-from devloop.dispatcher import Dispatcher, dependency_cycles, plan, queue_lines, start_order
+from devloop.dispatcher import Dispatcher, dependency_cycles
 from devloop.github import GitHub
+from devloop.planning import plan, queue_lines, start_order
 from helpers.devloop_fakes import FakeIdentities
 from test_devloop import CFG, FakeRunner, FakeWS, implemented
 from test_devloop_preflight import PCFG, checked

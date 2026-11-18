@@ -12,9 +12,10 @@ from types import SimpleNamespace
 from unittest import mock
 
 from devloop import agents
-from devloop.dispatcher import Action, Dispatcher, Snapshot
+from devloop.dispatcher import Dispatcher
 from devloop.ledger import Ledger
 from devloop.markdown import read_marker
+from devloop.planning import Action, Snapshot
 from devloop.workspace import run_in_group
 from helpers.devloop_fakes import FakeGH
 from test_devloop import CFG, FakeWS

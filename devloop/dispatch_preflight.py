@@ -5,8 +5,8 @@ issue's readiness checks (``_preflight_records``, ``_preflight_view``), the requ
 check (``_recheck_requested``), the attribution of the block it set (``_owns_block``), the
 recording of its outcome (``_publish_preflight``) and the check itself (``_do_preflight``,
 ``_do_preflight_block``), with their helpers and the module-level definitions they need.
-``Dispatcher`` inherits the methods, and ``devloop/dispatcher.py`` re-exports every module-level
-name.
+``Dispatcher`` inherits the methods; since #297 (step S7) the module-level names are imported
+from here, not re-exported by ``devloop/dispatcher.py``.
 """
 
 from .agents import AgentError, ModelUnavailable, PermissionDenied, denied_retry_note

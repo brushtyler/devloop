@@ -4,8 +4,8 @@ Moved from ``devloop/dispatcher.py`` without changes (#293, step S3 of #261): th
 supervisor decides (``_supervised``, ``_supervisor_view``, ``_to_operator``, ``_do_supervise``,
 ``_accept_defaults``, ``_decide``), the hold, release and fix commands of a PR
 (``_hold_command``, ``_fix_requests``) and the reading of a PR's thread (``_read_thread``), with
-the module-level definitions they need. ``Dispatcher`` inherits the methods, and
-``devloop/dispatcher.py`` re-exports every module-level name.
+the module-level definitions they need. ``Dispatcher`` inherits the methods; since #297 (step S7)
+the module-level names are imported from here, not re-exported by ``devloop/dispatcher.py``.
 """
 
 from dataclasses import replace
