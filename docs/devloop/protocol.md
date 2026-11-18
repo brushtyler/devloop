@@ -736,10 +736,27 @@ readiness check, on the PR for review, fix, sync and CI. The turns of a review r
 |---|---|---|
 | claude | `--output-format json` | `total_cost_usd`, `duration_ms`, `num_turns`, `usage` (input, output, cache read and cache creation tokens); the real model is the list of the keys of `modelUsage`, with no main model chosen |
 | codex | `codex exec --json`, which devloop now passes | input, output and cached input tokens, summed over the `turn.completed` events (input already includes the cached input). No cost, duration or model |
-| agy | none | every field null |
+| agy | `agy -p … --output-format json`, the top-level keys of the envelope (never those of the structured output `--json-schema` adds) | `duration_seconds` (as `duration_ms`), `num_turns`, and from `usage` the input, output, cache read and thinking tokens (`cache_read_tokens` as `cache_read_input_tokens`, `thinking_tokens` in its own field). Input **excludes** the cached input, which agy counts apart. `total_tokens` is not kept: in the envelopes observed it is input plus output. No cost or model |
+
+agy's `usage` covers the **whole conversation**, not a single request: it is the turn's because
+devloop starts a new conversation on every turn (`agy -p`, never `-c`). A turn that continued a
+conversation would have to subtract the previous envelope of the same conversation.
+
+`thinking_tokens` is a field of its own, filled only by agy: claude counts its thinking inside
+the output tokens, and codex's reasoning tokens are not read. Whether agy's `output_tokens`
+already include the thinking is not established: in the envelopes observed `total_tokens` is
+input plus output and the output is always larger than the thinking, which fits both readings.
+So the thinking tokens are kept as reported, never added to the output nor subtracted from it.
+
+The token counts of different CLIs do not mean the same thing: codex's input includes the cached
+input, claude's and agy's do not. Compare them only within the same agent; the totals of the
+[PR receipt](#pr-receipt) add up what each turn reports, whatever its agent.
 
 A value that is not attested is `null`, never 0, and the comment shows `non riportato`; the real
-model stays `null` next to the configured one when the CLI attests none.
+model stays `null` next to the configured one when the CLI attests none. An agy envelope that is
+missing, not JSON or without `usage` leaves every field `null`, duration and turns included; a
+duration that does not fit a finite number of milliseconds is `null`. Telemetry never makes a
+turn fail.
 
 **Turn persistence.** A turn's record is written before the CLI starts, as `open`; if that write
 fails the turn does not start and the step escalates like any `gh` failure. When the CLI ends the
@@ -861,7 +878,7 @@ renders.
 
 **Totals:** the number of rounds (and of those that count against `max_review_rounds`) and of
 turns, the summed duration of the turns, the known tokens (input, output, cache read, cache
-creation) and the known cost, the number of turns whose cost is not reported and of those with
+creation, and the thinking tokens agy reports apart) and the known cost, the number of turns whose cost is not reported and of those with
 no token reported. The duration of the verifications is apart: the local tests (ms) and the
 checks of the CI on the approved head (s). A value no record attests is `null` in the marker and
 `non riportato` in the text, never 0: a sum of values none of which is known is `null`.

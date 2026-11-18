@@ -39,7 +39,7 @@ NOT_REPORTED = 'non riportato'
 CONFLICT = 'receipt_conflict'
 STATES = ('current', 'superseded')
 TOKENS = ('input_tokens', 'output_tokens', 'cache_read_input_tokens',
-          'cache_creation_input_tokens')
+          'cache_creation_input_tokens', 'thinking_tokens')
 # The turn fields a receipt keeps: no error text, which may quote what an agent wrote.
 TURN_FIELDS = ('kind', 'agent', 'identity', 'model', 'effort', 'fallback_for', 'model_real',
                'state', 'started_at', 'duration_ms', 'outcome')
@@ -331,7 +331,8 @@ def _totals(t):
             '- **Token noti:** input ' + _v(tokens['input_tokens']) + ', output '
             + _v(tokens['output_tokens']) + ', cache in lettura '
             + _v(tokens['cache_read_input_tokens']) + ', cache in creazione '
-            + _v(tokens['cache_creation_input_tokens']),
+            + _v(tokens['cache_creation_input_tokens']) + ', ragionamento (contato a parte) '
+            + _v(tokens['thinking_tokens']),
             f'- **Costo noto (USD):** {_cost(t["cost_usd"])}',
             f'- **Turni con costo non riportato:** `{t["cost_unreported"]}`; con token non '
             f'riportati: `{t["tokens_unreported"]}`',
