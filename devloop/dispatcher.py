@@ -1165,9 +1165,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         The pin after a merge runs at once, also while actions run (#301): a new copy only
         moves ``current``, and the restart from it waits for the first tick at which nothing
         runs, while this one plans and starts actions with the code it loaded, as without
-        ``[pin] auto``. After ``[pin] restart_max_wait_minutes`` of a pending restart nothing
-        starts until the running actions end and the restart happens. A merge that requests a
-        pin while this tick reads GitHub (#264) is pinned by the next tick."""
+        ``[pin] auto``. While the restart is pending no new implementation starts (#342), the
+        long action, so that the running ones end soon; the short ones still start. After
+        ``[pin] restart_max_wait_minutes`` of a pending restart nothing starts until the running
+        actions end and the restart happens. A merge that requests a pin while this tick reads
+        GitHub (#264) is pinned by the next tick."""
         workers = self.workers
         # An action that ends from here on wakes the loop again: its result is not in this plan.
         workers.clear()
@@ -1195,9 +1197,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                        or action.kind == 'supervise' and action.number not in prs
                        or action.kind == 'conclave' and action.opens)
         merging = any(action.kind in MERGE_LANE for action, _ in running)
-        actions = plan(snap, self.cfg, busy, reserved, merging)
+        # #342: no new implementation, the long action, while the restart waits; the plan
+        # leaves its slots to the other actions.
+        pending = bool(running) and self._restart is not None
+        actions = plan(snap, self.cfg, busy, reserved, merging, implement=not pending)
         # The limit may pass while the snapshot reads GitHub: checked again before any start.
-        if running and self._restart is not None and self._restart_wait_over(running):
+        if pending and self._restart_wait_over(running):
             return []
         started = admit(actions, issue_of, running, workers.free())
         self.log(f'{pr_counts_line(snap, self.cfg)}; running: '
@@ -1214,8 +1219,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         limit = self.cfg.pin.restart_max_wait_minutes
         if self.clock() - since < limit * 60:
             return False
-        self.log(f'{restart_line(sha, iso(since), len(running))}: over [pin] '
-                 f'restart_max_wait_minutes ({limit}), no action starts until the restart')
+        self.log(restart_line(sha, iso(since), len(running),
+                              f'over [pin] restart_max_wait_minutes ({limit}), no action starts '
+                              'until the restart'))
         return True
 
     def _set_restart(self, copy):

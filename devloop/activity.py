@@ -196,9 +196,13 @@ def describe(state_dir, now=None, alive=pid_alive, held=lock_held):
     return _describe(record, state_dir, now, alive, held)
 
 
-def restart_line(sha, since, running):
-    """The line of a pending restart (#301), in the log of the dispatcher and in ``status``."""
-    return f'restart to {sha} pending since {since} ({running} running)'
+NO_IMPLEMENT = 'no new implement until the restart'
+
+
+def restart_line(sha, since, running, note=NO_IMPLEMENT):
+    """The line of a pending restart (#301), in the log of the dispatcher and in ``status``:
+    while it waits no new implementation starts (#342), unless ``note`` says otherwise."""
+    return f'restart to {sha} pending since {since} ({running} running): {note}'
 
 
 def describe_restart(state_dir, alive=pid_alive, held=lock_held):
