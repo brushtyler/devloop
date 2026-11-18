@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from orchestrator import SSDLCOrchestrator
+from helpers.host_commands import direct_host_commands
 from ssdlc_tasks import TaskError, atomic_json, git
 from test_task_bootstrap import RepositoryTests
 
@@ -21,6 +22,12 @@ def framed(gate, orch, findings=(), verdict=None, **changes):
 
 
 class FullCheckpointReviewTests(RepositoryTests):
+    def setUp(self):
+        super().setUp()
+        # Writer fencing is verified by test_host_command_fencing: here the host
+        # commands of the run go to Git directly, without the run_host() supervisor.
+        direct_host_commands(self)
+
     def seed(self):
         runtime = self.repo/'.ssdlc/.runtime'
         with patch('orchestrator.ProjectRuntimeIsolation.activate', return_value={

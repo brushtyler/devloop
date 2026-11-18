@@ -695,8 +695,9 @@ an authorized I2 generation without `state.json` is refused before anything is c
   tree; it needs its own coverage probe. The supervisor runs with the controller's
   identity, so a host command could kill it or forge a conclusion: host commands are
   trusted, and a killed supervisor fails closed. Each host command starts one supervisor
-  process (a Python interpreter, about 0.1 s per Git command on the operator's host) and
-  leaves two small registry records (its tree record and conclusion, beside
+  process (a Python interpreter, about 0.1 s per Git command on the operator's host;
+  one supervisor per lease, reused by several commands, would lower that cost and is not
+  implemented) and leaves two small registry records (its tree record and conclusion, beside
   one host marker per generation), which are never removed.
 - A deleted or replaced gate is detected through its anchor, the registry, a bound
   identity or an open lease, and is never recreated. Only deleting the gate, its anchor

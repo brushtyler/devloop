@@ -22,7 +22,9 @@ from ssdlc_fencing_proof import FencingRefused
 from ssdlc_tasks import digest, git, ticket_lock
 from ssdlc_transitions import TransitionStore, source_binding
 import ssdlc_writer_gate as wg
+from helpers.host_commands import direct_host_commands
 from replay.repository_fixtures import RepositoryTests
+import test_task_bootstrap as bootstrap
 
 
 class FakeDocker:
@@ -222,6 +224,58 @@ class AdmittedRunTests(HostCommandTestCase):
             self.assertEqual(git(orch.repo_root, 'rev-parse', 'HEAD'), self.base)
         run_host.assert_not_called()
         self.assertFalse(wg.gate_path(self.ticket).exists())
+
+
+def generate(prompt, **kwargs):
+    (kwargs['cwd'] / 'app.py').write_text('value = 1\n')
+    return 'Done', 0
+
+
+@patch('orchestrator.EngineRunner._should_spawn_role_container', return_value=True)
+class RealRunTests(HostCommandTestCase):
+    """A real pipeline phase of a new run, as the engine tests drive it, on the real supervisor.
+
+    The engine tests that do not verify fencing run their host commands directly
+    (``helpers.host_commands``); this run does not, and its Git goes through ``run_host()``.
+    """
+    make_orchestrator = bootstrap.OrchestratorBootstrapTests.make_orchestrator
+    seed_inputs = bootstrap.OrchestratorBootstrapTests.seed_inputs
+
+    def test_a_real_run_executes_its_host_commands_with_run_host(self, _runtime):
+        os.environ['SSDLC_EXECUTION_MODE'] = 'local'
+        orch = self.make_orchestrator()
+        self.assertTrue(rf.admitted(orch.state))
+        self.seed_inputs(orch)
+        orch.state.update(risk_tier='S', goal='Scoped goal')
+        orch._save_state()
+        environment = {'mode': 'role_container', 'platform': 'fixture',
+                       'image_id': 'sha256:' + '1' * 64, 'reuse_eligible': True}
+        with patch.object(SSDLCOrchestrator, '_verification_environment', return_value=environment), \
+                patch('orchestrator.SquadDispatcher.dispatch_role', return_value=('codex', 'fake', 'low', 'test')), \
+                patch('orchestrator.EngineRunner.run_codex', side_effect=generate), \
+                patch('orchestrator.EngineRunner.run_sandboxed_cmd', return_value=('Ran 1 test\nOK', '', 0)), \
+                patch.object(wg, 'run_host', wraps=wg.run_host) as run_host:
+            orch.run_pipeline('Scoped goal', from_phase='03-dev', until_phase='03-dev')
+        state = self.stored_state()
+        self.assertEqual(state['status'], o.PAUSED_AT_PHASE_BOUNDARY)
+        self.assertEqual(state['phase_boundary']['completed_tasks'], ['T1'])
+        # The run's Git went through run_host(): one tree per command, each concluded.
+        self.assertGreater(run_host.call_count, 0)
+        self.assertEqual(len(self.registry('t')), run_host.call_count)
+        self.assertEqual(self.registry('t'), self.registry('c'))
+        self.assertEqual({tree['mechanism'] for tree in self.records('t')}, {wg.TREE_MECHANISM})
+        self.assertEqual(self.registry('w'), [])
+        self.assertTrue(rf.admitted(state))
+
+    def test_the_engine_test_helper_runs_host_commands_directly(self, _runtime):
+        orch = self.orchestrator()
+        self.assertTrue(rf.admitted(orch.state))
+        direct_host_commands(self)
+        with patch.object(wg, 'run_host') as run_host, o._writer_fencing_scope(orch):
+            self.assertEqual(git(orch.repo_root, 'rev-parse', 'HEAD'), self.base)
+        run_host.assert_not_called()
+        self.assertFalse(wg.gate_path(self.ticket).exists())
+        self.assertTrue(rf.admitted(self.stored_state()))
 
 
 class HistoricalRunTests(HostCommandTestCase):

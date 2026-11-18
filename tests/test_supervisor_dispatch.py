@@ -18,6 +18,7 @@ import ssdlc_supervisor as s
 import test_task_bootstrap as bootstrap
 from test_supervisor_preflight import Case, ClassificationFixtures
 from helpers.supervisor_fakes import hook_environment
+from helpers.host_commands import direct_host_commands
 from ssdlc_tasks import DevelopmentBlocked, TaskJournal
 
 
@@ -260,6 +261,12 @@ class TestDispatchHooks(Case):
 class DevelopmentCase(bootstrap.RepositoryTests):
     make_orchestrator = bootstrap.OrchestratorBootstrapTests.make_orchestrator
     seed_inputs = bootstrap.OrchestratorBootstrapTests.seed_inputs
+
+    def setUp(self):
+        super().setUp()
+        # Writer fencing is verified by test_host_command_fencing: here the host
+        # commands of the run go to Git directly, without the run_host() supervisor.
+        direct_host_commands(self)
 
     def attach_hooks(self, orch):
         # Metadata belongs to a separate supervisor ticket; canonical task state is untouched.
