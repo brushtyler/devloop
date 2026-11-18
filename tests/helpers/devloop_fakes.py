@@ -6,6 +6,7 @@ for the tests of the dispatcher: it keeps what the dispatcher wrote in plain att
 does not prove persistence, atomicity or concurrency of any real backend.
 """
 
+import datetime
 import functools
 
 from devloop import config, markdown
@@ -17,6 +18,12 @@ SHA1 = 'a' * 40  # the head FakeGH reports by default
 # The marker of PR #100 for issue 7, with whatever roles config.toml assigns.
 META = {'issue': 7, 'implementer': _CFG.implementer, 'reviewer': _CFG.reviewer}
 PORT_METHODS = frozenset(name for port in PORTS for name in port_methods(port))
+_EPOCH = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+
+
+def at(seconds):
+    """The time ``seconds`` after an arbitrary start, as GitHub writes times (ISO 8601, UTC)."""
+    return (_EPOCH + datetime.timedelta(seconds=seconds)).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
 class FakeGH:
@@ -54,10 +61,11 @@ class FakeGH:
                 'labeled': [('agent:ready', 'brushtyler', '2026-11-13T10:00:00Z')],
                 'renamed': list(self.renames)}
 
-    # Comments: whatever devloop published, as written by the operator's login.
+    # Comments: whatever devloop published, as written by the operator's login, each at the time
+    # of its place among all the comments (``at``), so that native reviews fall among them.
     def pr_comments(self, number):
-        return [{'author': {'login': 'brushtyler'}, 'body': body}
-                for n, body in self.comments if n == number]
+        return [{'author': {'login': 'brushtyler'}, 'body': body, 'created_at': at(2 * i)}
+                for i, (n, body) in enumerate(self.comments) if n == number]
 
     def issue_comments(self, number):
         return self.pr_comments(number)
@@ -154,15 +162,32 @@ class FakeGH:
     def merge_pr(self, number, head):
         self.merged = getattr(self, 'merged', []) + [(number, head)]
 
+    # The native reviews a test sets, then those submitted on the PR read (#325), each with the
+    # login of the actor that submitted it (``ActingAs``) and a time after the previous one.
     def pr_reviews(self, number):
-        return [dict(r) for r in self.native_reviews]
+        submitted = [{'id': 5000 + i, 'login': r['login'], 'state': r['state'],
+                      'body': r['body'], 'submitted_at': r['submitted_at']}
+                     for i, (n, r) in enumerate(self.native) if n == number]
+        return [dict(r) for r in self.native_reviews] + submitted
 
     def create_pr(self, *, base, head, title, body):
         self.created.append({'base': base, 'head': head, 'title': title, 'body': body})
         return 100, 'https://example/pr/100'
 
+    _STATES = {'APPROVE': 'APPROVED', 'REQUEST_CHANGES': 'CHANGES_REQUESTED',
+               'COMMENT': 'COMMENTED'}
+
+    def _submitter(self):
+        """The login of who submits a native review: the actor of the latest ``ActingAs``
+        call, else the login the dispatcher acts with."""
+        acts = getattr(self, 'acts', None)
+        return FakeIdentities.LOGINS.get(acts[-1][0]) if acts else self.labeler
+
     def submit_review(self, number, *, commit, event, body):
-        self.native.append((number, {'commit': commit, 'event': event, 'body': body}))
+        # Between the comments written before it and those written after (``pr_comments``).
+        self.native.append((number, {'commit': commit, 'event': event, 'body': body,
+                                     'login': self._submitter(), 'state': self._STATES[event],
+                                     'submitted_at': at(2 * len(self.comments) - 1)}))
 
     # CI ------------------------------------------------------------------
     def checks(self, sha):
@@ -230,8 +255,9 @@ class SnapshotGH(FakeGH):
                  'mergeable': 'MERGEABLE', 'mergeStateStatus': 'CLEAN'}]
 
     def pr_comments(self, number):
-        return self.earlier +[{'author': {'login': 'brushtyler'}, 'body': body}
-                               for n, body in self.comments if n == number]
+        return self.earlier + [{'author': {'login': 'brushtyler'}, 'body': body,
+                                'created_at': at(2 * i)}
+                               for i, (n, body) in enumerate(self.comments) if n == number]
 
     def issues_with_label(self, label):
         return []

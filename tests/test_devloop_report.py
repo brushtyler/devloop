@@ -225,6 +225,32 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(s.actions, [('23:30', 7, 'implement', 'claude', 'success', 3600000)])
         self.assertEqual(s.rounds, 1)  # round 2 of #13
 
+    def test_a_round_register_gives_its_turns_its_ci_and_its_round(self):
+        # #325: the reviews are native reviews, outside the comments the summary reads; the
+        # register of the round holds its turns and its CI, and counts the round.
+        gh = ReportGH()
+        day = '2026-11-16'
+        sections = [read_marker(turn('review', 'codex', f'{day}T10:00:00Z'), 'ledger'),
+                    read_marker(turn('review', 'claude', f'{day}T10:01:00Z', state='open'),
+                                'ledger'),
+                    read_marker(event('ci_round', f'{day}T10:30:00Z', head='c' * 40,
+                                      state='fail', checks=[], round=4), 'ledger')]
+        register = ledger.render({'type': 'round', 'round': 4, 'records': [
+            dict(s, section=i + 1) for i, s in enumerate(sections)]})
+        gh.add(12, DISPATCHER, register, f'{day}T10:00:01Z')
+        # A register of a round never evaluated, and one another identity wrote, count nothing.
+        idle = ledger.render({'type': 'round', 'round': 5, 'records': [dict(sections[1],
+                                                                            section=1)]})
+        gh.add(12, DISPATCHER, idle, f'{day}T11:00:01Z')
+        gh.add(13, STRANGER, register, f'{day}T10:00:01Z')
+        when = report.parse_day(day)
+        s = report.Records(gh, TRUST, when, when, CFG.agents).summary(when)
+        self.assertEqual(s.actions, [('10:00', 12, 'review', 'codex', 'success', 60000),
+                                     ('10:01', 12, 'review', 'claude', 'in corso', None),
+                                     ('10:01', 12, 'review', 'claude', 'in corso', None)])
+        self.assertEqual(s.ci, [('10:30', 12, f'blocco: CI `fail` sul commit `{"c" * 12}`')])
+        self.assertEqual(s.rounds, 1)
+
     def test_the_rendered_summary(self):
         _, s = self.summary()
         text = report.render_text(s)

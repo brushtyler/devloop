@@ -2315,30 +2315,42 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(self.ws.authors[0]['name'], self.login(IMPL))
         self.assertEqual(len(self.ws.pushes), 1)
 
-    def test_the_reviewer_posts_its_verdict_and_a_native_review(self):
+    def test_the_reviewer_posts_its_verdict_as_one_native_review(self):
+        # #325: the native review is the record, with the whole review and its marker.
         for raw, event in ((raw_review(), 'APPROVE'),
                            (raw_review('request_changes', [finding()]), 'REQUEST_CHANGES'),
                            (raw_review('needs_operator', human='call'), 'COMMENT')):
             with self.subTest(event=event):
                 d = self.make(FakeRunner(raw))
                 d._do_review(pr())
-                self.assertEqual(self.gh.acts, [(REV, apps.REVIEW, 'comment'),
-                                                (REV, apps.REVIEW, 'submit_review')])
+                self.assertEqual(self.gh.acts, [(REV, apps.REVIEW, 'submit_review')])
+                # No review comment: the dispatcher writes only what the verdict asks for.
+                self.assertFalse([b for _, b in self.gh.comments
+                                  if markdown.read_marker(b, 'review') is not None])
                 ((number, native),) = self.gh.native
                 self.assertEqual((number, native['commit'], native['event']), (100, SHA1, event))
                 self.assertTrue(native['body'].startswith(f'> [!NOTE]\n> **Agent:** {REV_NAME}'))
-                self.assertNotIn('<!--', native['body'])
+                self.assertIn('## Review automatica, round 1/', native['body'])
+                record = markdown.read_marker(native['body'], 'review')
+                self.assertEqual((record['reviewer'], record['round']), (REV, 1))
 
-    def test_a_failed_native_review_does_not_stop_the_flow(self):
+    def test_a_failed_native_review_is_retried_then_escalated(self):
         d = self.make(FakeRunner(raw_review()))
+        d.review_retry_pause = 0
+        attempts = []
 
         def refuse(number, **kw):
-            raise GitHubError('HTTP 422')
+            attempts.append(number)
+            raise GitHubError('HTTP 502')
         self.gh.submit_review = refuse
         p = pr()
         self.gh.labels[100] = set(p.labels)
-        d._do_review(p)
-        self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
+        self.assertIsInstance(d._run_action(Action('review', 100), {100: p}), GitHubError)
+        self.assertEqual(len(attempts), 3)
+        self.assertIn('agent:needs-operator', self.gh.labels[100])
+        self.assertNotIn('agent:ready-to-merge', self.gh.labels[100])
+        self.assertIn('native review', self.gh.comments[-1][1])
+        self.assertIsNotNone(markdown.read_marker(self.gh.comments[-1][1], 'notice'))
 
     def test_agents_comment_with_only_the_permission_they_need(self):
         d = self.make(FakeRunner(implemented('blocked')))

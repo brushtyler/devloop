@@ -355,7 +355,7 @@ class SupervisionMixin:
         if is_pr:
             fresh = self.gh.pr_state(number)
             labels = label_names(fresh.get('labels') or [])
-            comments = self.gh.pr_comments(number)
+            comments = self._pr_thread(number)
         else:
             labels = label_names(self.gh.issue(number).get('labels') or [])
             comments = self.gh.issue_comments(number)

@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .acceptance import render_map
 from .config import INSTALL_ROOT
+from .github import GitHubError
 from .policy import EVENTS, valid_receipt
 from .review import LEGACY_VERDICT, current_verdict
 from .supervision import COMMANDS, MAX_RETRIES, OUTCOMES, critical, describe
@@ -123,6 +124,18 @@ def bot_header(bot, version):
 def dispatcher_header(root=INSTALL_ROOT):
     """The header of every text the dispatcher writes on its own."""
     return bot_header(DISPATCHER, devloop_version(root))
+
+
+# The longest body GitHub accepts for a comment or a review, in characters.
+MAX_BODY = 65536
+TRUNCATED = ('> **Testo troncato:** la review supera il limite di 65 536 caratteri di un testo di '
+             'GitHub, e devloop ne ha accorciato solo la parte leggibile. Il record completo, '
+             'con tutti i finding, è nel marker.')
+
+
+class BodyTooLong(GitHubError):
+    """A body that does not fit ``MAX_BODY`` even with its readable part cut away: it is not
+    published, and the step escalates like any failed write (#325)."""
 
 
 def marker(kind, payload):
@@ -245,15 +258,29 @@ def _valid_notice(n):
     return n.get('event') in NOTICES
 
 
-LEDGER_TYPES = ('request', 'turn', 'event', 'verification')
+LEDGER_TYPES = ('request', 'turn', 'event', 'verification', 'round')
 TURN_STATES = ('open', 'closed', 'incomplete')
+# The records a round's register holds, each in a section of its own (#325).
+ROUND_RECORDS = ('turn', 'event')
+
+
+def _valid_section(s):
+    return (isinstance(s, dict) and s.get('type') in ROUND_RECORDS
+            and _is_int(s.get('section'), 1) and _valid_ledger(s))
 
 
 def _valid_ledger(r):
     """A dispatcher record of evidence and telemetry (#133). A turn that is not closed has no
-    end, outcome nor telemetry: they are null, never guessed."""
+    end, outcome nor telemetry: they are null, never guessed. A ``round`` (#325) is the
+    register of a review round: in ``records`` its review turns and its CI event, each with the
+    number of its ``section``, all different."""
     if r.get('type') not in LEDGER_TYPES:
         return False
+    if r['type'] == 'round':
+        records = r.get('records')
+        return (_is_int(r.get('round'), 1) and isinstance(records, list)
+                and all(_valid_section(s) for s in records)
+                and len({s['section'] for s in records}) == len(records))
     if r['type'] == 'turn':
         return (r.get('state') in TURN_STATES
                 and all(isinstance(r.get(k), str) for k in ('kind', 'agent', 'started_at'))
@@ -467,7 +494,26 @@ def render_review(review, head):
         parts += ['', '<details><summary>Controlli eseguiti</summary>', '']
         parts += [f'- {c}' for c in review['checks_performed']]
         parts += ['', '</details>']
-    return publishable(head + '\n' + '\n'.join(parts), 'review', review)
+    return fitted(head, '\n'.join(parts), 'review', review)
+
+
+def fitted(head, text, kind, payload, limit=MAX_BODY):
+    """``publishable(head + text)`` with its marker, within ``limit`` characters (#325). A
+    longer body keeps the header and the marker whole and cuts only ``text``, the readable part,
+    followed by ``TRUNCATED``. When header, notice and marker alone exceed ``limit`` it raises
+    ``BodyTooLong``: nothing of the record is dropped, and nothing else is published."""
+    body = publishable(head + '\n' + text, kind, payload)
+    if len(body) <= limit:
+        return body
+    top = neutralize(head).rstrip('\n') + '\n'
+    tail = '\n\n' + TRUNCATED + '\n\n' + marker(kind, payload) + '\n'
+    room = limit - len(top) - len(tail)
+    if room < 0:
+        raise BodyTooLong(f'the {kind} record does not fit the {limit} characters of a GitHub '
+                          f'text even without its readable part ({len(top) + len(tail)} '
+                          'characters with header, notice and marker): not published')
+    # A prefix of neutralized text cannot open an HTML comment either.
+    return top + neutralize(text)[:room].rstrip('\n') + tail
 
 
 _REVIEW_EVENT = {'approve': 'APPROVE', 'request_changes': 'REQUEST_CHANGES',
@@ -475,12 +521,10 @@ _REVIEW_EVENT = {'approve': 'APPROVE', 'request_changes': 'REQUEST_CHANGES',
 
 
 def render_native_review(review, head):
-    """``{event, body}`` of the GitHub review that mirrors a devloop review. It carries no
-    marker: devloop reads only the review comment."""
-    body = (head + f'\n**Verdetto devloop:** {_VERDICT_TEXT[review["verdict"]]} (round '
-            f'{review["round"]}/{review["max_rounds"]}, commit `{review["head_sha"][:12]}`). '
-            'I dettagli sono nel commento della review automatica.')
-    return {'event': _REVIEW_EVENT[review['verdict']], 'body': publishable(body)}
+    """``{event, body}`` of the GitHub review of an agent with an app of its own (#325): the
+    whole review with its marker (``render_review``), the record devloop reads, and the event
+    that mirrors its verdict for GitHub and branch protection."""
+    return {'event': _REVIEW_EVENT[review['verdict']], 'body': render_review(review, head)}
 
 
 def render_fix(fix, head, round_no):
