@@ -281,7 +281,10 @@ class Ledger:
 
         The journal is the authority (ADR 0004, D7): a marker it does not confirm, for another
         issue, a story it does not hold, or an issue that is neither its root nor one of its
-        children, raises ``JournalError``."""
+        children, raises ``JournalError``. So does the marker of a root whose ``hashes`` are not
+        a prefix of the story's in the journal: a marker behind the journal (a write that failed
+        after the journal recorded the hash) is valid, one that diverges from it or goes beyond
+        it (a journal restored from before) contradicts it."""
         if self.signed is None:
             return None
         found = [read_marker(c.get('body', ''), 'story') for c in comments
@@ -298,6 +301,12 @@ class Ledger:
             raise JournalError(f'#{number}: the dispatcher\'s story marker ({mark["story"]}, '
                                f'root #{mark["root"]}) is not confirmed by the journal: the '
                                'journal is the authority, and the story is not used')
+        hashes = mark.get('hashes')
+        if hashes is not None and story['hashes'][:len(hashes)] != hashes:
+            raise JournalError(f'#{number}: the hashes of the dispatcher\'s story marker '
+                               f'({mark["story"]}) are not a prefix of those the journal '
+                               'records: the journal is the authority, and the story is not '
+                               'used')
         return story
 
     def mark_child(self, number, story, repo):

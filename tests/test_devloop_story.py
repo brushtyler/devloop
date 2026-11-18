@@ -11,7 +11,7 @@ import devloop
 from devloop import ledger, markdown
 from devloop.config import ConfigError, load_config, load_data, parse_config
 from devloop.dispatcher import Dispatcher
-from devloop.journal import JOURNAL, JournalError, TurnJournal
+from devloop.journal import JOURNAL, SNAPSHOT, JournalError, TurnJournal
 from devloop.ledger import Ledger
 from test_devloop import CFG, implemented
 from test_devloop_ledger import LedgerGH, ReportingRunner, TreeWS
@@ -128,6 +128,31 @@ class StoryDispatcherTests(unittest.TestCase):
                          [[first['hash']], [first['hash'], second['hash']],
                           [first['hash'], second['hash']]])
 
+    def test_a_journal_restored_from_before_the_root_marker_is_an_error(self):
+        # Requests A, B and C published as usual; then the journal and its snapshot are
+        # restored as they were after A, and a new process takes the root over with C.
+        d = self.make()
+        d._do_implement(7)
+        saved = {name: (self.state / name).read_bytes() for name in (JOURNAL, SNAPSHOT)}
+        for body in ('Do B.', 'Do C.'):
+            self.gh.texts[7] = ('Issue 7', body)
+            d._do_implement(7)
+        a, b, c = (r['hash'] for r in self.gh.records(7, 'request'))
+        self.assertEqual(story_markers(self.gh.thread[7])[-1]['hashes'], [a, b, c])
+        for name, data in saved.items():
+            (self.state / name).write_bytes(data)
+        restarted = Ledger(self.gh, state_dir=self.state)
+        d = Dispatcher(STORY, self.gh, TreeWS(), ReportingRunner(implemented(), gh=self.gh),
+                       log=self.logs.append, ledger=restarted)
+        requests, before = len(self.gh.records(7, 'request')), journal_events(self.state)
+        # The marker goes beyond the journal: it contradicts it, and B is not dropped silently.
+        with self.assertRaisesRegex(JournalError, 'not a prefix'):
+            d._do_implement(7)
+        self.assertEqual(journal_events(self.state), before)
+        (only,) = TurnJournal(self.state).stories().values()
+        self.assertEqual(only['hashes'], [a])
+        self.assertEqual(len(self.gh.records(7, 'request')), requests)
+
     def test_a_child_without_the_dispatchers_marker_does_not_inherit_the_story(self):
         d = self.make()
         d._do_implement(7)
@@ -212,6 +237,25 @@ class StoryLedgerTests(unittest.TestCase):
                 self.gh.add(9, DISPATCHER, forged(story, 7, issue))
                 with self.assertRaises(JournalError):
                     self.ledger.story_of(9, self.gh.issue_comments(9), CFG.repo)
+
+    def test_the_hashes_of_a_root_marker_must_be_a_prefix_of_the_journals(self):
+        self.ledger.journal.story(CFG.repo, 7, 'h2')
+
+        def root(hashes):
+            return markdown.publishable('Radice.', 'story', {
+                'story': self.root, 'repo': CFG.repo, 'root': 7, 'issue': 7, 'hashes': hashes})
+        # Equal to the journal, or behind it (a marker whose write failed): valid.
+        for hashes in (['h1', 'h2'], ['h1']):
+            with self.subTest(hashes=hashes):
+                comments = [{'author': {'login': DISPATCHER}, 'body': root(hashes)}]
+                self.assertEqual(self.ledger.story_of(7, comments, CFG.repo)['hashes'],
+                                 ['h1', 'h2'])
+        # Diverging from it, or beyond it (a journal restored from before): an integrity error.
+        for hashes in (['h2'], ['h1', 'h3'], ['h2', 'h1'], ['h1', 'h2', 'h3']):
+            with self.subTest(hashes=hashes):
+                comments = [{'author': {'login': DISPATCHER}, 'body': root(hashes)}]
+                with self.assertRaisesRegex(JournalError, 'not a prefix'):
+                    self.ledger.story_of(7, comments, CFG.repo)
 
     def test_the_child_marker_writer(self):
         comment = self.ledger.mark_child(8, self.root, CFG.repo)

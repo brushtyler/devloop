@@ -998,7 +998,11 @@ behaves as before.
 - **Root marker.** The comment of the `request` record of the root ends with the `ledger` marker
   followed by a `story` marker, `{story, repo, root, issue, hashes}`, with every hash recorded so
   far, oldest first, and a "Storia" section in its text. A marker missing because a write failed
-  is written again at the next takeover, from the journal.
+  is written again at the next takeover, from the journal. The journal must confirm the root's
+  latest marker too: its `hashes` must be a prefix of the story's. A marker behind the journal
+  (a write that failed after the journal recorded the hash) is valid; one that diverges from it,
+  or goes beyond it (a journal restored from before), contradicts it: an integrity error, and the
+  step escalates without recording the new hash.
 - **Children.** A child issue inherits the story **only** from a `story` marker the dispatcher
   wrote on it, `{story, repo, root, issue}` without hashes (D7). A story declared in the text of
   the issue, by an agent or by a user, the operator included, or in a marker written by any
