@@ -225,10 +225,9 @@ def _stop(run, outcome, liveness):
         detail = 'work in progress with no writer left: the controller ended without a recorded outcome'
     elif outcome != 'stopped':
         return None
-    elif status == 'HALTED_BUDGET_EXCEEDED':
-        cls, code, detail = 'limits', 'budget_exceeded', None
-    elif status == 'ESCALATED_TO_SUPERVISOR':
-        cls, code, detail = 'operator_decision', 'operator_decision', None
+    # The precedence of the supervisor's table: the recorded category first
+    # (authentication, integrity, the recovery stops, a resource limit), then the
+    # budget halt, then the escalation, whatever status carries the category.
     elif category in ('AUTH_MISSING', 'AUTH_EXPIRED', 'AUTHENTICATION'):
         cls = 'authentication'
         code = {'AUTH_MISSING': 'auth_missing', 'AUTH_EXPIRED': 'auth_expired'}.get(category, 'auth_unverified')
@@ -239,6 +238,10 @@ def _stop(run, outcome, liveness):
         cls, code, detail = STOPS[category], category.lower(), None
     elif category == 'ENVIRONMENT_RESOURCE':
         cls, code, detail = 'limits', 'resource_limit', None
+    elif status == 'HALTED_BUDGET_EXCEEDED':
+        cls, code, detail = 'limits', 'budget_exceeded', None
+    elif status == 'ESCALATED_TO_SUPERVISOR':
+        cls, code, detail = 'operator_decision', 'operator_decision', None
     else:
         # The supervisor binds the other categories to its controller events; without
         # them the outcome stays unbound, as in its own fallback row.

@@ -208,12 +208,14 @@ coverage the activity is `idle`, and recorded work is reported as interrupted. O
 recorded, it is `null`: other activities are not persisted, and no wait for a provider is deduced.
 
 **Stops.** A stop keeps the classes of the supervisor's
-[recovery matrix](supervision.md) (`RECOVERY_MATRIX`): `HALTED_BUDGET_EXCEEDED` is `limits`,
-`ESCALATED_TO_SUPERVISOR` is `operator_decision`; for `FAILED`, the recorded `failure.category` maps as
-in the supervisor (authentication, `INTEGRITY`, the recovery stops such as `LIMIT_REACHED`,
-`ENVIRONMENT_RESOURCE`). The categories the supervisor binds only through its controller events
-(`CHECK_FAILURE`, `SCOPE_REQUIRED`, …) and a missing category stay `uncertain_outcome`,
-`terminal_unbound`, as in its fallback row. A `STALE` run is `uncertain_outcome` too.
+[recovery matrix](supervision.md) (`RECOVERY_MATRIX`), with the precedence of its table. The recorded
+`failure.category` comes first, whatever the stopped status: authentication, `INTEGRITY`, the recovery
+stops such as `LIMIT_REACHED` or `OUTCOME_UNCERTAIN`, `ENVIRONMENT_RESOURCE`. The pipeline records
+`ESCALATED_TO_SUPERVISOR` also for these categories, so an escalated run with an expired authentication
+is `authentication`, not `operator_decision`. Then `HALTED_BUDGET_EXCEEDED` is `limits` and
+`ESCALATED_TO_SUPERVISOR` is `operator_decision`. For `FAILED`, the categories the supervisor binds only
+through its controller events (`CHECK_FAILURE`, `SCOPE_REQUIRED`, …) and a missing category stay
+`uncertain_outcome`, `terminal_unbound`, as in its fallback row. A `STALE` run is `uncertain_outcome` too.
 
 **Next action.** `action` and `mode` are those of the recovery matrix for a stop. A `command` is given
 only when every argument is available: today only sign-off, `./ssdlc approve <ticket>` from the

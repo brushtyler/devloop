@@ -145,6 +145,38 @@ class ClassificationTest(LivenessCase):
             self.set_state(status=status, failure=None)
             self.assertIsNone(self.status(FakeKernel())['stop'])
 
+    def test_a_recorded_category_takes_the_native_precedence_over_escalation_and_budget(self):
+        # The pipeline records ESCALATED_TO_SUPERVISOR also for these categories: the
+        # supervisor's table classifies the category first, and so does the status.
+        from ssdlc_supervisor import RECOVERY_MATRIX
+        cases = [
+            ('LIMIT_REACHED', 'limits', 'limit_reached', 'a limit explicitly raised by the operator'),
+            ('OUTCOME_UNCERTAIN', 'uncertain_outcome', 'outcome_uncertain', 'reconciles the invocation outcome'),
+            ('AUTH_EXPIRED', 'authentication', 'auth_expired', 'authentication refreshed out of band'),
+            ('INTEGRITY', 'integrity', 'integrity_failure', 'reconciles integrity'),
+            ('ENVIRONMENT_RESOURCE', 'limits', 'resource_limit', 'a limit explicitly raised by the operator'),
+            ('ENVIRONMENT_DIAGNOSIS', 'transient_environment_provider', 'environment_diagnosis',
+             'retries read-only preflight'),
+        ]
+        for status in ('ESCALATED_TO_SUPERVISOR', 'HALTED_BUDGET_EXCEEDED'):
+            for category, cls, code, prerequisite in cases:
+                with self.subTest(status=status, category=category):
+                    self.set_state(status=status, failure={'category': category})
+                    result = self.status(FakeKernel())
+                    self.assertEqual((result['stop']['class'], result['stop']['reason_code']), (cls, code))
+                    action = result['next_action']
+                    self.assertEqual((action['action'], action['mode']),
+                                     (RECOVERY_MATRIX[cls]['action'], RECOVERY_MATRIX[cls]['mode']))
+                    self.assertIsNone(action['command'])
+                    self.assertTrue(any(prerequisite in p for p in action['prerequisites']), action)
+                    self.assertIn(lv.RESUME, action['prerequisites'])
+        # A category the supervisor binds only through its events keeps the status's class.
+        for status, cls, code in (('ESCALATED_TO_SUPERVISOR', 'operator_decision', 'operator_decision'),
+                                  ('HALTED_BUDGET_EXCEEDED', 'limits', 'budget_exceeded')):
+            self.set_state(status=status, failure={'category': 'CHECK_FAILURE'})
+            stop = self.status(FakeKernel())['stop']
+            self.assertEqual((stop['class'], stop['reason_code']), (cls, code))
+
     def test_activity_is_what_the_records_say_and_idle_only_without_writers(self):
         self.writer.append(tasks_state(a='COMPLETED', b='RUNNING', attempts=1), 'TASK_STARTED')
         running = self.status(FakeKernel([GATE_READ]))['activity']
