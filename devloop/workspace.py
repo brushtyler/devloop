@@ -191,12 +191,15 @@ class Workspace:
                                str((self.repo_root / common).resolve() / 'objects'),
                            'GIT_OPTIONAL_LOCKS': '0'}
 
-    def _git(self, *args, cwd=None, check=True, stdin=None, env=None, unset=()):
+    def _git(self, *args, cwd=None, check=True, stdin=None, env=None, unset=(), binary=False):
         return self._git_run(*args, cwd=cwd, check=check, stdin=stdin, env=env,
-                             unset=unset).stdout
+                             unset=unset, binary=binary).stdout
 
-    def _git_run(self, *args, cwd=None, check=True, stdin=None, env=None, unset=()):
-        """The completed git command, stdout and stderr included."""
+    def _git_run(self, *args, cwd=None, check=True, stdin=None, env=None, unset=(),
+                 binary=False):
+        """The completed git command, stdout and stderr included. ``binary``: ``stdin`` and
+        stdout are bytes, neither decoded nor with their line ends translated (a patch, #374);
+        stderr is decoded all the same, for the messages."""
         if self._read_only is not None:
             if args[0] == 'fetch':
                 return subprocess.CompletedProcess(['git', *args], 0, '', '')
@@ -209,8 +212,13 @@ class Workspace:
             kwargs['env'] = dict(inherited, **(env or {}))
         try:
             with self._shared if args[:1] and args[0] in _SHARED_GIT else nullcontext():
-                done = self._run(['git', *args], cwd=cwd or self.repo_root, input=stdin,
-                                 capture_output=True, text=True, timeout=600, **kwargs)
+                if binary:
+                    done = self._run(['git', *args], cwd=cwd or self.repo_root, input=stdin,
+                                     capture_output=True, timeout=600, **kwargs)
+                    done.stderr = done.stderr.decode('utf-8', 'replace')
+                else:
+                    done = self._run(['git', *args], cwd=cwd or self.repo_root, input=stdin,
+                                     capture_output=True, text=True, timeout=600, **kwargs)
         except subprocess.TimeoutExpired as exc:
             raise WorkspaceError(f'git {" ".join(args[:2])}: timed out after {exc.timeout}s') from exc
         except OSError as exc:
@@ -296,11 +304,15 @@ class Workspace:
     def save_evidence(self, name, text):
         """Write ``text`` as file ``name`` of the dispatcher's logs (``<state_dir>/logs``, next to
         the worktrees), and return its path: the uncommitted changes of an agent that stopped,
-        kept as evidence when a conclave restarts its step from the published commit (#142)."""
+        kept as evidence when a conclave restarts its step from the published commit (#142).
+        Bytes are written as they are (a patch, #374), a string in UTF-8."""
         logs = self.root.parent / 'logs'
         logs.mkdir(parents=True, exist_ok=True)
         path = logs / name
-        path.write_text(text, encoding='utf-8')
+        if isinstance(text, bytes):
+            path.write_bytes(text)
+        else:
+            path.write_text(text, encoding='utf-8')
         return path
 
     def keep_work(self, path, commit, name):
@@ -308,23 +320,25 @@ class Workspace:
         everything ``git add -A`` would stage, new files included, as a patch against ``commit``
         that ``git apply`` takes (binary files included), written as evidence ``name``
         (:meth:`save_evidence`). Nothing is committed, and the index of ``path`` is untouched.
-        Returns ``(file, stats)``, ``stats`` the ``(path, added, removed)`` of each file
-        (``None`` counts for a binary one), or None when the worktree holds nothing beyond
-        ``commit``."""
+        The patch stays bytes from here to :meth:`apply_work`, never decoded: line ends (CRLF)
+        and text that is not UTF-8 come back as they were. Returns ``(file, stats)``, ``stats``
+        the ``(path, added, removed)`` of each file (``None`` counts for a binary one), or None
+        when the worktree holds nothing beyond ``commit``."""
         tree = self.tree(path)
         if tree == self.commit_tree(path, commit):
             return None
         patch = self._git('diff', '--binary', '--full-index', '--no-color', '--no-renames',
                           '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/',
-                          commit, tree, cwd=path)
+                          commit, tree, cwd=path, binary=True)
         return self.save_evidence(name, patch), self.patch_stats(path, patch)
 
     def patch_stats(self, path, patch):
-        """The ``(path, added, removed)`` of each file of ``patch``, as ``git apply --numstat``
-        reads it in ``path`` without applying it; ``None`` counts for a binary file."""
+        """The ``(path, added, removed)`` of each file of ``patch`` (bytes), as ``git apply
+        --numstat`` reads it in ``path`` without applying it; ``None`` counts for a binary
+        file. A path that is not UTF-8 is shown with replacement characters."""
         stats = []
-        out = self._git('apply', '--numstat', '-z', '-', cwd=path, stdin=patch)
-        for entry in out.split('\0'):
+        out = self._git('apply', '--numstat', '-z', '-', cwd=path, stdin=patch, binary=True)
+        for entry in out.decode('utf-8', 'replace').split('\0'):
             added, _, rest = entry.partition('\t')
             removed, _, file = rest.partition('\t')
             if file:
@@ -333,23 +347,25 @@ class Workspace:
         return stats
 
     def take_work(self, name):
-        """The patch :meth:`keep_work` saved as ``name`` for the retry of its step (#374), or
-        None. It is taken once: the file is renamed ``<name>.used-<time>``, so that a later run
-        of the step does not apply it again, and stays in the logs as evidence."""
+        """The patch :meth:`keep_work` saved as ``name`` for the retry of its step (#374), as
+        bytes, or None. It is taken once: the file is renamed ``<name>.used-<time>``, so that a
+        later run of the step does not apply it again, and stays in the logs as evidence."""
         path = self.root.parent / 'logs' / name
         try:
-            text = path.read_text(encoding='utf-8')
+            data = path.read_bytes()
         except FileNotFoundError:
             return None
         path.rename(path.with_name(f'{name}.used-{time.strftime("%Y%m%dT%H%M%S")}'))
-        return text
+        return data
 
     def apply_work(self, path, patch):
-        """``(applied, error)``: apply ``patch`` (:meth:`keep_work`) to the worktree ``path``,
-        without staging or committing anything. ``git apply`` applies all of it or nothing."""
+        """``(applied, error)``: apply ``patch`` (:meth:`keep_work`, bytes) to the worktree
+        ``path``, without staging or committing anything. ``git apply`` applies all of it or
+        nothing."""
         done = self._git_run('apply', '--whitespace=nowarn', '-', cwd=path, stdin=patch,
-                             check=False)
-        return done.returncode == 0, (done.stderr.strip() or done.stdout.strip())[:500]
+                             check=False, binary=True)
+        out = done.stdout.decode('utf-8', 'replace')
+        return done.returncode == 0, (done.stderr.strip() or out.strip())[:500]
 
     def review_copy(self, path, reviewer=None):
         """``(name, path)`` of a disposable worktree for a reviewer, detached at the HEAD of

@@ -192,6 +192,46 @@ class TimeoutWorkTests(unittest.TestCase):
         self.assertIn('run the targeted tests of what you change first', prompt)
         self.assertTrue(any('not applied' in line for line in self.lines))
 
+    def test_the_retry_gets_back_the_exact_bytes_of_crlf_and_non_utf8_text(self):
+        # git treats both files as text; the patch must keep their bytes, never decode them.
+        self.git('config', 'core.autocrlf', 'false')
+        crlf, latin = b'first\r\nsecond\r\n', b'caf\xe9\n'
+
+        def work(path):
+            (path / 'crlf.txt').write_bytes(crlf)
+            (path / 'a.py').write_bytes(b'a\n' + latin)
+            (path / 'latin.txt').write_bytes(latin)
+            return timed_out()
+        seen = {}
+
+        def retry(path):
+            seen.update({name: (path / name).read_bytes()
+                         for name in ('crlf.txt', 'a.py', 'latin.txt')})
+            return implemented('blocked')
+        self.make(work, retry)
+        self.implement()
+        body = self.gh.comments[-1][1]
+        self.assertIn('3 file, +4 −0 righe', body)
+        saved = (self.logs / EVIDENCE).read_bytes()
+        self.assertIn(b'+first\r\n+second\r\n', saved)
+        self.assertIn(b'+' + latin, saved)
+        self.implement()
+        self.assertEqual(seen, {'crlf.txt': crlf, 'a.py': b'a\n' + latin, 'latin.txt': latin})
+        self.assertIn('They have been reapplied to it', self.runner.calls[1][3])
+
+    def test_a_non_utf8_patch_that_does_not_apply_is_shown_in_the_prompt(self):
+        def work(path):
+            (path / 'a.py').write_bytes(b'a\ncaf\xe9\n')
+            return timed_out()
+        self.make(work, implemented('blocked'))
+        self.implement()
+        (self.repo / 'a.py').write_text('main rewrote it\n')
+        self.commit('main moves')
+        self.implement()
+        prompt = self.runner.calls[1][3]
+        self.assertIn('They could not be reapplied to it', prompt)
+        self.assertIn('+caf�\n', prompt)
+
     def test_a_timeout_without_uncommitted_work_changes_nothing(self):
         self.make(timed_out(), implemented('blocked'))
         self.implement()

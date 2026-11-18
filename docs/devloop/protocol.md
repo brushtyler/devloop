@@ -134,7 +134,9 @@ An implementation or a fix that times out (`agent_timeout_seconds`) may leave un
 its worktree (#374). devloop never commits it. It saves it as evidence,
 `timeout-<label>.diff` in `<state_dir>/logs` (`<label>` is the step's, such as
 `issue-7-implement` or `pr-9-fix-r2`): a patch against the commit the turn started from, with
-new files that git does not ignore, deleted files and binary files. The escalation names that
+new files that git does not ignore, deleted files and binary files. The patch is handled as bytes
+from the save to `git apply`, so line ends (CRLF) and text that is not UTF-8 come back unchanged;
+only the copy in a prompt is decoded, with replacement characters. The escalation names that
 file and lists its files with the lines added and removed. The retry of the same step (same
 label) recreates the worktree, then, before the agent starts, the dispatcher applies the patch
 with `git apply`, all or nothing, without staging it. If it does not apply, for example because

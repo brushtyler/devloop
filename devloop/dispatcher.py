@@ -290,7 +290,11 @@ def kept_work_text(kept, state_dir):
 def kept_work_note(timeout, stats, applied, error, patch):
     """The note appended to the prompt of the retry of a step whose previous turn timed out
     leaving uncommitted work (#374): reapplied to the new worktree, or, when ``git apply``
-    refused it, the patch itself, cut to ``MAX_KEPT_PROMPT`` characters."""
+    refused it, the patch itself, cut to ``MAX_KEPT_PROMPT`` characters. ``patch``: its bytes,
+    decoded here for the prompt only (bytes that are not UTF-8 shown as replacement
+    characters); a string is taken as it is."""
+    if isinstance(patch, bytes):
+        patch = patch.decode('utf-8', 'replace')
     files = '\n'.join(f'- `{name}`' for name, _, _ in stats) or '- (none listed)'
     note = ('\n\n## The previous turn timed out\n\nThe previous turn of this same step was '
             f'stopped after {timeout} seconds (`agent_timeout_seconds`) before it finished, and '
@@ -2057,8 +2061,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
     def _resume_kept(self, path, label):
         """The prompt note of the retry of step ``label`` (#374), '' when its previous turn left
-        no saved work. The saved patch is taken once (``take_work``) and applied to the new
-        worktree ``path``; when it does not apply, the note carries it as text."""
+        no saved work. The saved patch is taken once (``take_work``), as bytes, and applied as
+        it is to the new worktree ``path``; when it does not apply, the note carries it as
+        text."""
         try:
             patch = self.ws.take_work(kept_work_file(label))
         except (OSError, UnicodeError) as error:
