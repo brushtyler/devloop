@@ -468,6 +468,8 @@ def main(argv=None):
         for pr in snap.prs:
             log(pr_status_line(pr, cfg, dispatcher.status_reviews(pr)))
         log(pr_counts_line(snap, cfg))
+        for line in dispatcher.status_budget(snap):
+            log(line)
         for line in queue_lines(snap):
             log(line)
         for action in plan(snap, cfg):

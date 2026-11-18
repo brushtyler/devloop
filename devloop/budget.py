@@ -11,19 +11,24 @@ behaves as before.
   of phase (``implementation``), and time (``wall_seconds`` from the story's start): the only
   measures devloop takes itself and that hold for every agent. Dollars count only where they are
   attested, measured spend (``metered_usd``) and estimates (``cli_estimate_usd``) apart: today
-  the estimate claude reports. Token caps are not part of it.
+  the estimate claude reports. Token caps are not part of it. ``wall_seconds`` runs from the
+  first booking of the story with the budget on, not from its takeover (#396).
 - **The rule of each agent** for unknown usage, as in the engine: ``unmetered_quota`` (D2, for
   agy and codex, the only rule they accept: no reserve in USD, only the turn caps) or, for claude
-  only, ``reserve_per_invocation`` (a reserve in both dollar kinds, booked before the turn). An
-  agent whose CLI reports no dollar figure has no turn without one: the configuration is refused
-  at startup. The rule is the agent's and
-  covers every model of its chain: a fallback runs on the same CLI.
+  only, ``reserve_per_invocation`` (a reserve in both dollar kinds, booked before the turn).
+  Every agent needs one, claude included (#396): a claude turn that ends without its
+  ``total_cost_usd`` (a model not available, a timeout, a crash, no output) would otherwise
+  leave its story ``uncovered`` for good. Without one the configuration is refused at startup.
+  The rule is the agent's and covers every model of its chain: a fallback runs on the same CLI.
 - **The booking** is written in the intent of the turn in the journal (``TurnJournal.intent``),
   in the same event and under the same lock as the check: the journal is the authority (D7).
 - **The envelope is frozen** at the first booking of a story: every booking records the limits
   of its story (``envelope``: the turn and dollar caps, ``wall_seconds`` and the deadline), and
   the later ones read them from the journal, across restarts. A changed configuration applies
   to new stories only: it never extends an existing one, an operator's decision case by case.
+  A role configured after that (the advisory review, the conclave) has no cap in the frozen
+  envelope: its turn is refused with a category of its own, ``ROLE_NOT_IN_ENVELOPE``, never
+  with a default cap, which would be a value of the budget (D2).
 - **Consumption is cumulative**: every turn booked for the story counts, whatever its issue (the
   root or a child), attempt, outcome, model or process. Nothing refunds a booking: a turn that
   failed, was not dispatched or is uncertain stays counted. The dollars a CLI reported are
@@ -48,6 +53,9 @@ from core import budget as core
 from .journal import FAILED, IMPLEMENTATION, NOT_DISPATCHED, RETURNED, UNCERTAIN, TurnBlocked
 
 BUDGET = 'budget'  # the class of the escalation of a refused turn
+# The refusal of a turn whose role has no cap in the frozen envelope of its story (#396): the
+# role was configured after its first booking. devloop's own category, beside those of ``core``.
+ROLE_NOT_IN_ENVELOPE = 'ROLE_NOT_IN_ENVELOPE'
 OUTSIDE = ('preflight',)  # the kinds of turn outside the envelope
 # A booked turn as a row of ``core.budget``: the status the engine would give its outcome.
 STATUS = {RETURNED: 'returned', FAILED: 'terminated', NOT_DISPATCHED: 'not_dispatched',
@@ -61,7 +69,8 @@ class BudgetRefused(TurnBlocked):
     """A turn refused before its intent because the envelope of its story does not cover it
     (#365). A ``TurnBlocked`` with no turns: the step stops and escalates, as for the block on
     uncertain turns, and nothing is recorded as started. ``category``: the refusal of
-    ``core.budget`` (``LIMIT_REACHED``, ``OUTCOME_UNCERTAIN``, ``SCOPE_REQUIRED``)."""
+    ``core.budget`` (``LIMIT_REACHED``, ``OUTCOME_UNCERTAIN``, ``SCOPE_REQUIRED``), or
+    ``ROLE_NOT_IN_ENVELOPE`` for a role without a cap in the frozen envelope (#396)."""
 
     def __init__(self, message, category):
         super().__init__(message, [])
@@ -96,13 +105,35 @@ def policy(budget, engine=None, rule=None):
     return profile
 
 
-def limits(budget, story):
-    """The limits of ``budget`` for ``story`` (``TurnJournal.stories``) as a booking records
-    them (``envelope``): the turn caps, the dollar caps, ``wall_seconds`` and the deadline it
-    gives the story."""
+def booked_envelope(story, turns):
+    """The limits recorded by the first booking of ``story`` (``TurnJournal.stories``) among
+    ``turns`` (``TurnJournal.turns``), as ``limits`` gives them, or None before it."""
+    for turn in turns.values():
+        booked = turn.get('budget')
+        if booked and booked.get('story') == story['story'] and 'envelope' in booked:
+            return booked['envelope']
+    return None
+
+
+def started(story, turns, now):
+    """The start of the time of ``story``, in seconds (#396): its first booking with the budget
+    on, recorded in its envelope (``started_at``), never its takeover; ``now`` before its first
+    booking. A booking recorded without ``started_at`` gives it from its deadline."""
+    found = booked_envelope(story, turns)
+    if found is None:
+        return now
+    if 'started_at' in found:
+        return _seconds(found['started_at'])
+    return _seconds(found['deadline_at']) - found['wall_seconds']
+
+
+def limits(budget, start):
+    """The limits of ``budget`` for a story whose time started at ``start`` (``started``) as a
+    booking records them (``envelope``): the turn caps, the dollar caps, ``wall_seconds``, the
+    start and the deadline it gives the story."""
     return {'turns': budget.turns, 'role_turns': dict(budget.role_turns),
             'phase_turns': dict(budget.phase_turns), 'wall_seconds': budget.wall_seconds,
-            'deadline_at': _iso(_seconds(story['at']) + budget.wall_seconds),
+            'started_at': _iso(start), 'deadline_at': _iso(start + budget.wall_seconds),
             'metered_usd': budget.metered_usd, 'cli_estimate_usd': budget.cli_estimate_usd}
 
 
@@ -111,22 +142,20 @@ def frozen(budget, story, turns):
     (``TurnJournal.turns``), as a ``config.BudgetPolicy`` with the rules of ``budget``; before
     its first booking, ``budget`` itself. A later configuration applies to new stories only:
     it never extends, nor shrinks, the envelope of a story already booked."""
-    for turn in turns.values():
-        booked = turn.get('budget')
-        if booked and booked.get('story') == story['story'] and 'envelope' in booked:
-            found = booked['envelope']
-            return dataclasses.replace(
-                budget, turns=found['turns'], role_turns=tuple(found['role_turns'].items()),
-                phase_turns=tuple(found['phase_turns'].items()),
-                wall_seconds=found['wall_seconds'], metered_usd=found['metered_usd'],
-                cli_estimate_usd=found['cli_estimate_usd'])
-    return budget
+    found = booked_envelope(story, turns)
+    if found is None:
+        return budget
+    return dataclasses.replace(
+        budget, turns=found['turns'], role_turns=tuple(found['role_turns'].items()),
+        phase_turns=tuple(found['phase_turns'].items()),
+        wall_seconds=found['wall_seconds'], metered_usd=found['metered_usd'],
+        cli_estimate_usd=found['cli_estimate_usd'])
 
 
-def state(story, turns, live, wall_seconds):
+def state(story, turns, live, start, wall_seconds):
     """The state of ``core.budget`` of ``story`` (``TurnJournal.stories``): the turns booked for
     it among ``turns`` (``TurnJournal.turns``), ``live`` those still running in this process,
-    and its deadline, ``wall_seconds`` after its start."""
+    and its deadline, ``wall_seconds`` after ``start`` (``started``)."""
     rows = {}
     for turn in turns.values():
         booked = turn.get('budget')
@@ -145,7 +174,6 @@ def state(story, turns, live, wall_seconds):
             if key in booked:
                 row[key] = booked[key]
         rows[turn['turn']] = row
-    start = _seconds(story['at'])
     return {'started_at': start, 'deadline_at': start + wall_seconds, 'invocations': rows}
 
 
@@ -166,30 +194,64 @@ def summary(budget, current, role=None):
     return '; '.join(parts)
 
 
+def no_story(issue):
+    """Why issue ``issue``, held by no story of the journal, gets no turn with the budget on
+    (#396): the refusal (``SCOPE_REQUIRED``) and ``devloop status`` say the same."""
+    return (f'l\'issue #{issue} non appartiene a nessuna storia del journal: una storia nasce '
+            'alla presa in carico con `story_identity` acceso, e un\'issue presa in carico prima '
+            'resta esclusa dal budget, senza migrazione (`SCOPE_REQUIRED`). Con il budget acceso '
+            'nessun suo turno parte, e un turno senza storia non si addebita a nessun envelope; '
+            'decide l\'operatore')
+
+
+def excluded(budget, journal, repo, issues):
+    """The lines of ``devloop status`` for the ``issues`` of ``repo`` (numbers) that no story of
+    ``journal`` holds, with the budget on (#396): their turns are refused (``no_story``).
+    Nothing with the budget off."""
+    if not budget.enabled:
+        return []
+    return [f'budget: {no_story(issue)}' for issue in sorted(set(issues))
+            if journal.story_of(repo, issue) is None]
+
+
 def reserve(budget, journal, *, repo, issue, kind, agent):
     """The booking of a turn of ``kind`` of ``agent`` (``AgentConfig``) on the work of issue
     ``issue`` of ``repo``, in the envelope of its story, for ``TurnJournal.intent``; raises
     ``BudgetRefused`` when the envelope does not cover it. Called under the journal's lock.
-    The messages end without a full stop: the escalation adds it (``_failure_text``)."""
+    The messages end without a full stop: the escalation adds it (``_failure_text``).
+
+    A role without a cap in the envelope, configured after the first booking of the story, is
+    refused as ``ROLE_NOT_IN_ENVELOPE`` (#396): the story keeps its envelope, with no default
+    cap added."""
     found = journal.story_of(repo, issue)
     where = f'il turno `{kind}` di `{agent.key}` (modello `{agent.model}`) sull\'issue #{issue}'
     if found is None:
-        raise BudgetRefused(
-            f'{where} non è coperto dall\'envelope di budget: l\'issue non appartiene a nessuna '
-            'storia del journal (una storia nasce alla presa in carico, con `story_identity`), '
-            'e un turno senza storia non si addebita a nessun envelope. Nessun turno parte; '
-            'decide l\'operatore', 'SCOPE_REQUIRED')
+        raise BudgetRefused(f'{where} non è coperto dall\'envelope di budget: {no_story(issue)}',
+                            'SCOPE_REQUIRED')
     story = found[0]
     turns = journal.turns()
+    now = journal.seconds()
     envelope = frozen(budget, story, turns)
-    current = state(story, turns, journal.live(), envelope.wall_seconds)
+    start = started(story, turns, now)
+    if kind not in dict(envelope.role_turns):
+        configured = dict(budget.role_turns).get(kind)
+        later = ('' if configured is None else
+                 f' La configurazione attuale gli dà {configured} turni, che valgono solo per '
+                 'le storie nuove.')
+        raise BudgetRefused(
+            f'{where} non è coperto dall\'envelope di budget della storia `{story["story"]}` '
+            f'(radice #{story["issue"]}): il ruolo `{kind}` non ha un tetto nell\'envelope '
+            'fissato alla sua prima prenotazione, perché è stato configurato dopo '
+            f'(`{ROLE_NOT_IN_ENVELOPE}`).{later} La storia conserva il suo envelope, e nessun '
+            'tetto predefinito si aggiunge: sarebbe un valore di budget. Nessun turno parte; '
+            'decide l\'operatore (ADR 0004, D2)', ROLE_NOT_IN_ENVELOPE)
+    current = state(story, turns, journal.live(), start, envelope.wall_seconds)
     rule = budget.rule(agent.key)
     try:
         row = core.check_capacity({'policy': policy(envelope, agent.kind, rule), 'binding': {}},
-                                  current, kind, IMPLEMENTATION, agent.kind,
-                                  now=journal.seconds())
+                                  current, kind, IMPLEMENTATION, agent.kind, now=now)
     except core.Refused as exc:
-        kept = ('' if limits(envelope, story) == limits(budget, story) else
+        kept = ('' if limits(envelope, start) == limits(budget, start) else
                 ' La configurazione attuale ha limiti diversi, che valgono solo per le storie '
                 'nuove: questa storia conserva quelli fissati alla sua prima prenotazione.')
         raise BudgetRefused(
@@ -201,7 +263,7 @@ def reserve(budget, journal, *, repo, issue, kind, agent):
             'dell\'envelope e le sue estensioni sono decisioni dell\'operatore (ADR 0004, D2)',
             exc.category) from exc
     booking = {'story': story['story'], 'role': kind, 'phase': IMPLEMENTATION,
-               'engine': agent.kind, 'envelope': limits(envelope, story)}
+               'engine': agent.kind, 'envelope': limits(envelope, start)}
     for key in ('usage_model', 'conservative_usage'):
         if key in row:
             booking[key] = row[key]

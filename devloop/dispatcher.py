@@ -185,6 +185,7 @@ from .agents import (TAIL_LINES, AgentError, ModelsUnavailable, ModelUnavailable
                      PermissionDenied, background_unfinished, denied_retry_note)
 from .apps import DISPATCHER, ISSUE_COMMENT, PR_COMMENT
 from .budget import BUDGET, OUTSIDE, BudgetRefused
+from .budget import excluded as budget_excluded
 from .budget import reserve as budget_reserve
 from .config import INSTALL_ROOT, LEGACY_NEEDS_OPERATOR, ConfigError
 from .context import (LABEL_STYLE, _describe_bases, _failure_text, _open_findings_reason,
@@ -974,6 +975,18 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                            merge_state=self.gh.merge_state(raw),
                            mergeable=raw.get('mergeable'), merge_status=raw.get('mergeStateStatus'))
 
+    def status_budget(self, snap):
+        """The lines of ``status`` for the budget (#396): with it on, each issue being worked,
+        or of an open devloop PR, that no story of the journal holds, with the reason its turns
+        are refused (``budget.no_story``). Nothing with the budget off or without a ledger."""
+        if self.ledger is None or not self.cfg.budget.enabled:
+            return []
+        issues = list(snap.working_issues) + [pr.issue for pr in snap.prs if pr.issue]
+        try:
+            return budget_excluded(self.cfg.budget, self.ledger.journal, self.cfg.repo, issues)
+        except JournalError as exc:
+            return [f'budget: the journal cannot be read: {exc}']
+
     def status_reviews(self, pr):
         """The review records of ``pr`` for ``status`` (#289). The snapshot reads the thread
         only of the PRs devloop works on; a PR escalated to agent:needs-operator (as after
@@ -1650,7 +1663,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
         The escalation of a ``TurnBlocked`` records the ids of the turns it names (``turns``).
         A turn the budget envelope does not cover (``BudgetRefused``, #365, a ``TurnBlocked``
-        with no turns) escalates the same way, with class ``budget``."""
+        with no turns) escalates the same way, with class ``budget``, its ``category`` and, on
+        a PR, its ``head`` (#396)."""
         if action.kind == 'conclave' and not isinstance(exc, TurnBlocked):
             self.log('  conclave: no escalation, it resumes from its record')
             return
@@ -1661,6 +1675,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         reason = f'Il passo `{action.kind}` è fallito: {_failure_text(exc)}{self._log_hint(exc)}'
         if getattr(exc, 'kept_work', None):  # what a timed-out writing turn left (#374)
             reason += kept_work_text(exc.kept_work, self.cfg.state_dir)
+        if action.kind == 'advisory' and isinstance(exc, BudgetRefused) and pr is not None:
+            reason += (f'\n\nLa review consultiva della head `{pr.head_sha[:12]}` resta sospesa '
+                       'finché la storia non copre il turno. Una nuova head non resta sospesa '
+                       'in silenzio: la sua review consultiva viene ritentata e, se rifiutata, '
+                       'segnalata con un\'altra escalation.')
         cls = (TOOL_FAILURE if isinstance(exc, AgentError)
                else 'untrusted' if isinstance(exc, UntrustedChange)
                else BUDGET if isinstance(exc, BudgetRefused)
@@ -1677,7 +1696,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 # A readiness check runs again only on an issue with agent:ready: one the
                 # operator may retry keeps it, as a failed check does.
                 remove = [label for label in remove if label != lb.ready]
-            extra = ({'category': exc.category} if isinstance(exc, BudgetRefused)
+            # A budget refusal on a PR records its head (#396): an advisory review waits only
+            # on the refusal of the head it would review (``_advisory_held``).
+            extra = ({'category': exc.category,
+                      **({'head': pr.head_sha} if pr is not None else {})}
+                     if isinstance(exc, BudgetRefused)
                      else {'turns': [t['turn'] for t in exc.turns]}
                      if isinstance(exc, TurnBlocked) else None)
             self._escalate(number, reason, getattr(exc, 'tail', ''), remove=remove, cls=cls,

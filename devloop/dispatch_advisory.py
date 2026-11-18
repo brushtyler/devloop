@@ -289,14 +289,14 @@ class AdvisoryMixin:
             if self._advisory_retry_held(pr.number, pr.head_sha, key) is not None:
                 continue
             try:
-                if self._advisory_held(pr.number, comments):
+                if self._advisory_held(pr.number, comments, pr.head_sha):
                     continue
             except JournalError as exc:  # TurnBlocked included: the action escalates it
                 self.log(f'  PR #{pr.number}: advisory review planned, its turns: {exc}')
             found.append({'number': pr.number, 'head': pr.head_sha})
         return found
 
-    def _advisory_held(self, number, comments):
+    def _advisory_held(self, number, comments, head):
         """With ``block_uncertain_turns`` (#362), whether the work of PR ``number`` has turns
         that block it (``_check_turns``) all already named by an ``uncertain_turn`` escalation
         of the dispatcher in ``comments`` (its ``turns``): the advisory review waits for their
@@ -305,9 +305,11 @@ class AdvisoryMixin:
 
         With the budget on (#365), likewise when the envelope of the story would refuse the
         advisory turn (``_check_budget``): held when an escalation of class ``budget`` of the
-        dispatcher in ``comments`` already names the same refusal (its ``category``), until the
-        story covers the turn again; otherwise ``BudgetRefused``, which the action escalates
-        once."""
+        dispatcher in ``comments`` already names the same refusal (its ``category``) on
+        ``head``, the current head of the PR (#396), until the story covers the turn again;
+        otherwise ``BudgetRefused``, which the action escalates once per head. An escalation
+        of an earlier head, or without one, holds nothing: a new head is told to the operator
+        with an escalation of its own, never held in silence."""
         escalations = [record for _, record in self._dispatcher_records(comments, 'notice',
                                                                          'escalation')]
         try:
@@ -325,7 +327,9 @@ class AdvisoryMixin:
                                self.cfg.agent(self.cfg.review_policy.advisory_reviewer))
         except BudgetRefused as exc:
             if any(record.get('class') == BUDGET and record.get('category') == exc.category
-                   for record in escalations):
+                   and record.get('head') == head for record in escalations):
+                self.log(f'  PR #{number}: advisory review of {head[:12]} held: its budget '
+                         f'refusal ({exc.category}) is already escalated for this head')
                 return True
             raise
         return False
@@ -477,7 +481,7 @@ class AdvisoryMixin:
             # checkout made: blocking turns not escalated yet raise ``TurnBlocked``, which
             # escalates; those already escalated hold the review back until reconciled. So does
             # a refusal of the budget envelope (#365), until the story covers the turn again.
-            if self._advisory_held(pr.number, self.gh.pr_comments(pr.number)):
+            if self._advisory_held(pr.number, self.gh.pr_comments(pr.number), head):
                 self.log('  advisory review held: its work has uncertain turns, or a budget '
                          'refusal, already escalated')
                 return
