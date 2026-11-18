@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Explicit operator authorization of one exact limit-extension proposal. expires_at is mandatory and is checked at the first atomic activation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "contract",
+    "proposal_sha256",
+    "authorized",
+    "source_fenced",
+    "actor",
+    "expires_at",
+    "approved_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "contract": {
+      "const": "operator-limit-extension-v1"
+    },
+    "proposal_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "authorized": {
+      "const": true
+    },
+    "source_fenced": {
+      "const": true
+    },
+    "actor": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "\\S"
+    },
+    "expires_at": {
+      "type": "number"
+    },
+    "approved_at": {
+      "type": "number"
+    }
+  }
+}

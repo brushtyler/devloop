@@ -7,6 +7,9 @@ from ssdlc_tasks import TaskError, digest
 
 
 CAPABILITY = 'operator-deadline-extension-v1'
+# The common limit-extension contract (ssdlc_limit_extensions) mirrors its
+# extend_deadline operation into this chain with the same fields and rules.
+LIMIT_CAPABILITY = 'operator-limit-extension-deadline-v1'
 
 
 def specification(source, profile, deadline_at):
@@ -34,7 +37,7 @@ def accounting_anchor(envelope):
               'old_wall_seconds', 'new_wall_seconds', 'source_policy_sha256'}
     for entry in entries:
         if (not isinstance(entry, dict) or set(entry) != fields
-                or entry['capability'] != CAPABILITY
+                or entry['capability'] not in (CAPABILITY, LIMIT_CAPABILITY)
                 or entry['started_at'] != anchor['started_at']
                 or entry['old_deadline_at'] != anchor['deadline_at']
                 or any(type(entry[k]) not in (int, float) or not math.isfinite(entry[k])

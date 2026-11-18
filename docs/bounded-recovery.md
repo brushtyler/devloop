@@ -49,6 +49,14 @@ adds a marker for newly authorized runs; it is not permission to copy a new
 controller into an existing run. Historical admission uses #27's transaction,
 which publishes the same marker after its final accounting binding is sealed.
 
+A stopped run can raise named global limits or its deadline only through a
+[manual limit extension](limit-extensions.md) that the operator authorizes for
+the exact proposal. Its activation republishes both mode bindings with the new
+policy digest. Every load then validates the bound extension chain in
+`binding.limit_extensions`, and refuses while an activation intent
+(`limits/extension-pending.json`) is still pending. Relaunching a native run with
+its original `--limits-profile` keeps the extended envelope.
+
 `metered_usd` sums positive API usage observations;
 `cli_estimate_usd` sums positive CLI estimates. They are independent thresholds,
 not interchangeable charges. Missing/default-zero telemetry remains `null`;

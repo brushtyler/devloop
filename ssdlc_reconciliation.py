@@ -460,7 +460,10 @@ def _selected_execution_root(ticket, projection):
     if marker != projection['runtime_binding'] or marker.get('model_dispatch_authorized') is not True:
         raise TransitionError('Execution generation binding changed')
     envelope, counters = LimitsStore(root)._load(repair=False)
-    if digest(envelope) != marker['policy_sha256']:
+    # Operator limit extensions applied to this generation are a bound chain on
+    # top of the authorized envelope; _load has validated each of its steps.
+    from ssdlc_limit_extensions import unwind
+    if digest(unwind(envelope, identity)) != marker['policy_sha256']:
         raise TransitionError('Execution policy differs from authorized generation')
     state = _read(root, 'state.json')
     if state['ledger'][:len(projection['ledger'])] != projection['ledger']:
