@@ -494,10 +494,14 @@ class MergeMixin:
             payload['merged_by'] = merged_by
         if bases:
             payload['bases'] = bases
+        # The comment names who wrote to the base (#323): the dispatcher only decides the merge.
+        executor = (f'con l\'app `{merged_by.removesuffix("[bot]")}`' if merged_by
+                    else 'con il login `gh` locale')
         try:
             self.gh.comment(pr.number, publishable(
                 dispatcher_header() + '\n## Mergiata da devloop\n\n'
-                f'devloop ha mergiato il commit `{head[:12]}` con un merge commit, legato a quel '
+                f'devloop ha deciso il merge e l\'ha eseguito {executor}: commit `{head[:12]}` '
+                'con un merge commit, legato a quel '
                 f'head (`--match-head-commit`), in modalità `{mode}`, al livello '
                 f'{current["level"]}. Subito prima ha ricontrollato le direttive di merge: CI '
                 '`pass`, `MERGEABLE` e `CLEAN`, nessun finding aperto, nessuna label '
