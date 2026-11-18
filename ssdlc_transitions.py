@@ -245,11 +245,28 @@ class TransitionStore:
         current = self._read(self.root, 'active.json')
         if not isinstance(current, dict) or current.get('transition_id') != identity:
             return None
+        self._same_inputs(identity, proposal, authorization)
+        return self.load()
+
+    def _same_inputs(self, identity, proposal, authorization):
         stored = self._read(self.root / identity, 'intent.json')
         if (not isinstance(stored, dict) or stored.get('proposal') != proposal
                 or stored.get('authorization') != authorization):
             raise TransitionError('Transition identity reused with different inputs')
-        return self.load()
+
+    def replayed(self, proposal, authorization):
+        """A caller's replay after its selector was published: the same inputs, no new proof.
+
+        The selector must name this transition and its intent must hold this exact
+        proposal and authorization, so a replay can switch neither between the
+        operator's ``source_fenced`` and the automatic proof nor any other field.
+        Callers use it before completing an already published activation.
+        """
+        identity = proposal.get('transition_id') if isinstance(proposal, dict) else None
+        current = self._read(self.root, 'active.json')
+        if not isinstance(current, dict) or current.get('transition_id') != identity:
+            raise TransitionError('Another generation is already selected')
+        self._same_inputs(identity, proposal, authorization)
 
     def publish(self, source, proposal, authorization, old_state, new_state, artifacts):
         identity = proposal.get('transition_id', '')

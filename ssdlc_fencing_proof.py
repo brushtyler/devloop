@@ -18,6 +18,9 @@ authorization. The host then, in ``TransitionStore.publish``:
 4. records the proof beside the authorization in the generation's ``intent.json`` and
    keeps the lock until the selector is published.
 
+The feedback recording authority (``FeedbackStore.authorize``, F1) takes the same
+proof, recorded beside its authorization in ``feedback/authority.json``.
+
 Historical intents have no proof: they stay manual attestations and are never
 reclassified. Delegated contracts that carry their own proof keep it; for an
 admitted run they also need this one.

@@ -700,6 +700,7 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
         selected, projected = store.load(), _read(preparation, 'projection.json')
         if selected['transition_id'] == proposal['transition_id']:
             if selected != projected: raise TransitionError('Activated projection changed')
+            store.replayed(proposal, authorization)
             _selected_execution_root(ticket, selected)
             if delegated:
                 finalize(delegation, proposal, recipe, selected, fault=fault)

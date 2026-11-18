@@ -1,4 +1,5 @@
 """Automatic fencing proof in native transitions (#45 part c2, #158): real gate, fake Docker."""
+import contextlib
 import copy
 import fcntl
 import functools
@@ -384,6 +385,7 @@ class DocumentationTests(unittest.TestCase):
             'ssdlc_fencing_proof.py', 'ssdlc-automatic-fencing-proof', 'RUN_NOT_ADMITTED',
             'without** `source_fenced`', 'beside** the operator', 'Historical intents', 'Replay after a crash',
             'strengthened, not equated', 'FencingRefused',
+            'The feedback recording authority (F1)', 'TransitionStore.replayed',
         ], issues=(45, 158))
 
 
@@ -402,6 +404,226 @@ class ReconciliationAuthorizationTests(unittest.TestCase):
         for change in ({'source_fenced': False}, {'profile_sha256': 'e' * 64}, {'authorized': False}):
             with self.subTest(change=change), self.assertRaises(Exception):
                 _authorization(dict(authorization, **change), proposal)
+
+
+def held_proof(generation='.'):
+    """A recorded-format proof for a fence injected into the native callers' stores."""
+    return fp.validate_proof(dict(
+        kind=fp.KIND, schema_version=fp.SCHEMA_VERSION, gate={'device': 1, 'inode': 2}, generation=generation,
+        lock=dict(operation=fp.LOCK_OPERATION, acquired=True, receipt='writer-gate-exclusive-v1',
+                  holder=wg.self_identity()[0]),
+        docker=dict(statuses=list(fp.DOCKER_STATUSES), listed=0, ticket_containers=0), verified_at=1.0))
+
+
+class InjectedFence:
+    """Stands for ``ssdlc_fencing_proof.fence`` in the native callers, which build their own store."""
+
+    def __init__(self):
+        self.calls = 0
+
+    @contextlib.contextmanager
+    def __call__(self, ticket_root, source_root):
+        self.calls += 1
+        yield fp.Fence(held_proof(), mock.Mock())
+
+
+def refuse_new_proof(*args, **kwargs):
+    raise AssertionError('a replay after publication must not take a new proof')
+
+
+class NativeReplayTests(unittest.TestCase):
+    """A replay after publication keeps the published intent's authorization in every native caller."""
+
+    def fixture(self, cls):
+        case = cls()
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        return case
+
+    def check_published_replay(self, activate, manual, published, store):
+        """``published`` is the form first published; the other form must be refused on replay."""
+        automatic = {k: v for k, v in manual.items() if k != 'source_fenced'}
+        first, other = (manual, automatic) if published == 'manual' else (automatic, manual)
+        fence = InjectedFence()
+        with mock.patch.object(fp, 'fence', fence), self.assertRaises(OSError):
+            activate(first, crash_at('after_activation'))
+        self.assertEqual(fence.calls, 0 if published == 'manual' else 1)
+        pointer = (store / 'active.json').read_bytes()
+        with mock.patch.object(fp, 'fence', refuse_new_proof):
+            with self.assertRaisesRegex(TransitionError, 'different inputs'):
+                activate(other, lambda point: None)
+            self.assertEqual((store / 'active.json').read_bytes(), pointer)
+            selected = activate(first, lambda point: None)
+        identity = json.loads(pointer)['transition_id']
+        intent = json.loads((store / identity / 'intent.json').read_text())
+        self.assertEqual(intent['authorization'], first)
+        self.assertEqual(fp.evidence(intent)['mode'], published)
+        return selected
+
+    def test_continuation_replay_compares_the_published_authorization(self):
+        from test_continuations import ContinuationTests
+        from ssdlc_continuations import activate_generation
+        for published in ('manual', 'automatic'):
+            with self.subTest(published=published):
+                case = self.fixture(ContinuationTests)
+                prepared = case.prepare()
+                selected = self.check_published_replay(
+                    lambda auth, fault: activate_generation(case.target, prepared['preparation'], auth, fault=fault),
+                    case.authorize(prepared), published, case.target / 'continuations')
+                self.assertEqual(selected['transition_id'], prepared['proposal']['transition_id'])
+
+    def test_reconciliation_replay_compares_the_published_authorization(self):
+        from test_reconciliation import ReconciliationTests
+        from ssdlc_reconciliation import activate
+        for published in ('manual', 'automatic'):
+            with self.subTest(published=published):
+                case = self.fixture(ReconciliationTests)
+                staged = case.stage()
+                selected = self.check_published_replay(
+                    lambda auth, fault: activate(case.target, staged['preparation'], auth, fault=fault),
+                    case.auth(staged), published, case.target / 'execution')
+                self.assertEqual(selected['transition_id'], staged['proposal']['transition_id'])
+
+    def test_scope_amendment_replay_compares_the_published_authorization(self):
+        from test_scope_amendments import ScopeAmendmentTests
+        from ssdlc_scope_amendments import activate
+        for published in ('manual', 'automatic'):
+            with self.subTest(published=published):
+                case = self.fixture(ScopeAmendmentTests)
+                staged = case.stage()
+                selected = self.check_published_replay(
+                    lambda auth, fault: activate(case.ticket, staged['preparation'], auth, fault=fault),
+                    case.auth(staged), published, case.ticket / 'execution')
+                self.assertEqual(selected['transition_id'], staged['proposal']['transition_id'])
+
+
+class FeedbackAuthorityFencingTests(unittest.TestCase):
+    """F1: the feedback recording authority accepts the automatic proof for admitted runs only."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.ticket = Path(tmp.name).absolute() / '.ssdlc' / 'ISSUE22'
+        self.ticket.mkdir(parents=True)
+        (self.ticket / 'state.json').write_text(json.dumps({'ticket_id': 'ISSUE22', 'writer_fencing': 'v1'}))
+        self.policy = dict(schema_version=1, capability='record-only-v1', ticket='ISSUE22',
+                           source_binding_sha256='a' * 64, controller_sha256='b' * 64, limits_sha256='c' * 64,
+                           allowed_files=['tests/test_app.py'], max_requests=3, max_amendments=2,
+                           max_added_files=2, max_rounds=2, role_calls={'diagnosis': 1, 'planner': 2, 'reviewer': 2},
+                           expires_at=200, max_amendments_per_task=2, require_strong_independence=True)
+        self.manual = dict(schema_version=1, policy_sha256=digest(self.policy), authorized=True, source_fenced=True)
+        self.automatic = {k: v for k, v in self.manual.items() if k != 'source_fenced'}
+        self.docker = FakeDocker()
+        self.writers = set()
+        self.addCleanup(lambda: [os.close(fd) for fd in self.writers])
+
+    def store(self):
+        from ssdlc_feedback import FeedbackStore
+        return FeedbackStore(self.ticket, clock=lambda: 100)
+
+    def authorize(self, authorization=None, fault=lambda point: None):
+        return self.store().authorize(self.policy, self.automatic if authorization is None else authorization,
+                                      fault=fault, fencing=functools.partial(fp.fence, docker=self.docker,
+                                                                             clock=lambda: 1000.0))
+
+    def authority(self):
+        return json.loads((self.ticket / 'feedback' / 'authority.json').read_text())
+
+    def hold_writer(self):
+        wg.open_gate(self.ticket).close()
+        fd = os.open(self.ticket / wg.GATE_NAME, os.O_RDONLY | os.O_CLOEXEC)
+        fcntl.flock(fd, fcntl.LOCK_SH)
+        self.writers.add(fd)
+        return fd
+
+    def test_admitted_run_without_writers_records_the_proof_beside_the_authorization(self):
+        from ssdlc_feedback import FeedbackError
+        self.authorize()
+        authority = self.authority()
+        self.assertEqual(authority['status'], 'ACTIVE')
+        self.assertEqual(authority['authorization'], self.automatic)
+        proof = fp.validate_proof(authority['fencing'])
+        self.assertEqual(proof['generation'], '.')
+        self.assertEqual(proof['verified_at'], 1000.0)
+        self.assertEqual(fp.evidence(authority), {'mode': 'automatic', 'operator_attested': False, 'automatic': proof})
+        self.assertEqual(self.store().recording()['status'], 'ACTIVE')
+        # Every other exact field stays required.
+        for change in ({'policy_sha256': '0' * 64}, {'authorized': False}, {'schema_version': 2}, {'extra': 1}):
+            with self.subTest(change=change), self.assertRaisesRegex(FeedbackError, 'Exact fenced'):
+                self.authorize(dict(self.automatic, **change))
+
+    def test_active_writer_refuses_and_records_nothing(self):
+        self.hold_writer()
+        with self.assertRaises(FencingRefused) as refused:
+            self.authorize()
+        self.assertEqual(refused.exception.code, 'writers_active')
+        self.assertFalse((self.ticket / 'feedback' / 'authority.json').exists())
+
+    def test_run_not_admitted_refuses_and_keeps_the_manual_path(self):
+        (self.ticket / 'state.json').write_text(json.dumps({'ticket_id': 'ISSUE22'}))
+        with self.assertRaises(FencingRefused) as refused:
+            self.authorize()
+        self.assertEqual(refused.exception.code, 'RUN_NOT_ADMITTED')
+        self.assertFalse((self.ticket / 'feedback' / 'authority.json').exists())
+        self.authorize(self.manual)
+        authority = self.authority()
+        self.assertNotIn('fencing', authority)
+        self.assertEqual(fp.evidence(authority), {'mode': 'manual', 'operator_attested': True, 'automatic': None})
+        self.assertFalse((self.ticket / wg.GATE_NAME).exists())
+        self.assertEqual(self.docker.calls, [])
+
+    def test_historical_manual_authority_is_never_read_as_automatic(self):
+        from ssdlc_feedback import FeedbackError, validate_recording_authority
+        self.authorize(self.manual)
+        validate_recording_authority(self.policy, self.manual)
+        with self.assertRaisesRegex(FeedbackError, 'no exact recording authority'):
+            validate_recording_authority(self.policy, self.automatic)
+        with self.assertRaisesRegex(FeedbackError, 'never both'):
+            validate_recording_authority(self.policy, self.manual, held_proof())
+
+    def test_replay_before_publication_takes_a_fresh_proof_and_keeps_the_first(self):
+        for point in ('policy_intent', 'policy_journal'):
+            with self.subTest(point=point):
+                self.setUp()
+                with self.assertRaises(OSError):
+                    self.authorize(fault=crash_at(point))
+                first = (self.ticket / 'feedback' / 'authority.json').read_bytes()
+                self.assertEqual(self.authority()['status'], 'INTENT')
+                fd = self.hold_writer()
+                with self.assertRaises(FencingRefused):
+                    self.authorize()
+                self.assertEqual((self.ticket / 'feedback' / 'authority.json').read_bytes(), first)
+                os.close(fd)
+                self.writers.discard(fd)
+                with self.assertRaisesRegex(Exception, 'different inputs'):
+                    self.authorize(self.manual)
+                calls = len(self.docker.calls)
+                state = self.authorize()
+                self.assertEqual(len(self.docker.calls), calls + 1)
+                self.assertEqual(state['requests'], {})
+                self.assertEqual(self.authority()['fencing'], json.loads(first)['fencing'])
+                self.assertEqual(self.authority()['status'], 'ACTIVE')
+                journal = (self.ticket / 'feedback' / 'task-journal.jsonl').read_text().splitlines()
+                self.assertEqual(len(journal), 1)  # FEEDBACK_AUTHORIZED is never appended twice
+
+    def test_replay_after_publication_takes_no_new_proof_nor_switches_form(self):
+        from ssdlc_feedback import FeedbackError
+        self.authorize()
+        authority = (self.ticket / 'feedback' / 'authority.json').read_bytes()
+        calls = len(self.docker.calls)
+        self.hold_writer()  # the run's writers may already record
+        self.authorize()
+        self.assertEqual(len(self.docker.calls), calls)
+        with self.assertRaisesRegex(FeedbackError, 'different inputs'):
+            self.authorize(self.manual)
+        self.assertEqual((self.ticket / 'feedback' / 'authority.json').read_bytes(), authority)
+
+    def test_manual_authority_replay_cannot_switch_to_automatic(self):
+        from ssdlc_feedback import FeedbackError
+        self.authorize(self.manual)
+        with self.assertRaisesRegex(FeedbackError, 'different inputs'):
+            self.authorize()
+        self.assertEqual(self.docker.calls, [])
 
 
 if __name__ == '__main__':

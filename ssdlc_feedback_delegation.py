@@ -175,7 +175,7 @@ def validate_proof(proof):
     authority = proof['recording_authority']
     from ssdlc_feedback import validate_policy, validate_recording_authority
     validate_policy(authority['policy'])
-    validate_recording_authority(authority['policy'], authority['authorization'])
+    validate_recording_authority(authority['policy'], authority['authorization'], authority.get('fencing'))
     if (authority['status'] != 'ACTIVE' or state['policy_sha256'] != digest(authority['policy'])
             or authority['policy']['require_strong_independence'] is not True):
         raise FeedbackError('Delegation recording authority changed')

@@ -109,7 +109,7 @@ def validate_proof(value):
 
 def _validate_proof(value):
     reviewed, authority, state = value['subject'], value['recording_authority'], value['state']
-    validate_recording_authority(authority['policy'], authority['authorization'])
+    validate_recording_authority(authority['policy'], authority['authorization'], authority.get('fencing'))
     validate_document('recovery-limits', value['envelope']['policy'])
     if (authority['authorization'].get('contract') != 'native-feedback-recording-v1'
             or value['envelope']['policy'] != authority['authorization']['envelope']['policy']):

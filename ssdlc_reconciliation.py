@@ -409,6 +409,7 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
         if (store.root / 'active.json').exists():
             selected = store.load()
             if selected != projection: raise TransitionError('Another execution generation is already selected')
+            store.replayed(proposal, normalized)
             resolve_execution(ticket)
             from ssdlc_preparations import update, clear_pending
             update(ticket, proposal['transition_id'], namespace='execution', status='ACTIVE')

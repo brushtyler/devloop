@@ -465,6 +465,7 @@ def activate_generation(ticket_root, preparation, authorization, *, fault=lambda
                 raise TransitionError('Another continuation is active')
             from ssdlc_transitions import validate_operator_authorization
             validate_operator_authorization(authorization, proposal)
+            store.replayed(proposal, authorization)
             from ssdlc_preparations import update, clear_pending, receipt_path
             if receipt_path(ticket_root, proposal['transition_id']).exists():
                 update(ticket_root, proposal['transition_id'], status='ACTIVE')

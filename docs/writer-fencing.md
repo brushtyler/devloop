@@ -9,10 +9,11 @@ of the canonical ticket is running. This page describes the protocol implemented
 > [Containers](#containers-the-pid-1-holder)) exist, and the operator's host passed the
 > Docker test of the holder on 2026-11-16. Part (c1) runs the role containers of
 > **admitted runs** under the holder (see [Role containers](#role-containers-activation-and-admission)).
-> Part (c2), #158, lets the native transitions of an admitted run replace the operator's
-> "writers stopped" attestation with a versioned automatic proof (see
-> [Native transitions](#native-transitions-the-automatic-proof)). Other runs, the
-> supervisor and the feedback recording authority keep the manual path. Host command
+> Part (c2), #158, lets the native transitions and the feedback recording authority (F1)
+> of an admitted run replace the operator's "writers stopped" attestation with a
+> versioned automatic proof (see
+> [Native transitions](#native-transitions-the-automatic-proof)). Other runs and the
+> supervisor keep the manual path. Host command
 > trees can be proven finished by a child subreaper (#132, [Host writers](#host-writers));
 > `run_host()` is not yet used by the controller, so nothing changes for real runs.
 
@@ -530,18 +531,40 @@ For other runs nothing changes.
 - **After the selector is published**: the replay finds the selector naming its own
   generation, checks that the stored intent has the same proposal and authorization, and
   returns the validated projection without taking a new proof (the source is no longer
-  the selected generation, and its writers may already run).
+  the selected generation, and its writers may already run). The native callers that
+  complete an already published activation themselves (`activate_generation`,
+  `ssdlc_reconciliation.activate`, `ssdlc_scope_amendments.activate`) make the same
+  check through `TransitionStore.replayed` before finishing: the selector must name
+  their transition and its intent must hold their exact proposal and authorization.
 
 Neither case dispatches anything, resets task attempts, ledgers or counters (still
 checked by `preserve_allowances`), or touches the source journal or the captured
-artifacts. A replay cannot switch between the manual and the automatic form: the inputs
-differ, and it is refused.
+artifacts. A replay cannot switch between the manual and the automatic form, in either
+direction: the inputs differ, and it is refused without taking a proof.
+
+### The feedback recording authority (F1)
+
+`FeedbackStore.authorize` freezes the feedback recording policy under the operator's
+exact authorization (`schema_version`, `policy_sha256`, `authorized`). It publishes no
+selector, but the same rule applies: the operator attests `source_fenced: true`, or,
+for an admitted run, omits it and the host takes the automatic proof for the generation
+the ticket's selectors name, with the same checks and refusals as above. The proof is
+recorded in `feedback/authority.json` under `"fencing"`, beside `"authorization"`, and
+the lock is checked again right before the authority becomes `ACTIVE`.
+
+- A historical authority has no proof and validates as before, as the operator's
+  attestation; an authorization without `source_fenced` and without a valid proof is
+  refused, and one with both is refused.
+- A replay keeps the stored authorization and its form, checked before any proof. While
+  the authority is still `INTENT` it takes a fresh proof (same gate and generation) and
+  keeps the first one; once `ACTIVE` it takes none.
+- The native F3 bootstrap (`native-feedback-recording-v1`) keeps its own technical
+  fence, unchanged.
 
 ### Not covered
 
-The feedback recording authority (`FeedbackStore.authorize`, F1) publishes no selector
-and keeps its manual `source_fenced: true`. So do the operator approval of limit
-extensions (`limits approve --source-fenced`) and the supervisor.
+The operator approval of limit extensions (`limits approve --source-fenced`) and the
+supervisor keep the manual path.
 
 ## Historical and non-conforming writers
 
