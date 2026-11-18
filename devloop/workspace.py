@@ -303,6 +303,54 @@ class Workspace:
         path.write_text(text, encoding='utf-8')
         return path
 
+    def keep_work(self, path, commit, name):
+        """Save the uncommitted work a writing turn left in ``path`` when it timed out (#374):
+        everything ``git add -A`` would stage, new files included, as a patch against ``commit``
+        that ``git apply`` takes (binary files included), written as evidence ``name``
+        (:meth:`save_evidence`). Nothing is committed, and the index of ``path`` is untouched.
+        Returns ``(file, stats)``, ``stats`` the ``(path, added, removed)`` of each file
+        (``None`` counts for a binary one), or None when the worktree holds nothing beyond
+        ``commit``."""
+        tree = self.tree(path)
+        if tree == self.commit_tree(path, commit):
+            return None
+        patch = self._git('diff', '--binary', '--full-index', '--no-color', '--no-renames',
+                          '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/',
+                          commit, tree, cwd=path)
+        return self.save_evidence(name, patch), self.patch_stats(path, patch)
+
+    def patch_stats(self, path, patch):
+        """The ``(path, added, removed)`` of each file of ``patch``, as ``git apply --numstat``
+        reads it in ``path`` without applying it; ``None`` counts for a binary file."""
+        stats = []
+        out = self._git('apply', '--numstat', '-z', '-', cwd=path, stdin=patch)
+        for entry in out.split('\0'):
+            added, _, rest = entry.partition('\t')
+            removed, _, file = rest.partition('\t')
+            if file:
+                stats.append((file, None if added == '-' else int(added),
+                              None if removed == '-' else int(removed)))
+        return stats
+
+    def take_work(self, name):
+        """The patch :meth:`keep_work` saved as ``name`` for the retry of its step (#374), or
+        None. It is taken once: the file is renamed ``<name>.used-<time>``, so that a later run
+        of the step does not apply it again, and stays in the logs as evidence."""
+        path = self.root.parent / 'logs' / name
+        try:
+            text = path.read_text(encoding='utf-8')
+        except FileNotFoundError:
+            return None
+        path.rename(path.with_name(f'{name}.used-{time.strftime("%Y%m%dT%H%M%S")}'))
+        return text
+
+    def apply_work(self, path, patch):
+        """``(applied, error)``: apply ``patch`` (:meth:`keep_work`) to the worktree ``path``,
+        without staging or committing anything. ``git apply`` applies all of it or nothing."""
+        done = self._git_run('apply', '--whitespace=nowarn', '-', cwd=path, stdin=patch,
+                             check=False)
+        return done.returncode == 0, (done.stderr.strip() or done.stdout.strip())[:500]
+
     def review_copy(self, path, reviewer=None):
         """``(name, path)`` of a disposable worktree for a reviewer, detached at the HEAD of
         ``path`` and sharing its refs, so that ``origin/<base>`` resolves. What the reviewer and
