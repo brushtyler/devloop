@@ -296,11 +296,12 @@ Oggi la coppia è la prima valida del pool, senza guardare la disponibilità (de
 
 Oggi un fallback di un reviewer al livello 2 deve solo restare indipendente per tupla (devloop/dispatch_actions.py:478-493); al livello 1 non c'è controllo. Un fallback di agy su un modello Claude passerebbe, perché il `kind` resta `agy`.
 
-**Proposta, scritta nel codice:**
+**Proposta, scritta nel codice.** È un vincolo **separato dalla regola di quorum** (sezione precedente) e vale qualunque alternativa scelga l'operatore in D8: la regola di quorum decide quali reviewer formano la coppia, questo vincolo decide quali modelli di fallback un reviewer può usare.
 
-- a runtime, un modello di fallback di un reviewer è ammesso solo se il suo fornitore rispetta la regola di quorum scelta (sezione precedente) rispetto agli autori della PR, a entrambi i livelli. Se nessun modello della catena la rispetta, il turno fallisce come `tool_failure`, senza review;
+- a runtime, a entrambi i livelli, un modello di fallback di un reviewer **non è mai ammesso** se il suo fornitore coincide con quello di un autore effettivo della PR: l'implementer, ogni fixer e ogni sync con conflitti, con i modelli di fallback che hanno davvero usato. Il fatto che un altro reviewer della coppia sia già di un fornitore diverso non lo rende ammissibile: con la regola (ii), su una PR implementata da claude e revisionata da codex e agy, agy non può ripiegare su un modello Claude anche se codex garantisce già un fornitore diverso. Se nessun modello rimasto nella catena è ammesso, il turno fallisce come `tool_failure`, senza review;
+- il modello primario di un reviewer resta soggetto solo alla regola di quorum: `claude-review` può fare la review di una PR di claude se la regola scelta lo permette, ma i suoi fallback, tutti Claude, non sono ammessi su quella PR;
 - simmetricamente, un fallback dell'implementer o di un fixer entra negli autori con il suo fornitore, come oggi entra con la sua tupla;
-- all'avvio, la configurazione si rifiuta se un agent del pool ha un fallback dello stesso fornitore del default `roles.implementer` senza dichiararlo nella chiave `provider`.
+- all'avvio, come controllo anticipato, la configurazione si rifiuta se un reviewer del pool ha nella catena un fallback di un fornitore diverso da quello del suo modello primario e uguale al fornitore di un agent che può fare l'implementer (il default `roles.implementer`, gli agent della mappa per area e quelli selezionabili con `impl:<agent>`). È il caso di agy con un fallback Claude. Il controllo a runtime resta comunque quello che garantisce il vincolo, perché l'implementer effettivo si conosce solo per PR.
 
 ### 3.4 Ritmo delle decisioni
 
@@ -336,6 +337,8 @@ Questo ADR le elenca, con le alternative e le raccomandazioni, ma **non le prend
   - la regola sul fornitore: (i), (ii) o (iii); la raccomandazione è (ii);
   - claude come terzo reviewer, con quale modello e in quale posizione del pool;
   - la dichiarazione del fornitore: (a), (b) o (c); la raccomandazione è (c).
+
+  Il divieto dei fallback sul fornitore degli autori ([Fallback dello stesso fornitore](#fallback-dello-stesso-fornitore)) non dipende dalla regola scelta qui e non è un'alternativa: è richiesto dall'issue #370.
 - **D9. Ritmo:** le finestre, i loro orari e i casi che giustificano un'interruzione fuori finestra.
 - **D10. Attivazione.** Ogni delega e ogni cambio di ruolo è spento per default e lo accende l'operatore, uno per volta, in quest'ordine raccomandato: retry dei fallimenti tecnici, round, implementer generico, terzo reviewer, capacità, budget.
 
@@ -355,7 +358,7 @@ Ogni issue si apre dopo l'approvazione di questo ADR, una per area.
 | P5-2 | feat(devloop): retry dei fallimenti tecnici sulle PR dello stesso agent del supervisore | Il controllo di devloop/dispatch_supervision.py:106-107 non vale più per `tool_failure`; resta per le altre classi. Limite di 2 retry invariato e condiviso con l'operatore. Chiave di revoca | Approvazione dell'ADR e D2 | Livello 2 |
 | P5-3 | feat(devloop): app implementer generica e selezione dell'agent | Attore riservato `implementer` con la sua app per commit, push, PR e record dei fix; scripts/agent-token.py non lo espone; `identity` del profilo uguale all'app generica. Selezione dell'agent secondo D7, registrata nel record `request` e nel marker della PR; controllo del preflight per issue; esclusione del pool per PR. `AGENTS.md`, tabella delle identità, aggiornato: la mergia l'operatore | Approvazione dell'ADR, D6 (app creata dall'operatore) e D7 | Livello 2, merge dell'operatore |
 | P5-4 | feat(devloop): esclusione dei reviewer per agent effettivo e terzo reviewer | Chiave `provider` per agent e fallback, tabella di prefissi come controllo; regola di quorum sul fornitore secondo D8, a entrambi i livelli; indipendenza per tupla anche al livello 1; salto del reviewer non disponibile alla scelta di un nuovo round; claude come terzo reviewer nel pool, con l'identità decisa in D6 | P5-3 e D8 | Livello 2 |
-| P5-5 | feat(devloop): nessun fallback sullo stesso fornitore dell'implementer | Controllo del fornitore sui fallback dei reviewer a runtime, a entrambi i livelli; fallback dell'implementer e dei fixer registrati con il fornitore; rifiuto all'avvio delle configurazioni incoerenti | P5-4 | Livello 2 |
+| P5-5 | feat(devloop): nessun fallback sullo stesso fornitore dell'implementer | Divieto a runtime, a entrambi i livelli e indipendente dalla regola di quorum di D8, di ogni fallback di un reviewer sul fornitore di un autore effettivo della PR, con `tool_failure` se la catena non ha modelli ammessi; fallback dell'implementer e dei fixer registrati con il fornitore; rifiuto all'avvio dei reviewer con un fallback sul fornitore di un possibile implementer diverso dal fornitore del loro modello primario | P5-4 | Livello 2 |
 | P5-6 | feat(devloop): tolleranza dell'envelope di budget delegata al supervisore | `/devloop grant-budget <motivo>`: una volta per storia, solo turni e tempo, del X% deciso in D3, mai USD né token; registro e revoca come P5-1 | #365, P5-1 e D3 | Livello 2 |
 | P5-7 | feat(devloop): limiti di capacità temporanei del supervisore | `/devloop capacity` sulla issue del riepilogo, entro i tetti di D4 e con scadenza; ritorno automatico al valore configurato | P5-1 e D4 | Livello 2 |
 
