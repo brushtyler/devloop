@@ -153,8 +153,8 @@ only once the CI of the same head passes, replayed without a new review (``_appr
 a CI that fails makes it a ``ci_failed`` round. An approval that saw no CI, on a head still
 without CI past the window, gets the full suite locally before its promotion
 (``_do_apply_review``). A request for changes made before the CI was known waits for that CI in
-agent:changes (``changes_before_ci``): a failure is a ``ci_failed`` round first, so that one fix
-answers both.
+agent:changes (``changes_before_ci``): a failure joins that same round as a ``ci`` finding
+(#352, ``ci_joins_round``), without a round of its own, so that one fix answers both.
 """
 
 import functools

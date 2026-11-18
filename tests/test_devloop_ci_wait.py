@@ -8,14 +8,15 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from devloop import config, markdown
+from devloop import config, markdown, review
 from devloop.dispatcher import Dispatcher
 from devloop.github import GitHub, GitHubError
-from devloop.planning import Action, plan
+from devloop.planning import Action, ci_joins_round, counted_rounds, plan, round_reasons
+from devloop.review import open_findings
 from devloop.unavailability import iso
 
 from helpers.devloop_fakes import SHA1, SnapshotGH
-from test_devloop import CFG, FakeRunner, FakeWS, finding, fixed, norm, pr, raw_review
+from test_devloop import CFG, SHA2, FakeRunner, FakeWS, finding, fixed, norm, pr, raw_review
 
 NOW = 1_795_000_000.0  # the controlled clock: 2026-11-18, any fixed moment will do
 SUITE = (Path('/wt/pr-100-review'), CFG.test_cmd)  # the full suite before a review
@@ -266,10 +267,15 @@ class ReviewDuringCITests(unittest.TestCase):
         self.assertEqual((len(self.runner.calls), self.ws.commands), (1, []))
         records = [m for _, body in self.gh.comments
                    if (m := markdown.read_marker(body, 'review')) is not None]
-        # The CI failure is a round of its own after the review's, as today.
+        # The CI failure is a round of its own after the review's, as today: the approval no
+        # longer holds, and the fix answers a new round (#352).
         self.assertEqual([(r['source'], r['round'], r['verdict']) for r in records],
                          [('agent', 1, 'approve'), ('ci', 2, 'request_changes')])
+        self.assertNotIn('entra nel suo round', records[1]['note'])
         snap = d.snapshot()
+        self.assertEqual(counted_rounds(snap.prs[0].reviews), 2)
+        self.assertEqual(round_reasons(snap.prs[0].reviews),
+                         [(1, 'prima review', True), (2, 'CI fallita', True)])
         self.assertEqual([a.kind for a in plan(snap, cfg)], ['fix'])
 
     def changes(self, ci='pending', committed=NOW - 6 * 60):
@@ -281,26 +287,42 @@ class ReviewDuringCITests(unittest.TestCase):
         self.assertEqual(self.gh.labels[100], {'agent:changes'})
         return d
 
-    def test_changes_asked_with_ci_pending_wait_and_a_failure_joins_the_same_fix(self):
+    def test_changes_asked_with_ci_pending_wait_and_a_failure_joins_the_same_round(self):
         d = self.changes()
         # While the CI of the reviewed head runs, the fix does not start.
         self.assertEqual(self.step(d), [])
         self.assertEqual(len(self.runner.calls), 1)
         self.gh.ci = 'fail'
+        snap = d.snapshot()
+        self.assertEqual(plan(snap, self.cfg), [Action(
+            'ci_failed', 100, 'CI failed after the review: it joins its round')])
         self.assertEqual(self.step(d), ['ci_failed'])
         records = [m for _, body in self.gh.comments
                    if (m := markdown.read_marker(body, 'review')) is not None]
+        # One head, one round (#352): the CI failure is a ci finding of the review's round.
         self.assertEqual([(r['source'], r['round'], r['verdict']) for r in records],
-                         [('agent', 1, 'request_changes'), ('ci', 2, 'request_changes')])
+                         [('agent', 1, 'request_changes'), ('ci', 1, 'request_changes')])
+        self.assertEqual(records[1]['blocking_findings'][0]['key'], '1/ci/R1-1')
+        self.assertIn('entra nel suo round', records[1]['note'])
+        self.assertIn('  CI failure joins round 1', self.lines)
         self.assertEqual(self.gh.labels[100], {'agent:changes'})
-        # One fix, with the reviewer's finding and the CI failure.
         snap = d.snapshot()
+        reviews = snap.prs[0].reviews
+        self.assertEqual(counted_rounds(reviews), 1)
+        self.assertEqual(round_reasons(reviews),
+                         [(1, 'prima review, con la CI fallita dello stesso head', True)])
+        self.assertEqual(sorted(f['owner'] for f in open_findings(reviews)),
+                         ['ci', CFG.reviewer])
+        # One fix, with the reviewer's finding and the CI failure, answering round 1.
         self.assertEqual([a.kind for a in plan(snap, self.cfg)], ['fix'])
         d._do_fix(snap.prs[0])
         self.assertEqual(len(self.runner.calls), 2)
         prompt = self.prompt()
         self.assertIn('reviewer bug', prompt)
         self.assertIn('CI fallita', prompt)
+        (fix,) = [m for _, body in self.gh.comments
+                  if (m := markdown.read_marker(body, 'fix')) is not None]
+        self.assertEqual(fix['round'], 1)
 
     def test_changes_asked_with_ci_pending_go_to_the_fix_once_the_ci_passes(self):
         d = self.changes()
@@ -329,6 +351,11 @@ class ReviewDuringCITests(unittest.TestCase):
         records = [m for _, body in self.gh.comments
                    if (m := markdown.read_marker(body, 'review')) is not None]
         self.assertEqual([(r['source'], r['round']) for r in records], [('ci', 1)])
+        # A round of its own, counted, with no review to join (#352).
+        self.assertNotIn('entra nel suo round', records[0]['note'])
+        snap = d.snapshot()
+        self.assertEqual(round_reasons(snap.prs[0].reviews), [(1, 'CI fallita', True)])
+        self.assertEqual([a.kind for a in plan(snap, self.cfg)], ['fix'])
 
     def test_no_local_full_suite_while_the_ci_runs_or_within_the_window(self):
         for ci, committed in (('pending', NOW - 6 * 60), ('none', NOW - 30)):
@@ -355,7 +382,7 @@ class PlanTests(unittest.TestCase):
                                                   working_issues=[], supervised=[],
                                                   conclaves=[]), CFG), [])
         # Changes asked before the CI was known (#271): the fix waits for the CI of the head,
-        # also for a re-run of #200; a failure is a CI round, then the same fix.
+        # also for a re-run of #200; a failure joins the round (#352), then the same fix.
         seen = norm(raw_review('request_changes', [finding()]))
         blind = dict(seen, ci='pending')
         cases = (('pending', '', False, []), ('none', 'waiting', False, []),
@@ -378,6 +405,46 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(plan(SimpleNamespace(prs=[missing], ready_issues=[], working_issues=[],
                                               supervised=[], conclaves=[]), CFG),
                          [Action('ci_missing', 100, 'required checks missing: unittest')])
+
+    def plan_of(self, p, cfg=CFG):
+        return plan(SimpleNamespace(prs=[p], ready_issues=[], working_issues=[], supervised=[],
+                                    conclaves=[]), cfg)
+
+    def test_one_head_one_round(self):
+        """#352: a CI failure on the head of a round that asked for changes joins that round,
+        and takes no round of the limit; after an approval, or before any review, it is a
+        round of its own, as before."""
+        last = dataclasses.replace(CFG, max_review_rounds=1)
+        changes = dict(norm(raw_review('request_changes', [finding()])), ci='pending')
+        joins = Action('ci_failed', 100, 'CI failed after the review: it joins its round')
+        failed = pr(checks='fail', reviews=[changes], labels={'agent:changes'})
+        self.assertEqual(ci_joins_round(failed), [changes])
+        for cfg in (CFG, last):
+            with self.subTest(max_review_rounds=cfg.max_review_rounds):
+                # No round of the limit: never round_limit, also with no round left.
+                self.assertEqual(self.plan_of(failed, cfg), [joins])
+        # Once joined, the round goes to the one fix: no second CI record.
+        ci = review.ci_failure_review(failed_checks=['Unit Tests'], log_tail='boom',
+                                      previous_open=[], round_no=1, max_rounds=3,
+                                      head_sha=SHA1)
+        joined = pr(checks='fail', reviews=[changes, ci], labels={'agent:changes'})
+        self.assertEqual(ci_joins_round(joined), [])
+        self.assertEqual(self.plan_of(joined), [Action('fix', 100)])
+        # A round answered by a fix, voided by a rereview or on another head takes nothing.
+        answered = dataclasses.replace(failed, fixes=[{'round': 1, 'head_sha': SHA1,
+                                                       'responses': []}])
+        for other in (answered, dataclasses.replace(failed, rereview=True),
+                      pr(checks='fail', reviews=[changes], head=SHA2)):
+            self.assertEqual(ci_joins_round(other), [])
+        # After an approval of the same head the failure is a round of its own, as before.
+        approval = dict(norm(raw_review()), ci='pending')
+        approved = pr(checks='fail', reviews=[approval])
+        self.assertEqual(ci_joins_round(approved), [])
+        self.assertEqual(self.plan_of(approved), [Action('ci_failed', 100)])
+        self.assertEqual(self.plan_of(approved, last), [Action('round_limit', 100)])
+        # Before any review, the same.
+        self.assertEqual(ci_joins_round(pr(checks='fail')), [])
+        self.assertEqual(self.plan_of(pr(checks='fail')), [Action('ci_failed', 100)])
 
 
 class ConfigTests(unittest.TestCase):

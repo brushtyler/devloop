@@ -26,8 +26,9 @@ from .github import GitHubError, job_id
 from .localtests import failed_modules, select_modules, suite_summary
 from .markdown import (dispatcher_header, publishable, render_fix, render_native_review,
                        render_review)
-from .planning import (BASE_CHANGED, FIX_COMMAND, RESYNC_AFTER_APPROVAL, counted_rounds,
-                       pending_reviewers, preflight_state, waived_rounds, waiting_reviewers)
+from .planning import (BASE_CHANGED, FIX_COMMAND, RESYNC_AFTER_APPROVAL, ci_joins_round,
+                       counted_rounds, pending_reviewers, preflight_state, waived_rounds,
+                       waiting_reviewers)
 from .policy import ZERO_LEVEL, distinct, independent, profile_of
 from .ports import summarize_checks
 from .review import (ci_failure_review, current_round, last_round, normalize_review,
@@ -200,26 +201,47 @@ class ActionsMixin:
         if self._rerun_unrelated(pr, paths):
             return
         log_tail = '\n'.join(self.gh.failed_log(run) for run in pr.failed_runs[:2])
+        # One head, one round (#352): a failure on the head of a round that asked for changes
+        # is a ci finding of that round, not a round of its own.
+        joined = ci_joins_round(pr)
+        round_no = joined[0]['round'] if joined else last_round(pr.reviews) + 1
+        earlier = [r for r in pr.reviews if r['round'] < round_no]
         review = ci_failure_review(failed_checks=pr.failed_checks, log_tail=log_tail,
-                                   previous_open=open_findings(pr.reviews, pr.closures),
-                                   round_no=last_round(pr.reviews) + 1,
+                                   previous_open=open_findings(earlier, pr.closures),
+                                   round_no=round_no,
                                    max_rounds=self._last_round_allowed(pr.reviews),
                                    head_sha=pr.head_sha)
+        notes = []
+        if joined:
+            notes.append(f'La review del round {round_no} ha chiesto modifiche su questo stesso '
+                         'commit: il fallimento della CI entra nel suo round, non ne apre uno '
+                         'nuovo, e una sola correzione risponde a tutti i finding.')
         rerun = rerun_of(pr.reruns, pr.head_sha)
         if rerun is not None:
-            review['note'] = (
+            notes.append(
                 'I job falliti di questo commit erano già stati rilanciati una volta, perché '
                 'nessun modulo fallito era pertinente alla PR (run '
                 + ', '.join(str(r) for r in rerun['runs']) + '; moduli: '
                 + (', '.join(rerun['modules']) or 'nessuno') + '). Anche il rilancio è fallito: '
-                'questo fallimento conta come round.')
+                + ('questo fallimento entra nel round.' if joined
+                   else 'questo fallimento conta come round.'))
+        review['note'] = ' '.join(notes)
         review['receipt'] = receipt
         if self.ledger is not None:
+            # The event of a joined round is a section of that round's register (#325).
             details = self.gh.check_details(pr.head_sha)
             self._record_ci(pr, pr.head_sha, summarize_checks(details)[0], details,
                             review['round'], jobs=self._ci_jobs(details))
         self.gh.comment(pr.number, render_review(review, dispatcher_header()))
-        self._apply_round(pr, [review], announce=True, reviews=pr.reviews + [review])
+        records = joined + [review]
+        if joined and waiting_reviewers(records, self.cfg.conclave):
+            # The round still waits for its other reviewers: it is applied after them.
+            self.log(f'  CI failure joins round {round_no}, which waits for '
+                     + ', '.join(waiting_reviewers(records, self.cfg.conclave)))
+            return
+        if joined:
+            self.log(f'  CI failure joins round {round_no}')
+        self._apply_round(pr, records, announce=True, reviews=earlier + records)
 
     def _rerun_unrelated(self, pr, paths):
         """Re-run once the failed jobs of the head's CI when its failure does not concern the
