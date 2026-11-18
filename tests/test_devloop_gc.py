@@ -4,6 +4,8 @@ import dataclasses
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,7 +16,7 @@ import devloop.__main__ as cli
 from devloop import config, pin
 from devloop.config import ConfigError, GCPolicy
 from devloop.dispatcher import Dispatcher
-from devloop.github import GitHubError
+from devloop.github import GitHub, GitHubError
 from devloop.housekeeping import Housekeeping
 from devloop.ledger import LedgerError
 from test_devloop import CFG, FakeRunner, FakeWS
@@ -140,13 +142,20 @@ class InUseTests(unittest.TestCase):
             copy.mkdir()
         self.proc = self.tmp / 'proc'
 
-    def process(self, pid, environ=(), cmdline=(), cwd=None):
+    def process(self, pid, environ=(), cmdline=(), cwd=None, uid=1000, readable=True):
         entry = self.proc / str(pid)
         entry.mkdir(parents=True)
-        (entry / 'environ').write_bytes(b'\0'.join(os.fsencode(v) for v in environ))
+        (entry / 'status').write_text(f'Name:\tx\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n')
+        if readable:
+            (entry / 'environ').write_bytes(b'\0'.join(os.fsencode(v) for v in environ))
+        else:  # as a process not dumpable: reading its environment fails
+            (entry / 'environ').mkdir()
         (entry / 'cmdline').write_bytes(b'\0'.join(os.fsencode(v) for v in cmdline))
         if cwd:
             os.symlink(cwd, entry / 'cwd')
+
+    def in_use(self):
+        return pin.copies_in_use(self.copies, self.proc, uid=1000)
 
     def test_a_process_uses_a_copy_through_its_path_its_command_or_its_directory(self):
         self.process(1, environ=['HOME=/x', f'PYTHONPATH={self.copies[0]}'])
@@ -154,8 +163,37 @@ class InUseTests(unittest.TestCase):
         self.process(3, cwd=self.copies[2] / '.')
         self.process(4, environ=['PYTHONPATH=/elsewhere'], cmdline=['sleep', '1'], cwd='/')
         (self.proc / 'self').mkdir()
-        self.assertEqual(pin.copies_in_use(self.copies, self.proc),
-                         {'pinned-aaa', 'pinned-bbb', 'pinned-ccc'})
+        self.assertEqual(self.in_use(), {'pinned-aaa', 'pinned-bbb', 'pinned-ccc'})
+
+    def test_other_users_and_processes_gone_do_not_count(self):
+        self.process(1, environ=[f'PYTHONPATH={self.copies[0]}'], uid=0)
+        self.process(2, uid=0, readable=False)
+        (self.proc / '3').mkdir()  # gone: its entries are no longer there
+        self.process(4, environ=[f'PYTHONPATH={self.copies[1]}'])
+        self.assertEqual(self.in_use(), {'pinned-bbb'})
+
+    def test_a_process_of_the_user_that_cannot_be_read_may_use_any_copy(self):
+        self.process(1, environ=[f'PYTHONPATH={self.copies[0]}'])
+        self.process(2, cmdline=['ssh-agent'], readable=False)
+        self.assertIsNone(self.in_use())
+
+    @unittest.skipUnless(sys.platform.startswith('linux') and Path('/proc/self/status').exists(),
+                         'needs the /proc of Linux')
+    def test_a_live_process_not_dumpable_keeps_the_copy_it_uses(self):
+        """A process of this user that turned off ``PR_SET_DUMPABLE`` hides its environment:
+        the copy on its ``PYTHONPATH`` cannot be told unused."""
+        child = subprocess.Popen(
+            [sys.executable, '-c', 'import ctypes, sys; ctypes.CDLL(None).prctl(4, 0, 0, 0, 0); '
+                                   'print("ready", flush=True); sys.stdin.read()'],
+            env=dict(os.environ, PYTHONPATH=str(self.copies[0])), stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE)
+        self.addCleanup(child.wait)
+        self.addCleanup(child.stdin.close)
+        self.addCleanup(child.stdout.close)
+        self.assertEqual(child.stdout.readline().strip(), b'ready')
+        used = pin.copies_in_use(self.copies)
+        # Unreadable (None), or read by a user who may read it (root): never ``unused``.
+        self.assertTrue(used is None or 'pinned-aaa' in used, used)
 
     def test_without_proc_it_cannot_tell(self):
         self.assertIsNone(pin.copies_in_use(self.copies, self.tmp / 'missing'))
@@ -181,34 +219,25 @@ class GCWS:
 
 
 class GCGH:
-    """GitHub as the cleanup reads it: issue and PR states, labels of escalation."""
+    """GitHub as the cleanup reads it: the state and the labels of each issue and PR, read one by
+    one (``fail``: the numbers whose read fails, or True for every one)."""
 
-    def __init__(self, issues=None, prs=None, labelled=None, open_prs=(), fail=False):
-        self.issues, self.prs = issues or {}, prs or {}
-        self.labelled, self._open_prs, self.fail = labelled or {}, list(open_prs), fail
+    def __init__(self, issues=None, prs=None, labels=None, fail=False):
+        self.issues, self.prs, self.labels, self.fail = issues or {}, prs or {}, labels or {}, fail
         self.reads = []
 
-    def issue(self, number):
-        self.reads.append(('issue', number))
-        if self.fail:
+    def _read(self, kind, number, state):
+        self.reads.append((kind, number))
+        if self.fail is True or number in (self.fail or ()):
             raise GitHubError('HTTP 502')
-        return {'number': number, 'state': self.issues.get(number, 'OPEN')}
+        return {'number': number, 'state': state,
+                'labels': [{'name': name} for name in self.labels.get(number, ())]}
+
+    def issue(self, number):
+        return self._read('issue', number, self.issues.get(number, 'OPEN'))
 
     def pr_state(self, number):
-        self.reads.append(('pr', number))
-        if self.fail:
-            raise GitHubError('HTTP 502')
-        return {'state': self.prs.get(number, 'OPEN')}
-
-    def issues_with_label(self, label):
-        if self.fail:
-            raise GitHubError('HTTP 502')
-        return [{'number': n} for n in self.labelled.get(label, ())]
-
-    def open_prs(self):
-        if self.fail:
-            raise GitHubError('HTTP 502')
-        return self._open_prs
+        return self._read('pr', number, self.prs.get(number, 'OPEN'))
 
 
 class Ledger:
@@ -283,37 +312,72 @@ class LogRetentionTests(HousekeepingCase):
     def test_the_evidence_of_an_open_escalation_stays(self):
         old = {
             'timeout-issue-7-implement.diff': 20,  # #7 in agent:needs-operator
+            # The turn's log the escalation of #7 cites (``Dispatcher._log_hint``).
+            '20261101T101010-issue-7-implement-1-claude.log': 20,
             'timeout-pr-9-fix-r2.diff.used-20261101T101010': 20,  # PR #9 in needs-supervisor
             'conclave-issue-8-123.diff': 20,  # #8 no longer escalated
-            '20261101T101010-issue-7-implement-1-claude.log': 20,
+            '20261101T101010-issue-12-implement-1-claude.log': 20,  # #12 closed, label left
             '20261101T101010-issue-5-implement-1-claude.prompt.md': 20,  # turn still open
             '20261101T101010-pr-11-review-codex.log': 20,
             '20261117T101010-pr-11-review-codex.log': 1,  # recent
+            'timeout-unknown.diff': 20,  # an evidence without its issue or PR
         }
         for name, age in old.items():
             self.write(name, age)
-        gh = GCGH(labelled={'agent:needs-operator': [7]},
-                  open_prs=[{'number': 9, 'labels': [{'name': 'agent:needs-supervisor'}]},
-                            {'number': 11, 'labels': [{'name': 'agent:review'}]}])
+        gh = GCGH(issues={12: 'CLOSED'},
+                  labels={7: ['agent:needs-operator'], 9: ['agent:needs-supervisor'],
+                          11: ['agent:review'], 12: ['agent:needs-operator']})
         keeper = self.keeper(gh, pending=[5])
         removed = keeper.run(gc_cfg(logs=True, worktrees=False))['log files']
-        self.assertEqual(sorted(removed), ['20261101T101010-issue-7-implement-1-claude.log',
+        self.assertEqual(sorted(removed), ['20261101T101010-issue-12-implement-1-claude.log',
                                            '20261101T101010-pr-11-review-codex.log',
                                            'conclave-issue-8-123.diff'])
         self.assertEqual(self.left(), [
             '20261101T101010-issue-5-implement-1-claude.prompt.md',
+            '20261101T101010-issue-7-implement-1-claude.log',
             '20261117T101010-pr-11-review-codex.log',
             'timeout-issue-7-implement.diff',
-            'timeout-pr-9-fix-r2.diff.used-20261101T101010'])
+            'timeout-pr-9-fix-r2.diff.used-20261101T101010',
+            'timeout-unknown.diff'])
         self.assertIn('gc: removed the log file conclave-issue-8-123.diff (older than 14 days)',
                       self.logs)
+        # Each issue or PR is read once, fresh, and not the one with a turn open.
+        self.assertEqual(sorted(gh.reads), [('issue', 7), ('issue', 8), ('issue', 12),
+                                            ('pr', 9), ('pr', 11)])
 
-    def test_unreadable_escalations_keep_every_evidence(self):
+    def test_an_item_that_cannot_be_read_keeps_its_files(self):
         self.write('timeout-issue-7-implement.diff', 20)
         self.write('20261101T101010-issue-7-implement-1-claude.log', 20)
-        keeper = self.keeper(GCGH(fail=True))
+        self.write('20261101T101010-pr-11-review-codex.log', 20)
+        keeper = self.keeper(GCGH(fail={7}))
         keeper.run(gc_cfg(logs=True, worktrees=False))
-        self.assertEqual(self.left(), ['timeout-issue-7-implement.diff'])
+        self.assertEqual(self.left(), ['20261101T101010-issue-7-implement-1-claude.log',
+                                       'timeout-issue-7-implement.diff'])
+        self.assertTrue(any('issue #7 cannot be read, its log files stay' in line
+                            for line in self.logs))
+
+    def test_an_escalation_beyond_the_limit_of_the_lists_stays(self):
+        """The lists of GitHub stop at 200 items (``open_prs``, ``issues_with_label``): the
+        cleanup reads each PR it would touch, so PR #250, the 201st open one, keeps its files."""
+        self.write('timeout-pr-250-fix-r1.diff', 20)
+        self.write('20261101T101010-pr-250-fix-r1-claude.log', 20)
+        self.write('20261101T101010-pr-251-review-codex.log', 20)
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv[1:3])
+            if argv[1:3] == ['pr', 'view']:
+                number = int(argv[3])
+                labels = [{'name': 'agent:needs-supervisor'}] if number == 250 else []
+                out = {'state': 'OPEN', 'labels': labels}
+            else:  # a list: the first 200 open PRs, without #250
+                out = [{'number': n, 'labels': []} for n in range(1, 201)]
+            return SimpleNamespace(returncode=0, stdout=json.dumps(out), stderr='')
+
+        self.keeper(GitHub('o/r', run=run)).run(gc_cfg(logs=True, worktrees=False))
+        self.assertEqual(self.left(), ['20261101T101010-pr-250-fix-r1-claude.log',
+                                       'timeout-pr-250-fix-r1.diff'])
+        self.assertEqual(sorted(calls), [['pr', 'view'], ['pr', 'view']])
 
     def test_the_retention_is_off_by_default(self):
         self.write('20261101T101010-issue-7-implement-1-claude.log', 400)

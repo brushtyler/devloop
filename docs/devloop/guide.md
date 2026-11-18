@@ -914,8 +914,10 @@ of the log that starts with `gc:`; a cleanup that fails is logged and never stop
   included, recorded in `state_dir/pin-times.json`; a copy pinned before that record existed
   counts with the time its directory was last modified. A copy is never removed while a process
   uses it: the copy the dispatcher runs from, or one named by the `PYTHONPATH`, the command line
-  or the working directory of a process of the same user (read in `/proc`; where `/proc` cannot
-  be read, no copy is removed). Such a copy stays, and a later cleanup tries again. The rejected
+  or the working directory of a process of the same user (read in `/proc`). Where `/proc` cannot
+  be read, or a live process of the same user cannot be inspected (one that is not dumpable, as
+  `ssh-agent`, hides its environment and its working directory), no copy is removed: it cannot
+  be told which copies are unused. Such a copy stays, and a later cleanup tries again. The rejected
   copies (`rejected-<sha12>`) are never touched. A pin that runs meanwhile leaves the copies to a
   later cleanup.
 - **Worktrees** (`worktrees`, on by default). The worktrees of a closed issue (`issue-<n>` and
@@ -926,11 +928,13 @@ of the log that starts with `gc:`; a cleanup that fails is logged and never stop
   to `devloop cleanup`.
 - **Logs** (`logs`, off by default: turn it on in the
   [local overlay](#local-config-as-an-overlay)). The files directly in `state_dir/logs` not
-  modified for `log_days` days (default 14) are removed, except the evidence (`timeout-…` and
-  `conclave-…` files) of an issue or PR in `agent:needs-operator` or `agent:needs-supervisor`,
-  and every file of an issue or PR with a turn still open in the ledger. When the escalations
-  cannot be read every evidence stays, and when the ledger cannot be read every file of a turn
-  stays.
+  modified for `log_days` days (default 14) are removed, except every file of an open issue or
+  PR in `agent:needs-operator` or `agent:needs-supervisor`: its evidence (`timeout-…` and
+  `conclave-…` files) and the logs of its turns, which the escalation cites. Nor every file of
+  an issue or PR with a turn still open in the ledger, nor an evidence whose name has no issue
+  or PR. The state and the labels of each issue or PR are read fresh, one at a time, not from a
+  list of the escalations that a limit of GitHub could cut short. When an issue or PR cannot be
+  read its files stay, and when the ledger cannot be read every file of an issue or PR stays.
 
 ```toml
 # .ssdlc/devloop/config.local.toml

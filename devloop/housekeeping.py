@@ -10,10 +10,13 @@ removes, each removal logged:
   or merged PR, read fresh from GitHub; never one of an issue or PR with a turn still open in the
   ledger (``ledger-open-turns.json``). A worktree with another name is ``devloop cleanup``'s;
 - **log files** (``[gc] logs``, off by default): the files directly in ``logs/`` not modified
-  for ``log_days`` days, never the evidence (``timeout-…``, ``conclave-…``) of an issue or PR
-  in an escalation (``agent:needs-operator``, ``agent:needs-supervisor``), nor the files of an
-  issue or PR with a turn still open in the ledger. When the escalations or the ledger cannot be
-  read, the files they would protect stay.
+  for ``log_days`` days, never one of an open issue or PR in an escalation
+  (``agent:needs-operator``, ``agent:needs-supervisor``): its evidence (``timeout-…``,
+  ``conclave-…``) and its turns' logs, which the escalation cites. Nor the files of an issue or
+  PR with a turn still open in the ledger, nor an evidence without its issue or PR. The state
+  and labels of each issue or PR are read fresh, one by one, not from a list that a limit could
+  cut short. When the ledger or an issue or PR cannot be read, the files they would protect
+  stay.
 
 A failure is logged and never fails the tick.
 """
@@ -36,7 +39,7 @@ LOGS = 'logs'
 WORKTREE = re.compile(r'(issue|pr)-(\d+)(?:-.+)?')
 # The issue or PR of a file of the logs: a turn's (``<time>-issue-7-implement-1-claude.log``) or
 # an evidence (``timeout-pr-9-fix-r2.diff``, ``conclave-issue-7-<comment>.diff``).
-LOG_ITEM = re.compile(r'(?:^|-)(?:issue|pr)-(\d+)-')
+LOG_ITEM = re.compile(r'(?:^|-)(issue|pr)-(\d+)-')
 EVIDENCE = ('timeout-', 'conclave-')
 DAY = 86400
 
@@ -158,25 +161,25 @@ class Housekeeping:
         return removed
 
     # Logs ----------------------------------------------------------------
-    def _escalated(self, labels):
-        """The open issues and PRs in an escalation, or None when they cannot be read."""
-        names = set(labels.operator()) | {labels.needs_supervisor}
-        numbers = set()
+    def _escalated(self, kind, number, names):
+        """Whether ``kind`` (``issue``/``pr``) ``number`` is open with one of the labels
+        ``names``, read fresh: not from a list of the open escalations, which a limit could cut
+        short. None when it cannot be read."""
         try:
-            for label in sorted(names):
-                numbers |= {item['number'] for item in self.gh.issues_with_label(label) or []}
-            for pr in self.gh.open_prs() or []:
-                if names & {label.get('name') for label in pr.get('labels') or []}:
-                    numbers.add(pr['number'])
-        except (GitHubError, KeyError, TypeError) as exc:
-            self.log(f'gc: the open escalations cannot be read, the evidence stays: {exc}')
+            item = (self.gh.issue(number) if kind == 'issue' else self.gh.pr_state(number)) or {}
+            state = (item.get('state') or '').upper()
+            labels = {label.get('name') for label in item.get('labels') or []}
+        except (GitHubError, AttributeError, TypeError) as exc:
+            self.log(f'gc: the state of {kind} #{number} cannot be read, its log files stay: '
+                     f'{exc}')
             return None
-        return numbers
+        return state not in ('CLOSED', 'MERGED') and bool(labels & names)
 
     def logs(self, cfg, open_turns):
-        """Remove the files of ``logs/`` not modified for ``[gc] log_days`` days, except the
-        evidence of an open escalation and the files of a turn still open; returns their names.
-        ``open_turns`` None keeps every file of a turn and every evidence."""
+        """Remove the files of ``logs/`` not modified for ``[gc] log_days`` days, except those
+        of an open escalation (its evidence and its turns' logs, which it cites), those of a
+        turn still open and an evidence without its issue or PR; returns their names.
+        ``open_turns`` None keeps every file of an issue or PR."""
         folder = self.state / LOGS
         cutoff = self.clock() - cfg.gc.log_days * DAY
         old = []
@@ -192,17 +195,22 @@ class Housekeeping:
                 continue
             if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
                 old.append(path)
-        escalated = self._escalated(cfg.labels) if any(
-            p.name.startswith(EVIDENCE) for p in old) else set()
+        names = set(cfg.labels.operator()) | {cfg.labels.needs_supervisor}
+        escalated = {}  # (kind, number): True, False, or None when it cannot be read
         removed = []
         for path in old:
             match = LOG_ITEM.search(path.name)
-            number = int(match[1]) if match else None
-            if number is not None and (open_turns is None or number in open_turns):
-                continue
-            if path.name.startswith(EVIDENCE) and (
-                    escalated is None or number is None or number in escalated):
-                continue
+            if match is None:
+                if path.name.startswith(EVIDENCE):
+                    continue  # an evidence whose issue or PR is unknown
+            else:
+                item = (match[1], int(match[2]))
+                if open_turns is None or item[1] in open_turns:
+                    continue
+                if item not in escalated:
+                    escalated[item] = self._escalated(*item, names)
+                if escalated[item] is not False:
+                    continue
             try:
                 path.unlink()
             except OSError as exc:

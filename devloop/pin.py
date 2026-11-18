@@ -514,14 +514,31 @@ def _record_time(state, copy=None, clock=time.time):
     os.replace(tmp, state / TIMES)
 
 
-def copies_in_use(copies, proc=Path('/proc')):
+def _uids(entry):
+    """The user ids (real, effective, saved, filesystem) of process ``entry`` of ``/proc``, read
+    in its ``status``, which every user can read even when the process is not dumpable (its
+    other entries then belong to root). Raises ``OSError``: ``FileNotFoundError`` or
+    ``ProcessLookupError`` when the process is gone."""
+    for line in (entry / 'status').read_text(encoding='utf-8', errors='replace').splitlines():
+        if line.startswith('Uid:'):
+            return {int(uid) for uid in line.split()[1:] if uid.isdigit()}
+    raise OSError(f'{entry / "status"}: no Uid line')
+
+
+GONE = (FileNotFoundError, ProcessLookupError)
+
+
+def copies_in_use(copies, proc=Path('/proc'), uid=None):
     """The names of ``copies`` that a process uses (#380): one whose ``PYTHONPATH``, working
     directory or command line names the copy or a path inside it, as the launcher, a restart
-    and the checks of a pin do. Only the processes whose ``/proc`` entries can be read count
-    (those of the same user). None when ``proc`` is not there: it cannot be told."""
+    and the checks of a pin do. The processes of the user ``uid`` (default: this one) count,
+    those of other users do not; a process gone meanwhile does not count either. None when it
+    cannot be told: ``proc`` is not there, or a live process of the user cannot be read (one
+    not dumpable, ``PR_SET_DUMPABLE`` 0, hides its environment and working directory)."""
     proc = Path(proc)
     if not proc.is_dir():
         return None
+    uid = os.getuid() if uid is None else uid
     roots = {os.path.realpath(c): Path(c).name for c in copies}
 
     def names(path):
@@ -534,10 +551,18 @@ def copies_in_use(copies, proc=Path('/proc')):
         if not entry.name.isdigit():
             continue
         try:
+            if uid not in _uids(entry):
+                continue  # a process of another user
             environ = (entry / 'environ').read_bytes().split(b'\0')
             cmdline = (entry / 'cmdline').read_bytes().split(b'\0')
-        except OSError:
-            continue  # gone, or a process of another user
+            try:
+                cwd = os.readlink(entry / 'cwd')
+            except GONE:
+                cwd = None  # a zombie has none
+        except GONE:
+            continue  # gone meanwhile
+        except (OSError, ValueError):
+            return None  # alive, of the user, and not readable: it may use any copy
         for var in environ:
             if var.startswith(b'PYTHONPATH='):
                 for part in os.fsdecode(var[len(b'PYTHONPATH='):]).split(os.pathsep):
@@ -545,10 +570,7 @@ def copies_in_use(copies, proc=Path('/proc')):
         for arg in cmdline:
             if arg.startswith(b'/'):
                 used |= names(os.fsdecode(arg))
-        try:
-            used |= names(os.readlink(entry / 'cwd'))
-        except OSError:
-            pass
+        used |= names(cwd)
     return used
 
 
@@ -583,7 +605,7 @@ def prune(state, keep, log=print, in_use=None):
     used = (in_use or copies_in_use)(extra)
     if used is None:
         log(f'gc: {len(extra)} pinned copies beyond the last {keep} not removed: the processes '
-            'that use them cannot be read')
+            'that may use them cannot be read; a later cleanup tries again')
         return []
     removed = []
     for copy in extra:
