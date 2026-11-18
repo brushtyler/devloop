@@ -15,6 +15,8 @@ import stat
 import subprocess
 import tempfile
 
+from ssdlc_role_fencing import host_command
+
 
 class CandidateError(RuntimeError):
     pass
@@ -42,7 +44,7 @@ def git_environment():
 
 
 def _git(root, *args):
-    result = subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', *args], cwd=root,
+    result = host_command(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', *args], cwd=root,
                             capture_output=True, text=True, env=git_environment())
     if result.returncode:
         raise CandidateError('Candidate Git operation failed: ' + args[0])
@@ -132,7 +134,7 @@ def _sync(directory):
 
 def checkout(source, destination, head):
     """Independent objects/config; no linked metadata or credential directories."""
-    result = subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', 'clone', '-q',
+    result = host_command(['git', '-c', 'core.hooksPath=/dev/null', 'clone', '-q',
                              '--no-local', '--no-checkout', '--depth=1', '--template=',
                              str(source.resolve()), str(destination)], capture_output=True, env=git_environment())
     if result.returncode:

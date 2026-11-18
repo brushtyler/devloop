@@ -25,6 +25,11 @@ The only paths SSDLC prepares for the identity are those it creates for one invo
 the role cache, the verification scratch and the disposable workspaces declared with
 ``disposable_workspace`` (``share_disposable``). Git run by the payload trusts those
 workspaces, and only them, through the container's environment (``git_trust``).
+
+The controller's own Git commands go through ``host_command`` (#345): inside an
+entrypoint of an admitted run they run under ``ssdlc_writer_gate.run_host`` with a
+writer lease held only for the command (``run_fenced``), so their trees are proven
+finished; anywhere else they are ``subprocess.run``.
 """
 import contextlib
 import os
@@ -238,6 +243,95 @@ def prepare(ticket_root, runtime, uid, gid, needs, *, probe=None):
     if wg.generation_key(generation) != wg.generation_key(expected):
         raise GateError('stale_generation', 'the controller does not run the selected generation')
     return Fencing(ticket_root, generation, identity, uid, gid)
+
+
+# ---------------------------------------------------------------------------
+# Trusted host commands of the controller (#345): Git, run on the host for the roles.
+
+_host = threading.local()
+
+
+@contextlib.contextmanager
+def host_commands(runner):
+    """Host commands started in this block go through ``runner``; ``None`` runs them plainly."""
+    previous = getattr(_host, 'runner', None)
+    _host.runner = runner
+    try:
+        yield
+    finally:
+        _host.runner = previous
+
+
+def host_command(argv, **kwargs):
+    """Run a trusted host command of the controller, with ``subprocess.run`` arguments.
+
+    Inside an orchestrator entrypoint the scope's runner decides (``run_fenced`` for an
+    admitted run); anywhere else this is ``subprocess.run``, unchanged.
+    """
+    runner = getattr(_host, 'runner', None)
+    return (runner or subprocess.run)(argv, **kwargs)
+
+
+PENDING_SELECTORS = ('execution/pending.json', 'continuations/pending.json')
+
+
+def host_generation(ticket_root):
+    """The generation a host command of the controller runs in, for its writer lease.
+
+    Normally ``holder.current_generation``, as for a role container. A pending native
+    transition fences dispatch and verification (``runtime_root``), not the controller
+    that prepares and activates it under ``ticket.lock``: while this thread holds that
+    lock, the generation is the one the published selectors name
+    (``ssdlc_fencing_proof.selected_generation``), and its state must still be this
+    ticket's. Without the lock a pending transition stays a refusal.
+    """
+    ticket_root = Path(ticket_root)
+    if any((ticket_root / ref).exists() for ref in PENDING_SELECTORS):
+        from ssdlc_locks import current_lock
+        try:
+            owned = current_lock(ticket_root / 'ticket.lock') is not None
+        except Exception:
+            owned = False
+        if owned:
+            from ssdlc_fencing_proof import selected_generation
+            generation = selected_generation(ticket_root)
+            holder.check_state(ticket_root / generation, ticket_root.name)
+            return generation
+    return holder.current_generation(ticket_root)
+
+
+def run_fenced(ticket_root, runtime, argv, *, check=False, stdin=None, lease_timeout=30.0, **kwargs):
+    """Run ``argv`` through ``run_host`` under a writer lease held only for this command.
+
+    ``runtime`` is the generation the controller runs, inside the canonical ticket
+    ``ticket_root``. The lease takes ``LOCK_SH`` on the gate (creating it only on first
+    initialization) and checks that ``runtime`` is the selected generation
+    (``host_generation``); the command
+    then runs under the subreaper, which records its tree and, once the kernel answers
+    ``ECHILD``, its conclusion. Any refusal before the command is released is a
+    ``HostCommandNotRun``: the caller may still run it on the manual path. A refusal
+    after it ran is a plain ``GateError``.
+    """
+    if stdin not in (None, subprocess.DEVNULL):
+        raise ValueError('run_host owns the command stdin; pass input instead')
+    ticket_root, runtime = Path(ticket_root), Path(runtime)
+    try:
+        generation = runtime.relative_to(ticket_root).as_posix()
+    except ValueError:
+        raise wg.HostCommandNotRun('generation_invalid', 'the controller runtime is outside the canonical ticket') from None
+    leased = False
+    try:
+        with wg.writer(ticket_root, generation, lambda: host_generation(ticket_root),
+                       timeout=lease_timeout) as lease:
+            leased = True
+            done = wg.run_host(lease, argv, **kwargs)
+    except GateError as exc:
+        if leased or isinstance(exc, wg.HostCommandNotRun):
+            raise
+        raise wg.HostCommandNotRun(exc.code, exc.detail) from None
+    if check:
+        done.check_returncode()
+    return done
 
 
 def refusal_record(error, when):

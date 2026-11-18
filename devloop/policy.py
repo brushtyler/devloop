@@ -86,6 +86,10 @@ class ReviewPolicy:
     zero_label: str = 'reviews:0'
     zero_allowlist: tuple = ()
     zero_checks: tuple = ()
+    # The agent of the advisory review of a PR in agent:needs-operator (#369), '' when off. It
+    # never counts for the quorum, so it stays out of the version: turning it on or off voids
+    # no approval.
+    advisory_reviewer: str = ''
 
     def zero_enabled(self):
         return bool(self.zero_allowlist) and bool(self.zero_checks)

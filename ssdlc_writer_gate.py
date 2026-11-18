@@ -77,6 +77,10 @@ class GateError(Exception):
         super().__init__(f'writer gate refused ({code}): {detail}' if detail else f'writer gate refused ({code})')
 
 
+class HostCommandNotRun(GateError):
+    """A refusal raised before a host command was released past its barrier: it never ran."""
+
+
 def _require_linux():
     if not sys.platform.startswith('linux') or not os.path.isdir('/proc/self/fdinfo'):
         raise GateError('unsupported_platform', 'automatic fencing needs Linux flock and /proc')
@@ -863,9 +867,14 @@ def run_host(lease, argv, *, cwd=None, env=None, input=None, timeout=None, captu
 
     On ``timeout`` the supervisor kills the whole tree, records its conclusion and
     ``TimeoutExpired`` is raised. Without the subreaper the command still runs, but
-    its tree record names the reason and refuses automatic fencing.
+    its tree record names the reason and refuses automatic fencing. A refusal before
+    the command is released is a ``HostCommandNotRun``; one after it ran is a plain
+    ``GateError``.
     """
-    lease.check()
+    try:
+        lease.check()
+    except GateError as exc:
+        raise HostCommandNotRun(exc.code, exc.detail) from None
     key = generation_key(lease.generation)
     argv = [os.fspath(arg) for arg in argv]
     program = _resolve(argv[0], env)
@@ -905,7 +914,7 @@ def run_host(lease, argv, *, cwd=None, env=None, input=None, timeout=None, captu
         _record_tree(lease._gate, tree, key, observed[0], controller, mechanism, reason)
         with contextlib.suppress(BrokenPipeError):
             _write_all(child.stdin.fileno(), b'\n')
-    except BaseException:
+    except BaseException as exc:
         # EOF on the barrier: the command is never executed.
         try:
             child.communicate(timeout=SUPERVISOR_START)
@@ -913,6 +922,8 @@ def run_host(lease, argv, *, cwd=None, env=None, input=None, timeout=None, captu
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(child.pid, signal.SIGKILL)
             child.communicate()
+        if isinstance(exc, GateError) and not isinstance(exc, HostCommandNotRun):
+            raise HostCommandNotRun(exc.code, exc.detail) from None
         raise
     finally:
         os.close(report_r)

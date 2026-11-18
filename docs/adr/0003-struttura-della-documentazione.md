@@ -1,6 +1,6 @@
 # ADR 0003: audit della documentazione e struttura di destinazione
 
-- **Stato:** proposto. Come previsto dall'ADR 0001, diventa approvato solo con l'approvazione e il merge dell'operatore (`operator_only_paths`).
+- **Stato:** approvato dall'operatore con il merge di PR #233 (2026-11-17); piano I1–I10 implementato. Le decisioni riservate sono state prese il 2026-11-17 (vedi [Decisioni riservate all'operatore](#decisioni-riservate-alloperatore)). Il resto del documento è il registro della proposta: inventario, alternative e piano descrivono `main` al commit d6f3110.
 - **Fase:** design (#205). È il binario 2 approvato dall'operatore il 2026-11-17 (diario #76): riallineare la documentazione esistente.
 - **Data:** 2026-11-17.
 - **Base verificata:** `main` al commit d6f3110.
@@ -248,6 +248,24 @@ La mappa unisce le voci che coprono un file (devloop/config.py:108-120). Una voc
 Le voci di I10 sono proposte da confermare leggendo ciascun modulo. Le chiavi non ammettono caratteri jolly, quindi serve una voce per file (docs/devloop.md:1615-1617).
 
 ## Decisioni riservate all'operatore
+
+Decise dall'operatore il 2026-11-17, con il merge della PR #233. Per la presentazione nel README l'operatore ha indicato la scelta; per gli altri punti ha accettato le raccomandazioni di questo ADR, come le ha applicate il piano I1–I10:
+
+1. **Approvazione:** ADR approvato, con il merge della PR #233.
+2. **Presentazione del prodotto nel README:** A nella forma compatta di C.
+3. **Nomi pubblici:** (i), "SSDLC" come nome del prodotto e "devloop" come nome del componente dispatcher, senza rinominare niente.
+4. **Cosa si elimina:**
+   - `docs/devloop.md` dopo la divisione: resta come indice verso le tre pagine;
+   - le sezioni duplicate dell'ADR 0002 (docs/devloop.md:912-966): sostituite da un rimando all'ADR 0002;
+   - le parti di cronologia nei documenti di recupero: spostate in sezioni di cronologia, non eliminate.
+5. **Collocazione dei file:** (a), spostamenti minimi. **Lingua:** nessun cambio, documenti in inglese e ADR e `AGENTS.md` in italiano.
+6. **Riga di stato dell'ADR 0002:** aggiornata (issue I2).
+
+Restano valide tutte le decisioni riservate degli ADR 0001 e 0002.
+
+### Domande come proposte
+
+Registro storico: le domande come le poneva la versione proposta di questo ADR, prima delle decisioni qui sopra.
 
 - L'approvazione di questo ADR, con il merge della sua PR.
 - **La presentazione del prodotto nel README:** alternativa A, B o C, o una loro combinazione. La raccomandazione è A in forma compatta.

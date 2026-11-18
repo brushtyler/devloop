@@ -328,19 +328,9 @@ class MergeMixin:
         if self.ledger is None:
             return True, None
         thread = self.gh.pr_comments(pr.number)
-        on_issue = ledger_collect(self.gh.issue_comments(pr.issue), self._signed)
-        on_pr = ledger_collect(thread, self._signed)
-        # The criteria as the issue states them, read now; a text changed by someone outside
-        # trusted_users is not quoted.
-        history = self.gh.issue_history(pr.issue)
-        criteria = (None if self._untrusted_change(history)
-                    else acceptance_criteria(history['body']))
-        content = pr_receipt.build(
-            pr=pr.number, issue=pr.issue, head=current['head'], promotion=pr.promotions + 1,
-            policy=current, request=on_issue['request'], issue_records=on_issue,
-            pr_records=on_pr, reviews=reviews, closures=pr.closures,
-            approved_round=approved_round, criteria=criteria,
-            acceptance_map=latest_map(pr.meta, pr.fixes))
+        # The advisory review of the same head, already recorded (#369), goes in the receipt.
+        content = self._receipt_content(pr, current, pr.promotions + 1, approved_round, reviews,
+                                        thread, self._advisory_record(thread, current['head']))
         problems = pr_receipt.contradictions(content, implementer=pr.meta['implementer'],
                                              approved_head=approved_head)
         if problems:
@@ -357,6 +347,26 @@ class MergeMixin:
                 cls=RECEIPT_CONFLICT)
             return False, None
         return True, (content, thread)
+
+    def _receipt_content(self, pr, policy, promotion, approved_round, reviews, thread,
+                         advisory=None):
+        """The content of the receipt of promotion ``promotion`` of ``pr`` with the policy
+        receipt ``policy`` (``receipt.build``): from the ledger records of the issue and of the
+        PR (``thread``, its comments) and from the markers; ``advisory``, the dispatcher's
+        record of the advisory review of the head (#369), or None."""
+        on_issue = ledger_collect(self.gh.issue_comments(pr.issue), self._signed)
+        on_pr = ledger_collect(thread, self._signed)
+        # The criteria as the issue states them, read now; a text changed by someone outside
+        # trusted_users is not quoted.
+        history = self.gh.issue_history(pr.issue)
+        criteria = (None if self._untrusted_change(history)
+                    else acceptance_criteria(history['body']))
+        return pr_receipt.build(
+            pr=pr.number, issue=pr.issue, head=policy['head'], promotion=promotion,
+            policy=policy, request=on_issue['request'], issue_records=on_issue,
+            pr_records=on_pr, reviews=reviews, closures=pr.closures,
+            approved_round=approved_round, criteria=criteria,
+            acceptance_map=latest_map(pr.meta, pr.fixes), advisory=advisory)
 
     def _supersede_receipts(self, number, why, comments=None, strict=False):
         """Mark superseded, because ``why``, every receipt of PR ``number`` still current: the

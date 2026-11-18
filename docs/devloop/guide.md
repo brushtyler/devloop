@@ -298,6 +298,13 @@ An issue is ready only if the agent says so **and** lists no gap and no split: a
 `default_available` gap blocks too, until a trusted comment accepts the proposed default. A
 default the repository or the issue already prescribes is not a gap.
 
+A decision that an ADR on `main` records as taken by the operator ("Decise dall'operatore") counts
+as an operator decision for the issues that cite it (#367): `docs/adr/` is in
+`operator_only_paths`, so it reaches `main` only through the operator's merge. A point the ADR
+leaves open, or an ADR that is only proposed, settles nothing and stays an `operator_decision`
+gap. The lifecycle of an ADR, from proposal to the recorded decisions, is in
+[`docs/adr/README.md`](../adr/README.md).
+
 The outcome is a comment on the issue, with a marker that records it and a hash of the request
 (see [Readiness check records](protocol.md#readiness-check-records)). The outcome is reused
 while the hash stays the same:
@@ -808,6 +815,46 @@ above, `/devloop recheck` for a readiness check, the manual merge for an operato
 item stays in `agent:needs-operator`. A command from outside `trusted_users` and the supervisor's
 identity is only logged. The trace is the one of the supervisor's commands, under the title
 "Comando su un'escalation all'operatore".
+
+### Advisory review for the operator
+
+With `[review_policy] advisory_reviewer` set (#369; empty, and so off, by default: the local
+overlay turns it on, for example `advisory_reviewer = "claude"`), a devloop PR in
+`agent:needs-operator` gets one more review for the person who decides on it: after an
+escalation to the operator, or when its merge is the operator's
+([Ready PRs whose merge is the operator's](#ready-prs-whose-merge-is-the-operators): `[merge]`
+off, a level `off`, an `operator_only_paths` path). A PR also in `agent:needs-supervisor` waits
+for the supervisor. The agent may be the PR's implementer: each turn is a new CLI process, so it
+does not have the implementer's context, and having the same model it could never count for the
+quorum anyway.
+
+- **One per head.** An `advisory` action, which takes a slot of `max_actions_per_tick`, runs one
+  read-only turn of that agent in a disposable checkout of the head (`pr-<n>-advisory`), with
+  the issue, the PR, its changed files and the reviews of the quorum, and the schema
+  [`devloop/schemas/advisory.json`](../../devloop/schemas/advisory.json): a summary of the PR,
+  the residual risks, what the operator should look at, points the reviewers of the quorum may
+  have missed, and a non-binding opinion (`ok`, `dubbi`, `contrario`). A head gets one turn,
+  even when it failed or its publication did; a new head gets its own while the PR is still in
+  `agent:needs-operator`. The PR is read again before the turn and after it: when it is no
+  longer open, its head moved, or it left `agent:needs-operator` or went to
+  `agent:needs-supervisor` before the turn ended, nothing is published.
+- **Publication.** The result of the turn is kept in `<state_dir>/advisory-results.json` before
+  anything is published. The native review comes first, then the receipt, then the dispatcher's
+  summary, last: a head is done once it has that summary. When a write fails, a later tick
+  publishes what is missing from the kept result, or from the native review already published,
+  without a new turn; a PR back to the operator on the same head gets the result kept for it.
+- **Where.** A native GitHub review of type `COMMENT` on the head, never `APPROVE` nor
+  `REQUEST_CHANGES` (GitHub accepts a `COMMENT` from the PR's author too), with the agent's
+  identity and the title "Review consultiva: non conta per il quorum". The dispatcher then adds
+  the opinion to the current [receipt](protocol.md#pr-receipt) of the same head, if any, and
+  writes its summary for the operator ("Review consultiva per l'operatore"), with the agent and
+  the opinion only. A failed turn gets only the summary, which says so.
+- **No effect.** It opens no round and does not count against `max_review_rounds`, creates no
+  finding, changes no label and no promotion; devloop reads it only to know whether a head
+  already has one and to show its opinion, never to decide. A failed action is never escalated:
+  the PR is already the operator's.
+- **Cost.** One turn per head, recorded in the [ledger](protocol.md#evidence-and-telemetry) as a
+  `turn` of kind `advisory`, and counted in the totals of the receipt.
 
 ## Who does what
 
