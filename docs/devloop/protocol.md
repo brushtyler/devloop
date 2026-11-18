@@ -958,7 +958,8 @@ the operator raises the limit: devloop has no compaction of its own. Before that
 limit, where nothing is refused yet, each tick of the dispatcher warns the operator, with the
 current size: with `[run].alert_issue`, one alert per threshold, which the journal records
 (`size_warning`) so that it is not repeated after a restart (a new limit is a new threshold); a
-failed alert is tried again at the next tick. Without `[run].alert_issue` the warning is a line
+failed alert is tried again at the next tick. With `publication_outbox`, an alert with an
+uncertain outcome is only reconciled, never sent again (see the outbox below). Without `[run].alert_issue` the warning is a line
 of the log, `WARNING: the journal of the turns is <n> bytes, ...`, once per start of devloop while
 the size stays beyond the threshold. Either way the turns go on as usual until the limit itself.
 
@@ -1214,6 +1215,15 @@ their id, operation, issue or PR, actor and reason, never their body, which stay
 The journal then records each as reported (`publication_signalled`): it is never reported
 again, not even after a restart. A failed alert is tried again at the next tick. Without
 `[run].alert_issue` the log alone reports them, at each start.
+
+The alert is itself a write of the outbox, and its `publication` names what it reports, in
+`covers`: the ids of the drops, or `journal_size:<threshold>` for the alert on the size of the
+journal. So an alert whose outcome is uncertain is never followed by a second one about the same
+drops or threshold: while it is pending they count as reported, also after a restart, and the
+outbox only reconciles it. Once it is found published, the dispatcher writes the
+`publication_signalled` of its drops, or the `size_warning` of its threshold, without sending
+anything. Dropped in its turn, absent from GitHub, it covers nothing: the next alert reports its
+drops again, and the dropped alert with them.
 
 A reconciliation is as precise as the body: devloop's comments, reviews and pull requests carry
 times, heads and digests, so two writes with the same body by the same author are not expected. The key applies at the next

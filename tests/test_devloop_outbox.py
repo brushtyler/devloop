@@ -1471,6 +1471,62 @@ class DroppedSignalTests(unittest.TestCase):
         self.assertEqual(len(gh.bodies(76)), 1)
         self.assertEqual(box.unsignalled(), [])
 
+    def test_an_alert_applied_with_an_uncertain_outcome_is_never_sent_twice(self):
+        """R1-1: GitHub applies the alert, its answer is uncertain and the first
+        reconciliation cannot read: the drop is not reported again, neither at the next tick
+        nor after a restart; once the outbox finds the alert, the drop is recorded reported."""
+        gh, box, client = self.dropped()
+        [pub] = box.entries()
+        gh.uncertain_writes, gh.read_fails = ['applied'], 1
+        d, lines = self.dispatcher(box, client, 76)
+        d._signal_dropped()
+        self.assertEqual(len(gh.bodies(76)), 1)
+        self.assertTrue(any('has an uncertain outcome (GitHubUncertain)' in line
+                            for line in lines))
+        alert = [e for e in box.entries().values() if e['pub'] != pub]
+        self.assertEqual([(e['status'], e['covers']) for e in alert], [(UNCERTAIN, [pub])])
+        self.assertEqual(box.unsignalled(), [])
+        d._signal_dropped()  # the next tick, before the outbox settles it
+        self.assertEqual(len(gh.bodies(76)), 1)
+        # A restart: a new process reads the journal, reports nothing before settling.
+        again, client2 = make(gh, self.state)
+        d2, lines2 = self.dispatcher(again, client2, 76)
+        d2._signal_dropped()
+        self.assertEqual(len(gh.bodies(76)), 1)
+        self.assertEqual(again.resume(), [])  # the next tick settles it: found, published
+        d2._signal_dropped()
+        self.assertEqual(len(gh.bodies(76)), 1)
+        self.assertEqual(again.unsignalled(), [])
+        self.assertTrue(again.entries()[pub]['signalled'])
+        signalled = [e['data']['pub'] for e in journal_events(self.state)
+                     if e['event'] == 'publication_signalled']
+        self.assertEqual(signalled, [pub])
+        self.assertEqual(len(gh.sent), 3)  # the write twice, the alert once: never resent
+        self.assertFalse(any('WARNING' in line for line in lines2))
+
+    def test_an_alert_never_published_reports_its_drops_again(self):
+        """An alert with an uncertain outcome that the outbox drops, absent from GitHub,
+        covers nothing: a new alert reports its drops, and the dropped alert with them."""
+        gh, box, client = self.dropped()
+        [pub] = box.entries()
+        gh.uncertain_writes, gh.read_fails = ['lost'], 1
+        d, _ = self.dispatcher(box, client, 76)
+        d._signal_dropped()
+        self.assertEqual(gh.bodies(76), [])
+        [alert] = [p for p in box.entries() if p != pub]
+        self.assertEqual(box.unsignalled(), [])
+        gh.clock.now += IN_FLIGHT_SECONDS
+        again, client2 = make(gh, self.state)
+        gh.clock.now += IN_FLIGHT_SECONDS
+        self.assertEqual(again.resume(), [])
+        self.assertEqual(again.entries()[alert]['status'], DROPPED)
+        d2, _ = self.dispatcher(again, client2, 76)
+        d2._signal_dropped()
+        [body] = gh.bodies(76)
+        self.assertIn(f'`{pub}`', body)
+        self.assertIn(f'`{alert}`', body)
+        self.assertEqual(again.unsignalled(), [])
+
     def test_without_an_alert_issue_the_log_reports_it_at_each_start(self):
         gh, box, client = self.dropped()
         [pub] = box.entries()

@@ -224,6 +224,47 @@ class SizeWarningTests(unittest.TestCase):
         d._watch_journal()
         self.assertEqual(len(self.alerts()), 1)
 
+    def test_an_alert_with_an_uncertain_outcome_is_never_sent_twice(self):
+        """R1-1: with the outbox, GitHub applies the alert, its answer is uncertain and the
+        first reconciliation cannot read: no second alert for the threshold, neither at the
+        next tick nor after a restart; once the outbox finds it, the warning is recorded."""
+        from test_devloop_outbox import OutboxGH, make
+        limit = self.fill(200) * 100 // 85
+        gh = OutboxGH()
+        gh.uncertain_writes, gh.read_fails = ['applied'], 1
+
+        def start():
+            ledger = Ledger(None, state_dir=self.dir, journal_max_bytes=limit)
+            box, client = make(gh, journal=ledger.journal)
+            lines = []
+            cfg = dataclasses.replace(CFG, run=RunPolicy(alert_issue=76))
+            return Dispatcher(cfg, client, None, None, log=lines.append, ledger=ledger,
+                              identities=SimpleNamespace(outbox=box)), box, lines
+
+        d, box, lines = start()
+        threshold = d.ledger.journal.warn_bytes()
+        d._watch_journal()
+        self.assertEqual(len(gh.bodies(76)), 1)
+        self.assertTrue(any('has an uncertain outcome (GitHubUncertain)' in line
+                            for line in lines))
+        self.assertEqual(box.alerts(), {f'journal_size:{threshold}': 'uncertain'})
+        self.assertFalse(d.ledger.journal.size_warned(threshold))
+        d._watch_journal()  # the next tick, before the outbox settles it
+        self.assertEqual(len(gh.bodies(76)), 1)
+        # A restart: nothing published before the outbox settles the alert, then recorded.
+        d2, box2, lines2 = start()
+        d2._watch_journal()
+        self.assertEqual(len(gh.bodies(76)), 1)
+        self.assertEqual(box2.resume(), [])
+        d2._watch_journal()
+        self.assertEqual(len(gh.bodies(76)), 1)
+        self.assertIn('  alert of the size of the journal found published on #76: recorded in '
+                      'the journal', lines2)
+        self.assertTrue(TurnJournal(self.dir, max_bytes=limit).size_warned(threshold))
+        d3, _, _ = start()
+        d3._watch_journal()
+        self.assertEqual(len(gh.sent), 1)  # one POST in all
+
     def test_without_an_alert_issue_a_warning_in_the_log_at_each_start(self):
         size = self.fill()
         limit = size * 100 // 85

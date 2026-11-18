@@ -194,7 +194,7 @@ from .dispatch_conclave import ConclaveMixin
 from .dispatch_merge import MergeMixin
 from .dispatch_preflight import PreflightMixin
 from .dispatch_supervision import SupervisionMixin, UntrustedChange
-from .github import GitHubError, author_login
+from .github import GitHubError, GitHubUncertain, author_login
 from .journal import (CLOSED, MERGED, RECONCILE_COMMAND, JournalError, TurnBlocked, blocked_text,
                       reconcile_command)
 from .ledger import attempt_branch, comment_ref, fix_register, open_turns, parse_branch
@@ -202,7 +202,7 @@ from .localtests import module_command, select_modules
 from .markdown import (RESUME, carries_record, dispatcher_header, publishable, read_marker,
                        render_cycle, render_escalation, render_operator_merge)
 from .activity import iso, restart_line
-from .outbox import describe as outbox_describe
+from .outbox import SENT as PUBLISHED, describe as outbox_describe
 from .pin import PREFIX, PinError, Repinned, SmokeError
 from .planning import (BASE_CHANGED, MERGE_LANE, MERGING, RESYNC_AFTER_APPROVAL, PullRequest,
                        Snapshot,
@@ -1723,10 +1723,21 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         dropped (#397): never published, and never to be. Each is logged once per process; with
         ``[run].alert_issue`` the dispatcher also publishes one alert for those not reported
         yet, and the journal records them reported (``publication_signalled``): each is
-        reported once. A failed alert is tried again at the next tick."""
+        reported once. A failed alert is tried again at the next tick.
+
+        The alert names in its publication the drops it reports (``OutboxClient.alert``): while
+        it is pending, its outcome uncertain, they are not reported again, also after a
+        restart; once the outbox finds it published, they are recorded reported
+        (``Outbox.record_alerted``) without a second alert. Dropped itself, it reports nothing:
+        its drops are reported again, with it."""
         outbox = getattr(self.identities, 'outbox', None)
         if outbox is None:
             return
+        try:
+            outbox.record_alerted()
+        except GitHubError as exc:
+            self.log(f'  the alert of the dropped publications is not recorded in the journal: '
+                     f'{exc}')
         try:
             dropped = outbox.unsignalled()
         except GitHubError as exc:
@@ -1755,11 +1766,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
               'pubblicate su GitHub e non lo saranno.' + listed + '\n\n'
             + 'Il corpo di ognuna resta nel journal dei turni (`turn-journal.jsonl` nella '
               'directory di stato), con il suo id: va pubblicato a mano, se serve ancora.')
+        covers = [e['pub'] for e in dropped]
         try:
-            self.gh.comment(issue, body)
+            self._alert(issue, body, covers)
         except Exception as exc:  # one attempt per tick: its class, never its output
-            self.log(f'  the alert of the dropped publications on #{issue} could not be '
-                     f'published ({type(exc).__name__}): tried again at the next tick')
+            self._alert_failed('the alert of the dropped publications', issue, exc, covers)
             return
         try:
             outbox.signalled([e['pub'] for e in dropped])
@@ -1795,9 +1806,26 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         if not issue:
             self._journal_warned = True
             return
+        key = f'journal_size:{threshold}'
+        outbox = getattr(self.identities, 'outbox', None)
         try:
             if journal.size_warned(threshold):
                 self._journal_warned = True
+                return
+            # With the outbox, an alert of this threshold names it in its publication: once
+            # published it is recorded, never sent twice; while its outcome is uncertain it is
+            # only reconciled, and a new one follows only if it turns out dropped.
+            state = outbox.alerts().get(key) if outbox is not None else None
+            if state == PUBLISHED:
+                self._journal_warned = True
+                journal.size_warning(size, threshold)
+                self.log(f'  alert of the size of the journal found published on #{issue}: '
+                         'recorded in the journal')
+                return
+            if state is not None:
+                self.log(f'  the alert of the size of the journal on #{issue} has an uncertain '
+                         'outcome: the outbox reconciles it, and no other alert is published '
+                         'meanwhile')
                 return
         except JournalError as exc:
             self.log(f'  the alert of the size of the journal cannot be checked: {exc}')
@@ -1813,10 +1841,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
               'ne rimuove nulla e non lo compatta. Questo avviso si pubblica una volta per '
               'soglia.')
         try:
-            self.gh.comment(issue, body)
+            self._alert(issue, body, [key])
         except Exception as exc:  # one attempt per tick: its class, never its output
-            self.log(f'  the alert of the size of the journal on #{issue} could not be '
-                     f'published ({type(exc).__name__}): tried again at the next tick')
+            self._alert_failed('the alert of the size of the journal', issue, exc, [key])
             return
         self._journal_warned = True
         try:
@@ -1824,6 +1851,31 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         except JournalError as exc:
             self.log(f'  the alert of the size of the journal is not recorded in it: {exc}')
         self.log(f'  alert of the size of the journal published on #{issue}')
+
+    def _alert(self, issue, body, covers):
+        """Publish an alert on ``issue`` (#397). With the outbox, its publication names what it
+        reports, ``covers`` (``OutboxClient.alert``): an uncertain outcome is never followed by
+        a second alert about the same drops or threshold. Without it, a comment as before."""
+        alert = getattr(self.gh, 'alert', None)
+        if getattr(self.identities, 'outbox', None) is None or not callable(alert):
+            return self.gh.comment(issue, body)
+        return alert(issue, body, covers=covers)
+
+    def _alert_failed(self, what, issue, exc, covers):
+        """Log an alert that raised ``exc``: tried again at the next tick when it certainly was
+        not published; only reconciled by the outbox when its outcome is uncertain (its
+        publication still pending covers ``covers``)."""
+        outbox = getattr(self.identities, 'outbox', None)
+        try:
+            pending = outbox is not None and any(k in outbox.alerts() for k in covers)
+        except GitHubError:
+            pending = isinstance(exc, GitHubUncertain)
+        if pending:
+            self.log(f'  {what} on #{issue} has an uncertain outcome ({type(exc).__name__}): '
+                     'the outbox reconciles it, and no other alert is published meanwhile')
+        else:
+            self.log(f'  {what} on #{issue} could not be published ({type(exc).__name__}): '
+                     'tried again at the next tick')
 
     def _signed(self, login):
         """Whether ``login`` signs as the dispatcher, as its other records do."""

@@ -30,6 +30,15 @@ it says so, the ``time`` of the clock it happened at:
 - ``publication_signalled``: the operator was told of the drop (#397): the dispatcher reports
   each dropped write once, on ``[run].alert_issue`` (``unsignalled``, ``signalled``).
 
+An alert of the dispatcher on ``[run].alert_issue`` (#397) is a ``comment`` whose
+``publication`` also names what it reports, in ``covers`` (``OutboxClient.alert``): the ids of
+the dropped writes, or ``journal_size:<threshold>`` for the size of the journal. While that
+alert is published or still pending, what it covers counts as reported (``alerts``): an alert
+with an uncertain outcome is only reconciled, never followed by a second one about the same
+drops or threshold, also after a restart; once it is published, ``record_alerted`` writes the
+``publication_signalled`` its drops are still missing. Failed for certain or dropped, it covers
+nothing: what it named is reported again, the dropped alert among the drops.
+
 The rules, on the model of ``ProjectionOutbox`` (ssdlc_feedback_delivery.py):
 
 - **No POST repeated on an uncertain outcome.** A write that raises ``GitHubUncertain`` is
@@ -205,10 +214,41 @@ class Outbox:
         uncertain outcome."""
         return [e for e in self.entries().values() if e['status'] in PENDING]
 
+    def alerts(self):
+        """What the alerts of the dispatcher cover (#397): each key of their ``covers``, with
+        ``SENT`` when one of them is published, otherwise ``UNCERTAIN`` when one is still
+        pending (its outcome unknown, to reconcile). An alert failed for certain or dropped
+        covers nothing."""
+        covered = {}
+        for entry in self.entries().values():
+            if entry['status'] == SENT:
+                state = SENT
+            elif entry['status'] in PENDING:
+                state = UNCERTAIN
+            else:
+                continue
+            for key in entry.get('covers') or ():
+                if covered.get(key) != SENT:
+                    covered[key] = state
+        return covered
+
     def unsignalled(self):
-        """The writes dropped that the operator was not told of yet (#397), oldest first."""
+        """The writes dropped that the operator was not told of yet (#397), oldest first: not
+        ``publication_signalled``, nor covered by an alert published or still pending
+        (``alerts``)."""
+        covered = self.alerts()
         return [e for e in self.entries().values()
-                if e['status'] == DROPPED and not e['signalled']]
+                if e['status'] == DROPPED and not e['signalled'] and e['pub'] not in covered]
+
+    def record_alerted(self):
+        """Record ``publication_signalled`` for each dropped write that an alert, now
+        published, reported without it: its outcome was uncertain, or the journal did not take
+        the record. Returns their ids; raises ``JournalError`` if the journal cannot take it."""
+        covered = self.alerts()
+        pubs = [e['pub'] for e in self.entries().values()
+                if e['status'] == DROPPED and not e['signalled'] and covered.get(e['pub']) == SENT]
+        self.signalled(pubs)
+        return pubs
 
     def signalled(self, pubs):
         """Record that the operator was told of the drop of each write of ``pubs``: it is never
@@ -573,6 +613,12 @@ class OutboxClient:
 
     def comment(self, number, body):
         return self._write(COMMENT, body, number=number)
+
+    def alert(self, number, body, *, covers):
+        """An alert of the dispatcher on ``number`` (#397): a ``comment`` whose publication
+        names what it reports, ``covers``: ids of dropped writes, or
+        ``journal_size:<threshold>`` (``Outbox.alerts``)."""
+        return self._write(COMMENT, body, number=number, covers=list(covers))
 
     def edit_comment(self, comment_id, body):
         self._write(EDIT, body, comment_id=comment_id)
