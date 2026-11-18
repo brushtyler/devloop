@@ -18,16 +18,16 @@ from itertools import combinations
 
 from .agents import AgentError
 from .conclave import (DONE, MAX_DIFF, MAX_OPTION, MAX_OPTIONS, MAX_RESOLUTION, MAX_TEXT,
-                       apply_proposal, apply_vote, calls_left, consistent, describe_block,
-                       make_stale, missing, new_record, next_call, outcome, render,
-                       settle_started, text_hash)
+                       PENDING, apply_proposal, apply_vote, calls_left, consistent,
+                       describe_block, make_stale, missing, new_record, next_call, outcome,
+                       render, settle_started, text_hash)
 from .context import _template
 from .dispatch_actions import Models
 from .dispatch_supervision import UntrustedChange
 from .github import GitHubError
 from .ledger import comment_ref
 from .markdown import read_marker
-from .planning import PullRequest, label_names, operator_blocked, operator_held, pending_reviewers
+from .planning import PullRequest, label_names, operator_blocked, operator_held, waiting_reviewers
 from .policy import independent
 from .review import current_round, owner_of, round_verdict
 
@@ -95,7 +95,8 @@ class ConclaveMixin:
         failed readiness checks and the notices of agents that stopped. A block is the notice
         of an implementer or fixer that stopped (``blocked``), written by that agent's identity
         with the agent, the step, the commit and the reason in its marker, or, on a PR, its
-        latest review round when complete with verdict ``needs_operator`` (the dispatcher's
+        latest review round with verdict ``needs_operator``, complete or suspended by its first
+        ``needs_operator`` (``waiting_reviewers``; the dispatcher's
         ``reviewer_decision`` notice after it counts as the same block). The block's durable
         reference is the notice's comment id, or the round, the reviewer of the first
         ``needs_operator`` record of the round, and its head. Anything after the latest
@@ -148,15 +149,17 @@ class ConclaveMixin:
                        'reason': record['reason']}
 
     def _review_block(self, comments, pr):
-        """``(position, block, details)`` of the PR's latest review round when it is complete
-        with verdict ``needs_operator``, else None. Of several reviewers who asked for the
-        operator, the first record of the round is the block and its author the proposer:
-        the round opens one conclave."""
+        """``(position, block, details)`` of the PR's latest review round when its verdict is
+        ``needs_operator``, else None. The first ``needs_operator`` suspends the round
+        (``waiting_reviewers``): it counts even before the other reviewers its receipt requires
+        have reviewed. Of several reviewers who asked for the operator, the first record of the
+        round is the block and its author the proposer: the round opens one conclave."""
         entries = self._marker_entries(pr, comments, 'review')
         if not entries:
             return None
         records = current_round([record for _, record in entries])
-        if pending_reviewers(records) or round_verdict(records) != 'needs_operator':
+        if (waiting_reviewers(records, self.cfg.conclave)
+                or round_verdict(records) != 'needs_operator'):
             return None
         latest = records[0]['round']
         first = next(r for r in records if r['verdict'] == 'needs_operator')
@@ -254,6 +257,13 @@ class ConclaveMixin:
             return 'le modifiche non committate dell\'agent fermo sono cambiate'
         return ''
 
+    def _conclave_recheck(self, issue_number, view, pr, record):
+        """Why the context frozen in ``record`` no longer holds, read again now, or ''."""
+        try:
+            return self._conclave_stale(record, self._conclave_context(issue_number, view, pr))
+        except UntrustedChange as exc:
+            return f'il testo dell\'issue non è più fidato ({_short(exc)})'
+
     def _do_conclave(self, target):
         """One step of the conclave of an issue or PR: open it, or resume it from its record,
         run the next call and record the outcome once known."""
@@ -297,6 +307,13 @@ class ConclaveMixin:
             if which is not None:
                 comment = self._conclave_call(number, pr, record, comment, which, context,
                                               details)
+                if outcome(record) is not None:
+                    # The last call is in: the frozen context must still hold now, or the
+                    # outcome is BLOCKED (RESERVED still prevails), never one on an old head or
+                    # an old text of the issue.
+                    stale = self._conclave_recheck(issue_number, view, pr, record)
+                    if stale:
+                        make_stale(record, stale)
         record['outcome'] = outcome(record) or ''
         self._conclave_publish(number, comment, record, pr)
         self.log(f'  conclave: {record["outcome"] or "in progress"}')
@@ -337,20 +354,40 @@ class ConclaveMixin:
             comment = self._conclave_publish(number, comment, record, pr)
             label = f'{kind}-{number}-conclave-' + ('proposal' if proposal else f'vote{which + 1}')
             try:
-                raw, _ = self._turn(Models(cfg.agent(member['agent'])), 'review', prompt,
-                                    'conclave_proposal' if proposal else 'conclave_vote', path,
-                                    label, where=(number, 'conclave'), note='conclave')
+                raw, used = self._turn(Models(cfg.agent(member['agent'])), 'review', prompt,
+                                       'conclave_proposal' if proposal else 'conclave_vote',
+                                       path, label, self._conclave_allowed(record, member),
+                                       where=(number, 'conclave'), note='conclave')
             except AgentError as exc:
                 missing(record, which, f'agent fallito o in timeout: {_short(exc)}')
                 self.log(f'  conclave: {member["agent"]} failed: {_short(exc)}')
             else:
+                # The profile it actually ran with, a fallback model included: the later calls,
+                # on this tick or the next ones, stay distinct from it.
+                profile = self._profile(member['agent'], 'review', used)
                 if proposal:
-                    apply_proposal(record, raw)
+                    apply_proposal(record, raw, profile)
                 else:
-                    apply_vote(record, which, raw, record['hash'])
+                    apply_vote(record, which, raw, record['hash'], profile)
         finally:
             self.ws.remove(name)
         return comment
+
+    def _conclave_allowed(self, record, member):
+        """Which models ``member`` may contribute with (the ``allowed`` of ``_turn``): a model,
+        fallback included, distinct by identity and by ``(kind, model, effort)`` from the
+        profile each other member contributed with, as the record keeps it, and from the
+        configured profile of each member still to be asked. The three stay distinct even when
+        a model is unavailable."""
+        others = [item['profile'] if item['state'] == DONE and item['profile']
+                  else self._profile(item['agent'], 'review')
+                  for item in [record['proposal'], *record['votes']]
+                  if item is not member and item['state'] in (DONE, PENDING)]
+
+        def allowed(candidate):
+            mine = self._profile(member['agent'], 'review', candidate)
+            return all(independent(mine, other) for other in others)
+        return allowed
 
     def _conclave_publish(self, number, comment, record, pr=None):
         """Write ``record`` on issue or PR ``number``: a new comment when ``comment`` is None,

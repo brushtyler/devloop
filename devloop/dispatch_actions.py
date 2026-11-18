@@ -26,7 +26,7 @@ from .localtests import failed_modules, select_modules, suite_summary
 from .markdown import (dispatcher_header, publishable, render_fix, render_native_review,
                        render_review)
 from .planning import (BASE_CHANGED, FIX_COMMAND, RESYNC_AFTER_APPROVAL, counted_rounds,
-                       pending_reviewers, preflight_state, waived_rounds)
+                       pending_reviewers, preflight_state, waived_rounds, waiting_reviewers)
 from .policy import ZERO_LEVEL, distinct, independent, profile_of
 from .ports import summarize_checks
 from .review import (ci_failure_review, current_round, last_round, normalize_review,
@@ -308,11 +308,12 @@ class ActionsMixin:
     def _open_round(self, pr, records):
         """Whether the round ``records`` is still open for this head: an agent round of the
         same head, not answered by a fix nor voided by a rereview request, still waiting for a
-        reviewer. Whether a new review joins it depends on the receipt (``_do_review``)."""
+        reviewer (not one a ``needs_operator`` suspended, with the conclave, #141). Whether a
+        new review joins it depends on the receipt (``_do_review``)."""
         return (bool(records) and records[0]['source'] == 'agent'
                 and records[0]['head_sha'] == pr.head_sha and not pr.rereview
                 and not any(f['round'] == records[0]['round'] for f in pr.fixes)
-                and bool(pending_reviewers(records)))
+                and bool(waiting_reviewers(records, self.cfg.conclave)))
 
     def _do_review(self, pr):
         """One review by one reviewer: each review call is an action of its own. The first
@@ -507,7 +508,9 @@ class ActionsMixin:
             # The CI the round reviewed, whatever its verdict (#133).
             self._record_ci(pr, pr.head_sha, pr.checks, pr.check_details, round_no,
                             jobs=ci_jobs)
-        waiting = pending_reviewers(records)
+        # With the conclave (#141) the first needs_operator suspends the round: it is applied
+        # now, and the reviewers it still waited for are not asked.
+        waiting = waiting_reviewers(records, cfg.conclave)
         if new and not waiting:
             self._apply_round(pr, records, announce=True, reviews=earlier + records)
         self.ws.remove(name)

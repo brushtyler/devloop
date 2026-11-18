@@ -16,12 +16,12 @@ _TESTS_DIR = str(Path(__file__).resolve().parent)
 if _TESTS_DIR not in sys.path:
     sys.path.insert(0, _TESTS_DIR)
 
-from devloop import agents, conclave, config, markdown, review, schema  # noqa: E402
+from devloop import agents, conclave, config, markdown, planning, review, schema  # noqa: E402
 from devloop.dispatcher import Dispatcher  # noqa: E402
 from devloop.planning import Snapshot, plan  # noqa: E402
 from devloop.workspace import Workspace  # noqa: E402
 from helpers.devloop_fakes import SHA1, FakeGH, FakeIdentities  # noqa: E402
-from test_devloop import CFG, FakeRunner, FakeWS, implemented, pr  # noqa: E402
+from test_devloop import CFG, FakeRunner, FakeWS, implemented, pr, receipt  # noqa: E402
 
 MEMBERS = ('claude', 'codex', 'agy')
 CCFG = dataclasses.replace(CFG, conclave=MEMBERS)
@@ -101,6 +101,23 @@ class ThreadGH(FakeGH):
                 if markdown.read_marker(c['body'], 'conclave') is not None]
 
 
+class HookRunner(FakeRunner):
+    """FakeRunner that runs ``hooks[n]`` while its ``n``-th call (from 1) is running: what
+    changes on GitHub during an agent's turn."""
+
+    def __init__(self, *outputs, hooks=None):
+        super().__init__(*outputs)
+        self.hooks = hooks or {}
+
+    def run(self, agent, mode, prompt, schema_name, workdir, label):
+        hook = self.hooks.get(len(self.calls) + 1)
+        try:
+            return super().run(agent, mode, prompt, schema_name, workdir, label)
+        finally:
+            if hook is not None:
+                hook()
+
+
 class ConclaveWS(FakeWS):
     def __init__(self, diff='', **kw):
         super().__init__(**kw)
@@ -118,10 +135,10 @@ class ConclaveWS(FakeWS):
 class Base(unittest.TestCase):
     cfg = CCFG
 
-    def make(self, *outputs, ws=None, identities=True, cfg=None):
+    def make(self, *outputs, ws=None, identities=True, cfg=None, hooks=None):
         self.gh = ThreadGH()
         self.ws = ws or ConclaveWS()
-        self.runner = FakeRunner(*outputs)
+        self.runner = HookRunner(*outputs, hooks=hooks)
         self.logs = []
         self.d = Dispatcher(cfg or self.cfg, self.gh, self.ws, self.runner,
                             log=self.logs.append,
@@ -233,6 +250,48 @@ class UnanimousTests(Base):
         self.assertEqual([c[0] for c in self.runner.calls], ['agy', 'claude', 'codex'])
         self.assertIn('Serve una scelta (agy).', self.runner.calls[0][3])
 
+    def needs_operator_by_codex(self):
+        """The record of round 1 of PR #100 by codex, needs_operator, under a level 2 receipt
+        that requires codex and agy: agy has not reviewed yet."""
+        record = review.normalize_review(
+            {'verdict': 'needs_operator', 'summary': 's', 'blocking_findings': [],
+             'non_blocking_findings': [], 'previous_findings': [],
+             'human_reason': 'Serve una scelta (codex).', 'checks_performed': []},
+            previous_open=[], round_no=1, max_rounds=3, head_sha=SHA1, ci='pass',
+            reviewer='codex')
+        record['receipt'] = dict(receipt(), level=2, reviewers=['codex', 'agy'])
+        return record
+
+    def test_the_first_needs_operator_suspends_an_incomplete_round_and_opens_the_conclave(self):
+        record = self.needs_operator_by_codex()
+        self.assertEqual(planning.pending_reviewers([record]), ['agy'])
+        # Without the conclave the round waits for agy, as today; with it, the first
+        # needs_operator suspends the round: its verdict applies, no review of agy is planned.
+        snap = Snapshot(prs=[pr(reviews=[record])], ready_issues=[], working_issues=[])
+        self.assertEqual([(a.kind, a.number) for a in plan(snap, CFG)], [('review', 100)])
+        self.assertEqual([(a.kind, a.number) for a in plan(snap, self.cfg)],
+                         [('apply_review', 100)])
+        self.make(proposal(), vote(), vote())
+        self.gh.labels[100] = {'agent:review'}
+        self.gh.say(100, markdown.render_review(record, '> [!NOTE]\n'), LOGINS['codex'])
+        self.d._do_apply_review(pr(reviews=[record]))
+        self.assertEqual(self.gh.labels[100], {NEEDS_OPERATOR})
+        # The verdict of codex is the durable reference of the block, codex the proposer.
+        self.run_conclave()
+        found = self.record()
+        self.assertEqual(found['block'], {'kind': 'review', 'round': 1, 'reviewer': 'codex',
+                                          'head': SHA1})
+        self.assertEqual(found['outcome'], conclave.UNANIMOUS)
+        self.assertEqual([c[0] for c in self.runner.calls], ['codex', 'claude', 'agy'])
+        self.assertIn('Serve una scelta (codex).', self.runner.calls[0][3])
+
+    def test_without_conclave_an_incomplete_round_opens_nothing(self):
+        self.make(cfg=CFG)
+        self.gh.labels[100] = {NEEDS_OPERATOR}
+        self.gh.say(100, markdown.render_review(self.needs_operator_by_codex(), '> [!NOTE]\n'),
+                    LOGINS['codex'])
+        self.assertIsNone(self.d._review_block(self.gh.pr_comments(100), self.target()))
+
 
 class OutcomeTests(Base):
     def test_one_block_vote_is_blocked_and_the_other_vote_is_still_collected(self):
@@ -289,6 +348,27 @@ class OutcomeTests(Base):
         record = self.record()
         self.assertEqual(record['outcome'], conclave.RESERVED)
         self.assertIn('Chi mergia?', self.gh.thread[100][-1]['body'])
+
+    def test_a_first_voter_that_flags_the_perimeter_still_gets_the_second_vote(self):
+        self.make(proposal(), vote(reserved=True, question='Chi decide il budget?',
+                                   options=['L\'operatore']),
+                  vote('BLOCCA', reserved=True, question='Chi mergia?'))
+        self.block_pr()
+        self.run_conclave(times=1)
+        self.run_conclave(times=1)
+        record = self.record()
+        # Not concluded after the first vote: the second is still due.
+        self.assertEqual(record['outcome'], '')
+        self.assertEqual(self.d._conclave_items([self.target()])[0]['calls'], 1)
+        self.run_conclave(times=1)
+        record = self.record()
+        self.assertEqual(record['outcome'], conclave.RESERVED)
+        self.assertEqual([v['state'] for v in record['votes']], ['done', 'done'])
+        self.assertEqual(len(self.runner.calls), 3)
+        body = self.gh.thread[100][-1]['body']
+        self.assertIn('Chi decide il budget?', body)
+        self.assertIn('Chi mergia?', body)
+        self.assertNotIn('non ancora richiesto', body)
 
     def test_a_reserved_flag_after_a_block_vote_still_prevails(self):
         self.make(proposal(), vote('BLOCCA'), vote('BLOCCA', reserved=True, question='Budget?'))
@@ -404,6 +484,57 @@ class ResumeTests(Base):
         # The same block does not convene it again.
         self.assertIsNone(self.d._conclave_view(100, self.gh.pr_comments(100), self.target()))
 
+    def test_a_pr_head_that_moves_during_the_last_vote_makes_it_blocked(self):
+        self.make(proposal(), vote(), vote(), hooks={3: lambda: setattr(self.gh, 'head', SHA2)})
+        self.block_pr()
+        self.run_conclave()
+        record = self.record()
+        self.assertEqual(record['outcome'], conclave.BLOCKED)
+        self.assertIn('head', record['stale'])
+        self.assertEqual([v['state'] for v in record['votes']], ['done', 'done'])
+        self.assertEqual(conclave.consistent(record), (True, ''))
+        # Concluded: the same block does not convene it again.
+        self.assertIsNone(self.d._conclave_view(100, self.gh.pr_comments(100), self.target()))
+
+    def test_an_issue_text_that_changes_during_the_last_vote_makes_it_blocked(self):
+        self.make(implemented('blocked'), proposal(), vote(), vote(),
+                  hooks={4: lambda: self.gh.say(7, 'Nuovo requisito: usare YAML.',
+                                                'brushtyler')})
+        self.d._do_implement(7)
+        for _ in range(3):
+            self.d._do_conclave(7)
+        record = self.record(7)
+        self.assertEqual(record['outcome'], conclave.BLOCKED)
+        self.assertIn('issue', record['stale'])
+
+    def test_a_reserved_flag_in_the_last_vote_prevails_over_a_context_that_changed(self):
+        self.make(proposal(), vote(), vote(reserved=True, question='Chi mergia?'),
+                  hooks={3: lambda: setattr(self.gh, 'head', SHA2)})
+        self.block_pr()
+        self.run_conclave()
+        record = self.record()
+        self.assertEqual(record['outcome'], conclave.RESERVED)
+        self.assertIn('head', record['stale'])
+
+    def test_an_unexpected_error_with_parallel_actions_does_not_end_the_block(self):
+        cfg = dataclasses.replace(CCFG, max_parallel_actions=2)
+        self.make(implemented('blocked'), proposal(),
+                  RuntimeError('dispatcher crashed during the call'), vote(), cfg=cfg)
+        self.d._do_implement(7)
+        notices = len(self.gh.thread[7])
+        actions = self.d.tick()
+        self.assertEqual([(a.kind, a.number) for a in actions], [('conclave', 7)] * 3)
+        # No escalation: the block stays, and the call started without a result is settled
+        # as a failure by the next action, not repeated.
+        self.assertEqual(self.gh.labels[7], {NEEDS_OPERATOR})
+        self.assertEqual([c for c in self.gh.thread[7][notices:]
+                          if markdown.read_marker(c['body'], 'notice')], [])
+        record = self.record(7)
+        self.assertEqual(record['outcome'], conclave.BLOCKED)
+        self.assertEqual(record['votes'][0]['missing'], conclave.STARTED_WITHOUT_RESULT)
+        self.assertEqual(record['votes'][1]['state'], 'done')
+        self.assertEqual([c[0] for c in self.runner.calls], ['claude', 'claude', 'codex', 'agy'])
+
     def test_a_pr_no_longer_at_the_commit_of_the_block_gets_a_blocked_conclave_at_once(self):
         self.make()
         self.block_pr(head=SHA2)
@@ -429,6 +560,63 @@ class ResumeTests(Base):
         self.gh.say(100, markdown.render_escalation('altro', cls='failure'),
                     LOGINS['dispatcher'])
         self.assertEqual(self.d._conclave_items([self.target()]), [])
+
+
+class FallbackTests(Base):
+    """codex and agy of the same kind, with different models: the configuration holds, and a
+    fallback model of codex may coincide with the model of agy."""
+
+    def config(self, fallback):
+        codex = dataclasses.replace(
+            CFG.agent('codex'),
+            fallback_models=(config.FallbackModel(fallback, fallback, 'high'),))
+        agy = dataclasses.replace(CFG.agent('agy'), kind='codex', model='other-model',
+                                  model_label='other-model', effort='high')
+        return dataclasses.replace(CCFG, agents=dict(CFG.agents, codex=codex, agy=agy))
+
+    def unavailable(self):
+        return agents.ModelUnavailable('quota exhausted', None, 'quota', None)
+
+    def test_a_fallback_that_coincides_with_another_member_is_not_used(self):
+        self.make(proposal(), self.unavailable(), vote(), cfg=self.config('other-model'))
+        self.block_pr()
+        self.run_conclave()
+        record = self.record()
+        # codex's model is unavailable and its fallback is agy's tuple: refused, so its vote is
+        # missing (a BLOCCA), never a second contribution of the same tuple.
+        self.assertEqual(record['outcome'], conclave.BLOCKED)
+        self.assertEqual(record['votes'][0]['state'], 'missing')
+        self.assertEqual([c[0] for c in self.runner.calls], ['claude', 'codex', 'agy'])
+        self.assertEqual(record['votes'][1]['profile']['model'], 'other-model')
+        self.assertEqual(conclave.consistent(record), (True, ''))
+
+    def test_the_effective_profile_is_recorded_and_bounds_the_next_calls(self):
+        self.make(proposal(), self.unavailable(), vote(), vote(),
+                  cfg=self.config('third-model'))
+        self.block_pr()
+        self.run_conclave()
+        record = self.record()
+        self.assertEqual(record['outcome'], conclave.UNANIMOUS)
+        self.assertEqual(record['proposal']['profile']['model'], CFG.agent('claude').model)
+        self.assertEqual(record['votes'][0]['profile']['model'], 'third-model')
+        self.assertEqual(record['votes'][0]['profile']['identity'], LOGINS['codex'])
+        # A member resumed on a later tick is checked against what the record keeps: the
+        # fallback codex used now excludes that tuple for agy.
+        allowed = self.d._conclave_allowed(record, record['votes'][1])
+        clash = dataclasses.replace(self.d.cfg.agent('agy'), model='third-model')
+        self.assertFalse(allowed(clash))
+        self.assertTrue(allowed(self.d.cfg.agent('agy')))
+
+    def test_a_record_with_two_contributions_of_the_same_tuple_does_not_hold(self):
+        self.make(proposal(), vote(), vote())
+        self.block_pr()
+        self.run_conclave()
+        record = self.record()
+        record['votes'][1]['profile'] = dict(record['votes'][0]['profile'],
+                                             identity=LOGINS['agy'])
+        ok, why = conclave.consistent(record)
+        self.assertFalse(ok)
+        self.assertIn('stessa', why)
 
 
 class DisabledTests(Base):
@@ -524,7 +712,17 @@ class WorkspaceTests(unittest.TestCase):
             (path / 'new.py').write_text('n\n')
             diff = ws.pending_diff('issue-7', commit)
             self.assertIn('+partial', diff)
-            self.assertIn('#   new.py', diff)
+            # A new file comes with its content: the members cannot read it in the checkout.
+            self.assertIn('+++ b/new.py\n@@ -0,0 +1,1 @@\n+n\n', diff)
+            self.assertEqual(ws.pending_diff('issue-7', commit), diff)  # deterministic
+            # A change to its content changes the diff, and so the hash bound in the record.
+            (path / 'new.py').write_text('m\n')
+            changed = ws.pending_diff('issue-7', commit)
+            self.assertIn('+m\n', changed)
+            self.assertNotEqual(conclave.text_hash(changed), conclave.text_hash(diff))
+            (path / 'blob.bin').write_bytes(b'\0\1\2')
+            self.assertIn('binary or larger', ws.pending_diff('issue-7', commit))
+            (path / 'blob.bin').unlink()
             # Read only: the worktree keeps its changes, untracked file included.
             self.assertTrue(ws.has_changes(path))
             self.assertIn('?? new.py', self.git('status', '--porcelain', cwd=path))

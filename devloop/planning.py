@@ -11,7 +11,7 @@ these names: import them from here.
 from dataclasses import dataclass, field, replace
 
 from .policy import receipt_of
-from .review import CI, current_round, open_findings, owner_of, round_verdict
+from .review import CI, current_round, current_verdict, open_findings, owner_of, round_verdict
 from .supervision import ISSUE_STEPS, RETRY
 
 RECHECK_COMMAND = '/devloop recheck'
@@ -426,9 +426,10 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
             actions.append(Action('hold', pr.number, f'{pr.hold["event"]} by {pr.hold["by"]}'))
             continue
         # The latest round, and the reviewers it still waits for: its verdict counts only once
-        # every reviewer its receipt requires has reviewed.
+        # every reviewer its receipt requires has reviewed, or, with the conclave (#141), once
+        # one of them asked for the operator.
         latest = current_round(pr.reviews)
-        pending = pending_reviewers(latest)
+        pending = waiting_reviewers(latest, cfg.conclave)
         verdict = round_verdict(latest) if latest and not pending else None
         head = latest[0]['head_sha'] if latest else None
         rounds_left = counted_rounds(pr.reviews) < cfg.max_review_rounds
@@ -702,6 +703,16 @@ def pending_reviewers(records):
         return []
     done = {owner_of(r) for r in records}
     return [key for key in receipt['reviewers'] if key not in done]
+
+
+def waiting_reviewers(records, conclave=()):
+    """The reviewers the round ``records`` still waits for before its verdict counts: those of
+    ``pending_reviewers``, or none with ``conclave`` configured (#141) once a reviewer of the
+    round asked for the operator. The first ``needs_operator`` suspends the round: the verdict
+    applies at once, no other review of the round is asked, and the round opens one conclave."""
+    if conclave and any(current_verdict(r['verdict']) == 'needs_operator' for r in records):
+        return []
+    return pending_reviewers(records)
 
 
 def _round_records(reviews, number):

@@ -242,7 +242,8 @@ implementation, the PR's head for a fix or a sync). A notice without them, writt
 convenes no conclave. The durable reference of a block is `{kind: "blocked", comment, agent,
 step}`, `comment` being the id of the notice's comment, or, for a review round whose verdict is
 `needs_operator`, `{kind: "review", round, reviewer, head}` of the first `needs_operator` record
-of the round.
+of the round. With `conclave` configured that record suspends the round: it is the block even
+while the receipt of the round still waits for other reviewers.
 
 **The conclave.** One dispatcher comment per block, edited as the conclave goes on, ending with a
 `conclave` marker:
@@ -253,16 +254,17 @@ of the round.
 | `step` | `implement`, `fix` or `review` |
 | `issue`, `issue_hash` | the issue and the hash of its request (title, body and trusted comments, as for the [readiness check](#readiness-check-records)) when the conclave opened |
 | `commit`, `head` | the commit of the block, which every call checks out; on a PR its head when the conclave opened (null on an issue) |
-| `diff_hash` | SHA-256 of the uncommitted changes of the agent that stopped, attached to the prompts |
-| `proposal` | the proposer (`agent`), `state` (`pending`, `started`, `done`, `missing`), `missing` (the reason, when missing), the `resolution` and its `hash`, and the reserved fields (`reserved`, `reserved_reason`, `operator_question`, `options`) |
-| `votes` | the two voters, each with `state`, `missing`, `vote` (`APPROVA`, `BLOCCA`), `reason`, the reserved fields and `proposal_hash`, the hash of the text it voted on |
+| `diff_hash` | SHA-256 of the uncommitted changes of the agent that stopped, attached to the prompts: the tracked files as `git diff`, the new untracked files with their content |
+| `proposal` | the proposer (`agent`), `state` (`pending`, `started`, `done`, `missing`), `missing` (the reason, when missing), the `resolution` and its `hash`, the reserved fields (`reserved`, `reserved_reason`, `operator_question`, `options`) and `profile`, the profile the contribution was given with (identity, kind, model, effort and arguments, a fallback model included; null until it is done) |
+| `votes` | the two voters, each with `state`, `missing`, `vote` (`APPROVA`, `BLOCCA`), `reason`, the reserved fields, `profile` and `proposal_hash`, the hash of the text it voted on |
 | `hash` | SHA-256 of the proposal's text: the content evaluated |
 | `stale` | why the frozen context stopped holding, `""` otherwise |
 | `outcome` | `UNANIMOUS`, `BLOCKED` or `RESERVED`; `""` while the conclave is open |
 
 A record is read back only from the dispatcher's identity and with a valid structure, and it must
-hold together: `hash` is the hash of the recorded text, every vote was given on that hash, and the
-recorded outcome is the one its contributions give. A record that does not hold is logged and
+hold together: `hash` is the hash of the recorded text, every vote was given on that hash, every
+contribution done records its `profile`, the profiles distinct two by two by identity and by
+`(kind, model, effort)`, and the recorded outcome is the one its contributions give. A record that does not hold is logged and
 left to the operator: the block gets no other conclave. Each call is also a ledger `turn` of kind
 `conclave` ([Evidence and telemetry](#evidence-and-telemetry)).
 

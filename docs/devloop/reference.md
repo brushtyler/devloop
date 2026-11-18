@@ -16,7 +16,8 @@ with `--config`. `preflight` (absent by default) names the agent of the
 than the implementer. `conclave` (absent by default) lists the three agents of the
 [conclave on a block](guide.md#conclave-on-a-block) (#141): exactly three configured agents,
 different from each other and with different `(kind, model, effort)`; anything else stops devloop
-at startup. Among the limits, `agent_stall_seconds` (an integer of at least 1, default 900)
+at startup. Their fallback models are checked when each call runs: one whose tuple coincides with
+another member's is not used. Among the limits, `agent_stall_seconds` (an integer of at least 1, default 900)
 and `agent_stall_action` (`"warn"`, the default, or `"abort"`) control the
 [stall check](guide.md#stalled-agents); other values stop devloop at startup. `max_parallel_actions`
 (default 1) sets how many actions of a tick run at once ([Parallel actions](#parallel-actions)).

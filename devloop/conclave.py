@@ -20,6 +20,7 @@ unblocked, and the item stays with the operator.
 import hashlib
 
 from .markdown import dispatcher_header, publishable
+from .policy import independent, valid_profile
 
 UNANIMOUS, BLOCKED, RESERVED = 'UNANIMOUS', 'BLOCKED', 'RESERVED'
 OUTCOMES = (UNANIMOUS, BLOCKED, RESERVED)
@@ -51,8 +52,10 @@ def text_hash(text):
 
 
 def _contribution(agent):
+    # ``profile``: the profile the contribution was actually given with, a fallback model
+    # included, recorded with it; None until then.
     return {'agent': agent, 'state': PENDING, 'missing': '', 'reserved': False,
-            'reserved_reason': '', 'operator_question': '', 'options': []}
+            'reserved_reason': '', 'operator_question': '', 'options': [], 'profile': None}
 
 
 def new_record(block, step, members, issue, issue_hash, commit, head, diff_hash):
@@ -87,16 +90,16 @@ def _reserved_fields(raw):
             else []}
 
 
-def apply_proposal(record, raw):
-    """``record`` with the proposer's schema-valid output ``raw``. A reserved perimeter ends the
-    protocol: no proposal, and the votes are not asked. A proposal without text, or beyond the
-    limits, is a failed contribution."""
+def apply_proposal(record, raw, profile=None):
+    """``record`` with the proposer's schema-valid output ``raw``, given with ``profile``. A
+    reserved perimeter ends the protocol: no proposal, and the votes are not asked. A proposal
+    without text, or beyond the limits, is a failed contribution."""
     proposal = record['proposal']
     why = _too_long(raw, 'resolution', MAX_RESOLUTION)
     if why:
         return missing(record, 'proposal', f'output oltre i limiti: {why}')
     if raw['reserved']:
-        proposal.update(state=DONE, **_reserved_fields(raw))
+        proposal.update(state=DONE, profile=profile, **_reserved_fields(raw))
         for vote in record['votes']:
             vote.update(state=MISSING, missing='non richiesto: il proponente ha segnalato il '
                                                'perimetro riservato all\'operatore')
@@ -104,20 +107,21 @@ def apply_proposal(record, raw):
     text = raw['resolution']
     if not text.strip():
         return missing(record, 'proposal', 'risoluzione vuota')
-    proposal.update(state=DONE, resolution=text, hash=text_hash(text), **_reserved_fields(raw))
+    proposal.update(state=DONE, resolution=text, hash=text_hash(text), profile=profile,
+                    **_reserved_fields(raw))
     record['hash'] = proposal['hash']
     return record
 
 
-def apply_vote(record, index, raw, proposal_hash):
-    """``record`` with the schema-valid vote ``raw`` of voter ``index``, given on the proposal
-    whose hash is ``proposal_hash``."""
+def apply_vote(record, index, raw, proposal_hash, profile=None):
+    """``record`` with the schema-valid vote ``raw`` of voter ``index``, given with ``profile``
+    on the proposal whose hash is ``proposal_hash``."""
     vote = record['votes'][index]
     why = _too_long(raw, 'reason', MAX_TEXT)
     if why:
         return missing(record, index, f'output oltre i limiti: {why}')
     vote.update(state=DONE, vote=raw['vote'], reason=raw['reason'].strip(),
-                proposal_hash=proposal_hash, **_reserved_fields(raw))
+                proposal_hash=proposal_hash, profile=profile, **_reserved_fields(raw))
     return record
 
 
@@ -155,14 +159,17 @@ def settle_started(record):
 
 
 def outcome(record):
-    """The outcome of ``record``, or None while a contribution is still due. ``RESERVED``
-    prevails; then a stale context, a missing proposal, a missing vote or a ``BLOCCA`` give
-    ``BLOCKED``, once every vote is in; two ``APPROVA`` on the proposal give ``UNANIMOUS``."""
+    """The outcome of ``record``, or None while a contribution is still due: after a voter
+    flags the reserved perimeter the other vote is still collected, as after a ``BLOCCA``,
+    since it may write its own question for the operator. Only a proposer that flags it ends
+    the protocol at once (``apply_proposal`` marks the votes missing). Once every contribution
+    is in, ``RESERVED`` prevails; then a stale context, a missing proposal, a missing vote or a
+    ``BLOCCA`` give ``BLOCKED``; two ``APPROVA`` on the proposal give ``UNANIMOUS``."""
     items = [record['proposal'], *record['votes']]
-    if any(item['state'] == DONE and item['reserved'] for item in items):
-        return RESERVED
     if any(item['state'] in (PENDING, STARTED) for item in items):
         return None
+    if any(item['state'] == DONE and item['reserved'] for item in items):
+        return RESERVED
     if record['stale'] or record['proposal']['state'] != DONE:
         return BLOCKED
     if all(v['state'] == DONE and v['vote'] == APPROVE and v['proposal_hash'] == record['hash']
@@ -205,6 +212,7 @@ def _valid_item(item, vote):
             and isinstance(item.get('reserved'), bool)
             and isinstance(item.get('options'), list) and all(map(_is_str, item['options']))
             and (not vote or item['vote'] in ('', APPROVE, BLOCK))
+            and (item.get('profile') is None or valid_profile(item['profile']))
             and (item['state'] != MISSING or bool(item['missing'])))
 
 
@@ -234,8 +242,18 @@ def valid_record(r):
 def consistent(record):
     """Whether ``record`` holds together, as the dispatcher reads it back: the content hash is
     the hash of the proposal's text, every vote was given on that hash, and a recorded outcome
-    is the one its contributions give. Returns ``(ok, why)``."""
+    is the one its contributions give, and every contribution records the profile it was given
+    with, the three distinct by identity and by ``(kind, model, effort)``, fallback models
+    included. Returns ``(ok, why)``."""
     proposal = record['proposal']
+    done = [item for item in [proposal, *record['votes']] if item['state'] == DONE]
+    if any(item['profile'] is None for item in done):
+        return False, 'un contributo non registra il profilo con cui è stato dato'
+    for position, a in enumerate(done):
+        for b in done[position + 1:]:
+            if not independent(a['profile'], b['profile']):
+                return False, (f'`{a["agent"]}` e `{b["agent"]}` hanno contribuito con la stessa '
+                               'identità o la stessa tupla (kind, model, effort)')
     if proposal['state'] == DONE and not proposal['reserved']:
         if record['hash'] != text_hash(proposal['resolution']) or proposal['hash'] != record['hash']:
             return False, 'l\'hash della proposta non corrisponde al suo testo'

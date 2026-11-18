@@ -1301,10 +1301,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 handler(prs.get(action.number) or action.number)
             except (AgentError, GitHubError, WorkspaceError, UntrustedChange) as exc:
                 self.log(f'  failed: {exc}')
-                if action.kind != 'conclave':
-                    self._escalate_failure(action, prs.get(action.number), exc)
-                # A conclave (#141) runs on an item already with the operator: no other
-                # escalation, which would end its block; it resumes from its record.
+                self._escalate_failure(action, prs.get(action.number), exc)
                 return exc
         return None
 
@@ -1381,7 +1378,15 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         """Escalate a failed action. Its class (#182): ``tool_failure`` when the agent or its
         model produced no result (``AgentError``: a crash, a timeout, a stall, an unavailable
         model, a denied permission), ``untrusted`` for an issue text no longer trusted,
-        ``failure`` for anything else (``gh``, git, the dispatcher itself)."""
+        ``failure`` for anything else (``gh``, git, the dispatcher itself).
+
+        A conclave (#141) is never escalated, whatever failed and however it ran
+        (``_run_action``, or ``_run_lane`` for an unexpected error): it runs on an item already
+        with the operator, and another escalation would end its block, leaving a call started
+        without a result unsettled. It resumes from its record on a later tick."""
+        if action.kind == 'conclave':
+            self.log('  conclave: no escalation, it resumes from its record')
+            return
         lb = self.cfg.labels
         reason = f'Il passo `{action.kind}` è fallito: {_failure_text(exc)}{self._log_hint(exc)}'
         cls = (TOOL_FAILURE if isinstance(exc, AgentError)

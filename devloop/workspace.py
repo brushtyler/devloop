@@ -1,6 +1,7 @@
 """Git worktrees for agent work. The main checkout's working tree is never touched."""
 
 import base64
+import hashlib
 import os
 import re
 import shutil
@@ -84,6 +85,38 @@ def run_in_group(argv, *, timeout=None, input=None, watch=None, watch_interval=3
                 pass
             raise
     return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
+# A new file beyond this size is shown in a pending diff by its size and hash only (#141).
+MAX_NEW_FILE = 256 * 1024
+
+
+def _new_file_diff(root, name):
+    """New file ``name`` of worktree ``root``, not tracked, as a diff that adds it (#141): its
+    lines when it is UTF-8 text up to ``MAX_NEW_FILE`` bytes, otherwise its size and sha256;
+    the target of a symbolic link. Deterministic: the same content gives the same text."""
+    path = root / name
+    head = f'diff --git a/{name} b/{name}\nnew file, not tracked\n--- /dev/null\n+++ b/{name}\n'
+    try:
+        if path.is_symlink():
+            return head + f'@@ -0,0 +1 @@\n+{os.readlink(path)}\n\\ symbolic link\n'
+        data = path.read_bytes()
+    except OSError as exc:
+        return head + f'(not readable: {type(exc).__name__})\n'
+    try:
+        text = data.decode('utf-8') if b'\0' not in data and len(data) <= MAX_NEW_FILE else None
+    except UnicodeDecodeError:
+        text = None
+    if text is None:
+        return head + (f'(binary or larger than {MAX_NEW_FILE} bytes: {len(data)} bytes, sha256 '
+                       f'{hashlib.sha256(data).hexdigest()})\n')
+    lines = text.splitlines()
+    if not lines:
+        return head + '(empty)\n'
+    body = ''.join(f'+{line}\n' for line in lines)
+    if not text.endswith(('\n', '\r')):
+        body += '\\ No newline at end of file\n'
+    return head + f'@@ -0,0 +1,{len(lines)} @@\n' + body
 
 
 def git_config_env(pairs):
@@ -235,16 +268,20 @@ class Workspace:
 
     def pending_diff(self, name, commit):
         """What worktree ``name`` holds beyond ``commit`` (#141): ``git diff`` of the tracked
-        files against it, then the new files git does not ignore, by name. ``''`` when the
-        worktree does not exist; nothing is written to it."""
+        files against it, then each new file git does not ignore, in name order, as a diff
+        that adds it with its content (``_new_file_diff``): the members cannot read it in the
+        checkout of the commit, and a change to it changes the diff and its hash. ``''`` when
+        the worktree does not exist; nothing is written to it."""
         path = self.path(name)
         if not path.is_dir():
             return ''
         diff = self._git('diff', '--no-color', commit, cwd=path)
         new = [n for n in self._git('ls-files', '--others', '--exclude-standard', '-z',
                                     cwd=path).split('\0') if n]
-        if new:
-            diff += '\n# New files, not tracked:\n' + '\n'.join(f'#   {n}' for n in sorted(new))
+        for new_name in sorted(new):
+            if diff and not diff.endswith('\n'):
+                diff += '\n'
+            diff += _new_file_diff(path, new_name)
         return diff
 
     def review_copy(self, path, reviewer=None):

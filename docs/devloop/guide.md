@@ -359,9 +359,11 @@ record, a command applied, a passed readiness check, a policy record of no escal
 - the implementer or a fixer that stopped as `blocked` (`Lavoro bloccato`): its notice, written
   with the agent's identity, records the agent, the step, the commit it started from and the
   reason. A sync that stops is not a block of the conclave;
-- a review round whose verdict is `needs_operator`. When several reviewers of the round asked
-  for the operator, the **first** record of the round is the block and its author the proposer:
-  the round opens one conclave.
+- a review round whose verdict is `needs_operator`. With `conclave` configured the **first**
+  `needs_operator` suspends the round: its verdict applies at once, even while the policy receipt
+  still waits for other reviewers, and none of them is asked. When several reviewers of the round
+  asked for the operator, the first record of the round is the block and its author the
+  proposer: the round opens one conclave.
 
 An item in `agent:needs-supervisor` gets none.
 
@@ -370,7 +372,11 @@ effort)`; the configuration refuses fewer or more than three, an unknown agent o
 tuples. The agent that stopped is one of the three and makes the proposal; the other two vote,
 in configuration order. When the agent that stopped is not one of the three, or two of them share
 an identity (without GitHub Apps every agent has the operator's), there is no conclave: the
-escalation stays as it is, and the log says why.
+escalation stays as it is, and the log says why. The three stay distinct on [fallback
+models](reference.md#fallback-models) too: a member may run only on a model whose tuple differs
+from the profile each other member contributed with, as the record keeps it, and from the
+configured one of each member still to be asked. A fallback that would coincide is not used; with
+no model left the contribution fails. Every contribution records the profile it was given with.
 
 **Protocol.** It is finite:
 
@@ -401,7 +407,8 @@ no proposal and no votes.
 - `UNANIMOUS`, with three consents: the proposal and two `APPROVA`;
 - `BLOCKED`, with even one `BLOCCA`, a member that failed or timed out, which counts as `BLOCCA`
   and not as an abstention, or a context that changed. After a first `BLOCCA` or a failure the
-  other vote is still collected, because it may flag the reserved perimeter.
+  other vote is still collected, because it may flag the reserved perimeter; after a first
+  voter's flag of the perimeter too, because it may write its own question for the operator.
 
 Every missing contribution is recorded as `missing`, with its reason.
 
@@ -420,9 +427,12 @@ announces it again) never convene a second conclave, once one is concluded or re
 gets it (title, body and the trusted comments), read when the conclave opens, with its hash, and
 the commit the block started from, in a disposable read-only checkout (`issue-<n>-conclave` or
 `pr-<n>-conclave`) removed after each call. The changes the agent that stopped left uncommitted
-in its worktree are attached to the prompts as a diff, read only. If the PR's head, the hash of
-the issue or that diff changes before the conclusion, the outcome is `BLOCKED`, and the same
-block does not convene it again. A PR whose head is no longer the commit of the block when the
+in its worktree are attached to the prompts as a diff, read only: the tracked files as `git diff`
+against the commit, and each new file git does not ignore with its content (a binary file, or one
+above 256 KiB, by its size and SHA-256). If the PR's head, the hash of the issue or that diff
+changes before the conclusion, the outcome is `BLOCKED` (`RESERVED` still prevails), and the same
+block does not convene it again. The context is read again before each call and once more after
+the last one, before the outcome is published: a change during the last call counts too. A PR whose head is no longer the commit of the block when the
 conclave would open gets a `BLOCKED` conclave at once, without calls.
 
 **Capacity and restarts.** Each call (the proposal and each vote) is one `conclave` action and
@@ -431,8 +441,9 @@ recorded point. Each runs under `agent_timeout_seconds`, in review mode, on the 
 [fallback models](reference.md#fallback-models). No limit or round grows. Before each call the
 record marks it `started`: a call **not started** (no slot, a checkout that failed) runs on a
 later tick; a call **started without a durable result** (a crash after the start) counts as a
-failure, that is `BLOCCA`, and is not repeated. A failed `conclave` action is only logged: the
-item is already the operator's, and no other escalation is added.
+failure, that is `BLOCCA`, and is not repeated. A failed `conclave` action, or one stopped by an
+unexpected error of the dispatcher (with `max_parallel_actions` above 1 too), is only logged: the
+item is already the operator's, and no other escalation is added, which would end the block.
 
 ## Merge modes
 
