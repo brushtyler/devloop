@@ -43,7 +43,9 @@ ops/
 
 - **Parametri.** Leggono `ops/params.env` (o il file di `--params`). I valori finiscono in un
   sudoers e in un'unità systemd, quindi gli script accettano solo forme note (nomi utente, percorsi
-  assoluti senza spazi, `owner/nome`) e si fermano su un valore diverso.
+  assoluti senza spazi, `owner/nome`) e si fermano su un valore diverso. `STATE_DIR` resta
+  `.ssdlc/devloop`: il launcher (`scripts/devloop-pinned`) cerca lì la copia fissata e l'overlay,
+  quindi gli script rifiutano un altro valore.
 - **`--dry-run`.** Stampa ogni azione (`[dry-run] …`) e il contenuto dei file che scriverebbe,
   senza fare nulla. Le verifiche in sola lettura (un utente esiste, una directory ha già il modo
   giusto) si fanno lo stesso, così l'elenco mostra solo ciò che manca.
@@ -107,11 +109,48 @@ proprietario del repository (`GITHUB_OWNER_TYPE=org` per un'organizzazione). Per
 
 1. **Crea**: GitHub mostra la pagina di creazione già compilata dal manifest; confermare. Se il
    nome è già usato, l'app esiste già: saltarla. Dopo la creazione GitHub torna alla pagina del
-   repository con un parametro `code`: non serve, l'app è già creata.
-2. **Installa**: *Install App* → *Only select repositories* → solo il repository gestito.
-3. **Chiave privata**: *Generate a private key*. Il file scaricato, `<slug>.<data>.private-key.pem`,
-   va nella `key_dir` dell'utente che usa l'app (passo 4), mode 600, e poi tolto dai Download.
-4. **Configurazione**: `app_id` e `slug` (non segreti) in `[apps]` di `devloop/config.toml`, con
+   repository (il `redirect_url` del manifest) con un parametro `code` nell'indirizzo:
+   `https://github.com/<repo>?code=<code>`.
+2. **Completa lo scambio del `code`**, entro un'ora: il flusso manifest finisce solo con
+   `POST /app-manifests/<code>/conversions`
+   ([documentazione GitHub](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest#3-you-exchange-the-temporary-code-to-retrieve-the-app-configuration)).
+   Il `code` vale una volta sola. La risposta contiene **segreti** (`pem`, la chiave privata, e i
+   segreti OAuth del client e del webhook): va scritta solo in una directory privata, mai stampata,
+   mai copiata in issue, PR, log o nel repository. Dalla risposta servono soltanto `id`, `slug` e
+   `pem`; il resto si cancella. Come utente con `sudo`, sulla macchina dove andrà la chiave:
+
+   ```bash
+   CODE='<code>'                                   # dall'indirizzo del passo 1
+   work=$(mktemp -d)                               # mode 700
+   ( umask 077
+     curl -fsS -X POST -H 'Accept: application/vnd.github+json' \
+         -o "$work/app.json" "https://api.github.com/app-manifests/$CODE/conversions"
+     python3 - "$work" <<'EOF'
+   import datetime, json, os, sys
+   work = sys.argv[1]
+   app = json.load(open(os.path.join(work, 'app.json')))
+   name = f"{app['slug']}.{datetime.date.today()}.private-key.pem"
+   with open(os.path.join(work, name), 'x') as f:
+       f.write(app['pem'])
+   print(f"app_id = {app['id']}  slug = {app['slug']}  chiave: {name}")
+   EOF
+   )
+   ```
+
+   Lo `slug` stampato deve essere `<APP_PREFIX><ruolo>`. La chiave
+   `$work/<slug>.<data>.private-key.pem` va nella `key_dir` dell'utente che usa l'app (sezioni 4 e
+   7 di questa guida), mode 600, per esempio
+   `sudo install -o devloop -g devloop -m 600 "$work"/*.private-key.pem /home/devloop/.ghapps/`;
+   poi `rm -rf "$work"`, che cancella anche `app.json` con gli altri segreti. L'endpoint non chiede
+   autenticazione: non serve nessun token. Se il `code` è scaduto o già usato (risposta 404 o 422)
+   e l'app risulta creata, la chiave si genera dalle sue impostazioni (punto 4).
+3. **Installa**, solo dopo lo scambio: *Install App* → *Only select repositories* → solo il
+   repository gestito.
+4. **Chiave privata**: quella del punto 2. Solo se manca (scambio non riuscito, chiave persa o da
+   ruotare): *Generate a private key* nelle impostazioni dell'app; il file scaricato,
+   `<slug>.<data>.private-key.pem`, va nella `key_dir` dell'utente che usa l'app (sezioni 4 e 7),
+   mode 600, e poi tolto dai Download. Le chiavi che non servono più si revocano lì.
+5. **Configurazione**: `app_id` e `slug` (non segreti) in `[apps]` di `devloop/config.toml`, con
    una PR. Le app `implementer` e `supervisor` non sono ancora in `[apps]`: si creano quando
    servono (ADR 0005, P5-4).
 

@@ -164,6 +164,17 @@ class LayoutTests(unittest.TestCase):
                        'memory', 'devloop pin', 'mai due dispatcher attivi', 'systemctl stop'):
             self.assertIn(phrase, migrate)
 
+    def test_the_guide_completes_the_manifest_flow_before_the_installation(self):
+        # The manifest flow ends with the exchange of the code (POST /app-manifests/<code>/
+        # conversions, within an hour); its answer holds the private key, which goes to key_dir.
+        guide = ' '.join((OPS / 'README.md').read_text().split())
+        exchange = guide.index('https://api.github.com/app-manifests/$CODE/conversions')
+        self.assertIn('entro un\'ora', guide)
+        self.assertIn('umask 077', guide)
+        self.assertIn('rm -rf "$work"', guide)
+        self.assertLess(exchange, guide.index('*Install App*'))
+        self.assertNotIn('non serve, l\'app è già creata', guide)
+
     def test_the_devloop_guide_links_the_ops_guide(self):
         self.assertIn('(../../ops/README.md)', (ROOT / 'docs/devloop/guide.md').read_text())
 
@@ -397,6 +408,7 @@ class DryRunTests(OpsTestCase):
                              manifest(data['name'][len(PREFIX):])['default_permissions'])
         self.assertEqual(sorted(names), sorted(PREFIX + role for role in REQUIRED))
         self.assertIn('action="https://github.com/settings/apps/new"', text)
+        self.assertIn('POST /app-manifests/&lt;code&gt;/conversions', text)
         self.assertEqual(self.mutating_calls(), [])
 
     def test_another_platform_warns_and_goes_on_in_dry_run(self):
@@ -423,11 +435,81 @@ class DryRunTests(OpsTestCase):
         self.assertIn('SUPERVISOR_USER non è un nome utente valido', done.stderr)
         self.assertEqual(self.mutating_calls(), [])
 
+    def test_another_state_dir_is_refused(self):
+        # scripts/devloop-pinned looks for the pinned copy and the overlay in .ssdlc/devloop only:
+        # setup and check refuse another state_dir instead of preparing one the launcher ignores.
+        for script in ('host/setup-devloop.sh', 'host/setup-supervisor.sh', 'host/check-host.sh'):
+            done = self.run_script(script, '--dry-run', '--params',
+                                   str(self.params(STATE_DIR='custom-state')))
+            self.assertNotEqual(done.returncode, 0, script)
+            self.assertIn('STATE_DIR non è configurabile', done.stderr, script)
+            self.assertIn('.ssdlc/devloop', done.stderr, script)
+        self.assertEqual(self.mutating_calls(), [])
+
     def test_a_missing_params_file_is_explained(self):
         done = self.run_script('host/check-host.sh', '--dry-run', '--params',
                                str(self.tmp / 'missing.env'))
         self.assertNotEqual(done.returncode, 0)
         self.assertIn('params.env.example', done.stderr)
+
+
+@unittest.skipIf(BASH is None, 'bash is not installed')
+class PutFileTests(unittest.TestCase):
+    """put_file of ops/lib.sh, called the way the scripts call it: in an `if` or with `|| true`,
+    where bash does not apply errexit to the function's body."""
+
+    SCRIPT = '''
+. "$OPS_LIB"
+DRY_RUN=0
+if put_file "$1" 644 "$2" contenuto; then echo scritto; else echo aggiornato; fi
+put_file "$1" 644 "$2" contenuto || true
+echo dopo
+'''
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='ops-put-file-'))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def put_file(self, dest):
+        env = dict(os.environ, OPS_LIB=str(OPS / 'lib.sh'), LC_ALL='C.UTF-8')
+        return subprocess.run([BASH, '-c', self.SCRIPT, 'put-file-test', str(dest), ME],
+                              capture_output=True, text=True, env=env, timeout=60)
+
+    def test_a_new_file_is_written_and_a_rerun_leaves_it(self):
+        dest = self.tmp / 'unit.service'
+        done = self.put_file(dest)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(dest.read_text(), 'contenuto\n')
+        self.assertEqual(oct(dest.stat().st_mode & 0o777), oct(0o644))
+        self.assertIn('scritto\n', done.stdout)
+        self.assertIn('è già aggiornato', done.stdout)
+        self.assertIn('dopo', done.stdout)
+        done = self.put_file(dest)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn('aggiornato\n', done.stdout)
+        self.assertNotIn('scritto\n', done.stdout)
+
+    def test_a_failed_install_stops_the_script(self):
+        # The parent directory is missing: install fails, and the script stops right there
+        # instead of reporting the file as written.
+        dest = self.tmp / 'missing' / 'sudoers.d' / 'devloop-supervisor'
+        done = self.put_file(dest)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn(f'install non riesce a scrivere {dest}', done.stderr)
+        self.assertNotIn('scritto', done.stdout)
+        self.assertNotIn('dopo', done.stdout)
+        self.assertFalse(dest.exists())
+
+    def test_an_unknown_owner_stops_the_script(self):
+        dest = self.tmp / 'unit.service'
+        env = dict(os.environ, OPS_LIB=str(OPS / 'lib.sh'), LC_ALL='C.UTF-8')
+        done = subprocess.run([BASH, '-c', self.SCRIPT, 'put-file-test', str(dest),
+                               'opsdry-nouser'], capture_output=True, text=True, env=env,
+                              timeout=60)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("l'utente opsdry-nouser non esiste", done.stderr)
+        self.assertNotIn('dopo', done.stdout)
+        self.assertFalse(dest.exists())
 
 
 class CheckHostTests(OpsTestCase):

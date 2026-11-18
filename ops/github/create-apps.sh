@@ -2,8 +2,9 @@
 # Genera una pagina HTML locale con un pulsante per ciascuna GitHub App: il pulsante invia a
 # GitHub il manifest dell'app (ops/github/apps/<ruolo>.json, flusso "manifest"), con il nome
 # <APP_PREFIX><ruolo> e gli URL del repository di params.env. GitHub mostra la pagina di
-# creazione già compilata; l'operatore conferma, poi installa l'app solo sul repository e ne
-# genera la chiave privata (ops/README.md).
+# creazione già compilata; l'operatore conferma, completa entro un'ora lo scambio del `code`
+# (POST /app-manifests/<code>/conversions, che restituisce la chiave privata), poi installa l'app
+# solo sul repository (ops/README.md).
 #
 # Lo script non chiama GitHub, non legge e non scrive segreti: scrive solo la pagina HTML.
 # Idempotente: rieseguito, riscrive la stessa pagina.
@@ -73,9 +74,11 @@ print(f'''<!doctype html>
 <head><meta charset="utf-8"><title>GitHub App di devloop per {html.escape(repo)}</title></head>
 <body>
 <h1>GitHub App di devloop per {html.escape(repo)}</h1>
-<p>Un pulsante per app. Dopo la creazione: <em>Install App</em>, <em>Only select repositories</em>,
-solo {html.escape(repo)}; poi <em>Generate a private key</em> e copia della chiave in key_dir
-(mode 600). Vedi ops/README.md.</p>
+<p>Un pulsante per app. Dopo la creazione GitHub torna al repository con un parametro
+<code>code</code> nell'indirizzo: entro un'ora completare lo scambio
+<code>POST /app-manifests/&lt;code&gt;/conversions</code> come descritto in ops/README.md (la risposta
+contiene la chiave privata: va in key_dir, mode 600, mai stampata). Poi <em>Install App</em>,
+<em>Only select repositories</em>, solo {html.escape(repo)}.</p>
 {chr(10).join(forms)}
 </body>
 </html>''')

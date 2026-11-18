@@ -23,6 +23,9 @@ VERIFIED_ID=ubuntu
 VERIFIED_VERSION=26.04
 VERIFIED_ARCH=aarch64
 
+# Lo state_dir di devloop, relativo al clone: quello che scripts/devloop-pinned usa sempre.
+OPS_STATE_DIR=.ssdlc/devloop
+
 # I segnaposto @NOME@ che `render` sostituisce nei file dichiarativi (unità, sudoers).
 OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER DEVLOOP_HOME DEVLOOP_CLONE STATE_DIR DEVLOOP_PATH SERVICE_NAME'
 
@@ -86,7 +89,7 @@ ops_load_params() {
     : "${SUPERVISOR_HOME:=/home/$SUPERVISOR_USER}"
     : "${DEVLOOP_CLONE:=$DEVLOOP_HOME/${REPO#*/}}"
     : "${SUPERVISOR_CLONE:=$SUPERVISOR_HOME/${REPO#*/}}"
-    : "${STATE_DIR:=.ssdlc/devloop}"
+    : "${STATE_DIR:=$OPS_STATE_DIR}"
     : "${DEVLOOP_KEY_DIR:=$DEVLOOP_HOME/.ghapps}"
     : "${SUPERVISOR_KEY_DIR:=$SUPERVISOR_HOME/.ghapps}"
     : "${DEVLOOP_KEYS:=dispatcher merger claude-agent codex-agent agy-agent}"
@@ -101,8 +104,11 @@ ops_load_params() {
     [[ $APP_PREFIX =~ ^[a-z0-9-]*$ ]] || die "APP_PREFIX ammette solo minuscole, cifre e '-': '$APP_PREFIX'"
     [[ $DEFAULT_BRANCH =~ ^[A-Za-z0-9._/-]+$ ]] || die "DEFAULT_BRANCH non valido: '$DEFAULT_BRANCH'"
     [[ $GITHUB_OWNER_TYPE =~ ^(user|org)$ ]] || die "GITHUB_OWNER_TYPE deve essere user o org"
-    [[ $STATE_DIR =~ ^[A-Za-z0-9._][A-Za-z0-9._/-]*$ && $STATE_DIR != *..* ]] \
-        || die "STATE_DIR deve essere relativo al clone: '$STATE_DIR'"
+    # scripts/devloop-pinned cerca la copia fissata (current) e l'overlay sempre in
+    # .ssdlc/devloop del clone: un altro STATE_DIR preparerebbe log e overlay dove il launcher
+    # non li legge, e il servizio non partirebbe.
+    [ "$STATE_DIR" = "$OPS_STATE_DIR" ] \
+        || die "STATE_DIR non è configurabile: scripts/devloop-pinned usa sempre $OPS_STATE_DIR (valore: '$STATE_DIR')"
     [[ $SERVICE_NAME =~ ^[A-Za-z0-9_-]+$ ]] || die "SERVICE_NAME non valido: '$SERVICE_NAME'"
     [[ $DEVLOOP_PATH =~ ^[A-Za-z0-9._/:-]+$ ]] || die "DEVLOOP_PATH non valido: '$DEVLOOP_PATH'"
     [[ $(basename "$SUDOERS_FILE") =~ ^[A-Za-z0-9_-]+$ ]] \
@@ -145,8 +151,10 @@ user_exists() { id -u "$1" >/dev/null 2>&1; }
 
 # put_file DEST MODE OWNER CONTENUTO: scrive DEST solo se il contenuto è diverso. Con --dry-run
 # stampa il contenuto che scriverebbe. Torna 0 se ha scritto (o scriverebbe), 1 se era già così.
+# Se non riesce a scrivere ferma lo script con die: si chiama dentro `if` o con `|| true`, dove
+# bash non applica errexit al corpo della funzione, quindi ogni errore va gestito qui.
 put_file() {
-    local dest=$1 mode=$2 owner=$3 content=$4 group
+    local dest=$1 mode=$2 owner=$3 content=$4 group tmp
     if [ -f "$dest" ] && cmp -s "$dest" <(printf '%s\n' "$content"); then
         ok "$dest è già aggiornato"
         return 1
@@ -156,12 +164,18 @@ put_file() {
         printf '%s\n' "$content" | sed 's/^/    | /'
         return 0
     fi
-    group=$(id -gn "$owner")
-    local tmp
-    tmp=$(mktemp)
-    printf '%s\n' "$content" >"$tmp"
-    run install -m "$mode" -o "$owner" -g "$group" "$tmp" "$dest"
+    group=$(id -gn "$owner") || die "non scrivo $dest: l'utente $owner non esiste"
+    tmp=$(mktemp) || die "non scrivo $dest: mktemp non riesce"
+    if ! printf '%s\n' "$content" >"$tmp"; then
+        rm -f "$tmp"
+        die "non scrivo $dest: non riesco a preparare il file temporaneo"
+    fi
+    if ! run install -m "$mode" -o "$owner" -g "$group" "$tmp" "$dest"; then
+        rm -f "$tmp"
+        die "install non riesce a scrivere $dest: setup interrotto"
+    fi
     rm -f "$tmp"
+    return 0
 }
 
 # Una directory DIR di OWNER con MODE: la crea, o ne corregge modo e proprietario.
