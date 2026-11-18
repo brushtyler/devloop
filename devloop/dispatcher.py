@@ -73,7 +73,8 @@ Advisory review (#369, with ``review_policy.advisory_reviewer``): a devloop PR i
 agent:needs-operator gets, once per head, one ``advisory`` action: a read-only turn of that agent,
 published as a native ``COMMENT`` review with its identity, and the dispatcher's summary with the
 opinion, also added to the current receipt of the same head. No round, no finding, no label, no
-promotion; a failure is never escalated (``dispatch_advisory``).
+promotion; a failure is never escalated, and a publication left halfway resumes on a later tick
+without a new turn (``dispatch_advisory``).
 
 Start order (#146): ready issues start by priority (``priority:high``, ``normal``, ``low``; a
 ``priority_labels`` label counts as high), then by the oldest current ``agent:ready``, then by
@@ -184,7 +185,7 @@ from .context import (LABEL_STYLE, _describe_bases, _failure_text, _open_finding
                       _render_issue_comments, both_labels_warning, label_transition,
                       transition_labels)
 from .dispatch_actions import ActionsMixin, Models, ready_approval, rerun_of
-from .dispatch_advisory import AdvisoryMixin
+from .dispatch_advisory import AdvisoryMixin, AdvisoryResults
 from .dispatch_conclave import ConclaveMixin
 from .dispatch_merge import MergeMixin
 from .dispatch_preflight import PreflightMixin
@@ -525,7 +526,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
     status``. ``ledger`` (``ledger.Ledger``) records evidence and telemetry of each step (#133)."""
 
     def __init__(self, cfg, gh: Backend, ws, runner, log=print, identities=None, activity=None,
-                 ledger=None, merger=None, pinner=None, memory=None, clock=time.time):
+                 ledger=None, merger=None, pinner=None, memory=None, clock=time.time,
+                 advisory_results=None):
         self.cfg = cfg
         # Wall-clock seconds, and since when each head waits for its CI (#263): the time of
         # the dispatcher's own push, else its commit date, read once.
@@ -548,6 +550,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         # The models found unavailable (``unavailability.Memory``, #151), or None: every turn
         # starts from the configured model.
         self.memory = memory
+        # The advisory turns run and not yet published (#369, ``AdvisoryResults``): in
+        # ``state_dir`` from ``devloop``, in memory without it.
+        self.advisory_results = (advisory_results if advisory_results is not None
+                                 else AdvisoryResults())
         # Continuous mode (#227): set by ``devloop run`` with parallel actions, a tick starts
         # its actions in these ``Workers`` and does not wait for them.
         self.workers = None

@@ -16,6 +16,7 @@ from .agents import AgentRunner, isolated_env
 from .apps import DISPATCHER, MERGER, Identities
 from .config import ConfigError, Reloader, load_config
 from .context import both_labels_warning, label_transition
+from .dispatch_advisory import AdvisoryResults
 from .dispatcher import (Dispatcher, TickLog, Workers, ensure_labels, pr_counts_line,
                          pr_status_line)
 from .github import GitHub, GitHubError
@@ -117,7 +118,8 @@ def build(args):
                             merger=identities.merger(),
                             pinner=pin.AutoPin(root, state, args.local_config, log=tick_log,
                                                fetch_lock=ws.shared_lock),
-                            memory=unavailability.Memory(state))
+                            memory=unavailability.Memory(state),
+                            advisory_results=AdvisoryResults(state))
     return cfg, state, dispatcher
 
 

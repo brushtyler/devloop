@@ -826,16 +826,22 @@ quorum anyway.
   the issue, the PR, its changed files and the reviews of the quorum, and the schema
   [`devloop/schemas/advisory.json`](../../devloop/schemas/advisory.json): a summary of the PR,
   the residual risks, what the operator should look at, points the reviewers of the quorum may
-  have missed, and a non-binding opinion (`ok`, `dubbi`, `contrario`). A head that already has
-  one never gets another, even when its turn failed; a new head gets its own while the PR is
-  still in `agent:needs-operator`. When the labels or the head change before the turn ends,
-  nothing is published.
+  have missed, and a non-binding opinion (`ok`, `dubbi`, `contrario`). A head gets one turn,
+  even when it failed or its publication did; a new head gets its own while the PR is still in
+  `agent:needs-operator`. The PR is read again before the turn and after it: when it is no
+  longer open, its head moved, or it left `agent:needs-operator` or went to
+  `agent:needs-supervisor` before the turn ended, nothing is published.
+- **Publication.** The result of the turn is kept in `<state_dir>/advisory-results.json` before
+  anything is published. The native review comes first, then the receipt, then the dispatcher's
+  summary, last: a head is done once it has that summary. When a write fails, a later tick
+  publishes what is missing from the kept result, or from the native review already published,
+  without a new turn; a PR back to the operator on the same head gets the result kept for it.
 - **Where.** A native GitHub review of type `COMMENT` on the head, never `APPROVE` nor
   `REQUEST_CHANGES` (GitHub accepts a `COMMENT` from the PR's author too), with the agent's
-  identity and the title "Review consultiva: non conta per il quorum". The dispatcher then writes
-  its summary for the operator ("Review consultiva per l'operatore"), with the agent and the
-  opinion only, and adds the opinion to the current [receipt](protocol.md#pr-receipt) of the same
-  head, if any. A failed turn gets only the summary, which says so.
+  identity and the title "Review consultiva: non conta per il quorum". The dispatcher then adds
+  the opinion to the current [receipt](protocol.md#pr-receipt) of the same head, if any, and
+  writes its summary for the operator ("Review consultiva per l'operatore"), with the agent and
+  the opinion only. A failed turn gets only the summary, which says so.
 - **No effect.** It opens no round and does not count against `max_review_rounds`, creates no
   finding, changes no label and no promotion; devloop reads it only to know whether a head
   already has one and to show its opinion, never to decide. A failed action is never escalated:

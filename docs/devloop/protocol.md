@@ -506,8 +506,10 @@ never part of the PR's conversation as the review records see it, so it is no ro
 and no finding. The dispatcher's summary of it ("Review consultiva per l'operatore") ends with
 an `advisory` marker too, with the same fields, or `outcome: failed` and `opinion: null` when
 the turn failed: only the dispatcher's identity writes it, and it carries no text of the agent.
-A head has its advisory review once it has that summary, or a published native review with an
-`advisory` marker of that head written by the identity of the configured agent.
+A head has its advisory review once it has that summary, written last. A published native
+review with an `advisory` marker of that head, written by the identity of the configured agent,
+stands for its turn: a head that has it without the summary gets the summary, and the receipt,
+without a new turn.
 
 **Compatibility.** The review comments published before #325 stay records, read with the same
 rules as before: a PR opened during the change, with rounds of both forms, keeps every round and
@@ -950,5 +952,7 @@ digest and totals (with the `advisory` turn) recomputed from the ledger, while p
 policy record and state stay, and so does the text before the receipt's title. A superseded
 receipt, or one of another head, is left as it is. Without a current receipt the opinion stays in
 the dispatcher's summary, and a later receipt of the same head carries it; no promotion is
-written for it. A receipt that cannot hold the section, or an edit that fails, is logged: the
-summary already tells the operator.
+written for it. The receipt is edited before the dispatcher's summary: an edit that fails leaves
+the summary unwritten, and a later tick edits the receipt again, then writes the summary,
+without a new turn. A receipt that cannot hold the section is logged and left as it is: the
+summary tells the operator.

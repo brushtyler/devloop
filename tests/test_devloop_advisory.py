@@ -5,6 +5,7 @@ is published and that it changes nothing devloop decides on."""
 
 import dataclasses
 import sys
+import tempfile
 import tomllib
 import unittest
 from pathlib import Path
@@ -15,7 +16,8 @@ if _TESTS_DIR not in sys.path:
 
 from devloop import config, markdown, receipt  # noqa: E402
 from devloop.agents import AgentError  # noqa: E402
-from devloop.dispatch_advisory import ADVISORY_TITLE, normalize_advisory  # noqa: E402
+from devloop.dispatch_advisory import (ADVISORY_TITLE, AdvisoryResults,  # noqa: E402
+                                       normalize_advisory)
 from devloop.dispatcher import Dispatcher  # noqa: E402
 from devloop.github import GitHubError  # noqa: E402
 from devloop.ledger import Ledger  # noqa: E402
@@ -57,6 +59,10 @@ class OperatorGH(ThreadGH):
     def __init__(self, head=SHA1):
         super().__init__(head=head)
         self.review_reads = 0
+        self.state = 'OPEN'
+
+    def pr_state(self, number):
+        return dict(super().pr_state(number), state=self.state)
 
     def open_prs(self):
         return [{'number': 100, 'title': 't', 'body': markdown.publishable('b', 'pr', META),
@@ -73,6 +79,27 @@ class OperatorGH(ThreadGH):
 def records(gh, kind, number=100):
     return [(c, r) for c in gh.thread.get(number, [])
             if (r := markdown.read_marker(c['body'], kind)) is not None]
+
+
+def no_summary(gh):
+    """Make the dispatcher's advisory summary fail on ``gh`` (HTTP 502); returns the method to
+    put back."""
+    comment = gh.comment
+
+    def broken(number, body):
+        if markdown.read_marker(body, 'advisory') is not None:
+            raise GitHubError('HTTP 502')
+        return comment(number, body)
+    gh.comment = broken
+    return comment
+
+
+def advisory_reviews(gh):
+    return [r for _, r in gh.native if markdown.read_marker(r['body'], 'advisory')]
+
+
+def advisory_turns(runner):
+    return [call for call in runner.calls if call[2] == 'advisory']
 
 
 class Base(unittest.TestCase):
@@ -175,15 +202,48 @@ class AdvisoryTests(Base):
         self.assertEqual(len(self.runner.calls), 2)
         self.assertEqual([r['commit'] for _, r in self.gh.native], [SHA1, SHA2])
 
-    def test_a_native_review_without_its_summary_still_counts_for_its_head(self):
-        self.make(answer())
+    def test_a_native_review_without_its_summary_gets_it_without_a_new_turn(self):
+        self.make(answer(), answer('ok'))
+        comment = no_summary(self.gh)
         self.tick()
-        # The summary lost after the review: the review alone holds the head.
-        self.gh.thread[100] = []
-        self.assertTrue(self.d._advisory_done(100, SHA1, IMPL))
+        # The review is published, its summary failed: the head is not done yet.
+        self.assertEqual(len(self.gh.native), 1)
+        self.assertEqual(records(self.gh, 'advisory'), [])
+        self.assertFalse(self.d._advisory_done(100, SHA1))
+        self.assertEqual(self.gh.labels[100], {NEEDS_OPERATOR})
+        # Even without the kept result (a restart without state_dir), the native review stands
+        # for the turn: the next tick writes the summary from it, without a new turn.
+        self.gh.comment = comment
+        self.d.advisory_results = AdvisoryResults()
+        snap, _ = self.tick()
+        self.assertEqual(snap.advisories, [{'number': 100, 'head': SHA1}])
+        self.assertEqual(len(self.runner.calls), 1)
+        self.assertEqual(len(self.gh.native), 1)
+        ((_, record),) = records(self.gh, 'advisory')
+        self.assertEqual(record, {'head': SHA1, 'reviewer': IMPL, 'outcome': 'done',
+                                  'opinion': 'dubbi'})
+        snap, _ = self.tick()
+        self.assertEqual(snap.advisories, [])
+        self.assertEqual(len(self.runner.calls), 1)
         # Only the configured agent's identity counts.
         self.gh.native = [(n, dict(r, login=LOGINS[REV])) for n, r in self.gh.native]
-        self.assertFalse(self.d._advisory_done(100, SHA1, IMPL))
+        self.assertIsNone(self.d._advisory_published(100, SHA1, IMPL))
+
+    def test_a_kept_result_is_published_without_a_new_turn(self):
+        # The summary of a failed turn fails too: the next tick writes it, with no turn.
+        self.make(AgentError('timeout after 600s'), answer())
+        comment = no_summary(self.gh)
+        self.tick()
+        self.assertEqual(records(self.gh, 'advisory'), [])
+        self.gh.comment = comment
+        self.tick()
+        self.assertEqual(len(self.runner.calls), 1)
+        self.assertEqual(self.gh.native, [])
+        ((comment, record),) = records(self.gh, 'advisory')
+        self.assertEqual(record['outcome'], 'failed')
+        self.assertIn('timeout after 600s', comment['body'])
+        # Once written, the kept result is forgotten.
+        self.assertIsNone(self.d.advisory_results.get(100, SHA1, IMPL))
 
     def test_no_round_no_finding_no_label_no_promotion(self):
         self.make(answer('contrario'), labels=(NEEDS_OPERATOR, READY))
@@ -232,32 +292,90 @@ class AdvisoryTests(Base):
         def broken(*args, **kw):
             raise GitHubError('HTTP 502')
         self.gh.submit_review = broken
-        self.tick()
+        # However many ticks GitHub fails, the head gets one turn: only the publication is
+        # tried again.
+        for _ in range(3):
+            self.tick()
+        self.assertEqual(len(self.runner.calls), 1)
         self.assertEqual(self.gh.thread.get(100, []), [])
         self.assertEqual(self.gh.labels[100], {NEEDS_OPERATOR})
         self.gh.submit_review = submit
         self.tick()
+        self.assertEqual(len(self.runner.calls), 1)
         self.assertEqual(len(self.gh.native), 1)
         self.assertEqual(len(records(self.gh, 'advisory')), 1)
+        # The native review published later is the one the turn wrote.
+        self.assertIn(ADVISORY_TITLE, self.gh.native[0][1]['body'])
+        self.assertIn('La chiave non è validata.', self.gh.native[0][1]['body'])
+
+    def during_the_turn(self, change):
+        """Run ``change`` while the agent's turn runs."""
+        run = self.runner.run
+
+        def changing(*args):
+            change()
+            return run(*args)
+        self.runner.run = changing
 
     def test_labels_or_head_changed_publish_nothing(self):
         self.make(answer())
         snap = self.d.snapshot()
+        # Before the turn: labels changed, or the PR closed.
         self.gh.labels[100] = {'agent:review'}
         self.d._do_advisory(snap.prs[0])
-        self.assertEqual(self.runner.calls, [])
-        # The head moves during the turn: the review of the old head is not published.
         self.gh.labels[100] = {NEEDS_OPERATOR}
-        run = self.runner.run
-
-        def moving(*args):
-            self.gh.head = SHA2
-            return run(*args)
-        self.runner.run = moving
+        self.gh.state = 'CLOSED'
+        self.d._do_advisory(snap.prs[0])
+        self.assertEqual(self.runner.calls, [])
+        self.gh.state = 'OPEN'
+        # The head moves during the turn: the review of the old head is not published.
+        self.during_the_turn(lambda: setattr(self.gh, 'head', SHA2))
         self.d._do_advisory(snap.prs[0])
         self.assertEqual(len(self.runner.calls), 1)
         self.assertEqual(self.gh.native, [])
         self.assertEqual(records(self.gh, 'advisory'), [])
+
+    def test_labels_changed_or_pr_closed_during_the_turn_publish_nothing(self):
+        changes = {
+            'supervisor': lambda gh: gh.labels[100].add('agent:needs-supervisor'),
+            'review': lambda gh: gh.labels.__setitem__(100, {'agent:review'}),
+            'closed': lambda gh: setattr(gh, 'state', 'CLOSED'),
+            'merged': lambda gh: setattr(gh, 'state', 'MERGED'),
+        }
+        for name, change in changes.items():
+            with self.subTest(change=name):
+                self.make(answer(), answer())
+                snap = self.d.snapshot()
+                self.during_the_turn(lambda: change(self.gh))
+                self.d._do_advisory(snap.prs[0])
+                self.assertEqual(len(self.runner.calls), 1)
+                self.assertEqual(self.gh.native, [])
+                self.assertEqual(records(self.gh, 'advisory'), [])
+        # Back to the operator on the same head, the kept result is published: no new turn.
+        self.gh.labels[100] = {NEEDS_OPERATOR}
+        self.gh.state = 'OPEN'
+        self.tick()
+        self.assertEqual(len(self.runner.calls), 1)
+        self.assertEqual(len(self.gh.native), 1)
+        self.assertEqual(len(records(self.gh, 'advisory')), 1)
+
+    def test_the_kept_results_survive_a_restart(self):
+        with tempfile.TemporaryDirectory() as state:
+            kept = {'head': SHA1, 'reviewer': IMPL, 'advisory': normalize_advisory(answer()),
+                    'error': '', 'header': 'h'}
+            AdvisoryResults(state).put(100, kept)
+            results = AdvisoryResults(state)
+            self.assertEqual(results.get(100, SHA1, IMPL), kept)
+            # Another head, another agent: nothing kept for them.
+            self.assertIsNone(results.get(100, SHA2, IMPL))
+            self.assertIsNone(results.get(100, SHA1, REV))
+            results.drop(100)
+            self.assertIsNone(AdvisoryResults(state).get(100, SHA1, IMPL))
+            # A file that is not valid counts as empty.
+            (Path(state) / AdvisoryResults.FILE).write_text('{not json')
+            self.assertIsNone(AdvisoryResults(state).get(100, SHA1, IMPL))
+            AdvisoryResults(state).put(100, dict(kept, advisory={'opinion': 'forse'}))
+            self.assertIsNone(AdvisoryResults(state).get(100, SHA1, IMPL))
 
     def test_the_answer_needs_a_valid_opinion(self):
         self.assertEqual(normalize_advisory(answer('ok'))['opinion'], 'ok')
@@ -297,6 +415,48 @@ class ReceiptTests(unittest.TestCase):
                          after['body'].split('## Ricevuta della PR #100')[0])
         # The summary for the operator is there too, and the labels stay.
         self.assertEqual(len(records(gh, 'advisory')), 1)
+        self.assertEqual(gh.labels[100], {READY, NEEDS_OPERATOR})
+
+    def test_a_partial_publication_completes_receipt_and_summary_without_a_new_turn(self):
+        gh = ReceiptGH()
+        gh.labels[100] = {'agent:review'}
+        runner = FakeRunner(raw_review(), answer('ok'), answer('contrario'))
+        d = Dispatcher(ON, gh, AdvisoryWS(), runner, log=lambda m: None, ledger=Ledger(gh))
+        d.tick()
+        d.tick()
+        ((before, old),) = receipts(gh)
+        edit = gh.edit_comment
+
+        def broken(comment_id, body):
+            if comment_id == before['id']:
+                raise GitHubError('HTTP 502')
+            return edit(comment_id, body)
+        # The receipt's edit fails after the native review: no summary yet.
+        gh.edit_comment = broken
+        d.tick()
+        self.assertEqual(len(advisory_turns(runner)), 1)
+        self.assertEqual(len(advisory_reviews(gh)), 1)
+        self.assertEqual(records(gh, 'advisory'), [])
+        self.assertEqual(receipts(gh)[0][1]['digest'], old['digest'])
+        # Then the summary fails, after the receipt.
+        gh.edit_comment = edit
+        comment = no_summary(gh)
+        d.tick()
+        self.assertEqual(records(gh, 'advisory'), [])
+        ((after, new),) = receipts(gh)
+        self.assertIn('### Review consultiva', after['body'])
+        self.assertNotEqual(new['digest'], old['digest'])
+        # The next tick writes the summary: the receipt and the opinion stay those of the one
+        # turn of the head.
+        gh.comment = comment
+        d.tick()
+        self.assertEqual(len(advisory_turns(runner)), 1)
+        self.assertEqual(len(advisory_reviews(gh)), 1)
+        ((_, record),) = records(gh, 'advisory')
+        self.assertEqual(record['opinion'], 'ok')
+        ((after, last),) = receipts(gh)
+        self.assertIn('**ok**', after['body'])
+        self.assertEqual(last['digest'], new['digest'])
         self.assertEqual(gh.labels[100], {READY, NEEDS_OPERATOR})
 
     def test_a_later_receipt_of_the_same_head_carries_the_opinion(self):
