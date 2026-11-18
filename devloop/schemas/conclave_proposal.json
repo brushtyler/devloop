@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reserved", "resolution", "reserved_reason", "operator_question", "options"],
+  "properties": {
+    "reserved": {"type": "boolean"},
+    "resolution": {"type": "string"},
+    "reserved_reason": {"type": "string"},
+    "operator_question": {"type": "string"},
+    "options": {"type": "array", "items": {"type": "string"}}
+  }
+}

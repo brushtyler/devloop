@@ -257,6 +257,9 @@ class Config:
     reviewers: tuple = ()
     # The agent of the readiness check before implement (#114), or '' when it is disabled.
     preflight: str = ''
+    # The three agents of the conclave on a block (#141), the agent that stopped among them, or
+    # () when it is disabled.
+    conclave: tuple = ()
     max_open_prs: int = 2
     # Open devloop PRs waiting for a person (``dispatcher.parked``, #199): they do not take the
     # slots of max_open_prs, and once this many are open only priority:high issues start (#274).
@@ -686,6 +689,27 @@ def _reviewer_pool(roles, agents, implementer):
     return pool
 
 
+CONCLAVE_SIZE = 3
+
+
+def parse_conclave(data, agents):
+    """``conclave`` (#141): three distinct configured agents, whose ``(kind, model, effort)``
+    differ two by two; ``()`` without the key. That their identities differ too is checked when
+    a conclave would open, where the apps are known."""
+    if 'conclave' not in data:
+        return ()
+    keys = _str_list(data, 'conclave', 'config')
+    if len(keys) != CONCLAVE_SIZE or len(set(keys)) != CONCLAVE_SIZE:
+        raise ConfigError(f'conclave: exactly {CONCLAVE_SIZE} different agents are required')
+    unknown = [key for key in keys if key not in agents]
+    if unknown:
+        raise ConfigError(f'conclave: unknown agent {unknown[0]!r}')
+    tuples = {(agents[k].kind, agents[k].model, agents[k].effort) for k in keys}
+    if len(tuples) != CONCLAVE_SIZE:
+        raise ConfigError('conclave: the agents must differ in (kind, model, effort)')
+    return keys
+
+
 def parse_config(data, root=INSTALL_ROOT):
     """``root`` is where relative ``review_policy.sensitive_path_lists`` are read."""
     test_cmd = _require(data, 'test_cmd', str, 'config')
@@ -733,7 +757,8 @@ def parse_config(data, root=INSTALL_ROOT):
             raise ConfigError(f'preflight: unknown agent {preflight!r}')
         if preflight == implementer:
             raise ConfigError('preflight: must be a different agent from the implementer')
-    trusted = _str_list(data, 'trusted_users', 'config')
+    conclave = parse_conclave(data, agents)
+    trusted =_str_list(data, 'trusted_users', 'config')
     if not trusted:
         raise ConfigError('trusted_users: at least one GitHub login is required')
     if any(login.endswith('[bot]') for login in trusted):
@@ -781,7 +806,7 @@ def parse_config(data, root=INSTALL_ROOT):
         test_cmd=test_cmd,
         language=data.get('language', 'English'),
         implementer=implementer, reviewer=pool[0], reviewers=pool, agents=agents,
-        preflight=preflight,
+        preflight=preflight, conclave=conclave,
         trusted_users=trusted,
         blocked_labels=_str_list(data, 'blocked_labels', 'config', ('bloccata',)),
         priority_labels=_str_list(data, 'priority_labels', 'config', ('prerequisito',)),
@@ -820,7 +845,8 @@ _AGENT_KEYS = dict.fromkeys(('kind', 'display_name', 'model', 'model_label', 'ef
                              'write_commands', 'review_commands'))
 OVERLAY_KEYS = {
     **dict.fromkeys(('repo', 'base_branch', 'branch_prefix', 'state_dir', 'test_cmd',
-                     'local_tests', 'ci_rerun_unrelated', 'language', 'trusted_users', 'preflight', 'max_open_prs',
+                     'local_tests', 'ci_rerun_unrelated', 'language', 'trusted_users', 'preflight',
+                     'conclave', 'max_open_prs',
                      'max_parked_prs', 'max_review_rounds', 'max_actions_per_tick',
                      'max_parallel_actions', 'implement_test_retries', 'agent_timeout_seconds',
                      'test_timeout_seconds',

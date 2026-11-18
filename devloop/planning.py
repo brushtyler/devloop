@@ -11,7 +11,7 @@ these names: import them from here.
 from dataclasses import dataclass, field, replace
 
 from .policy import receipt_of
-from .review import CI, current_round, open_findings, owner_of, round_verdict
+from .review import CI, current_round, current_verdict, open_findings, owner_of, round_verdict
 from .supervision import ISSUE_STEPS, RETRY
 
 RECHECK_COMMAND = '/devloop recheck'
@@ -27,7 +27,8 @@ RESYNC_AFTER_APPROVAL = 'resync_after_approval'
 # dispatcher revoked that approval because the base branch touched the PR's files.
 BASE_CHANGED = 'base_changed'
 # Actions that take a slot of ``max_actions_per_tick``.
-EXPENSIVE = ('review', 'fix', 'implement', 'sync', 'preflight', 'merge', 'supervise')
+EXPENSIVE = ('review', 'fix', 'implement', 'sync', 'preflight', 'merge', 'supervise',
+             'conclave')
 # Actions that write to the whole repository or to devloop itself (the pin of #174): with
 # ``max_parallel_actions`` above 1 each runs alone, after the actions planned before it and
 # before those planned after it (#176), and in continuous mode only when nothing runs (#227).
@@ -175,6 +176,10 @@ class Snapshot:
     # a retry of an issue's step has ``blocked_by`` too, its open blocks (#277), and waits
     # while it is not empty.
     supervised: list = field(default_factory=list)
+    # With ``conclave`` (#141), the issues and PRs in agent:needs-operator whose block still
+    # needs its conclave: dicts ``{number, calls, reason}``, ``calls`` being the calls left
+    # (``conclave.calls_left``), one action each.
+    conclaves: list = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -421,9 +426,10 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
             actions.append(Action('hold', pr.number, f'{pr.hold["event"]} by {pr.hold["by"]}'))
             continue
         # The latest round, and the reviewers it still waits for: its verdict counts only once
-        # every reviewer its receipt requires has reviewed.
+        # every reviewer its receipt requires has reviewed, or, with the conclave (#141), once
+        # one of them asked for the operator.
         latest = current_round(pr.reviews)
-        pending = pending_reviewers(latest)
+        pending = waiting_reviewers(latest, cfg.conclave)
         verdict = round_verdict(latest) if latest and not pending else None
         head = latest[0]['head_sha'] if latest else None
         rounds_left = counted_rounds(pr.reviews) < cfg.max_review_rounds
@@ -555,6 +561,10 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None):
                           if pr.checks == 'pending' or pr.ci_wait
                           else '')
                 actions.append(Action('review', pr.number, reason))
+    # The conclave on a block (#141): one action per call still due, each taking a slot of
+    # max_actions_per_tick; those beyond it run on a later tick, from the recorded point.
+    for item in snapshot.conclaves:
+        actions += [Action('conclave', item['number'], item['reason'])] * item['calls']
     # A ready issue that a merged devloop PR already resolved is never checked nor implemented
     # again (#228): it is escalated, once, and waits for whoever decides it.
     held_back = set()
@@ -693,6 +703,16 @@ def pending_reviewers(records):
         return []
     done = {owner_of(r) for r in records}
     return [key for key in receipt['reviewers'] if key not in done]
+
+
+def waiting_reviewers(records, conclave=()):
+    """The reviewers the round ``records`` still waits for before its verdict counts: those of
+    ``pending_reviewers``, or none with ``conclave`` configured (#141) once a reviewer of the
+    round asked for the operator. The first ``needs_operator`` suspends the round: the verdict
+    applies at once, no other review of the round is asked, and the round opens one conclave."""
+    if conclave and any(current_verdict(r['verdict']) == 'needs_operator' for r in records):
+        return []
+    return pending_reviewers(records)
 
 
 def _round_records(reviews, number):

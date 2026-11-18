@@ -4,7 +4,9 @@ devloop moves issues through implementation, independent review and fixes. Its d
 split into three pages:
 
 - [Guide](devloop/guide.md), for the operator and the supervisor: the loop, labels and
-  `/devloop` commands, merge modes and escalations, watching a tick and the continuous loop, the
+  `/devloop` commands, merge modes and escalations, the conclave of three agents on a block
+  (`conclave`, disabled by default: [Conclave on a block](devloop/guide.md#conclave-on-a-block)),
+  watching a tick and the continuous loop, the
   installation from the dedicated user to the rollback (keys, agent CLIs, pin, overlay, start
   and stop), limits.
 - [Reference](devloop/reference.md): configuration, local tests, documentation map, agents and
