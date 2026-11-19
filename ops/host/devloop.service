@@ -1,0 +1,34 @@
+# Unità systemd del loop continuo di devloop (ops/host/devloop.service).
+# setup-devloop.sh la installa in SYSTEMD_DIR/SERVICE_NAME.service sostituendo i segnaposto con
+# i valori di params.env. Non la avvia e non la abilita: l'attivazione è dell'operatore.
+[Unit]
+Description=devloop continuous loop (@REPO@)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=@DEVLOOP_USER@
+Group=@DEVLOOP_USER@
+WorkingDirectory=@DEVLOOP_CLONE@
+# Ogni riga arriva subito nel log, così un crash lascia le sue ultime righe.
+Environment=PYTHONUNBUFFERED=1
+# Dove il servizio trova le CLI degli agent, gh e git: ~/.local/bin dell'utente devloop prima.
+Environment=PATH=@DEVLOOP_PATH@
+# Il launcher della copia fissata; aggiunge --local-config quando l'overlay esiste.
+ExecStart=/usr/bin/python3 @DEVLOOP_CLONE@/scripts/devloop-pinned run
+StandardOutput=append:@DEVLOOP_CLONE@/@STATE_DIR@/run.log
+StandardError=append:@DEVLOOP_CLONE@/@STATE_DIR@/run.log
+# SIGTERM solo al processo principale: devloop smette di pianificare e aspetta le azioni in
+# corso, al più agent_timeout_seconds (3600). Il default control-group fermerebbe anche loro.
+KillMode=mixed
+# Più di agent_timeout_seconds: dopo, systemd ferma anche le azioni ancora in corso.
+TimeoutStopSec=4200
+# Un crash riavvia il loop; un'uscita pulita (0, anche per il file STOP) no. Il codice 4 (tre
+# tick falliti di fila, allarme inviato) lascia il servizio fermo finché l'operatore non lo riavvia.
+Restart=on-failure
+RestartSec=60
+RestartPreventExitStatus=4
+
+[Install]
+WantedBy=multi-user.target

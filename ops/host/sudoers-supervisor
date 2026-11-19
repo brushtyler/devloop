@@ -1,0 +1,23 @@
+# sudoers minimale del supervisore di devloop (ops/host/sudoers-supervisor).
+# setup-supervisor.sh lo installa in SUDOERS_FILE (mode 440) dopo averlo validato con visudo -c,
+# sostituendo i segnaposto con i valori di params.env.
+#
+# Come utente devloop: solo il launcher della copia fissata, con status, watch, report,
+# tick --dry-run e pin. Come root: solo start, stop, restart e status del servizio.
+# Nessun comando scrive sull'overlay di devloop (config.local.toml) né apre una shell.
+
+Defaults>@DEVLOOP_USER@ always_set_home, secure_path="@DEVLOOP_PATH@"
+
+@SUPERVISOR_USER@ ALL=(@DEVLOOP_USER@) NOPASSWD: \
+    /usr/bin/python3 @DEVLOOP_CLONE@/scripts/devloop-pinned status, \
+    /usr/bin/python3 @DEVLOOP_CLONE@/scripts/devloop-pinned status *, \
+    /usr/bin/python3 @DEVLOOP_CLONE@/scripts/devloop-pinned watch *, \
+    /usr/bin/python3 @DEVLOOP_CLONE@/scripts/devloop-pinned report *, \
+    /usr/bin/python3 @DEVLOOP_CLONE@/scripts/devloop-pinned tick --dry-run, \
+    /usr/bin/python3 @DEVLOOP_CLONE@/scripts/devloop-pinned pin *
+
+@SUPERVISOR_USER@ ALL=(root) NOPASSWD: \
+    /usr/bin/systemctl start @SERVICE_NAME@, \
+    /usr/bin/systemctl stop @SERVICE_NAME@, \
+    /usr/bin/systemctl restart @SERVICE_NAME@, \
+    /usr/bin/systemctl status @SERVICE_NAME@ *

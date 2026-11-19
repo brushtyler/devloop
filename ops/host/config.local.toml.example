@@ -1,0 +1,37 @@
+# Overlay locale di devloop: <clone>/.ssdlc/devloop/config.local.toml, dell'utente devloop.
+# setup-devloop.sh lo copia da qui solo se non esiste; poi è dell'operatore.
+#
+# Contiene SOLO le chiavi che l'operatore sovrascrive: devloop lo applica sopra
+# devloop/config.toml della copia fissata (una tabella si unisce chiave per chiave, ogni altro
+# valore sostituisce quello della copia). Così com'è, tutto commentato, non cambia nulla.
+# Una chiave che config.toml non può avere ferma devloop. Riferimento: docs/devloop/guide.md,
+# "Local config as an overlay", e docs/devloop/reference.md per ogni chiave.
+# Nessun segreto qui: le chiavi delle app stanno in key_dir.
+
+# Limiti (una modifica vale dal tick successivo, senza riavvio).
+# max_open_prs = 2
+# max_parked_prs = 3
+# max_review_rounds = 3
+
+# Chi fa il controllo di prontezza prima dell'implementazione.
+# preflight = "codex"
+
+# Modalità di merge: "off" (merge dell'operatore), "strict" o "auto". Decisione dell'operatore.
+# [merge]
+# mode = "off"
+
+# Nuovo pin di origin/main dopo un merge di devloop che tocca devloop/ o core/.
+# [pin]
+# auto = false
+
+# Issue su cui commentare l'allarme di tre tick falliti di fila (senza: solo una riga nel log).
+# [run]
+# alert_issue = 123
+
+# Issue del riepilogo giornaliero (senza: nessun riepilogo).
+# [report]
+# issue = 124
+
+# Il supervisore che decide le escalation non critiche (identità della sua app).
+# [roles]
+# supervisor = "claude"
