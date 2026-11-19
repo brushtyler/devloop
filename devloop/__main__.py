@@ -763,10 +763,13 @@ def main(argv=None):
         for line in dispatcher.budget_status(list(snap.working_issues)
                                              + [pr.issue for pr in snap.prs]):
             log(line)
-        log(pr_counts_line(snap, cfg))
+        # The supervisor's temporary capacity limits in force (#412), as a tick plans with them;
+        # read only, like a dry run: no command is answered here.
+        planned = dispatcher._capacity(dry_run=True)
+        log(pr_counts_line(snap, planned))
         for line in queue_lines(snap):
             log(line)
-        for action in plan(snap, cfg):
+        for action in plan(snap, planned):
             log(f'next: {action.kind} #{action.number}'
                 + (f': {action.reason}' if action.reason else ''))
         return

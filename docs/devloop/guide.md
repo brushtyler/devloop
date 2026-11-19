@@ -296,7 +296,8 @@ capacity:
 A new issue starts only while both limits leave room: fewer PRs in progress than `max_open_prs`,
 and fewer parked PRs than `max_parked_prs`, since many open PRs make conflicts more likely.
 `devloop status` and every tick log show the two counters, as `open PRs: <n>/<max_open_prs> in
-progress (max_open_prs), <n>/<max_parked_prs> parked (max_parked_prs)`. Issues with a
+progress (max_open_prs), <n>/<max_parked_prs> parked (max_parked_prs)`, with the
+[temporary capacity limits](#temporary-capacity-limits) in force when there are any. Issues with a
 `blocked_labels` label are skipped.
 
 **Exception for high-priority issues** (#274): once `max_parked_prs` is reached, a ready issue
@@ -1036,8 +1037,19 @@ Each answer is a `supervision` record on the issue (see
 (`granted`) records the key, the value, the configured value, the cap and the end, and the
 same figures go in a ledger `event` `delegation_grant` and in a `grant` event of the turn journal.
 
+With the delegation off, the dispatcher still reads the issue at every tick that is not a dry run
+and answers each command with a `refused` record, "not applicable": the delegation is off. The
+answer spends the command, so turning the delegation on later grants nothing written before: the
+supervisor writes the command again.
+
+A value or a duration in characters other than the ASCII digits `0`-`9` (such as `²`), or with
+more than 9 digits, makes the command malformed: it is refused, and the tick goes on.
+
+`devloop status` reads the issue like a dry run, without answering any command, and shows the
+counters and the `next:` lines with the limits in force, the same a tick plans with.
+
 **Revocation.** `capacity = false` revokes the delegation from the next tick: the limits in force
-stop applying, and the issue is no longer read, so its commands are no longer answered.
+stop applying, and the commands written from then on are refused as not applicable.
 
 ### Commands on escalations to the operator
 

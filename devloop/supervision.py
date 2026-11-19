@@ -175,14 +175,27 @@ def supervisor_command(body):
     return tokens[1], reason
 
 
+# Far more than any cap or duration of a capacity command needs (#412).
+_MAX_DIGITS = 9
+
+
+def _whole(text):
+    """``text`` as a whole number when it is up to ``_MAX_DIGITS`` ASCII digits; None for
+    anything else. ``str.isdigit`` accepts characters such as ``²`` that ``int`` refuses, and
+    ``int`` refuses a string of thousands of digits: both would stop the tick (#412)."""
+    if not text or len(text) > _MAX_DIGITS or not all('0' <= c <= '9' for c in text):
+        return None
+    return int(text)
+
+
 def capacity_minutes(text):
     """The minutes of the duration ``text`` of a capacity command (#412): ``<N>h`` or ``<N>m``,
-    ``N`` a whole number above 0; None for anything else."""
+    ``N`` a whole number above 0 in ASCII digits; None for anything else."""
     text = (text or '').strip().lower()
-    if len(text) < 2 or text[-1] not in 'hm' or not text[:-1].isdigit():
+    if len(text) < 2 or text[-1] not in 'hm':
         return None
-    amount = int(text[:-1])
-    if amount <= 0:
+    amount = _whole(text[:-1])
+    if amount is None or amount <= 0:
         return None
     return amount * 60 if text[-1] == 'h' else amount
 
@@ -195,10 +208,11 @@ def capacity_arguments(text):
     ``<N>m``, no reason. Whether the key, the value and the duration are within the caps is the
     dispatcher's check."""
     parts = (text or '').split(None, 3)
-    if len(parts) < 4 or not parts[1].isdigit():
+    if len(parts) < 4:
         return None
+    value = _whole(parts[1])
     minutes = capacity_minutes(parts[2])
     reason = parts[3].strip()
-    if minutes is None or not reason:
+    if value is None or minutes is None or not reason:
         return None
-    return parts[0], int(parts[1]), minutes, reason
+    return parts[0], value, minutes, reason

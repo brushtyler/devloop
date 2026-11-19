@@ -303,6 +303,7 @@ enabled = false
 # <value> <duration> <reason>` on [report] issue (required when on) sets max_open_prs or
 # max_parked_prs to value for duration (<N>h or <N>m), then the configured value is back; each
 # grant counts against max_grants_per_day. max_parallel_actions is refused: it needs a restart.
+# When off, a command on [report] issue is refused as not applicable and spent.
 # capacity_max_open_prs, capacity_max_parked_prs and capacity_max_hours may only lower the caps of
 # the code (6, 6 and 24 hours).
 [delegations]

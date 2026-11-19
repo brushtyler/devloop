@@ -123,7 +123,8 @@ the supervisor's agent go to the supervisor, who may retry it
 ([Escalations to the supervisor](guide.md#escalations-to-the-supervisor)); `capacity` (true or
 false, default false, #412) lets the supervisor set a
 [temporary capacity limit](guide.md#temporary-capacity-limits) of `max_open_prs` or
-`max_parked_prs` with `/devloop capacity` on `[report] issue`, which it requires;
+`max_parked_prs` with `/devloop capacity` on `[report] issue`, which it requires (off, with
+`[report] issue` set, the command there is refused as not applicable and spent);
 `capacity_max_open_prs` (default 6), `capacity_max_parked_prs` (default 6) and
 `capacity_max_hours` (default 24) may only lower the caps of the code, `MAX_CAPACITY` and
 `MAX_CAPACITY_HOURS` in `devloop/supervision.py`. `max_parallel_actions` is not delegated: it

@@ -704,21 +704,24 @@ class SupervisionMixin:
         changes: when a limit expires, or the delegation is turned off, the next tick plans with
         the configured value again.
 
-        Only with ``[delegations] capacity`` on: the dispatcher reads the comments of
-        ``[report] issue``, applies the ``/devloop capacity`` commands still to answer
-        (``_capacity_commands``; not in a dry run) and takes the limits in force from its own
-        ``supervision`` records (``_capacity_limits``). With the delegation off the issue is not
-        read and its commands are not answered. When the issue cannot be read the configured
-        values apply (fail closed)."""
+        With ``[report] issue`` set, the dispatcher reads its comments and answers the
+        ``/devloop capacity`` commands still to answer (``_capacity_commands``; not in a dry
+        run). Only with ``[delegations] capacity`` on does it take the limits in force from its
+        own ``supervision`` records (``_capacity_limits``); with the delegation off each command
+        is refused as not applicable and spent (ADR 0005, §3.1, rule 6), so turning the
+        delegation on later grants nothing written before. A dry run with the delegation off
+        does not read the issue. When the issue cannot be read the configured values apply
+        (fail closed)."""
         cfg = self.cfg
         issue = cfg.report.issue
         limits = {}
-        if cfg.delegations.capacity and issue:
+        if issue and (cfg.delegations.capacity or not dry_run):
             try:
                 comments = self.gh.issue_comments(issue)
                 if not dry_run and self._capacity_commands(issue, comments):
                     comments = self.gh.issue_comments(issue)
-                limits = self._capacity_limits(comments)
+                if cfg.delegations.capacity:
+                    limits = self._capacity_limits(comments)
             except GitHubError as exc:
                 self.log(f'capacity: #{issue} cannot be read or answered ({exc}): the configured '
                          'limits apply')
@@ -795,8 +798,8 @@ class SupervisionMixin:
     def _capacity_command(self, issue, comment, name, text, by):
         """Answer the command ``name`` with its ``text`` of ``by`` in ``comment`` of ``[report]
         issue`` (#412, ADR 0005, P5-8). Only ``/devloop capacity <key> <value> <duration>
-        <reason>`` applies, and only when every condition holds, each verified now: merge mode
-        ``auto``; a well-formed command with the analysis of the causes in its reason; a key the
+        <reason>`` applies, and only when every condition holds, each verified now: ``[delegations]
+        capacity`` on; merge mode ``auto``; a well-formed command with the analysis of the causes in its reason; a key the
         delegation covers (``max_parallel_actions`` is refused: it needs a restart); a value
         from 1 to the cap of the key and a duration up to ``capacity_max_hours``, caps of the
         code the configuration may only lower; a duration not over yet, counted from when the
@@ -824,6 +827,9 @@ class SupervisionMixin:
 
         if name != CAPACITY:
             return refuse(f'sulla issue del riepilogo vale solo `/devloop {CAPACITY}`')
+        if not rules.capacity:
+            return refuse('la delega dei limiti di capacità è spenta (`[delegations] capacity`): '
+                          'i limiti li cambia solo l\'operatore')
         if cfg.merge.mode != 'auto':
             return refuse(f'la modalità di merge è `{cfg.merge.mode}`, non `auto`, quindi i '
                           'comandi del supervisore non valgono')

@@ -11,6 +11,7 @@ which counts against the daily cap of the delegations.
 import dataclasses
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest import mock
 
 from devloop import config, dispatcher, markdown, supervision
@@ -71,13 +72,35 @@ class OffTests(CapacityCase):
         self.assertFalse(defaults.capacity)
         self.assertFalse(AUTO.delegations.capacity)
 
-    def test_off_the_issue_is_not_read_and_the_configured_limits_apply(self):
+    def test_off_the_command_is_refused_and_spent(self):
+        # ADR 0005, §3.1, rule 6: with the delegation off the command is answered "not
+        # applicable", and turning the delegation on later grants nothing written before.
         d = self.make(OFF)
         self.command('/devloop capacity max_open_prs 4 6h ' + REASON)
         cfg = self.planned(d)
         self.assertEqual((cfg.max_open_prs, cfg.max_parked_prs), (2, 3))
-        self.assertEqual(self.decisions(), [])
+        (decision,) = self.decisions()
+        self.assertEqual(decision['outcome'], 'refused')
+        self.assertIn('la delega dei limiti di capacità è spenta', ' '.join(self.body().split()))
+        self.assertIn('Il comando è speso', self.body())
         self.assertEqual(d.ledger.journal.grants(), [])
+        d.cfg = ON
+        self.assertEqual(self.planned(d).max_open_prs, 2)
+        self.assertEqual(len(self.decisions()), 1)
+        self.assertEqual(d.ledger.journal.grants(), [])
+        # A new command, written once the delegation is on, applies.
+        self.command('/devloop capacity max_open_prs 4 6h ' + REASON)
+        self.assertEqual(self.planned(d).max_open_prs, 4)
+        self.assertEqual([r['outcome'] for r in self.decisions()], ['refused', 'granted'])
+
+    def test_off_a_dry_run_does_not_read_the_issue(self):
+        d = self.make(OFF)
+        self.command('/devloop capacity max_open_prs 4 6h ' + REASON)
+        with mock.patch.object(self.gh, 'issue_comments',
+                               side_effect=AssertionError('read')) as read:
+            self.assertIs(d._capacity(dry_run=True), OFF)
+        read.assert_not_called()
+        self.assertEqual(self.decisions(), [])
 
 
 class GrantTests(CapacityCase):
@@ -164,6 +187,22 @@ class GrantTests(CapacityCase):
         self.command('/devloop capacity max_open_prs 3 1h ' + REASON, login='brushtyler')
         self.assertEqual(self.planned(d).max_open_prs, 3)
 
+    def test_status_shows_the_limits_in_force_and_answers_nothing(self):
+        import devloop.__main__ as cli
+        d = self.make()
+        self.command('/devloop capacity max_open_prs 4 6h ' + REASON)
+        self.planned(d)
+        self.command('/devloop capacity max_parked_prs 5 6h ' + REASON)
+        lines = []
+        with mock.patch.object(cli, 'build', return_value=(ON, Path('/state'), d)), \
+                mock.patch.object(cli, 'log', lines.append), \
+                mock.patch.object(cli, 'plan', wraps=cli.plan) as planned:
+            cli.main(['status'])
+        self.assertTrue(any(line.startswith('open PRs: 1/4 in progress') for line in lines),
+                        lines)
+        self.assertEqual(planned.call_args.args[1].max_open_prs, 4)
+        self.assertEqual(len(self.decisions()), 1)  # the later command waits for a tick
+
     def test_an_unreadable_issue_leaves_the_configured_limits(self):
         d = self.make()
         self.command('/devloop capacity max_open_prs 4 6h ' + REASON)
@@ -233,6 +272,15 @@ class RefusalTests(CapacityCase):
 
     def test_a_malformed_duration(self):
         self.refused('/devloop capacity max_open_prs 4 2d ' + REASON, 'non è ben formato')
+
+    def test_numbers_int_refuses_are_refused_and_the_tick_goes_on(self):
+        # str.isdigit accepts ² and int() refuses it, as it refuses thousands of digits: such a
+        # command is refused like any malformed one, instead of stopping every tick.
+        for text in ('max_open_prs ² 2h', 'max_open_prs 4 ²h', 'max_open_prs ٤ 2h',
+                     'max_open_prs ' + '1' * 5000 + ' 2h',
+                     'max_open_prs 4 ' + '1' * 5000 + 'm'):
+            with self.subTest(text=text[:40]):
+                self.refused(f'/devloop capacity {text} ' + REASON, 'non è ben formato')
 
     def test_a_duration_already_over(self):
         self.refused('/devloop capacity max_open_prs 4 20m ' + REASON, 'è già trascorsa')
@@ -332,7 +380,11 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(args('max_parked_prs 6 90m x'), ('max_parked_prs', 6, 90, 'x'))
         self.assertEqual(cmd('/devloop capacity'), ('capacity', None))
         for text in ('max_open_prs 4 6h', 'max_open_prs four 6h x', 'max_open_prs 4 6 x',
-                     'max_open_prs 4 0h x', 'max_open_prs 4 1d x', 'max_open_prs -1 6h x', ''):
+                     'max_open_prs 4 0h x', 'max_open_prs 4 1d x', 'max_open_prs -1 6h x', '',
+                     'max_open_prs ² 6h x', 'max_open_prs 4 ²h x', 'max_open_prs ٤ 6h x',
+                     'max_open_prs ' + '9' * 5000 + ' 6h x',
+                     'max_open_prs 4 ' + '9' * 5000 + 'h x',
+                     'max_open_prs 1234567890 6h x'):
             with self.subTest(text=text):
                 self.assertIsNone(args(text))
 

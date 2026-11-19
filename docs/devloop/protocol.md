@@ -461,7 +461,8 @@ never passes the cap. A temporary capacity limit set with `/devloop capacity` (#
 (`until`, counted from when the command was written) and the figures of the day (`daily`,
 `daily_cap`, `daily_left`). The latest `granted` record of a key, until its `until`, is the limit
 the dispatcher plans with; the same figures go in a ledger `event` `delegation_grant` with the
-`delegation` `capacity`, after a `grant` event in the turn journal. The record is
+`delegation` `capacity`, after a `grant` event in the turn journal. With the delegation off the
+command gets a `refused` record all the same, which spends it. The record is
 written before the labels change, so a
 lost label change never runs a retry twice. A command that does not apply (#321) gets the same
 record, `refused`, with the reason and how to resume in the comment: it spends the command, which
