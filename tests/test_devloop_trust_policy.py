@@ -142,8 +142,8 @@ class TrustPolicyPromptTest(unittest.TestCase):
         self.assertIn('`trust_policy` when the only reason is the trust policy, `decision` for '
                       'every other case, which stops the loop until the operator decides. List '
                       'your blocking findings in both cases.', verdicts)
-        self.assertIn('Leave `operator_reason` empty (`""`) with `approve` and '
-                      '`request_changes`.', verdicts)
+        self.assertIn('Set `operator_reason` to `none` with `approve` and `request_changes`.',
+                      verdicts)
 
     def test_the_advisory_review_asks_for_doubts_and_the_first_residual_risk(self):
         text = flat(section('advisory'))

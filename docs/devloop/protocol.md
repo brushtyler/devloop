@@ -518,11 +518,13 @@ security finding with *(sicurezza)*. devloop then enforces consistency:
 - `request_changes` with nothing to fix becomes `needs_operator`;
 - an earlier finding the reviewer does not assess stays open;
 - `operator_reason` (#434) says why a reviewer asks for the operator: `trust_policy` or
-  `decision`, empty with the other verdicts. The record keeps it only with `needs_operator`, as
-  `decision` when the reviewer gave none; a record without the field, written before #434, is a
-  `decision`. A `trust_policy` with another verdict becomes `needs_operator`. The schema keeps
-  the field required for the CLIs, but the runner fills it in (empty) before checking an output
-  that lacks it: such a review is a `decision`, not a failure of the tool.
+  `decision`, `none` with the other verdicts. The record keeps it only with `needs_operator`, as
+  `decision` when the reviewer gave none or `none`; a record without the field, written before
+  #434, is a `decision`. A `trust_policy` with another verdict becomes `needs_operator`. The
+  schema keeps the field required for the CLIs, but the runner fills it in (`none`) before
+  checking an output that lacks it: such a review is a `decision`, not a failure of the tool. No
+  `enum` of an output schema holds an empty string (#441): Gemini rejects the schema, and agy
+  with it every turn that uses it.
 
 **What devloop does with the verdict** (#434). Only a `needs_operator` for a `decision` stops the
 loop: escalation `reviewer_decision`, the round suspended with a conclave. A `needs_operator`
