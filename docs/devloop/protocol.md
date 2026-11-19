@@ -356,7 +356,7 @@ Every agent review, CI round and promotion records a **receipt** in its marker:
 | Field | Content |
 |---|---|
 | `pr`, `base`, `head` | The PR, the base branch commit and the head the level was computed for |
-| `policy` | The policy version: the SHA-256 of the loaded policy configuration, including key, app, kind, model, effort and `review_args` of every reviewer of the pool |
+| `policy` | The policy version: the SHA-256 of the loaded policy configuration, including key, app, kind, model, effort and `review_args` of every reviewer of the pool and, when there is one, the SHA-256 of the [project file](reference.md#project-file) (ADR 0006, R2) |
 | `level`, `reasons` | The effective level and why: default, label with its author, sensitive paths, earlier level, and with level 0 enabled the `reviews:0` label with its author, time, whether it applied and the paths outside the allowlist |
 | `reviewers` | The reviewers the level requires, in order (none at level 0, or when the pool has not enough independent ones) |
 | `profiles` | The identity and tuple `(kind, model, effort, review_args)` each required reviewer reviews with now. At level 1 the PR's recorded reviewer stays required even when it is no longer in the pool, so the policy version does not cover it: its profile does |
@@ -1006,6 +1006,18 @@ their format does not change. The journal is append-only, one JSON event per lin
   lock in the same step as the write: past the cap nothing is written and the grant does not
   apply ([Granting a review round](guide.md#granting-a-review-round)). The events of the
   [publication outbox](#publication-outbox) start with `publication`.
+- `config` (ADR 0006, R2, trace T1 of K1): the configuration the dispatcher read, at each start
+  of `tick` and `run` (`when: start`, before any tick: a start whose record cannot be written
+  stops devloop) and at each reload of `run` whose hashes differ from the last `config` event
+  (`when: reload`). It holds the SHA-256 of the local overlay (`overlay`) and of the
+  [project file](reference.md#project-file) (`project`), null without the file, that of the
+  effective configuration (`effective`, the canonical JSON of the composed files), and
+  `changes`: the trust keys (`repo`, `trusted_users`, `[apps]`, `[merge]`, roles,
+  `[review_policy]`, the agents, `[budget]`, `[delegations]`, `test_cmd`, the restrictions, …,
+  each value by dotted key) whose value differs from the one the earlier `config` events
+  recorded, each as `{key, old, new}`, null for a value not set. The first lists every trust
+  key. A reload that does not load has `effective` null, no `changes` and its `error`. The
+  values are those of the files: a trust key changed by a reload still waits for a restart.
 - With the [budget envelope](reference.md#budget-envelope) on (`[budget] enabled`, #365), the
   intent of a turn charged to a story carries its booking, `budget`: `{story, role, phase,
   engine}` (the role is the kind of the turn, the engine the kind of the agent's CLI) and, when

@@ -125,7 +125,8 @@ or the reviewers of the pool (their order, app, kind, model, effort, `review_arg
 `agent:needs-operator` (#369); it may be the implementer, and an agent that is not configured,
 or a value that is not a string, stops devloop at startup. It counts for no quorum, so it is
 not part of the policy version: turning it on or off voids no approval. The local overlay
-turns it on.
+turns it on. The [project file](#project-file) (ADR 0006, R2) sits between the installation's
+file and the overlay.
 
 Each PR records its implementer and the first reviewer of the pool when it is opened, so
 changing the roles does not affect the level-1 reviewer of open PRs. If the recorded reviewer is
@@ -157,6 +158,67 @@ code running as the same user: the [agent user](#agent-user), when there is one,
 read the keys nor `state_dir`. For them, the copy and the final check catch writes to the
 reviewed tree, not access to the rest of the system. With the network disabled, codex cannot run tests
 that open TCP sockets, even on loopback.
+
+### Project file
+
+The project file (ADR 0006, R2) holds what belongs to the managed repository: its facts and the
+restrictions it adds. It is `<state_dir>/project.toml`, on the host, beside the
+[local overlay](guide.md#local-config-as-an-overlay) and with the same permissions (readable only
+by the dispatcher's user). The operator writes it; devloop never reads it from the managed
+repository, a PR branch, the worktree of a turn or the pinned copy. The
+[launcher](guide.md#launcher) passes it with `--project-config` when it exists, and devloop
+refuses, at startup, a `--project-config` that is not `<state_dir>/project.toml`, that the
+managed repository tracks, or that is a symbolic link or has other hard links; a `state_dir`
+reached through a link is refused when the file it leads to is tracked by the git checkout that
+holds it (a worktree, another clone). The file is read without following a link, at the start
+and at each reload, and each reload checks it again before reading it. Without the file the
+configuration is the one of before: same keys, same policy version.
+
+**Precedence:** installation (`devloop/config.toml` of the pinned copy) < project file <
+overlay. The schema is closed, and a key outside it stops devloop at startup with a message that
+names it (a key of the overlay is told so: `set it in the local overlay`):
+
+| Kind | Keys | How it composes |
+|---|---|---|
+| Facts | `test_cmd`, `local_tests`, `language`, `priority_labels`, `[docs.map]` | replace the installation's value (`[docs.map]` merges key by key); the overlay replaces them in turn |
+| Restrictions | `protected_paths`, `blocked_labels`, `[review_policy] sensitive_paths` and `sensitive_path_lists`, `[review_policy.zero] checks`, `[merge] operator_only_paths` | only add: the entries of the installation and of the overlay (or the code's default) stay, those of the project file that are not there follow. An empty list removes nothing. `[review_policy.zero] checks` only add to the checks of the installation and the overlay: the project file never turns level 0 on, and a check with none below stops devloop |
+
+Every other key, the trust keys (`repo`, `trusted_users`, `[apps]`, `[merge] mode`, roles, review
+levels, the level-0 allowlist, the agents and their permissions, `[budget]`, `preflight`,
+`conclave`, `[delegations]`), the limits and `state_dir`, is the overlay's alone. The
+`test_cmd` of the project file is the dispatcher's test command, never a permission of the
+agents: the default commands of agy (`write_commands` and `review_commands`, see
+[agy permissions](#agy-permissions)) still derive from the `test_cmd` of the overlay, or of the
+installation without one there; the overlay alone admits the project's test command. The lists of
+`sensitive_path_lists` the project file adds are read from the pinned copy, as those of the
+installation: `devloop pin` extracts them, and checks the copy with the project file of the
+`state_dir`. A copy whose code cannot read the project file is refused while there is one.
+
+The SHA-256 of the file is part of the [policy version](#review-level-and-policy-receipt), and
+so of every receipt: any change of the file, a comment too, voids the approvals of the open PRs,
+as a change of the configuration does. `devloop run` reads it again before each tick, with the
+other files ([Changes while the loop runs](guide.md#changes-while-the-loop-runs)): a new key of
+it applies at the next start, a file that does not load leaves the previous configuration in
+use. A file created while the loop runs is read at the next start.
+
+**Facts of the repository.** The managed repository holds no file of devloop's configuration.
+Its facts are the files the agents already read in their worktree (`AGENTS.md`, the README,
+`pyproject.toml`, `package.json`, …), untrusted input: the dispatcher never reads them to decide
+or to run anything. What the dispatcher uses (the test command and the selection of the tests,
+`[docs.map]`, the restrictions) comes only from the host; a command derived from the repository
+runs only inside an agent's turn. The commands the dispatcher runs, such as `test_cmd`, still
+run the repository's code in its worktree, as before.
+
+**Trace of the configuration.** At each start of `tick` and `run`, and at each reload of `run`
+that finds the files changed, the dispatcher records in its [journal](protocol.md#turn-journal)
+a `config` event: the SHA-256 of the overlay and of the project file, that of the effective
+configuration, and the trust keys whose value changed since the previous one, with the value
+before and after. The trust keys are `repo`, `base_branch`, `state_dir`, `source`, `test_cmd`,
+`trusted_users`, `preflight`, `conclave`, `[roles]`, `[agents]`, `[apps]`, `[merge]`,
+`[review_policy]`, `max_review_rounds`, `protected_paths`, `blocked_labels`, `[budget]`,
+`[delegations]`, `[agent_user]` and `[pin]`. The start records the files the dispatcher was
+built from, as they were read, never a second read of them. Its log says the same. A start whose
+record cannot be written stops devloop.
 
 ### No background work in a turn
 
@@ -587,7 +649,9 @@ each agy turn its minimal permissions, and treats a stop without output as a fai
   prefixes come from `review_commands` (review and readiness check turns) and `write_commands`
   (implement, fix and sync turns) of the agy agent. Both default to the tokens of `test_cmd`,
   `python3 -m unittest`, `git status`, `git diff`, `git log` and `git show`; write turns get no
-  `git add` nor `git commit`, because the dispatcher commits.
+  `git add` nor `git commit`, because the dispatcher commits. The `test_cmd` of these defaults is
+  that of the overlay or of the installation, never that of the
+  [project file](#project-file) (ADR 0006, D2).
 - **Never.** devloop refuses at startup a prefix that is a bare interpreter, shell or `git`
   (`python3`, `bash`, `sh`, …), also when given by path (`/usr/bin/python3`, `/bin/sh`,
   `venv/bin/python`), one with wildcards, quotes or shell syntax (`*`, `;`, `&&`, `|`,

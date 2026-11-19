@@ -1922,7 +1922,9 @@ without a smoke test, but checked again against the current overlay: if a file i
 missing, the pin fails. Earlier copies stay for the rollback, up to `[gc] keep_pins` (default
 5) besides `current`: after a successful pin the older ones that no process uses are removed
 ([Cleanup of the state directory](#cleanup-of-the-state-directory)). `pin` uses the
-overlay given with `--local-config`, or `.ssdlc/devloop/config.local.toml` when it exists. A
+overlay given with `--local-config`, or `.ssdlc/devloop/config.local.toml` when it exists, and
+the [project file](reference.md#project-file) of the `state_dir` when it exists: the lists it
+adds are extracted, and a copy that cannot read it is refused. A
 `run` already started keeps the code it started with: restart it after a pin by hand (a pin
 after a merge restarts it by itself, see below). `devloop cleanup` removes only the agent
 worktrees under `state_dir/worktrees`, never a pinned copy; `devloop gc` removes the pinned
@@ -1940,7 +1942,9 @@ sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned tick --dry
 ```
 
 It runs `python3 -P -m devloop` from the root of its clone, with `PYTHONPATH` on the copy only
-and, when `.ssdlc/devloop/config.local.toml` exists, `--local-config` on it. It imports nothing
+and, when `.ssdlc/devloop/config.local.toml` exists, `--local-config` on it; when
+`.ssdlc/devloop/project.toml` exists, `--project-config` on it (the
+[project file](reference.md#project-file), ADR 0006, R2). It imports nothing
 from the clone, and works both run directly by the `devloop` user and through `sudo -u devloop
 -H`. Without a pin it stops and says so. It refuses to run as root, unless `--allow-root` is its
 first argument. `-P` is required: without it `python3 -m` puts the current directory first on
@@ -1949,8 +1953,9 @@ commands do not inherit that `PYTHONPATH`: the tests of a worktree import the wo
 It exports `DISABLE_AUTOUPDATER=1`, which the agents inherit, so that Claude Code does not update
 itself while devloop runs it; a value already in the environment (the operator's) is kept.
 
-With `--state-dir DIR` (ADR 0006, R1), an absolute path, the launcher takes the copy and the
-overlay from `DIR/current` and `DIR/config.local.toml` instead of `.ssdlc/devloop` of its clone,
+With `--state-dir DIR` (ADR 0006, R1), an absolute path, the launcher takes the copy, the
+overlay and the project file from `DIR/current`, `DIR/config.local.toml` and `DIR/project.toml`
+instead of `.ssdlc/devloop` of its clone,
 so it can live anywhere, for example installed on the host as
 `/usr/local/lib/devloop/devloop-pinned` (see [Installation source](#installation-source)). It then
 runs devloop in the current directory, which must be in the checkout of the managed repository
@@ -1996,8 +2001,10 @@ state_dir = "/var/lib/devloop/widget"
   later pins go through the launcher (`devloop-pinned --state-dir /var/lib/devloop/widget pin
   <tag>`).
 
-The configuration, the prompts and the tests are still those of ssdlc: the project keys go in
-the overlay until the project file of ADR 0006 (R2) exists.
+The facts of the project (`test_cmd`, `[docs.map]`, …) and the restrictions it adds go in the
+[project file](reference.md#project-file) `DIR/project.toml` (ADR 0006, R2), on the host; the
+trust keys stay in the overlay. The prompts and the selection of the tests are still those of
+ssdlc.
 
 #### Local config as an overlay
 
@@ -2025,11 +2032,25 @@ the one of the copy. A new pin therefore needs no realignment of the config by h
 any value the copy's config would refuse. An overlay cannot remove a key of the copy, only
 replace it.
 
+Beside it, `.ssdlc/devloop/project.toml` is the [project file](reference.md#project-file)
+(ADR 0006, R2), with the same permissions: the facts of the managed repository (`test_cmd`,
+`local_tests`, `language`, `priority_labels`, `[docs.map]`) and the restrictions it adds
+(`protected_paths`, `blocked_labels`, sensitive paths and lists, level-0 checks,
+`operator_only_paths`). The order is installation < project file < overlay, but a restriction
+of the project file only adds to those of the installation and the overlay. Any other key in it
+stops devloop, naming the key; the trust keys stay in the overlay, and its `test_cmd` never
+enters the default commands of agy: the overlay alone admits it. It must be a regular file of
+its own: a symbolic link, or a file with other hard links, stops devloop. Its hash is part of
+the policy version, and each start and reload records the configuration in the journal.
+
 #### Changes while the loop runs
 
-A running `devloop run` reads `devloop/config.toml` of its copy and the overlay again before
+A running `devloop run` reads `devloop/config.toml` of its copy, the overlay and the
+[project file](reference.md#project-file) again before
 each tick (#278), and loads them at the first tick and then when their content changed (the hash
-of each file), so a change made while the loop was starting is not missed. Only these
+of each file), so a change made while the loop was starting is not missed. Each load whose
+hashes differ from the last recorded ones leaves a `config` event in the
+[turn journal](protocol.md#turn-journal), with the trust keys changed (ADR 0006, T1). Only these
 keys take effect without a restart:
 
 - `max_open_prs`, `max_parked_prs` and `max_review_rounds`: the new values apply from the next
@@ -2054,7 +2075,8 @@ overlay removed or unreadable) does not stop the loop: the log says
 `config: changed but not valid, the previous configuration stays in use: <error>`, the tick goes
 on with the previous configuration, and the files are loaded again at their next change. The
 overlay must exist when the loop starts: the [launcher](#launcher) passes `--local-config` only
-for an overlay it finds, so an overlay created later needs a restart. `devloop tick` reads the
+for an overlay it finds, so an overlay created later needs a restart; the same holds for the
+project file and `--project-config`. `devloop tick` reads the
 configuration at each run, as before.
 
 #### Rollback

@@ -90,13 +90,19 @@ class ReviewPolicy:
     # never counts for the quorum, so it stays out of the version: turning it on or off voids
     # no approval.
     advisory_reviewer: str = ''
+    # The SHA-256 of the project file on the host (ADR 0006, R2), '' without one. A change of
+    # the file changes the version, and so voids every approval, as a change of the
+    # configuration does.
+    project: str = ''
 
     def zero_enabled(self):
         return bool(self.zero_allowlist) and bool(self.zero_checks)
 
     def version(self):
         """Deterministic version of the loaded policy: the SHA-256 of its canonical form. Level
-        0 enters it only when enabled, so a policy without it keeps the version of part 1."""
+        0 enters it only when enabled, so a policy without it keeps the version of part 1; the
+        project file (ADR 0006, R2) only when there is one, so that without it the version is
+        the one before."""
         data = {'schema': POLICY_SCHEMA, 'default_level': self.default_level,
                 'label': self.label, 'sensitive_level': SENSITIVE_LEVEL,
                 'sensitive_paths': sorted({_norm(p) for p in self.sensitive_paths}),
@@ -115,6 +121,8 @@ class ReviewPolicy:
                             'checks': sorted([name, app] for name, app in self.zero_checks),
                             'excluded': sorted(ZERO_EXCLUDED + ZERO_EXCLUDED_NAMES),
                             'markdown': sorted(MARKDOWN)}
+        if self.project:
+            data['project'] = self.project
         text = json.dumps(data, sort_keys=True, separators=(',', ':'))
         return hashlib.sha256(text.encode()).hexdigest()
 
