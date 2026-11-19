@@ -2334,7 +2334,7 @@ class IdentityTests(unittest.TestCase):
         # #325: the native review is the record, with the whole review and its marker.
         for raw, event in ((raw_review(), 'APPROVE'),
                            (raw_review('request_changes', [finding()]), 'REQUEST_CHANGES'),
-                           (raw_review('needs_operator', human='call'), 'COMMENT')):
+                           (raw_review('needs_operator', human='call'), 'APPROVE')):
             with self.subTest(event=event):
                 d = self.make(FakeRunner(raw))
                 d._do_review(pr())
@@ -2348,6 +2348,91 @@ class IdentityTests(unittest.TestCase):
                 self.assertIn('## Review automatica, round 1/', native['body'])
                 record = markdown.read_marker(native['body'], 'review')
                 self.assertEqual((record['reviewer'], record['round']), (REV, 1))
+
+    def review_rounds(self, *raws, earlier=()):
+        """One review round per output of ``raws`` by the reviewer, on the same FakeGH with the
+        native reviews ``earlier``: round ``n`` reads the records of the earlier rounds, on a
+        head of its own. It returns the login of the reviewer's app."""
+        self.make(FakeRunner())
+        self.gh.native_reviews = list(earlier)
+        reviews = []
+        for n, raw in enumerate(raws, start=1):
+            head = SHA1 if n == 1 else f'{n}' * 40
+            self.gh.head = head
+            d = Dispatcher(CFG, self.gh, FakeWS(head=head), FakeRunner(raw), log=lambda m: None,
+                           identities=self.ids)
+            d._do_review(pr(reviews=reviews, head=head))
+            reviews.append(markdown.read_marker(self.gh.native[-1][1]['body'], 'review'))
+        return self.login(REV)
+
+    def standing(self, login):
+        """The logins among ``login`` and the other reviewers whose native ``REQUEST_CHANGES``
+        still stands on PR #100, as GitHub reads it: a later ``APPROVED`` of the same author
+        withdraws it, a ``COMMENTED`` does not."""
+        return policy.changes_requested(self.gh.pr_reviews(100),
+                                        {login, 'other-reviewer[bot]'})
+
+    def test_needs_operator_with_its_findings_closed_leaves_no_request_for_changes(self):
+        # #418: round 1 asks for changes; round 2 closes the finding and asks the operator.
+        # Its native review is APPROVE, so the earlier REQUEST_CHANGES no longer blocks the
+        # merge once the operator decides, and nothing is dismissed.
+        login = self.review_rounds(
+            raw_review('request_changes', [finding()]),
+            raw_review('needs_operator', previous=[{'id': 'R1-1', 'status': 'resolved',
+                                                    'note': 'ok'}], human='scope?'))
+        self.assertEqual([n['event'] for _, n in self.gh.native],
+                         ['REQUEST_CHANGES', 'APPROVE'])
+        self.assertEqual(self.standing(login), [])
+        body = self.gh.native[-1][1]['body']
+        self.assertIn('**Verdetto:** Serve una decisione dell\'operatore', body)
+        self.assertIn('Review nativa `APPROVE`', body)
+        self.assertEqual(markdown.read_marker(body, 'review')['verdict'], 'needs_operator')
+        # devloop keeps the PR with the operator: it reads the verdict, not the event.
+        self.assertIn('agent:needs-operator', self.gh.labels[100])
+        self.assertNotIn('agent:ready-to-merge', self.gh.labels[100])
+        # Only native reviews are written: no dismissal, of its own or of anyone else.
+        self.assertEqual({act for _, _, act in self.gh.acts}, {'submit_review'})
+
+    def test_needs_operator_with_its_findings_open_keeps_requesting_changes(self):
+        # #418: a finding of its own still open (unresolved, or not assessed) keeps
+        # REQUEST_CHANGES, and nothing is removed.
+        for previous in ([{'id': 'R1-1', 'status': 'unresolved', 'note': 'still'}], []):
+            with self.subTest(previous=previous):
+                login = self.review_rounds(
+                    raw_review('request_changes', [finding()]),
+                    raw_review('needs_operator', previous=previous, human='scope?'))
+                self.assertEqual([n['event'] for _, n in self.gh.native],
+                                 ['REQUEST_CHANGES', 'REQUEST_CHANGES'])
+                self.assertEqual(self.standing(login), [login])
+                self.assertIn('Review nativa `REQUEST_CHANGES`', self.gh.native[-1][1]['body'])
+                self.assertEqual({act for _, _, act in self.gh.acts}, {'submit_review'})
+        # A new blocking finding of its own in the needs_operator round does the same.
+        login = self.review_rounds(raw_review('needs_operator', [finding()], human='scope?'))
+        self.assertEqual([n['event'] for _, n in self.gh.native], ['REQUEST_CHANGES'])
+
+    def test_another_reviewers_request_for_changes_is_never_removed(self):
+        # #418: another reviewer's REQUEST_CHANGES stands, whatever this reviewer decides.
+        other = {'id': 4000, 'login': 'other-reviewer[bot]', 'state': 'CHANGES_REQUESTED',
+                 'body': 'no', 'submitted_at': '2025-12-31T00:00:00Z'}
+        login = self.review_rounds(
+            raw_review('request_changes', [finding()]),
+            raw_review('needs_operator', previous=[{'id': 'R1-1', 'status': 'resolved',
+                                                    'note': 'ok'}], human='scope?'),
+            earlier=[other])
+        self.assertEqual([n['event'] for _, n in self.gh.native],
+                         ['REQUEST_CHANGES', 'APPROVE'])
+        # Its own request for changes is withdrawn by its approval; the other one stands.
+        self.assertEqual(self.standing(login), ['other-reviewer[bot]'])
+        self.assertIn(other, self.gh.pr_reviews(100))
+        self.assertEqual({act for _, _, act in self.gh.acts}, {'submit_review'})
+        # An open finding of another owner does not turn its own outcome into REQUEST_CHANGES
+        # (#111), and is not its to close or to withdraw.
+        record = norm(raw_review('needs_operator', human='scope?'))
+        record['previous_findings'] = [{'id': 'R1-1', 'key': '1/other/R1-1',
+                                        'status': 'unresolved', 'note': 'n'}]
+        self.assertEqual(markdown.native_event(record), 'APPROVE')
+        record['previous_findings'][0]['key'] = f'1/{REV}/R1-1'
+        self.assertEqual(markdown.native_event(record), 'REQUEST_CHANGES')
 
     def test_a_failed_native_review_is_retried_then_escalated(self):
         d = self.make(FakeRunner(raw_review()))
