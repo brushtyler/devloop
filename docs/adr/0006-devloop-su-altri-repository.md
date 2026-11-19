@@ -1,6 +1,6 @@
 # ADR 0006: devloop su altri repository (parità con il motore locale)
 
-- **Stato:** proposto. Le decisioni riservate all'operatore sono nella [sezione 6](#6-decisioni-riservate-alloperatore), con le alternative e una raccomandazione, senza prenderle.
+- **Stato:** proposto. Le decisioni riservate all'operatore sono nella [sezione 6](#6-decisioni-riservate-alloperatore), con le alternative e una raccomandazione, senza prenderle. Le correzioni di analisi chieste dal supervisore con la review consultiva del 2026-11-19 alle 00:25 sono integrate, senza prendere decisioni: lock per repository (sezioni 1.8 e 3.8), coerenza con l'ADR 0005 e confine di fiducia del file di progetto (sezione 3.2), migrazione di ssdlc (sezioni 3.2 e 5), tracciabilità dell'overlay (sezioni 3.2 e 3.9), confine dell'installazione (sezione 3.5).
 - **Fase:** design (#404). Richiesta dell'operatore del 2026-11-19 nel diario #76.
 - **Data:** 2026-11-19.
 - **Base verificata:** il commit fba0bb8 di `main`.
@@ -110,7 +110,7 @@ Il confine rende devloop **già separabile** dal motore: l'installazione non con
 
 ### 1.8 Più progetti sullo stesso host
 
-Oggi non è previsto. `state_dir` è dentro il clone (sezione 1.1), il launcher e gli script ne assumono il percorso fisso (scripts/devloop-pinned:24; ops/params.env.example:25-28), l'unità ha un solo nome (ops/params.env.example:43-44) e il lock del dispatcher è `<state_dir>/dispatcher.lock` (devloop/__main__.py:490), cioè per clone. I login delle CLI stanno nella home dell'utente `devloop`, condivisa (ops/host/setup-devloop.sh:82, :110-114).
+Oggi non è previsto. `state_dir` è dentro il clone (sezione 1.1), il launcher e gli script ne assumono il percorso fisso (scripts/devloop-pinned:24; ops/params.env.example:25-28), l'unità ha un solo nome (ops/params.env.example:43-44) e il lock del dispatcher è `<state_dir>/dispatcher.lock` (devloop/__main__.py:490), cioè **per `state_dir`**, non per repository. Oggi le due cose coincidono solo perché `state_dir` è dentro il clone: due clone dello stesso repository, o due `state_dir` diversi, non si escludono. `tick --dry-run` non prende il lock (devloop/__main__.py:481-489). I login delle CLI stanno nella home dell'utente `devloop`, condivisa (ops/host/setup-devloop.sh:82, :110-114).
 
 ## 2. Lacune
 
@@ -123,7 +123,7 @@ Oggi non è previsto. `state_dir` è dentro il clone (sezione 1.1), il launcher 
 | G5 | Confine non dichiarato fra ciò che resta in ssdlc e ciò che è installazione | sezione 1.5 | Non è scritto quali file sono del prodotto installabile e quali del progetto ssdlc |
 | G6 | Identità e script legati al repository di ssdlc | sezione 1.6 | Per ogni progetto servono decisioni su app, chiavi e `scripts/agent-token.py` |
 | G7 | Pacchetto solo come installazione sull'host del repository gestito | sezione 1.7 | Avviare devloop su un progetto nuovo richiede la procedura completa di ops |
-| G8 | Un progetto per host | sezione 1.8 | Due progetti sullo stesso host si contendono percorsi, servizio e login |
+| G8 | Un progetto per host | sezione 1.8 | Due progetti sullo stesso host si contendono percorsi, servizio e login. Con `state_dir` separati, due servizi sullo stesso repository non si escludono |
 
 ## 3. Proposte
 
@@ -162,34 +162,72 @@ Oggi un solo file mescola tre tipi di chiavi. La proposta le separa per **chi le
 | Tipo | Chiavi (esempi) | Dove |
 |---|---|---|
 | Installazione: default generali | limiti e timeout, agent e modelli, forma del budget, pin, gc, run, report, ci | `devloop/config.toml` dell'installazione, ripulito dei valori di ssdlc |
-| Progetto: fatti del repository | `test_cmd`, selezione e formato dei test (sezione 3.4), `[docs.map]`, `sensitive_paths` e `sensitive_path_lists` aggiuntivi, `protected_paths`, `operator_only_paths` aggiuntivi, allowlist e check del livello 0, `blocked_labels`, `priority_labels`, `language`, istruzioni per i prompt (sezione 3.3) | `.devloop/project.toml` nel repository gestito |
-| Host e operatore | `repo`, `base_branch`, `state_dir`, `source`, `[apps]` e `key_dir`, `trusted_users`, modalità di merge, ruoli, valori del budget, attivazioni (preflight, conclave, deleghe) | overlay locale `<state_dir>/config.local.toml` |
+| Progetto: fatti del repository e restrizioni aggiuntive | Fatti: `test_cmd`, selezione e formato dei test (sezione 3.4), `[docs.map]`, `language`, `priority_labels`, istruzioni per i prompt (sezione 3.3). Restrizioni, solo in aggiunta a quelle dell'installazione e dell'overlay: `sensitive_paths`, `sensitive_path_lists`, `protected_paths`, `operator_only_paths`, `blocked_labels`, check obbligatori del livello 0 | `.devloop/project.toml` nel repository gestito |
+| Host e operatore | `repo`, `base_branch`, `state_dir`, `source`, `[apps]` e `key_dir`, `trusted_users`, modalità di merge, ruoli, livelli di review, allowlist del livello 0, permessi degli agent, valori del budget, attivazioni (preflight, conclave, deleghe) | overlay locale `<state_dir>/config.local.toml` |
 
 **Precedenza:** default dell'installazione < file di progetto < overlay locale. L'overlay resta l'ultima parola dell'operatore, come oggi (devloop/config.py:1185-1198).
 
-**Da dove si legge il file di progetto.** Dal commit di `origin/<base_branch>` letto all'inizio del tick, **mai** dal branch di una PR né dal worktree di un agent. È la stessa regola della policy di oggi (devloop/config.toml:111-116). Il suo hash entra nell'hash della policy e quindi nelle ricevute: una modifica annulla le approvazioni delle PR aperte, come oggi un cambio della configurazione.
+**Da dove si legge il file di progetto.** Dal commit di `origin/<base_branch>` letto all'inizio del tick, **mai** dal branch di una PR né dal worktree di un agent. È la stessa regola della policy di oggi (devloop/config.toml:111-116). Il suo hash entra nell'hash della policy e quindi nelle ricevute: una modifica annulla le approvazioni delle PR aperte, come oggi un cambio della configurazione. Per ssdlc, dove sorgente e gestito coincidono, si propone di leggerlo dal commit fissato (vedi "Migrazione di ssdlc", sotto).
 
-**Chi lo può modificare.** Il file è **policy di fiducia del progetto**: decide percorsi sensibili e riservati, comandi che gli agent eseguono e check obbligatori. Alternative:
+#### Confine di fiducia: il file di progetto è input non fidato
 
-- (a) **Tutte le chiavi di progetto, comprese quelle di fiducia**, protette solo dalla regola dei reviewer di #399 (ADR 0005, regola 2 della sezione 3.1), come `devloop/config.toml` oggi.
-- (b) **Il file di progetto può solo aggiungere restrizioni.** Le chiavi di fiducia (`trusted_users`, merge, ruoli, app, permessi degli agent) stanno solo nell'overlay. Il file di progetto può **aggiungere** percorsi sensibili, riservati e protetti, mai toglierne di quelli dell'installazione o dell'overlay. In più, `.devloop/` è sensibile (livello 2) e riservato all'operatore (`operator_only_paths`) **per codice**: il file non può togliere la propria protezione. La regola dei reviewer vale anche qui.
+Leggere da `origin/<base_branch>` esclude i branch delle PR, ma **non** chi scrive su `main` fuori da devloop. In un repository di terzi chiunque abbia la scrittura su `main` può modificare il file senza passare da una PR di devloop: collaboratori, altre automazioni, un push diretto. Lo fa quindi senza reviewer, senza la regola di P5-0 e senza `operator_only_paths`, che valgono solo per le PR che devloop rivede e mergia. Anche in ssdlc chi ha la scrittura su `main` lo può fare, ma lì è l'operatore.
+
+Il file di progetto si tratta quindi come **input non fidato**, in ogni repository, ssdlc compreso. **Requisiti** (issue R2):
+
+1. **Solo fatti e restrizioni.** Il file può contenere solo le chiavi della riga "Progetto" della tabella, con uno schema chiuso: una chiave sconosciuta o non ammessa è un errore, non si ignora. Le chiavi di fiducia (`trusted_users`, merge, ruoli, app, livelli di review, allowlist del livello 0, permessi degli agent, budget, attivazioni) sono rifiutate.
+2. **Mai allentamenti.** Il **pavimento** è la configurazione dell'installazione con l'overlay. Il file di progetto può solo aggiungere sopra il pavimento: percorsi sensibili, protetti e riservati, label bloccanti, check obbligatori. Non può toglierne né indebolire un valore del pavimento. Un valore che allenta, per esempio `local_tests = "none"` quando il pavimento non lo è, è un errore.
+3. **Rifiuto all'avvio e a ogni tick.** devloop **rifiuta all'avvio** un file di progetto che allenti l'installazione o l'overlay, o che non rispetti lo schema, con un messaggio che nomina la chiave. Se un file non valido compare su `origin/<base_branch>` durante `run`, il tick si ferma senza pianificare né agire e lo segnala come un pin fallito. Non applica il file, e non prosegue in silenzio con quello precedente.
+4. **Le restrizioni del progetto non sono garantite.** Una restrizione scritta solo nel file di progetto può sparire con una modifica di `main`: il pavimento non scende mai, ma ciò che sta sopra sì. Una restrizione che l'operatore vuole garantita va nell'overlay. Per ssdlc, quindi, `devloop/`, `core/` e `schemas/` sensibili vanno nell'overlay, non solo nel file di progetto.
+5. **I fatti eseguibili non allargano il confine.** `test_cmd` viene dal repository, ma esegue codice del repository nel suo worktree, cosa che devloop fa già fuori dal confine (docs/architecture.md:159-162). Un `test_cmd` cambiato su `main` vale quanto uno `scripts/run-tests.py` cambiato su `main`. I **permessi** degli agent invece non vengono mai dal file di progetto (sezione 3.4).
+6. **Traccia.** Ogni cambio dell'hash del file di progetto lascia un record nel registro del dispatcher, con il commit da cui è stato letto, come per l'overlay (sezione 3.9).
+
+#### Chi lo può modificare
+
+Il file decide percorsi sensibili e riservati, check obbligatori e comandi che devloop esegue: è **policy di fiducia del progetto**. Alternative:
+
+- (a) **Tutte le chiavi di progetto, comprese quelle di fiducia**, protette solo dalla regola dei reviewer di P5-0 (#399; ADR 0005, regola 2 della sezione 3.1), come `devloop/config.toml` oggi.
+- (b) **Solo fatti e restrizioni, con la regola dei reviewer.** Le chiavi di fiducia stanno solo nell'overlay, e il file rispetta i requisiti del confine di fiducia. Le PR di devloop che toccano `.devloop/` ricadono nella regola dei reviewer di P5-0, come oggi `devloop/config.toml`. `.devloop/` è sensibile (livello 2) per default dell'installazione, ma **non** riservato.
+- (b') **Come (b), più `.devloop/` riservato all'operatore per codice** (`operator_only_paths`). Il file non può togliere la propria protezione.
 - (c) **Nessun file nel repository.** Tutto nell'overlay dell'host, per progetto.
+
+**Coerenza con l'ADR 0005.** La decisione dell'operatore del 2026-11-18 alle 21:50 (ADR 0005, regola 2 della sezione 3.1 e sezione 4) ha tolto il file riservato per la policy di fiducia. Non si fa `operator_policy.toml`, `devloop/config.toml` non è in `operator_only_paths`, e resta solo la regola dei reviewer. Il motivo: in ssdlc il rischio reale è una regressione accidentale, o un agent che si sblocca allentando un controllo, e le PR passano già da due reviewer di fornitori diversi. (b') introdurrebbe un file riservato, in tensione con quella decisione. Bisogna quindi chiedersi se un repository gestito, specie di terzi, richieda una protezione più forte:
+
+- **Il rischio in più esiste.** In un repository di terzi altri scrivono su `main` senza passare da devloop: un allentamento non nasce solo da un agent.
+- **(b') non lo copre.** `operator_only_paths` e la regola dei reviewer agiscono solo sulle PR che devloop rivede e mergia, e un push diretto su `main` le scavalca entrambe. Contro quel rischio protegge solo la **validazione al caricamento** (requisiti 1-3), qualunque sia la strada da cui il file arriva su `main`.
+- **Per le PR di devloop basta la regola dei reviewer**, come per `devloop/config.toml`. Con i requisiti 1 e 2 una PR può cambiare solo fatti e restrizioni sopra il pavimento, mai togliere una garanzia dell'operatore. Se una PR sfugge ai reviewer, il caso peggiore è un fatto sbagliato (una mappa dei documenti, un `test_cmd`) o una restrizione in meno sopra il pavimento: lo stesso rischio residuo che l'ADR 0005 ha accettato.
 
 Valutazione:
 
-- (a) è la scelta dell'ADR 0005 per ssdlc, ma lì i reviewer conoscono il repository e la policy. In un altro progetto, una PR può cambiare insieme il codice e le regole che lo giudicano. Restano i rischi residui già accettati dall'ADR 0005, moltiplicati per i progetti.
+- (a) estende la scelta dell'ADR 0005 a un contesto dove non regge. In un altro progetto chi scrive su `main` può cambiare insieme il codice e le regole che lo giudicano, comprese `trusted_users` e il merge.
+- (b) è coerente con l'ADR 0005: nessun file riservato, regola dei reviewer. La protezione forte sta dove serve, nel codice che valida il file, non nei permessi di merge.
+- (b') aggiunge un file riservato senza coprire il rischio che lo motiverebbe, e manderebbe all'operatore ogni modifica di un fatto del progetto.
 - (c) è la più semplice, ma i fatti del progetto (mappa dei documenti, test) si allontanano dal repository e nessuno li rivede in una PR.
-- (b) costa poco: il file cambia di rado, quindi pochi merge in più per l'operatore. Rende monotona la parte che conta.
 
-**Raccomandazione: (b).**
+**Raccomandazione: (b).** Per `.devloop/` vale la regola dei reviewer di P5-0, e il file si valida come input non fidato, senza file riservato. Sono decisioni dell'operatore (D2):
 
-- Per ssdlc, la migrazione sposta in `.devloop/project.toml` di ssdlc le chiavi di progetto oggi in `devloop/config.toml`. I valori di ssdlc nel codice (devloop/config.py:19, :120; devloop/policy.py:48-52, :75; devloop/localtests.py:24-25) passano nel file di progetto di ssdlc.
-- Sono decisioni dell'operatore (D2):
-  - la precedenza;
-  - la regola "solo aggiungere";
-  - la protezione per codice di `.devloop/`. Per ssdlc la protezione renderebbe riservato un file nuovo, mentre l'ADR 0005 ha scelto di non riservare `devloop/config.toml`;
-  - il nome del file.
-- `sensitive_path_lists` oggi si legge dall'installazione (devloop/config.py:16-18). Per gli altri progetti le liste sono del repository gestito, e si leggono dallo stesso commit di base del file di progetto. Per ssdlc i due commit coincidono quando sorgente e gestito coincidono.
+- la precedenza;
+- le chiavi ammesse e la regola "solo fatti e restrizioni";
+- la protezione di `.devloop/`: (b), regola dei reviewer, oppure (b'), riservato per codice;
+- il nome del file.
+
+#### Migrazione di ssdlc
+
+La migrazione (issue R3) sposta in `.devloop/project.toml` di ssdlc le chiavi di progetto oggi in `devloop/config.toml`, e i valori di ssdlc oggi scritti nel codice (devloop/config.py:19, :120; devloop/policy.py:48-52, :75; devloop/localtests.py:24-25). Le chiavi di fiducia di ssdlc (`repo`, `trusted_users`, `[apps]`, merge) vanno nell'overlay di ssdlc, con la tracciabilità della sezione 3.9.
+
+**Il commit del pin e quello di base non coincidono.** Oggi tutta la configurazione, comprese le liste di `sensitive_path_lists` (devloop/config.py:16-18), si legge dalla copia fissata, cioè dal **commit del pin**. Il pin automatico è spento per default (`[pin] auto = false`, devloop/config.toml:193). La copia fissata resta quindi al commit dell'ultimo `devloop pin`, e rimane indietro rispetto a `main` finché l'operatore non fissa di nuovo. Il file di progetto letto da `origin/<base_branch>` viene invece dal **commit di base**, che avanza a ogni merge. I due commit coincidono solo subito dopo un pin di `origin/<base_branch>`, fino al merge successivo.
+
+**Equivalenza della migrazione, con precisione.**
+
+- *Equivalenza statica.* Per uno stesso commit C, la configurazione effettiva del codice nuovo fissato a C, con il file di progetto di C e l'overlay migrato, è identica a quella del codice di oggi fissato a C con l'overlay di oggi. È la prova di R3: un test calcola le due configurazioni effettive allo stesso commit e le confronta chiave per chiave, con lo stesso hash della policy.
+- *Differenza di tempi.* Oggi una modifica delle chiavi di progetto mergiata su `main` ha effetto solo al pin successivo, che con `auto = false` è un atto dell'operatore. Se il file si legge dal commit di base, ha effetto al tick successivo, senza pin. Per ssdlc sarebbe un cambio di comportamento, non un'equivalenza.
+
+Alternative per ssdlc, cioè quando sorgente e gestito coincidono:
+
+- (i) **file di progetto dal commit fissato.** I tempi restano quelli di oggi: una modifica ha effetto solo con un pin. Il pin automatico, quando è attivo, scatta anche per un merge che tocca `.devloop/`, come oggi per `devloop/` e `core/` (devloop/config.toml:184-193);
+- (ii) **file di progetto dal commit di base,** come per gli altri progetti. La regola è una sola, ma i fatti e le restrizioni del progetto cambiano senza pin.
+
+**Raccomandazione: (i) per ssdlc,** e il commit di base per gli altri progetti, dove il repository gestito non è mai fissato. Con (i) la migrazione è equivalente anche nei tempi, e il pin resta il punto in cui l'operatore adotta una configurazione nuova. Le liste di `sensitive_path_lists` si leggono dallo stesso commit del file di progetto: quello fissato per ssdlc, quello di base per gli altri. La scelta è dell'operatore (D2).
 
 ### 3.3 Prompt come modelli
 
@@ -249,9 +287,20 @@ Diventano **installazione**, estratti dal pin come oggi:
 
 - `devloop/` (codice, prompt, schemi e default);
 - `core/`;
-- nient'altro.
+- nient'altro: l'installazione è esattamente ciò che il pin estrae (devloop/pin.py:51, :384-388), salvo le liste di `sensitive_path_lists`, che diventano dati del repository gestito (sezione 3.2).
 
-`scripts/devloop-pinned` e `scripts/agent-token.py` sono strumenti dell'installazione: vanno nella copia fissata o nell'immagine, non nel repository gestito.
+Oggi due strumenti stanno fuori da quel confine, in `scripts/` del clone:
+
+- `scripts/devloop-pinned` è un **avviatore**: trova la copia fissata in `<clone>/.ssdlc/devloop/current` ed esegue devloop da lì, senza importare nulla dal clone (scripts/devloop-pinned:1-16, :28-42). Non può stare nella copia fissata, perché serve proprio a trovarla;
+- `scripts/agent-token.py` importa il pacchetto `devloop` che trova accanto a sé, cioè quello del checkout, non quello fissato (scripts/agent-token.py:28-33).
+
+Proposta coerente con il confine:
+
+- **`agent-token` diventa un sottocomando dell'installazione** (`devloop token <actor> -- <comando>`), dentro `devloop/`, con le stesse regole di oggi su attori riservati e permessi. Si esegue attraverso l'avviatore, quindi dalla copia fissata e con la configurazione del progetto indicato (sezione 3.6). `scripts/agent-token.py` resta in ssdlc come involucro sottile che lo richiama, per non cambiare `AGENTS.md` e le abitudini delle sessioni (issue R6).
+- **L'avviatore non è installazione: è il bootstrap dell'host o dell'immagine.** Non sta nella copia fissata e non dipende dal repository gestito. Riceve lo `state_dir` come parametro invece di ricavarlo dalla propria posizione (scripts/devloop-pinned:23-24), e continua a non importare nulla fuori dalla copia fissata.
+  - Sull'host, gli script di `ops/host/` lo installano in un percorso dell'host, per esempio `/usr/local/lib/devloop/devloop-pinned`, copiandolo dalla sorgente al tag fissato. L'unità del servizio lo chiama con lo `state_dir` del progetto (issue R1 e R8).
+  - Nel container è l'entrypoint dell'immagine (sezione 3.7).
+  - Per ssdlc, dove sorgente e gestito coincidono, `scripts/devloop-pinned` resta dov'è e funziona come oggi senza parametro.
 
 Alternative:
 
@@ -283,7 +332,7 @@ Alternative:
 **Raccomandazione: B per i repository dello stesso proprietario e dello stesso operatore, A per gli altri.** In entrambi i casi:
 
 - `merger` si installa **solo** sui repository dove l'operatore attiva il merge automatico;
-- `scripts/agent-token.py` legge `repo` e le app dalla configurazione del progetto indicato (`--project` o lo `state_dir`), non da `devloop/config.toml` accanto a sé (scripts/agent-token.py:28-33, :71-77);
+- il sottocomando `devloop token` della sezione 3.5, richiamato anche da `scripts/agent-token.py`, legge `repo` e le app dalla configurazione del progetto indicato (lo `state_dir`, con il suo overlay), non da `devloop/config.toml` accanto a sé (scripts/agent-token.py:28-33, :71-77);
 - le chiavi restano in `key_dir`, per slug (devloop/apps.py:113-123). Con A, gli slug distinti per prefisso convivono nella stessa `key_dir` senza conflitti;
 - i manifest di #402 (PR #403) si riusano senza modifiche: `@REPO@` e `APP_PREFIX` bastano a creare un insieme per progetto. Con B si aggiunge solo l'installazione sul nuovo repository.
 
@@ -330,7 +379,7 @@ Punti aperti del container, da chiudere nell'issue che lo costruisce:
 
 - uno `state_dir` per progetto, **fuori** dal clone (per esempio `/var/lib/devloop/<progetto>`) o dentro il clone del progetto. Contiene lock, journal, worktree, overlay e copie fissate;
 - un servizio per progetto: un'unità template `devloop@<progetto>.service` sull'host, oppure un container per progetto;
-- il lock del dispatcher resta **per repository**, in `<state_dir>/dispatcher.lock` (devloop/__main__.py:490). Due servizi sullo stesso repository si escludono come oggi;
+- il lock del dispatcher di oggi, `<state_dir>/dispatcher.lock` (devloop/__main__.py:490), resta, ma è **per `state_dir`**, non per repository (sezione 1.8). Con installazioni e `state_dir` separati, due servizi configurati sullo stesso `repo` **non** si escluderebbero: due dispatcher agirebbero sulle stesse issue e PR, con lavoro doppio e marker in conflitto. L'esclusione per repository va quindi aggiunta (vedi sotto);
 - la memoria dei modelli non disponibili (`model-unavailability.json`) e il budget restano per progetto. Le **quote** degli account delle CLI sono condivise se il login è condiviso.
 
 Alternative per i login delle CLI e per l'utente di sistema:
@@ -340,6 +389,32 @@ Alternative per i login delle CLI e per l'utente di sistema:
 - (c) **un container per progetto**, con i volumi propri: equivale a (b).
 
 **Raccomandazione: (b) sull'host e (c) con il container.** Un repository di terzi non deve poter leggere lo stato di ssdlc.
+
+**Esclusione per repository.** Alternative:
+
+- (L1) **lock per repository sull'host.** Oltre al lock dello `state_dir`, il dispatcher prende, senza attendere, un lock con nome derivato dal `repo` normalizzato (proprietario e nome in minuscolo), in una directory comune dell'host, per esempio `/run/devloop/repos/<proprietario>--<nome>.lock`. Se il lock è occupato, devloop si ferma all'avvio con un messaggio che nomina il repository, come oggi con il lock dello `state_dir` (devloop/__main__.py:59-68).
+  - Pro: stesso meccanismo di oggi (`flock`), nessuna dipendenza dal tracker, rilasciato dal kernel se il processo muore.
+  - Contro: vale solo **sullo stesso host**. Con utenti per progetto la directory comune deve essere scrivibile da tutti gli utenti di devloop, per esempio con un gruppo dedicato, senza dare accesso agli `state_dir`. Con i container la directory va montata in tutti i container di quell'host.
+- (L2) **lease sul tracker.** Un oggetto del repository gestito che dice quale dispatcher lo sta servendo, con scadenza e rinnovo a ogni tick, scritto dall'app del dispatcher.
+  - Pro: vale anche fra host diversi.
+  - Contro: serve un'operazione atomica sul tracker (per esempio la creazione di un ref, che fallisce se il ref esiste), con permessi in più per l'app del dispatcher; scadenze e orologi; un dispatcher che perde il lease deve fermare le azioni in corso. È il **fencing** degli esecutori del passo 4 dell'ADR 0001, di cui sarebbe un anticipo parziale.
+- (L3) **solo procedura.** La guida dice "un servizio per repository" e lo controlla `check-host.sh`. Non è un'esclusione.
+
+**Raccomandazione: (L1) in R8, come requisito**, con la regola "un repository, un host" scritta nella guida rapida. (L2) si valuta con il fencing del passo 4 dell'ADR 0001, se servirà gestire lo stesso repository da più host. `tick --dry-run` continua a non prendere nessun lock (devloop/__main__.py:481-489). La scelta è dell'operatore (D6).
+
+### 3.9 Rischi
+
+Rischi introdotti o resi più visibili da queste proposte, con la mitigazione proposta:
+
+| # | Rischio | Mitigazione proposta |
+|---|---|---|
+| K1 | **Le chiavi di fiducia perdono storia e revisione.** Con la sezione 3.2, `repo`, `trusted_users`, `[apps]`, merge e permessi degli agent passano dal `devloop/config.toml` versionato, rivisto in PR e coperto dalla regola dei reviewer di P5-0, all'overlay non versionato. Una modifica dell'overlay non lascia traccia di chi l'ha fatta, quando e da quale valore | (T1) A ogni avvio, e a ogni rilettura della configurazione (devloop/config.py:1232-1255), il dispatcher scrive nel suo registro (il journal) un record con l'**hash dell'overlay**, l'hash del file di progetto con il suo commit, l'hash della configurazione effettiva e l'elenco delle chiavi di fiducia cambiate rispetto al record precedente, con il valore vecchio e quello nuovo. Il riepilogo di #316 mostra i cambi. (T2) In aggiunta, facoltativo: un **repository di configurazione dell'operatore**, privato, da cui l'overlay si copia sull'host. Dà storia e revisione vere, ma è infrastruttura in più e sta fuori da devloop. Raccomandazione: T1 sempre, nell'issue R2; T2 a scelta dell'operatore (D6) |
+| K2 | **Il file di progetto cambia fuori da devloop** (push diretto su `main` di un repository di terzi) | Validazione come input non fidato e rifiuto all'avvio e al tick (sezione 3.2, requisiti 1-3); traccia del suo hash (requisito 6, T1); hash nella policy, quindi approvazioni annullate |
+| K3 | **Restrizioni del progetto che spariscono** con una modifica di `main` | Il pavimento sta nell'installazione e nell'overlay; ciò che conta va nell'overlay (sezione 3.2, requisito 4) |
+| K4 | **Due servizi sullo stesso repository** | Lock per repository sull'host (sezione 3.8, L1); un repository per host nella guida |
+| K5 | **Lettura dello stato fra progetti** con un utente condiviso | Utente o container per progetto (sezione 3.8) |
+| K6 | **Chiavi condivise fra repository** con le app condivise | `merger` solo dove serve; app per repository per i terzi (sezione 3.6) |
+| K7 | **Il container non separa gli agent dal dispatcher** | Dichiararlo nella guida; il contenimento resta il passo 4 dell'ADR 0001 (sezione 3.7) |
 
 ## 4. Collocazione nel piano dell'ADR 0001
 
@@ -369,19 +444,19 @@ Le issue si aprono dopo l'approvazione di questo ADR, una per area, e citano la 
 - Quasi tutte cambiano la policy di fiducia o il codice che la applica (file di progetto, permessi degli agent, identità): con la regola dei reviewer di #399 vanno all'operatore.
 - Quelle che toccano `AGENTS.md`, `CLAUDE.md` o `docs/adr/` le mergia l'operatore (`operator_only_paths`, devloop/config.toml:178).
 - Ogni issue aggiorna i documenti che la mappa `[docs.map]` lega ai file che cambia.
-- Nessuna issue cambia il comportamento di devloop su ssdlc. La prova è l'equivalenza: stessa configurazione effettiva, stessi prompt resi, stessi moduli di test selezionati.
+- Nessuna issue cambia il comportamento di devloop su ssdlc. La prova è l'equivalenza allo stesso commit fissato: stessa configurazione effettiva, stessi prompt resi, stessi moduli di test selezionati. Con la raccomandazione (i) della sezione 3.2, anche i tempi in cui una modifica della configurazione ha effetto restano quelli di oggi.
 - Nessuna issue tocca il motore locale né i file fissati dalla baseline del replay gate.
 
 | Issue | Titolo proposto | Perimetro | Dipendenze | Review |
 |---|---|---|---|---|
-| R1 | feat(devloop): sorgente dell'installazione separata dal repository gestito | `source` nella configurazione dell'host; il pin usa la radice della sorgente, worktree e GitHub quella del gestito; pin automatico solo con sorgente = gestito; `state_dir` dell'host letto anche da `scripts/devloop-pinned` e dagli script di ops; senza `source` il comportamento di oggi. Test con due repository git locali | Approvazione dell'ADR e D1 | Livello 2 |
-| R2 | feat(devloop): file di progetto `.devloop/project.toml` | Schema e lettura dal commit di `origin/<base_branch>`, mai da un branch di PR; precedenza installazione < progetto < overlay; chiavi ammesse secondo D2; regola "solo aggiungere" per i percorsi; `.devloop/` sensibile e riservato per codice; hash nella policy e nelle ricevute. Senza file, la configurazione di oggi | R1, P5-0 dell'ADR 0005 e D2 | Livello 2, all'operatore (policy di fiducia) |
-| R3 | refactor: configurazione di ssdlc nel suo file di progetto | Chiavi di progetto di ssdlc da `devloop/config.toml` a `.devloop/project.toml` di ssdlc; valori di ssdlc nel codice (devloop/config.py:19, :120; devloop/policy.py:48-52, :75; devloop/localtests.py:24-25) nel file; `sensitive_path_lists` dal repository gestito. Test di equivalenza della configurazione effettiva e un controllo che l'installazione non contenga più valori di ssdlc (sezione 3.5) | R2 | Livello 2, all'operatore |
+| R1 | feat(devloop): sorgente dell'installazione separata dal repository gestito | `source` nella configurazione dell'host; il pin usa la radice della sorgente, worktree e GitHub quella del gestito; pin automatico solo con sorgente = gestito; `state_dir` dell'host passato all'avviatore come parametro e letto dagli script di ops; avviatore installato sull'host dalla sorgente al tag fissato, fuori dalla copia fissata e dal repository gestito (sezione 3.5); senza `source` il comportamento di oggi. Test con due repository git locali | Approvazione dell'ADR e D1 | Livello 2 |
+| R2 | feat(devloop): file di progetto `.devloop/project.toml` | Schema chiuso e lettura dal commit di `origin/<base_branch>`, mai da un branch di PR (dal commit fissato per ssdlc, secondo D2); precedenza installazione < progetto < overlay; il file come input non fidato, con i requisiti 1-6 della sezione 3.2: solo fatti e restrizioni sopra il pavimento, rifiuto all'avvio di un file che allenti l'installazione o l'overlay, tick fermato se un file non valido compare su `main`; `.devloop/` sensibile per default, e riservato solo se D2 sceglie (b'); hash nella policy e nelle ricevute; record nel registro con gli hash dell'overlay, del file di progetto e della configurazione effettiva, e le chiavi di fiducia cambiate (sezione 3.9, T1). Senza file, la configurazione di oggi | R1, P5-0 dell'ADR 0005 e D2 | Livello 2, all'operatore (policy di fiducia) |
+| R3 | refactor: configurazione di ssdlc nel suo file di progetto | Chiavi di progetto di ssdlc da `devloop/config.toml` a `.devloop/project.toml` di ssdlc; valori di ssdlc nel codice (devloop/config.py:19, :120; devloop/policy.py:48-52, :75; devloop/localtests.py:24-25) nel file; chiavi di fiducia di ssdlc nel suo overlay, con le restrizioni da garantire (`devloop/`, `core/`, `schemas/` sensibili); `sensitive_path_lists` dal repository gestito, allo stesso commit del file di progetto. Test di equivalenza statica: allo stesso commit fissato, stessa configurazione effettiva e stesso hash della policy prima e dopo la migrazione (sezione 3.2). Un controllo che l'installazione non contenga più valori di ssdlc (sezione 3.5) | R2 | Livello 2, all'operatore |
 | R4 | feat(devloop): prompt come modelli con i dati del progetto | Segnaposto per le istruzioni da leggere, il comando di un solo modulo e le regole sugli ADR; frasi tolte quando il dato manca; valori di ssdlc nel suo file di progetto. Test: prompt resi identici byte per byte per ssdlc | R2 (R3 per i valori di ssdlc) | Livello 2, all'operatore (i prompt sono policy) |
 | R5 | feat(devloop): test e CI dichiarati dal progetto | `test_cmd`, `local_tests`, strategia di selezione con nome (quella di oggi parametrizzata) e formato dei log della CI, facoltativi; senza selezione, `changed` vale `full`; senza formato, `ci_rerun_unrelated` spento. Comandi ammessi agli agent secondo D2. Test: stessi moduli selezionati per ssdlc | R2 | Livello 2, all'operatore |
-| R6 | feat(devloop): identità per progetto | `scripts/agent-token.py` con la configurazione del progetto indicato; `Identities` e `devloop apps` sul `repo` del progetto; documentazione delle due modalità (insieme per repository o app condivise) secondo D3; `AGENTS.md` aggiornato. I manifest di `ops/github/apps/` non cambiano | R1, P5-3 e P5-4 dell'ADR 0005, D3 | Livello 2, merge dell'operatore |
+| R6 | feat(devloop): identità per progetto | Sottocomando `devloop token` nell'installazione, con la configurazione del progetto indicato, e `scripts/agent-token.py` come involucro che lo richiama (sezione 3.5); `Identities` e `devloop apps` sul `repo` del progetto; documentazione delle due modalità (insieme per repository o app condivise) secondo D3; `AGENTS.md` aggiornato. I manifest di `ops/github/apps/` non cambiano | R1, P5-3 e P5-4 dell'ADR 0005, D3 | Livello 2, merge dell'operatore |
 | R7 | feat(ops): immagine container di devloop | Prima, la **prova** della sandbox di codex nel container, con il risultato registrato nell'issue: se non si attiva senza `--privileged` né sandbox spenta, l'issue si ferma e torna all'operatore. Poi: immagine con versioni fissate, entrypoint con smoke test, volumi e segreti della sezione 3.7, login interattivi, aggiornamento e rollback per tag; supervisore fuori dal container con accesso in sola lettura | R1–R6 e D4 | Livello 2 |
-| R8 | feat(ops): più progetti sullo stesso host | Unità template `devloop@.service`, parametri per progetto, `state_dir` e utente per progetto secondo D6, `check-host.sh` per progetto, sudoers del supervisore per unità | R1 e D6 | Livello 1, livello 2 se tocca `devloop/` |
+| R8 | feat(ops): più progetti sullo stesso host | Unità template `devloop@.service`, parametri per progetto, `state_dir` e utente per progetto secondo D6, `check-host.sh` per progetto, sudoers del supervisore per unità. **Requisito: esclusione per repository** secondo D6, con la raccomandazione L1 della sezione 3.8: lock per `repo` normalizzato in una directory comune dell'host, preso all'avvio senza attendere, arresto con un messaggio se è occupato; directory comune accessibile a tutti gli utenti di devloop dell'host senza accesso agli `state_dir`, e montata in ogni container. Test: due dispatcher con `state_dir` diversi sullo stesso `repo` non partono insieme; su `repo` diversi sì | R1 e D6 | Livello 2: il lock tocca `devloop/` |
 | R9 | docs: guida rapida per un nuovo progetto | Creare le app dai manifest (o installare quelle esistenti), scrivere `.devloop/project.toml`, scrivere l'overlay, avviare il container o il servizio, fare i login, verificare con `devloop apps` e `tick --dry-run`. Una prova su un repository di test | R1–R8 | Livello 1 |
 
 **Ordine.**
@@ -411,8 +486,10 @@ Questo ADR le elenca, con le alternative e le raccomandazioni, ma **non le prend
   - Se i tag fissati per gli altri progetti debbano essere firmati e verificati prima del pin. La raccomandazione è no per ora, perché il pin verifica già la raggiungibilità da `origin`, e sì prima di aprire devloop a operatori diversi.
 - **D2. File di progetto e sua precedenza** ([sezione 3.2](#32-file-di-progetto-e-precedenza)).
   - Il nome (`.devloop/project.toml`) e la precedenza: installazione < progetto < overlay.
-  - Quali chiavi può contenere: (a), (b) o (c). La raccomandazione è (b): solo fatti del progetto e restrizioni aggiuntive, con le chiavi di fiducia nell'overlay.
-  - Se `.devloop/` è sensibile e riservato all'operatore **per codice**, anche per ssdlc, dove sarebbe un file riservato nuovo accanto al `devloop/config.toml` non riservato dell'ADR 0005. La raccomandazione è sì.
+  - Quali chiavi può contenere: (a), (b), (b') o (c). La raccomandazione è (b): solo fatti del progetto e restrizioni sopra il pavimento di installazione e overlay, con le chiavi di fiducia nell'overlay.
+  - Il file di progetto come **input non fidato**, con il rifiuto all'avvio di un file che allenti l'installazione o l'overlay e l'arresto del tick se un file non valido compare su `main` (requisiti 1-6 della sezione 3.2). La raccomandazione è sì, in ogni repository.
+  - La protezione di `.devloop/`: (b), regola dei reviewer di P5-0, coerente con la decisione dell'ADR 0005 del 2026-11-18 alle 21:50, oppure (b'), riservato all'operatore per codice. La raccomandazione è (b): (b') non copre le scritture su `main` fuori da devloop, che sono il rischio in più dei repository di terzi, e quelle le copre la validazione.
+  - Per ssdlc, da quale commit si legge il file di progetto: (i) dal commit fissato, con i tempi di oggi, oppure (ii) dal commit di base. La raccomandazione è (i).
   - Chi ammette i comandi degli agent derivati dai test del progetto ([sezione 3.4](#34-test-locali-e-ci)). La raccomandazione è l'overlay dell'operatore, mai il file di progetto da solo.
 - **D3. App per repository** ([sezione 3.6](#36-identità)).
   - Alternative: A (un insieme per repository), B (app condivise), C (mista). La raccomandazione è B per i repository dello stesso proprietario e operatore, A per gli altri, e `merger` solo dove il merge automatico è attivo.
@@ -428,6 +505,8 @@ Questo ADR le elenca, con le alternative e le raccomandazioni, ma **non le prend
   - `trusted_users`, modalità di merge, supervisore e deleghe sono per progetto, nell'overlay. Se un altro progetto può avere utenti fidati diversi dall'operatore è una scelta caso per caso.
   - Un utente di sistema per progetto, (b), oppure uno condiviso, (a). La raccomandazione è (b) sull'host e un container per progetto.
   - Se un progetto di terzi può essere gestito sullo stesso host di ssdlc. La raccomandazione è sì, solo con utenti o container separati.
+  - Come si garantisce l'esclusione per repository ([sezione 3.8](#38-più-progetti-sullo-stesso-host)): (L1) lock per repository sull'host, (L2) lease sul tracker, (L3) solo procedura. La raccomandazione è (L1) in R8, con un repository per host, e (L2) solo con il fencing del passo 4 dell'ADR 0001.
+  - La tracciabilità delle chiavi di fiducia nell'overlay ([sezione 3.9](#39-rischi), K1): (T1) hash e cambi nel registro del dispatcher, (T2) repository di configurazione dell'operatore. La raccomandazione è T1 sempre e T2 a scelta dell'operatore.
 
 ## Precedenti
 
