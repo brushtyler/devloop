@@ -2038,8 +2038,10 @@ Beside it, `.ssdlc/devloop/project.toml` is the [project file](reference.md#proj
 (`protected_paths`, `blocked_labels`, sensitive paths and lists, level-0 checks,
 `operator_only_paths`). The order is installation < project file < overlay, but a restriction
 of the project file only adds to those of the installation and the overlay. Any other key in it
-stops devloop, naming the key; the trust keys stay in the overlay. Its hash is part of the
-policy version, and each start and reload records the configuration in the journal.
+stops devloop, naming the key; the trust keys stay in the overlay, and its `test_cmd` never
+enters the default commands of agy: the overlay alone admits it. It must be a regular file of
+its own: a symbolic link, or a file with other hard links, stops devloop. Its hash is part of
+the policy version, and each start and reload records the configuration in the journal.
 
 #### Changes while the loop runs
 

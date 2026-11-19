@@ -54,9 +54,10 @@ def command(root, argv, python=sys.executable, state=None):
                  '`python3 -m devloop pin origin/main` from the main checkout first')
     local = state / 'config.local.toml'
     extra = ['--local-config', str(local)] if local.is_file() else []
-    # The project file on the host (ADR 0006, R2), beside the overlay.
+    # The project file on the host (ADR 0006, R2), beside the overlay. A link is passed too:
+    # devloop refuses it, rather than running without the project file.
     project = state / 'project.toml'
-    if project.is_file():
+    if project.is_file() or project.is_symlink():
         extra += ['--project-config', str(project)]
     env = {k: v for k, v in os.environ.items()
            if k not in ('PYTHONPATH', 'PYTHONHOME', STATE_ENV)}

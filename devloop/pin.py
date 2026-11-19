@@ -48,7 +48,8 @@ import tomllib
 from contextlib import contextmanager, nullcontext
 from pathlib import Path, PurePosixPath
 
-from .config import DEFAULT_SENSITIVE_LISTS, INSTALL_ROOT, ConfigError, compose, read_toml
+from .config import (DEFAULT_SENSITIVE_LISTS, INSTALL_ROOT, ConfigError, compose,
+                     read_project_toml, read_toml)
 
 POINTER = 'current'
 # The time of the last successful pin of each copy (#380): the order of ``prune``.
@@ -241,8 +242,9 @@ def required_files(root, sha, local, project=None):
     try:
         overlay = (read_toml(Path(local), 'local config')
                    if local and Path(local).exists() else None)
-        table = (read_toml(Path(project), 'project file')
-                 if project and Path(project).exists() else None)
+        table = (read_project_toml(Path(project))
+                 if project and (Path(project).exists() or Path(project).is_symlink())
+                 else None)
         data = compose(data, table, overlay)
     except ConfigError as exc:
         raise PinError(str(exc)) from exc

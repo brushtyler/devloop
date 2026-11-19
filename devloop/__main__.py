@@ -74,29 +74,46 @@ def tracked(root, path):
 
 def check_project(project, state, root):
     """``ConfigError`` unless the project file ``project`` (ADR 0006, R2), if any, is
-    ``<state_dir>/project.toml`` on the host, and not a file the managed repository (its main
-    checkout ``root``) tracks: the project file never comes from the repository, a PR branch
-    or the worktree of a turn."""
+    ``<state_dir>/project.toml`` on the host, not a symbolic link, not a file the managed
+    repository (its main checkout ``root``) tracks, and, at the path it resolves to (a
+    state_dir reached through a link), not a file the git checkout holding it tracks: the
+    project file never comes from the repository, a PR branch or the worktree of a turn. Its
+    reads refuse a link too (``config.read_project_bytes``)."""
     if project is None:
         return
     expected = Path(state) / PROJECT_CONFIG
     if Path(project).resolve() != expected.resolve():
         raise ConfigError(f'project file: {project} is not {expected}: the project file is '
                           f'{PROJECT_CONFIG} in the state_dir, on the host')
+    if Path(project).is_symlink() or expected.is_symlink():
+        raise ConfigError(f'project file: {expected} is a symbolic link: the project file is a '
+                          'regular file of the host, in the state_dir')
     if tracked(root, expected):
         raise ConfigError(f'project file: {expected} is a file of the managed repository: the '
                           'project file belongs to the host, never to the repository')
+    real = expected.resolve()
+    if tracked(real.parent, real):
+        raise ConfigError(f'project file: {expected} is {real}, a file of a git checkout (the '
+                          'repository, a worktree or another clone): the project file belongs '
+                          'to the host, never to the repository')
 
 
-def load(args, root=None):
-    """The configuration of ``args``: the installation's, the project file (ADR 0006, R2) and
-    the overlay. A project file given is checked (``check_project``) on the main checkout
-    ``root`` (default: ``main_checkout()``)."""
-    cfg = load_config(args.config, args.local_config, project_of(args))
+def load_sources(args, root=None):
+    """``(configuration, sources)`` of ``args``: the installation's, the project file (ADR
+    0006, R2) and the overlay, with the files as they were read (``config.read_sources``). A
+    project file given is checked (``check_project``) on the main checkout ``root`` (default:
+    ``main_checkout()``)."""
+    sources = read_sources(args.config, args.local_config, project_of(args))
+    cfg = load_config(sources=sources)
     if project_of(args) is not None:
         root = root or main_checkout()
         check_project(project_of(args), state_path(cfg, root), root)
-    return cfg
+    return cfg, sources
+
+
+def load(args, root=None):
+    """The configuration of ``args``, as ``load_sources``."""
+    return load_sources(args, root)[0]
 
 
 def config_recorder(journal, when, log):
@@ -122,15 +139,19 @@ def config_recorder(journal, when, log):
     return record
 
 
-def record_start(args, dispatcher, log):
-    """Record the configuration the dispatcher starts with in its journal (ADR 0006, T1);
-    nothing for a dispatcher without a journal of its own. Returns the recorder of the reloads,
-    or None."""
+def record_start(dispatcher, log):
+    """Record the configuration the dispatcher starts with in its journal (ADR 0006, T1): the
+    ``fingerprint`` of the very files ``build`` read (``dispatcher.config_print``), never a new
+    read; nothing for a dispatcher without a journal of its own. Returns the recorder of the
+    reloads, or None."""
     journal = getattr(getattr(dispatcher, 'ledger', None), 'journal', None)
     if not isinstance(journal, TurnJournal):
         return None
+    print_ = getattr(dispatcher, 'config_print', None)
+    if print_ is None:
+        raise ConfigError('the dispatcher has no record of the configuration it was built with')
     record = config_recorder(journal, 'start', log)
-    record(fingerprint(read_sources(args.config, args.local_config, project_of(args))))
+    record(print_)
     reload = config_recorder(journal, 'reload', log)
     # The first reload reads the files in any case: recorded only when they changed since.
     return lambda print_: reload(print_, only_if_changed=True)
@@ -215,7 +236,7 @@ def agent_environment(cfg, gh_config, agent_user=None):
 
 def build(args):
     root = main_checkout()
-    cfg = load(args, root)
+    cfg, sources = load_sources(args, root)
     state = state_path(cfg, root)
     try:
         identities = Identities.from_config(cfg)
@@ -276,6 +297,9 @@ def build(args):
                             advisory_failures=AdvisoryFailures(state),
                             housekeeping=Housekeeping(state, ws, gh, ledger=ledger,
                                                       log=tick_log))
+    # What the trace T1 (ADR 0006, K1) records of the start: the files this configuration came
+    # from, as they were read.
+    dispatcher.config_print = fingerprint(sources)
     return cfg, state, dispatcher
 
 
@@ -361,7 +385,8 @@ def run_pin(args):
         local = args.local_config or state / pin.LOCAL_CONFIG
         # The project file of the state_dir (ADR 0006, R2), as the launcher would pass it.
         project = project_of(args) or state / PROJECT_CONFIG
-        check_project(project if Path(project).exists() else None, state, root)
+        check_project(project if Path(project).exists() or Path(project).is_symlink() else None,
+                      state, root)
     except ConfigError as exc:
         sys.exit(f'devloop: invalid config: {exc}')
     try:
@@ -700,7 +725,7 @@ def main(argv=None):
             # The trace T1 of the configuration (ADR 0006, K1), under the lock: no record, no
             # tick.
             try:
-                recorder = record_start(args, dispatcher, log)
+                recorder = record_start(dispatcher, log)
             except (ConfigError, GitHubError) as exc:
                 sys.exit(f'devloop: the configuration was not recorded in the journal: {exc}')
         if args.command == 'cleanup':
@@ -719,9 +744,13 @@ def main(argv=None):
             if args.command == 'tick':
                 dispatcher.tick(dry_run=args.dry_run)
             elif args.command == 'run':
+                project = project_of(args)
+                # Each reload checks the project file again before reading it (ADR 0006, D2).
+                check = (lambda: check_project(project, state, dispatcher.ws.repo_root)
+                         ) if project else None
                 code = run_loop(cfg, state, dispatcher, timeout,
-                                Reloader(cfg, args.config, args.local_config, project_of(args),
-                                         log=log, record=recorder))
+                                Reloader(cfg, args.config, args.local_config, project,
+                                         log=log, record=recorder, check=check))
                 if code:
                     sys.exit(code)
         except pin.PinError as exc:

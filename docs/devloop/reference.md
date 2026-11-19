@@ -167,9 +167,12 @@ restrictions it adds. It is `<state_dir>/project.toml`, on the host, beside the
 by the dispatcher's user). The operator writes it; devloop never reads it from the managed
 repository, a PR branch, the worktree of a turn or the pinned copy. The
 [launcher](guide.md#launcher) passes it with `--project-config` when it exists, and devloop
-refuses, at startup, a `--project-config` that is not `<state_dir>/project.toml` or that the
-managed repository tracks. Without the file the configuration is the one of before: same keys,
-same policy version.
+refuses, at startup, a `--project-config` that is not `<state_dir>/project.toml`, that the
+managed repository tracks, or that is a symbolic link or has other hard links; a `state_dir`
+reached through a link is refused when the file it leads to is tracked by the git checkout that
+holds it (a worktree, another clone). The file is read without following a link, at the start
+and at each reload, and each reload checks it again before reading it. Without the file the
+configuration is the one of before: same keys, same policy version.
 
 **Precedence:** installation (`devloop/config.toml` of the pinned copy) < project file <
 overlay. The schema is closed, and a key outside it stops devloop at startup with a message that
@@ -182,7 +185,11 @@ names it (a key of the overlay is told so: `set it in the local overlay`):
 
 Every other key, the trust keys (`repo`, `trusted_users`, `[apps]`, `[merge] mode`, roles, review
 levels, the level-0 allowlist, the agents and their permissions, `[budget]`, `preflight`,
-`conclave`, `[delegations]`), the limits and `state_dir`, is the overlay's alone. The lists of
+`conclave`, `[delegations]`), the limits and `state_dir`, is the overlay's alone. The
+`test_cmd` of the project file is the dispatcher's test command, never a permission of the
+agents: the default commands of agy (`write_commands` and `review_commands`, see
+[agy permissions](#agy-permissions)) still derive from the `test_cmd` of the overlay, or of the
+installation without one there; the overlay alone admits the project's test command. The lists of
 `sensitive_path_lists` the project file adds are read from the pinned copy, as those of the
 installation: `devloop pin` extracts them, and checks the copy with the project file of the
 `state_dir`. A copy whose code cannot read the project file is refused while there is one.
@@ -206,7 +213,12 @@ run the repository's code in its worktree, as before.
 that finds the files changed, the dispatcher records in its [journal](protocol.md#turn-journal)
 a `config` event: the SHA-256 of the overlay and of the project file, that of the effective
 configuration, and the trust keys whose value changed since the previous one, with the value
-before and after. Its log says the same. A start whose record cannot be written stops devloop.
+before and after. The trust keys are `repo`, `base_branch`, `state_dir`, `source`, `test_cmd`,
+`trusted_users`, `preflight`, `conclave`, `[roles]`, `[agents]`, `[apps]`, `[merge]`,
+`[review_policy]`, `max_review_rounds`, `protected_paths`, `blocked_labels`, `[budget]`,
+`[delegations]`, `[agent_user]` and `[pin]`. The start records the files the dispatcher was
+built from, as they were read, never a second read of them. Its log says the same. A start whose
+record cannot be written stops devloop.
 
 ### No background work in a turn
 
@@ -637,7 +649,9 @@ each agy turn its minimal permissions, and treats a stop without output as a fai
   prefixes come from `review_commands` (review and readiness check turns) and `write_commands`
   (implement, fix and sync turns) of the agy agent. Both default to the tokens of `test_cmd`,
   `python3 -m unittest`, `git status`, `git diff`, `git log` and `git show`; write turns get no
-  `git add` nor `git commit`, because the dispatcher commits.
+  `git add` nor `git commit`, because the dispatcher commits. The `test_cmd` of these defaults is
+  that of the overlay or of the installation, never that of the
+  [project file](#project-file) (ADR 0006, D2).
 - **Never.** devloop refuses at startup a prefix that is a bare interpreter, shell or `git`
   (`python3`, `bash`, `sh`, …), also when given by path (`/usr/bin/python3`, `/bin/sh`,
   `venv/bin/python`), one with wildcards, quotes or shell syntax (`*`, `;`, `&&`, `|`,

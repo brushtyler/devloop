@@ -86,6 +86,31 @@ class PrecedenceTests(FilesCase):
                         overlay='max_open_prs = 4\ntest_cmd = "make test"\n')
         self.assertEqual(cfg.test_cmd, 'make test')
 
+    def test_the_test_cmd_of_the_project_file_never_reaches_the_agents_permissions(self):
+        # agy without commands of its own (the installation's): its defaults derive from the
+        # test command of the installation or of the overlay, never of the project file (D2).
+        floor = self.load()
+        self.assertNotIn('write_commands', config.read_toml(self.base)['agents']['agy'])
+        cfg = self.load('test_cmd = "python3 project_runner.py"\n')
+        self.assertEqual(cfg.test_cmd, 'python3 project_runner.py')
+        agy = cfg.agents['agy']
+        for commands in (agy.write_commands, agy.review_commands):
+            self.assertNotIn('python3 project_runner.py', commands)
+        self.assertEqual((agy.write_commands, agy.review_commands),
+                         (floor.agents['agy'].write_commands, floor.agents['agy'].review_commands))
+        # The overlay admits it.
+        cfg = self.load('test_cmd = "python3 project_runner.py"\n',
+                        overlay='max_open_prs = 4\ntest_cmd = "python3 project_runner.py"\n')
+        self.assertIn('python3 project_runner.py', cfg.agents['agy'].write_commands)
+        self.assertIn('python3 project_runner.py', cfg.agents['agy'].review_commands)
+        # The reloader composes them the same way.
+        self.write('max_open_prs = 4\n', self.local)
+        self.write('test_cmd = "python3 project_runner.py"\n')
+        reloaded, _ = Reloader(floor, self.base, self.local, self.project,
+                               log=lambda _: None)._load(config.read_sources(
+                                   self.base, self.local, self.project))
+        self.assertNotIn('python3 project_runner.py', reloaded.agents['agy'].review_commands)
+
     def test_restrictions_only_add_to_the_installation_and_the_overlay(self):
         floor = self.load()
         cfg = self.load('protected_paths = ["infra/"]\nblocked_labels = ["wontfix"]\n'
@@ -218,6 +243,25 @@ class ReloaderTests(FilesCase):
         self.assertIn("'trusted_users'", print_['error'])
         self.assertEqual(print_['project'], hashlib.sha256(self.project.read_bytes()).hexdigest())
 
+    def test_a_project_file_that_becomes_a_link_or_fails_its_check_is_not_read(self):
+        self.reloader.refresh()
+        tracked = self.tmp / 'tracked-project.toml'
+        tracked.write_text('language = "Esperanto"\n')
+        self.project.unlink()
+        self.project.symlink_to(tracked)
+        self.assertIs(self.reloader.refresh(), self.cfg)
+        self.assertIn('symbolic link', self.logs[-1])
+        self.assertIn('symbolic link', self.records[-1]['error'])
+        self.assertIsNone(self.records[-1]['project'])
+        # A check that fails (the project file became a file of the repository) stops the read.
+        self.project.unlink()
+        self.write('language = "Esperanto"\n')
+        reloader = Reloader(self.cfg, self.base, self.local, self.project, log=self.logs.append,
+                            check=mock.Mock(side_effect=ConfigError('a file of the repository')))
+        self.assertIs(reloader.refresh(), self.cfg)
+        self.assertIn('a file of the repository', self.logs[-1])
+        reloader.check.assert_called_once_with()
+
     def test_a_failed_record_is_logged(self):
         reloader = Reloader(self.cfg, self.base, self.local, self.project, log=self.logs.append,
                             record=mock.Mock(side_effect=JournalError('full')))
@@ -261,6 +305,16 @@ class JournalTests(FilesCase):
         self.assertEqual(records[-1]['project'], print_['project'])
         self.assertEqual(records[-1]['effective'], print_['effective'])
         self.assertIsNone(records[0]['project'])
+
+    def test_a_change_of_max_review_rounds_is_recorded_before_and_after(self):
+        rounds = config.read_toml(self.base)['max_review_rounds']
+        self.journal.configuration('start', self.fingerprint())
+        self.assertEqual(self.journal.trust()['max_review_rounds'], rounds)
+        changes = self.journal.configuration(
+            'reload', self.fingerprint(overlay=f'max_open_prs = 4\nmax_review_rounds = {rounds + 3}\n'),
+            only_if_changed=True)
+        self.assertEqual(changes, [{'key': 'max_review_rounds', 'old': rounds,
+                                    'new': rounds + 3}])
 
     def test_only_if_changed_skips_the_same_hashes(self):
         print_ = self.fingerprint()
@@ -328,6 +382,42 @@ class CommandTests(FilesCase):
             cli.load(self.args(self.project), self.root)
         self.assertFalse(cli.tracked(self.root, self.state / 'config.local.toml'))
 
+    def test_a_link_to_a_file_of_the_repository_is_refused(self):
+        # An untracked project.toml in the state_dir, a link to a file the repository tracks.
+        target = self.root / 'tracked-project.toml'
+        target.write_text('test_cmd = "python3 project_runner.py"\n')
+        git(self.root, 'add', str(target))
+        git(self.root, 'commit', '--quiet', '-m', 'a file of the repository')
+        self.project.symlink_to(target)
+        self.assertFalse(cli.tracked(self.root, self.project))
+        with self.assertRaisesRegex(ConfigError, 'symbolic link'):
+            cli.load(self.args(self.project), self.root)
+        with self.assertRaisesRegex(ConfigError, 'symbolic link'):
+            config.read_sources(self.base, self.local, self.project)
+        with self.assertRaisesRegex(ConfigError, 'symbolic link'):
+            cli.check_project(self.project, self.state, self.root)
+        # A hard link to it is refused too.
+        self.project.unlink()
+        os.link(target, self.project)
+        with self.assertRaisesRegex(ConfigError, 'hard links'):
+            cli.load(self.args(self.project), self.root)
+
+    def test_a_state_dir_linked_into_a_checkout_is_refused(self):
+        # The state_dir is a link into a git checkout (a worktree, another clone) whose
+        # project.toml git tracks: not the host's file.
+        other = self.tmp / 'worktree'
+        git(self.tmp, 'init', '--quiet', '-b', 'main', str(other))
+        (other / 'project.toml').write_text('test_cmd = "python3 project_runner.py"\n')
+        git(other, 'add', 'project.toml')
+        git(other, 'commit', '--quiet', '-m', 'a project file of the branch')
+        linked = self.tmp / 'linked-state'
+        linked.symlink_to(other)
+        with self.assertRaisesRegex(ConfigError, 'a file of a git checkout'):
+            cli.check_project(linked / 'project.toml', linked, self.root)
+        # An untracked one beside it is the host's.
+        git(other, 'rm', '--quiet', '--cached', 'project.toml')
+        cli.check_project(linked / 'project.toml', linked, self.root)
+
     def test_build_reads_the_project_file_and_the_pinner_gets_it(self):
         self.write('language = "Italiano"\n')
         args = self.args(self.project)
@@ -339,12 +429,34 @@ class CommandTests(FilesCase):
         self.assertEqual(state, self.state)
         self.assertEqual(d.pinner.project, str(self.project))
 
-    def test_the_start_is_recorded_and_the_reloads_only_when_changed(self):
+    def test_the_start_records_the_files_build_read_not_a_new_read(self):
         self.write('language = "Italiano"\n')
         args = self.args(self.project, 'run')
+        with mock.patch.object(cli, 'main_checkout', return_value=self.root), \
+                mock.patch.object(cli.Identities, 'from_config',
+                                  side_effect=lambda cfg: cli.Identities(cfg.repo, {})):
+            cfg, _, d = cli.build(args)
+        used = cfg.review_policy.project
+        # The operator changes the file between the load and the record.
+        self.write('language = "Esperanto"\n')
+        logs = []
+        cli.record_start(d, logs.append)
+        record = d.ledger.journal.configurations()[-1]
+        self.assertEqual(record['when'], 'start')
+        self.assertEqual(record['project'], used)
+        self.assertNotEqual(record['project'],
+                            hashlib.sha256(self.project.read_bytes()).hexdigest())
+        # A dispatcher without the record of its build is refused, never read again.
+        with self.assertRaisesRegex(ConfigError, 'no record of the configuration'):
+            cli.record_start(SimpleNamespace(ledger=d.ledger), logs.append)
+
+    def test_the_start_is_recorded_and_the_reloads_only_when_changed(self):
+        self.write('language = "Italiano"\n')
         ledger = Ledger(None, state_dir=self.state)
         logs = []
-        reload = cli.record_start(args, SimpleNamespace(ledger=ledger), logs.append)
+        print_ = config.fingerprint(config.read_sources(self.base, self.local, self.project))
+        reload = cli.record_start(SimpleNamespace(ledger=ledger, config_print=print_),
+                                  logs.append)
         records = ledger.journal.configurations()
         self.assertEqual([r['when'] for r in records], ['start'])
         self.assertEqual(records[0]['project'],
@@ -360,7 +472,7 @@ class CommandTests(FilesCase):
                          ['start', 'reload'])
         self.assertIn("config: trust key trusted_users ['brushtyler'] -> ['a']", logs)
         # A dispatcher without a journal of its own records nothing.
-        self.assertIsNone(cli.record_start(args, SimpleNamespace(), logs.append))
+        self.assertIsNone(cli.record_start(SimpleNamespace(), logs.append))
 
     def test_run_records_the_start_before_the_loop_and_gives_the_reloader_the_files(self):
         self.write('language = "Italiano"\n')
@@ -372,14 +484,23 @@ class CommandTests(FilesCase):
             return 0
         argv = ['--config', str(self.base), '--local-config', str(self.local),
                 '--project-config', str(self.project), 'run']
+        print_ = config.fingerprint(config.read_sources(self.base, self.local, self.project))
+        dispatcher = SimpleNamespace(ledger=ledger, config_print=print_,
+                                     ws=SimpleNamespace(repo_root=self.root))
         with mock.patch.object(cli, 'build', return_value=(
-                config.load_config(), self.state, SimpleNamespace(ledger=ledger))), \
+                config.load_config(), self.state, dispatcher)), \
                 mock.patch.object(cli, 'log'), mock.patch.object(cli, 'run_loop', loop):
             cli.main(argv)
         reloader, records = seen[0]
         self.assertEqual(reloader.paths['project'], self.project)
         self.assertEqual([r['when'] for r in records], ['start'])
         self.assertIsNotNone(reloader.record)
+        # The reloader checks the project file before each read of it.
+        reloader.check()
+        self.project.unlink()
+        self.project.symlink_to(self.base)
+        with self.assertRaisesRegex(ConfigError, 'symbolic link'):
+            reloader.check()
 
     def test_a_start_that_cannot_be_recorded_stops(self):
         ledger = Ledger(None, state_dir=self.state)
@@ -387,7 +508,9 @@ class CommandTests(FilesCase):
                                side_effect=JournalError('full')), \
                 mock.patch.object(cli, 'build', return_value=(
                     config.load_config(), self.state,
-                    SimpleNamespace(ledger=ledger, tick=mock.Mock()))) as build, \
+                    SimpleNamespace(ledger=ledger, tick=mock.Mock(),
+                                    config_print=config.fingerprint(
+                                        config.read_sources(self.base))))) as build, \
                 mock.patch.object(cli, 'log'), self.assertRaises(SystemExit) as raised:
             cli.main(['--config', str(self.base), 'tick'])
         self.assertIn('the configuration was not recorded in the journal', str(raised.exception))
@@ -436,9 +559,10 @@ class PinTests(GitCase):
         project = self.tmp / 'project.toml'
         project.write_text('language = "Italiano"\n')
         old = (self.root / 'devloop' / 'config.py').read_text()
-        text = old.replace('def load_config(path=None, local=None, project=None):',
+        text = old.replace('def load_config(path=None, local=None, project=None, *, sources=None):',
                            'def load_config(path=None, local=None):').replace(
-            '    return parse_sources(read_sources(path, local, project))\n\n\n# The trust',
+            '    return parse_sources(read_sources(path, local, project) if sources is None '
+            'else sources)\n\n\n# The trust',
             '    return parse_sources(read_sources(path, local))\n\n\n# The trust')
         self.assertNotEqual(text, old)
         self.push('a copy before R2', 'devloop/config.py', text)
@@ -496,6 +620,11 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(argv[4:], ['--local-config', str(self.state / 'config.local.toml'),
                                     '--project-config', str(self.state / 'project.toml'),
                                     'tick'])
+        # A link, even a dangling one, is passed: devloop refuses it rather than run without.
+        (self.state / 'project.toml').unlink()
+        (self.state / 'project.toml').symlink_to(self.tmp / 'missing.toml')
+        argv, _ = launcher.command(self.root, ['tick'])
+        self.assertIn('--project-config', argv)
 
 
 class DocsTests(unittest.TestCase):

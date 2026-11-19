@@ -4,7 +4,9 @@ import dataclasses
 import hashlib
 import json
 import math
+import os
 import re
+import stat
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -562,8 +564,9 @@ def _command(value, where):
 
 def _agy_commands(table, where, kind, test_cmd):
     """``(write_commands, review_commands)`` of an agent (issue #122). Only agy has them: by
-    default the tokens of ``test_cmd`` followed by ``AGY_DEFAULT_COMMANDS``, for both modes.
-    ``write_args`` and ``review_args`` may not bypass or replace them."""
+    default the tokens of ``test_cmd`` (none when it is empty) followed by
+    ``AGY_DEFAULT_COMMANDS``, for both modes. ``write_args`` and ``review_args`` may not bypass
+    or replace them."""
     keys = ('write_commands', 'review_commands')
     if kind != 'agy':
         for key in keys:
@@ -578,7 +581,8 @@ def _agy_commands(table, where, kind, test_cmd):
     lists = []
     for key in keys:
         configured = key in table
-        raw = _str_list(table, key, where) if configured else (test_cmd, *AGY_DEFAULT_COMMANDS)
+        raw = (_str_list(table, key, where) if configured
+               else (*((test_cmd,) if test_cmd else ()), *AGY_DEFAULT_COMMANDS))
         commands = []
         for value in raw:
             command = _command(value, f'{where}.{key}' if configured else
@@ -1130,11 +1134,14 @@ def parse_supervisor(roles, agents):
     return name, SupervisorActor(name=name, kind=kind, provider=provider, model=model)
 
 
-def parse_config(data, root=INSTALL_ROOT, project=''):
+def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
     """``root`` is where relative ``review_policy.sensitive_path_lists`` are read. ``project``
     is the SHA-256 of the project file (ADR 0006, R2) composed into ``data``, '' without one:
-    it enters the version of the review policy, and so every receipt."""
+    it enters the version of the review policy, and so every receipt. ``agent_test_cmd``, when
+    given, is the test command the default commands of agy derive from instead of
+    ``test_cmd``: the agents' permissions are the installation's and the overlay's (D2)."""
     test_cmd = _require(data, 'test_cmd', str, 'config')
+    agent_cmd = test_cmd if agent_test_cmd is None else agent_test_cmd
     agents = {}
     for key, table in (data.get('agents') or {}).items():
         where = f'agents.{key}'
@@ -1146,7 +1153,7 @@ def parse_config(data, root=INSTALL_ROOT, project=''):
         model = _require(table, 'model', str, where)
         effort = _require(table, 'effort', str, where)
         patterns, codes = _unavailable(table, where)
-        write_commands, review_commands = _agy_commands(table, where, kind, test_cmd)
+        write_commands, review_commands = _agy_commands(table, where, kind, agent_cmd)
         agents[key] = AgentConfig(
             key=key, kind=kind,
             display_name=_require(table, 'display_name', str, where),
@@ -1500,6 +1507,41 @@ def compose(data, project=None, overlay=None):
     return data
 
 
+def read_project_bytes(path):
+    """The content of the project file ``path`` (ADR 0006, R2), read without following a link:
+    a symbolic link, a file with other hard links or anything but a regular file is refused
+    (``ConfigError``), so that the project file is never a file of the managed repository, of a
+    worktree or of a pinned copy under another name."""
+    where = Path(path)
+    try:
+        fd = os.open(where, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError as exc:
+        if where.is_symlink():
+            raise ConfigError(f'project file {where}: a symbolic link: the project file is a '
+                              'regular file of the host, in the state_dir') from exc
+        raise ConfigError(f'project file {where}: {exc}') from exc
+    with os.fdopen(fd, 'rb') as fh:
+        info = os.fstat(fh.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise ConfigError(f'project file {where}: not a regular file')
+        if info.st_nlink != 1:
+            raise ConfigError(f'project file {where}: it has {info.st_nlink} hard links: the '
+                              'project file is a file of the host of its own, in the state_dir')
+        try:
+            return fh.read()
+        except OSError as exc:
+            raise ConfigError(f'project file {where}: {exc}') from exc
+
+
+def read_project_toml(path):
+    """The table of the project file ``path``, read as ``read_project_bytes``."""
+    raw = read_project_bytes(path)
+    try:
+        return tomllib.loads(raw.decode())
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ConfigError(f'project file {path}: {exc}') from exc
+
+
 def read_toml(path, what='config'):
     try:
         with open(path, 'rb') as fh:
@@ -1516,7 +1558,7 @@ def read_sources(path=None, local=None, project=None):
     """The files of the configuration as ``{name: (path, bytes)}``: ``config`` (``path``,
     default: config.toml of this installation), ``local`` (the overlay, #174) and ``project``
     (the project file, ADR 0006, R2) when given. Each is read once: what is hashed is what is
-    parsed."""
+    parsed. The project file is read as ``read_project_bytes``."""
     paths = {'config': Path(path) if path else DEFAULT_CONFIG}
     if local:
         paths['local'] = Path(local)
@@ -1524,6 +1566,9 @@ def read_sources(path=None, local=None, project=None):
         paths['project'] = Path(project)
     sources = {}
     for name, where in paths.items():
+        if name == 'project':
+            sources[name] = (where, read_project_bytes(where))
+            continue
         try:
             sources[name] = (where, where.read_bytes())
         except OSError as exc:
@@ -1531,15 +1576,38 @@ def read_sources(path=None, local=None, project=None):
     return sources
 
 
-def compose_sources(sources):
-    """The raw configuration of ``sources`` (``read_sources``), as ``compose``."""
+def _tables(sources):
     tables = {}
     for name, (where, raw) in sources.items():
         try:
             tables[name] = tomllib.loads(raw.decode())
         except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
             raise ConfigError(f'{SOURCES[name]} {where}: {exc}') from exc
+    return tables
+
+
+def agent_test_cmd(tables):
+    """The test command the default commands of agy derive from (``_agy_commands``): that of
+    the overlay, else the installation's, never the project file's (ADR 0006, D2: the agents'
+    commands derived from the project's tests are admitted by the overlay alone); '' when it
+    is not a string."""
+    local = tables.get('local') or {}
+    value = local['test_cmd'] if 'test_cmd' in local else tables['config'].get('test_cmd')
+    return value if isinstance(value, str) else ''
+
+
+def compose_sources(sources):
+    """The raw configuration of ``sources`` (``read_sources``), as ``compose``."""
+    tables = _tables(sources)
     return compose(tables['config'], tables.get('project'), tables.get('local'))
+
+
+def parse_composed(sources, root=INSTALL_ROOT):
+    """``(configuration, raw configuration)`` of ``sources``, as ``parse_sources``."""
+    tables = _tables(sources)
+    data = compose(tables['config'], tables.get('project'), tables.get('local'))
+    agent_cmd = agent_test_cmd(tables) if 'project' in tables else None
+    return parse_config(data, root, project_hash(sources), agent_cmd), data
 
 
 def _sha(raw):
@@ -1553,8 +1621,9 @@ def project_hash(sources):
 
 def parse_sources(sources, root=INSTALL_ROOT):
     """The configuration of ``sources`` (``read_sources``), the project file's hash in the
-    review policy."""
-    return parse_config(compose_sources(sources), root, project_hash(sources))
+    review policy. The default commands of agy derive from the test command of the overlay or
+    of the installation, never from that of the project file (``agent_test_cmd``)."""
+    return parse_composed(sources, root)[0]
 
 
 def load_data(path=None, local=None, project=None):
@@ -1564,18 +1633,19 @@ def load_data(path=None, local=None, project=None):
     return compose_sources(read_sources(path, local, project))
 
 
-def load_config(path=None, local=None, project=None):
+def load_config(path=None, local=None, project=None, *, sources=None):
     """The configuration of ``path`` (default: config.toml of this installation) with the
     project file ``project`` (ADR 0006, R2) and the local overlay ``local`` (#174), when
-    given."""
-    return parse_sources(read_sources(path, local, project))
+    given; of ``sources`` (``read_sources``), files already read, when given."""
+    return parse_sources(read_sources(path, local, project) if sources is None else sources)
 
 
 # The trust keys (ADR 0006, K1 and T1): a change of a value under them is recorded, with the
 # value before and after, in the journal of the dispatcher at its start and at each reload.
 TRUST_KEYS = ('repo', 'base_branch', 'state_dir', 'source', 'test_cmd', 'trusted_users',
               'preflight', 'conclave', 'roles', 'agents', 'apps', 'merge', 'review_policy',
-              'protected_paths', 'blocked_labels', 'budget', 'delegations', 'agent_user', 'pin')
+              'max_review_rounds', 'protected_paths', 'blocked_labels', 'budget', 'delegations',
+              'agent_user', 'pin')
 
 
 def _plain(value):
@@ -1642,12 +1712,17 @@ class Reloader:
     time the files are loaded, ``record`` (when given) gets the ``fingerprint`` of what was
     read, or, for a configuration that does not load, the hashes of its files with
     ``effective`` and ``trust`` None and the ``error``: the trace of T1 (ADR 0006, K1). An
-    exception of ``record`` is logged, and the configuration of the tick is the same."""
+    exception of ``record`` is logged, and the configuration of the tick is the same. The
+    project file is read as ``read_project_bytes``, and ``check`` (when given) is called before
+    each read of it: a ``ConfigError`` of either is a configuration that does not load."""
 
-    def __init__(self, cfg, path=None, local=None, project=None, *, log, record=None):
+    def __init__(self, cfg, path=None, local=None, project=None, *, log, record=None,
+                 check=None):
         self.cfg = cfg
         self.log = log
         self.record = record
+        self.check = check
+        self._errors = {}
         self.paths = {'config': Path(path) if path else DEFAULT_CONFIG}
         if local:
             self.paths['local'] = Path(local)
@@ -1655,11 +1730,18 @@ class Reloader:
             self.paths['project'] = Path(project)
         self._seen = None  # no content compared with ``cfg`` yet
 
-    @staticmethod
-    def _read(path):
-        """The content of ``path``, or None when it cannot be read."""
+    def _read(self, name, path):
+        """The content of ``path``, or None when it cannot be read (for the project file, the
+        reason in ``self._errors``)."""
         try:
+            if name == 'project':
+                if self.check is not None:
+                    self.check()
+                return read_project_bytes(path)
             return path.read_bytes()
+        except ConfigError as exc:
+            self._errors[name] = str(exc)
+            return None
         except OSError:
             return None
 
@@ -1668,9 +1750,10 @@ class Reloader:
         and their ``fingerprint``."""
         for name, (path, raw) in sources.items():
             if raw is None:
-                raise ConfigError(f'{SOURCES[name]} {path}: cannot be read')
-        data = compose_sources(sources)
-        return parse_config(data, project=project_hash(sources)), fingerprint(sources, data)
+                raise ConfigError(self._errors.get(name)
+                                  or f'{SOURCES[name]} {path}: cannot be read')
+        new, data = parse_composed(sources)
+        return new, fingerprint(sources, data)
 
     def _record(self, print_):
         if self.record is None:
@@ -1683,7 +1766,8 @@ class Reloader:
 
     def refresh(self):
         """The configuration of the next tick."""
-        sources = {name: (path, self._read(path)) for name, path in self.paths.items()}
+        self._errors = {}
+        sources = {name: (path, self._read(name, path)) for name, path in self.paths.items()}
         now = {name: _sha(raw) if raw is not None else None
                for name, (_, raw) in sources.items()}
         changed = now != self._seen
