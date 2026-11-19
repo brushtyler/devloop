@@ -40,7 +40,13 @@ before it (``previous``) and its own (``sha256``), like the journal of the local
   The extension of a budget envelope (``/devloop grant-budget``, #411, ADR 0005, P5-7) is a
   ``grant`` of the delegation ``budget`` that also records the ``story`` and the ``extension``
   (the turns and seconds it adds), with the ``reason`` of the command: one per story, ever, and
-  the authority on the envelope of that story (``devloop.budget``).
+  the authority on the envelope of that story (``devloop.budget``). The grant books the
+  extension; the first turn of the story booked after it spends it (#466);
+- ``grant_lapsed``: the extension of a story whose first turn after the grant was refused all
+  the same, before any turn used it (#466): its ``story``, the ``comment`` of the command, the
+  issue or PR ``number`` and the ``category`` of the refusal. It no longer extends the envelope
+  and does not spend the story's one extension; the grant still counts against the daily cap of
+  its day.
 - ``config``: the configuration the dispatcher read (ADR 0006, R2, trace T1 of K1), at its start
   (``when: start``) and at each reload of ``devloop run`` that found the files changed
   (``when: reload``): the SHA-256 of the local overlay and of the project file (null without the
@@ -131,6 +137,7 @@ WARN_RATIO = 0.8
 SIZE_WARNING = 'size_warning'  # the event of that warning
 GRANT = 'grant'  # a grant of a delegation to the supervisor (#405), for the daily cap
 BUDGET = 'budget'  # the delegation of the extension of a budget envelope (#411)
+LAPSED = 'grant_lapsed'  # an extension no turn used, its first turn refused all the same (#466)
 CONFIG = 'config'  # the configuration read at a start or a reload (ADR 0006, T1)
 CONFIG_HASHES = ('overlay', 'project', 'effective')
 # A turn's id: its sequence (or, for a legacy one, its number) and 8 hex digits that differ
@@ -894,21 +901,70 @@ class TurnJournal:
                                      'comment': comment, 'by': by})
             return others + 1
 
-    def _extension(self, story):
-        """The extension of the budget envelope of ``story`` (under the lock): the first
-        ``grant`` of the delegation ``budget`` for it, of any day, or None."""
+    def _lapsed(self, story):
+        """The comments of the commands whose extension of ``story`` lapsed (#466)."""
+        return {e['data'].get('comment') for e in self._events
+                if e['event'] == LAPSED and e['data'].get('story') == story}
+
+    def _extension_event(self, story):
+        """The event of the extension of the budget envelope of ``story`` (under the lock): the
+        first ``grant`` of the delegation ``budget`` for it, of any day, that did not lapse
+        (#466), or None."""
+        lapsed = self._lapsed(story)
         for e in self._events:
             d = e['data']
-            if e['event'] == GRANT and d.get('delegation') == BUDGET and d.get('story') == story:
-                return d
+            if (e['event'] == GRANT and d.get('delegation') == BUDGET and d.get('story') == story
+                    and d.get('comment') not in lapsed):
+                return e
         return None
+
+    def _extension(self, story):
+        """The extension of the budget envelope of ``story`` (under the lock), or None."""
+        found = self._extension_event(story)
+        return None if found is None else found['data']
 
     def extension(self, story):
         """The extension of the budget envelope of story ``story`` (#411): the ``grant`` that
-        recorded it, with its ``extension`` and ``at``, or None when the story has none."""
+        recorded it, with its ``extension`` and ``at``, or None when the story has none or its
+        extension lapsed (``lapse``, #466)."""
         with self._lock:
             self._load()
             return self._extension(story)
+
+    def _used(self, found):
+        """Whether a turn of the story of the extension event ``found`` was booked after it."""
+        story = found['data'].get('story')
+        return any(e['event'] == 'intent' and e['sequence'] > found['sequence']
+                   and (e['data'].get('budget') or {}).get('story') == story
+                   for e in self._events)
+
+    def extension_used(self, story):
+        """Whether the extension of the budget envelope of ``story`` is spent (#466): a turn of
+        the story was booked after its grant. Until then the grant only books it, and a refusal
+        of the first turn makes it lapse (``lapse``). False when the story has no extension."""
+        with self._lock:
+            self._load()
+            found = self._extension_event(story)
+            return found is not None and self._used(found)
+
+    def lapse(self, story, comment, category):
+        """Record that the extension of the budget envelope of ``story``, granted by the command
+        of comment ``comment``, lapsed (#466): the first turn of the story after the grant was
+        refused all the same (``category``), so no turn used it. From then on it does not extend
+        the envelope, and the story keeps its one extension: another grant may give it, under
+        the same conditions. The check and the record are one step under the journal's lock,
+        as the booking of a turn: an extension a turn used never lapses. Returns whether it
+        lapsed. Raises ``JournalError`` if it cannot be written."""
+        if self.read_only:
+            raise JournalError(f'{self.path}: read-only journal: no lapse is recorded in it')
+        with self._lock:
+            self._load()
+            found = self._extension_event(story)
+            if found is None or found['data'].get('comment') != comment or self._used(found):
+                return False
+            self._append(LAPSED, {'story': story, 'comment': comment,
+                                  'number': found['data'].get('number'), 'category': category})
+            return True
 
     def extend(self, story, extension, number, comment, by, cap, reason=None):
         """Record the extension ``extension`` of the budget envelope of story ``story`` (#411,
@@ -922,8 +978,9 @@ class TurnJournal:
         the journal's lock, so that two commands applied together never extend a story twice
         nor pass the cap. Returns ``(grants of the UTC day with this one, None)``, or ``(None,
         why)`` when nothing is recorded and the extension does not apply: ``'spent'`` when the
-        story already has an extension of another command, ``'daily'`` when the grants of the
-        day already reached ``cap``. The same command recorded already is not recorded again.
+        story already has an extension of another command, ``'lapsed'`` when the extension of
+        this same command lapsed already (#466), ``'daily'`` when the grants of the day already
+        reached ``cap``. The same command recorded already is not recorded again.
         Raises ``JournalError`` if it cannot be written, and then the extension does not
         apply."""
         if self.read_only:
@@ -933,6 +990,8 @@ class TurnJournal:
             found = self._extension(story)
             if found is not None and found.get('comment') != comment:
                 return None, 'spent'
+            if comment in self._lapsed(story):
+                return None, 'lapsed'
             today = self._grants(self._now()[:10])
             others = sum(1 for c in today if c != comment)
             if found is None and others >= cap:

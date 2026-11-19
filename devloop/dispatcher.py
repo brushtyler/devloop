@@ -1166,6 +1166,15 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             if self.cfg.preflight and not issue['blocked_by']:
                 issue['preflight'] = self._preflight_view(issue['number'], issue['labels'],
                                                           base_head)
+        if self.cfg.preflight:
+            # An issue that waits for the supervisor runs no check, but a request of a person
+            # for one is answered all the same (#468): its view says whether one is pending.
+            waiting = (set(self.cfg.blocked_labels) | {lb.working}) - {lb.needs_supervisor}
+            for issue in ready:
+                if (lb.needs_supervisor in issue['labels'] and issue['admitted']
+                        and not issue['labels'] & waiting and issue['number'] not in pr_issues):
+                    issue['preflight'] = self._preflight_view(issue['number'], issue['labels'],
+                                                              base_head)
         working = [raw['number'] for raw in self.gh.issues_with_label(lb.working)]
         return Snapshot(prs=prs, ready_issues=ready, working_issues=working,
                         supervised=self._supervised_items(prs),
@@ -2083,13 +2092,15 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         now: the check of the booking, read only, for a step that records something before its
         turn (a conclave call recorded as started) or that must not plan a turn already refused
         and escalated (the advisory review). The booking itself stays in ``_open_turn``, under
-        the journal's lock. Without a ledger, or with the budget off, nothing."""
+        the journal's lock: a check never makes an extension no turn used lapse (#466), only
+        the refusal of a booking does. Without a ledger, or with the budget off, nothing."""
         budget = self.cfg.budget
         if self.ledger is None or not budget.enabled or kind in OUTSIDE:
             return
         try:
             budget_reserve(budget, self.ledger.journal, repo=self.cfg.repo,
-                           issue=self._work_issue(number), kind=kind, agent=agent)
+                           issue=self._work_issue(number), kind=kind, agent=agent,
+                           check_only=True)
         except BudgetRefused as exc:
             self.log(f'  turn {kind} refused on #{number}: not covered by the budget envelope '
                      f'({exc.category})')

@@ -345,7 +345,8 @@ class LegacyPreflightTests(unittest.TestCase):
         # Someone added the old label again after the check's own.
         self.gh.label_log = {(7, OLD): ['brushtyler', 'brushtyler']}
         self.gh.say('/devloop recheck')
-        self.assertEqual(self.planned(d), [])
+        # No check runs: the request is only answered (#468).
+        self.assertEqual(self.planned(d), [('recheck_refused', 7)])
 
 
 class GitIdentities(MergeIdentities):

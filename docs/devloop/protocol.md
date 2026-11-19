@@ -293,9 +293,30 @@ was removed and applied again, if a comment starting with the attribution header
 identity allowed to write devloop records, came after the check (another escalation, or
 anything that may be one, marker or not; the dispatcher's [ledger records](#evidence-and-telemetry),
 such as the turn of a recheck, and its [supervision traces](#supervision-trace), such as the
-answer to a command that does not apply, do not count), or if the attribution is uncertain. A comment from
+answer to a command that does not apply, and its `recheck` answers do not count, nor, since #468,
+a comment of the supervisor's identity that carries neither a `notice` nor a `preflight`
+marker), or if the attribution is uncertain. A comment from
 anyone else, header or not, never touches the attribution. A label already present when the
 check failed is never the check's.
+
+On a request of a person (#468), `/devloop recheck` from a trusted user or `agent:ready` added
+again by one of the issue's admitters, the check runs, and owns the block it then records, if the
+block is still the issue's latest: the label has one name only, the latest record is `blocked`
+with `class` `operator_decision` or `preflight_default`, no `notice` of another class (or
+without one) from an identity allowed to write devloop records came after it, and the label
+events are those the record counted plus the dispatcher's one. Other text after the check does
+not count here. The request is read when the check starts and kept for its outcome: the ledger
+record of the check's turn spends a `/devloop recheck` before the outcome is recorded, while
+the conditions above are read again when it is. A request on an issue in
+`agent:needs-supervisor` never runs a check: it is refused, with the latest escalation after the
+check as the reason, and every label stays. A request that fails these conditions runs no check: the `recheck_refused`
+action logs the reason and answers on the issue with a dispatcher comment ending with a
+`recheck` marker: `request` (`recheck` or `relabeled`), `by`, `reason` and, when an
+`agent:ready` added again is pending, `labeled`, the time of its `labeled` event. The answer is a
+devloop record, so it spends the `/devloop recheck` written before it; an `agent:ready` added
+again counts as answered by a `recheck` record after the latest check with the time of its
+label. The record leaves the readiness hash and the block's attribution as they are, and only
+the dispatcher's identity writes it.
 
 ## Conclave records
 
@@ -512,7 +533,10 @@ record adds no label and blocks nothing by itself: the open blocks do.
 ## Daily summary
 
 The [daily summary](guide.md#daily-summary) (#256) reads only records bound to identities: the
-`ledger`, `merged` and `notice` (escalation) records the dispatcher signed, the `review` records
+`ledger`, `merged` and `notice` (escalation) records the dispatcher signed, its
+[`supervision`](#supervision-trace) records of `grant-round`, `grant-budget` and `capacity`
+(#466: the grants of the supervisor of the day, with the caps left their figures record: `left`
+of `cap` for the rounds of the PR, `daily_left` of `daily_cap` for the day), the `review` records
 of a configured reviewer written with its identity (a CI round with the dispatcher's), and the
 `pr` marker of a PR opened by the implementer it names. It reads the comments of the repository,
 not the native reviews: a round whose reviews are native reviews is counted from its
@@ -1066,7 +1090,16 @@ their format does not change. The journal is append-only, one JSON event per lin
   envelope (#411, `/devloop grant-budget`) is a `grant` of the delegation `budget` that also
   records the `story` and the `extension` it adds; one per story, ever, checked under the lock in
   the same step as the daily cap and the write, and from then on part of the envelope of that
-  story ([Extending the budget envelope](guide.md#extending-the-budget-envelope)). The events of the
+  story ([Extending the budget envelope](guide.md#extending-the-budget-envelope)). The grant
+  books the extension; the first turn of the story booked after it spends it (#466).
+- `grant_lapsed` (#466): the extension of a story whose first turn after the grant was refused
+  all the same, before any turn used it, with the `story`, the `comment` of the command, the
+  issue or PR `number` and the `category` of the refusal. Written under the journal's lock in
+  the same step as the refusal of the booking, never by a read-only check of the envelope; an
+  extension a turn used never lapses. From then
+  on the extension does not extend the envelope and the story keeps its one extension; the
+  grant still counts against the daily cap of its day, and the same command never applies
+  again. The events of the
   [publication outbox](#publication-outbox) start with `publication`.
 - `config` (ADR 0006, R2, trace T1 of K1): the configuration the dispatcher read, at each start
   of `tick` and `run` (`when: start`, before any tick: a start whose record cannot be written

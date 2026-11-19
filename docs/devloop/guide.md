@@ -513,8 +513,26 @@ Checks recorded before #270 carry neither the commit nor `repository_dependent`:
 holding for their text alone, devloop does not infer the dependency from their descriptions, and
 `agent:ready` added again repeats them too. The next check records both.
 
-Rechecks run only for blocks the check owns: when the check owns `agent:needs-operator` is
-described in [Readiness check records](protocol.md#readiness-check-records).
+A check nobody asked for (the text changed, `main` advanced) runs only for a block the check
+owns: when the check owns `agent:needs-operator` is described in
+[Readiness check records](protocol.md#readiness-check-records). A note of the supervisor, such as
+its "Decisione per l'operatore" listing the options, does not take the block away from the
+check: only a comment of the supervisor with an escalation or a readiness check record does
+(#468).
+
+A request of a person, `/devloop recheck` from a trusted user or `agent:ready` added again by
+someone who may admit the issue, needs less (#468): the block need only be still the issue's
+**latest**. The latest check set it (class `operator_decision` or `preflight_default`), no
+escalation of another class came after it, and the label was not added again by anyone else.
+Any other comment after the check, with the header or not, does not stop the request. When the
+check runs, the block is the check's again: a pass removes it, a failure keeps it. A request
+that runs no check, because the latest block is another one (an escalation of another class, for
+example), leaves the block in place: devloop logs why and answers once on the issue with a
+"Controllo di prontezza non ripetuto" comment that gives the reason. The answer spends a
+`/devloop recheck`; an `agent:ready` added again is answered once for each time it is added.
+An issue in `agent:needs-supervisor` (a recheck that failed and went to the supervisor as
+`tool_failure`, for example) runs no check either: a request there gets the same answer, naming
+the escalation the issue waits on, and every block stays.
 
 Each check is an agent action: it takes a slot of `max_actions_per_tick`, and a check of an
 issue that may start also takes one of the free PR slots of the tick. It runs under
@@ -1101,6 +1119,20 @@ same, and the item stays where it is, without resuming the step;
 `devloop status` and the refusals show the extension in the state of the budget. A later turn
 the extended envelope refuses goes to the operator as `budget`: a second extension, the dollars
 and the values of the envelope stay the operator's (ADR 0004, D2).
+
+**The grant books the extension; the turn spends it** (#466). A PR's turn runs at a later tick,
+and may wait for capacity or a reviewer: meanwhile even the extended deadline (`wall_seconds`)
+may pass. The extension is spent by the first turn of the story booked after the grant. If that
+turn is refused all the same, before any turn used the extension, the extension lapses: the
+journal records a `grant_lapsed` event, the envelope goes back to the frozen one, and the story
+keeps its one extension. The refusal says so and goes through the delegation again, to the
+supervisor as `budget_grantable` when an extension would cover the turn now, otherwise to the
+operator as `budget` (for a deadline already past, an extension of 25% of `wall_seconds` usually
+no longer covers it). The lapsed grant still counts against the daily cap of its day, and the
+same command never applies again; a story never has more than one extension in force. Only the
+refusal of a booking makes it lapse: the read-only check of the envelope before a conclave call
+or an advisory review, and `devloop tick --dry-run`, refuse the turn and leave the extension
+booked.
 
 **Revocation.** `budget = false` revokes the delegation from the next tick, as for `rounds`: a
 refused turn goes to the operator, and a `grant-budget` on an escalation already with the
@@ -1820,6 +1852,13 @@ and writes nothing without `--publish`. The summary lists:
 - the merges: devloop's with their mode and level, a person's as such;
 - the escalations, with their class and whether they went to the operator or the supervisor;
 - the CI blocks (a failed CI round) and the re-runs of failed jobs;
+- the grants of the supervisor (#466, ADR 0005, section 3.1, rule 4), so that the coordinator
+  verifies them without reading each thread: every `grant-round`, `grant-budget` and `capacity`
+  the dispatcher answered that day, granted or refused, from its `supervision` records, with the
+  UTC time, the issue or PR, the first line of the reason, the outcome and the caps left: the
+  rounds still grantable to the PR, the story's one budget extension (booked until the turn
+  starts) or the capacity limit in force with its expiry, and the grants of the day still
+  available across every delegation;
 - the totals: PRs opened and merged that day, review rounds opened that day (each round once,
   on the day of its first review comment or of its [round register](protocol.md#round-register),
   counted once a review turn of the round succeeded or its CI was recorded: the native reviews

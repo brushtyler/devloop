@@ -11,7 +11,12 @@ Days are UTC days:
   the day of its own time (``at``) or, without one, of the creation of its comment;
 - the totals count the PRs opened that day, the PRs merged that day (by devloop or by a person),
   the review rounds opened that day (the first review record of the round) and the turns run
-  with a fallback model (``fallback_for``).
+  with a fallback model (``fallback_for``);
+- the grants of the supervisor (#466, ADR 0005, section 3.1, rule 4): every ``grant-round``,
+  ``grant-budget`` and ``capacity`` the dispatcher answered that day, from its ``supervision``
+  records, with the time, the issue or PR, the first line of the reason, the outcome and the
+  caps left (per PR, or per story for the one extension of its budget, and per day), so that
+  the coordinator verifies them without reading each thread (rule 5).
 
 With ``--publish`` the summary goes to ``[report] issue``, a dedicated issue whose body is the
 dispatcher's: today's summary on top, then the index of the past days. When the day changes the
@@ -35,6 +40,7 @@ from pathlib import Path
 
 from .apps import DISPATCHER
 from .markdown import dispatcher_header, publishable, read_marker
+from .supervision import CAPACITY, GRANT_BUDGET, GRANT_ROUND
 from .watch import failure_class
 
 # In state_dir: the time of the last automatic attempt (``AutoReport``), and the lock that keeps
@@ -49,6 +55,10 @@ INDEX_HEADING = '## Giorni precedenti'
 NOT_REPORTED = 'non riportato'
 _DESTINATION = {'operator': 'all\'operatore', 'supervisor': 'al supervisore'}
 _STATE = {'open': 'in corso', 'incomplete': 'incompleto'}
+# The commands of the supervisor's delegations the summary lists (#466), and their outcomes.
+GRANT_COMMANDS = (GRANT_ROUND, GRANT_BUDGET, CAPACITY)
+_GRANT_OUTCOME = {'granted': 'concessa', 'refused': 'rifiutata'}
+REASON_CHARS = 120  # the first line of a reason, at most
 
 
 class ReportError(Exception):
@@ -97,6 +107,8 @@ class Summary:
     merges: list = field(default_factory=list)       # (time, number, mode, level)
     escalations: list = field(default_factory=list)  # (time, number, class, destination)
     ci: list = field(default_factory=list)           # (time, number, text)
+    # (time, number, command, reason, outcome, caps left): the grants of the supervisor (#466)
+    grants: list = field(default_factory=list)
     opened: list = field(default_factory=list)       # PR numbers
     merged: list = field(default_factory=list)       # PR numbers
     rounds: int = 0
@@ -104,8 +116,8 @@ class Summary:
     open: int = 0                                    # turns not closed yet
 
     def empty(self):
-        return not (self.actions or self.merges or self.escalations or self.ci or self.opened
-                    or self.merged or self.rounds)
+        return not (self.actions or self.merges or self.escalations or self.ci or self.grants
+                    or self.opened or self.merged or self.rounds)
 
 
 class Records:
@@ -223,6 +235,11 @@ class Records:
                 if at is not None and _day_of(at) == day:
                     out.merges.append((_hour(at), number, merged['mode'], merged['level']))
                 continue
+            supervision = read_marker(body, 'supervision')
+            if supervision is not None:
+                if supervision['command'] in GRANT_COMMANDS and _day_of(created) == day:
+                    out.grants.append(_grant_row(_hour(created), number, supervision))
+                continue
             notice = read_marker(body, 'notice')
             if (notice is not None and notice.get('event') == 'escalation'
                     and _day_of(created) == day):
@@ -237,7 +254,7 @@ class Records:
             if _day_of(merged) == day and number not in by_devloop:
                 out.merges.append((_hour(merged), number, None, None))
         out.merged = sorted(merged_numbers | by_devloop)
-        for rows in (out.actions, out.merges, out.escalations, out.ci):
+        for rows in (out.actions, out.merges, out.escalations, out.ci, out.grants):
             rows.sort(key=lambda row: (row[0], row[1]))
         return out
 
@@ -270,6 +287,51 @@ class Records:
             out.ci.append((_hour(at), number, f'rilancio dei job falliti (run {runs})'))
         else:
             out.actions.append((_hour(at), number, f'evento {event}', None, None, None))
+
+
+def first_line(text):
+    """The first non-empty line of ``text``, at most ``REASON_CHARS`` characters, or ``—``."""
+    line = next((ln.strip() for ln in str(text or '').splitlines() if ln.strip()), '')
+    if len(line) > REASON_CHARS:
+        line = line[:REASON_CHARS - 1].rstrip() + '…'
+    return line or '—'
+
+
+def _count(record, left, cap):
+    """``left`` of ``cap`` as ``record`` gives them, or None when it does not give both as
+    integers."""
+    values = [record.get(left), record.get(cap)]
+    if all(isinstance(v, int) and not isinstance(v, bool) for v in values):
+        return f'{max(values[0], 0)} di {values[1]}'
+    return None
+
+
+def remaining(record):
+    """The caps a command of the supervisor's delegations (its ``supervision`` record) leaves,
+    in Italian (#466): per PR the review rounds (``grant-round``), per story the one extension
+    of its budget envelope (``grant-budget``), the limit in force for a ``capacity``, and per
+    day the grants of every delegation together. A refused command records none: ``—``."""
+    parts = []
+    if record.get('outcome') == 'granted':
+        if record['command'] == GRANT_ROUND and (rounds := _count(record, 'left', 'cap')):
+            parts.append(f'PR: {rounds} round')
+        elif record['command'] == GRANT_BUDGET:
+            parts.append('storia: 0 di 1 estensioni (prenotata fino all\'avvio del turno)')
+        elif record['command'] == CAPACITY and isinstance(record.get('setting'), str):
+            parts.append(f'`{record["setting"]}` = {record.get("value")} fino a '
+                         f'{record.get("until") or NOT_REPORTED}')
+    if daily := _count(record, 'daily_left', 'daily_cap'):
+        parts.append(f'giorno: {daily}')
+    return '; '.join(parts) or '—'
+
+
+def _grant_row(at, number, record):
+    """A row of the grants of the supervisor (#466) from its ``supervision`` record."""
+    outcome = _GRANT_OUTCOME.get(record['outcome'], record['outcome'])
+    if record.get('trace_only'):
+        outcome += ' (traccia completata)'
+    return (at, number, record['command'], first_line(record.get('reason')), outcome,
+            remaining(record))
 
 
 def _cell(value):
@@ -305,6 +367,14 @@ def render(summary):
     if summary.ci:
         parts += ['### CI', '']
         parts += [f'- {at} #{number}: {text}' for at, number, text in summary.ci]
+        parts.append('')
+    if summary.grants:
+        parts += ['### Concessioni del supervisore', '',
+                  '| Ora (UTC) | Numero | Comando | Motivo | Esito | Tetti residui |',
+                  '|---|---|---|---|---|---|']
+        for at, number, command, reason, outcome, left in summary.grants:
+            parts.append(f'| {at} | #{number} | `{command}` | {_cell(reason)} '
+                         f'| {_cell(outcome)} | {_cell(left)} |')
         parts.append('')
 
     def listed(numbers):
