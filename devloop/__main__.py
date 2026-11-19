@@ -556,19 +556,38 @@ def run_pin(args):
                       state, root)
     except ConfigError as exc:
         sys.exit(f'devloop: invalid config: {exc}')
+    # The pin by hand is the one after the step on the host (#462): it releases, under the lock
+    # of the pins, the holds whose merge the pinned commit contains (#473).
+    released = {}
+
+    def release(source, sha):
+        try:
+            released['steps'] = pin.release(state, source, sha)
+        except OSError as exc:
+            released['error'] = exc
     try:
-        pin.pin(installation_source(cfg, root), state, args.ref, local, log=log,
-                smoke=not args.no_smoke, keep=keep_pins(cfg), managed=root, project=project)
+        source = installation_source(cfg, root)
+        pin.pin(source, state, args.ref, local, log=log, smoke=not args.no_smoke,
+                keep=keep_pins(cfg), managed=root, project=project,
+                then=lambda sha: release(source, sha))
     except (pin.PinError, ConfigError, OSError) as exc:
         sys.exit(f'devloop: pin failed, the pinned copy is unchanged: {exc}')
-    # The pin by hand is the one after the step on the host (#462): the auto-pin resumes.
-    try:
-        steps = pin.release(state)
-    except OSError as exc:
-        sys.exit(f'devloop: pinned, but the hold of the auto-pin was not released: {exc}')
+    if 'error' in released:
+        sys.exit(f'devloop: pinned, but the hold of the auto-pin was not released: '
+                 f'{released["error"]}')
+    steps, left = released.get('steps'), pin.held(state)
     if steps:
-        log(f'auto-pin resumed: the hold after the step on the host of {pin.held_prs(steps)} '
-            'is released')
+        log(f'auto-pin {"still held" if left else "resumed"}: the hold after the step on the '
+            f'host of {pin.held_prs(steps)} is released')
+    known = [s for s in left or [] if pin.merge_known(s)]
+    unknown = [s for s in left or [] if not pin.merge_known(s)]
+    if known:
+        log(f'auto-pin held: the pinned commit does not contain the merge of '
+            f'{pin.held_prs(known)}; pin by hand a commit that contains it, after its step')
+    if unknown:
+        log(f'auto-pin held: the merge commit of {pin.held_prs(unknown)} is not known yet '
+            '(devloop reads it on GitHub at its next tick, or the merge outcome is uncertain); '
+            'pin by hand again once devloop status shows it')
 
 
 def run_watch(parser, args):
@@ -864,6 +883,8 @@ def main(argv=None):
         if steps:
             log(f'auto-pin held: the step on the host of {pin.held_prs(steps)} waits for a pin '
                 'by hand (devloop pin)')
+            for line in pin.describe_held(steps):  # #473: each hold with its step
+                log(line)
         for line in unavailability.describe(state):
             log(line)
         if label_transition(dispatcher.gh, cfg.labels) == 'both':

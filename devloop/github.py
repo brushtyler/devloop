@@ -398,6 +398,15 @@ class GitHub:
                                                     'mergeCommit')
         return [dict(raw, author={'login': author_login(raw.get('author'))}) for raw in prs]
 
+    def commit_prs(self, sha):
+        """The numbers of the merged PRs that GitHub associates with commit ``sha`` (#473): for
+        a commit of the base branch, the PR whose merge (a merge commit, a squash or the last
+        commit of a rebase) brought it there."""
+        prs = self._json('api', f'repos/{self.repo}/commits/{sha}/pulls') or []
+        return [raw['number'] for raw in prs
+                if isinstance(raw, dict) and raw.get('merged_at')
+                and isinstance(raw.get('number'), int)]
+
     def branch_prs(self, branch):
         """The PRs whose head branch is ``branch``, in any state, newest first, with the fields
         of :meth:`open_prs` (the mergeability ones aside), ``state`` and ``createdAt`` (#384)."""
@@ -409,15 +418,16 @@ class GitHub:
 
     def find_pr(self, number):
         """PR ``number`` in any state, with the fields of :meth:`open_prs` (the mergeability
-        ones aside) and ``state``, or None when ``number`` is an issue (#362). Read with REST
-        first, so that an issue is told from a PR without reading an error."""
+        ones aside), ``state`` and ``mergeCommit`` (``{oid}`` once merged, #473), or None when
+        ``number`` is an issue (#362). Read with REST first, so that an issue is told from a PR
+        without reading an error."""
         kind = self._json('api', f'repos/{self.repo}/issues/{int(number)}',
                           '--jq', '{pull_request: (.pull_request != null)}') or {}
         if not kind.get('pull_request'):
             return None
         raw = self._json('pr', 'view', str(int(number)), '-R', self.repo, '--json',
                          'number,title,body,labels,headRefName,headRefOid,author,'
-                         'isCrossRepository,state')
+                         'isCrossRepository,state,mergeCommit')
         return dict(raw, author={'login': author_login(raw.get('author'))})
 
     def merge_state(self, pr):

@@ -24,6 +24,7 @@ from devloop.dispatcher import Dispatcher
 from devloop.planning import Snapshot
 from devloop.workspace import Workspace, WorkspaceError
 from helpers import ssdlc_project
+from helpers.devloop_fakes import FakeGH
 from test_devloop import (CFG, REV_NAME, SHA1, FakeRunner, FakeWS, norm, raw_review, receipt)
 from test_devloop_merge import Identities, MergeGH, header, records
 from test_devloop_zero import changes
@@ -352,10 +353,11 @@ class AutoPinTests(GitCase):
     """The pin after a merge, through the real repository and a dispatcher whose tick stops at
     the pin."""
 
-    def dispatcher(self, auto):
+    def dispatcher(self, auto, gh=None):
         cfg = dataclasses.replace(CFG, pin=PinPolicy(auto=auto))
         snapshots = []
-        d = Dispatcher(cfg, None, FakeWS(), FakeRunner(), log=self.logs.append,
+        # A GitHub where no commit has a merged PR, unless the test gives one (#473).
+        d = Dispatcher(cfg, gh or FakeGH(), FakeWS(), FakeRunner(), log=self.logs.append,
                        pinner=pin.AutoPin(self.root, self.state, log=self.logs.append,
                                           smoke=self.passing_smoke))
         d.labels_checked = True  # no GitHub here: the label rename of #248 is not under test
@@ -930,6 +932,9 @@ class AlertGH:
             raise RuntimeError('gh: HTTP 502 with a token ghs_secret')
         self.comments.append((number, body))
 
+    def commit_prs(self, sha):
+        return []  # no merge outside devloop here (#473)
+
 
 class AutoPinSmokeTests(GitCase):
     """An auto-pin whose copy fails the smoke test (#260): the request is dropped, ``current``
@@ -1093,12 +1098,15 @@ class FakePinner:
     def request(self, pr, head):
         self.requests.append((pr, head))
 
-    def hold(self, pr, head, step):
+    def hold(self, pr, head, step, issue=None):
         self.unhold(pr)
         self.holds.append((pr, head, step))
         self.attempts = dict(getattr(self, 'attempts', {}), **{str(pr): f'attempt-{pr}-'
                                                                 f'{len(self.holds)}'})
         getattr(self, 'doubts', {}).pop(str(pr), None)
+        # What the hold records besides (#473): its alarm is still to go out.
+        self.marks = dict(getattr(self, 'marks', {}), **{str(pr): dict(
+            {'alerted': False}, **({'issue': issue} if issue is not None else {}))})
         return self.attempts[str(pr)]
 
     def unhold(self, pr):
@@ -1109,6 +1117,7 @@ class FakePinner:
         if getattr(self, 'attempts', {}).get(str(pr)) != attempt:
             return False
         self.doubts = dict(getattr(self, 'doubts', {}), **{str(pr): issue})
+        self.mark(pr, attempt, issue=issue)
         return any(h[0] == pr for h in self.holds)
 
     def settle(self, pr, merged, attempt):
@@ -1120,11 +1129,24 @@ class FakePinner:
             self.unhold(pr)
         return True
 
+    def mark(self, pr, attempt, **fields):
+        if getattr(self, 'attempts', {}).get(str(pr)) != attempt:
+            return False
+        self.marks.setdefault(str(pr), {}).update(fields)
+        return True
+
+    def forget(self, pr, attempt):
+        if getattr(self, 'attempts', {}).get(str(pr)) != attempt:
+            return False
+        self.unhold(pr)
+        return True
+
     def held(self):
         doubts, attempts = getattr(self, 'doubts', {}), getattr(self, 'attempts', {})
+        marks = getattr(self, 'marks', {})
         return [dict({'pr': pr, 'head': head, 'step': step, 'attempt': attempts.get(str(pr))},
-                     **({'uncertain': True, 'issue': doubts[str(pr)]} if str(pr) in doubts
-                        else {}))
+                     **marks.get(str(pr), {}), **({'uncertain': True} if str(pr) in doubts
+                                                  else {}))
                 for pr, head, step in self.holds] or None
 
     def pending(self):
@@ -1133,7 +1155,10 @@ class FakePinner:
     def observe(self, branch, touches):
         return None  # no merge outside devloop here (#430)
 
-    def pin(self, ref):
+    def scan(self, branch, lookup, target=None):
+        return []  # no merge outside devloop here (#473)
+
+    def pin(self, ref, lookup=None):
         self.pins.append(ref)
         raise pin.Repinned('/new')
 
