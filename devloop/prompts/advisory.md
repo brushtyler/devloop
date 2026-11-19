@@ -24,8 +24,9 @@ Do not run the full test suite.
 - `unfounded`: the findings of the reviews below whose evidence does not hold, and the fixes the
   implementer made that were not needed, shown in the section "Finding senza evidenza o
   corretti senza necessità". Verify each one: run its scenario again, or read again the code
-  and the rule it cites. Name the finding (`round/reviewer/ID`) and say what you observed;
-  `[]` when you see none.
+  and the rule it cites. The reviews below also list, under "Blocking findings without
+  evidence", those devloop recorded as non-blocking because they had none: include them. Name
+  the finding (`round/reviewer/ID`) and say what you observed; `[]` when you see none.
 - `opinion`: your final, non-binding opinion: `ok`, `dubbi` (doubts) or `contrario` (against).
 - `opinion_reason`: why, in a few sentences.
 

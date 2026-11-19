@@ -581,14 +581,19 @@ opens no finding and does not send the PR to the fix. A finding with `security: 
 blocking without evidence too: in doubt, the rule fails closed. The published review shows the
 evidence of each finding (*Evidenza:*) and marks a demoted one *(bloccante senza evidenza:
 registrato come non bloccante)*; the fix prompt and the previous rounds of the next review show
-it as `Evidence:`. The findings devloop writes itself, of a CI failure and of the acceptance
+it as `Evidence:`. The previous rounds, which the review and the advisory review read, also list
+each review's assessments of the earlier findings and its findings demoted for lack of evidence
+("Blocking findings without evidence"); the fix prompt shows, under each open finding, the
+latest assessment of its owner (`Latest assessment by its owner`), with the new evidence that
+answers a dispute. The findings devloop writes itself, of a CI failure and of the acceptance
 map, stay blocking as before. devloop then enforces consistency:
 
 - `approve` with a blocking finding, or with one of the reviewer's own earlier findings
   unresolved, becomes `request_changes` (another owner's open finding does not change it: the
   dispatcher checks it before promoting);
 - `request_changes` whose only blocking findings were demoted for lack of evidence (#481), with
-  no earlier finding left unresolved, becomes `approve`;
+  none of the reviewer's own earlier findings left unresolved, becomes `approve` (another
+  owner's open finding does not keep it: the dispatcher checks it before promoting);
 - `request_changes` with nothing else to fix becomes `needs_operator`;
 - an earlier finding the reviewer does not assess stays open;
 - `operator_reason` (#434) says why a reviewer asks for the operator: `trust_policy` or

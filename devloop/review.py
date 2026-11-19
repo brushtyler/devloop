@@ -260,7 +260,9 @@ def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, 
     if verdict == 'approve' and (blocking or own_unresolved):
         verdict = 'request_changes'
         notes.append('Verdetto corretto da approve a request_changes: restano finding bloccanti aperti.')
-    elif verdict == 'request_changes' and unproven and not (blocking or unresolved):
+    # Another owner's open finding is not the reviewer's to fix (#111): it does not keep the
+    # request for changes alive once its own blocking findings were demoted.
+    elif verdict == 'request_changes' and unproven and not (blocking or own_unresolved):
         verdict = 'approve'
         notes.append('Verdetto corretto da request_changes ad approve: nessun finding bloccante '
                      'ha un\'evidenza.')

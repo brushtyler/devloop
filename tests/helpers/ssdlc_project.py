@@ -156,7 +156,8 @@ _DISPUTE_REVIEW = """\
   dispute. Keeping it open without new evidence is not enough.
 """
 _EVIDENCE_FIX = """\
-- Before fixing a finding, verify its evidence (`Evidence` below, when the reviewer gave one):
+- Before fixing a finding, verify its evidence (`Evidence` below, when the reviewer gave one,
+  and the `Latest assessment by its owner`, which answers an earlier dispute with new evidence):
   run its scenario again, or read again the code and the rule it cites. When the evidence does
   not hold (the scenario does not fail, the code does not do what it says, the rule says
   something else), dispute the finding (`disputed`) instead of changing the code, and report in
@@ -169,8 +170,9 @@ _UNFOUNDED_ADVISORY = """\
 - `unfounded`: the findings of the reviews below whose evidence does not hold, and the fixes the
   implementer made that were not needed, shown in the section "Finding senza evidenza o
   corretti senza necessità". Verify each one: run its scenario again, or read again the code
-  and the rule it cites. Name the finding (`round/reviewer/ID`) and say what you observed;
-  `[]` when you see none.
+  and the rule it cites. The reviews below also list, under "Blocking findings without
+  evidence", those devloop recorded as non-blocking because they had none: include them. Name
+  the finding (`round/reviewer/ID`) and say what you observed; `[]` when you see none.
 """
 # The changes of the templates since R4, each as ``(anchor, text)``: ``text`` follows the only
 # occurrence of ``anchor`` in the reference. The frozen files stay as they were; the prompts of

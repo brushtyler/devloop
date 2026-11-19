@@ -12,7 +12,8 @@ merge or rebase the branch yourself.
 
 - Address every open finding listed below. For each one, either fix it or dispute it with a concrete
   technical reason (for example, the finding misreads the code or the issue). Do not dispute to avoid work.
-- Before fixing a finding, verify its evidence (`Evidence` below, when the reviewer gave one):
+- Before fixing a finding, verify its evidence (`Evidence` below, when the reviewer gave one,
+  and the `Latest assessment by its owner`, which answers an earlier dispute with new evidence):
   run its scenario again, or read again the code and the rule it cites. When the evidence does
   not hold (the scenario does not fail, the code does not do what it says, the rule says
   something else), dispute the finding (`disputed`) instead of changing the code, and report in

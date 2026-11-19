@@ -7,6 +7,7 @@ record says so, unless it is one of security, which stays blocking. The review a
 describe the evidence and the dispute of a finding whose evidence does not hold, and the
 advisory review lists the findings of the quorum without evidence or fixed without need."""
 
+import dataclasses
 import re
 import unittest
 from pathlib import Path
@@ -14,13 +15,18 @@ from types import SimpleNamespace
 
 from devloop import markdown, review
 from devloop.config import PromptFacts
-from devloop.context import _format_findings, _template, format_previous_rounds, prompt_values
+from devloop.context import (_format_findings, _template, format_previous_rounds,
+                             owner_assessments, prompt_values)
 from devloop.dispatch_advisory import (UNFOUNDED_TITLE, normalize_advisory,
                                        render_advisory_review)
+from devloop.dispatcher import Dispatcher
 from devloop.schema import load_schema
 from helpers import ssdlc_project
-from test_devloop import REV, SHA1, FakeRunner, finding, raw_review
-from test_devloop_findings import Flow, reviewed_by
+from test_devloop import (CFG, IMPL, REV, SHA1, FakeGH, FakeRunner, FakeWS, finding, fixed, pr,
+                          raw_review)
+from test_devloop_advisory import Base as AdvisoryBase
+from test_devloop_advisory import answer
+from test_devloop_findings import OTHER, Flow, reviewed_by
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIGS = (ssdlc_project.load(), SimpleNamespace(prompts=PromptFacts()))
@@ -109,6 +115,71 @@ class NormalizeTests(unittest.TestCase):
         self.assertEqual([f['key'] for f in review.open_findings([first, second])],
                          [f'1/{REV}/R1-1'])
 
+    def test_another_owners_open_finding_does_not_keep_the_request_for_changes(self):
+        # Another reviewer's finding the reviewer cannot close, and a CI one, stay open: they
+        # are not the reviewer's to fix, and its own findings without evidence leave nothing.
+        first = reviewed_by(OTHER, raw_review('request_changes', [finding('theirs')]))
+        ci = review.ci_failure_review(failed_checks=['Unit Tests'], log_tail='boom',
+                                      previous_open=review.open_findings([first]), round_no=1,
+                                      max_rounds=3, head_sha=SHA1)
+        previous = review.open_findings([first, ci])
+        self.assertEqual({f['owner'] for f in previous}, {OTHER, 'ci'})
+        second = review.normalize_review(
+            raw_review('request_changes', [finding('new', evidence='')],
+                       previous=[{'id': f['key'], 'status': 'unresolved', 'note': 'n'}
+                                 for f in previous]),
+            previous_open=previous, round_no=2, max_rounds=3, head_sha=SHA1, ci='pass',
+            reviewer=REV)
+        self.assertEqual(second['verdict'], 'approve')
+        self.assertEqual(second['blocking_findings'], [])
+        self.assertTrue(second['non_blocking_findings'][0]['without_evidence'])
+        # The other owners' findings stay open: the dispatcher checks them before promoting.
+        self.assertEqual({f['owner'] for f in review.open_findings([first, ci, second])},
+                         {OTHER, 'ci'})
+
+
+class DisputeTests(unittest.TestCase):
+    """A finding disputed for its evidence, kept open by its owner with new evidence, and fixed
+    again: the implementer sees the new evidence, not only the one it disputed."""
+
+    OLD, NEW = 'OLD: input 1 fails', 'NEW: input 2 fails; output=error'
+
+    def rounds(self):
+        key = f'1/{REV}/R1-1'
+        first = reviewed_by(REV, raw_review('request_changes', [finding(evidence=self.OLD)]))
+        assess = [{'id': key, 'status': 'unresolved', 'note': self.NEW}]
+        second = reviewed_by(REV, raw_review('request_changes', previous=assess),
+                             review.open_findings([first]), round_no=2)
+        # Another reviewer's assessment of the same finding is not its owner's.
+        foreign = reviewed_by(OTHER, raw_review('approve', previous=[
+            dict(assess[0], note='FOREIGN: looks fine')]), review.open_findings([first]),
+            round_no=2)
+        return key, first, second, foreign
+
+    def test_the_fix_after_a_dispute_shows_the_new_evidence(self):
+        key, first, second, foreign = self.rounds()
+        self.assertEqual(owner_assessments([first, second, foreign]),
+                         {key: (2, 'unresolved', self.NEW)})
+        runner = FakeRunner(fixed())
+        Dispatcher(CFG, FakeGH(), FakeWS(), runner, log=lambda m: None)._do_fix(
+            pr(labels=['agent:changes'], reviews=[first, second, foreign]))
+        ((_, mode, schema, prompt),) = runner.calls
+        self.assertEqual(schema, 'fix')
+        self.assertIn(f'Evidence: {self.OLD}', prompt)
+        self.assertIn(f'Latest assessment by its owner (round 2, unresolved): {self.NEW}', prompt)
+        self.assertNotIn('FOREIGN', prompt)
+        self.assertIn('the `Latest assessment by its owner`, which answers an earlier dispute '
+                      'with new evidence', flat(prompt))
+
+    def test_the_previous_rounds_show_the_dispute_and_the_new_evidence(self):
+        key, first, second, _ = self.rounds()
+        fix = {'round': 1, 'head_sha': SHA1, 'summary': 's', 'responses': [
+            {'finding_id': key, 'action': 'disputed', 'note': 'input 1 passes: exit 0'}]}
+        text = format_previous_rounds([first, second], [fix])
+        self.assertIn(f'Evidence: {self.OLD}', text)
+        self.assertIn(f'- {key}: disputed: input 1 passes: exit 0', text)
+        self.assertIn(f'Assessments of earlier findings:\n- {key}: unresolved: {self.NEW}', text)
+
 
 class FlowTests(Flow, unittest.TestCase):
     def test_a_finding_without_evidence_does_not_send_the_pr_to_the_fix(self):
@@ -193,6 +264,22 @@ class AdvisoryTests(unittest.TestCase):
         self.assertEqual(section.group(1), '- 1/codex/R1-2: lo scenario passa.')
         empty = render_advisory_review(normalize_advisory(self.answer([])), 'codex', SHA1, 'h')
         self.assertIn(f'### {UNFOUNDED_TITLE}\n\n_Nessuno indicato._', empty['body'])
+
+
+class AdvisoryTurnTests(AdvisoryBase):
+    def test_the_advisory_turn_gets_the_findings_without_evidence(self):
+        record = reviewed_by(REV, raw_review('request_changes', [
+            dict(finding('UNIQUE_DEMOTED_FINDING', evidence=''), detail='DEMOTED_DETAIL')]))
+        self.make(answer())
+        p = dataclasses.replace(self.d.snapshot().prs[0], reviews=[record])
+        self.d._advisory_turn(p, IMPL)
+        ((_, _, schema, prompt),) = self.runner.calls
+        self.assertEqual(schema, 'advisory')
+        self.assertIn('Blocking findings without evidence, recorded by devloop as non-blocking:\n'
+                      f'- **1/{REV}/R1-1** (x.py:3): UNIQUE_DEMOTED_FINDING\n  DEMOTED_DETAIL',
+                      prompt)
+        self.assertIn('under "Blocking findings without evidence", those devloop recorded as '
+                      'non-blocking because they had none: include them', flat(prompt))
 
 
 class DocsTests(unittest.TestCase):

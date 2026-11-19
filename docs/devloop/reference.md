@@ -562,15 +562,20 @@ document) with the quotation. The prompts use it this way:
 - **Review prompt** (`devloop/prompts/review.md`). It asks for the evidence of every blocking
   finding, checked by the reviewer, and says what devloop does without it. In a later round, a
   finding disputed because its evidence does not hold is withdrawn (`withdrawn`) or kept
-  `unresolved` with new evidence in its `note`.
-- **Fix prompt** (`devloop/prompts/fix.md`). Each open finding shows its `Evidence:`; the
-  implementer verifies it first (runs its scenario again, or reads again the code and the rule
+  `unresolved` with new evidence in its `note`. The previous rounds list each review's
+  assessments of the earlier findings, with that new evidence.
+- **Fix prompt** (`devloop/prompts/fix.md`). Each open finding shows its `Evidence:` and, after
+  a later round, the latest assessment of its owner (`Latest assessment by its owner`), with the
+  new evidence that answers a dispute; the assessments of other reviewers are left out. The
+  implementer verifies them first (runs its scenario again, or reads again the code and the rule
   it cites) and disputes (`disputed`) one whose evidence does not hold, with the outcome of the
   verification in the `note` of its response, instead of fixing it to converge sooner.
 - **Advisory review prompt** (`devloop/prompts/advisory.md`). The field `unfounded` of
   [`devloop/schemas/advisory.json`](../../devloop/schemas/advisory.json) lists the findings of
   the quorum whose evidence does not hold and the fixes that were not needed, in the section
-  "Finding senza evidenza o corretti senza necessità" of the advisory review.
+  "Finding senza evidenza o corretti senza necessità" of the advisory review. The previous
+  rounds it reads list, under "Blocking findings without evidence", the findings devloop
+  demoted, each as `round/reviewer/ID` with its detail.
 
 A blocking finding with an empty `evidence` is recorded as non-blocking, with
 `without_evidence: true`, and does not send the PR to the fix; one with `security: true` stays
