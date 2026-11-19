@@ -28,7 +28,9 @@ the later ones, until the operator does the step and pins by hand (``devloop pin
 resolved the commit to pin (``AutoPin.pin``, ``PinHeld``): a merge that lands while a pin runs is
 in that commit only if its hold was already written. A merge whose outcome is unknown (an error
 from GitHub, a timeout) keeps its hold, marked ``uncertain`` (``doubt``): a later tick reads the
-PR and drops it, or keeps it as the hold of a merged PR (``settle``).
+PR and drops it, or keeps it as the hold of a merged PR (``settle``). Each hold names its merge
+attempt (``attempt``): a doubt and a settle touch only the hold of the attempt they name, so the
+state of a PR read for an earlier attempt never settles the hold of a later one.
 
 The installation's source (ADR 0006, R1) is the clone the pin takes the code from: the
 managed repository itself, as for ssdlc, unless the configuration names another clone in
@@ -47,6 +49,7 @@ import io
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -808,11 +811,16 @@ def _write_held(state, steps):
 
 def hold(state, pr, head, step):
     """Hold the auto-pin for the step on the host ``step`` that PR ``pr``, merged at ``head``,
-    declared (#462): no auto-pin runs until a pin by hand. The steps of earlier PRs stay."""
+    declared (#462): no auto-pin runs until a pin by hand. The steps of earlier PRs stay.
+    Returns the identifier of this merge attempt, which ``doubt`` and ``settle`` name: a hold
+    of ``pr`` written again by a later attempt has another one."""
+    attempt = secrets.token_hex(8)
     with _held_locked(state):
         steps = [s for s in (held(state) or []) if s.get('pr') != pr]
-        steps.append({'pr': pr, 'head': head, 'step': step, 'at': int(time.time())})
+        steps.append({'pr': pr, 'head': head, 'step': step, 'at': int(time.time()),
+                      'attempt': attempt})
         _write_held(state, steps)
+    return attempt
 
 
 def unhold(state, pr):
@@ -823,13 +831,19 @@ def unhold(state, pr):
             _write_held(state, [s for s in steps if s.get('pr') != pr])
 
 
-def doubt(state, pr, issue=None):
-    """Mark the step of ``pr`` ``uncertain`` (#462): its merge failed with an unknown outcome,
-    and the hold stays until ``settle`` knows it. ``issue`` is the issue the PR closes, for the
-    alarm of a merge that did happen. False when ``pr`` holds nothing."""
+def _attempt_of(steps, pr, attempt):
+    """The steps of ``pr`` written by the merge attempt ``attempt`` (``hold``)."""
+    return [s for s in steps if s.get('pr') == pr and s.get('attempt') == attempt]
+
+
+def doubt(state, pr, attempt, issue=None):
+    """Mark the step of ``pr`` written by the merge attempt ``attempt`` ``uncertain`` (#462): its
+    merge failed with an unknown outcome, and the hold stays until ``settle`` knows it. ``issue``
+    is the issue the PR closes, for the alarm of a merge that did happen. False when that
+    attempt holds nothing."""
     with _held_locked(state):
         steps = held(state) or []
-        mine = [s for s in steps if s.get('pr') == pr]
+        mine = _attempt_of(steps, pr, attempt)
         for s in mine:
             s['uncertain'] = True
             if isinstance(issue, int):
@@ -839,20 +853,22 @@ def doubt(state, pr, issue=None):
         return bool(mine)
 
 
-def settle(state, pr, merged):
-    """The outcome of the uncertain merge of ``pr``, read on GitHub (#462): when ``merged`` its
-    step stays, as the hold of a merged PR; otherwise it goes. A step of ``pr`` held again
-    since (``hold``: no longer ``uncertain``) is left as it is. True when a step changed."""
+def settle(state, pr, merged, attempt):
+    """The outcome of the uncertain merge attempt ``attempt`` of ``pr``, read on GitHub (#462):
+    when ``merged`` its step stays, as the hold of a merged PR; otherwise it goes. Only the hold
+    of that attempt changes, and only while it is still ``uncertain``: the state of the PR was
+    read for it, so a hold that a later attempt wrote since (another ``attempt``, even an
+    uncertain one) is left as it is. True when a step changed."""
     with _held_locked(state):
         steps = held(state) or []
-        if not any(s.get('pr') == pr and s.get('uncertain') for s in steps):
+        mine = [s for s in _attempt_of(steps, pr, attempt) if s.get('uncertain')]
+        if not mine:
             return False
         if merged:
-            for s in steps:
-                if s.get('pr') == pr:
-                    s.pop('uncertain', None)
+            for s in mine:
+                s.pop('uncertain', None)
         else:
-            steps = [s for s in steps if not (s.get('pr') == pr and s.get('uncertain'))]
+            steps = [s for s in steps if not any(s is m for m in mine)]
         _write_held(state, steps)
         return True
 
@@ -926,16 +942,16 @@ class AutoPin:
         clear_pending(self.state)
 
     def hold(self, pr, head, step):
-        hold(self.state, pr, head, step)
+        return hold(self.state, pr, head, step)
 
     def unhold(self, pr):
         unhold(self.state, pr)
 
-    def doubt(self, pr, issue=None):
-        return doubt(self.state, pr, issue)
+    def doubt(self, pr, attempt, issue=None):
+        return doubt(self.state, pr, attempt, issue)
 
-    def settle(self, pr, merged):
-        return settle(self.state, pr, merged)
+    def settle(self, pr, merged, attempt):
+        return settle(self.state, pr, merged, attempt)
 
     def held(self):
         return held(self.state)

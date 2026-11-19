@@ -2405,7 +2405,10 @@ to the issue the PR closes; with `[pin] auto = false` only the alert and the lab
 fails may still have happened (a timeout of `gh pr merge` loses GitHub's answer): its hold stays,
 marked uncertain, and at the next tick devloop reads the PR. Merged, the hold stays and the alert
 and the label follow then (`auto-pin: #<N> was merged despite the error: …`); not merged, the hold
-goes (`auto-pin: #<N> was not merged: its hold of the auto-pin goes`). The auto-pin reads the
+goes (`auto-pin: #<N> was not merged: its hold of the auto-pin goes`). Each hold names its merge
+attempt, and the tick settles only the hold of the attempt it read the PR for: when the merge
+worker of `run` merges the same PR again meanwhile, the hold of that new attempt stays, even if
+it too is uncertain, until a later tick reads the PR for it. The auto-pin reads the
 hold again once it has resolved `origin/main`: a merge that the merge worker of `run` makes
 while a pin is fetching writes its hold first, so a commit that contains it is never pinned.
 While the hold stays, no auto-pin runs, of that commit nor of later ones:

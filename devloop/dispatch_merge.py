@@ -763,9 +763,10 @@ class MergeMixin:
         # that no tick pins the merged base first: a hold that cannot be recorded stops it.
         step = latest_host_step(pr.meta, pr.fixes)
         holding = bool(step) and self.pinner is not None and cfg.pin.auto
+        attempt = None  # the merge attempt the hold names (``pin.hold``)
         if holding:
             try:
-                self.pinner.hold(pr.number, head, step)
+                attempt = self.pinner.hold(pr.number, head, step)
             except OSError as exc:
                 return skip(f'it declares a step on the host and the hold of the auto-pin '
                             f'could not be recorded: {exc}')
@@ -777,7 +778,7 @@ class MergeMixin:
                 # timeout). The hold stays, marked uncertain, until a later tick reads the PR
                 # (``_settle_host_steps``): it goes if the PR was not merged, else it alerts.
                 try:
-                    self.pinner.doubt(pr.number, pr.meta.get('issue'))
+                    self.pinner.doubt(pr.number, attempt, pr.meta.get('issue'))
                     self.log(f'  the merge failed: the hold of the auto-pin stays until a '
                              f'later tick reads whether #{pr.number} was merged')
                 except OSError as exc:
@@ -828,7 +829,10 @@ class MergeMixin:
         """The holds of the auto-pin whose merge failed with an unknown outcome (#462,
         ``pin.doubt``): the PR, read on GitHub, says how it went. Merged (the answer was lost),
         the hold stays and the alarm of its step goes out now; not merged, the hold goes, and a
-        new merge of that PR holds again. A PR that cannot be read is tried at the next tick."""
+        new merge of that PR holds again. A PR that cannot be read is tried at the next tick.
+        The settle names the merge attempt of the hold read here, before the state of the PR:
+        a new attempt of the same PR that the merge worker makes meanwhile writes a hold of its
+        own, which a state read for the earlier attempt never touches."""
         for held in self.pinner.held() or []:
             number = held.get('pr')
             if not held.get('uncertain') or not isinstance(number, int):
@@ -845,8 +849,8 @@ class MergeMixin:
                 continue
             merged = state == 'MERGED'
             try:
-                if not self.pinner.settle(number, merged):
-                    continue  # held again by a new merge meanwhile
+                if not self.pinner.settle(number, merged, held.get('attempt')):
+                    continue  # held again by a new merge attempt meanwhile
             except OSError as exc:
                 self.log(f'auto-pin: the hold of #{number} not settled, next tick: {exc}')
                 continue
