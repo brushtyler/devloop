@@ -9,12 +9,12 @@
 Defaults>@DEVLOOP_USER@ always_set_home, secure_path="@DEVLOOP_PATH@"
 
 @SUPERVISOR_USER@ ALL=(@DEVLOOP_USER@) NOPASSWD: \
-    /usr/bin/python3 @DEVLOOP_CLONE@/scripts/devloop-pinned status, \
-    /usr/bin/python3 @DEVLOOP_CLONE@/scripts/devloop-pinned status *, \
-    /usr/bin/python3 @DEVLOOP_CLONE@/scripts/devloop-pinned watch *, \
-    /usr/bin/python3 @DEVLOOP_CLONE@/scripts/devloop-pinned report *, \
-    /usr/bin/python3 @DEVLOOP_CLONE@/scripts/devloop-pinned tick --dry-run, \
-    /usr/bin/python3 @DEVLOOP_CLONE@/scripts/devloop-pinned pin *
+    @LAUNCHER_CMD@ status, \
+    @LAUNCHER_CMD@ status *, \
+    @LAUNCHER_CMD@ watch *, \
+    @LAUNCHER_CMD@ report *, \
+    @LAUNCHER_CMD@ tick --dry-run, \
+    @LAUNCHER_CMD@ pin *
 
 @SUPERVISOR_USER@ ALL=(root) NOPASSWD: \
     /usr/bin/systemctl start @SERVICE_NAME@, \

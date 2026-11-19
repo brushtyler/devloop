@@ -32,13 +32,51 @@ from .workspace import Workspace
 
 # The descriptor of the dispatcher lock, passed on by a restart from a new pinned copy (#174).
 LOCK_FD = 'DEVLOOP_LOCK_FD'
+# The state_dir given to the launcher (``scripts/devloop-pinned --state-dir``, ADR 0006, R1).
+STATE_ENV = 'DEVLOOP_STATE_DIR'
 
 
 def main_checkout():
-    """The main checkout of the repository containing the current directory."""
+    """The main checkout of the repository containing the current directory: the managed
+    repository (ADR 0006, R1)."""
     common = subprocess.run(['git', 'rev-parse', '--path-format=absolute', '--git-common-dir'],
                             capture_output=True, text=True, check=True).stdout.strip()
     return Path(common).parent
+
+
+def state_path(cfg, root):
+    """The ``state_dir`` of ``cfg``: absolute, or relative to the managed repository's main
+    checkout ``root``. When the launcher was given a state_dir (``STATE_ENV``, ADR 0006, R1),
+    this must be the same directory, else ``ConfigError``: the launcher reads the pinned copy and
+    the overlay there, and devloop would write its pins and its state elsewhere."""
+    state = root / cfg.state_dir
+    given = os.environ.get(STATE_ENV)
+    if given and Path(given).resolve() != state.resolve():
+        raise ConfigError(f'state_dir: {state} is not the directory given to the launcher, '
+                          f'{given}: set state_dir = "{given}" in its {pin.LOCAL_CONFIG}')
+    return state
+
+
+def installation_source(cfg, root):
+    """The main checkout of the installation's source (``pin.source_root``, ADR 0006, R1):
+    ``root`` without ``source``. ``ConfigError`` when ``source`` is not a git checkout."""
+    try:
+        return pin.source_root(root, cfg.source)
+    except pin.PinError as exc:
+        raise ConfigError(str(exc)) from exc
+
+
+def auto_pinner(cfg, root, state, local, log, **kw):
+    """The pin after a merge (``pin.AutoPin``) on ``root``, or None when the installation's
+    source is not the managed repository (ADR 0006, R1): a merge in another project never
+    touches the installation, and ``[pin] auto`` is then off, with a line in the log."""
+    source = installation_source(cfg, root)
+    if source.resolve() == Path(root).resolve():
+        return pin.AutoPin(root, state, local, log=log, **kw)
+    if cfg.pin.auto:
+        log(f'auto-pin off: the installation comes from {source}, not from the managed '
+            'repository; pin a tag of the source by hand')
+    return None
 
 
 def _inherited_lock(lock_path):
@@ -89,6 +127,8 @@ def agent_environment(cfg, gh_config, agent_user=None):
     # The pinned copy on PYTHONPATH (#174) is devloop's own: the tests of a worktree import the
     # worktree's code.
     env.pop('PYTHONPATH', None)
+    # The launcher's state_dir (ADR 0006, R1) is the dispatcher's: not that of the code under test.
+    env.pop(STATE_ENV, None)
     env.setdefault('BASH_DEFAULT_TIMEOUT_MS', str(cfg.agent_command_timeout_seconds * 1000))
     env.setdefault('BASH_MAX_TIMEOUT_MS', str(cfg.test_timeout_seconds * 1000))
     return env
@@ -97,7 +137,7 @@ def agent_environment(cfg, gh_config, agent_user=None):
 def build(args):
     cfg = load_config(args.config, args.local_config)
     root = main_checkout()
-    state = root / cfg.state_dir
+    state = state_path(cfg, root)
     try:
         identities = Identities.from_config(cfg)
     except OSError as exc:
@@ -148,7 +188,7 @@ def build(args):
     dispatcher = Dispatcher(cfg, gh, ws, runner, log=tick_log, identities=identities,
                             activity=current, ledger=ledger,
                             merger=identities.merger(),
-                            pinner=pin.AutoPin(root, state, args.local_config, log=tick_log,
+                            pinner=auto_pinner(cfg, root, state, args.local_config, tick_log,
                                                fetch_lock=ws.shared_lock,
                                                keep=keep_pins(cfg)),
                             memory=unavailability.Memory(state),
@@ -214,9 +254,10 @@ def run_fallback(args):
     unavailable, so that its next turn starts from the configured model. Local files only."""
     try:
         cfg = load_config(args.config, args.local_config)
+        state = state_path(cfg, main_checkout())
     except ConfigError as exc:
         sys.exit(f'devloop: invalid config: {exc}')
-    memory = unavailability.Memory(main_checkout() / cfg.state_dir)
+    memory = unavailability.Memory(state)
     known = {key for key, _, _ in memory.entries()}
     if args.agent not in cfg.agents and args.agent not in known:
         sys.exit(f'devloop: fallback reset: unknown agent {args.agent!r}')
@@ -230,17 +271,18 @@ def run_fallback(args):
 def run_pin(args):
     """``devloop pin [--no-smoke] <ref>`` (#174). The overlay is ``--local-config``, or
     ``<state_dir>/config.local.toml`` when it exists. ``--no-smoke`` skips the smoke test of a
-    new copy (#260), and the log says so."""
+    new copy (#260), and the log says so. The commit comes from the installation's source
+    (``source``, ADR 0006, R1), the smoke test runs in the managed repository."""
     try:
         cfg = load_config(args.config, args.local_config)
+        root = main_checkout()
+        state = state_path(cfg, root)
     except ConfigError as exc:
         sys.exit(f'devloop: invalid config: {exc}')
-    root = main_checkout()
-    state = root / cfg.state_dir
     local = args.local_config or state / pin.LOCAL_CONFIG
     try:
-        pin.pin(root, state, args.ref, local, log=log, smoke=not args.no_smoke,
-                keep=keep_pins(cfg))
+        pin.pin(installation_source(cfg, root), state, args.ref, local, log=log,
+                smoke=not args.no_smoke, keep=keep_pins(cfg), managed=root)
     except (pin.PinError, ConfigError, OSError) as exc:
         sys.exit(f'devloop: pin failed, the pinned copy is unchanged: {exc}')
 
@@ -262,9 +304,10 @@ def run_watch(parser, args):
             parser.error(f'watch: {exc}')
     try:
         cfg = load_config(args.config, args.local_config)
+        state = (Path(args.state) if args.state
+                 else state_path(cfg, main_checkout()) / watch.STATE_FILE)
     except ConfigError as exc:
         sys.exit(f'devloop: invalid config: {exc}')
-    state = Path(args.state) if args.state else main_checkout() / cfg.state_dir / watch.STATE_FILE
     try:
         gh = Identities.from_config(cfg).github(DISPATCHER)
     except OSError as exc:
@@ -310,6 +353,10 @@ def run_report(parser, args):
         sys.exit('devloop: report --publish: no [report] issue is configured. Set the number of '
                  'the dedicated issue as "issue" in [report] of the local overlay.')
     try:
+        state = state_path(cfg, main_checkout()) if args.publish else None
+    except ConfigError as exc:
+        sys.exit(f'devloop: invalid config: {exc}')
+    try:
         gh = Identities.from_config(cfg).github(DISPATCHER)
     except OSError as exc:
         sys.exit(f'devloop: invalid config: GitHub App key: {exc}. Set $DEVLOOP_APP_KEY_DIR or '
@@ -317,7 +364,6 @@ def run_report(parser, args):
     trust = watch.Trust.from_config(cfg)
     try:
         if args.publish:
-            state = main_checkout() / cfg.state_dir
             report.build(cfg, gh, trust, state, log=log).publish(day)
             return
         day = day or report.utc_today()
@@ -461,9 +507,9 @@ def main(argv=None):
             sys.exit(f'devloop: follow needs issue-<N> or pr-<N>, not {args.target!r}')
         try:
             cfg = load_config(args.config, args.local_config)
+            root = state_path(cfg, main_checkout()) / 'worktrees'
         except ConfigError as exc:
             sys.exit(f'devloop: invalid config: {exc}')
-        root = main_checkout() / cfg.state_dir / 'worktrees'
         try:
             # The transcripts are in the HOME of the user the agents run as (#415).
             agent_user = agent_user_of(cfg)

@@ -14,7 +14,12 @@ the attribution header:
 - ``/devloop accept-defaults``: accept the defaults the readiness check proposed;
 - ``/devloop decide <text>``: decide the gaps of the readiness check otherwise (#258): the text,
   the rest of the comment, reaches the next check through the dispatcher's record;
-- ``/devloop escalate <reason>``: hand the escalation to the operator.
+- ``/devloop escalate <reason>``: hand the escalation to the operator;
+- ``/devloop grant-round <reason>``: grant one more review round to a PR at the round limit, only
+  on a ``round_grantable`` escalation (#405, ADR 0005, P5-1). The reason carries the analysis of
+  the causes (rule 9 of section 3.1 of the ADR): without one the command is malformed. Granting
+  rounds is a delegation of the operator, off by default (``[delegations] rounds``), within the
+  caps below.
 
 A trusted user may use the same commands on an escalation to the operator (#321), in any merge
 mode: ``retry`` of a step it records, critical classes included, and ``accept-defaults`` or
@@ -27,7 +32,10 @@ TOOL_FAILURE = 'tool_failure'            # the agent or its model produced no re
 PREFLIGHT_DEFAULT = 'preflight_default'  # readiness gaps all ``default_available``
 SYNC_FAILED = 'sync_failed'              # a sync failed, no conflict on a sensitive path
 MERGED_ISSUE = 'merged_issue'            # a ready issue that a merged devloop PR resolved (#228)
-NON_CRITICAL = (TOOL_FAILURE, PREFLIGHT_DEFAULT, SYNC_FAILED, MERGED_ISSUE)
+# A PR at the round limit whose next round the supervisor may grant (#405, ADR 0005, P5-1): only
+# with ``[delegations] rounds`` on and every condition of the delegation verified.
+ROUND_GRANTABLE = 'round_grantable'
+NON_CRITICAL = (TOOL_FAILURE, PREFLIGHT_DEFAULT, SYNC_FAILED, MERGED_ISSUE, ROUND_GRANTABLE)
 
 # Critical classes: always to the operator. Any other value is critical too.
 CRITICAL = {
@@ -63,15 +71,21 @@ UNCERTAIN_TURN = 'uncertain_turn'  # a turn refused by the block on uncertain ou
 RETRY_STEPS = ('preflight', 'implement', 'review', 'fix', 'sync')
 ISSUE_STEPS = ('preflight', 'implement')
 MAX_RETRIES = 2
+# The caps of the supervisor's delegations (#405, ADR 0005, D4): constants of the code, which the
+# configuration and the local overlay may only lower (``[delegations]``), never raise. The rounds
+# granted to one PR, and the grants of one UTC day, every delegation together, retries excluded.
+MAX_GRANTED_ROUNDS = 2
+MAX_DAILY_GRANTS = 3
 # An issue with this label is in a design phase: its escalations stay critical.
 DESIGN_LABEL = 'phase:design'
 
 RETRY, ACCEPT_DEFAULTS, DECIDE, ESCALATE = 'retry', 'accept-defaults', 'decide', 'escalate'
-COMMANDS = (RETRY, ACCEPT_DEFAULTS, DECIDE, ESCALATE)
+GRANT_ROUND = 'grant-round'
+COMMANDS = (RETRY, ACCEPT_DEFAULTS, DECIDE, ESCALATE, GRANT_ROUND)
 # The commands that need a text: without one they are malformed.
-NEEDS_TEXT = (DECIDE, ESCALATE)
+NEEDS_TEXT = (DECIDE, ESCALATE, GRANT_ROUND)
 # What a supervision record says happened to a command.
-OUTCOMES = ('applied', 'accepted', 'decided', 'escalated', 'refused', 'limit')
+OUTCOMES = ('applied', 'accepted', 'decided', 'escalated', 'refused', 'limit', 'granted')
 
 
 def critical(cls):
@@ -108,6 +122,8 @@ def describe(cls):
         return 'sincronizzazione con la base non riuscita'
     if cls == MERGED_ISSUE:
         return 'issue ancora aperta, ma risolta da una PR devloop già mergiata'
+    if cls == ROUND_GRANTABLE:
+        return 'limite dei round di review, con un round in più che il supervisore può concedere'
     return CRITICAL.get(cls, 'classe non riconosciuta, quindi critica')
 
 
@@ -124,10 +140,11 @@ def preflight_class(outcome):
 def supervisor_command(body):
     """The supervisor command of a comment: ``(command, text)`` when the first line after the
     attribution header is ``/devloop retry``, ``/devloop accept-defaults``, ``/devloop decide
-    <text>`` or ``/devloop escalate <reason>``; None when the comment is no such command. The
-    reason of an escalate is the rest of its line; the text of a decide is the rest of the
-    comment, from the rest of its first line on (#258). A decide or an escalate without a text
-    has None as text, and is malformed."""
+    <text>``, ``/devloop escalate <reason>`` or ``/devloop grant-round <reason>``; None when the
+    comment is no such command. The reason of an escalate is the rest of its line; the text of a
+    decide and the reason of a grant-round are the rest of the comment, from the rest of its
+    first line on (#258; #405, whose analysis of the causes may take several lines). A decide,
+    an escalate or a grant-round without a text has None as text, and is malformed."""
     lines = (body or '').strip().splitlines()
     while lines and (not lines[0].strip() or lines[0].strip().startswith('>')):
         lines.pop(0)
@@ -135,7 +152,7 @@ def supervisor_command(body):
     if len(tokens) < 2 or tokens[0] != '/devloop' or tokens[1] not in COMMANDS:
         return None
     reason = tokens[2].strip() if len(tokens) > 2 else ''
-    if tokens[1] == DECIDE:
+    if tokens[1] in (DECIDE, GRANT_ROUND):
         reason = '\n'.join([reason, *lines[1:]]).strip()
     if tokens[1] in NEEDS_TEXT:
         return tokens[1], reason or None

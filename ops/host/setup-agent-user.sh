@@ -31,7 +31,7 @@ ops_load_params
 ops_check_platform
 require_root
 
-STATE="$DEVLOOP_CLONE/$STATE_DIR"
+STATE="$STATE_PATH"
 
 # acl_entry PATH ENTRY: la riga ENTRY (per esempio user:x:--x o default:user:x:rwx) nell'ACL
 # di PATH, o niente. getfacl può aggiungere alla riga un commento #effective.

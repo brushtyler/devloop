@@ -46,9 +46,12 @@ ops/
 
 - **Parametri.** Leggono `ops/params.env` (o il file di `--params`). I valori finiscono in un
   sudoers e in un'unità systemd, quindi gli script accettano solo forme note (nomi utente, percorsi
-  assoluti senza spazi, `owner/nome`) e si fermano su un valore diverso. `STATE_DIR` resta
-  `.ssdlc/devloop`: il launcher (`scripts/devloop-pinned`) cerca lì la copia fissata e l'overlay,
-  quindi gli script rifiutano un altro valore.
+  assoluti senza spazi, `owner/nome`) e si fermano su un valore diverso. `STATE_DIR` è
+  `.ssdlc/devloop` del clone per default; può essere un altro percorso relativo al clone o un
+  percorso assoluto dell'host (per esempio `/var/lib/devloop/<progetto>`). Con un valore diverso
+  dal default, o con `SOURCE_REPO`, unità, sudoers e verifiche chiamano il launcher con
+  `--state-dir <percorso>` e con `env -C <clone>`, perché giri nel clone gestito, e l'overlay deve
+  avere lo stesso `state_dir` ([docs/devloop/guide.md](../docs/devloop/guide.md#launcher)).
 - **`--dry-run`.** Stampa ogni azione (`[dry-run] …`) e il contenuto dei file che scriverebbe,
   senza fare nulla. Le verifiche in sola lettura (un utente esiste, una directory ha già il modo
   giusto) si fanno lo stesso, così l'elenco mostra solo ciò che manca.
@@ -301,7 +304,9 @@ averlo validato con `visudo -c`, clona il repository e prepara `key_dir` e `~/.c
 Il **sudoers** (`ops/host/sudoers-supervisor`) permette:
 
 - come `devloop`, solo `scripts/devloop-pinned` con `status`, `status *`, `watch *`, `report *`,
-  `tick --dry-run` e `pin *` (con `Defaults>devloop always_set_home, secure_path=…`);
+  `tick --dry-run` e `pin *` (con `Defaults>devloop always_set_home, secure_path=…`); con uno
+  `STATE_DIR` diverso dal default o con `SOURCE_REPO`, lo stesso comando dell'unità
+  (`/usr/bin/env -C <clone> /usr/bin/python3 <avviatore> --state-dir <state_dir>`);
 - come root, solo `systemctl start|stop|restart devloop` e `systemctl status devloop *`.
 
 Nessun comando scrive sull'overlay di devloop. Per esempio:
@@ -377,9 +382,30 @@ ordine, senza mai due dispatcher attivi sullo stesso repository.
 
 ## Un altro progetto
 
-devloop lavora sul repository che lo contiene: `pin` estrae devloop dallo stesso repository di cui
-crea i worktree. Per usarlo su un altro progetto, quindi, **il repository gestito contiene
-devloop**. Separare l'installazione dal repository gestito è fuori dal perimetro di questa guida.
+Per default devloop lavora sul repository che lo contiene: `pin` estrae devloop dallo stesso
+repository di cui crea i worktree. Ci sono due strade.
+
+**Sorgente dell'installazione a parte** (ADR 0006, R1). Il repository gestito non contiene
+devloop: `pin` prende il codice da un clone di ssdlc, a un suo tag
+([docs/devloop/guide.md](../docs/devloop/guide.md#installation-source)). In `params.env`:
+`REPO` del progetto, `SOURCE_REPO=brushtyler/ssdlc`, `SOURCE_REF` con il tag da fissare, e di
+solito uno `STATE_DIR` assoluto. `setup-devloop.sh` clona la sorgente in `SOURCE_CLONE`
+(`/home/devloop/devloop-source`) e installa l'avviatore dal tag `SOURCE_REF` in `LAUNCHER_DIR`
+(`/usr/local/lib/devloop/devloop-pinned`, di root), fuori dalla copia fissata e dal clone gestito;
+unità e sudoers lo chiamano con `--state-dir`. L'overlay nello `state_dir` ha `source`,
+`state_dir` e le chiavi del progetto (`repo`, `base_branch`, `test_cmd`, `[apps]`, …): lo script
+ricorda le prime due finché mancano. Il primo pin si fa dal clone della sorgente:
+
+```bash
+sudo -u devloop -H sh -c 'cd ~/widget && PYTHONPATH=~/devloop-source python3 -P -m devloop \
+    --local-config /var/lib/devloop/widget/config.local.toml pin v1.2.0'
+```
+
+Il pin dopo un merge resta spento: un nuovo tag si fissa a mano, con `devloop-pinned
+--state-dir … pin <tag>`. Prompt, test locali e lettura della CI sono ancora quelli di ssdlc
+(issue R2-R5 dell'ADR 0006): vale quanto sotto per `local_tests` e `ci_rerun_unrelated`.
+
+**devloop nel repository gestito**, come ssdlc:
 
 1. **Portare devloop nel repository** (con una PR, come ogni cambiamento):
    - `devloop/` (con i prompt, `devloop/prompts/`, e gli schemi, `devloop/schemas/`);

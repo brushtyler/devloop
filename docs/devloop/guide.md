@@ -734,7 +734,8 @@ check, and the `policy` marker of a level that cannot be reviewed or promoted. A
 | `preflight_default` | A failed [readiness check](#readiness-check-before-implementation) whose gaps are all `default_available`, with no split | No |
 | `sync_failed` | A [sync](protocol.md#conflicts-with-main) that failed, with no file in conflict under a sensitive path (`sensitive_paths`) or `operator_only_paths`; one whose agent could not start is a `tool_failure` | No |
 | `merged_issue` | An open issue in `agent:ready` that a merged devloop PR already resolved ([Closing the issue](#closing-the-issue)) | No |
-| `round_limit` | The limit of review rounds | Yes |
+| `round_grantable` | The limit of review rounds, with `[delegations] rounds` on and every condition of [granting a round](#granting-a-review-round) verified: the supervisor may grant one more | No |
+| `round_limit` | The limit of review rounds, when the supervisor may not grant another one | Yes |
 | `operator_decision` | A readiness check with an `operator_decision` or `tool_unavailable` gap, or a split | Yes |
 | `untrusted` | The issue text changed after `agent:ready` by someone outside `trusted_users` | Yes |
 | `reviewer_decision`, `open_findings` | A reviewer asks for a decision; an approval leaves open findings only the operator can close (`ci` findings with the head's CI still running, or passed during the review, wait for it instead) | Yes |
@@ -778,6 +779,7 @@ any, is one of:
 /devloop accept-defaults
 /devloop decide <decisions>
 /devloop escalate <reason>
+/devloop grant-round <reason>
 ```
 
 They count only in `"auto"`, from the identity of `[roles].supervisor` (the GitHub App of that
@@ -841,14 +843,77 @@ one wins; without one, the latest that does not apply is answered.
   supervisor's: the operator decides them with a comment of their own on GitHub.
 - `/devloop escalate <reason>` hands the escalation to the operator: `agent:needs-operator`, with
   the reason (`supervisor_escalated`). It needs a reason.
+- `/devloop grant-round <reason>` grants one more review round to a PR in a `round_grantable`
+  escalation, as described in [Granting a review round](#granting-a-review-round). It needs a
+  reason, which may go on in the lines below the command.
 
 An escalation whose class is critical or unknown, or that was not routed to the supervisor,
 accepts no command: the command is refused and the item goes to `agent:needs-operator`. A command
-the class does not admit (`accept-defaults` or `decide` on a tool failure, `retry` on defaults) is refused
+the class does not admit (`accept-defaults` or `decide` on a tool failure, `retry` on defaults,
+`grant-round` on anything but `round_grantable`) is refused
 and the escalation stays with the supervisor. The answer lists the commands that apply to the
 escalation (`retry` for `tool_failure` and `sync_failed`, `accept-defaults` and `decide` for
-`preflight_default`, none of them for an input changed since, `escalate` always) and the manual
-steps without the supervisor.
+`preflight_default`, `grant-round` for `round_grantable`, none of them for an input changed
+since, `escalate` always) and the manual steps without the supervisor.
+
+#### Granting a review round
+
+A delegation of the operator to the supervisor (#405, [ADR 0005](../adr/0005-deleghe-e-ruoli-degli-agent.md#round-di-review),
+P5-1), **off by default**: `[delegations] rounds = false`. It replaces raising
+`max_review_rounds` by hand, which applies to every PR: a round granted applies to one PR only,
+and `max_review_rounds` does not change.
+
+With `rounds = true`, in merge mode `"auto"`, a PR that reaches its round limit goes to
+`agent:needs-supervisor` as `round_grantable` instead of `agent:needs-operator` as
+`round_limit`, when every one of these holds, each verified by the dispatcher:
+
+- the conditions of **Routing** above: the merge mode of the PR is `"auto"` (so it touches no
+  `operator_only_paths`), the supervisor's agent did not implement it, the issue is trusted and
+  still approved, no `phase:design`;
+- the latest round that counts against the limit is a CI failure, **or** the blocking findings
+  left open are fewer than after the round before;
+- no open blocking finding is a security finding: one whose `security` field (in the
+  [review schema](protocol.md#structured-review)) is not `false`, a finding of a review written
+  before the field existed included;
+- the owner of every finding can be reconstructed;
+- the caps are not reached: **2** rounds granted per PR (`max_rounds_per_pr`) and **3** grants
+  per UTC day across every PR (`max_grants_per_day`, all delegations together, retries
+  excluded). The caps are constants of the code (`MAX_GRANTED_ROUNDS` and `MAX_DAILY_GRANTS` in
+  `devloop/supervision.py`); the configuration and the local overlay may only lower them, and a
+  higher value is refused at startup. The grants of the day are read from the
+  [turn journal](protocol.md#turn-journal): without a journal that can be read none applies.
+
+Otherwise the escalation is `round_limit`, to the operator, and with the delegation on its
+comment says which condition failed. The supervisor answers a `round_grantable` escalation with:
+
+```text
+/devloop grant-round <reason>
+```
+
+The reason is required and carries the analysis of the causes, or cites it in the diary issue:
+the cause (findings new or decreasing, a sync, the CI, a PR too large, the interaction with other
+PRs) and, when the cause can be corrected, the issue opened to correct it. devloop refuses the
+command without a reason; the content of the analysis is checked by the coordinator, today the
+operator. Before granting, the dispatcher checks every condition again on the PR read then: a
+head moved since the escalation is refused and the escalation stays with the supervisor; a
+delegation turned off, a cap reached or a condition that no longer holds hand the PR to the
+operator as `round_limit`. The daily cap is checked once more when the grant is written in the
+turn journal, in one step with the write: two grants applied together on different PRs
+(parallel actions) never pass it, and the one that finds the last grant of the day taken hands
+its PR to the operator as `round_limit`. Granted, the PR's limit becomes `max_review_rounds` plus the rounds
+granted to it (plus the rounds that do not count, as before), and the PR goes back to
+`agent:review` or `agent:changes`, where it was. The grant leaves a `grant` event in the turn
+journal, a `supervision` record with outcome `granted` and a ledger `event`
+`delegation_grant` with the caps, the value granted and what remains (see
+[Supervision trace](protocol.md#supervision-trace)). A third round on the same PR goes back to the
+operator as `round_limit`. The supervisor never approves: the judgement of the code stays with
+the reviewers.
+
+**Revocation.** `rounds = false` revokes the delegation. `devloop run` reads `[delegations]` again
+before every tick, as it does `max_review_rounds`: from the next tick a round limit goes to the
+operator, and a `grant-round` on an escalation already with the supervisor is refused and hands
+the PR to the operator. A trusted user's `grant-round` on an escalation to the operator does not
+apply: the operator grants more rounds by raising `max_review_rounds`, as before.
 
 **Trace.** Every command applied leaves a dispatcher record, described in
 [Supervision trace](protocol.md#supervision-trace).
@@ -1776,15 +1841,17 @@ sudo -u devloop -H tail -f /home/devloop/ssdlc/.ssdlc/devloop/run.log   # follow
 - **`[report] issue`.** With it in the overlay the loop keeps the
   [daily summary](#daily-summary) on that issue, at most every `[report] interval` minutes;
   without it the loop publishes no summary.
-- **Limits.** A new `max_open_prs`, `max_parked_prs` or `max_review_rounds` in the overlay takes
-  effect at the next tick, without a stop; any other key needs a restart
+- **Limits.** A new `max_open_prs`, `max_parked_prs`, `max_review_rounds` or `[delegations]` in
+  the overlay takes effect at the next tick, without a stop; any other key needs a restart
   ([Changes while the loop runs](#changes-while-the-loop-runs)).
 
 A systemd unit does the same with restarts on a crash: see [Continuous loop](#continuous-loop).
 
 #### Pin
 
-`python3 -m devloop pin <ref>`, from the main checkout (or `scripts/devloop-pinned pin <ref>`):
+`python3 -m devloop pin <ref>`, from the main checkout (or `scripts/devloop-pinned pin <ref>`),
+takes the commit from the [installation's source](#installation-source), which is this clone
+unless `source` names another:
 
 1. updates the branches and tags of `origin`, dropping those deleted on `origin` (the tags of
    `origin` go to `refs/devloop/origin-tags/`, apart from the local tags), and resolves `<ref>`:
@@ -1853,6 +1920,56 @@ commands do not inherit that `PYTHONPATH`: the tests of a worktree import the wo
 It exports `DISABLE_AUTOUPDATER=1`, which the agents inherit, so that Claude Code does not update
 itself while devloop runs it; a value already in the environment (the operator's) is kept.
 
+With `--state-dir DIR` (ADR 0006, R1), an absolute path, the launcher takes the copy and the
+overlay from `DIR/current` and `DIR/config.local.toml` instead of `.ssdlc/devloop` of its clone,
+so it can live anywhere, for example installed on the host as
+`/usr/local/lib/devloop/devloop-pinned` (see [Installation source](#installation-source)). It then
+runs devloop in the current directory, which must be in the checkout of the managed repository
+(the `WorkingDirectory` of the service; otherwise it stops and says so), and passes `DIR` to
+devloop in `DEVLOOP_STATE_DIR`: devloop stops with `invalid config: state_dir: <path> is not the
+directory given to the launcher, DIR` when the `state_dir` of its configuration is another
+directory, so that pins and state never end up where the launcher does not look. The agents and
+the test commands do not get that variable. Without `--state-dir` nothing changes.
+
+#### Installation source
+
+The **installation's source** is the clone `devloop pin` takes the code from; the **managed
+repository** is the one of the worktrees, the issues and the PRs, whose main checkout is the
+directory devloop runs in (ADR 0006, R1). For ssdlc they are the same clone, and nothing above
+changes. For a project that does not contain devloop, the overlay names a clone of ssdlc in
+`source` (absolute, with `~`, or relative to the managed checkout; it must be the top of a git
+checkout, else the configuration is refused), and usually a `state_dir` of the host:
+
+```toml
+source = "/home/devloop/devloop-source"
+state_dir = "/var/lib/devloop/widget"
+```
+
+- `devloop pin <ref>` resolves and extracts `<ref>` from the source and its `origin`, with the
+  same checks as above: a tag of ssdlc, so that an update is an explicit act. The smoke test runs
+  in the managed repository, with the copy and the overlay. The managed repository is not fetched
+  by a pin.
+- The [pin after a merge](#pin-after-a-merge) is off: a merge in the managed repository never
+  touches the installation. With `[pin] auto = true` the log says `auto-pin off: the installation
+  comes from <source>, not from the managed repository`; `devloop status` does not compare the
+  copy with `origin/<base_branch>`.
+- The launcher is installed on the host from the source at the pinned tag, outside the pinned
+  copy and the managed repository, and gets the `state_dir` with `--state-dir`; the
+  [ops guide](../../ops/README.md) does it with `SOURCE_REPO` and `SOURCE_REF`.
+- The first pin runs devloop of the source clone in the managed checkout, with the overlay:
+
+  ```bash
+  cd /home/devloop/widget
+  PYTHONPATH=/home/devloop/devloop-source python3 -P -m devloop \
+      --local-config /var/lib/devloop/widget/config.local.toml pin v1.2.0
+  ```
+
+  later pins go through the launcher (`devloop-pinned --state-dir /var/lib/devloop/widget pin
+  <tag>`).
+
+The configuration, the prompts and the tests are still those of ssdlc: the project keys go in
+the overlay until the project file of ADR 0006 (R2) exists.
+
 #### Local config as an overlay
 
 `.ssdlc/devloop/config.local.toml` holds **only the keys the operator overrides**, for example:
@@ -1883,13 +2000,16 @@ replace it.
 
 A running `devloop run` reads `devloop/config.toml` of its copy and the overlay again before
 each tick (#278), and loads them at the first tick and then when their content changed (the hash
-of each file), so a change made while the loop was starting is not missed. Only three
+of each file), so a change made while the loop was starting is not missed. Only these
 keys take effect without a restart:
 
 - `max_open_prs`, `max_parked_prs` and `max_review_rounds`: the new values apply from the next
   tick, with a line `config: <key> <old> -> <new> from this tick` in the log. The actions already
   running go on and are not interrupted: a higher `max_open_prs` lets the next tick start an
   issue alongside them.
+- `[delegations]` (#405, #406): a delegation turned off, `rounds` or `retry_own_prs`, is revoked
+  from the next tick ([Granting a review round](#granting-a-review-round),
+  [Escalations to the supervisor](#escalations-to-the-supervisor)).
 
 **Every other key needs a restart**, including the merge modes (`[merge]`), `[pin]`, the roles,
 `trusted_users`, the agents, the identities (`[apps]`), `state_dir`, `max_parallel_actions` and
@@ -1934,7 +2054,9 @@ With `[pin] auto = true` (default `false`: the operator's decision), after a mer
 devloop ([merge modes](#merge-modes)) whose diff touches `devloop/`, `core/` (which devloop
 imports since #365) or a file of
 `sensitive_path_lists` (those of the running configuration), devloop records the request in
-`.ssdlc/devloop/pin-pending.json`. The next tick, before planning, runs `pin origin/main` (the
+`.ssdlc/devloop/pin-pending.json` (only when the [installation's source](#installation-source) is
+the managed repository: with `source` set the pin after a merge is off). The next tick, before
+planning, runs `pin origin/main` (the
 `base_branch` of `origin`). If the pin succeeds, `run` and `tick` start again from the new copy
 with the same arguments: configuration, policy and dispatcher load again, and the lock stays
 held across the restart, so no other dispatcher can start in between. If the pin fails, the tick

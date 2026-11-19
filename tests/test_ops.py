@@ -156,7 +156,8 @@ class LayoutTests(unittest.TestCase):
 
     def test_the_guide_explains_another_project_and_the_migration(self):
         guide = ' '.join((OPS / 'README.md').read_text().split())
-        for phrase in ('## Un altro progetto', 'il repository gestito contiene devloop',
+        for phrase in ('## Un altro progetto', '**devloop nel repository gestito**',
+                       "**Sorgente dell'installazione a parte** (ADR 0006, R1)", '`SOURCE_REF`',
                        '`scripts/devloop-pinned`', '`core/`', '`schemas/`', 'devloop/prompts/',
                        '## Migrazione su un\'altra macchina', 'host/migrate.md',
                        'Ubuntu 26.04 LTS su aarch64', 'shellcheck', 'tokens.md'):
@@ -259,9 +260,9 @@ class DeclarativeFileTests(unittest.TestCase):
         unit = (OPS / 'host/devloop.service').read_text()
         for line in ('User=@DEVLOOP_USER@', 'WorkingDirectory=@DEVLOOP_CLONE@',
                      'Environment=PYTHONUNBUFFERED=1', 'Environment=PATH=@DEVLOOP_PATH@',
-                     'ExecStart=/usr/bin/python3 @DEVLOOP_CLONE@/scripts/devloop-pinned run',
-                     'StandardOutput=append:@DEVLOOP_CLONE@/@STATE_DIR@/run.log',
-                     'StandardError=append:@DEVLOOP_CLONE@/@STATE_DIR@/run.log',
+                     'ExecStart=@LAUNCHER_CMD@ run',
+                     'StandardOutput=append:@STATE_PATH@/run.log',
+                     'StandardError=append:@STATE_PATH@/run.log',
                      'KillMode=mixed', 'TimeoutStopSec=4200', 'Restart=on-failure',
                      'RestartSec=60'):
             self.assertIn(line + '\n', unit)
@@ -273,7 +274,7 @@ class DeclarativeFileTests(unittest.TestCase):
         self.assertEqual(body[0], 'Defaults>@DEVLOOP_USER@ always_set_home, '
                                   'secure_path="@DEVLOOP_PATH@"')
         as_devloop = [c.strip() for c in body[1].split('NOPASSWD:', 1)[1].split(',')]
-        launcher = '/usr/bin/python3 @DEVLOOP_CLONE@/scripts/devloop-pinned '
+        launcher = '@LAUNCHER_CMD@ '
         self.assertTrue(body[1].startswith('@SUPERVISOR_USER@ ALL=(@DEVLOOP_USER@) NOPASSWD:'))
         self.assertEqual(as_devloop, [launcher + args for args in (
             'status', 'status *', 'watch *', 'report *', 'tick --dry-run', 'pin *')])
@@ -332,6 +333,13 @@ class DryRunTests(OpsTestCase):
         self.assertIn('    | User=opsdry-nouser\n', out)
         self.assertIn(f'    | StandardOutput=append:{self.home}/devloop/ssdlc/.ssdlc/devloop/run.log',
                       out)
+        # Without SOURCE_REPO and with the default state_dir, the launcher of the clone without
+        # parameters, as before ADR 0006, R1.
+        self.assertIn(f'    | ExecStart=/usr/bin/python3 {self.home}/devloop/ssdlc/scripts/'
+                      'devloop-pinned run\n', out)
+        self.assertNotIn('env -C', out)
+        self.assertNotIn('scrivere state_dir', out)
+        self.assertNotIn("Sorgente dell'installazione", out)
         self.assertIn('    |   "autoUpdates": false,', out)
         # The CLIs are the agent user's (#415).
         self.assertIn("le CLI e i loro login sono dell'utente devloop-agent (#415): "
@@ -366,7 +374,8 @@ class DryRunTests(OpsTestCase):
         (self.tmp / 'systemd').mkdir()
         (self.tmp / 'systemd/devloop.service').write_text(render('host/devloop.service', {
             'REPO': 'brushtyler/ssdlc', 'DEVLOOP_USER': ME, 'DEVLOOP_CLONE': str(clone),
-            'STATE_DIR': '.ssdlc/devloop',
+            'LAUNCHER_CMD': f'/usr/bin/python3 {clone}/scripts/devloop-pinned',
+            'STATE_PATH': f'{clone}/.ssdlc/devloop',
             'DEVLOOP_PATH': f'{devloop}/.local/bin:/usr/local/bin:/usr/bin:/bin'}))
         params = self.params(DEVLOOP_USER=ME)
         for _ in range(2):
@@ -523,16 +532,93 @@ class DryRunTests(OpsTestCase):
         self.assertIn('SUPERVISOR_USER non è un nome utente valido', done.stderr)
         self.assertEqual(self.mutating_calls(), [])
 
-    def test_another_state_dir_is_refused(self):
-        # scripts/devloop-pinned looks for the pinned copy and the overlay in .ssdlc/devloop only:
-        # setup and check refuse another state_dir instead of preparing one the launcher ignores.
-        for script in ('host/setup-devloop.sh', 'host/setup-supervisor.sh',
-                       'host/setup-agent-user.sh', 'host/check-host.sh'):
-            done = self.run_script(script, '--dry-run', '--params',
-                                   str(self.params(STATE_DIR='custom-state')))
-            self.assertNotEqual(done.returncode, 0, script)
-            self.assertIn('STATE_DIR non è configurabile', done.stderr, script)
-            self.assertIn('.ssdlc/devloop', done.stderr, script)
+    def test_a_state_dir_of_unknown_form_is_refused(self):
+        # It ends up in the unit and in the sudoers (ADR 0006, R1): only known forms.
+        for value in ('../elsewhere', '/var/lib/../x', 'with space', './state', '/var//x'):
+            for script in ('host/setup-devloop.sh', 'host/setup-supervisor.sh',
+                           'host/setup-agent-user.sh', 'host/check-host.sh'):
+                with self.subTest(value=value, script=script):
+                    done = self.run_script(script, '--dry-run', '--params',
+                                           str(self.params(STATE_DIR=f"'{value}'")))
+                    self.assertNotEqual(done.returncode, 0)
+                    self.assertIn('STATE_DIR deve essere un percorso assoluto o relativo',
+                                  done.stderr)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_another_state_dir_reaches_the_launcher_as_a_parameter(self):
+        # ADR 0006, R1: the state_dir of the host, absolute or relative to the clone, is passed
+        # to the launcher, which then runs in the managed clone.
+        clone = f'{self.home}/devloop/ssdlc'
+        for value, path in (('/var/lib/devloop/ssdlc', '/var/lib/devloop/ssdlc'),
+                            ('custom-state', f'{clone}/custom-state')):
+            with self.subTest(value=value):
+                params = self.params(DEVLOOP_USER='opsdry-nouser', STATE_DIR=value)
+                done = self.run_script('host/setup-devloop.sh', '--dry-run', '--params',
+                                       str(params))
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                command = (f'/usr/bin/env -C {clone} /usr/bin/python3 {clone}/scripts/'
+                           f'devloop-pinned --state-dir {path}')
+                self.assertIn(f'    | ExecStart={command} run\n', done.stdout)
+                self.assertIn(f'    | StandardOutput=append:{path}/run.log\n', done.stdout)
+                self.assertIn(f'da fare a mano: scrivere state_dir = "{path}" in '
+                              f'{path}/config.local.toml', done.stdout)
+                self.assertNotIn('scrivere source', done.stdout)
+                done = self.run_script('host/setup-supervisor.sh', '--dry-run', '--params',
+                                       str(params))
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                self.assertIn(f'    {command} tick --dry-run, \\\n', done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def source_params(self, **overrides):
+        values = dict(REPO='acme/widget', DEVLOOP_USER='opsdry-nouser',
+                      SOURCE_REPO='brushtyler/ssdlc', SOURCE_REF='v1.2.0',
+                      STATE_DIR=str(self.tmp / 'state' / 'widget'),
+                      LAUNCHER_DIR=str(self.tmp / 'lib' / 'devloop'))
+        values.update(overrides)
+        return self.params(**values)
+
+    def test_a_separate_source_installs_the_launcher_from_its_tag(self):
+        # ADR 0006, R1 and section 3.5: the launcher on the host, from the source at the pinned
+        # tag, outside the pinned copy and the managed repository.
+        params = self.source_params()
+        before = self.tree()
+        done = self.run_script('host/setup-devloop.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        out = done.stdout
+        home, lib, state = self.home / 'devloop', self.tmp / 'lib/devloop', self.tmp / 'state/widget'
+        self.assertIn('[dry-run] sudo -u opsdry-nouser -H -- git clone '
+                      f'https://github.com/acme/widget.git {home}/widget', out)
+        self.assertIn('[dry-run] sudo -u opsdry-nouser -H -- git clone '
+                      f'https://github.com/brushtyler/ssdlc.git {home}/devloop-source', out)
+        self.assertIn(f'[dry-run] install -d -m 755 -o root -g root {lib}', out)
+        self.assertIn(f'[dry-run] installerebbe {lib}/devloop-pinned (mode 755, proprietario '
+                      'root): scripts/devloop-pinned del tag v1.2.0 di origin', out)
+        self.assertIn(f'[dry-run] install -d -m 755 -o opsdry-nouser -g opsdry-nouser {state}',
+                      out)
+        command = (f'/usr/bin/env -C {home}/widget /usr/bin/python3 {lib}/devloop-pinned '
+                   f'--state-dir {state}')
+        self.assertIn(f'    | ExecStart={command} run\n', out)
+        self.assertIn(f'    | WorkingDirectory={home}/widget\n', out)
+        self.assertIn(f'    | StandardError=append:{state}/run.log\n', out)
+        self.assertIn(f'scrivere source = "{home}/devloop-source" in {state}/config.local.toml',
+                      out)
+        self.assertIn('primo pin del tag v1.2.0', out)
+        self.assertNotRegex(out, r'@[A-Z_]+@')
+        self.assertEqual(self.mutating_calls(), [])
+        self.assertEqual(self.tree(), before)
+
+    def test_a_separate_source_needs_a_tag_and_another_repository(self):
+        for overrides, message in (({'SOURCE_REF': ''}, 'SOURCE_REF deve essere il tag'),
+                                   ({'SOURCE_REF': 'v1..2'}, 'SOURCE_REF deve essere il tag'),
+                                   ({'SOURCE_REPO': 'Acme/Widget'}, 'SOURCE_REPO è il repository '
+                                                                    'gestito'),
+                                   ({'SOURCE_REPO': 'not a repo'}, 'SOURCE_REPO deve essere')):
+            with self.subTest(overrides=overrides):
+                done = self.run_script('host/check-host.sh', '--dry-run', '--params',
+                                       str(self.source_params(**{
+                                           k: f"'{v}'" for k, v in overrides.items()})))
+                self.assertNotEqual(done.returncode, 0)
+                self.assertIn(message, done.stderr)
         self.assertEqual(self.mutating_calls(), [])
 
     def test_a_missing_params_file_is_explained(self):
@@ -630,7 +716,9 @@ class CheckHostTests(OpsTestCase):
         (self.tmp / 'systemd').mkdir()
         (self.tmp / 'systemd/devloop.service').write_text(render('host/devloop.service', {
             'REPO': 'brushtyler/ssdlc', 'DEVLOOP_USER': ME,
-            'DEVLOOP_CLONE': str(self.devloop / 'ssdlc'), 'STATE_DIR': '.ssdlc/devloop',
+            'DEVLOOP_CLONE': str(self.devloop / 'ssdlc'),
+            'LAUNCHER_CMD': f'/usr/bin/python3 {self.devloop}/ssdlc/scripts/devloop-pinned',
+            'STATE_PATH': str(state),
             'DEVLOOP_PATH': f'{self.devloop}/.local/bin:/usr/local/bin:/usr/bin:/bin'}))
         self.acl(f'user:{ME}:--x')
         self.service('active')
@@ -771,6 +859,27 @@ class CheckHostTests(OpsTestCase):
         self.assertEqual(done.returncode, 1)
         self.assertEqual(errors, [f'  ERRORE: {self.tmp}/systemd/devloop.service non esiste '
                                   '(setup-devloop.sh)'])
+
+    def test_a_separate_source_checks_the_launcher_and_the_state_dir_of_the_host(self):
+        # ADR 0006, R1: the launcher installed from the source's tag, the host's state_dir.
+        state, lib = self.tmp / 'state', self.tmp / 'lib'
+        (state / 'current').mkdir(parents=True)
+        (state / 'run.log').touch()
+        (self.devloop / 'devloop-source/.git').mkdir(parents=True)
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=ME, REPO='acme/widget',
+                             DEVLOOP_CLONE=str(self.devloop / 'ssdlc'),
+                             SOURCE_REPO='brushtyler/ssdlc', SOURCE_REF='v1.2.0',
+                             STATE_DIR=str(state), LAUNCHER_DIR=str(lib))
+        done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
+        out = done.stdout
+        self.assertEqual(done.returncode, 1, out + done.stderr)
+        self.assertIn(f'ERRORE: {lib}/devloop-pinned non esiste (setup-devloop.sh, dal tag '
+                      'v1.2.0)', out)
+        self.assertIn(f'ok: {self.devloop}/devloop-source è un clone della sorgente', out)
+        self.assertIn(f'[dry-run] sudo -u {ME} -H -- test -r {state}/run.log', out)
+        self.assertIn(f'[dry-run] sudo -u {ME} -H -- env -C {self.devloop}/ssdlc /usr/bin/python3 '
+                      f'{lib}/devloop-pinned --state-dir {state} apps', out)
+        self.assertEqual(self.mutating_calls(), [])
 
 
 if __name__ == '__main__':

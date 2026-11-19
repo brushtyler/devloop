@@ -23,11 +23,11 @@ VERIFIED_ID=ubuntu
 VERIFIED_VERSION=26.04
 VERIFIED_ARCH=aarch64
 
-# Lo state_dir di devloop, relativo al clone: quello che scripts/devloop-pinned usa sempre.
+# Lo state_dir di devloop, relativo al clone, che scripts/devloop-pinned usa senza --state-dir.
 OPS_STATE_DIR=.ssdlc/devloop
 
 # I segnaposto @NOME@ che `render` sostituisce nei file dichiarativi (unità, sudoers).
-OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER DEVLOOP_HOME AGENT_HOME DEVLOOP_CLONE STATE_DIR DEVLOOP_PATH AGENT_PATH SERVICE_NAME'
+OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER DEVLOOP_HOME AGENT_HOME DEVLOOP_CLONE STATE_DIR STATE_PATH LAUNCHER_CMD DEVLOOP_PATH AGENT_PATH SERVICE_NAME'
 
 say() { printf '%s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }
@@ -103,16 +103,48 @@ ops_load_params() {
     : "${SUDOERS_FILE:=/etc/sudoers.d/devloop-supervisor}"
     : "${AGENT_SUDOERS_FILE:=/etc/sudoers.d/devloop-agent}"
     : "${APPS:=dispatcher merger claude-agent codex-agent agy-agent implementer supervisor}"
+    : "${SOURCE_REPO:=}"
+    : "${SOURCE_REF:=}"
+    : "${SOURCE_CLONE:=$DEVLOOP_HOME/devloop-source}"
+    : "${LAUNCHER_DIR:=/usr/local/lib/devloop}"
 
     [[ $REPO =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || die "REPO deve essere owner/nome: '$REPO'"
     [[ $APP_PREFIX =~ ^[a-z0-9-]*$ ]] || die "APP_PREFIX ammette solo minuscole, cifre e '-': '$APP_PREFIX'"
     [[ $DEFAULT_BRANCH =~ ^[A-Za-z0-9._/-]+$ ]] || die "DEFAULT_BRANCH non valido: '$DEFAULT_BRANCH'"
     [[ $GITHUB_OWNER_TYPE =~ ^(user|org)$ ]] || die "GITHUB_OWNER_TYPE deve essere user o org"
-    # scripts/devloop-pinned cerca la copia fissata (current) e l'overlay sempre in
-    # .ssdlc/devloop del clone: un altro STATE_DIR preparerebbe log e overlay dove il launcher
-    # non li legge, e il servizio non partirebbe.
-    [ "$STATE_DIR" = "$OPS_STATE_DIR" ] \
-        || die "STATE_DIR non è configurabile: scripts/devloop-pinned usa sempre $OPS_STATE_DIR (valore: '$STATE_DIR')"
+    # STATE_DIR: assoluto, oppure relativo al clone gestito, senza componenti "." o "..".
+    [[ $STATE_DIR =~ ^/?[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] && ! [[ /$STATE_DIR/ =~ /\.\.?/ ]] \
+        || die "STATE_DIR deve essere un percorso assoluto o relativo al clone, senza spazi né '.' o '..': '$STATE_DIR'"
+    if [[ $STATE_DIR == /* ]]; then
+        STATE_PATH=$STATE_DIR
+    else
+        STATE_PATH=$DEVLOOP_CLONE/$STATE_DIR
+    fi
+    # La sorgente dell'installazione (ADR 0006, R1): vuota, è il repository gestito, come per
+    # ssdlc. Altrimenti un clone a parte, e l'avviatore installato dal suo tag SOURCE_REF.
+    if [ -n "$SOURCE_REPO" ]; then
+        [[ $SOURCE_REPO =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] \
+            || die "SOURCE_REPO deve essere owner/nome: '$SOURCE_REPO'"
+        [ "${SOURCE_REPO,,}" != "${REPO,,}" ] \
+            || die "SOURCE_REPO è il repository gestito: lasciarlo vuoto"
+        [[ $SOURCE_REF =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] && [[ $SOURCE_REF != *..* ]] \
+            || die "SOURCE_REF deve essere il tag di $SOURCE_REPO da cui installare l'avviatore: '$SOURCE_REF'"
+        _require_abs SOURCE_CLONE
+        _require_abs LAUNCHER_DIR
+        LAUNCHER=$LAUNCHER_DIR/devloop-pinned
+    else
+        LAUNCHER=$DEVLOOP_CLONE/scripts/devloop-pinned
+    fi
+    # Il comando dell'avviatore, nell'unità, nel sudoers e nelle verifiche. Con lo state_dir di
+    # default e senza sorgente a parte è quello di sempre; altrimenti riceve lo state_dir come
+    # parametro e gira nel clone gestito.
+    if [ -z "$SOURCE_REPO" ] && [ "$STATE_DIR" = "$OPS_STATE_DIR" ]; then
+        LAUNCHER_ARGS=''
+        LAUNCHER_CMD="/usr/bin/python3 $LAUNCHER"
+    else
+        LAUNCHER_ARGS="--state-dir $STATE_PATH"
+        LAUNCHER_CMD="/usr/bin/env -C $DEVLOOP_CLONE /usr/bin/python3 $LAUNCHER $LAUNCHER_ARGS"
+    fi
     [[ $SERVICE_NAME =~ ^[A-Za-z0-9_-]+$ ]] || die "SERVICE_NAME non valido: '$SERVICE_NAME'"
     [[ $DEVLOOP_PATH =~ ^[A-Za-z0-9._/:-]+$ ]] || die "DEVLOOP_PATH non valido: '$DEVLOOP_PATH'"
     [[ $AGENT_PATH =~ ^[A-Za-z0-9._/:-]+$ ]] || die "AGENT_PATH non valido: '$AGENT_PATH'"

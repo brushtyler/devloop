@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Prepara l'host per devloop: pacchetti, utente dedicato, clone, state_dir, overlay d'esempio,
-# key_dir 700, impostazioni di Claude Code senza aggiornamenti automatici, unità systemd.
+# key_dir 700, impostazioni di Claude Code senza aggiornamenti automatici, unità systemd. Con
+# SOURCE_REPO anche il clone della sorgente dell'installazione e l'avviatore dal suo tag.
 # Idempotente: si può rieseguire, fa solo ciò che manca. Non scrive segreti e non avvia il
 # servizio. L'utente degli agent e le sue CLI li prepara setup-agent-user.sh (#415); i login
 # delle CLI, le chiavi delle app e il pin restano passi manuali (ops/README.md).
@@ -56,10 +57,41 @@ else
     as_user "$DEVLOOP_USER" git clone "https://github.com/$REPO.git" "$DEVLOOP_CLONE"
 fi
 
+if [ -n "$SOURCE_REPO" ]; then
+    step "Sorgente dell'installazione: $SOURCE_REPO, avviatore dal tag $SOURCE_REF"
+    if [ -d "$SOURCE_CLONE/.git" ]; then
+        ok "$SOURCE_CLONE è già un clone (devloop pin lo aggiorna da origin)"
+    else
+        as_user "$DEVLOOP_USER" git clone "https://github.com/$SOURCE_REPO.git" "$SOURCE_CLONE"
+    fi
+    # L'avviatore sta fuori dalla copia fissata e dal repository gestito (ADR 0006, sezione 3.5):
+    # di root, non scrivibile dall'utente devloop né dagli agent.
+    ensure_dir "$LAUNCHER_DIR" 755 root
+    if [ "$DRY_RUN" = 1 ]; then
+        say "  [dry-run] installerebbe $LAUNCHER (mode 755, proprietario root): scripts/devloop-pinned del tag $SOURCE_REF di origin, in $SOURCE_CLONE"
+    else
+        # Il tag come è su origin, anche se il clone ne aveva uno locale con lo stesso nome.
+        as_user "$DEVLOOP_USER" git -C "$SOURCE_CLONE" fetch --quiet --no-tags origin \
+            "+refs/tags/$SOURCE_REF:refs/tags/$SOURCE_REF"
+        if [ "$(id -un)" = "$DEVLOOP_USER" ]; then
+            launcher=$(git -C "$SOURCE_CLONE" show "refs/tags/$SOURCE_REF:scripts/devloop-pinned") \
+                || die "scripts/devloop-pinned non è nel tag $SOURCE_REF di $SOURCE_REPO"
+        else
+            launcher=$(sudo -u "$DEVLOOP_USER" -H -- git -C "$SOURCE_CLONE" show \
+                "refs/tags/$SOURCE_REF:scripts/devloop-pinned") \
+                || die "scripts/devloop-pinned non è nel tag $SOURCE_REF di $SOURCE_REPO"
+        fi
+        put_file "$LAUNCHER" 755 root "$launcher" || true
+    fi
+fi
+
 step 'state_dir, log e overlay'
-STATE="$DEVLOOP_CLONE/$STATE_DIR"
+STATE=$STATE_PATH
 if [ -d "$STATE" ]; then
     ok "$STATE esiste"
+elif [[ $STATE_DIR == /* ]]; then
+    # Fuori dal clone: le directory intermedie restano di root, lo state_dir è di devloop.
+    ensure_dir "$STATE" 755 "$DEVLOOP_USER"
 else
     # mkdir -p come utente devloop: anche le directory intermedie sono sue.
     as_user "$DEVLOOP_USER" mkdir -p "$STATE"
@@ -74,6 +106,17 @@ if [ -f "$STATE/config.local.toml" ]; then
     ok "$STATE/config.local.toml esiste: è dell'operatore, non lo tocca"
 else
     put_file "$STATE/config.local.toml" 644 "$DEVLOOP_USER" "$(<"$OPS_DIR/host/config.local.toml.example")" || true
+fi
+# Con l'avviatore che riceve lo state_dir (LAUNCHER_ARGS), devloop si ferma se l'overlay ne
+# nomina un altro; con la sorgente a parte, l'overlay dice dove è il suo clone.
+if [ -n "$LAUNCHER_ARGS" ]; then
+    for line in "state_dir = \"$STATE_PATH\"" ${SOURCE_REPO:+"source = \"$SOURCE_CLONE\""}; do
+        if [ -f "$STATE/config.local.toml" ] && grep -qxF "$line" "$STATE/config.local.toml"; then
+            ok "l'overlay ha $line"
+        else
+            todo "scrivere $line in $STATE/config.local.toml"
+        fi
+    done
 fi
 
 step 'Directory private (700)'
@@ -126,4 +169,8 @@ for role in $DEVLOOP_KEYS; do
 done
 
 step 'Fatto'
-say "Poi: chiavi, setup-agent-user.sh e login delle CLI, primo pin, ops/host/check-host.sh, avvio del servizio (ops/README.md)."
+if [ -n "$SOURCE_REPO" ]; then
+    say "Poi: chiavi, setup-agent-user.sh e login delle CLI, primo pin del tag $SOURCE_REF, ops/host/check-host.sh, avvio del servizio (ops/README.md)."
+else
+    say "Poi: chiavi, setup-agent-user.sh e login delle CLI, primo pin, ops/host/check-host.sh, avvio del servizio (ops/README.md)."
+fi

@@ -1287,12 +1287,15 @@ class RestartTests(unittest.TestCase):
                     cli.main(['tick'])
 
     def test_no_smoke_reaches_the_pin(self):
-        cfg = SimpleNamespace(state_dir='.ssdlc/devloop', gc=config.GCPolicy())
+        cfg = SimpleNamespace(state_dir='.ssdlc/devloop', source='', gc=config.GCPolicy())
         with mock.patch.object(cli, 'load_config', return_value=cfg), \
                 mock.patch.object(cli, 'main_checkout', return_value=self.tmp), \
                 mock.patch.object(cli.pin, 'pin') as pinned:
             cli.main(['pin', '--no-smoke', 'main'])
             self.assertIs(pinned.call_args.kwargs['smoke'], False)
+            # Without source (ADR 0006, R1) the source is the managed repository, as before.
+            self.assertEqual(pinned.call_args.args[0], self.tmp)
+            self.assertEqual(pinned.call_args.kwargs['managed'], self.tmp)
             cli.main(['pin', 'main'])
             self.assertIs(pinned.call_args.kwargs['smoke'], True)
             # The cleanup of the copies after the pin (#380): [gc] keep_pins, or none when off.

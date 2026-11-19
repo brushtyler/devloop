@@ -21,6 +21,12 @@ head last seen (``pin-base.json``; the first time, since the commit of ``current
 to those paths, requests the pin of the new head. ``devloop status`` says when the copy it runs
 from is behind ``origin/<base_branch>`` on those paths (``AutoPin.behind``).
 
+The installation's source (ADR 0006, R1) is the clone the pin takes the code from: the
+managed repository itself, as for ssdlc, unless the configuration names another clone in
+``source`` (``source_root``). The smoke test still runs in the managed repository. The pin after
+a merge is only for a source that is the managed repository: a merge in another project never
+touches the installation.
+
 Each successful pin, of a new copy or a reused one, records its time in ``pin-times.json``. With
 ``keep`` (``[gc] keep_pins``, #380) the pin then keeps ``current`` and the ``keep`` other copies
 pinned most recently (``prune``), and removes the others, except a copy a process still uses: that
@@ -142,6 +148,25 @@ def _git(root, *args, binary=False):
         err = proc.stderr if not binary else proc.stderr.decode(errors='replace')
         raise PinError(f'git {" ".join(args)}: {err.strip() or "exit " + str(proc.returncode)}')
     return proc.stdout
+
+
+def source_root(managed, source):
+    """The main checkout of the installation's source (ADR 0006, R1), where a pin takes the
+    code from: ``managed``, the managed repository's main checkout, when ``source`` is empty;
+    else the clone at ``source`` (absolute, with ``~``, or relative to ``managed``), which must be
+    the top of a git checkout. Raises ``PinError`` otherwise."""
+    managed = Path(managed)
+    if not source:
+        return managed
+    path = Path(source).expanduser()
+    path = path if path.is_absolute() else managed / path
+    if not path.is_dir():
+        raise PinError(f'source {source}: not a directory')
+    top = _git(path, 'rev-parse', '--show-toplevel').strip()
+    if not top or Path(top).resolve() != path.resolve():
+        raise PinError(f'source {source}: not the top of a git checkout')
+    common = _git(path, 'rev-parse', '--path-format=absolute', '--git-common-dir').strip()
+    return Path(common).parent
 
 
 def _verified_copies(state):
@@ -447,10 +472,12 @@ def _reject(state, sha, tmp):
 
 
 def pin(root, state, ref, local=None, log=print, fetch=True, smoke=True, fetch_lock=None,
-        keep=None, in_use=None):
+        keep=None, in_use=None, managed=None):
     """Pin ``ref``: the verified copy of its commit, which ``state/current`` now points at.
     ``local`` is the overlay (used when the file exists). On any failure ``current`` is left as
-    it was.
+    it was. ``root`` is the main checkout of the installation's source, whose ``origin`` the
+    commit comes from; ``managed`` (default: ``root``) that of the managed repository, where the
+    smoke test runs (ADR 0006, R1).
 
     A new copy passes the smoke test (#260) before ``current`` moves: ``smoke`` is True for
     ``Smoke``, a callable ``smoke(copy, local)`` raising ``StepFailed``, or False to skip it
@@ -483,7 +510,8 @@ def pin(root, state, ref, local=None, log=print, fetch=True, smoke=True, fetch_l
                     log(f'smoke test of {sha[:12]} skipped (--no-smoke)')
                 else:
                     try:
-                        (Smoke(root, log=log) if smoke is True else smoke)(tmp, local)
+                        (Smoke(managed or root, log=log) if smoke is True else smoke)(
+                            tmp, local)
                     except StepFailed as exc:
                         failed = exc
                 if failed is None:

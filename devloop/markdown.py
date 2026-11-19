@@ -568,7 +568,9 @@ def _location(finding):
 def _findings(findings):
     lines = []
     for f in findings:
-        lines.append(f'- **{f.get("key") or f["id"]}**{_location(f)}: {f["title"]}')
+        # A finding the reviewer marked as one of security (#405, ADR 0005, D5).
+        tag = ' *(sicurezza)*' if f.get('security') is True else ''
+        lines.append(f'- **{f.get("key") or f["id"]}**{_location(f)}: {f["title"]}{tag}')
         if f['detail']:
             lines.append(f'  {f["detail"]}'.replace('\n', '\n  '))
         if f['suggested_fix']:
@@ -576,8 +578,9 @@ def _findings(findings):
     return '\n'.join(lines)
 
 
-def render_review(review, head):
-    """Markdown body (after the header) for a normalized review record."""
+def render_review(review, head, native=None):
+    """Markdown body (after the header) for a normalized review record. ``native``: the event
+    of the native review that carries it, stated for a ``needs_operator`` verdict (#418)."""
     parts = [f'## Review automatica, round {review["round"]}/{review["max_rounds"]}', '',
              f'**Verdetto:** {_VERDICT_TEXT[review["verdict"]]}  ',
              f'**Commit:** `{review["head_sha"][:12]}` · **CI:** {review["ci"]}']
@@ -611,6 +614,13 @@ def render_review(review, head):
     parts +=['', review['summary'].strip()]
     if review['verdict'] == 'needs_operator' and review['human_reason']:
         parts += ['', '### Decisione richiesta', '', review['human_reason'].strip()]
+    if review['verdict'] == 'needs_operator' and native:
+        outcome = ('restano aperti finding bloccanti del reviewer'
+                   if native == 'REQUEST_CHANGES'
+                   else 'non resta aperto nessun finding bloccante del reviewer')
+        parts += ['', f'> Review nativa `{native}`: {outcome}. Non è un\'approvazione del merge: '
+                      'la decisione resta all\'operatore, e devloop tiene la PR in attesa della '
+                      'sua decisione.']
     if review['blocking_findings']:
         parts += ['', '### Bloccanti', '', _findings(review['blocking_findings'])]
     if review['non_blocking_findings']:
@@ -646,15 +656,39 @@ def fitted(head, text, kind, payload, limit=MAX_BODY):
     return top + neutralize(text)[:room].rstrip('\n') + tail
 
 
-_REVIEW_EVENT = {'approve': 'APPROVE', 'request_changes': 'REQUEST_CHANGES',
-                 'needs_operator': 'COMMENT'}
+_REVIEW_EVENT = {'approve': 'APPROVE', 'request_changes': 'REQUEST_CHANGES'}
+
+
+def own_open_findings(review):
+    """The blocking findings of its own that ``review`` leaves open: those it opens, and those
+    of its reviewer from earlier rounds it marks ``unresolved``. Another owner's finding is not
+    its to close (#111), so it does not count."""
+    owner = review.get('reviewer')
+    earlier = [p for p in review['previous_findings'] if p['status'] == 'unresolved'
+               and str(p.get('key', '')).split('/')[1:2] == [owner]]
+    return list(review['blocking_findings']) + earlier
+
+
+def native_event(review):
+    """The event of the native review that carries ``review``. ``approve`` and
+    ``request_changes`` mirror the verdict. ``needs_operator`` mirrors the reviewer's technical
+    outcome (#418): ``REQUEST_CHANGES`` while blocking findings of its own stay open, otherwise
+    ``APPROVE``, so that its earlier ``REQUEST_CHANGES`` does not block the merge after the
+    operator's decision. The body still states the verdict, and devloop keeps the PR with the
+    operator: it reads the verdict from the record, never from the event. No review is ever
+    dismissed."""
+    verdict = review['verdict']
+    if verdict == 'needs_operator':
+        return 'REQUEST_CHANGES' if own_open_findings(review) else 'APPROVE'
+    return _REVIEW_EVENT[verdict]
 
 
 def render_native_review(review, head):
     """``{event, body}`` of the GitHub review of an agent with an app of its own (#325): the
     whole review with its marker (``render_review``), the record devloop reads, and the event
-    that mirrors its verdict for GitHub and branch protection."""
-    return {'event': _REVIEW_EVENT[review['verdict']], 'body': render_review(review, head)}
+    of ``native_event`` for GitHub and branch protection."""
+    event = native_event(review)
+    return {'event': event, 'body': render_review(review, head, native=event)}
 
 
 def render_fix(fix, head, round_no):
@@ -763,6 +797,9 @@ SUPERVISOR_RESUME = (
     'l\'issue in coda;\n'
     '- `/devloop decide <decisioni>`: decide le lacune del controllo di prontezza anche '
     'diversamente dai default (il testo è il resto del commento) e rimette l\'issue in coda;\n'
+    '- `/devloop grant-round <motivo>`: concede un round di review in più a una PR al limite dei '
+    'round (`round_grantable`), entro i tetti della delega; il motivo, che può continuare nelle '
+    'righe successive, riporta o cita l\'analisi delle cause;\n'
     '- `/devloop escalate <motivo>`: passa l\'escalation all\'operatore (`agent:needs-operator`).')
 
 
