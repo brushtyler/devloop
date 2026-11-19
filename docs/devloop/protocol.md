@@ -570,8 +570,14 @@ green the PR is promoted, then handed to the operator once for the review and th
 [Changes to the trust policy](guide.md#changes-to-the-trust-policy)). A round with a `decision`
 is a `needs_operator` round, whatever the other verdicts; the round limit, the CI joining a round
 and the quorum read the same verdicts. Once a reviewer of the PR has given `trust_policy`, the
-merge is the operator's for good: the snapshot plans the PR as mode `off`, the operator merge
-notice lists the parts each reviewer named, and the merge checks it again just before.
+merge is the operator's: the snapshot plans the PR as mode `off`, the operator merge notice lists
+the parts each reviewer named in its latest `trust_policy`, and the merge checks it again just
+before. By the operator's decision of 2026-11-19 (#461, ADR 0005, D10) the `trust_policy` of a
+reviewer no longer counts when the same reviewer approves the head of the latest round, every
+blocking finding its `trust_policy` records left open (opened there, or carried unresolved) was
+closed by a later review of its own, not by a `finding` record of the operator or the CI, and no
+record of that round, a duplicate included, is a `trust_policy`. A reviewer missing from that
+round, or a CI round, keeps it; one `trust_policy` in that round keeps every earlier one.
 
 **Trust policy** (#399). The review prompt asks for `needs_operator` when the change touches the
 trust policy and needs the operator for it, at every review level, with the parts touched in
@@ -684,6 +690,15 @@ implementer is recorded in the PR marker and shown in the PR description; each f
 full map again in its `fix` marker and comment. The latest map holds: that of the latest fix
 that carries one, otherwise that of the PR. A sync carries no map, so the previous one still
 holds after it.
+
+Implementer and fixer also return `host_step` (#462): empty, or the short text of a step the
+operator makes on the host before the code is pinned, with a reference to its document. A
+non-empty one is recorded in the PR marker (`host_step`) and shown in the PR description under
+"Passo sull'host"; each fix records its declaration again in its `fix` marker (`host_step`, empty
+when there is none), and the latest holds, as for the map. The reviewer receives it and checks
+that it is there when the PR needs it and empty otherwise. When devloop merges a PR whose latest
+declaration is not empty, it holds the auto-pin instead of requesting it, and alerts the operator
+([Step on the host](guide.md#step-on-the-host)).
 
 The reviewer receives the criteria and the latest map, and must verify them: a criterion without
 real coverage, or with tests that do not actually verify it, is a blocking finding. A

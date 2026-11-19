@@ -3,6 +3,7 @@
 
 import argparse
 import fcntl
+import json
 import os
 import subprocess
 import sys
@@ -16,8 +17,9 @@ from .agents import AgentRunner, isolated_env
 from .agentuser import GH_CONFIG, SHARED_DIR, WORKTREES_DIR, AgentUser, AgentUserError, SharedDir
 from .agentuser import check as check_isolation
 from .apps import DISPATCHER, MERGER, Identities
-from .config import (PROJECT_CONFIG, ConfigError, Reloader, fingerprint, load_config,
-                     read_sources, repo_lock_name)
+from .config import (INSTALL_ROOT, PROJECT_CONFIG, ConfigError, Reloader, compose_sources,
+                     fingerprint, load_config, missing_project_tables, read_sources,
+                     repo_lock_name)
 from .context import both_labels_warning, label_transition
 from .dispatch_advisory import AdvisoryFailures, AdvisoryResults
 from .dispatcher import (Dispatcher, TickLog, Workers, ensure_labels, pr_counts_line,
@@ -26,6 +28,7 @@ from .github import GitHub, GitHubError
 from .housekeeping import Housekeeping
 from .journal import MIB, TurnJournal
 from .ledger import Ledger
+from .markdown import dispatcher_header, publishable
 from .outbox import for_identities
 from .planning import plan, queue_lines
 from .stall import StallWatch
@@ -37,6 +40,8 @@ LOCK_FD = 'DEVLOOP_LOCK_FD'
 REPO_LOCK_FD = 'DEVLOOP_REPO_LOCK_FD'
 # The state_dir given to the launcher (``scripts/devloop-pinned --state-dir``, ADR 0006, R1).
 STATE_ENV = 'DEVLOOP_STATE_DIR'
+# The tables of the project file whose absence was last reported on alert_issue (#462).
+TABLES_ALERTED = 'project-tables-alerted.json'
 
 
 def main_checkout():
@@ -157,6 +162,66 @@ def record_start(dispatcher, log):
     reload = config_recorder(journal, 'reload', log)
     # The first reload reads the files in any case: recorded only when they changed since.
     return lambda print_: reload(print_, only_if_changed=True)
+
+
+def project_tables_warning(alert_issue, state, gh, out=None, copy=None):
+    """The warning of the tables of the project file that this copy knows and the configuration
+    lacks (#462, ``config.missing_project_tables``): ``warn(missing)`` writes it in the log
+    each time, at the start and at each reload, and on ``alert_issue`` once for each set of
+    missing tables (``TABLES_ALERTED`` in ``state``; forgotten when none is missing, so that a
+    later loss is reported again). One attempt; a failure is logged and tried at the next
+    call. ``copy`` (default: the installation this runs from) names the copy in the alert;
+    ``out`` (default: ``log``) writes the lines."""
+    path = Path(state) / TABLES_ALERTED
+
+    def warn(missing):
+        _warn(missing, out or log)  # ``log`` is read at the call: defined below
+
+    def _warn(missing, log):
+        if not missing:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                log(f'config: {TABLES_ALERTED} not removed: {exc}')
+            return
+        tables = ', '.join(f'[{name}]' for name in missing)
+        log(f'config: this copy reads {tables} from the project file, and the configuration '
+            'has none: devloop runs without them, degraded; add them to the project file')
+        try:
+            alerted = json.loads(path.read_text(encoding='utf-8')).get('missing')
+        except (OSError, ValueError, AttributeError):
+            alerted = None
+        if alerted == list(missing):
+            return
+        if not alert_issue:
+            log('config: no [run].alert_issue is configured: no alert for the missing tables')
+            return
+        sha = pin.copy_commit(INSTALL_ROOT if copy is None else copy)
+        listed = ', '.join(f'`[{name}]`' for name in missing)
+        body = publishable(
+            dispatcher_header() + '\n## Tabelle del file di progetto assenti\n\n'
+            + (f'La copia fissata al commit `{sha[:12]}`' if sha else 'La copia di devloop in '
+               'esecuzione') + f' legge dal file di progetto {listed}, ma né il file di '
+            'progetto né l\'overlay le definiscono. devloop parte lo stesso, ma con i prompt o '
+            'la selezione dei test degradati.\n\nVanno aggiunte al file di progetto '
+            '(`project.toml` nella directory di stato), a loop fermo. Questo avviso non si '
+            'ripete finché le tabelle assenti restano le stesse.')
+        try:
+            gh.comment(alert_issue, body)
+        except Exception as exc:  # one attempt only: its class, never its output
+            log(f'config: the alert of the missing tables on #{alert_issue} could not be '
+                f'published ({type(exc).__name__})')
+            return
+        log(f'config: alert of the missing tables published on #{alert_issue}')
+        try:
+            tmp = path.with_name(f'.{TABLES_ALERTED}-{os.getpid()}')
+            tmp.write_text(json.dumps({'missing': list(missing)}) + '\n', encoding='utf-8')
+            os.replace(tmp, path)
+        except OSError as exc:
+            log(f'config: the alert of the missing tables not recorded, it may repeat: {exc}')
+    return warn
 
 
 def installation_source(cfg, root):
@@ -366,7 +431,10 @@ def build(args):
                                                       log=tick_log))
     # What the trace T1 (ADR 0006, K1) records of the start: the files this configuration came
     # from, as they were read.
-    dispatcher.config_print = fingerprint(sources)
+    data = compose_sources(sources)
+    dispatcher.config_print = fingerprint(sources, data)
+    # The tables of the project file this copy knows and the configuration lacks (#462).
+    dispatcher.config_missing = missing_project_tables(data)
     return cfg, state, dispatcher
 
 
@@ -493,6 +561,14 @@ def run_pin(args):
                 smoke=not args.no_smoke, keep=keep_pins(cfg), managed=root, project=project)
     except (pin.PinError, ConfigError, OSError) as exc:
         sys.exit(f'devloop: pin failed, the pinned copy is unchanged: {exc}')
+    # The pin by hand is the one after the step on the host (#462): the auto-pin resumes.
+    try:
+        steps = pin.release(state)
+    except OSError as exc:
+        sys.exit(f'devloop: pinned, but the hold of the auto-pin was not released: {exc}')
+    if steps:
+        log(f'auto-pin resumed: the hold after the step on the host of {pin.held_prs(steps)} '
+            'is released')
 
 
 def run_watch(parser, args):
@@ -781,6 +857,10 @@ def main(argv=None):
             behind = f'pinned copy: not compared with origin/{cfg.base_branch}: {exc}'
         if behind:
             log(behind)
+        steps = pin.held(state)  # #462: a step on the host holds the auto-pin
+        if steps:
+            log(f'auto-pin held: the step on the host of {pin.held_prs(steps)} waits for a pin '
+                'by hand (devloop pin)')
         for line in unavailability.describe(state):
             log(line)
         if label_transition(dispatcher.gh, cfg.labels) == 'both':
@@ -836,6 +916,13 @@ def main(argv=None):
                 recorder = record_start(dispatcher, log)
             except (ConfigError, GitHubError) as exc:
                 sys.exit(f'devloop: the configuration was not recorded in the journal: {exc}')
+        warn = None
+        missing = getattr(dispatcher, 'config_missing', None)
+        if args.command in ('tick', 'run') and missing is not None:
+            # The tables of the project file this copy knows and lacks (#462): at the start
+            # and at each reload of `run`.
+            warn = project_tables_warning(cfg.run.alert_issue, state, dispatcher.gh)
+            warn(missing)
         if args.command == 'cleanup':
             for name in dispatcher.ws.names():
                 dispatcher.ws.remove(name)
@@ -861,7 +948,9 @@ def main(argv=None):
                          ) if project else None
                 code = run_loop(cfg, state, dispatcher, timeout,
                                 Reloader(cfg, args.config, args.local_config, project,
-                                         log=log, record=recorder, check=check))
+                                         log=log, record=recorder, check=check,
+                                         notice=(lambda data: warn(missing_project_tables(data))
+                                                 ) if warn else None))
                 if code:
                     sys.exit(code)
         except pin.PinError as exc:

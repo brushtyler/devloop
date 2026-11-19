@@ -339,9 +339,21 @@ class TrustPolicyDocsTest(unittest.TestCase):
                       'A `trust_policy` does not stop the loop',
                       'within `max_review_rounds` as usual',
                       'gets `agent:needs-operator` with the',
-                      'devloop never merges the PR itself',
+                      'devloop does not merge the PR itself',
                       'A `decision`, or a `needs_operator` without `operator_reason`'):
             self.assertIn(words, text)
+        # #461: the operator's decision of 2026-11-19, a precisation of D10 in ADR 0005.
+        for words in ('with one exception decided by the operator on 2026-11-19 (#461',
+                      'that same reviewer approves the head of the latest round',
+                      'it closed its own blocking findings itself',
+                      'no reviewer of that round gives `trust_policy`'):
+            self.assertIn(words, text)
+        adr = (ROOT / 'docs' / 'adr' / '0005-deleghe-e-ruoli-degli-agent.md').read_text(
+            encoding='utf-8')
+        d10 = adr[adr.index('- **D10.** Tutto spento'):adr.index('Restano **aperti**')]
+        self.assertIn('**Precisazione del 2026-11-19**', d10)
+        self.assertIn('issues/461#issuecomment-7012437974', d10)
+        self.assertIn('cade solo se lo stesso reviewer che l\'ha dato approva l\'head finale', d10)
 
     def test_the_guide_describes_when_the_operator_decides(self):
         # #447: the narrowed rule, with ADR 0002 cited.

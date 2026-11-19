@@ -1954,6 +1954,17 @@ def _project_schema():
 
 PROJECT_KEYS = _project_schema()
 _MISSING = object()
+# The tables of the project file that change what devloop does (#462): without them a copy
+# that knows them still starts, but its prompts or its test selection are degraded.
+PROJECT_BEHAVIOUR_TABLES = ('prompts', 'tests')
+
+
+def missing_project_tables(data):
+    """The tables of ``PROJECT_BEHAVIOUR_TABLES`` that this copy reads from the project file
+    (``PROJECT_FACTS``) and that the raw configuration ``data`` lacks: neither the project file
+    nor the overlay nor the installation sets them (#462)."""
+    return [name for name in PROJECT_BEHAVIOUR_TABLES
+            if name in PROJECT_FACTS and name not in data]
 
 
 def _check_project(table, schema, overlay, where=''):
@@ -2260,14 +2271,17 @@ class Reloader:
     ``effective`` and ``trust`` None and the ``error``: the trace of T1 (ADR 0006, K1). An
     exception of ``record`` is logged, and the configuration of the tick is the same. The
     project file is read as ``read_project_bytes``, and ``check`` (when given) is called before
-    each read of it: a ``ConfigError`` of either is a configuration that does not load."""
+    each read of it: a ``ConfigError`` of either is a configuration that does not load.
+    ``notice`` (when given) gets the raw configuration of each load that succeeds: the warning
+    of the tables of the project file it lacks (#462)."""
 
     def __init__(self, cfg, path=None, local=None, project=None, *, log, record=None,
-                 check=None):
+                 check=None, notice=None):
         self.cfg = cfg
         self.log = log
         self.record = record
         self.check = check
+        self.notice = notice
         self._errors = {}
         self.paths = {'config': Path(path) if path else DEFAULT_CONFIG}
         if local:
@@ -2299,6 +2313,7 @@ class Reloader:
                 raise ConfigError(self._errors.get(name)
                                   or f'{SOURCES[name]} {path}: cannot be read')
         new, data = parse_composed(sources)
+        self._data = data
         return new, fingerprint(sources, data)
 
     def _record(self, print_):
@@ -2329,6 +2344,12 @@ class Reloader:
                           'error': f'{type(exc).__name__}: {exc}'})
             return self.cfg
         self._record(print_)
+        if self.notice is not None:
+            try:
+                self.notice(self._data)
+            except Exception as exc:  # the warning failed: said, and the tick goes on
+                self.log(f'config: the check of the project tables failed: '
+                         f'{type(exc).__name__}: {exc}')
         restart = [f.name for f in dataclasses.fields(Config) if f.name not in LIVE_KEYS
                    and getattr(new, f.name) != getattr(self.cfg, f.name)]
         if restart:

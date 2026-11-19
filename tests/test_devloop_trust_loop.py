@@ -20,7 +20,7 @@ from devloop.planning import Action, Snapshot, ci_joins_round, plan, waiting_rev
 from devloop.schema import SchemaError, with_defaults
 from test_devloop import (CFG, REV, REV_NAME, SHA1, FakeGH, FakeRunner, FakeWS, finding, norm,
                           pr, raw_review)
-from test_devloop_merge import READY, STRICT, Case, MergeGH, header, records
+from test_devloop_merge import MERGE, READY, STRICT, Case, MergeGH, header, records
 
 OPERATOR = 'agent:needs-operator'
 PARTS = 'Tocca la policy di fiducia: punto 4, `devloop/dispatcher.py` (condizioni di merge).'
@@ -102,13 +102,87 @@ class NormalizeTests(unittest.TestCase):
         # The reason is recorded only with needs_operator.
         self.assertNotIn('operator_reason', norm(raw_review(reason='decision')))
 
-    def test_the_trust_policy_parts_are_sticky_and_one_per_reviewer(self):
+    def test_the_trust_policy_parts_are_one_per_reviewer(self):
         first = dict(norm(trust([finding()], human='punto 4')), round=1)
-        second = dict(norm(trust(human='punto 4 e punto 5')), round=2)
-        approval = dict(norm(raw_review()), round=3)
-        self.assertEqual(review.trust_policy_parts([first, second, approval]),
+        second = dict(norm(trust(human='punto 4 e punto 5'),
+                           previous_open=review.open_findings([first]), round_no=2), round=2)
+        self.assertEqual(review.trust_policy_parts([first, second]),
                          [(REV, 2, 'punto 4 e punto 5')])
-        self.assertEqual(review.trust_policy_parts([approval]), [])
+        self.assertEqual(review.trust_policy_parts([dict(norm(raw_review()), round=3)]), [])
+
+
+def resolving(earlier, round_no=2, raw=None, reviewer=REV):
+    """The record of ``reviewer`` in round ``round_no`` that closes every finding ``earlier``
+    left open, with the verdict of ``raw`` (an approval by default)."""
+    left = review.open_findings(earlier)
+    raw = dict(raw or raw_review(), previous_findings=[
+        {'id': f['key'], 'status': 'resolved', 'note': 'ok'} for f in left])
+    record = review.normalize_review(raw, previous_open=left, round_no=round_no, max_rounds=3,
+                                     head_sha=SHA1, ci='pass', reviewer=reviewer)
+    return dict(record, receipt=norm(raw_review())['receipt'])
+
+
+class LatestRoundTests(unittest.TestCase):
+    """The operator's decision of 2026-11-19 (#461): a ``trust_policy`` of an earlier round no
+    longer holds the merge when the reviewer who gave it approves the head of the latest round,
+    it closed its own findings itself, and no reviewer of that round gives ``trust_policy``."""
+
+    def setUp(self):
+        self.first = norm(trust([finding()]))
+
+    def test_the_same_reviewer_approving_the_latest_round_clears_it(self):
+        self.assertEqual(review.trust_policy_parts([self.first, resolving([self.first])]), [])
+        # Without findings of its own there is nothing to close.
+        clean = norm(trust())
+        self.assertEqual(review.trust_policy_parts([clean, resolving([clean])]), [])
+
+    def test_a_trust_policy_in_the_latest_round_keeps_every_one(self):
+        again = resolving([self.first], raw=trust(human='punto 5'))
+        self.assertEqual(review.trust_policy_parts([self.first, again]), [(REV, 2, 'punto 5')])
+        # Another reviewer of the latest round says so: the first one stays too.
+        other = dict(norm(trust(human='punto 5'), round_no=2), reviewer='other')
+        self.assertEqual(review.trust_policy_parts([self.first, resolving([self.first]), other]),
+                         [(REV, 1, PARTS), ('other', 2, 'punto 5')])
+        # Even in a record that duplicates the reviewer's approval of the round.
+        duplicate = norm(trust(human='punto 5'), round_no=2)
+        self.assertEqual(
+            review.trust_policy_parts([self.first, resolving([self.first]), duplicate]),
+            [(REV, 2, 'punto 5')])
+
+    def test_it_stays_without_the_approval_of_the_same_reviewer(self):
+        # The latest round has only another reviewer's approval.
+        other = dict(resolving([self.first]), reviewer='other')
+        self.assertEqual(review.trust_policy_parts([self.first, other]), [(REV, 1, PARTS)])
+        # The latest round is a CI round.
+        ci = review.ci_failure_review(failed_checks=['tests'], log_tail='', round_no=2,
+                                      previous_open=review.open_findings([self.first]),
+                                      max_rounds=3, head_sha=SHA1)
+        self.assertEqual(review.trust_policy_parts([self.first, ci]), [(REV, 1, PARTS)])
+
+    def test_it_stays_when_another_closed_the_findings(self):
+        # The operator closed R1-1 (a ``finding`` record): the reviewer's approval of round 2
+        # did not close it.
+        approval = norm(raw_review(), round_no=2)
+        self.assertEqual(review.open_findings([self.first, approval],
+                                              [{'key': f'1/{REV}/R1-1', 'by': 'operator'}]), [])
+        self.assertEqual(review.trust_policy_parts([self.first, approval]), [(REV, 1, PARTS)])
+        # Another reviewer's assessment closes nothing either.
+        foreign = resolving([self.first], reviewer='other')
+        self.assertEqual(review.trust_policy_parts([self.first, foreign, approval]),
+                         [(REV, 1, PARTS)])
+
+    def test_a_finding_carried_by_the_trust_policy_must_be_closed_too(self):
+        # Round 1 asks for changes; round 2 gives trust_policy and leaves R1-1 unresolved; the
+        # operator closes it, and round 3 approves without closing it.
+        changes = norm(raw_review('request_changes', [finding()]))
+        carried = norm(trust(previous=[{'id': f'1/{REV}/R1-1', 'status': 'unresolved',
+                                        'note': 'no'}]),
+                       previous_open=review.open_findings([changes]), round_no=2)
+        approval = norm(raw_review(), round_no=3)
+        self.assertEqual(review.trust_policy_parts([changes, carried, approval]),
+                         [(REV, 2, PARTS)])
+        closed = resolving([changes, carried], round_no=3)
+        self.assertEqual(review.trust_policy_parts([changes, carried, closed]), [])
 
     def test_the_review_says_the_loop_goes_on(self):
         body = markdown.render_review(norm(trust([finding()])), header(REV_NAME),
@@ -199,8 +273,10 @@ class ReviewRoundTests(unittest.TestCase):
                 with self.assertRaises(agents.AgentError) as ctx:
                     turn(raw_review(reason='other'), kind)
                 self.assertIsInstance(ctx.exception.__cause__, SchemaError)
-        # The default belongs to the review: the other schemas are unchanged.
-        self.assertEqual(with_defaults('fix', {}), {})
+        # The default belongs to the review: the other schemas do not get it. ``fix`` has
+        # only its own default, ``host_step`` (#462); ``sync`` has none.
+        self.assertEqual(with_defaults('fix', {}), {'host_step': ''})
+        self.assertEqual(with_defaults('sync', {}), {})
         self.assertIn('operator_reason', agents.load_schema('review')['required'])
 
     def test_the_round_limit_holds_as_before(self):
@@ -281,16 +357,41 @@ class OperatorMergeTests(Case):
                 self.assertEqual(len(records(self.gh, 'notice')), 1)
                 self.assertEqual(escalations(self.gh), [])
 
-    def test_a_later_approval_does_not_hand_the_merge_back_to_devloop(self):
+    def test_an_approval_of_the_same_reviewer_hands_the_merge_back_to_devloop(self):
+        # #461: trust_policy with a finding in round 1, a faithful implementation approved in
+        # round 2 by the same reviewer, who closes its finding: devloop merges.
         gh = TrustGH(trust([finding()]))
-        approval = dict(norm(raw_review(previous=[
-            {'id': f'1/{REV}/R1-1', 'status': 'resolved', 'note': 'ok'}]),
-            previous_open=review.open_findings([norm(trust([finding()]))]), round_no=2),
-            round=2)
-        gh.say('brushtyler', markdown.render_review(approval, header(REV_NAME)))
+        gh.say('brushtyler', markdown.render_review(resolving([norm(trust([finding()]))]),
+                                                    header(REV_NAME)))
+        d = self.make(STRICT, gh=gh)
+        self.assertEqual(d.snapshot().prs[0].merge_mode, 'strict')
+        self.assertEqual(d.tick(), [MERGE])
+        self.assertEqual(self.gh.merged, [(100, SHA1)])
+        self.assertNotIn(OPERATOR, self.gh.labels[100])
+        self.assertEqual(records(self.gh, 'notice'), [])
+
+    def test_a_trust_policy_on_the_approved_head_keeps_the_merge_with_the_operator(self):
+        # #461: the reviewer of round 2 still says the PR touches the trust policy: the PR goes
+        # to the operator as before, and the notice cites the parts declared on that head.
+        gh = TrustGH(trust([finding()]))
+        again = resolving([norm(trust([finding()]))], raw=trust(human='punto 5, `config.toml`'))
+        gh.say('brushtyler', markdown.render_review(again, header(REV_NAME)))
         d = self.make(STRICT, gh=gh)
         self.assertEqual(d.snapshot().prs[0].merge_mode, 'off')
         self.assertEqual([a.kind for a in d.tick()], ['operator_merge'])
+        self.assert_not_merged()
+        self.assertEqual(self.gh.labels[100], {READY, OPERATOR})
+        body = self.gh.comments[-1][1]
+        self.assertIn(f'`{REV}`, round 2: punto 5, `config.toml`', body)
+        self.assertNotIn('round 1', body)
+
+    def test_an_approval_after_the_operator_closed_the_findings_does_not_clear_it(self):
+        gh = TrustGH(trust([finding()]))
+        gh.say('brushtyler', f'/devloop finding 1/{REV}/R1-1 resolved fatto a mano')
+        gh.say('brushtyler', markdown.render_review(norm(raw_review(), round_no=2),
+                                                    header(REV_NAME)))
+        d = self.make(STRICT, gh=gh)
+        self.assertEqual(d.snapshot().prs[0].merge_mode, 'off')
         self.assert_not_merged()
 
     def test_the_merge_itself_refuses_a_trust_policy_pr(self):

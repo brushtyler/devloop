@@ -43,6 +43,15 @@ $ci_summary
    for a map that does not list every criterion: you need not repeat those.
 7. Whether the change touches the trust policy, and whether it needs the operator for it: see
    the next section.
+8. The declaration of a step on the host (`host_step`, under "Step on the host" below). A PR
+   needs one when its code cannot run as intended, once devloop pins it, without a step the
+   operator makes on the host first, with the loop stopped: it changes the schema of the
+   project file or of the local overlay (a new table or key the code reads), or the procedures
+   of the host (such as `ops/host/`). Then the declaration must be there, with a short text of
+   the step and a reference to the document that describes it; in every other case it must be
+   empty. A declaration missing where it is needed, or present where it is not, is a blocking
+   finding: devloop merges a PR that declares one, but holds the automatic pin until the
+   operator pins by hand after the step, and pins a PR that declares none without waiting.
 
 ## Trust policy
 
@@ -199,6 +208,12 @@ $acceptance_criteria
 Latest coverage map of the pull request, from the implementer or its latest fix:
 
 $acceptance_map
+
+## Step on the host
+
+Latest declaration of the pull request (`host_step`), from the implementer or its latest fix:
+
+$host_step
 
 $docs
 

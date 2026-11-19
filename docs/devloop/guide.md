@@ -138,8 +138,17 @@ are not PRs and stay with the operator, and a `needs_operator` for a `decision` 
   as approved: the PR is promoted to `agent:ready-to-merge` and gets `agent:needs-operator` with
   the [operator merge](#ready-prs-whose-merge-is-the-operators) notice, written once per head, that asks
   for the operator's review and merge and lists the parts of the policy each reviewer named.
-  Once a reviewer of the PR has given `trust_policy`, devloop never merges the PR itself,
-  whatever `[merge]` says and even if a later round approves. A `decision`, or a
+  Once a reviewer of the PR has given `trust_policy`, devloop does not merge the PR itself,
+  whatever `[merge]` says, with one exception decided by the operator on 2026-11-19 (#461,
+  [ADR 0005](../adr/0005-deleghe-e-ruoli-degli-agent.md#4-decisioni-riservate-alloperatore),
+  D10): the `trust_policy` of a reviewer no longer holds the merge when that same reviewer
+  approves the head of the latest round, it closed its own blocking findings itself with its
+  reviews (not the operator with `/devloop finding`, nor the CI), and no reviewer of that round
+  gives `trust_policy`. It is the case of a PR that broke a rule in its first round and then
+  carried out the decision faithfully: devloop merges it like any other of its level. Otherwise
+  the PR goes to the operator as above, and the notice lists the parts each reviewer whose
+  `trust_policy` still holds named in its latest one: on the approved head when a reviewer of
+  that round gives it. A `decision`, or a
   `needs_operator` without `operator_reason` (a reviewer or a record from before #434), is an
   immediate escalation as before, of class `reviewer_decision`, which is critical and so stays
   with the operator in `auto` mode too
@@ -157,8 +166,9 @@ are not PRs and stay with the operator, and a `needs_operator` for a `decision` 
 
 - the rule depends on the attention of the reviewers, at every round: at level 2 they are two,
   of different vendors, but they may both miss a change, and a reviewer of a later round who
-  looks only at the latest fix may approve a PR an earlier round flagged. Since #447 they also
-  judge whether a change conforms to the decision it cites. devloop checks nothing
+  looks only at the latest fix may approve a PR an earlier round flagged; since #461 that
+  approval, by the reviewer who flagged it, also gives the merge back to devloop. Since #447
+  they also judge whether a change conforms to the decision it cites. devloop checks nothing
   of it in code: no file is reserved to the operator for the policy, and `devloop/config.toml` is
   not in `operator_only_paths`;
 - a change deliberately disguised as something else is not covered;
@@ -748,8 +758,8 @@ it does not (#248), because the [merge mode](#merge-modes) of the PR is `"off"`,
 `agent:needs-operator` once the PR is ready, with a comment ("Il merge spetta all'operatore")
 that says why: the reserved paths the diff touches, the mode or the level, the restart of its
 work after a [conclave](#after-a-unanimous-decision) (#142), or a reviewer who said that it
-touches the [trust policy](#changes-to-the-trust-policy) (#434), with the parts each reviewer
-named; this last reason is stated with `[merge] mode = "off"` too. The comment
+touches the [trust policy](#changes-to-the-trust-policy) (#434) and whose `trust_policy` a
+later approval did not clear (#461), with the parts each such reviewer named; this last reason is stated with `[merge] mode = "off"` too. The comment
 carries a `notice` marker of event `operator_merge` with the head, how many `labeled` events of
 the label came before, and the promotion it belongs to (how many promotions the PR's policy
 records count). There is one comment per head: a head promoted again, after its CI ran again
@@ -2483,6 +2493,48 @@ issue once per refused commit (its commit and failed step; the error stays in th
 recorded in `.ssdlc/devloop/pin-alerted.json`; a comment that cannot be published is only
 logged. The next merge that requests a pin, or the next advance of `origin/main` that touches
 the installation, tries again, on the new `origin/main`.
+
+#### Step on the host
+
+A PR whose code needs a step on the host before it is pinned (#462), such as a new table of the
+project file or of the overlay, declares it: implementer and fixer return `host_step` in their
+structured output (a short text with a reference to the document of the step, such as a section
+of `ops/host/migrate.md`; empty when there is none), the PR description shows it under
+"Passo sull'host", and the reviewer checks that it is there when the PR changes the schema of
+the project file or of the overlay, or `ops/host/`, and empty otherwise. The latest declaration
+holds: the PR's, or that of its latest fix.
+
+devloop merges such a PR as any other: the queue does not stop. With `[pin] auto = true`,
+though, the merge does not request the pin. Before merging, devloop records a hold of the
+auto-pin in `.ssdlc/devloop/pin-held.json` (a hold that cannot be recorded stops the merge), and
+after the merge it comments on `[run].alert_issue` with the step and adds `agent:needs-operator`
+to the issue the PR closes; with `[pin] auto = false` only the alert and the label. A merge that
+fails may still have happened (a timeout of `gh pr merge` loses GitHub's answer): its hold stays,
+marked uncertain, and at the next tick devloop reads the PR. Merged, the hold stays and the alert
+and the label follow then (`auto-pin: #<N> was merged despite the error: …`); not merged, the hold
+goes (`auto-pin: #<N> was not merged: its hold of the auto-pin goes`). Each hold names its merge
+attempt, and the tick settles only the hold of the attempt it read the PR for: when the merge
+worker of `run` merges the same PR again meanwhile, the hold of that new attempt stays, even if
+it too is uncertain, until a later tick reads the PR for it. The auto-pin reads the
+hold again once it has resolved `origin/main`: a merge that the merge worker of `run` makes
+while a pin is fetching writes its hold first, so a commit that contains it is never pinned.
+While the hold stays, no auto-pin runs, of that commit nor of later ones:
+a pending request (of a later merge, or of an advance of `origin/main`) waits, and the log says
+`auto-pin of origin/main held: the step on the host of #<N> waits for the operator, who pins by
+hand after it (devloop pin)`; `devloop status` shows `auto-pin held: …`. The operator does the
+step with the loop stopped, then pins by hand (`devloop pin`, also through the
+[launcher](#launcher)): that pin releases the hold (`auto-pin resumed: the hold after the step on
+the host of #<N> is released`) and drops the pending request, and the auto-pin resumes with the
+next merge.
+
+At the start of `tick` and `run`, and at each reload of `run`, devloop checks the tables of the
+project file that change its behaviour (`[prompts]`, `[tests]`): when the running copy reads one
+of them and neither the project file nor the overlay sets it, the log says `config: this copy
+reads [prompts], [tests] from the project file, and the configuration has none: devloop runs
+without them, degraded; add them to the project file`, and the dispatcher comments once on
+`[run].alert_issue` for each set of missing tables (recorded in
+`.ssdlc/devloop/project-tables-alerted.json`, forgotten once none is missing). The copy still
+starts.
 
 devloop may import only the Python standard library, itself and the `core` package, and a test
 enforces this (`tests/test_devloop_boundary.py`). [ADR 0001](../adr/0001-prodotto-unico-fasi-su-tracker.md) keeps

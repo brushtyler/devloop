@@ -21,6 +21,17 @@ head last seen (``pin-base.json``; the first time, since the commit of ``current
 to those paths, requests the pin of the new head. ``devloop status`` says when the copy it runs
 from is behind ``origin/<base_branch>`` on those paths (``AutoPin.behind``).
 
+A PR that declares a step on the host (``host_step``, #462) is merged as the others, but its
+merge holds the auto-pin (``hold``, ``pin-held.json``): no auto-pin runs, of that commit nor of
+the later ones, until the operator does the step and pins by hand (``devloop pin``, which calls
+``release``). The hold is written before the merge, and the auto-pin reads it again after it
+resolved the commit to pin (``AutoPin.pin``, ``PinHeld``): a merge that lands while a pin runs is
+in that commit only if its hold was already written. A merge whose outcome is unknown (an error
+from GitHub, a timeout) keeps its hold, marked ``uncertain`` (``doubt``): a later tick reads the
+PR and drops it, or keeps it as the hold of a merged PR (``settle``). Each hold names its merge
+attempt (``attempt``): a doubt and a settle touch only the hold of the attempt they name, so the
+state of a PR read for an earlier attempt never settles the hold of a later one.
+
 The installation's source (ADR 0006, R1) is the clone the pin takes the code from: the
 managed repository itself, as for ssdlc, unless the configuration names another clone in
 ``source`` (``source_root``). The smoke test still runs in the managed repository. The pin after
@@ -38,6 +49,7 @@ import io
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -61,6 +73,11 @@ LOCAL_CONFIG = 'config.local.toml'
 # section 3.4), which devloop imports for the budget envelope (#365).
 CODE_PACKAGES = ('core',)
 PENDING = 'pin-pending.json'
+# The merges of PRs that declared a step on the host (#462): while it exists no auto-pin runs,
+# and only a pin by hand (``devloop pin``, ``release``) removes it.
+HELD = 'pin-held.json'
+# Serializes the changes to ``HELD`` (#462): each one reads the steps and writes them again.
+HELD_LOCK = 'pin-held.lock'
 # The head of origin/<base_branch> the last tick saw (#430): an advance from it requests a pin.
 BASE_SEEN = 'pin-base.json'
 LOCK = 'pin.lock'
@@ -130,6 +147,15 @@ class SmokeError(PinError):
     def __init__(self, message, sha, step, copy=None):
         super().__init__(message)
         self.sha, self.step, self.copy = sha, step, copy
+
+
+class PinHeld(PinError):
+    """The auto-pin found the steps on the host ``steps`` holding it (#462) once it resolved the
+    commit: nothing is pinned, and the request stays."""
+
+    def __init__(self, steps):
+        super().__init__('held by the step on the host of ' + held_prs(steps))
+        self.steps = steps
 
 
 class StepFailed(Exception):
@@ -489,7 +515,7 @@ def _reject(state, sha, tmp):
 
 
 def pin(root, state, ref, local=None, log=print, fetch=True, smoke=True, fetch_lock=None,
-        keep=None, in_use=None, managed=None, project=None):
+        keep=None, in_use=None, managed=None, project=None, check=None):
     """Pin ``ref``: the verified copy of its commit, which ``state/current`` now points at.
     ``local`` is the overlay and ``project`` the project file (ADR 0006, R2), each used when
     the file exists: the copy is checked with them. On any failure ``current`` is left as
@@ -505,11 +531,17 @@ def pin(root, state, ref, local=None, log=print, fetch=True, smoke=True, fetch_l
 
     The pin records its time (``TIMES``). With ``keep`` (an integer, ``[gc] keep_pins``, #380)
     it then removes the copies beyond ``current`` and the ``keep`` pinned most recently
-    (``prune``, with ``in_use``); a failure there is logged and the pin stands."""
+    (``prune``, with ``in_use``); a failure there is logged and the pin stands.
+
+    ``check``, when given, is called with the commit once resolved, before anything is
+    extracted: an exception it raises stops the pin with ``current`` as it was (the hold of the
+    auto-pin, ``PinHeld``, #462)."""
     state = Path(state)
     state.mkdir(parents=True, exist_ok=True)
     with _locked(state):
         sha = resolve(root, state, ref, fetch=fetch, fetch_lock=fetch_lock)
+        if check is not None:
+            check(sha)
         dest = state / f'{PREFIX}{sha[:12]}'
         reused = dest.exists() or dest.is_symlink()
         if reused:
@@ -729,6 +761,126 @@ def clear_pending(state):
         pass
 
 
+def held(state):
+    """The steps on the host that hold the auto-pin (#462): a list of ``{pr, head, step, at}``,
+    or None when nothing holds it. A file that cannot be read holds it all the same, with one
+    step of unknown PR: only a pin by hand releases it."""
+    try:
+        data = json.loads((Path(state) / HELD).read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return [{'pr': None, 'head': None, 'step': None}]
+    steps = data.get('steps') if isinstance(data, dict) else None
+    if not isinstance(steps, list) or not all(isinstance(s, dict) for s in steps) or not steps:
+        return [{'pr': None, 'head': None, 'step': None}]
+    return steps
+
+
+def held_prs(steps):
+    """The PRs of the steps on the host ``steps`` (``held``), as the log names them."""
+    return ', '.join(f'#{s["pr"]}' if isinstance(s.get('pr'), int) else 'an unknown PR'
+                     for s in steps)
+
+
+@contextmanager
+def _held_locked(state):
+    """The lock of ``HELD`` (#462): a hold, a doubt, a settle and a release never interleave."""
+    state = Path(state)
+    state.mkdir(parents=True, exist_ok=True)
+    with open(state / HELD_LOCK, 'w') as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        yield
+
+
+def _write_held(state, steps):
+    """Write ``steps`` in ``HELD``; with none, the file goes."""
+    path = Path(state) / HELD
+    if not steps:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f'.{HELD}-{os.getpid()}')
+    tmp.write_text(json.dumps({'steps': steps}, indent=2, ensure_ascii=False) + '\n',
+                   encoding='utf-8')
+    os.replace(tmp, path)
+
+
+def hold(state, pr, head, step):
+    """Hold the auto-pin for the step on the host ``step`` that PR ``pr``, merged at ``head``,
+    declared (#462): no auto-pin runs until a pin by hand. The steps of earlier PRs stay.
+    Returns the identifier of this merge attempt, which ``doubt`` and ``settle`` name: a hold
+    of ``pr`` written again by a later attempt has another one."""
+    attempt = secrets.token_hex(8)
+    with _held_locked(state):
+        steps = [s for s in (held(state) or []) if s.get('pr') != pr]
+        steps.append({'pr': pr, 'head': head, 'step': step, 'at': int(time.time()),
+                      'attempt': attempt})
+        _write_held(state, steps)
+    return attempt
+
+
+def unhold(state, pr):
+    """Drop the step of ``pr`` (a merge that did not happen); the file goes with the last one."""
+    with _held_locked(state):
+        steps = held(state)
+        if steps is not None:
+            _write_held(state, [s for s in steps if s.get('pr') != pr])
+
+
+def _attempt_of(steps, pr, attempt):
+    """The steps of ``pr`` written by the merge attempt ``attempt`` (``hold``)."""
+    return [s for s in steps if s.get('pr') == pr and s.get('attempt') == attempt]
+
+
+def doubt(state, pr, attempt, issue=None):
+    """Mark the step of ``pr`` written by the merge attempt ``attempt`` ``uncertain`` (#462): its
+    merge failed with an unknown outcome, and the hold stays until ``settle`` knows it. ``issue``
+    is the issue the PR closes, for the alarm of a merge that did happen. False when that
+    attempt holds nothing."""
+    with _held_locked(state):
+        steps = held(state) or []
+        mine = _attempt_of(steps, pr, attempt)
+        for s in mine:
+            s['uncertain'] = True
+            if isinstance(issue, int):
+                s['issue'] = issue
+        if mine:
+            _write_held(state, steps)
+        return bool(mine)
+
+
+def settle(state, pr, merged, attempt):
+    """The outcome of the uncertain merge attempt ``attempt`` of ``pr``, read on GitHub (#462):
+    when ``merged`` its step stays, as the hold of a merged PR; otherwise it goes. Only the hold
+    of that attempt changes, and only while it is still ``uncertain``: the state of the PR was
+    read for it, so a hold that a later attempt wrote since (another ``attempt``, even an
+    uncertain one) is left as it is. True when a step changed."""
+    with _held_locked(state):
+        steps = held(state) or []
+        mine = [s for s in _attempt_of(steps, pr, attempt) if s.get('uncertain')]
+        if not mine:
+            return False
+        if merged:
+            for s in mine:
+                s.pop('uncertain', None)
+        else:
+            steps = [s for s in steps if not any(s is m for m in mine)]
+        _write_held(state, steps)
+        return True
+
+
+def release(state):
+    """Release the auto-pin (#462), after a pin by hand: the steps that held it, or None."""
+    with _held_locked(state):
+        steps = held(state)
+        _write_held(state, [])
+    return steps
+
+
 def copy_commit(copy):
     """The commit of the pinned copy ``copy``, read in its stamp, or None when ``copy`` is not
     one (devloop running from a checkout)."""
@@ -788,6 +940,27 @@ class AutoPin:
     def cancel(self):
         """Drop the request: a copy refused by the smoke test is not tried again (#260)."""
         clear_pending(self.state)
+
+    def hold(self, pr, head, step):
+        return hold(self.state, pr, head, step)
+
+    def unhold(self, pr):
+        unhold(self.state, pr)
+
+    def doubt(self, pr, attempt, issue=None):
+        return doubt(self.state, pr, attempt, issue)
+
+    def settle(self, pr, merged, attempt):
+        return settle(self.state, pr, merged, attempt)
+
+    def held(self):
+        return held(self.state)
+
+    def _check_held(self, sha):
+        """Raise ``PinHeld`` when a step on the host holds the auto-pin (#462)."""
+        steps = self.held()
+        if steps:
+            raise PinHeld(steps)
 
     def _seen(self):
         try:
@@ -865,8 +1038,12 @@ class AutoPin:
                 + ', '.join(changed[:5]) + (', …' if len(changed) > 5 else ''))
 
     def pin(self, ref):
+        """The auto-pin of ``ref``. The hold of a step on the host (#462) is read again once the
+        commit is resolved, and raises ``PinHeld``: a merge writes its hold before it merges, so
+        the hold of every merge in the resolved commit is already written then."""
         return pin(self.root, self.state, ref, self.local, log=self.log, smoke=self.smoke,
-                   fetch_lock=self.fetch_lock, keep=self.keep, project=self.project)
+                   fetch_lock=self.fetch_lock, keep=self.keep, project=self.project,
+                   check=self._check_held)
 
     def current(self):
         """The copy ``current`` points at now, or None: the operator may pin another one by
