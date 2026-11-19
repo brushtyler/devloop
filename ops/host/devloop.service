@@ -16,9 +16,9 @@ Environment=PYTHONUNBUFFERED=1
 # Dove il servizio trova le CLI degli agent, gh e git: ~/.local/bin dell'utente devloop prima.
 Environment=PATH=@DEVLOOP_PATH@
 # Il launcher della copia fissata; aggiunge --local-config quando l'overlay esiste.
-ExecStart=/usr/bin/python3 @DEVLOOP_CLONE@/scripts/devloop-pinned run
-StandardOutput=append:@DEVLOOP_CLONE@/@STATE_DIR@/run.log
-StandardError=append:@DEVLOOP_CLONE@/@STATE_DIR@/run.log
+ExecStart=@LAUNCHER_CMD@ run
+StandardOutput=append:@STATE_PATH@/run.log
+StandardError=append:@STATE_PATH@/run.log
 # SIGTERM solo al processo principale: devloop smette di pianificare e aspetta le azioni in
 # corso, al più agent_timeout_seconds (3600). Il default control-group fermerebbe anche loro.
 KillMode=mixed

@@ -328,6 +328,10 @@ class Config:
     reviewer: str  # the first of ``reviewers``, recorded in the PR marker
     agents: dict
     trusted_users: tuple
+    # The clone of the installation's source (ADR 0006, R1), where ``devloop pin`` takes the
+    # code from: absolute, with ``~``, or relative to the managed repository's main checkout.
+    # '' when the source is the managed repository itself, as for ssdlc.
+    source: str = ''
     # The reviewer pool, in order (``roles.reviewers``; ``roles.reviewer`` is a pool of one).
     reviewers: tuple = ()
     # The agent of the readiness check before implement (#114), or '' when it is disabled.
@@ -1123,6 +1127,7 @@ def parse_config(data, root=INSTALL_ROOT):
         base_branch=data.get('base_branch', 'main'),
         branch_prefix=data.get('branch_prefix', 'agent/issue-'),
         state_dir=data.get('state_dir', '.ssdlc/devloop'),
+        source=_source(data),
         test_cmd=test_cmd,
         language=data.get('language', 'English'),
         implementer=implementer, reviewer=pool[0], reviewers=pool, agents=agents,
@@ -1147,6 +1152,17 @@ def parse_config(data, root=INSTALL_ROOT):
         **ints)
 
 
+def _source(data):
+    """``source`` (ADR 0006, R1): a path that is not empty, or '' when the key is not set."""
+    if 'source' not in data:
+        return ''
+    value = _require(data, 'source', str, 'config')
+    if not value.strip():
+        raise ConfigError("source: expected the path of a clone of the installation's source; "
+                          'leave the key out when the source is the managed repository')
+    return value
+
+
 def sensitive_lists(data):
     """The names in ``review_policy.sensitive_path_lists`` of the raw configuration ``data``."""
     table = data.get('review_policy', {})
@@ -1163,8 +1179,8 @@ _AGENT_KEYS = dict.fromkeys(('kind', 'display_name', 'model', 'model_label', 'ef
                              'fallback_memory_seconds', 'denied_cooldown_hours',
                              'write_commands', 'review_commands'))
 OVERLAY_KEYS = {
-    **dict.fromkeys(('repo', 'base_branch', 'branch_prefix', 'state_dir', 'test_cmd',
-                     'local_tests', 'ci_rerun_unrelated', 'block_uncertain_turns', 'story_identity',
+    **dict.fromkeys(('repo', 'base_branch', 'branch_prefix', 'state_dir', 'source',
+                     'test_cmd', 'local_tests', 'ci_rerun_unrelated', 'block_uncertain_turns', 'story_identity',
                      'publication_outbox', 'attempt_identity', 'journal_max_mib',
                      'language', 'trusted_users', 'preflight',
                      'conclave', 'max_open_prs',
