@@ -27,7 +27,7 @@ from helpers.devloop_fakes import META, FakeGH
 from test_devloop import (CFG, REV_NAME, SHA1, FakeRunner, FakeWS, implemented, norm, raw_review,
                           receipt)
 from test_devloop_merge import Identities, MergeGH, header, records
-from test_devloop_pin import AutoPinTests, FakePinner, GitCase
+from test_devloop_pin import AutoPinTests, FakePinner, GitCase, git
 from test_devloop_zero import changes
 
 STEP = ('Aggiungere `[tests]` al file di progetto e verificare con check-equivalence.py '
@@ -382,7 +382,7 @@ class HeldPinTests(GitCase):
     def test_a_held_auto_pin_waits_for_a_pin_by_hand_then_resumes(self):
         old = self.pin('main')
         merged = self.push('merged with a step', 'devloop/extra.txt', 'new\n')
-        pin.hold(self.state, 100, merged, STEP)
+        attempt = pin.hold(self.state, 100, merged, STEP)
         pin.request(self.state, 100, merged)
         d, snapshots = self.dispatcher(auto=True)
         with self.assertRaisesRegex(AssertionError, 'plan'):
@@ -398,6 +398,8 @@ class HeldPinTests(GitCase):
         with self.assertRaisesRegex(AssertionError, 'plan'):
             d.tick()
         self.assertEqual(self.pointed(), old.resolve())
+        # A tick read the merge commit of #100 on GitHub (#473, ``_alert_held_steps``).
+        self.assertTrue(pin.mark(self.state, 100, attempt, merge=merged))
         # The operator does the step, then pins by hand: the hold is released.
         self.pin_by_hand()
         self.assertIsNone(pin.held(self.state))
@@ -496,6 +498,7 @@ class OutsideMergeTests(GitCase):
         raw = {'number': OUTSIDE, 'title': 't', 'labels': [{'name': 'agent:needs-operator'}],
                'headRefName': 'agent/issue-9', 'headRefOid': SHA1,
                'author': {'login': 'brushtyler'}, 'isCrossRepository': False, 'state': 'MERGED',
+               'mergeCommit': {'oid': commit} if commit else None,
                'body': markdown.publishable('b', 'pr', meta if in_fix
                                             else dict(meta, host_step=STEP))}
         stranger = dict(raw, number=OUTSIDE + 1, author={'login': 'stranger'},
@@ -584,6 +587,7 @@ class OutsideMergeTests(GitCase):
                 landed.append(self.push_elsewhere('Merge pull request #200',
                                                   'devloop/step.txt', 'step\n'))
                 gh.commit_raw = {landed[0]: [OUTSIDE]}
+                gh.any_prs[OUTSIDE]['mergeCommit'] = {'oid': landed[0]}
             return resolve(*args, **kwargs)
         with mock.patch.object(pin, 'resolve', side_effect=operator_merges_then_resolve):
             d.tick()
@@ -610,8 +614,8 @@ class OutsideMergeTests(GitCase):
     def test_a_pin_by_hand_releases_only_the_holds_it_contains(self):
         self.pin('main')
         before = self.push('merged by devloop with a step', 'devloop/extra.txt', 'new\n')
-        pin.hold(self.state, 100, before, 'first')
-        merged = self.push_elsewhere('Merge pull request #200', 'devloop/step.txt', 'step\n')
+        pin.mark(self.state, 100, pin.hold(self.state, 100, before, 'first'), merge=before)
+        merged =self.push_elsewhere('Merge pull request #200', 'devloop/step.txt', 'step\n')
         pin.hold_merged(self.state, OUTSIDE, SHA1, merged, STEP, 9)
         # A rollback to the first commit contains neither merge: both holds stay.
         self.pin_by_hand(self.first)
@@ -629,7 +633,7 @@ class OutsideMergeTests(GitCase):
                       'released', self.logs)
 
     def test_the_release_runs_under_the_lock_of_the_pins(self):
-        pin.hold(self.state, 100, self.first, STEP)
+        pin.hold_merged(self.state, 100, SHA1, self.first, STEP)
         released = []
 
         def then(sha):
@@ -640,6 +644,67 @@ class OutsideMergeTests(GitCase):
         self.pin('main', then=then)
         self.assertEqual([s['pr'] for s in released[0]], [100])
         self.assertIsNone(pin.held(self.state))
+
+    def test_a_rebased_pr_holds_with_its_last_commit(self):
+        # The operator rebases #200 onto main: GitHub associates the PR with both its commits,
+        # and its merge commit is the last one. The hold records that one, not the first commit
+        # the scan reads.
+        old = self.pin('main')
+        first = self.push_elsewhere('rebased 1/2', 'devloop/step.txt', 'step\n')
+        last = self.push_elsewhere('rebased 2/2', 'devloop/step.txt', 'step, 2\n')
+        gh = self.outside_gh(last)
+        gh.commit_raw = {first: [OUTSIDE], last: [OUTSIDE]}
+        self.dispatcher(gh).tick()
+        self.assertEqual(self.pointed(), old.resolve())
+        hold, = pin.held(self.state)
+        self.assertEqual((hold['pr'], hold['merge']), (OUTSIDE, last))
+        # The pin by hand of the first commit lacks the rest of the PR: the hold stays.
+        self.pin_by_hand(first)
+        self.assertEqual([s['pr'] for s in pin.held(self.state)], [OUTSIDE])
+        self.assertIn('auto-pin held: the pinned commit does not contain the merge of #200; pin '
+                      'by hand a commit that contains it, after its step', self.logs)
+        self.pin_by_hand(last)
+        self.assertIsNone(pin.held(self.state))
+
+    def test_the_head_of_the_pr_does_not_release_its_merge_commit(self):
+        # devloop merges #100 with a merge commit and its alarm goes out at once: the hold names
+        # the head of the PR, not yet its merge commit.
+        self.pin('main')
+        git(self.root, 'checkout', '--quiet', '-b', 'agent/issue-1')
+        head = self.push_branch('devloop/step.txt', 'step\n')
+        git(self.root, 'checkout', '--quiet', 'main')
+        self.push('on main meanwhile', 'devloop/other.txt', 'other\n')
+        git(self.root, 'merge', '--quiet', '--no-ff', '-m', 'Merge pull request #100',
+            'agent/issue-1')
+        git(self.root, 'push', '--quiet', 'origin', 'main')
+        merge = git(self.root, 'rev-parse', 'HEAD')
+        attempt = pin.hold(self.state, 100, head, STEP, 1)
+        pin.mark(self.state, 100, attempt, commented=True, alerted=True)
+        # A pin by hand of the head alone: the merge commit is not known, the hold stays.
+        self.pin_by_hand(head)
+        self.assertEqual([s['pr'] for s in pin.held(self.state)], [100])
+        self.assertIn('auto-pin held: the merge commit of #100 is not known yet (devloop reads it '
+                      'on GitHub at its next tick, or the merge outcome is uncertain); pin by '
+                      'hand again once devloop status shows it', self.logs)
+        # The tick reads it on GitHub, for a hold already alerted too, with no new alarm.
+        gh = self.outside_gh()
+        gh.pr_state = lambda number: {'state': 'MERGED', 'mergeCommit': {'oid': merge}}
+        self.dispatcher(gh)._alert_held_steps()
+        self.assertEqual(pin.held(self.state)[0]['merge'], merge)
+        self.assertEqual(self.alerts(gh), [])
+        # The head does not contain the merge commit: the hold stays; main releases it.
+        self.pin_by_hand(head)
+        self.assertEqual([s['pr'] for s in pin.held(self.state)], [100])
+        self.pin_by_hand('main')
+        self.assertIsNone(pin.held(self.state))
+
+    def push_branch(self, path, text):
+        """A commit on the current branch of the clone, pushed to the same branch of origin."""
+        (self.root / path).parent.mkdir(parents=True, exist_ok=True)
+        (self.root / path).write_text(text)
+        sha = self.commit('the head of the PR')
+        git(self.root, 'push', '--quiet', 'origin', 'HEAD')
+        return sha
 
     def test_status_shows_each_hold_with_its_step(self):
         merged = 'b' * 40

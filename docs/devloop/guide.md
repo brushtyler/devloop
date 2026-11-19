@@ -2589,9 +2589,12 @@ pinned commit contains (`auto-pin resumed: the hold after the step on the host o
 released`) and drops the pending request, and the auto-pin resumes with the next merge. A hold
 whose merge the pinned commit does not contain, such as after a rollback to an older commit or
 for a merge that landed during the pin, stays (`auto-pin held: the pinned commit does not
-contain the merge of #<N>; …`), until a pin by hand of a commit that contains it. Before devloop
-knows the merge commit of its own merge, the head of the PR stands for it; a hold that names no
-commit (a `pin-held.json` that cannot be read) goes with any pin by hand.
+contain the merge of #<N>; …`), until a pin by hand of a commit that contains it. Only the merge
+commit counts, never the head of the PR, which a commit without the merge may contain: devloop
+reads it on GitHub (`mergeCommit`) at each tick for every hold that does not know it yet, alerted
+or not, and until then the hold stays after any pin by hand (`auto-pin held: the merge commit of
+#<N> is not known yet …`; pin by hand again once `devloop status` shows it). A hold that names no
+PR (a `pin-held.json` that cannot be read) goes with any pin by hand.
 
 A merge devloop did not make (#473), such as the operator's merge on GitHub of a PR in
 `agent:needs-operator`, holds the auto-pin too. At each tick, after it has looked at
@@ -2600,7 +2603,8 @@ GitHub the PRs merged by each commit of the first-parent line of `origin/main` t
 pinned copy nor its last look contains (`.ssdlc/devloop/pin-scanned.json`; with neither, it
 starts from the head it sees). A devloop PR, recognised by its branch and its marker, whose
 latest declaration (of the marker or of a fix its implementer recorded) is not empty gets a hold
-with its merge commit, and the alert says `La PR #<N> è stata mergiata fuori da devloop`. When
+with the merge commit GitHub reports for the PR (for a rebase, its last commit, even when the
+scan met the PR on an earlier one), and the alert says `La PR #<N> è stata mergiata fuori da devloop`. When
 the PRs of the commit about to be pinned cannot be read, nothing is pinned and the log says
 `auto-pin of origin/main waits for the next tick, the pinned copy is unchanged: …`.
 

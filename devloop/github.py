@@ -418,15 +418,16 @@ class GitHub:
 
     def find_pr(self, number):
         """PR ``number`` in any state, with the fields of :meth:`open_prs` (the mergeability
-        ones aside) and ``state``, or None when ``number`` is an issue (#362). Read with REST
-        first, so that an issue is told from a PR without reading an error."""
+        ones aside), ``state`` and ``mergeCommit`` (``{oid}`` once merged, #473), or None when
+        ``number`` is an issue (#362). Read with REST first, so that an issue is told from a PR
+        without reading an error."""
         kind = self._json('api', f'repos/{self.repo}/issues/{int(number)}',
                           '--jq', '{pull_request: (.pull_request != null)}') or {}
         if not kind.get('pull_request'):
             return None
         raw = self._json('pr', 'view', str(int(number)), '-R', self.repo, '--json',
                          'number,title,body,labels,headRefName,headRefOid,author,'
-                         'isCrossRepository,state')
+                         'isCrossRepository,state,mergeCommit')
         return dict(raw, author={'login': author_login(raw.get('author'))})
 
     def merge_state(self, pr):

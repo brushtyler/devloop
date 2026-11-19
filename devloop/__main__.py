@@ -579,9 +579,15 @@ def run_pin(args):
     if steps:
         log(f'auto-pin {"still held" if left else "resumed"}: the hold after the step on the '
             f'host of {pin.held_prs(steps)} is released')
-    if left:
+    known = [s for s in left or [] if pin.merge_known(s)]
+    unknown = [s for s in left or [] if not pin.merge_known(s)]
+    if known:
         log(f'auto-pin held: the pinned commit does not contain the merge of '
-            f'{pin.held_prs(left)}; pin by hand a commit that contains it, after its step')
+            f'{pin.held_prs(known)}; pin by hand a commit that contains it, after its step')
+    if unknown:
+        log(f'auto-pin held: the merge commit of {pin.held_prs(unknown)} is not known yet '
+            '(devloop reads it on GitHub at its next tick, or the merge outcome is uncertain); '
+            'pin by hand again once devloop status shows it')
 
 
 def run_watch(parser, args):

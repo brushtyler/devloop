@@ -970,15 +970,18 @@ def hold(state, pr, head, step, issue=None):
 
 
 def hold_merged(state, pr, head, merge, step, issue=None):
-    """Hold the auto-pin for the step on the host ``step`` of PR ``pr``, found merged by the
-    commit ``merge`` of the base branch (#473): a merge devloop did not make, such as one of the
-    operator, or one of devloop whose hold is already there. A PR already held is left as it is,
-    but learns its ``merge`` when it did not know it yet. The new hold, or None."""
+    """Hold the auto-pin for the step on the host ``step`` of PR ``pr``, found merged on the base
+    branch with the merge commit ``merge`` (#473: the ``mergeCommit`` of the PR, also when it was
+    rebased; None when GitHub does not report it, and devloop reads it later): a merge devloop
+    did not make, such as one of the operator, or one of devloop whose hold is already there. A
+    PR already held is left as it is, but learns its ``merge`` when it did not know it yet. The
+    new hold, or None."""
+    merge = merge if isinstance(merge, str) and SHA.fullmatch(merge) else None
     with _held_locked(state):
         steps = held(state) or []
         mine = [s for s in steps if s.get('pr') == pr]
         if mine:
-            changed = [s for s in mine if not s.get('merge')]
+            changed = [s for s in mine if merge and not merge_known(s)]
             for s in changed:
                 s['merge'] = merge
             if changed:
@@ -1083,16 +1086,25 @@ def _known(root, commit):
     return proc.returncode == 0
 
 
+def merge_known(step):
+    """The merge commit of the hold ``step`` (``merge``, the ``mergeCommit`` GitHub reports for
+    its PR), or None while it is not known."""
+    merge = step.get('merge')
+    return merge if isinstance(merge, str) and SHA.fullmatch(merge) else None
+
+
 def _released(root, step, sha):
-    """Whether the pin of ``sha`` by hand releases the hold ``step`` (#473): when ``sha``
-    contains its merge (``merge``; before it is known, the head of its PR, which devloop merges
-    with a merge commit). A hold that names no commit (a file that cannot be read) goes with any
-    pin by hand; one whose commit git does not know stays."""
-    commits = [step.get(key) for key in ('merge', 'head')]
-    commits = [c for c in commits if isinstance(c, str) and SHA.fullmatch(c)]
-    if not commits:
-        return True
-    return _contains(root, commits[0], sha)
+    """Whether the pin of ``sha`` by hand releases the hold ``step`` (#473): only when ``sha``
+    contains its merge commit (``merge``). The head of its PR is no proof: a merge commit, a
+    squash or a rebase puts on the base branch commits other than that head, and the head may be
+    an ancestor of a commit that lacks the merge. A hold of a PR whose merge commit is not known
+    yet stays, until devloop reads it on GitHub (``_alert_held_steps``), and so does one whose
+    commit git does not know; a hold that names no PR nor commit (a file that cannot be read)
+    goes with any pin by hand."""
+    merge = merge_known(step)
+    if merge is not None:
+        return _contains(root, merge, sha)
+    return not isinstance(step.get('pr'), int)
 
 
 def release(state, root, sha):
@@ -1200,8 +1212,10 @@ class AutoPin:
 
     def scan(self, branch, lookup, target=None):
         """Hold the auto-pin for the merges devloop did not make (#473): ``lookup(commit)`` gives
-        the PRs merged by ``commit`` that declare a step on the host, as ``{pr, head, step,
-        issue}``, and each one not held yet is held (``hold_merged``). The commits are those of
+        the PRs merged by ``commit`` that declare a step on the host, as ``{pr, head, merge,
+        step, issue}``, and each one not held yet is held (``hold_merged``) with its own merge
+        commit ``merge``, not ``commit``: GitHub associates a rebased PR with each of its
+        commits, and only the last one contains it all. The commits are those of
         the first-parent line of ``target`` (default: ``origin/<branch>`` as last fetched) that
         neither the pinned copy nor the last scan contains; with neither of them there is
         nothing to compare with, and the scan starts from ``target``. ``target`` is then
@@ -1218,8 +1232,8 @@ class AutoPin:
                            '--not', *since).split()
             for commit in commits:
                 for entry in lookup(commit):
-                    new = hold_merged(self.state, entry['pr'], entry.get('head'), commit,
-                                      entry['step'], entry.get('issue'))
+                    new = hold_merged(self.state, entry['pr'], entry.get('head'),
+                                      entry.get('merge'), entry['step'], entry.get('issue'))
                     if new is not None:
                         found.append(new)
         if scanned is None or _contains(self.root, scanned, target):

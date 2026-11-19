@@ -31,7 +31,7 @@ from .ledger import collect as ledger_collect
 from .ledger import timestamp as ledger_timestamp
 from .markdown import (MAX_BODY, dispatcher_header, publishable, read_marker, split_markers,
                        with_record)
-from .pin import ScanFailed
+from .pin import ScanFailed, merge_known
 from .planning import MERGING, label_names, pending_reviewers, touched_by_base
 from .policy import describe as describe_receipt
 from .policy import (MAX_LISTED_PATHS, ZERO_LEVEL, changes_requested, check_outcome,
@@ -872,16 +872,18 @@ class MergeMixin:
         """The alarms of the holds of the auto-pin that have not gone out yet (#473,
         ``alerted`` False), tried again at each tick until they do: a comment or a label that
         failed, a process stopped between the merge and its alarm, a merge devloop did not make.
-        A hold whose merge is uncertain waits for ``_settle_host_steps``. A hold whose merge
-        commit is not known yet reads its PR first: merged, its merge commit is recorded and the
-        alarm goes out; closed without merge, the hold goes (``pin.forget``); open, or not
-        readable, it waits for the next tick."""
+        A hold whose merge is uncertain waits for ``_settle_host_steps``. Any other hold whose
+        merge commit is not known yet, alerted or not, reads its PR first: merged, its merge
+        commit (``mergeCommit``) is recorded, since only a pin by hand of a commit that contains
+        it releases the hold (``pin.release``), and its alarm goes out when due; closed without
+        merge, the hold goes (``pin.forget``); open, or not readable, it waits for the next
+        tick."""
         for held in self.pinner.held() or []:
             number = held.get('pr')
-            if (held.get('alerted') is not False or held.get('uncertain')
-                    or not isinstance(number, int)):
+            if held.get('uncertain') or not isinstance(number, int):
                 continue
-            if not held.get('merge'):
+            due = held.get('alerted') is False
+            if not merge_known(held):
                 try:
                     fresh = self.gh.pr_state(number) or {}
                 except GitHubError as exc:
@@ -898,11 +900,17 @@ class MergeMixin:
                     if state != 'MERGED':
                         continue  # a merge that runs now alerts by itself
                     merge = (fresh.get('mergeCommit') or {}).get('oid')
-                    if isinstance(merge, str) and merge:
+                    if merge_known({'merge': merge}):
                         self.pinner.mark(number, held.get('attempt'), merge=merge)
+                        held = dict(held, merge=merge)
+                    else:
+                        self.log(f'auto-pin: the merge commit of #{number} is not known yet: '
+                                 'its hold stays after a pin by hand until it is')
                 except OSError as exc:
                     self.log(f'auto-pin: the hold of #{number} not updated, next tick: {exc}')
                     continue
+            if not due:
+                continue
             head = held.get('head') if isinstance(held.get('head'), str) else ''
             step = held.get('step') if isinstance(held.get('step'), str) and held['step'] \
                 else UNREADABLE_STEP
@@ -915,7 +923,9 @@ class MergeMixin:
 
     def _merged_host_steps(self, commit):
         """The devloop PRs merged by ``commit`` of the base branch that declare a step on the
-        host (#473), for ``AutoPin.scan``: ``[{pr, head, step, issue}]``. A PR counts when
+        host (#473), for ``AutoPin.scan``: ``[{pr, head, merge, step, issue}]``, with ``merge``
+        the merge commit GitHub reports for the PR (``mergeCommit``: for a rebase, its last
+        commit, which ``commit`` may not be), or None when it reports none. A PR counts when
         ``_devloop_pr`` recognises it with its marker, and its step is the latest declaration
         (``hoststep.latest``), of the marker or of the fixes its implementer recorded. A PR
         already held is not read again. ``ScanFailed`` when GitHub cannot be read."""
@@ -934,8 +944,10 @@ class MergeMixin:
                 fixes = self._markers(pr, self._pr_thread(number), 'fix')
                 step = latest_host_step(pr.meta, fixes)
                 if step:
+                    merge = (raw.get('mergeCommit') or {}).get('oid')
                     found.append({'pr': number, 'head': pr.head_sha, 'step': step,
-                                  'issue': pr.issue})
+                                  'issue': pr.issue,
+                                  'merge': merge if isinstance(merge, str) else None})
         except GitHubError as exc:
             raise ScanFailed(f'the pull requests merged by {commit[:12]} could not be read: '
                              f'{exc}') from exc

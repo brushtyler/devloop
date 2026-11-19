@@ -147,7 +147,7 @@ class CodeReview(Protocol):
 
     def find_pr(self, number):
         """Pull request ``number`` in any state, as :meth:`open_prs` (the mergeability fields
-        aside) with ``state``, or None when ``number`` is an issue."""
+        aside) with ``state`` and ``mergeCommit``, or None when ``number`` is an issue."""
 
     def commit_prs(self, sha):
         """The numbers of the merged pull requests GitHub associates with commit ``sha``."""
