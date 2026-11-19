@@ -425,6 +425,11 @@ reviewer of the round is of another provider, a reviewer never falls back on a m
 author's provider, and a new round skips a reviewer whose models are all remembered unavailable.
 See
 [Reviewers by provider and the third reviewer](reference.md#reviewers-by-provider-and-the-third-reviewer).
+With `[review_policy] fallback_provider_ban = true` (#410, ADR 0005, P5-6), off by default and
+independent of `provider_quorum`, a reviewer never falls back on a model of an author's provider
+at either level, and a reviewer of the pool that falls back on the provider of an agent that may
+implement stops devloop at startup: see
+[No fallback on the authors' provider](reference.md#no-fallback-on-the-authors-provider).
 
 ### Readiness check before implementation
 
