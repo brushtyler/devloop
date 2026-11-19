@@ -219,8 +219,8 @@ from .policy import (BINDING, MAX_LISTED_PATHS, agent_profile, differences, prof
 from .ports import Backend, Tracker, summarize_checks
 from .review import (CI, OPERATOR, current_round, finding_commands, finding_key, open_findings,
                      owner_of, round_verdict)
-from .supervision import (ACCEPT_DEFAULTS, DECIDE, ISSUE_STEPS, RETRY, TOOL_FAILURE,
-                          UNCERTAIN_TURN, supervisor_command)
+from .supervision import (ACCEPT_DEFAULTS, DECIDE, ISSUE_STEPS, RETRY, ROUND_GRANTABLE,
+                          TOOL_FAILURE, UNCERTAIN_TURN, supervisor_command)
 from .workspace import WorkspaceError
 
 LEVEL_LABEL_STYLE = ('5319e7', 'devloop: la PR richiede una review di livello 2')
@@ -510,25 +510,34 @@ def pr_status_line(pr, cfg, reviews=None):
     reviews = pr.reviews if reviews is None else reviews
     labels = ', '.join(sorted(l for l in pr.labels if l.startswith('agent:')))
     waived = len(waived_rounds(reviews))
-    rounds = (f'rounds={counted_rounds(reviews)}/{cfg.max_review_rounds}'
+    granted = pr.granted_rounds
+    rounds = (f'rounds={counted_rounds(reviews)}/{cfg.max_review_rounds + granted}'
+              + (f' (+{granted} granted)' if granted else '')
               + (f' (+{waived} not counted)' if waived else ''))
     conflict = ' CONFLICT with ' + cfg.base_branch if pr.merge_state == 'conflict' else ''
     return (f'PR #{pr.number} (issue #{pr.issue}) [{labels}] {rounds} ci={pr.checks} '
             f'merge={pr.merge_state}{conflict}')
 
 
-def round_limit_reason(lead, reviews, fixes, syncs, limit):
+def round_limit_reason(lead, reviews, fixes, syncs, limit, granted=0, grantable=False):
     """The reason of a ``round_limit`` escalation (#289): ``lead``, then the rounds of
-    ``reviews`` that count against ``limit`` (``max_review_rounds``), each with its reason, and
-    those that do not, so that the operator sees where the limit comes from."""
+    ``reviews`` that count against ``limit`` (``max_review_rounds`` plus the ``granted`` rounds,
+    #405), each with its reason, and those that do not, so that the operator sees where the
+    limit comes from. ``grantable``: a ``round_grantable`` escalation, whose next round the
+    supervisor may grant."""
     rounds = round_reasons(reviews, fixes, syncs)
     counted = [(n, why) for n, why, counts in rounds if counts]
+    more = f' più {granted} concessi dal supervisore' if granted else ''
     text = (lead.rstrip() + f'\n\nRound contati sul limite ({len(counted)} di {limit}, '
-            '`max_review_rounds`):\n\n'
+            f'`max_review_rounds`{more}):\n\n'
             + ('\n'.join(f'- round {n}: {why}' for n, why in counted) or '- nessuno'))
     free = [(n, why) for n, why, counts in rounds if not counts]
     if free:
         text += ('\n\nNon contano:\n\n' + '\n'.join(f'- round {n}: {why}' for n, why in free))
+    if grantable:
+        return text + ('\n\nLe condizioni della delega dei round sono verificate: il supervisore '
+                       'può concedere un altro round a questa PR con `/devloop grant-round '
+                       '<motivo>`, dove il motivo riporta o cita l\'analisi delle cause.')
     return text + ('\n\nL\'operatore può concedere altri round alzando `max_review_rounds` '
                    'prima di riprendere la PR.')
 
@@ -985,6 +994,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         if not pr.meta or pr.labels & {lb.review, lb.changes, lb.ready_to_merge}:
             return pr.reviews
         comments = self._pr_thread(pr.number)
+        pr.granted_rounds = self._granted_rounds(comments)  # its limit, for the line (#405)
         return [record for _, record in self._marker_entries(pr, comments, 'review')]
 
     def snapshot(self):
@@ -2961,12 +2971,23 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                     'Un reviewer chiede una decisione dell\'operatore: il motivo è nella sua '
                     'review.', cls='reviewer_decision'))
             self.gh.edit_labels(pr.number, add=[lb.needs_operator], remove=transient)
-        elif counted_rounds(reviews) >= self.cfg.max_review_rounds:
+        elif counted_rounds(reviews) >= self.cfg.max_review_rounds + pr.granted_rounds:
+            limit = self.cfg.max_review_rounds + pr.granted_rounds
+            # The next round may be the supervisor's to grant (#405); else the operator's.
+            route, why = self._round_grant(pr, reviews) if announce else (None, '')
+            reason = round_limit_reason(
+                f'Raggiunto il limite di {limit} round di review con finding bloccanti ancora '
+                'aperti.', reviews, pr.fixes, pr.syncs, limit, pr.granted_rounds,
+                grantable=route is not None)
+            if route is not None:
+                self._escalate(pr.number, reason, remove=transient, cls=ROUND_GRANTABLE,
+                               supervised=route)
+                return
             if announce:
-                self.gh.comment(pr.number, render_escalation(round_limit_reason(
-                    f'Raggiunto il limite di {self.cfg.max_review_rounds} round di review con '
-                    'finding bloccanti ancora aperti.', reviews, pr.fixes, pr.syncs,
-                    self.cfg.max_review_rounds), cls='round_limit'))
+                if why:
+                    reason += ('\n\nIn modalità di merge `auto` il supervisore potrebbe concedere '
+                               f'un altro round, ma l\'escalation resta all\'operatore: {why}.')
+                self.gh.comment(pr.number, render_escalation(reason, cls='round_limit'))
             self.gh.edit_labels(pr.number, add=[lb.needs_operator], remove=transient)
         else:
             # A CI failure on a ready PR (#248): the dispatcher's own operator label goes too.
@@ -3113,14 +3134,22 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                        remove=[lb.review], cls='ci_missing')
 
     def _do_round_limit(self, pr):
+        """Escalate ``pr`` at its round limit: ``max_review_rounds`` plus the rounds the
+        supervisor granted. To the supervisor as ``round_grantable`` when it may grant the next
+        round (#405, ``_round_grant``), otherwise to the operator as ``round_limit``, with why
+        the delegation does not apply when it is on."""
         lb = self.cfg.labels
-        limit = self.cfg.max_review_rounds
+        limit = self.cfg.max_review_rounds + pr.granted_rounds
+        route, why = self._round_grant(pr, pr.reviews)
+        who = 'del supervisore o dell\'operatore' if route else 'dell\'operatore'
         self._escalate(pr.number, round_limit_reason(
             f'Raggiunto il limite di {limit} round di review: un nuovo round (review o CI '
-            'fallita) non parte senza una decisione dell\'operatore. Una CI fallita sul head di '
+            f'fallita) non parte senza una decisione {who}. Una CI fallita sul head di '
             'un round di review che ha approvato o chiesto modifiche entra in quel round e non '
             'ne apre uno nuovo.', pr.reviews, pr.fixes,
-            pr.syncs, limit), remove=[lb.review, lb.changes, lb.ready_to_merge], cls='round_limit')
+            pr.syncs, limit, pr.granted_rounds, grantable=route is not None),
+            remove=[lb.review, lb.changes, lb.ready_to_merge],
+            cls=ROUND_GRANTABLE if route else 'round_limit', supervised=route, why=why)
 
     def _do_apply_review(self, pr):
         """Apply the round already recorded. An approval given while the CI was not known

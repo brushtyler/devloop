@@ -181,14 +181,6 @@ operator_only_paths = ["docs/adr/", "AGENTS.md", "CLAUDE.md"]
 # [merge.levels]
 # "2" = "off"
 
-# The delegations to the supervisor (ADR 0005), each with its revocation key, all off by default:
-# turning one on is the operator's decision (D10). retry_own_prs (issue #406, P5-2): in "auto", a
-# tool_failure escalation on a PR implemented by the agent of roles.supervisor goes to the
-# supervisor, who may retry it with /devloop retry within the 2 retries it shares with the
-# operator; every other class on such a PR still goes to the operator.
-[delegations]
-retry_own_prs = false
-
 # Pinned installation (issue #174, see docs/devloop/guide.md). With auto = true, after a merge by
 # devloop whose diff touches devloop/, core/ (issue #365) or a file of
 # review_policy.sensitive_path_lists, the next
@@ -282,6 +274,25 @@ enabled = false
 # [budget.usage.claude]
 # model = "unmetered_quota"
 # reason = "claude reports its estimate only when a turn completes"
+
+# The delegations of the operator to the supervisor (ADR 0005), each with its revocation key, all
+# off here: turning one on is the operator's decision (D10); turned off, it is revoked from the
+# next tick. rounds (issue #405, P5-1): in merge mode "auto", a PR at the round limit whose
+# conditions hold (the latest counted round a CI failure or fewer open blocking findings than the
+# round before, no open security finding, the conditions of the supervisor's other escalations)
+# goes to the supervisor as round_grantable, and `/devloop grant-round <reason>` grants it one
+# more round, with the analysis of the causes in the reason; turned off, the round limit goes to
+# the operator, as before. max_rounds_per_pr and max_grants_per_day may only lower the caps of
+# the code (2 rounds per PR, 3 grants per UTC day, ADR 0005, D4): a higher value is refused at
+# startup. retry_own_prs (issue #406, P5-2): in "auto", a tool_failure escalation on a PR
+# implemented by the agent of roles.supervisor goes to the supervisor, who may retry it with
+# /devloop retry within the 2 retries it shares with the operator; every other class on such a PR
+# still goes to the operator.
+[delegations]
+rounds = false
+retry_own_prs = false
+# max_rounds_per_pr = 2
+# max_grants_per_day = 3
 
 # Documentation map (issue #203): code paths and the documents that describe them. A key is a
 # directory prefix ending in "/" or a file, relative to the root, with no pattern characters;
