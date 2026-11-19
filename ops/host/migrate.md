@@ -319,8 +319,10 @@ parte anche dopo il passo:
 3. rendere di root la home di `devloop-agent` e i file delle sue CLI:
    `sudo bash ops/host/setup-agent-user.sh --dry-run`, poi senza `--dry-run`, dal clone;
 4. verificare con `sudo bash ops/host/check-host.sh --no-apps`: nessun errore nel passo
-   `File delle CLI di devloop-agent`. Un eseguibile segnalato fuori da `~/.local` va reso di
-   root a mano;
+   `File delle CLI di devloop-agent`. Un link segnalato dallo script perché porta fuori da ciò
+   che è sigillato (per esempio un eseguibile fuori da `~/.local`) va reso di root a mano, o
+   sostituito. I file sigillati restano leggibili da `devloop-agent` tramite il suo gruppo,
+   anche quelli che erano 600 (come il `settings.json` di una versione precedente);
 5. provare una CLI per tipo come `devloop-agent` (`sudo -iu devloop-agent claude -p ciao`, e lo
    stesso per `codex exec` e `agy -p`): se una non trova una voce che vuole creare nella sua
    directory, `setup-agent-user.sh --unseal`, un avvio della CLI, poi di nuovo lo script senza;

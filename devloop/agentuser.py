@@ -45,7 +45,13 @@ would add), what they hold that carries instructions or configuration and ``~/.l
 (``CLI_SEALED``: nothing writable in them), and each CLI in ``~/.local/bin`` with the directory
 of the file it leads to (``CLIS``). A directory above them that the agent user can write protects
 them only when it is sticky and neither it nor the entry is the agent user's: the home, which
-the agent user writes, is root's and sticky.
+the agent user writes, is root's and sticky. A link among them, or inside a sealed one, is
+followed, and what it leads to must be protected the same way; the sealed files must stay
+readable by the agent user. The probe runs only the system's tools, never those of the agent
+user's PATH. In every claude turn, the auto memory, which ``~/.claude/projects`` keeps and
+shares among the worktrees of a repository, is off, and only the MCP servers of the command
+line count, never those of ``~/.claude.json``, which the agent user writes
+(``agents.CLAUDE_TURN_ENV``, ``agents.build_command``).
 """
 
 import contextlib
@@ -77,8 +83,9 @@ GH_CONFIG = 'gh-config'
 # the installed CLIs, where nothing may be writable; the CLIs devloop starts from ``.local/bin``.
 CLI_DIRS = ('.claude', '.codex', '.gemini', '.gemini/antigravity-cli')
 CLI_SEALED = (
-    '.claude/settings.json', '.claude/CLAUDE.md', '.claude/agents', '.claude/commands',
-    '.claude/skills', '.claude/hooks', '.claude/output-styles', '.claude/plugins',
+    '.claude/settings.json', '.claude/CLAUDE.md', '.claude/rules', '.claude/agents',
+    '.claude/commands', '.claude/skills', '.claude/hooks', '.claude/output-styles',
+    '.claude/plugins',
     '.codex/config.toml', '.codex/AGENTS.md', '.codex/AGENTS.override.md', '.codex/prompts',
     '.codex/rules', '.codex/skills', '.codex/packages',
     '.gemini/settings.json', '.gemini/GEMINI.md', '.gemini/antigravity-cli/settings.json',
@@ -91,14 +98,28 @@ CLIS = ('claude', 'codex', 'agy')
 # one it must read (n). #438: ``fixed``, one it must neither write (w) nor own (o: an owner
 # changes the mode), nor create (c), nor rename or remove (m), and the same for every directory
 # above it: in a directory it writes, only the sticky bit protects an entry, and only when
-# neither the entry nor the directory is its own; ``sealed``, a fixed one where nothing may be
-# writable (w) or its own (o) either, the first path found; ``bin``, a fixed executable whose
-# resolved file is fixed too, and sealed its directory.
-_PROBE = r'''out() { printf '%s:%s\0' "$1" "$2"; }
+# neither the entry nor the directory is its own. A link among them is followed one step at a
+# time, and what it leads to is fixed too; a link that cannot be read, or a chain of links that
+# does not end, is refused (l). ``sealed``, a fixed one where nothing may be writable (w) or its
+# own (o) either, the first path found, where everything must be readable and the directories
+# enterable (n), and where a link leads to a sealed path. ``bin``, a fixed executable whose
+# resolved file is fixed too, and sealed its directory. The tools come from the system's
+# directories only: the agent user's PATH starts with ``~/.local/bin``, which it controls on
+# the installation the probe must refuse.
+_PROBE = r'''PATH=/usr/bin:/bin
+out() { printf '%s:%s\0' "$1" "$2"; }
 me=$(id -u)
+declare -A seen
 mine() { [ "$(stat -c %u -- "$1" 2>/dev/null)" = "$me" ]; }
+to() {
+    n=$((n + 1))
+    if [ "$2" -ge 40 ] || [ "$n" -gt 1000 ] || ! T=$(readlink -- "$1"); then
+        out l "$1"; return 1
+    fi
+    case $T in /*) ;; *) T=${1%/*}/$T ;; esac
+}
 fixed() {
-    local q=$1 d
+    local q=$1 h=${2:-0} d
     [ -e "$q" ] && [ -w "$q" ] && out w "$q"
     while [ "$q" != / ] && [ -n "$q" ]; do
         mine "$q" && out o "$q"
@@ -107,18 +128,27 @@ fixed() {
             if ! [ -e "$q" ] && ! [ -L "$q" ]; then out c "$q"
             elif ! [ -k "$d" ] || mine "$q" || mine "$d"; then out m "$q"; fi
         fi
+        [ -L "$q" ] && to "$q" "$h" && fixed "$T" $((h + 1))
         q=$d
     done
 }
 writable() { [ -e "$1" ] && find "$1" -writable -printf 'w:%p\0' -quit 2>/dev/null; }
 sealed() {
+    local c l
     fixed "$1"
-    [ -e "$1" ] || return 0
-    writable "$1"
-    find "$1" -user "$me" -printf 'o:%p\0' -quit 2>/dev/null
+    [ -e "$1" ] && c=$(readlink -e -- "$1") || return 0
+    [ -n "${seen[$c]}" ] && return 0
+    seen[$c]=1
+    find -H "$1" -writable -printf 'w:%p\0' -quit 2>/dev/null
+    find -H "$1" -user "$me" -printf 'o:%p\0' -quit 2>/dev/null
+    find -H "$1" ! -type l \( ! -readable -o -type d ! -executable \) -printf 'n:%p\0' -quit \
+        2>/dev/null
+    while IFS= read -r -d '' l; do
+        to "$l" 0 && sealed "$T"
+    done < <(find -H "$1" -mindepth 1 -type l -print0 2>/dev/null)
 }
 for a; do
-    k=${a%%:*}; p=${a#*:}
+    k=${a%%:*}; p=${a#*:}; n=0
     case $k in
         secret) [ -r "$p" ] && out r "$p"; [ -d "$p" ] && [ -x "$p" ] && out x "$p" ;;
         list) [ -r "$p" ] && out r "$p" ;;
@@ -136,7 +166,7 @@ done
 true'''
 _PROBLEMS = {'r': 'can read', 'x': 'can enter', 'w': 'can write', 'e': 'cannot enter',
              'u': 'cannot write', 'n': 'cannot read', 'c': 'can create', 'o': 'owns',
-             'm': 'can rename or remove'}
+             'm': 'can rename or remove', 'l': 'cannot follow the link'}
 # A directory opened without following a link in its last component.
 _DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 

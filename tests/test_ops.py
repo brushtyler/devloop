@@ -13,6 +13,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import tempfile
 import tomllib
@@ -756,11 +757,14 @@ class DryRunTests(OpsTestCase):
         done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params', str(params))
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         out = done.stdout
+        # Root's, of the agent user's group, which reads them but cannot write them.
         for name in ('.claude/CLAUDE.md', '.claude/skills', '.codex/config.toml', '.local'):
-            self.assertIn(f'[dry-run] chown -hR root:root {agent}/{name}\n', out)
-            self.assertIn(f'[dry-run] chmod -R go-w {agent}/{name}\n', out)
+            self.assertIn(f'[dry-run] chown -hR root:opsdry-noagent {agent}/{name}\n', out)
+            self.assertIn(f'[dry-run] chmod -R g+rX\\,go-w {agent}/{name}\n', out)
         self.assertIn(f'ok: {agent}/.codex/AGENTS.md non esiste', out)
+        self.assertIn(f'ok: {agent}/.claude/rules non esiste', out)
         self.assertNotIn('.credentials.json', out)
+        self.assertNotIn(' porta a ', out)
         # --unseal gives the directories of the CLIs back, and says devloop will not start.
         done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--unseal', '--params',
                                str(params))
@@ -771,6 +775,60 @@ class DryRunTests(OpsTestCase):
                           out)
         self.assertNotIn('chown -hR root:root', out)
         self.assertIn('devloop non parte finché non si riesegue lo script senza --unseal', out)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_setup_agent_user_keeps_the_files_of_the_clis_readable(self):
+        # #438: a version before wrote settings.json 600, and a CLI may keep a directory 700:
+        # once root's, the agent user still reads them, through its group, without writing.
+        agent = self.home / 'agent'
+        rules = agent / '.claude/rules'
+        rules.mkdir(parents=True)
+        rules.chmod(0o700)
+        (rules / 'style.md').write_text('x\n')
+        (rules / 'style.md').chmod(0o600)
+        (agent / '.claude/settings.json').write_text('{}\n')
+        (agent / '.claude/settings.json').chmod(0o600)
+        params = self.params(DEVLOOP_USER=ME, AGENT_USER='opsdry-noagent')
+        done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        for path in (rules, agent / '.claude/settings.json'):
+            self.assertIn(f'[dry-run] chown -hR root:opsdry-noagent {path}\n', done.stdout)
+            self.assertIn(f'[dry-run] chmod -R g+rX\\,go-w {path}\n', done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+        # The modes the same chmod gives: readable and enterable by the group, never writable.
+        subprocess.run(['chmod', '-R', 'g+rX,go-w', str(rules), str(agent / '.claude/settings.json')],
+                       check=True)
+        self.assertEqual(stat.S_IMODE(rules.stat().st_mode), 0o750)
+        self.assertEqual(stat.S_IMODE((rules / 'style.md').stat().st_mode), 0o640)
+        self.assertEqual(stat.S_IMODE((agent / '.claude/settings.json').stat().st_mode), 0o640)
+
+    def test_setup_agent_user_reports_the_links_that_lead_out_of_the_sealed_files(self):
+        # #438: chown -h changes a link, not what it leads to; the startup check follows it and
+        # refuses a target the agent user can change: setup says to make it root's.
+        agent = self.home / 'agent'
+        elsewhere = self.tmp / 'elsewhere'
+        elsewhere.mkdir()
+        (elsewhere / 'config.toml').write_text('x\n')
+        (agent / '.codex').mkdir(parents=True)
+        (agent / '.codex/config.toml').symlink_to(elsewhere / 'config.toml')
+        versions = agent / '.local/share/claude/versions'
+        versions.mkdir(parents=True)
+        (versions / '2.0.0').write_text('#!/bin/sh\n')
+        (versions / '2.0.0').chmod(0o755)
+        (agent / '.local/bin').mkdir()
+        (agent / '.local/bin/claude').symlink_to(versions / '2.0.0')  # inside ~/.local: fine
+        (agent / '.local/bin/agy').symlink_to(elsewhere / 'agy')
+        params = self.params(DEVLOOP_USER=ME, AGENT_USER='opsdry-noagent')
+        done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        out = done.stdout
+        self.assertIn(f'da fare a mano: {agent}/.codex/config.toml porta a '
+                      f'{elsewhere}/config.toml: renderlo di root', out)
+        self.assertIn(f'da fare a mano: {agent}/.local/bin/agy porta a {elsewhere}/agy', out)
+        self.assertNotIn(f'{agent}/.local/bin/claude porta a', out)
+        # chmod would follow the link given as an argument: not run on it.
+        self.assertIn(f'[dry-run] chown -hR root:opsdry-noagent {agent}/.codex/config.toml\n', out)
+        self.assertNotIn(f'chmod -R g+rX\\,go-w {agent}/.codex/config.toml', out)
         self.assertEqual(self.mutating_calls(), [])
 
     def test_the_lists_of_the_cli_files_are_those_of_the_startup_check(self):
@@ -1321,9 +1379,9 @@ class CheckHostTests(OpsTestCase):
         text = (OPS / 'host/check-host.sh').read_text()
         probe = re.search(r"^CLI_PROBE='(.*?)'$", text, re.S | re.M).group(1)
 
-        def run(kind, path):
+        def run(kind, path, env=None):
             return subprocess.run([BASH, '-c', probe, '_', kind, str(path)],
-                                  capture_output=True, text=True, timeout=60)
+                                  capture_output=True, text=True, timeout=60, env=env)
         (self.agent / '.claude').mkdir()
         (self.agent / '.claude/CLAUDE.md').write_text('x\n')
         done = run('sealed', self.agent / '.claude/CLAUDE.md')
@@ -1334,6 +1392,31 @@ class CheckHostTests(OpsTestCase):
         self.assertIn(f'creabile: {self.agent}/.codex', done.stderr)
         self.assertEqual(run('sealed', BASH).returncode, 0)
         self.assertEqual(run('bin', BASH).returncode, 0)
+        # The tools of the agent user's PATH (~/.local/bin first) are not those the probe runs.
+        hostile = self.tmp / 'hostile'
+        hostile.mkdir()
+        for name, body in {'stat': 'echo 0', 'find': 'exit 0', 'id': 'echo 65534'}.items():
+            (hostile / name).write_text(f'#!/bin/sh\n{body}\n')
+            (hostile / name).chmod(0o755)
+        done = run('sealed', self.agent / '.claude/CLAUDE.md',
+                   env=dict(os.environ, PATH=f'{hostile}:/usr/bin:/bin'))
+        self.assertIn(f'suo: {self.agent}/.claude', done.stderr)
+        # A link is followed: the file it leads to, and a loop, are refused.
+        elsewhere = self.tmp / 'elsewhere'
+        elsewhere.mkdir()
+        (elsewhere / 'config.toml').write_text('x\n')
+        (elsewhere / 'config.toml').chmod(0o444)
+        (self.agent / '.codex').mkdir(exist_ok=True)
+        (self.agent / '.codex/config.toml').symlink_to(elsewhere / 'config.toml')
+        done = run('sealed', self.agent / '.codex/config.toml')
+        self.assertIn(f'suo: {elsewhere}/config.toml', done.stderr)
+        (self.agent / '.claude/rules').symlink_to('rules')
+        done = run('sealed', self.agent / '.claude/rules')
+        self.assertIn(f'link non seguibile: {self.agent}/.claude/rules', done.stderr)
+        # What the agent user cannot read is refused too.
+        (self.agent / '.claude/CLAUDE.md').chmod(0)
+        done = run('sealed', self.agent / '.claude/CLAUDE.md')
+        self.assertIn(f'illeggibile: {self.agent}/.claude/CLAUDE.md', done.stderr)
 
     def test_a_correct_installation_has_no_errors(self):
         done, errors = self.check()

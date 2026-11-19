@@ -146,28 +146,56 @@ else
 fi
 
 if [ "$UNSEAL" != 1 ]; then
-    step "Istruzioni, configurazione e binari delle CLI: di root, non scrivibili (#438)"
+    step "Istruzioni, configurazione e binari delle CLI: di root, leggibili, non scrivibili (#438)"
+    # Del gruppo dell'utente degli agent, che li legge e attraversa (un settings.json 600 o una
+    # directory 700 di una versione precedente restano leggibili) ma non li scrive né ne cambia
+    # il modo: solo il proprietario, root, può.
+    # unsealed PATH: qualcosa in PATH non è di root:AGENT_GROUP, o è scrivibile da gruppo o
+    # altri, o non è leggibile (una directory attraversabile) dal gruppo. Senza il gruppo (in
+    # --dry-run, prima di creare l'utente) tutto va sigillato.
+    unsealed() {
+        getent group "$AGENT_GROUP" >/dev/null || return 0
+        [ -n "$(find "$1" \( ! -user root -o ! -group "$AGENT_GROUP" \
+            -o \( ! -type l \( -perm /022 -o ! -perm -040 \) \) \
+            -o \( -type d ! -perm -010 \) \) -print -quit 2>/dev/null)" ]
+    }
     for entry in "${AGENT_CLI_SEALED[@]}"; do
         path="$AGENT_HOME/$entry"
         if ! [ -e "$path" ] && ! [ -L "$path" ]; then
             ok "$path non esiste: $AGENT_USER non può crearlo"
-        elif [ -n "$(find "$path" \( ! -user root -o ! -group root -o \( ! -type l -perm /022 \) \) \
-                -print -quit 2>/dev/null)" ]; then
-            run chown -hR root:root "$path"
-            run chmod -R go-w "$path"
+        elif unsealed "$path"; then
+            run chown -hR "root:$AGENT_GROUP" "$path"
+            # chmod segue un link dato come argomento: il target si controlla qui sotto.
+            [ -L "$path" ] || run chmod -R g+rX,go-w "$path"
         else
-            ok "$path: di root, non scrivibile"
+            ok "$path: di root, leggibile da $AGENT_USER, non scrivibile"
         fi
     done
-    # Un eseguibile fuori da ~/.local: la directory del file a cui porta va resa di root a mano.
-    for cli in "${AGENT_CLIS[@]}"; do
-        exe="$AGENT_HOME/.local/bin/$cli"
-        [ -e "$exe" ] || continue
-        target=$(readlink -f -- "$exe")
-        case $target in
-            "$AGENT_HOME/.local/"* | "$AGENT_HOME/.codex/packages/"*) ;;
-            *) todo "$exe porta a $target: renderne la directory di root e non scrivibile da $AGENT_USER" ;;
-        esac
+    # Un link che porta fuori da ciò che è sigillato (anche un eseguibile di ~/.local/bin, una
+    # directory delle CLI o un file di istruzioni): il controllo all'avvio segue i link e
+    # rifiuta un target che l'utente degli agent può cambiare, che va quindi reso di root a mano.
+    home_real=$(readlink -f -- "$AGENT_HOME" 2>/dev/null || printf '%s' "$AGENT_HOME")
+    sealed_target() {
+        local entry
+        for entry in "${AGENT_CLI_SEALED[@]}"; do
+            case $1 in "$home_real/$entry" | "$home_real/$entry/"*) return 0 ;; esac
+        done
+        return 1
+    }
+    # Le directory delle CLI stesse (non ciò che contengono: sessioni e stato restano
+    # dell'utente degli agent) e tutto ciò che è sigillato.
+    for dir in "${AGENT_CLI_DIRS[@]}"; do
+        [ -L "$AGENT_HOME/$dir" ] \
+            && todo "$AGENT_HOME/$dir è un link: sostituirlo con una directory di root"
+    done
+    for entry in "${AGENT_CLI_SEALED[@]}"; do
+        path="$AGENT_HOME/$entry"
+        [ -e "$path" ] || [ -L "$path" ] || continue
+        while IFS= read -r -d '' link; do
+            target=$(readlink -f -- "$link") || target='(irrisolvibile)'
+            sealed_target "$target" \
+                || todo "$link porta a $target: renderlo di root, leggibile e non scrivibile da $AGENT_USER, o sostituire il link"
+        done < <(find "$path" -type l -print0 2>/dev/null)
     done
 fi
 

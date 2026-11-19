@@ -271,16 +271,23 @@ configurazione o i binari delle CLI per i turni dopo, per esempio aggiungendo a
   agent, una skill, un hook);
 - ciò che porta istruzioni, configurazione o binari (`AGENT_CLI_SEALED` di `ops/lib.sh`, come in
   `devloop/agentuser.py`: `~/.claude/settings.json`, scritto senza aggiornamenti automatici,
-  `~/.claude/CLAUDE.md`, `agents`, `commands`, `skills`, `hooks`, `output-styles` e `plugins` di
-  `~/.claude`, `~/.codex/config.toml`, `AGENTS.md`, `AGENTS.override.md`, `prompts`, `rules`,
-  `skills` e `packages` di `~/.codex`, `~/.gemini/settings.json`, `~/.gemini/GEMINI.md`,
-  `~/.gemini/antigravity-cli/settings.json` e tutto `~/.local`) diventa di `root:root`, senza
-  scrittura per gruppo e altri. Un eseguibile di `~/.local/bin` che porta fuori da `~/.local` e da
-  `~/.codex/packages` è segnalato da rendere di root a mano;
+  `~/.claude/CLAUDE.md`, `rules`, `agents`, `commands`, `skills`, `hooks`, `output-styles` e
+  `plugins` di `~/.claude`, `~/.codex/config.toml`, `AGENTS.md`, `AGENTS.override.md`,
+  `prompts`, `rules`, `skills` e `packages` di `~/.codex`, `~/.gemini/settings.json`,
+  `~/.gemini/GEMINI.md`, `~/.gemini/antigravity-cli/settings.json` e tutto `~/.local`) diventa di
+  root, del gruppo di `devloop-agent`, leggibile e attraversabile dal gruppo e senza scrittura
+  per gruppo e altri (`chmod -R g+rX,go-w`): un `settings.json` 600 o una directory 700 restano
+  leggibili da `devloop-agent`, che non li scrive e non ne cambia il modo. Un link che porta
+  fuori da ciò che è sigillato (anche un eseguibile di `~/.local/bin` che porta fuori da
+  `~/.local` e da `~/.codex/packages`), o una directory delle CLI che è un link, è segnalato da
+  rendere di root a mano: `chown -h` cambia il link, non il file a cui porta;
 - restano di `devloop-agent` le altre voci che le CLI hanno creato nelle loro directory:
   credenziali, sessioni (`~/.claude/projects`, `~/.codex/sessions`, che lo script crea), cache e
   log. Una CLI che dopo un aggiornamento vuole creare una voce nuova nella sua directory non ci
-  riesce: si apre e si richiude come qui sotto.
+  riesce: si apre e si richiude come qui sotto. Ciò che vi resta scrivibile non porta istruzioni
+  ai turni dopo: devloop avvia ogni turno di Claude Code senza la memoria automatica di
+  `~/.claude/projects` (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`) e senza i server MCP di
+  `~/.claude.json` (`--strict-mcp-config`).
 
 **Installare, aggiornare, fare un login.** A loop fermo, `--unseal` rende a `devloop-agent` le
 directory delle CLI e `~/.local`; dopo l'installazione, il login o l'aggiornamento (e un avvio di
@@ -321,7 +328,10 @@ manca; `check-host.sh` lo considera un errore). All'avvio di `tick` e `run` devl
 legga l'overlay, che non scriva nulla in `.git` né le directory che contengono worktree e turni,
 che scriva nelle directory dei suoi turni, e che non possa scrivere, possedere, creare,
 rinominare o rimuovere le directory delle CLI, i file e le directory elencati sopra, gli
-eseguibili di `~/.local/bin` e il file a cui portano, con la sua directory; altrimenti non parte.
+eseguibili di `~/.local/bin` e il file a cui portano, con la sua directory, né ciò a cui porta un
+link lungo questi percorsi o dentro di essi, e che possa leggerli; altrimenti non parte. Il
+controllo, come quello di `check-host.sh`, usa solo gli strumenti del sistema (`/usr/bin`,
+`/bin`), mai quelli di `~/.local/bin`.
 
 Le **CLI** e i loro login non sono automatizzati: il login è interattivo e ogni fornitore ha il
 suo installatore. Tutto come utente `devloop-agent` (`sudo -iu devloop-agent`), dopo

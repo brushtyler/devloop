@@ -224,13 +224,25 @@ fi
 # Come il controllo all'avvio di devloop (devloop/agentuser.py), come l'utente degli agent:
 # fixed PATH, PATH non è scrivibile né suo, e né PATH né una directory sopra si crea, si rinomina
 # o si rimuove (in una directory scrivibile solo lo sticky bit protegge una voce, e solo se né la
-# voce né la directory sono sue); sealed PATH, nemmeno nulla dentro PATH è scrivibile o suo;
-# bin PATH, anche il file a cui porta PATH, e la sua directory sigillata.
-CLI_PROBE='me=$(id -u); bad=0
+# voce né la directory sono sue), e un link lungo il percorso porta, un passo alla volta, a un
+# percorso fixed (un link illeggibile o una catena che non finisce è rifiutata); sealed PATH,
+# nemmeno nulla dentro PATH è scrivibile o suo, tutto è leggibile e le directory attraversabili,
+# e un link dentro porta a un percorso sealed; bin PATH, anche il file a cui porta PATH, e la sua
+# directory sigillata. Solo gli strumenti del sistema: il PATH dell'utente degli agent comincia
+# da ~/.local/bin, che controlla proprio sull'installazione da rifiutare.
+CLI_PROBE='PATH=/usr/bin:/bin; me=$(id -u); bad=0; n=0
+declare -A seen
 mine() { [ "$(stat -c %u -- "$1" 2>/dev/null)" = "$me" ]; }
 no() { printf "    %s %s\n" "$1" "$2" >&2; bad=1; }
+to() {
+    n=$((n + 1))
+    if [ "$2" -ge 40 ] || [ "$n" -gt 1000 ] || ! T=$(readlink -- "$1"); then
+        no "link non seguibile:" "$1"; return 1
+    fi
+    case $T in /*) ;; *) T=${1%/*}/$T ;; esac
+}
 fixed() {
-    local q=$1 d
+    local q=$1 h=${2:-0} d
     [ -e "$q" ] && [ -w "$q" ] && no "scrivibile:" "$q"
     while [ "$q" != / ] && [ -n "$q" ]; do
         mine "$q" && no "suo:" "$q"
@@ -239,22 +251,29 @@ fixed() {
             if ! [ -e "$q" ] && ! [ -L "$q" ]; then no "creabile:" "$q"
             elif ! [ -k "$d" ] || mine "$q" || mine "$d"; then no "sostituibile:" "$q"; fi
         fi
+        [ -L "$q" ] && to "$q" "$h" && fixed "$T" $((h + 1))
         q=$d
     done
 }
 sealed() {
-    local w
+    local c l w
     fixed "$1"
-    [ -e "$1" ] || return 0
-    w=$(find "$1" \( -writable -o -user "$me" \) -print -quit 2>/dev/null)
+    [ -e "$1" ] && c=$(readlink -e -- "$1") || return 0
+    [ -n "${seen[$c]}" ] && return 0
+    seen[$c]=1
+    w=$(find -H "$1" \( -writable -o -user "$me" \) -print -quit 2>/dev/null)
     [ -z "$w" ] || no "scrivibile o suo:" "$w"
+    w=$(find -H "$1" ! -type l \( ! -readable -o -type d ! -executable \) -print -quit 2>/dev/null)
+    [ -z "$w" ] || no "illeggibile:" "$w"
+    while IFS= read -r -d "" l; do
+        to "$l" 0 && sealed "$T"
+    done < <(find -H "$1" -mindepth 1 -type l -print0 2>/dev/null)
 }
 case $1 in
     fixed) fixed "$2" ;;
     sealed) sealed "$2" ;;
     bin) fixed "$2"
-         t=$(readlink -f -- "$2" 2>/dev/null) && [ -e "$t" ] && [ "$t" != "$2" ] \
-             && { fixed "$t"; sealed "${t%/*}"; } ;;
+         t=$(readlink -e -- "$2") && [ "$t" != "$2" ] && { fixed "$t"; sealed "${t%/*}"; } ;;
 esac
 [ "$bad" = 0 ]'
 for dir in "${AGENT_CLI_DIRS[@]}"; do

@@ -2071,16 +2071,28 @@ dispatcher's user, as before ([reference](reference.md#agent-user)).
   the CLIs there (such as `~/.claude.json`, which stays its own) but cannot rename nor remove
   root's. `~/.claude`, `~/.codex`, `~/.gemini`, `~/.gemini/antigravity-cli` and `~/.local` are
   root's: it enters them but creates nothing there (an instruction file, an agent, a skill, a
-  hook). What carries instructions, configuration or binaries is root's and not writable:
-  `CLI_SEALED` in `devloop/agentuser.py` (`settings.json`, `CLAUDE.md`, `agents`, `commands`,
-  `skills`, `hooks`, `output-styles` and `plugins` of `~/.claude`; `config.toml`, `AGENTS.md`,
+  hook). What carries instructions, configuration or binaries is root's, of the group of
+  `devloop-agent`, which reads it but cannot write it: `CLI_SEALED` in `devloop/agentuser.py`
+  (`settings.json`, `CLAUDE.md`, `rules`, `agents`, `commands`, `skills`, `hooks`,
+  `output-styles` and `plugins` of `~/.claude`; `config.toml`, `AGENTS.md`,
   `AGENTS.override.md`, `prompts`, `rules`, `skills` and `packages` of `~/.codex`;
   `~/.gemini/settings.json`, `~/.gemini/GEMINI.md`, `~/.gemini/antigravity-cli/settings.json`;
   all of `~/.local`). The startup check above also refuses to start when, as `devloop-agent`, it
   can write, own (an owner changes the mode), create, rename or remove any of them, or a CLI of
   `~/.local/bin`, the file it leads to and that file's directory; in a directory above them that
   it can write, only the sticky bit protects an entry, and only when neither the entry nor the
-  directory is its own.
+  directory is its own. A link along these paths, or inside them, is followed one step at a
+  time, and what it leads to must be protected the same way; a link that cannot be followed (a
+  loop) is refused. It also refuses a file of them that `devloop-agent` cannot read, or a
+  directory it cannot enter. The check runs only the system's tools (`PATH=/usr/bin:/bin`),
+  never those of `~/.local/bin`, which comes first in the PATH of `devloop-agent`.
+- What the CLIs keep writable must not carry instructions into the next turn either. Every
+  claude turn runs with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, whatever the operator's
+  environment says: the auto memory of `~/.claude/projects/<project>/memory`, shared by the
+  worktrees of a repository, is neither loaded nor written. It runs with `--strict-mcp-config`:
+  the MCP servers of `~/.claude.json`, which `devloop-agent` writes, are ignored, and only those
+  of a `--mcp-config` in `write_args` or `review_args` count (`agents.CLAUDE_TURN_ENV`,
+  `agents.build_command`).
 
 `ops/host/setup-agent-user.sh` creates the user, its directories, the ACLs and the sudoers rule,
 and makes the files of the CLIs root's; `ops/host/check-host.sh` verifies them
