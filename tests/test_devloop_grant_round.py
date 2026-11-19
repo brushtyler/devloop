@@ -1,0 +1,443 @@
+"""devloop: the supervisor grants a review round within the caps of the code (#405, ADR 0005, P5-1).
+
+``[delegations] rounds`` (off by default) sends a PR at its round limit to the supervisor as
+``round_grantable`` when every condition of the delegation holds; ``/devloop grant-round
+<reason>`` raises the limit of that PR only, by one round, with a ``supervision`` record, a ledger
+``event`` and a ``grant`` in the turn journal. The caps are constants of the code that the
+configuration may only lower; a finding of the review says whether it concerns security, and one
+that does not say counts as one.
+"""
+
+import dataclasses
+import unittest
+
+from devloop import acceptance, config, markdown, review, schema, supervision
+from devloop.config import ConfigError, Delegations, parse_delegations
+from devloop.ledger import Ledger
+from devloop.planning import Snapshot, findings_decreasing, last_counted_ci, plan
+from test_devloop import CFG, SHA1, SHA2, finding, norm, pr, raw_review
+from test_devloop_supervision import (AUTO, HUMAN, REVIEW, SUPER, SUPERVISOR_LOGIN, Case, crash)
+
+ON = dataclasses.replace(AUTO, max_review_rounds=1, delegations=Delegations(rounds=True))
+OFF = dataclasses.replace(ON, delegations=Delegations())
+REASON = ('La CI è fallita per un test instabile, non per la modifica: corretto con #999.\n'
+          'Causa: CI.')
+
+
+def ci_round(round_no=1, head=SHA1, previous_open=()):
+    return review.ci_failure_review(failed_checks=['Unit Tests'], log_tail='boom',
+                                    previous_open=list(previous_open), round_no=round_no,
+                                    max_rounds=round_no, head_sha=head)
+
+
+def granted_record(comment):
+    return markdown.render_supervision({'command': 'grant-round', 'by': SUPERVISOR_LOGIN,
+                                        'reason': 'x', 'comment': comment,
+                                        'outcome': 'granted'}, 't')
+
+
+class GrantCase(Case):
+    def make(self, cfg=ON, *outputs, ledger=True):
+        d = super().make(cfg, *outputs)
+        if ledger:
+            d.ledger = Ledger(self.gh)
+            # The ledger's verification of the local tests reads the tree of the checkout.
+            self.ws.tree = lambda path: 'e' * 40
+        return d
+
+    def record(self, record):
+        self.gh.say(100, 'brushtyler', markdown.publishable('review', 'review', record))
+
+    def snapshot_pr(self, d):
+        (found,) = [p for p in d.snapshot().prs if p.number == 100]
+        return found
+
+    def at_limit(self, d, *records):
+        """Record ``records`` in the thread of PR #100 and escalate it at its round limit."""
+        for record in records:
+            self.record(record)
+        d._do_round_limit(self.snapshot_pr(d))
+        return self.escalations(100)[-1]
+
+    def body(self):
+        return self.gh.threads[100][-1]['body']
+
+
+class RoutingTests(GrantCase):
+    def test_off_by_default_the_round_limit_stays_with_the_operator(self):
+        self.assertFalse(config.load_config().delegations.rounds)
+        self.assertFalse(AUTO.delegations.rounds)
+        d = self.make(OFF)
+        record = self.at_limit(d, ci_round())
+        self.assertEqual((record['class'], record['to']), ('round_limit', 'operator'))
+        self.assertEqual(self.gh.labels[100], {HUMAN})
+        self.assertIn('alzando `max_review_rounds`', self.body())
+        self.assertNotIn('grant-round', self.body())
+        self.assertNotIn('andrebbe al supervisore', self.body())
+
+    def test_a_grantable_limit_goes_to_the_supervisor(self):
+        d = self.make()
+        record = self.at_limit(d, ci_round())
+        self.assertEqual({k: record[k] for k in ('class', 'critical', 'to', 'head', 'resume')},
+                         {'class': 'round_grantable', 'critical': False, 'to': 'supervisor',
+                          'head': SHA1, 'resume': REVIEW})
+        self.assertNotIn('step', record)  # nothing a retry would run
+        self.assertEqual(self.gh.labels[100], {SUPER})
+        self.assertIn('`/devloop grant-round <motivo>`', self.body())
+        self.assertIn('analisi delle cause', self.body())
+        # Nothing runs on the PR until the supervisor decides.
+        self.assertEqual(self.tick(d), [])
+
+    def test_an_open_security_finding_keeps_the_operator(self):
+        d = self.make()
+        record = self.at_limit(d, norm(raw_review('request_changes',
+                                                  [finding(security=True)])))
+        self.assertEqual((record['class'], record['to']), ('round_limit', 'operator'))
+        self.assertIn('finding di sicurezza', self.body())
+        self.assertIn('`1/', self.body())  # the key of the finding
+
+    def test_a_finding_that_does_not_say_counts_as_security(self):
+        old = ci_round()
+        del old['blocking_findings'][0]['security']  # a record written before #405
+        d = self.make()
+        record = self.at_limit(d, old)
+        self.assertEqual(record['class'], 'round_limit')
+        self.assertIn('finding che non dicono se lo sono', self.body())
+
+    def test_neither_a_ci_round_nor_fewer_findings(self):
+        d = self.make()
+        record = self.at_limit(d, norm(raw_review('request_changes', [finding()])))
+        self.assertEqual((record['class'], record['to']), ('round_limit', 'operator'))
+        self.assertIn('non sono meno di quelli del round precedente', self.body())
+        self.assertIn('andrebbe al supervisore', self.body())
+
+    def test_fewer_open_findings_than_the_round_before(self):
+        cfg = dataclasses.replace(ON, max_review_rounds=2)
+        first = norm(raw_review('request_changes', [finding('a'), finding('b')]))
+        second = norm(raw_review('request_changes', [finding('c')], previous=[
+            {'id': 'R1-1', 'status': 'resolved', 'note': 'ok'},
+            {'id': 'R1-2', 'status': 'resolved', 'note': 'ok'}]),
+            previous_open=review.open_findings([first]), round_no=2)
+        d = self.make(cfg)
+        self.assertEqual(self.at_limit(d, first, second)['class'], 'round_grantable')
+
+    def test_what_makes_the_grant_the_operators(self):
+        cases = {
+            'the supervisor implemented the PR': (
+                dataclasses.replace(ON, supervisor=CFG.implementer), lambda gh: None,
+                'il supervisore ha implementato'),
+            'phase:design': (ON, lambda gh: gh.labels[7].add('phase:design'), 'phase:design'),
+            'a merge mode other than auto': (
+                dataclasses.replace(ON, merge=config.MergePolicy(mode='auto',
+                                                                 levels=((1, 'strict'),))),
+                lambda gh: None, '`strict`'),
+        }
+        for name, (cfg, change, why) in cases.items():
+            with self.subTest(case=name):
+                d = self.make(cfg)
+                change(self.gh)
+                record = self.at_limit(d, ci_round())
+                self.assertEqual((record['class'], record['to']), ('round_limit', 'operator'))
+                self.assertIn(why, self.body())
+
+
+class CapTests(GrantCase):
+    def test_the_cap_of_the_pr(self):
+        cfg = dataclasses.replace(ON, max_review_rounds=1)
+        d = self.make(cfg)
+        self.gh.say(100, 'brushtyler', granted_record(1))
+        self.gh.say(100, 'brushtyler', granted_record(2))
+        record = self.at_limit(d, ci_round(1), ci_round(2), ci_round(3))
+        self.assertEqual(record['class'], 'round_limit')
+        self.assertIn('già stati concessi 2 round', self.body())
+
+    def test_the_configuration_lowers_the_cap_of_the_pr(self):
+        cfg = dataclasses.replace(ON, delegations=Delegations(rounds=True, max_rounds_per_pr=1))
+        d = self.make(cfg)
+        self.gh.say(100, 'brushtyler', granted_record(1))
+        record = self.at_limit(d, ci_round(1), ci_round(2))
+        self.assertEqual(record['class'], 'round_limit')
+        self.assertIn('`[delegations] max_rounds_per_pr` = 1', self.body())
+
+    def test_the_daily_cap_counts_every_pr(self):
+        d = self.make()
+        for n in range(supervision.MAX_DAILY_GRANTS):
+            d.ledger.journal.grant('rounds', 200 + n, 9000 + n, SUPERVISOR_LOGIN)
+        record = self.at_limit(d, ci_round())
+        self.assertEqual(record['class'], 'round_limit')
+        self.assertIn('il massimo giornaliero', self.body())
+
+    def test_the_configuration_lowers_the_daily_cap(self):
+        cfg = dataclasses.replace(ON, delegations=Delegations(rounds=True, max_grants_per_day=0))
+        record = self.at_limit(self.make(cfg), ci_round())
+        self.assertEqual(record['class'], 'round_limit')
+        self.assertIn('`[delegations] max_grants_per_day` = 0', self.body())
+
+    def test_without_a_journal_the_daily_cap_is_not_verifiable(self):
+        record = self.at_limit(self.make(ledger=False), ci_round())
+        self.assertEqual(record['class'], 'round_limit')
+        self.assertIn('non sono verificabili', self.body())
+
+    def test_the_caps_are_constants_the_configuration_may_only_lower(self):
+        self.assertEqual((supervision.MAX_GRANTED_ROUNDS, supervision.MAX_DAILY_GRANTS), (2, 3))
+        self.assertEqual(parse_delegations({}), Delegations(rounds=False, max_rounds_per_pr=2,
+                                                            max_grants_per_day=3))
+        self.assertEqual(parse_delegations({'rounds': True, 'max_rounds_per_pr': 1,
+                                            'max_grants_per_day': 0}),
+                         Delegations(rounds=True, max_rounds_per_pr=1, max_grants_per_day=0))
+        for table in ({'max_rounds_per_pr': 3}, {'max_grants_per_day': 4},
+                      {'max_rounds_per_pr': -1}, {'max_grants_per_day': True},
+                      {'rounds': 'yes'}, {'max_rounds': 1}):
+            with self.subTest(table=table):
+                with self.assertRaises(ConfigError):
+                    parse_delegations(table)
+        # The local overlay may set the keys, and is held to the same caps.
+        data = config.load_data()
+        on = config.apply_overlay(data, {'delegations': {'rounds': True}})
+        self.assertTrue(config.parse_config(on).delegations.rounds)
+        with self.assertRaises(ConfigError):
+            config.parse_config(config.apply_overlay(
+                data, {'delegations': {'max_rounds_per_pr': 5}}))
+        # Revoked from the next tick, without a restart.
+        self.assertIn('delegations', config.LIVE_KEYS)
+
+
+class GrantTests(GrantCase):
+    def escalate(self, d):
+        self.assertEqual(self.at_limit(d, ci_round())['class'], 'round_grantable')
+
+    def test_a_grant_raises_the_limit_of_the_pr_only(self):
+        d = self.make()
+        self.escalate(d)
+        self.gh.command(100, '/devloop grant-round ' + REASON)
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertEqual(self.gh.labels[100], {REVIEW})
+        (decision,) = self.decisions(100)
+        self.assertEqual({k: decision[k] for k in ('command', 'by', 'outcome', 'class', 'head',
+                                                   'granted', 'cap', 'left', 'daily',
+                                                   'daily_cap', 'daily_left')},
+                         {'command': 'grant-round', 'by': SUPERVISOR_LOGIN,
+                          'outcome': 'granted', 'class': 'round_grantable', 'head': SHA1,
+                          'granted': 1, 'cap': 2, 'left': 1, 'daily': 1, 'daily_cap': 3,
+                          'daily_left': 2})
+        self.assertEqual(decision['reason'], REASON)  # the analysis of the causes, whole
+        events = [r for r in self.gh.records(100, 'ledger')
+                  if r.get('event') == 'delegation_grant']
+        self.assertEqual(len(events), 1)
+        self.assertEqual({k: events[0][k] for k in ('delegation', 'by', 'granted', 'cap', 'left',
+                                                    'daily', 'daily_cap', 'daily_left')},
+                         {'delegation': 'rounds', 'by': SUPERVISOR_LOGIN, 'granted': 1,
+                          'cap': 2, 'left': 1, 'daily': 1, 'daily_cap': 3, 'daily_left': 2})
+        (grant,) = d.ledger.journal.grants()
+        self.assertEqual((grant['delegation'], grant['number'], grant['by']),
+                         ('rounds', 100, SUPERVISOR_LOGIN))
+        # The limit of the PR is max_review_rounds plus the round granted; the setting is
+        # unchanged.
+        self.assertEqual(d.cfg.max_review_rounds, 1)
+        p = self.snapshot_pr(d)
+        self.assertEqual(p.granted_rounds, 1)
+        kinds = [(a.kind, a.number) for a in plan(d.snapshot(), d.cfg)]
+        self.assertNotIn(('round_limit', 100), kinds)
+        self.assertIn(('apply_review', 100), kinds)
+        # The command is spent: it is never applied again.
+        self.assertNotIn(('supervise', 100), self.tick(d))
+        self.assertEqual(len(self.decisions(100)), 1)
+
+    def test_a_grant_without_a_reason_is_answered_and_not_applied(self):
+        d = self.make()
+        self.escalate(d)
+        self.gh.command(100, '/devloop grant-round')
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertEqual(self.gh.labels[100], {SUPER})
+        self.assertEqual(self.decisions(100)[-1]['outcome'], 'refused')
+        self.assertIn('manca il testo', self.body())
+        self.assertEqual(d.ledger.journal.grants(), [])
+
+    def test_a_grant_after_the_revocation_goes_to_the_operator(self):
+        d = self.make()
+        self.escalate(d)
+        d.cfg = OFF  # the operator turned the delegation off while it waited
+        self.gh.command(100, '/devloop grant-round ' + REASON)
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertEqual(self.gh.labels[100], {HUMAN})
+        self.assertEqual(self.decisions(100)[-1]['outcome'], 'refused')
+        self.assertEqual(self.escalations(100)[-1]['class'], 'round_limit')
+        self.assertTrue(self.escalations(100)[-1]['critical'])
+        self.assertEqual(d.ledger.journal.grants(), [])
+
+    def test_a_grant_rechecks_the_conditions_on_the_thread_read_now(self):
+        d = self.make()
+        self.escalate(d)
+        # A security finding, recorded after the escalation in the same round.
+        record = norm(raw_review('request_changes', [finding(security=True)]))
+        self.record(record)
+        self.gh.command(100, '/devloop grant-round ' + REASON)
+        self.tick(d)
+        self.assertEqual(self.gh.labels[100], {HUMAN})
+        self.assertEqual(self.decisions(100)[-1]['outcome'], 'refused')
+        self.assertIn('sicurezza', self.gh.threads[100][-2]['body'])
+
+    def test_a_grant_of_a_superseded_head_is_refused(self):
+        d = self.make()
+        self.escalate(d)
+        self.gh.head = SHA2
+        self.gh.command(100, '/devloop grant-round ' + REASON)
+        self.tick(d)
+        self.assertEqual(self.gh.labels[100], {SUPER})
+        self.assertEqual(self.decisions(100)[-1]['outcome'], 'refused')
+        self.assertIn('input superato', self.body())
+
+    def test_a_grant_on_another_class_is_refused(self):
+        d = self.make(ON, crash())
+        self.assertEqual(self.tick(d), [('review', 100)])
+        self.assertEqual(self.gh.labels[100], {SUPER})
+        self.gh.command(100, '/devloop grant-round ' + REASON)
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertEqual(self.gh.labels[100], {SUPER})
+        self.assertEqual(self.decisions(100)[-1]['outcome'], 'refused')
+        self.assertIn('vale solo per un\'escalation `round_grantable`', self.body())
+        self.assertIn('`/devloop retry`', self.body())
+
+    def test_a_retry_on_a_grantable_limit_is_refused(self):
+        d = self.make()
+        self.escalate(d)
+        self.gh.command(100, '/devloop retry')
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertEqual(self.gh.labels[100], {SUPER})
+        self.assertEqual(self.decisions(100)[-1]['outcome'], 'refused')
+        self.assertIn('`/devloop grant-round <motivo>`', self.body())
+
+    def test_the_operator_does_not_grant_with_the_command(self):
+        d = self.make(OFF)
+        self.at_limit(d, ci_round())
+        self.gh.command(100, '/devloop grant-round ' + REASON, login='brushtyler')
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertEqual(self.gh.labels[100], {HUMAN})
+        self.assertEqual(self.decisions(100)[-1]['outcome'], 'refused')
+        self.assertIn('delega del supervisore', self.body())
+
+    def test_a_round_that_reaches_the_limit_is_routed_too(self):
+        # The limit reached by applying a round that asked for changes: the round decreased the
+        # open findings, so the next one is the supervisor's to grant.
+        cfg = dataclasses.replace(ON, max_review_rounds=2)
+        first = norm(raw_review('request_changes', [finding('a'), finding('b')]))
+        second = raw_review('request_changes', [finding('c')], previous=[
+            {'id': 'R1-1', 'status': 'resolved', 'note': 'ok'},
+            {'id': 'R1-2', 'status': 'resolved', 'note': 'ok'}])
+        d = self.make(cfg, second)
+        self.record(first)
+        self.gh.say(100, 'brushtyler', markdown.publishable('fix', 'fix', {
+            'round': 1, 'head_sha': SHA1, 'responses': []}))
+        self.assertEqual(self.tick(d), [('review', 100)])
+        self.assertEqual(self.gh.labels[100], {SUPER})
+        self.assertEqual(self.escalations(100)[-1]['class'], 'round_grantable')
+
+    def test_a_round_that_reaches_the_limit_without_the_conditions(self):
+        d = self.make(ON, raw_review('request_changes', [finding()]))
+        self.assertEqual(self.tick(d), [('review', 100)])
+        self.assertEqual(self.gh.labels[100], {HUMAN})
+        record = self.escalations(100)[-1]
+        self.assertEqual(record['class'], 'round_limit')
+        self.assertIn('la delega dei round non si applica', self.body())
+
+
+class RoundLimitTests(unittest.TestCase):
+    def test_the_limit_of_a_pr_counts_its_granted_rounds(self):
+        cfg = dataclasses.replace(CFG, max_review_rounds=1)
+        rounds = [norm(raw_review('request_changes', [finding()]))]
+        fixes = [{'round': 1, 'head_sha': SHA1, 'responses': []}]
+        waiting = pr(reviews=rounds, fixes=fixes, head=SHA2)
+        self.assertEqual([a.kind for a in plan(Snapshot([waiting], [], []), cfg)],
+                         ['round_limit'])
+        waiting.granted_rounds = 1
+        self.assertEqual([a.kind for a in plan(Snapshot([waiting], [], []), cfg)], ['review'])
+
+    def test_the_latest_counted_round_and_the_trend_of_findings(self):
+        agent = norm(raw_review('request_changes', [finding('a'), finding('b')]))
+        self.assertFalse(last_counted_ci([agent]))
+        self.assertTrue(last_counted_ci([agent, ci_round(2)]))
+        self.assertFalse(last_counted_ci([]))
+        self.assertFalse(findings_decreasing([agent]))
+        fewer = norm(raw_review('request_changes', [], previous=[
+            {'id': 'R1-1', 'status': 'resolved', 'note': 'ok'},
+            {'id': 'R1-2', 'status': 'unresolved', 'note': 'no'}]),
+            previous_open=review.open_findings([agent]), round_no=2)
+        self.assertTrue(findings_decreasing([agent, fewer]))
+        same = norm(raw_review('request_changes', [finding('c')], previous=[
+            {'id': 'R1-1', 'status': 'resolved', 'note': 'ok'},
+            {'id': 'R1-2', 'status': 'unresolved', 'note': 'no'}]),
+            previous_open=review.open_findings([agent]), round_no=2)
+        self.assertFalse(findings_decreasing([agent, same]))
+
+
+class SecurityFieldTests(unittest.TestCase):
+    def test_every_finding_of_the_review_says_whether_it_is_of_security(self):
+        review_schema = schema.load_schema('review')
+        for kind in ('blocking_findings', 'non_blocking_findings'):
+            item = review_schema['properties'][kind]['items']
+            self.assertIn('security', item['required'])
+            self.assertEqual(item['properties']['security'], {'type': 'boolean'})
+            raw = raw_review('request_changes', [finding()])
+            raw[kind] = [{k: v for k, v in finding().items() if k != 'security'}]
+            with self.subTest(kind=kind), self.assertRaises(schema.SchemaError):
+                review.normalize_review(raw, previous_open=[], round_no=1, max_rounds=3,
+                                        head_sha=SHA1, ci='pass', reviewer='codex')
+        record = norm(raw_review('request_changes', [finding(security=True)]))
+        self.assertIs(record['blocking_findings'][0]['security'], True)
+
+    def test_the_findings_devloop_writes_are_not_of_security(self):
+        self.assertIs(ci_round()['blocking_findings'][0]['security'], False)
+        derived = acceptance.acceptance_findings(['criterio'], None)
+        self.assertTrue(derived)
+        self.assertTrue(all(f['security'] is False for f in derived))
+
+    def test_the_published_review_marks_a_security_finding(self):
+        text = markdown.render_review(norm(raw_review('request_changes', [
+            finding('falla', security=True), finding('stile', line=4)])), SHA1)
+        self.assertIn('falla *(sicurezza)*', text)
+        self.assertNotIn('stile *(sicurezza)*', text)
+
+    def test_the_review_prompt_asks_for_the_field(self):
+        from devloop.context import PROMPT_DIR
+        prompt = ' '.join((PROMPT_DIR / 'review.md').read_text(encoding='utf-8').split())
+        self.assertIn('set `security` to `true` on every finding', prompt)
+        self.assertIn('When in doubt, set it to `true`', prompt)
+
+
+class CommandTests(unittest.TestCase):
+    def test_parsing(self):
+        cmd = supervision.supervisor_command
+        self.assertEqual(cmd('/devloop grant-round CI instabile\n\nCausa: CI.'),
+                         ('grant-round', 'CI instabile\n\nCausa: CI.'))
+        self.assertEqual(cmd('/devloop grant-round\nCausa nel diario #76.'),
+                         ('grant-round', 'Causa nel diario #76.'))
+        self.assertEqual(cmd('/devloop grant-round   \n\n'), ('grant-round', None))
+
+    def test_a_grant_record_is_valid(self):
+        body = markdown.render_supervision({'command': 'grant-round', 'by': 'x',
+                                            'reason': REASON, 'outcome': 'granted',
+                                            'granted': 1}, 't')
+        self.assertEqual(markdown.read_marker(body, 'supervision')['outcome'], 'granted')
+        self.assertFalse(supervision.critical(supervision.ROUND_GRANTABLE))
+        self.assertTrue(supervision.critical('round_limit'))
+
+
+class DocsTests(unittest.TestCase):
+    def test_the_delegation_is_documented(self):
+        from devloop.context import PROMPT_DIR
+        root = PROMPT_DIR.parents[1]
+        guide = ' '.join((root / 'docs' / 'devloop' / 'guide.md').read_text(
+            encoding='utf-8').split())
+        self.assertIn('#### Granting a review round', (root / 'docs' / 'devloop' / 'guide.md')
+                      .read_text(encoding='utf-8'))
+        self.assertIn('**off by default**: `[delegations] rounds = false`', guide)
+        self.assertIn('- `/devloop grant-round <reason>` grants one more review round', guide)
+        reference = ' '.join((root / 'docs' / 'devloop' / 'reference.md').read_text(
+            encoding='utf-8').split())
+        self.assertIn('`[delegations]` (#405, ADR 0005)', reference)
+        toml = (root / 'devloop' / 'config.toml').read_text(encoding='utf-8')
+        self.assertIn('[delegations]\nrounds = false\n', toml)
+
+
+if __name__ == '__main__':
+    unittest.main()

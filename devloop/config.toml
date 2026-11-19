@@ -275,6 +275,20 @@ enabled = false
 # model = "unmetered_quota"
 # reason = "claude reports its estimate only when a turn completes"
 
+# The delegations of the operator to the supervisor (issue #405, ADR 0005, P5-1). rounds: in merge
+# mode "auto", a PR at the round limit whose conditions hold (the latest counted round a CI
+# failure or fewer open blocking findings than the round before, no open security finding, the
+# conditions of the supervisor's other escalations) goes to the supervisor as round_grantable, and
+# `/devloop grant-round <reason>` grants it one more round, with the analysis of the causes in the
+# reason. max_rounds_per_pr and max_grants_per_day may only lower the caps of the code (2 rounds
+# per PR, 3 grants per UTC day, ADR 0005, D4): a higher value is refused at startup. Off here:
+# turning it on is the operator's decision (ADR 0005, D10); turned off, it is revoked from the
+# next tick and the round limit goes to the operator, as before.
+[delegations]
+rounds = false
+# max_rounds_per_pr = 2
+# max_grants_per_day = 3
+
 # Documentation map (issue #203): code paths and the documents that describe them. A key is a
 # directory prefix ending in "/" or a file, relative to the root, with no pattern characters;
 # each value lists one or more documents of the repository (a pin does not extract them, #210).

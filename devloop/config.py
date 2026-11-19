@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .localtests import MODES as LOCAL_TESTS_MODES
 from .policy import MAX_LEVEL, MIN_LEVEL, ZERO_LEVEL, ReviewPolicy
+from .supervision import MAX_DAILY_GRANTS, MAX_GRANTED_ROUNDS
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / 'config.toml'
 # The root of the running dispatcher's installation (a pinned checkout, see docs/devloop/guide.md):
@@ -196,6 +197,19 @@ class BudgetPolicy:
 
 
 @dataclass(frozen=True)
+class Delegations:
+    """``[delegations]`` (#405, ADR 0005, P5-1): the delegations of the operator to the
+    supervisor, each off by default (D10) and revoked by turning it off. ``rounds``: the
+    supervisor may grant one more review round to a PR at the round limit
+    (``/devloop grant-round``). ``max_rounds_per_pr`` and ``max_grants_per_day`` lower the caps
+    of the code (``supervision.MAX_GRANTED_ROUNDS`` and ``MAX_DAILY_GRANTS``), never raise
+    them."""
+    rounds: bool = False
+    max_rounds_per_pr: int = MAX_GRANTED_ROUNDS
+    max_grants_per_day: int = MAX_DAILY_GRANTS
+
+
+@dataclass(frozen=True)
 class DocsMap:
     """``[docs] map`` (#203): code paths and the documents that describe them. A key is a
     directory prefix ending in ``/`` or a file, relative to the root; ``entries`` holds
@@ -363,6 +377,8 @@ class Config:
     journal_max_mib: int = 64
     # The budget envelope of each story (#365, ADR 0004, P2-5a). Off by default (D8).
     budget: BudgetPolicy = field(default_factory=BudgetPolicy)
+    # The delegations to the supervisor (#405, ADR 0005, P5-1). Each off by default (D10).
+    delegations: Delegations = field(default_factory=Delegations)
     agent_timeout_seconds: int = 3600
     test_timeout_seconds: int = 3600
     agent_command_timeout_seconds: int = 600
@@ -713,6 +729,32 @@ def parse_ci(table):
                 raise ConfigError(f'ci.{key}: expected a whole number of minutes, at least {low}')
             values[key] = value
     return CIPolicy(**values)
+
+
+def parse_delegations(table):
+    """``[delegations]`` (#405, ADR 0005, P5-1): ``rounds``, true or false (default false);
+    ``max_rounds_per_pr`` and ``max_grants_per_day``, whole numbers from 0 to the caps of the
+    code. A value above a cap is refused: the configuration and the overlay may only lower the
+    caps (D4)."""
+    if not isinstance(table, dict):
+        raise ConfigError('delegations: expected a table')
+    unknown = set(table) - {f.name for f in dataclasses.fields(Delegations)}
+    if unknown:
+        raise ConfigError(f'delegations: unknown keys {sorted(unknown)}')
+    values = {}
+    if 'rounds' in table:
+        if not isinstance(table['rounds'], bool):
+            raise ConfigError('delegations.rounds: expected true or false')
+        values['rounds'] = table['rounds']
+    for key, cap in (('max_rounds_per_pr', MAX_GRANTED_ROUNDS),
+                     ('max_grants_per_day', MAX_DAILY_GRANTS)):
+        if key in table:
+            value = table[key]
+            if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= cap:
+                raise ConfigError(f'delegations.{key}: expected a whole number from 0 to {cap}, '
+                                  'the cap of the code, which the configuration may only lower')
+            values[key] = value
+    return Delegations(**values)
 
 
 def parse_gc(table):
@@ -1116,6 +1158,7 @@ def parse_config(data, root=INSTALL_ROOT):
         report=parse_report(data.get('report', {})),
         ci=parse_ci(data.get('ci', {})),
         gc=parse_gc(data.get('gc', {})),
+        delegations=parse_delegations(data.get('delegations', {})),
         docs=parse_docs(data),
         review_policy=review_policy,
         **ints)
@@ -1162,6 +1205,7 @@ OVERLAY_KEYS = {
     'gc': dict.fromkeys(('pins', 'keep_pins', 'worktrees', 'logs', 'log_days',
                          'interval_minutes')),
     'docs': {'map': {'*': None}},
+    'delegations': dict.fromkeys(('rounds', 'max_rounds_per_pr', 'max_grants_per_day')),
     # Every key of [budget] (#365) is checked by ``parse_budget``, a token cap with its message.
     'budget': {'*': None},
 }
@@ -1223,7 +1267,8 @@ def load_config(path=None, local=None):
 
 # The keys ``devloop run`` reads again before each tick (#278): the operating limits. Any other
 # key, merge modes, pin, roles, trust, identities and ``state_dir`` included, needs a restart.
-LIVE_KEYS = ('max_open_prs', 'max_parked_prs', 'max_review_rounds')
+# ``delegations`` (#405) too, so that the operator revokes a delegation from the next tick.
+LIVE_KEYS = ('max_open_prs', 'max_parked_prs', 'max_review_rounds', 'delegations')
 
 
 class Reloader:

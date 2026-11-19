@@ -242,7 +242,8 @@ class ActionsMixin:
         review = ci_failure_review(failed_checks=pr.failed_checks, log_tail=log_tail,
                                    previous_open=open_findings(earlier, pr.closures),
                                    round_no=round_no,
-                                   max_rounds=self._last_round_allowed(pr.reviews),
+                                   max_rounds=self._last_round_allowed(pr.reviews,
+                                                                       pr.granted_rounds),
                                    head_sha=pr.head_sha)
         notes = []
         if voided:
@@ -383,10 +384,11 @@ class ActionsMixin:
         return format_ci_summary(pr.head_sha, summarize_checks(details)[0], jobs,
                                  conflict_base=conflict), jobs
 
-    def _last_round_allowed(self, reviews):
+    def _last_round_allowed(self, reviews, granted=0):
         """The number of the last round ``max_review_rounds`` allows, given the waived rounds
-        among ``reviews``: what records and prompts show as the limit."""
-        return self.cfg.max_review_rounds + len(waived_rounds(reviews))
+        among ``reviews`` and the rounds the supervisor ``granted`` (#405): what records and
+        prompts show as the limit."""
+        return self.cfg.max_review_rounds + granted + len(waived_rounds(reviews))
 
     def _open_round(self, pr, records):
         """Whether the round ``records`` is still open for this head: an agent round of the
@@ -455,9 +457,11 @@ class ActionsMixin:
                 why = ('approval was revoked because the base touched the PR'
                        if resync['reason'] == BASE_CHANGED else 'head was synced with the base')
                 self.log(f'  the {why} after round {resync["round"]}: this round does not count')
-        if counted > cfg.max_review_rounds:
+        # The limit of this PR: max_review_rounds plus the rounds the supervisor granted (#405).
+        limit = cfg.max_review_rounds + pr.granted_rounds
+        if counted > limit:
             return self._do_round_limit(pr)
-        max_rounds = cfg.max_review_rounds + round_no - counted
+        max_rounds = limit + round_no - counted
         reviewed = {owner_of(r) for r in done}
         waited = [key for key in receipt['reviewers'] if key not in reviewed]
         # One reviewer per action, or with parallel actions (#176) every one the round waits
@@ -915,7 +919,10 @@ class ActionsMixin:
         against ``max_review_rounds``, with the rounds left; without, the review of an approved
         head does not count (#235), and any other review counts as it would have anyway.
         ``fix``: a fix waits for the sync, and its review is the next one."""
-        limit = self.cfg.max_review_rounds
+        # The rounds the supervisor granted (#405) raise the limit of this PR only.
+        limit = self.cfg.max_review_rounds + pr.granted_rounds
+        what = '`max_review_rounds`' + (f' più {pr.granted_rounds} concessi dal supervisore'
+                                         if pr.granted_rounds else '')
         latest = current_round(pr.reviews)
         approved = (bool(latest) and latest[0]['source'] == 'agent'
                     and not pending_reviewers(latest) and round_verdict(latest) == 'approve'
@@ -934,12 +941,12 @@ class ActionsMixin:
             why = 'come avrebbe contato senza la sincronizzazione'
         number = counted_rounds(pr.reviews) + 1
         if number > limit:
-            where = (f'contati già {number - 1} round di {limit} (`max_review_rounds`); nessun '
+            where = (f'contati già {number - 1} round di {limit} ({what}); nessun '
                      f'round rimasto: la review {which} richiederà una decisione dell\'operatore')
         elif number == limit:
-            where = f'round {number} di {limit} (`max_review_rounds`), l\'ultimo rimasto'
+            where = f'round {number} di {limit} ({what}), l\'ultimo rimasto'
         else:
-            where = (f'round {number} di {limit} (`max_review_rounds`); dopo questo ne '
+            where = (f'round {number} di {limit} ({what}); dopo questo ne '
                      f'resteranno {limit - number}')
         return f'La review {which} **conterà** come round, {why}: {where}.'
 

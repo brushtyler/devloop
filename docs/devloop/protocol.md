@@ -174,7 +174,10 @@ replaces it counts once. Nor does the review of an approved head that only a syn
 conflicts moved, nor the new review of an approved head whose approval the base revoked (see
 [Resync after approval](#resync-after-approval)). Round numbers stay progressive, because they also name the findings
 (`round/reviewer/ID`), so the round shown as the limit (`round 4 of at most 4`, `round 4/4`) is
-`max_review_rounds` plus the rounds that did not count.
+`max_review_rounds` plus the rounds that did not count. The rounds the supervisor granted to the
+PR with `/devloop grant-round` (#405, [Granting a review round](guide.md#granting-a-review-round))
+raise the limit of that PR only: it is `max_review_rounds` plus the rounds granted, counted from
+the dispatcher's `supervision` records of the PR, plus the rounds that did not count.
 
 **One head, one round** (#352, #359): a CI failure on a head that already has a review round,
 not yet answered by a fix, does not open a round of its own when that round asked for changes or
@@ -187,7 +190,10 @@ a CI failure, a review after a fix, a review after a sync whose conflicts the im
 resolved, a new review of the same head or of a new one; a round the CI failure of its head
 joined adds `con la CI fallita dello stesso head`, and `che ne ha fatto decadere l'approvazione`
 when the round had approved), then the rounds that do not count with theirs, and recalls that the operator can grant more rounds by raising `max_review_rounds` (#289).
+A `round_grantable` escalation (#405) has the same lists and says instead that the supervisor
+may grant one more round with `/devloop grant-round <reason>`.
 `devloop status` shows the counted rounds of each PR on the limit, as `rounds=<counted>/<max>`,
+with the rounds granted in `<max>` and `(+<n> granted)` after it when the supervisor granted some,
 followed by `(+<n> not counted)` when some rounds did not count. It reads them from the thread
 also for a PR stopped in `agent:needs-operator` (as after `round_limit`) or
 `agent:needs-supervisor`, whose thread the tick does not read.
@@ -436,9 +442,17 @@ and of the [escalations to the operator](guide.md#commands-on-escalations-to-the
 
 **Trace.** Every command applied leaves a dispatcher comment with a `supervision` marker: the
 command, its author, its reason, the id of the comment that carried it, the class and the outcome
-(`applied`, `accepted`, `decided`, `escalated`, `refused` or `limit`), with the key and the
-attempt for a retry, the defaults for an acceptance and, for a decision, its text (in `reason`)
-and the gaps it answers. The record is written before the labels change, so a
+(`applied`, `accepted`, `decided`, `escalated`, `refused`, `limit` or `granted`), with the key
+and the attempt for a retry, the defaults for an acceptance and, for a decision, its text (in
+`reason`) and the gaps it answers. A round granted with `/devloop grant-round` (#405) carries the
+analysis of the causes in `reason`, the `head` it was granted on, the rounds granted to the PR
+with this one (`granted`), the cap of the PR (`cap`) and what remains (`left`), the grants of the
+UTC day with this one (`daily`), the daily cap (`daily_cap`) and what remains (`daily_left`):
+these records are what raises the round limit of the PR. The same figures go in a ledger
+`event` `delegation_grant` with the `delegation` (`rounds`), its author and the id of the
+command's comment, and, before both, a `grant` event in the
+[turn journal](#turn-journal), which counts the grants of the day across every PR. The record is
+written before the labels change, so a
 lost label change never runs a retry twice. A command that does not apply (#321) gets the same
 record, `refused`, with the reason and how to resume in the comment: it spends the command, which
 is answered once. The applied retries counted against the limit are those of both records, the
@@ -485,8 +499,15 @@ records of a [fix register](#fix-register) are read one by one, and open no roun
 
 The reviewer returns JSON validated against [`devloop/schemas/review.json`](../../devloop/schemas/review.json):
 `verdict` (`approve`, `request_changes`, `needs_operator`), blocking and non-blocking findings with
-file, line and a suggested fix, and the status of every earlier blocking finding (`resolved`,
-`unresolved`, `withdrawn`). devloop then enforces consistency:
+file, line, a suggested fix and `security`, and the status of every earlier blocking finding
+(`resolved`, `unresolved`, `withdrawn`). `security` (#405, ADR 0005, D5) is required: `true` on a
+finding that concerns security, `false` otherwise, and the review prompt says what counts and to
+choose `true` when in doubt. It is the reviewer's declaration, never the supervisor's. An open
+blocking finding whose `security` is not `false`, a finding of a review written before the field
+included, keeps a PR at the round limit with the operator: the supervisor may not
+[grant it a round](guide.md#granting-a-review-round). The findings devloop writes itself, of a CI
+failure and of the acceptance map, carry `security: false`; the published review marks a
+security finding with *(sicurezza)*. devloop then enforces consistency:
 
 - `approve` with a blocking finding, or with one of the reviewer's own earlier findings
   unresolved, becomes `request_changes` (another owner's open finding does not change it: the
@@ -501,7 +522,7 @@ the advisory review prompt asks instead for the opinion `dubbi` (`contrario` whe
 weakened) and a first residual risk beginning with "Policy di fiducia toccata:". Both carry the
 same closed list of five points and the same examples, described in
 [Changes to the trust policy](guide.md#changes-to-the-trust-policy). The rule lives only in the
-prompts: the schemas `review.json` and `advisory.json` do not change, and devloop does not check
+prompts: the schemas `review.json` and `advisory.json` do not change for it, and devloop does not check
 in code whether a verdict should have been `needs_operator`. Its residual risks, accepted by the
 operator, are listed in the guide: the attention of the reviewers at every round, a disguised
 change, the local overlay, with a conclave the reserved perimeter its members recognise, and a
@@ -947,7 +968,11 @@ their format does not change. The journal is append-only, one JSON event per lin
   on (see [Story identity](#story-identity)). `attempt`, `attempt_pr` and `concluded`: the
   attempts, with `attempt_identity` on (see [Attempt identity](#attempt-identity)), and an
   intent of a turn of an attempt carries its id. `size_warning`: the operator was warned that
-  the journal reached 80% of its limit (see below). The events of the
+  the journal reached 80% of its limit (see below). `grant`: a grant of a delegation to the
+  supervisor (#405), such as a round granted with `/devloop grant-round`, with the `delegation`,
+  the PR, the id of the command's comment and its author; written before the grant applies, the
+  grants of a UTC day count against the daily cap
+  ([Granting a review round](guide.md#granting-a-review-round)). The events of the
   [publication outbox](#publication-outbox) start with `publication`.
 - With the [budget envelope](reference.md#budget-envelope) on (`[budget] enabled`, #365), the
   intent of a turn charged to a story carries its booking, `budget`: `{story, role, phase,

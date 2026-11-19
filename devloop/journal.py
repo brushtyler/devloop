@@ -33,6 +33,10 @@ before it (``previous``) and its own (``sha256``), like the journal of the local
 - ``size_warning``: the operator was warned on ``[run].alert_issue`` that the journal reached
   ``WARN_RATIO`` of its limit (#397), with its ``size``, the ``threshold`` and the ``limit``, in
   bytes: once per threshold.
+- ``grant``: a grant of a delegation of the operator to the supervisor (#405, ADR 0005, P5-1),
+  such as a review round granted with ``/devloop grant-round``: the ``delegation``, the issue or
+  PR ``number``, the ``comment`` of the command and its author (``by``). It is written before
+  the grant applies, and the grants of a UTC day count against the daily cap of the delegations.
 
 With ``story_identity`` on (#363, ADR 0004, P2-3a) it also holds the stories, the unit of the
 budget:
@@ -115,6 +119,7 @@ MAX_BYTES = 64 * MIB
 # The share of the limit at which devloop warns the operator, once per threshold (#397).
 WARN_RATIO = 0.8
 SIZE_WARNING = 'size_warning'  # the event of that warning
+GRANT = 'grant'  # a grant of a delegation to the supervisor (#405), for the daily cap
 # A turn's id: its sequence (or, for a legacy one, its number) and 8 hex digits that differ
 # between journals, so that a command written for the turns of a journal since lost never
 # reconciles a turn of a new one.
@@ -834,6 +839,31 @@ class TurnJournal:
             self._load()
             self._append(SIZE_WARNING, {'size': size, 'threshold': threshold,
                                         'limit': self.max_bytes})
+
+    # Delegations (#405) ----------------------------------------------------
+    def grants(self, day=None):
+        """The grants of the supervisor's delegations recorded on the UTC ``day``
+        (``YYYY-MM-DD``, today by default), one per command comment, oldest first."""
+        with self._lock:
+            self._load()
+            day = day or self._now()[:10]
+            found = {}
+            for e in self._events:
+                if e['event'] == GRANT and str(e['data'].get('at', ''))[:10] == day:
+                    found.setdefault(e['data'].get('comment'), e['data'])
+            return list(found.values())
+
+    def grant(self, delegation, number, comment, by):
+        """Record a grant of the delegation ``delegation`` (``rounds``) on issue or PR
+        ``number``, by the command of comment ``comment`` of ``by``, before it applies: it counts
+        against the daily cap from now on. Raises ``JournalError`` if it cannot be written, and
+        then the grant does not apply."""
+        if self.read_only:
+            raise JournalError(f'{self.path}: read-only journal: no grant is recorded in it')
+        with self._lock:
+            self._load()
+            return self._append(GRANT, {'delegation': delegation, 'number': number,
+                                        'comment': comment, 'by': by})
 
     # Attempts (#384) -------------------------------------------------------
     def _attempts(self):

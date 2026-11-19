@@ -82,9 +82,16 @@ not a whole number of at least 1, or an unknown key, stops devloop at startup.
 `[docs] map` sets the
 [documentation map](#documentation-map). Operator overrides go into the
 [local overlay](guide.md#local-config-as-an-overlay), not into this file. A running
-`devloop run` takes a new `max_open_prs`, `max_parked_prs` or `max_review_rounds` from the next
-tick; any other key needs a restart
+`devloop run` takes a new `max_open_prs`, `max_parked_prs`, `max_review_rounds` or
+`[delegations]` from the next tick; any other key needs a restart
 ([Changes while the loop runs](guide.md#changes-while-the-loop-runs)).
+`[delegations]` (#405, ADR 0005) sets the delegations of the operator to the supervisor, each off
+by default: `rounds` (true or false, default false) lets the supervisor
+[grant a review round](guide.md#granting-a-review-round) to a PR at the round limit;
+`max_rounds_per_pr` (default 2) and `max_grants_per_day` (default 3) may only lower the caps of
+the code, `MAX_GRANTED_ROUNDS` and `MAX_DAILY_GRANTS` in `devloop/supervision.py`. A value that is
+not a whole number from 0 to its cap, a `rounds` that is not a boolean, or an unknown key, stops
+devloop at startup.
 `[review_policy]` sets the
 [review level](#review-level-and-policy-receipt): `default_level` (1 or 2, default 1), the level
 `label` (default `reviews:2`), `sensitive_paths` and `sensitive_path_lists`; changing any of them,
