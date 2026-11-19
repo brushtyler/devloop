@@ -71,13 +71,21 @@ when, it does one of these five things (a closed list):
    `write_args`, `review_args` and the other permissions of the agents;
 2. it changes the constants that cap the delegations and the retries, such as `MAX_RETRIES`;
 3. it changes who is believed: the filter of the trusted authors of the comments, the check of
-   the identity of markers and records, the identity required for `/devloop` commands;
+   the identity of markers and records, the identity required for `/devloop` commands, the names
+   by which devloop recognises trusted commands and records (#417): renaming, removing or
+   changing the meaning of a `/devloop` command or of a kind of the `<!-- devloop:<kind>:v1 ... -->`
+   markers;
 4. it changes when a PR is merged or promoted, or who decides on it: the merge conditions, the
    quorum of the reviewers, the checks of `operator_only_paths` and `protected_paths`, the choice
    of the review level, the classes of escalation the supervisor decides in `auto` mode
    (`NON_CRITICAL` in `devloop/supervision.py`) and those that stay with the operator: moving
    `reviewer_decision` among the non-critical ones, for example, would take from the operator
-   the very `needs_operator` of this rule;
+   the very `needs_operator` of this rule. So do the names of the labels that govern merge, hold
+   and escalation, defined in the `Labels` dataclass of `devloop/config.py` and not configurable
+   (`agent:ready-to-merge`, `agent:merge-hold`, `agent:needs-operator`,
+   `agent:needs-supervisor`, #417): renaming, removing or changing the meaning of one of them
+   would bypass the hold or the escalations, because devloop would look for a name nobody puts
+   any more;
 5. it changes one of these prompts in `devloop/prompts/`: the review prompt, the advisory review
    prompt, the conclave prompts (`conclave_proposal.md`, `conclave_vote.md`, which define the
    perimeter reserved to the operator), the parts of `implement.md`, `fix.md` and `preflight.md`
