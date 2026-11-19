@@ -1799,7 +1799,9 @@ A systemd unit does the same with restarts on a crash: see [Continuous loop](#co
 
 #### Pin
 
-`python3 -m devloop pin <ref>`, from the main checkout (or `scripts/devloop-pinned pin <ref>`):
+`python3 -m devloop pin <ref>`, from the main checkout (or `scripts/devloop-pinned pin <ref>`),
+takes the commit from the [installation's source](#installation-source), which is this clone
+unless `source` names another:
 
 1. updates the branches and tags of `origin`, dropping those deleted on `origin` (the tags of
    `origin` go to `refs/devloop/origin-tags/`, apart from the local tags), and resolves `<ref>`:
@@ -1867,6 +1869,56 @@ the module path and imports the checkout's `devloop/` instead of the pinned one.
 commands do not inherit that `PYTHONPATH`: the tests of a worktree import the worktree's code.
 It exports `DISABLE_AUTOUPDATER=1`, which the agents inherit, so that Claude Code does not update
 itself while devloop runs it; a value already in the environment (the operator's) is kept.
+
+With `--state-dir DIR` (ADR 0006, R1), an absolute path, the launcher takes the copy and the
+overlay from `DIR/current` and `DIR/config.local.toml` instead of `.ssdlc/devloop` of its clone,
+so it can live anywhere, for example installed on the host as
+`/usr/local/lib/devloop/devloop-pinned` (see [Installation source](#installation-source)). It then
+runs devloop in the current directory, which must be in the checkout of the managed repository
+(the `WorkingDirectory` of the service; otherwise it stops and says so), and passes `DIR` to
+devloop in `DEVLOOP_STATE_DIR`: devloop stops with `invalid config: state_dir: <path> is not the
+directory given to the launcher, DIR` when the `state_dir` of its configuration is another
+directory, so that pins and state never end up where the launcher does not look. The agents and
+the test commands do not get that variable. Without `--state-dir` nothing changes.
+
+#### Installation source
+
+The **installation's source** is the clone `devloop pin` takes the code from; the **managed
+repository** is the one of the worktrees, the issues and the PRs, whose main checkout is the
+directory devloop runs in (ADR 0006, R1). For ssdlc they are the same clone, and nothing above
+changes. For a project that does not contain devloop, the overlay names a clone of ssdlc in
+`source` (absolute, with `~`, or relative to the managed checkout; it must be the top of a git
+checkout, else the configuration is refused), and usually a `state_dir` of the host:
+
+```toml
+source = "/home/devloop/devloop-source"
+state_dir = "/var/lib/devloop/widget"
+```
+
+- `devloop pin <ref>` resolves and extracts `<ref>` from the source and its `origin`, with the
+  same checks as above: a tag of ssdlc, so that an update is an explicit act. The smoke test runs
+  in the managed repository, with the copy and the overlay. The managed repository is not fetched
+  by a pin.
+- The [pin after a merge](#pin-after-a-merge) is off: a merge in the managed repository never
+  touches the installation. With `[pin] auto = true` the log says `auto-pin off: the installation
+  comes from <source>, not from the managed repository`; `devloop status` does not compare the
+  copy with `origin/<base_branch>`.
+- The launcher is installed on the host from the source at the pinned tag, outside the pinned
+  copy and the managed repository, and gets the `state_dir` with `--state-dir`; the
+  [ops guide](../../ops/README.md) does it with `SOURCE_REPO` and `SOURCE_REF`.
+- The first pin runs devloop of the source clone in the managed checkout, with the overlay:
+
+  ```bash
+  cd /home/devloop/widget
+  PYTHONPATH=/home/devloop/devloop-source python3 -P -m devloop \
+      --local-config /var/lib/devloop/widget/config.local.toml pin v1.2.0
+  ```
+
+  later pins go through the launcher (`devloop-pinned --state-dir /var/lib/devloop/widget pin
+  <tag>`).
+
+The configuration, the prompts and the tests are still those of ssdlc: the project keys go in
+the overlay until the project file of ADR 0006 (R2) exists.
 
 #### Local config as an overlay
 
@@ -1952,7 +2004,9 @@ With `[pin] auto = true` (default `false`: the operator's decision), after a mer
 devloop ([merge modes](#merge-modes)) whose diff touches `devloop/`, `core/` (which devloop
 imports since #365) or a file of
 `sensitive_path_lists` (those of the running configuration), devloop records the request in
-`.ssdlc/devloop/pin-pending.json`. The next tick, before planning, runs `pin origin/main` (the
+`.ssdlc/devloop/pin-pending.json` (only when the [installation's source](#installation-source) is
+the managed repository: with `source` set the pin after a merge is off). The next tick, before
+planning, runs `pin origin/main` (the
 `base_branch` of `origin`). If the pin succeeds, `run` and `tick` start again from the new copy
 with the same arguments: configuration, policy and dispatcher load again, and the lock stays
 held across the restart, so no other dispatcher can start in between. If the pin fails, the tick

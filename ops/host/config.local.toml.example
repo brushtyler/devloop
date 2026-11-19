@@ -1,4 +1,5 @@
-# Overlay locale di devloop: <clone>/.ssdlc/devloop/config.local.toml, dell'utente devloop.
+# Overlay locale di devloop: <state_dir>/config.local.toml (per default
+# <clone>/.ssdlc/devloop/config.local.toml), dell'utente devloop.
 # setup-devloop.sh lo copia da qui solo se non esiste; poi è dell'operatore.
 #
 # Contiene SOLO le chiavi che l'operatore sovrascrive: devloop lo applica sopra
@@ -7,6 +8,12 @@
 # Una chiave che config.toml non può avere ferma devloop. Riferimento: docs/devloop/guide.md,
 # "Local config as an overlay", e docs/devloop/reference.md per ogni chiave.
 # Nessun segreto qui: le chiavi delle app stanno in key_dir.
+
+# Solo per un progetto che non contiene devloop (ADR 0006, R1): il clone della sorgente da cui
+# devloop pin prende il codice (SOURCE_CLONE) e lo state_dir dell'host, lo stesso che l'avviatore
+# riceve con --state-dir (STATE_DIR di params.env).
+# source = "/home/devloop/devloop-source"
+# state_dir = "/var/lib/devloop/progetto"
 
 # Limiti (una modifica vale dal tick successivo, senza riavvio).
 # max_open_prs = 2

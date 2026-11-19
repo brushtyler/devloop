@@ -65,7 +65,16 @@ stops devloop at startup in any case, until a story at its limit can be extended
 from the new copy may wait for the running actions while new ones, except implementations, still
 start; an `auto` that is
 not a boolean, a `restart_max_wait_minutes` that is not a whole number of at least 0, or an
-unknown key, stops devloop at startup. `[run]` (`alert_issue`, unset by
+unknown key, stops devloop at startup. `source` (unset by default, a key of the host's overlay)
+names the clone of the [installation's source](guide.md#installation-source) (ADR 0006, R1),
+where `devloop pin` takes the code from: absolute, with `~`, or relative to the managed
+repository's main checkout. Unset, the source is the managed repository, as for ssdlc. A value
+that is not a non-empty string stops devloop at startup, and one that is not the top of a git
+checkout stops every command that needs it (the pin and the dispatcher's commands); with a
+source other than the managed repository the pin after a merge is off. `state_dir` (default
+`.ssdlc/devloop`) is relative to the managed repository's main checkout, or absolute: a directory
+of the host. When the [launcher](guide.md#launcher) is given `--state-dir`, the configuration's
+`state_dir` must be that directory, or devloop stops. Both apply at the next start. `[run]` (`alert_issue`, unset by
 default) names the issue of the alert of the [continuous loop](guide.md#continuous-loop); a value that
 is not an issue number (an integer of at least 1), or an unknown key, stops devloop at startup.
 `[report]` (`issue`, unset by default; `interval`, default 15) sets the
