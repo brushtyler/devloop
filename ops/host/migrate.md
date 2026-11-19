@@ -117,62 +117,142 @@ aggiunge (`test_cmd`, `local_tests`, `language`, `priority_labels`, `[docs.map]`
 [`ops/host/ssdlc/project.toml`](ssdlc/project.toml) è l'esempio. I comandi di agy derivati dai
 test di ssdlc passano all'overlay ([`ops/host/ssdlc/overlay.toml`](ssdlc/overlay.toml)). `repo`,
 `trusted_users` e `[apps]` restano in `config.toml` fino a R6 (#425). Senza file di progetto la
-copia di R3 non parte e il suo pin fallisce, quindi i passi qui sotto vanno fatti **prima** del
-pin della copia di R3. Sono passi dell'operatore, dopo il merge della PR di R3.
+copia di R3 non parte e il suo pin fallisce: i passi sull'host vanno fatti **prima** del pin
+della copia di R3, nell'ordine di [Migrazione di R3 su un host
+attivo](#migrazione-di-r3-su-un-host-attivo).
 
-I percorsi sono quelli dell'installazione attuale (`state_dir` = `.ssdlc/devloop` del clone);
-i comandi vanno eseguiti come utente `devloop`, dal clone.
+**Dopo.** I fatti di ssdlc si cambiano sull'host: una PR aggiorna l'esempio
+`ops/host/ssdlc/project.toml` (per esempio una voce nuova di `[docs.map]`) e, dopo il merge,
+l'operatore copia il file sull'host come al passo 3 di [Migrazione di R3 su un host
+attivo](#migrazione-di-r3-su-un-host-attivo). Una PR su `devloop/config.toml` cambia solo i
+default dell'installazione.
 
-1. **Quando.** L'hash del file di progetto entra nella versione della policy: le approvazioni
-   delle PR aperte decadono e serve una nuova review. Meglio con la coda vuota.
-2. **Copia dell'overlay di prima**, per il confronto:
+## Migrazione di R3 su un host attivo
+
+Il passaggio di un host già in servizio alla copia di R3 (ADR 0006): il file di progetto nello
+`state_dir`, le chiavi di [`ops/host/ssdlc/overlay.toml`](ssdlc/overlay.toml) nell'overlay, la
+verifica con [`ops/host/ssdlc/check-equivalence.py`](ssdlc/check-equivalence.py), poi il pin.
+I percorsi sono quelli dell'installazione attuale: `state_dir` di devloop
+`/home/devloop/ssdlc/.ssdlc/devloop`, checkout dell'operatore `/root/repos/ssdlc`, checkout
+aggiornato `/tmp/ssdlc-r3`.
+
+### Ordine
+
+Il file di progetto e le chiavi dell'overlay vanno sull'host **prima** che devloop prenda la
+copia di R3, e il loop va riavviato perché li veda: il launcher passa `--project-config` solo
+all'avvio, e un pin dopo un merge riparte con gli stessi argomenti. Altrimenti, con
+`[pin] auto = true`, il primo tick dopo il merge fissa `origin/main`, il controllo della copia
+fallisce (`config: missing 'test_cmd'`) e dopo tre tick falliti `devloop run` si ferma con il
+codice 4, che systemd non riavvia (`RestartPreventExitStatus=4`).
+
+- **Prima del merge della PR di R3** (meglio): i passi 1–5 con il checkout della testa della PR,
+  poi `sudo systemctl restart devloop`, poi il merge. La copia di prima legge già il file di
+  progetto (R2) e con le chiavi dell'overlay dà gli stessi valori; il pin dopo il merge (auto, o
+  il passo 6 a mano) trova il file di progetto.
+- **Dopo il merge**: fermare il loop **prima** del merge (`sudo systemctl stop devloop`), così
+  nessun tick prova il pin; poi i passi 1–6 con `origin/main` e `sudo systemctl start devloop`.
+- **Se il loop si è già fermato** (il log dice `auto-pin of origin/main failed, the pinned copy is
+  unchanged: … missing 'test_cmd'` e poi `ALERT: 3 consecutive ticks failed`): `current` è
+  ancora la copia di prima e la richiesta di pin resta. I passi 1–6 con `origin/main`, poi
+  `sudo systemctl start devloop`. Non serve altro: il pin a mano del passo 6 lascia cadere la
+  richiesta rimasta.
+
+In ogni caso l'hash del file di progetto entra nella versione della policy: le approvazioni delle
+PR aperte decadono e serve una nuova review. Meglio con la coda vuota.
+
+### Comandi
+
+Tutti **come root**, con il checkout dell'operatore. `check-equivalence.py` legge e non scrive:
+come root legge lo `state_dir` di `devloop` e la copia fissata, e il checkout aggiornato è di root
+(`git` lo accetta). Come `devloop` dal checkout dell'operatore fallisce con `Permission denied`:
+`devloop` non entra in `/root`.
+
+1. **Il checkout aggiornato**, in una directory a sé (il checkout dell'operatore non cambia).
+   Dopo il merge:
 
    ```bash
-   cd ~/ssdlc && git fetch origin
-   cp -p .ssdlc/devloop/config.local.toml .ssdlc/devloop/config.local.toml.prima-r3
+   cd /root/repos/ssdlc && git fetch origin
+   git worktree add --detach /tmp/ssdlc-r3 origin/main
    ```
 
-   Senza overlay, non si crea nulla e il confronto si fa senza `--before-local`.
-3. **Il file di progetto**, dal commit di R3 su `origin/main`, con i permessi dell'overlay:
+   Prima del merge, la testa della PR (`<PR>` è il suo numero):
 
    ```bash
-   git show origin/main:ops/host/ssdlc/project.toml > .ssdlc/devloop/project.toml
-   chmod 600 .ssdlc/devloop/project.toml
+   cd /root/repos/ssdlc && git fetch origin pull/<PR>/head
+   git worktree add --detach /tmp/ssdlc-r3 FETCH_HEAD
+   ```
+
+2. **Copia dell'overlay di prima**, per il confronto, una volta sola: se c'è già, è quella di
+   prima e non va sovrascritta.
+
+   ```bash
+   test -e /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml.prima-r3 || \
+       install -o devloop -m 600 /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml \
+           /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml.prima-r3
+   ```
+
+   Senza overlay non si crea nulla e il confronto si fa senza `--before-local`.
+3. **Il file di progetto**, dal checkout aggiornato, di `devloop` e con mode 600:
+
+   ```bash
+   install -o devloop -m 600 /tmp/ssdlc-r3/ops/host/ssdlc/project.toml \
+       /home/devloop/ssdlc/.ssdlc/devloop/project.toml
    ```
 
    Deve essere un file regolare a sé: né un link né un hard link al file del repository.
-4. **L'overlay** riceve le chiavi di `ops/host/ssdlc/overlay.toml` (`write_commands` e
-   `review_commands` di `[agents.agy]`), accanto a quelle che ha già. Se l'overlay ha già
-   `[agents.agy]`, le due chiavi vanno in quella tabella.
-5. **Verifica dell'equivalenza**, con la copia fissata di prima e un checkout del commit di R3:
+4. **L'overlay** riceve le chiavi di `/tmp/ssdlc-r3/ops/host/ssdlc/overlay.toml`
+   (`write_commands` e `review_commands` di `[agents.agy]`), accanto a quelle che ha già. Se
+   l'overlay ha già `[agents.agy]`, le due chiavi vanno in quella tabella. Si modifica come
+   `devloop`, perché resti suo:
 
    ```bash
-   git worktree add --detach /tmp/ssdlc-r3 origin/main
+   sudo -u devloop -H "${EDITOR:-vi}" /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml
+   ```
+
+5. **Verifica dell'equivalenza**: prima la copia fissata in uso con l'overlay di prima, dopo il
+   checkout aggiornato con l'overlay e il file di progetto nuovi:
+
+   ```bash
    python3 /tmp/ssdlc-r3/ops/host/ssdlc/check-equivalence.py \
-       --before .ssdlc/devloop/current --before-local .ssdlc/devloop/config.local.toml.prima-r3 \
-       --after /tmp/ssdlc-r3 --after-local .ssdlc/devloop/config.local.toml \
-       --after-project .ssdlc/devloop/project.toml
+       --before /home/devloop/ssdlc/.ssdlc/devloop/current \
+       --before-local /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml.prima-r3 \
+       --after /tmp/ssdlc-r3 \
+       --after-local /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml \
+       --after-project /home/devloop/ssdlc/.ssdlc/devloop/project.toml
    ```
 
    Confronta la configurazione effettiva chiave per chiave, i prompt resi e i moduli di test
-   selezionati. Lascia fuori, dichiarandolo, l'hash del file di progetto
-   (`review_policy.project`), che R2 mette nella versione della policy: la versione si confronta
-   senza. Esce con 0 ed `equivalent: …` se non c'è differenza; altrimenti elenca ogni
-   differenza ed esce con 1, e il pin non va fatto finché non si è capito perché (di solito una
-   chiave dell'overlay che sostituisce un valore del file di progetto, o le chiavi del passo 4
-   mancanti). Poi `git worktree remove /tmp/ssdlc-r3`.
-6. **Pin e riavvio**: `scripts/devloop-pinned pin origin/main` (lo smoke test usa il file di
-   progetto), poi `sudo systemctl restart devloop`. Un loop in corso legge un file di progetto
+   selezionati per ogni file del checkout aggiornato (`--root`, per default il checkout dello
+   script). Lascia fuori, dichiarandolo, l'hash del file di progetto (`review_policy.project`),
+   che R2 mette nella versione della policy: la versione si confronta senza. Il codice di uscita:
+
+   | Codice | Significato | Cosa fare |
+   |---|---|---|
+   | 0 | `equivalent: …`: nessuna differenza | avanti: riavvio prima del merge, o il passo 6 |
+   | 1 | una riga per differenza, poi `N difference(s): the migration is not equivalent` | niente merge né pin finché non si è capito perché. Di solito: le chiavi del passo 4 mancanti (`config agents.agy.…`), una chiave dell'overlay che sostituisce un valore del file di progetto, un file di progetto copiato da un altro commit. Correggere e rilanciare |
+   | 2 | un lato non si carica, o un argomento è sbagliato: il messaggio dice quale (`not an installation of devloop`, `the configuration does not load: …`, `not a file`) | correggere il percorso o il file indicato (per esempio un file di progetto link, con più hard link o con un errore di sintassi) e rilanciare; il confronto non è stato fatto |
+
+6. **Pin e riavvio**, dopo il merge (prima del merge basta `sudo systemctl restart devloop`):
+
+   ```bash
+   sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned pin origin/main
+   sudo systemctl start devloop      # restart, se il loop è in esecuzione
+   ```
+
+   Lo smoke test del pin usa il file di progetto. Un loop in corso legge un file di progetto
    nuovo solo al riavvio.
+7. **Pulizia**: `git -C /root/repos/ssdlc worktree remove /tmp/ssdlc-r3`. La copia
+   `config.local.toml.prima-r3` si cancella quando la copia di R3 gira.
 
 **Rollback.** Il pin della copia di prima (`scripts/devloop-pinned pin <sha12>`) basta: con la
 copia di prima il file di progetto e le chiavi dell'overlay danno gli stessi valori. Si possono
 anche togliere, e la versione della policy torna quella di prima.
 
-**Dopo.** I fatti di ssdlc si cambiano sull'host: una PR aggiorna l'esempio
-`ops/host/ssdlc/project.toml` (per esempio una voce nuova di `[docs.map]`) e, dopo il merge,
-l'operatore copia il file sull'host come al passo 3. Una PR su `devloop/config.toml` cambia solo i
-default dell'installazione.
+### Ogni cambio con un passo sull'host
+
+Una PR che richiede un passo sull'host (un file nello `state_dir`, una chiave dell'overlay, un
+comando di root) dice nella descrizione e nella guida di `ops/` **che cosa fare prima del merge**,
+con i comandi completi, l'utente che li esegue e cosa fare se devloop ha già preso la copia nuova.
 
 ## Dati di ssdlc nei prompt
 

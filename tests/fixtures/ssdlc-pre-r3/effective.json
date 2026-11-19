@@ -2,7 +2,7 @@
  "source": {
   "commit": "28eaf9455bad6ff52dcbdbc29ecc07d7dde83e2a",
   "how": "dataclasses.asdict(devloop.config.load_config()) and review_policy.version(), computed by the code and the devloop/config.toml of that commit (origin/main before ADR 0006, R3), without overlay nor project file; tuples written as lists",
-  "later": "Updated after the freeze with later defaults of the installation, not R3's, merged with it (see the module): [apps.implementer] in config.toml, and agents.*.app and implementers in the configuration (#407); [delegations] capacity in config.toml and its four keys in the configuration (#412). Each value is the default of the code that added it."
+  "updated": "later changes of the installation, not R3's, added to config.toml and here with only the values they add (the policy version does not change): [apps.implementer], implementers and agents.*.app (issue #407, PR #442); delegations.capacity and capacity_max_* (issue #412, PR #450)"
  },
  "policy_version": "619dd4fda8b8e7870f12564883f49a790c9db939796fe17c90fba43b64e326d3",
  "config": {

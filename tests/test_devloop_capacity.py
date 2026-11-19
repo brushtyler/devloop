@@ -358,7 +358,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_the_overlay_is_held_to_the_same_caps_and_needs_the_summary_issue(self):
         data = ssdlc_project.data()
-        on =config.apply_overlay(data, {'delegations': {'capacity': True},
+        on = config.apply_overlay(data, {'delegations': {'capacity': True},
                                          'report': {'issue': 9}})
         self.assertTrue(config.parse_config(on).delegations.capacity)
         with self.assertRaises(ConfigError):

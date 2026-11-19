@@ -14,7 +14,9 @@ rebuilds the configuration from it: ``tests/fixtures/ssdlc-pre-r3/config.toml`` 
 configuration and the policy version that the code of that commit computed from it, without
 overlay nor project file (its ``source`` says how). A value migrated wrongly, in the project file
 or in the overlay, is a difference from it. A later change to the installation's defaults is not
-R3's: it updates the frozen ``config.toml`` and ``effective.json`` with it, saying so.
+R3's: it updates the frozen ``config.toml`` and ``effective.json`` with it, saying so (``source``
+``updated`` lists those made so far: the implementer app of #407 and the capacity delegation of
+#412, merged beside R3).
 
 ``repo``, ``trusted_users`` and ``[apps]`` stay in ``devloop/config.toml`` until R6 (#425), which
 brings ``devloop token`` with the configuration of the project: ``scripts/agent-token.py`` and
@@ -420,6 +422,15 @@ class CheckScriptTests(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn('equivalent:', out)
         self.assertIn('review_policy.project', out)  # declared, not hidden
+
+    def test_it_writes_nothing_in_the_installations(self):
+        # Run as root on the host (ops/host/migrate.md), a byte-code file would land in the
+        # read-only pinned copy of devloop: each side runs without writing any, whatever the
+        # outcome of the comparison.
+        code, out = self.check()
+        self.assertIn(code, (0, 1), out)
+        for side in ('before', 'after'):
+            self.assertEqual(list((self.tmp / side).rglob('__pycache__')), [], side)
 
     def test_relative_paths_are_the_callers(self):
         # As in ops/host/migrate.md: run from a directory with relative paths, the
