@@ -37,7 +37,12 @@ ops/
     config.local.toml.example  overlay di devloop, tutto commentato
     check-host.sh            verifica utenti, permessi (700/600), chiavi, ACL, sudoers, utente
                              degli agent, servizio, CLI e `devloop apps`
-    migrate.md               cosa copiare dalla macchina vecchia e cosa ricreare
+    migrate.md               cosa copiare dalla macchina vecchia e cosa ricreare, e la
+                             configurazione di ssdlc nel suo file di progetto (ADR 0006, R3)
+    ssdlc/project.toml       il file di progetto di ssdlc, d'esempio: l'operatore lo copia in
+                             <state_dir>/project.toml
+    ssdlc/overlay.toml       le chiavi che l'overlay di ssdlc riceve con R3 (comandi di agy)
+    ssdlc/check-equivalence.py  confronta la configurazione prima e dopo R3 su un host
   github/
     apps/<ruolo>.json        manifest delle GitHub App (flusso "manifest" di GitHub)
     create-apps.sh           genera una pagina HTML locale che crea ciascuna app dal suo manifest
@@ -225,6 +230,12 @@ Prepara anche il **lock per repository** (ADR 0006, R8): il gruppo `REPO_LOCK_GR
 è vuota e non è di `root:<gruppo>`. L'overlay deve avere `repo_lock_dir` con lo stesso valore: lo
 script lo ricorda finché manca ([Più progetti sullo stesso host](#più-progetti-sullo-stesso-host)).
 
+Per ssdlc servono anche il **file di progetto** e le chiavi che l'overlay riceve con l'ADR 0006,
+R3: lo script non li crea. L'operatore copia [`ssdlc/project.toml`](host/ssdlc/project.toml) in
+`<state_dir>/project.toml` (mode 600, utente `devloop`) e aggiunge all'overlay le chiavi di
+[`ssdlc/overlay.toml`](host/ssdlc/overlay.toml); senza file di progetto devloop non parte e il
+primo pin fallisce ([migrate.md](host/migrate.md#configurazione-di-ssdlc-nel-suo-file-di-progetto)).
+
 Poi le **chiavi**: in `key_dir` di `devloop` (`/home/devloop/.ghapps`) quelle delle app che usa il
 dispatcher (`DEVLOOP_KEYS`: `dispatcher`, `merger`, `claude-agent`, `codex-agent`, `agy-agent`):
 
@@ -296,11 +307,17 @@ launcher esporta `DISABLE_AUTOUPDATER=1`. Le CLI si aggiornano a mano con il loo
 
 L'overlay `/home/devloop/ssdlc/.ssdlc/devloop/config.local.toml` contiene solo le chiavi che
 l'operatore sovrascrive (merge mode, `[pin] auto`, `[run] alert_issue`, …); quello d'esempio è
-tutto commentato. Su questo host ha anche `repo_lock_dir = "/run/devloop/repos"`. Poi il primo
-pin, che fa anche lo smoke test:
+tutto commentato. Su questo host ha anche `repo_lock_dir = "/run/devloop/repos"`. Accanto, il
+file di progetto `/home/devloop/ssdlc/.ssdlc/devloop/project.toml`, copiato da
+[`ssdlc/project.toml`](host/ssdlc/project.toml), e nell'overlay le chiavi di
+[`ssdlc/overlay.toml`](host/ssdlc/overlay.toml) (vedi sopra). Poi il primo pin, che fa anche lo
+smoke test. Lo esegue il devloop del clone, non il launcher: file di progetto e overlay si passano
+a mano, prima del comando, perché dall'ADR 0006, R3 `devloop/config.toml` non ha `test_cmd`:
 
 ```bash
-sudo -u devloop -H sh -c 'cd ~/ssdlc && python3 -m devloop pin origin/main'
+sudo -u devloop -H sh -c 'cd ~/ssdlc && python3 -m devloop \
+    --project-config .ssdlc/devloop/project.toml \
+    --local-config .ssdlc/devloop/config.local.toml pin origin/main'
 ```
 
 ### 7. Host del supervisore
@@ -413,11 +430,14 @@ solito uno `STATE_DIR` assoluto. `setup-devloop.sh` clona la sorgente in `SOURCE
 (`/home/devloop/devloop-source`) e installa l'avviatore dal tag `SOURCE_REF` in `LAUNCHER_DIR`
 (`/usr/local/lib/devloop/devloop-pinned`, di root), fuori dalla copia fissata e dal clone gestito;
 unità e sudoers lo chiamano con `--state-dir`. L'overlay nello `state_dir` ha `source`,
-`state_dir` e le chiavi del progetto (`repo`, `base_branch`, `test_cmd`, `[apps]`, …): lo script
-ricorda le prime due finché mancano. Il primo pin si fa dal clone della sorgente:
+`state_dir` e le chiavi del progetto (`repo`, `base_branch`, `[apps]`, …): lo script ricorda le
+prime due finché mancano. I fatti del progetto (`test_cmd`, `[docs.map]`, …) stanno nel file di
+progetto `project.toml` dello stesso `state_dir` (ADR 0006, R3). Il primo pin si fa dal clone
+della sorgente, con il file di progetto e l'overlay prima del comando:
 
 ```bash
 sudo -u devloop -H sh -c 'cd ~/widget && PYTHONPATH=~/devloop-source python3 -P -m devloop \
+    --project-config /var/lib/devloop/widget/project.toml \
     --local-config /var/lib/devloop/widget/config.local.toml pin v1.2.0'
 ```
 

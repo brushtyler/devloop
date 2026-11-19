@@ -5,7 +5,6 @@ import re
 import tempfile
 import threading
 import time
-import tomllib
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +16,7 @@ from devloop.dispatcher import Dispatcher, TickLog
 from devloop.ledger import Ledger
 from devloop.planning import Action, Snapshot, schedule
 from devloop.workspace import Workspace
+from helpers import ssdlc_project
 from helpers.devloop_fakes import FakeGH
 from test_devloop import CFG, FakeRunner, FakeWS, pr, raw_review
 from test_devloop_fallback import unavailable
@@ -120,9 +120,9 @@ def run_plan(d, actions, prs=()):
 
 class ConfigTests(unittest.TestCase):
     def test_default_is_one_and_this_repository_runs_three(self):
-        data = tomllib.loads(config.DEFAULT_CONFIG.read_text())
+        data = ssdlc_project.data()
         self.assertEqual(data['max_parallel_actions'], 3)
-        self.assertEqual(config.load_config().max_parallel_actions, 3)
+        self.assertEqual(ssdlc_project.load().max_parallel_actions, 3)
         omitted = {k: v for k, v in data.items() if k != 'max_parallel_actions'}
         self.assertEqual(config.parse_config(omitted).max_parallel_actions, 1)
         for value in (0, -1, '3', True):

@@ -9,11 +9,12 @@ from types import SimpleNamespace
 from unittest import mock
 
 from devloop import journal as journal_mod
-from devloop.config import ConfigError, RunPolicy, load_data, parse_config
+from devloop.config import ConfigError, RunPolicy, parse_config
 from devloop.dispatcher import Dispatcher
 from devloop.journal import JOURNAL, MIB, SNAPSHOT, SIZE_WARNING, JournalError, TurnJournal
 from devloop.ledger import Ledger
 from helpers.devloop_fakes import FakeGH
+from helpers.ssdlc_project import data as load_data
 from test_devloop import CFG
 
 

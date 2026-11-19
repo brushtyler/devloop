@@ -471,7 +471,16 @@ completes that grant before any other command, the latest one included, rebuildi
 from the journal (comment, author, text): the ledger event only if absent, the record `granted`
 and the labels, without checking nor extending the story again. An issue that a merged devloop
 PR resolved meanwhile gets the records and then a `merged_issue` escalation, without running its
-step; an issue blocked by an open issue waits, with nothing written. The record is
+step; an issue blocked by an open issue waits, with nothing written. A temporary capacity limit
+set with `/devloop capacity` (#412,
+[Temporary capacity limits](guide.md#temporary-capacity-limits)) has its record on
+`[report] issue`, with no class: the analysis of the causes in `reason`, the key (`setting`), the
+`value`, the `configured` value, the `cap` of the key, the duration in `minutes`, its end
+(`until`, counted from when the command was written) and the figures of the day (`daily`,
+`daily_cap`, `daily_left`). The latest `granted` record of a key, until its `until`, is the limit
+the dispatcher plans with; the same figures go in a ledger `event` `delegation_grant` with the
+`delegation` `capacity`, after a `grant` event in the turn journal. With the delegation off the
+command gets a `refused` record all the same, which spends it. The record is
 written before the labels change, so a
 lost label change never runs a retry twice. A command that does not apply (#321) gets the same
 record, `refused`, with the reason and how to resume in the comment: it spends the command, which
@@ -881,7 +890,7 @@ readiness check, on the PR for review, fix, sync and CI. The turns of a review r
 
 | Record | When | Content |
 |---|---|---|
-| `request` | The issue goes from `agent:ready` to `agent:working` | SHA-256 of title and body, author and time of the trusted `labeled` event of `agent:ready`, ids of the trusted comments given to the implementer, time of the takeover. It is a snapshot **at the takeover**, not at the time of the label |
+| `request` | The issue goes from `agent:ready` to `agent:working` | SHA-256 of title and body, author and time of the trusted `labeled` event of `agent:ready`, ids of the trusted comments given to the implementer, time of the takeover, and the key of the implementer chosen for the issue (`implementer`, #407: an `impl:<kind>` label, the area map or the default, [the choice of the implementer](reference.md#the-implementer-app-and-the-keys-by-role)). It is a snapshot **at the takeover**, not at the time of the label |
 | `turn` | Every invocation of an agent CLI, retries, fallback models and failures included: implement, fix, sync with an agent, review, readiness check, conclave call, [advisory review](guide.md#advisory-review-for-the-operator) (`advisory`, on the PR, in a comment of its own) | Kind, agent, GitHub identity (none: the operator's `gh` login), configured model and effort (for a fallback, the fallback model and the model it replaces), real model, start, end, duration, outcome (`success`, `failure`, `unavailable`), the error if any, telemetry, and the last command the turn ran or started when the CLI exposes it (`last_command`: only codex, from the `command_execution` items of `--json`; cleaned like the tail of a timeout, on one line, at most 200 characters; absent otherwise), also for a turn that timed out. With `attempt_identity` on, the id of the [attempt](#attempt-identity) the turn belongs to (`attempt`; absent for a turn of no attempt) |
 | `verification` | Every test command the dispatcher runs after a writing turn (none when the [local tests](reference.md#local-tests) select nothing), and the full suite it runs before a review of a head without CI, or before the promotion of an approval given while no CI was known | Command, outcome, duration, the tree hash before and after the test, and the commit (none before a review) |
 | `event` | The CI of a head (`ci_round`): a failed CI round, the checks a review round saw whatever its verdict (`approve`, `request_changes` or `needs_operator`), or the passing checks read again just before the PR is promoted to `agent:ready-to-merge` (also at level 0); a sync without an agent, or the merge of `main` before a fix (`sync`) | For the CI, the head, the state (`fail`, `pass`, or `none` without checks), the review round (none at level 0) and each check with its outcome, the id of its GitHub Actions run (none for a commit status or a check outside Actions) and its duration in seconds (`duration_s`: none while it runs and for a commit status, #300). Every CI round also records `tests`, the [summary of the suite](reference.md#summary-of-the-ci-in-the-prompts) that the dispatcher reads for the review and fix prompts (read again from the job logs when a promotion records the round, for instance after a review that saw the CI pending): for each job whose log holds the final lines of `scripts/run-tests.py`, its name with `ran` and `slowest`, and for a job whose log could not be read, its name with `log: unavailable`; absent when no job has either. The same checks read again for the same head and round are not recorded twice, a new run is. A failure that joined a round that had approved its head carries `voided_approval: true` (#359). For a sync, the merged base commit and the old and new heads |
@@ -1027,7 +1036,9 @@ their format does not change. The journal is append-only, one JSON event per lin
   attempts, with `attempt_identity` on (see [Attempt identity](#attempt-identity)), and an
   intent of a turn of an attempt carries its id. `size_warning`: the operator was warned that
   the journal reached 80% of its limit (see below). `grant`: a grant of a delegation to the
-  supervisor (#405), such as a round granted with `/devloop grant-round`, with the `delegation`,
+  supervisor (#405), such as a round granted with `/devloop grant-round` or a temporary capacity
+  limit set with `/devloop capacity` (#412, `delegation` `capacity`, with the number of
+  `[report] issue`), with the `delegation`,
   the PR, the id of the command's comment and its author; written before the grant applies, the
   grants of a UTC day count against the daily cap, which is checked again under the journal's
   lock in the same step as the write: past the cap nothing is written and the grant does not

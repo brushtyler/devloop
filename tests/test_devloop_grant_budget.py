@@ -20,6 +20,7 @@ from devloop.budget import BudgetRefused
 from devloop.config import BudgetPolicy, ConfigError, DelegationPolicy, parse_delegations
 from devloop.journal import TurnJournal
 from devloop.planning import Action, plan, runs_issue_step
+from helpers import ssdlc_project
 from test_devloop import CFG, SHA1, SHA2, implemented, pr, raw_review
 from test_devloop_dependencies import block
 from test_devloop_grant_round import GrantCase
@@ -80,7 +81,7 @@ class BudgetCase(GrantCase):
 
 class RoutingTests(BudgetCase):
     def test_off_by_default_the_refused_turn_stays_with_the_operator(self):
-        self.assertFalse(config.load_config().delegations.budget)
+        self.assertFalse(ssdlc_project.load().delegations.budget)
         self.assertFalse(AUTO.delegations.budget)
         d = self.make(OFF)
         self.spend(d, 4)
@@ -700,7 +701,7 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(parse_delegations({'budget': True}).budget)
         with self.assertRaises(ConfigError):
             parse_delegations({'budget': 'yes'})
-        data = config.load_data()
+        data = ssdlc_project.data()
         on = config.apply_overlay(data, {'delegations': {'budget': True}})
         self.assertTrue(config.parse_config(on).delegations.budget)
         self.assertIn('delegations', config.LIVE_KEYS)

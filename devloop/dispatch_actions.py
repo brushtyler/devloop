@@ -28,9 +28,10 @@ from .ledger import attempt_branch, attempt_marker, fix_register
 from .localtests import failed_modules, select_modules, suite_summary
 from .markdown import (dispatcher_header, publishable, render_fix, render_native_review,
                        render_review, without_attribution)
+from .config import same_agent
 from .planning import (BASE_CHANGED, FIX_COMMAND, RESYNC_AFTER_APPROVAL, ci_joins_round,
-                       counted_rounds, pending_reviewers, preflight_state, voided_approval,
-                       waived_rounds, waiting_reviewers)
+                       counted_rounds, implementer_choice, pending_reviewers, preflight_state,
+                       voided_approval, waived_rounds, waiting_reviewers)
 from .policy import ZERO_LEVEL, distinct, independent, profile_of
 from .ports import summarize_checks
 from .review import (ci_failure_review, current_round, last_round, normalize_review,
@@ -117,16 +118,31 @@ class ActionsMixin:
 
     def _do_implement(self, number):
         cfg, lb = self.cfg, self.cfg.labels
-        agent = cfg.agent(cfg.implementer)
         if cfg.preflight and preflight_state(self._preflight_view(number, ()))[0] != 'ready':
             # The text changed, or a new check was asked, after the snapshot.
             self.log('  the readiness check does not cover the current text; next tick')
             return
         issue, comments = self._issue_context(number)
+        # The implementer is chosen at the takeover (ADR 0005, D7, #407) and recorded in the
+        # request and in the PR marker: a label changed later does not change it.
+        key, why, problem = implementer_choice(cfg, issue.get('labels') or [], issue['labeled'],
+                                               issue['admitters'])
+        if not problem and cfg.preflight and same_agent(cfg.agent(cfg.preflight),
+                                                        cfg.agent(key)):
+            problem = (f'l\'implementer scelto (`{key}`, {why}) è lo stesso agent del controllo '
+                       f'di prontezza (`{cfg.preflight}`)')
+        if problem:
+            return self._escalate(number, f'L\'implementer dell\'issue non è determinabile: '
+                                          f'{problem}. Serve una decisione su chi la implementa.',
+                                  remove=[lb.ready], cls='configuration')
+        agent = cfg.agent(key)
+        if why != 'default':
+            self.log(f'  implementer {key} ({why})')
         if self.ledger is not None:
             # The request as the implementer gets it, at the takeover (#133): not necessarily
             # the text at the time of the label.
             self.ledger.request(number, title=issue['title'], body=issue.get('body') or '',
+                                implementer=key,
                                 labeled=ready_approval(issue['labeled'], lb.ready,
                                                        issue['admitters']),
                                 comments=_trusted_comments(issue.get('comments') or [],
@@ -190,8 +206,11 @@ class ActionsMixin:
                                       'pubblicata: il commit resta nel worktree locale.')
         self.ws.push(path, branch, replace=True, auth=auth)
         self._pushed(path)
-        # The marker keeps the map the reviewer checks until a fix replaces it (#134).
-        meta = {'issue': number, 'implementer': agent.key, 'reviewer': cfg.reviewer,
+        # The marker keeps the map the reviewer checks until a fix replaces it (#134). Its
+        # reviewer is the first of the pool that is not the implementer's agent (#407).
+        reviewer = next((k for k in cfg.pool() if not cfg.signs_for_role(k)
+                         and not same_agent(cfg.agent(k), agent)), cfg.reviewer)
+        meta = {'issue': number, 'implementer': agent.key, 'reviewer': reviewer,
                 'profile': self._profile(agent.key, 'write', used),
                 'acceptance_map': result['acceptance_map'],
                 # Informative only (#169): no receipt nor approval depends on it.
@@ -517,14 +536,21 @@ class ActionsMixin:
         reserved = {key: self._profile(key, 'review') for key in keys}
         reserving = threading.Lock()
 
+        # Every model a review turn actually runs, fallbacks included, is never the same agent
+        # in effect as an author (ADR 0005, P5-3, #407), at both levels: at level 1 as the
+        # selection reads the implementer (``_implementer_agents``), at level 2 every author.
+        same = authors if level2 else self._implementer_agents(pr)
+
         def allowed_for(key):
             if not level2:
-                return None
+                return lambda candidate: not any(same_agent(candidate, a) for a in same)
 
             def allowed(candidate):
                 # A fallback model must keep the independence the pair was selected for: of
                 # who wrote the code, of the round's other reviewers as their records show
                 # them, and of the reviewers running alongside it in this action.
+                if any(same_agent(candidate, a) for a in same):
+                    return False
                 p = self._profile(key, 'review', candidate)
                 with reserving:
                     others = [q for k, q in reserved.items() if k != key]

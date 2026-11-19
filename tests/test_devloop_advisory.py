@@ -7,7 +7,6 @@ import dataclasses
 import json
 import sys
 import tempfile
-import tomllib
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,6 +25,7 @@ from devloop.github import GitHubError  # noqa: E402
 from devloop.ledger import Ledger  # noqa: E402
 from devloop.planning import counted_rounds, plan  # noqa: E402
 from devloop.workspace import Workspace  # noqa: E402
+from helpers import ssdlc_project  # noqa: E402
 from helpers.devloop_fakes import SHA1, FakeIdentities  # noqa: E402
 from test_devloop import CFG, IMPL, META, REV, FakeRunner, FakeWS, raw_review  # noqa: E402
 from test_devloop import receipt as policy_receipt  # noqa: E402
@@ -131,7 +131,7 @@ class Base(unittest.TestCase):
 
 class ConfigTests(unittest.TestCase):
     def data(self, **policy):
-        data = tomllib.loads(config.DEFAULT_CONFIG.read_text())
+        data = ssdlc_project.data()
         data['review_policy'] = dict(data['review_policy'], **policy)
         return data
 

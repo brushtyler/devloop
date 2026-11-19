@@ -13,6 +13,7 @@ import devloop.__main__ as cli_main
 from devloop import agents, config, markdown, unavailability
 from devloop.dispatch_actions import Models, skipped_models
 from devloop.dispatcher import Dispatcher
+from helpers import ssdlc_project
 from helpers.devloop_fakes import FakeGH
 from test_devloop import CFG, FakeRunner, FakeWS, implemented, pr
 from test_devloop_fallback import ARGON, DATA, HYDROGEN, QUOTA, FakeCLI, unavailable, with_agent
@@ -465,6 +466,9 @@ class FixMarkerTests(unittest.TestCase):
 
 
 class ResetCommandTests(unittest.TestCase):
+    def setUp(self):
+        ssdlc_project.as_default(self)  # the installation's file has no test_cmd (R3)
+
     def run_main(self, root, *argv):
         out = io.StringIO()
         with mock.patch.object(cli_main, 'main_checkout', return_value=root), \

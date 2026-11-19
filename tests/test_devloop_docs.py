@@ -2,7 +2,6 @@
 
 import dataclasses
 import tempfile
-import tomllib
 import unittest
 from pathlib import Path
 
@@ -10,6 +9,7 @@ from devloop import config
 from devloop.dispatcher import Dispatcher
 from devloop.workspace import Workspace
 
+from helpers import ssdlc_project
 from helpers.devloop_fakes import FakeGH
 from test_devloop import (CFG, FakeRunner, FakeWS, finding, fixed, implemented, norm, pr,
                           raw_review)
@@ -20,8 +20,7 @@ BLOCKING = ('A behaviour described in one of these documents that the change alt
 
 
 def config_data():
-    with open(config.DEFAULT_CONFIG, 'rb') as fh:
-        return tomllib.load(fh)
+    return ssdlc_project.data()
 
 
 class MapConfigTests(unittest.TestCase):

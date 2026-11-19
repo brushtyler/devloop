@@ -13,7 +13,9 @@ Actors: claude, codex, agy. The dispatcher's app is reserved to devloop: devloop
 the markers it reads only when the dispatcher wrote them. So is the merger's app, the only one
 with contents=write, used only for devloop's merges. The supervisor's role app is not exposed
 either (ADR 0005, P5-4): no review or interactive session may write a command as the
-supervisor. The supervisor gets its token with scripts/supervisor-token.py.
+supervisor. The supervisor gets its token with scripts/supervisor-token.py. Nor is the
+implementer's role app (ADR 0005, P5-3): only devloop commits, pushes, opens PRs and writes the
+records of fixes with it, and no session may write a record as the implementer.
 
 Without --perm the token gets issues=write and pull_requests=write: enough for comments,
 reviews and labels, not for pushing, merging or changing the repository. contents=write and
@@ -32,15 +34,24 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from devloop.apps import AppAuth, find_key  # noqa: E402
-from devloop.config import load_config  # noqa: E402
+from devloop.config import parse_config, read_toml  # noqa: E402
 
 ACTORS = ('claude', 'codex', 'agy')
-RESERVED = ('dispatcher', 'merger')  # devloop's own apps, never exposed here
+# devloop's own apps, never exposed here: the implementer's role app (#407) among them.
+RESERVED = ('dispatcher', 'merger', 'implementer')
 SUPERVISOR = 'supervisor'  # the supervisor's role app: scripts/supervisor-token.py only
 DEFAULT = {'issues': 'write', 'pull_requests': 'write'}
 ALLOWED = {'issues': {'read', 'write'}, 'pull_requests': {'read', 'write'},
            'contents': {'read'}, 'metadata': {'read'}, 'checks': {'read'},
            'statuses': {'read'}, 'actions': {'read'}}
+
+
+def load_config(path):
+    """The configuration of ``path`` for ``repo`` and ``[apps]``, the only keys the token needs.
+    Since ADR 0006, R3 the facts of the project (``test_cmd`` among them) are in the project
+    file on the host, not in ``path``: an empty ``test_cmd`` stands in for it when ``path`` has
+    none, and the token never uses it."""
+    return parse_config({'test_cmd': '', **read_toml(path)})
 
 
 def parse(argv):

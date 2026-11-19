@@ -22,7 +22,9 @@ from devloop import agents, agentuser, config
 from devloop.agentuser import AgentUser, AgentUserError
 from devloop.workspace import Workspace, WorkspaceError, run_in_group
 
-CFG = dataclasses.replace(config.load_config(), max_parallel_actions=1)
+from helpers import ssdlc_project
+
+CFG = dataclasses.replace(ssdlc_project.load(), max_parallel_actions=1)
 ME = getpass.getuser()
 SUDO = ['sudo', '-n', '-E', '-u', 'devloop-agent', '--']
 
@@ -605,7 +607,7 @@ class StartupCheckTests(unittest.TestCase):
 class ConfigTests(unittest.TestCase):
     def test_the_agent_user_is_off_by_default_and_checked_when_set(self):
         self.assertEqual(CFG.agent_user, config.AgentUserPolicy(name='', check=True))
-        data = config.load_data()
+        data = ssdlc_project.data()
         cfg = config.parse_config(dict(data, agent_user={'name': 'devloop-agent',
                                                          'check': False}))
         self.assertEqual(cfg.agent_user, config.AgentUserPolicy('devloop-agent', False))
@@ -614,7 +616,7 @@ class ConfigTests(unittest.TestCase):
                 config.parse_config(dict(data, agent_user=table))
 
     def test_the_local_overlay_may_set_it(self):
-        data = config.apply_overlay(config.load_data(),
+        data = config.apply_overlay(ssdlc_project.data(),
                                     {'agent_user': {'name': 'devloop-agent'}})
         self.assertEqual(config.parse_config(data).agent_user.name, 'devloop-agent')
 

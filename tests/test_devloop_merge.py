@@ -4,7 +4,6 @@ import dataclasses
 import importlib.util
 import os
 import tempfile
-import tomllib
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,11 +16,12 @@ from devloop.dispatch_supervision import merge_command
 from devloop.dispatcher import Dispatcher, ensure_labels
 from devloop.github import GitHub
 from devloop.planning import Action, Snapshot, plan
+from helpers import ssdlc_project
 from test_devloop import (CFG, IMPL_NAME, REV, REV_NAME, SHA1, SHA2, FakeRunner, FakeWS,
                           SnapshotGH, finding, norm, pr, raw_review, receipt)
 from test_devloop_zero import GRANT, SUCCESS, ZCFG, ZERO_LABELS, changes
 
-DATA = tomllib.loads(config.DEFAULT_CONFIG.read_text())
+DATA = ssdlc_project.data()
 READY = 'agent:ready-to-merge'
 HOLD = 'agent:merge-hold'
 SUPERVISOR = 'agy'  # neither the implementer nor the level-1 reviewer of the tests
@@ -126,7 +126,7 @@ class MergeConfigTests(unittest.TestCase):
         return config.parse_config(data)
 
     def test_the_distributed_config_is_off(self):
-        cfg = config.load_config()
+        cfg = ssdlc_project.load()
         self.assertEqual(cfg.merge, MergePolicy(mode='off'))
         self.assertFalse(cfg.merge.enabled())
         self.assertEqual(cfg.merge.operator_only_paths, ('docs/adr/', 'AGENTS.md', 'CLAUDE.md'))
@@ -660,7 +660,7 @@ class MergerAppTests(unittest.TestCase):
         self.assertEqual(ids.login('merger'), MERGER_LOGIN)
 
     def test_the_merger_is_configured_as_an_app_only(self):
-        cfg = config.load_config()
+        cfg = ssdlc_project.load()
         self.assertEqual(cfg.apps['merger'], config.AppConfig(5792929, 'brushtyler-devloop-merger'))
         self.assertNotIn('merger', cfg.agents)
         agents = dict(DATA['agents'], merger=DATA['agents']['codex'])

@@ -19,12 +19,18 @@ the attribution header:
   on a ``round_grantable`` escalation (#405, ADR 0005, P5-1). The reason carries the analysis of
   the causes (rule 9 of section 3.1 of the ADR): without one the command is malformed. Granting
   rounds is a delegation of the operator, off by default (``[delegations] rounds``), within the
-  caps below.
+  caps below;
 - ``/devloop grant-budget <reason>``: extend once the budget envelope of a story whose turn it
   refused, only on a ``budget_grantable`` escalation (#411, ADR 0005, P5-7): its turn caps and
   its time, by ``BUDGET_TOLERANCE_PERCENT`` of their values, never its dollars nor tokens. The
   reason carries the analysis of the causes, as for ``grant-round``. A delegation of the
-  operator, off by default (``[delegations] budget``), within the daily cap below.
+  operator, off by default (``[delegations] budget``), within the daily cap below;
+- ``/devloop capacity <key> <value> <duration> <reason>``: a temporary capacity limit (#412, ADR
+  0005, P5-8), only on the issue of the daily summary (``[report] issue``), never on an
+  escalation: ``max_open_prs`` or ``max_parked_prs`` set to ``value`` for ``duration`` (``<N>h``
+  or ``<N>m``), within the caps below, then the configured value again. The reason carries the
+  analysis of the causes, as for ``grant-round``. A delegation of the operator, off by default
+  (``[delegations] capacity``).
 
 A trusted user may use the same commands on an escalation to the operator (#321), in any merge
 mode: ``retry`` of a step it records, critical classes included, and ``accept-defaults`` or
@@ -90,17 +96,25 @@ MAX_DAILY_GRANTS = 3
 # this share of each of its turn caps and of its time, rounded down (``floor``), so that it never
 # goes beyond it. A constant of the code, like the caps above.
 BUDGET_TOLERANCE_PERCENT = 25
+# The caps of the temporary capacity limits (#412, ADR 0005, P5-8, D4 and the operator's decision
+# on the issue): the keys the supervisor may set with ``/devloop capacity``, each up to its cap,
+# for at most ``MAX_CAPACITY_HOURS``. Only keys devloop reads again without a restart:
+# ``max_parallel_actions`` sizes the workers when ``devloop run`` starts, and is refused.
+MAX_CAPACITY = {'max_open_prs': 6, 'max_parked_prs': 6}
+MAX_CAPACITY_HOURS = 24
+CAPACITY_REFUSED = ('max_parallel_actions',)
 # An issue with this label is in a design phase: its escalations stay critical.
 DESIGN_LABEL = 'phase:design'
 
 RETRY, ACCEPT_DEFAULTS, DECIDE, ESCALATE = 'retry', 'accept-defaults', 'decide', 'escalate'
 GRANT_ROUND = 'grant-round'
 GRANT_BUDGET = 'grant-budget'
-COMMANDS = (RETRY, ACCEPT_DEFAULTS, DECIDE, ESCALATE, GRANT_ROUND, GRANT_BUDGET)
+CAPACITY = 'capacity'
+COMMANDS = (RETRY, ACCEPT_DEFAULTS, DECIDE, ESCALATE, GRANT_ROUND, GRANT_BUDGET, CAPACITY)
 # The commands that need a text: without one they are malformed.
-NEEDS_TEXT = (DECIDE, ESCALATE, GRANT_ROUND, GRANT_BUDGET)
+NEEDS_TEXT = (DECIDE, ESCALATE, GRANT_ROUND, GRANT_BUDGET, CAPACITY)
 # The commands whose text is the rest of the comment, not only the rest of its first line.
-LONG_TEXT = (DECIDE, GRANT_ROUND, GRANT_BUDGET)
+LONG_TEXT = (DECIDE, GRANT_ROUND, GRANT_BUDGET, CAPACITY)
 # What a supervision record says happened to a command.
 OUTCOMES = ('applied', 'accepted', 'decided', 'escalated', 'refused', 'limit', 'granted')
 
@@ -161,11 +175,12 @@ def supervisor_command(body):
     """The supervisor command of a comment: ``(command, text)`` when the first line after the
     attribution header is ``/devloop retry``, ``/devloop accept-defaults``, ``/devloop decide
     <text>``, ``/devloop escalate <reason>``, ``/devloop grant-round <reason>`` or ``/devloop
-    grant-budget <reason>``; None when the comment is no such command. The reason of an escalate
-    is the rest of its line; the text of a decide and the reason of a grant-round or a
-    grant-budget are the rest of the comment, from the rest of its first line on (#258; #405 and
-    #411, whose analysis of the causes may take several lines). A decide, an escalate or a grant
-    without a text has None as text, and is malformed."""
+    grant-budget <reason>`` or ``/devloop capacity <arguments>``; None when the comment is no
+    such command. The reason of an escalate is the rest of its line; the text of a decide, the
+    reason of a grant-round or a grant-budget and the arguments of a capacity are the rest of the
+    comment, from the rest of its first line on (#258; #405, #411 and #412, whose analysis of the
+    causes may take several lines; ``capacity_arguments`` reads those of a capacity). A decide,
+    an escalate, a grant or a capacity without a text has None as text, and is malformed."""
     lines = (body or '').strip().splitlines()
     while lines and (not lines[0].strip() or lines[0].strip().startswith('>')):
         lines.pop(0)
@@ -178,3 +193,46 @@ def supervisor_command(body):
     if tokens[1] in NEEDS_TEXT:
         return tokens[1], reason or None
     return tokens[1], reason
+
+
+# Far more than any cap or duration of a capacity command needs (#412).
+_MAX_DIGITS = 9
+
+
+def _whole(text):
+    """``text`` as a whole number when it is up to ``_MAX_DIGITS`` ASCII digits; None for
+    anything else. ``str.isdigit`` accepts characters such as ``²`` that ``int`` refuses, and
+    ``int`` refuses a string of thousands of digits: both would stop the tick (#412)."""
+    if not text or len(text) > _MAX_DIGITS or not all('0' <= c <= '9' for c in text):
+        return None
+    return int(text)
+
+
+def capacity_minutes(text):
+    """The minutes of the duration ``text`` of a capacity command (#412): ``<N>h`` or ``<N>m``,
+    ``N`` a whole number above 0 in ASCII digits; None for anything else."""
+    text = (text or '').strip().lower()
+    if len(text) < 2 or text[-1] not in 'hm':
+        return None
+    amount = _whole(text[:-1])
+    if amount is None or amount <= 0:
+        return None
+    return amount * 60 if text[-1] == 'h' else amount
+
+
+def capacity_arguments(text):
+    """``(key, value, minutes, reason)`` of the text of ``/devloop capacity <key> <value>
+    <duration> <reason>`` (#412), as ``supervisor_command`` returns it; the reason, the analysis
+    of the causes, is the rest of the text and may take several lines. None when a part is
+    missing or malformed: a value that is not a whole number, a duration other than ``<N>h`` or
+    ``<N>m``, no reason. Whether the key, the value and the duration are within the caps is the
+    dispatcher's check."""
+    parts = (text or '').split(None, 3)
+    if len(parts) < 4:
+        return None
+    value = _whole(parts[1])
+    minutes = capacity_minutes(parts[2])
+    reason = parts[3].strip()
+    if value is None or minutes is None or not reason:
+        return None
+    return parts[0], value, minutes, reason

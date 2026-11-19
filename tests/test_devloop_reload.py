@@ -14,10 +14,11 @@ from unittest import mock
 
 import devloop.__main__ as cli
 from devloop import config
-from devloop.config import DEFAULT_CONFIG, LIVE_KEYS, Reloader
+from devloop.config import LIVE_KEYS, Reloader
 from devloop.dispatcher import Dispatcher
 from devloop.planning import Action, Snapshot
 from devloop.watch import NOTHING_NEW
+from helpers import ssdlc_project
 from helpers.devloop_fakes import FakeGH
 from test_devloop import FakeRunner, FakeWS, ready
 
@@ -25,7 +26,8 @@ REPO = Path(__file__).resolve().parent.parent
 
 
 class FilesCase(unittest.TestCase):
-    """A config.toml (the installation's) and an overlay in a temporary directory."""
+    """A config.toml (ssdlc's as one file, ``ssdlc_project.text``) and an overlay in a temporary
+    directory."""
 
     OVERLAY = 'max_open_prs = 1\n'
 
@@ -33,7 +35,7 @@ class FilesCase(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
         self.base = self.tmp / 'config.toml'
-        self.base.write_text(DEFAULT_CONFIG.read_text(encoding='utf-8'), encoding='utf-8')
+        self.base.write_text(ssdlc_project.text(), encoding='utf-8')
         self.local = self.tmp / 'config.local.toml'
         self.local.write_text(self.OVERLAY, encoding='utf-8')
         self.cfg = config.load_config(self.base, self.local)

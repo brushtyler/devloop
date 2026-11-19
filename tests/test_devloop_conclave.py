@@ -9,7 +9,6 @@ import os
 import subprocess
 import sys
 import tempfile
-import tomllib
 import unittest
 from pathlib import Path
 
@@ -21,6 +20,7 @@ from devloop import agents, conclave, config, markdown, planning, review, schema
 from devloop.dispatcher import Dispatcher  # noqa: E402
 from devloop.planning import Snapshot, plan  # noqa: E402
 from devloop.workspace import Workspace  # noqa: E402
+from helpers import ssdlc_project  # noqa: E402
 from helpers.devloop_fakes import SHA1, FakeGH, FakeIdentities, at  # noqa: E402
 from test_devloop import CFG, FakeRunner, FakeWS, implemented, pr, receipt  # noqa: E402
 
@@ -701,7 +701,7 @@ class DisabledTests(Base):
         self.assertEqual(self.gh.conclaves(7), [])
 
     def test_the_distributed_configuration_leaves_it_disabled_with_an_example(self):
-        self.assertEqual(config.load_config().conclave, ())
+        self.assertEqual(ssdlc_project.load().conclave, ())
         text = (Path(config.__file__).parent / 'config.toml').read_text(encoding='utf-8')
         self.assertIn('# conclave = ["claude", "codex", "agy"]', text)
 
@@ -725,7 +725,7 @@ class DisabledTests(Base):
         self.assertTrue(any('`other` is not a member' in line for line in self.logs))
 
     def test_the_configuration_requires_three_distinct_agents(self):
-        data = tomllib.loads((Path(config.__file__).parent / 'config.toml').read_text())
+        data = ssdlc_project.data()
         self.assertEqual(config.parse_config(dict(data, conclave=list(MEMBERS))).conclave,
                          MEMBERS)
         for bad in (['claude', 'codex'], ['claude', 'codex', 'codex'],

@@ -16,7 +16,7 @@ from unittest import mock
 from devloop import outbox as outbox_mod
 from devloop import ports
 from devloop.apps import Identities
-from devloop.config import ConfigError, parse_config, load_data
+from devloop.config import ConfigError, parse_config
 from devloop.dispatcher import Dispatcher
 from devloop.github import GitHub, GitHubError, GitHubUncertain
 from devloop.journal import JOURNAL, JournalError, TurnJournal
@@ -25,6 +25,7 @@ from devloop.outbox import (DROPPED, FAILED, IN_FLIGHT_SECONDS, SENT, UNCERTAIN,
                             OutboxClient, for_identities)
 from devloop.planning import Snapshot
 from helpers.devloop_fakes import FIRST_COMMENT_ID, SHA1, ActingAs, FakeGH, FakeIdentities
+from helpers.ssdlc_project import data as load_data
 
 REPO = 'brushtyler/ssdlc'
 START = 1_800_000_000.0

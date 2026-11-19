@@ -296,7 +296,8 @@ capacity:
 A new issue starts only while both limits leave room: fewer PRs in progress than `max_open_prs`,
 and fewer parked PRs than `max_parked_prs`, since many open PRs make conflicts more likely.
 `devloop status` and every tick log show the two counters, as `open PRs: <n>/<max_open_prs> in
-progress (max_open_prs), <n>/<max_parked_prs> parked (max_parked_prs)`. Issues with a
+progress (max_open_prs), <n>/<max_parked_prs> parked (max_parked_prs)`, with the
+[temporary capacity limits](#temporary-capacity-limits) in force when there are any. Issues with a
 `blocked_labels` label are skipped.
 
 **Exception for high-priority issues** (#274): once `max_parked_prs` is reached, a ready issue
@@ -399,6 +400,21 @@ user's would. The label approves the title and the body as they are; an edit by 
 
 Without `[roles].supervisor`, or without an app for it (the supervisor then acts with the
 operator's `gh` login), only `trusted_users` count, as before.
+
+### Choosing the implementer
+
+Every issue goes to `roles.implementer` unless a label chooses another (#407, ADR 0005, D7): an
+`impl:<kind>` label (`impl:codex`) gives it to the key `<kind>-implementer`, and prevails; an
+area label of `[roles.implementers]` (empty by default) gives it to the implementer it maps to.
+These labels count under the same rules as the supervisor's labels above: only while the issue
+has them, and only when their latest `labeled` event comes from a trusted user, or from the
+supervisor on an issue of a trusted user or of devloop's apps. The implementer is chosen at the
+takeover and recorded in the `request` record and in the PR marker: changing the label later
+does not change the implementer of an open PR. Two `impl:` labels, an `impl:` label of an
+implementer that is not configured, area labels that lead to different implementers, or an
+implementer that is the same agent as the readiness check, send the issue to the operator as
+`configuration`. Every implementer signs with the implementer app once the keys are renamed by
+role ([the keys by role](reference.md#the-implementer-app-and-the-keys-by-role)); off by default.
 
 ### Readiness check before implementation
 
@@ -824,10 +840,13 @@ stays with the operator, with a comment that says why, when:
   the same step on the same input, within the same two retries shared with the operator. The key
   is off by default and turning it on is the operator's decision; off, every escalation on such a
   PR goes to the operator, and one already waiting for the supervisor is refused at its retry
-  (`supervisor_refused`). The other classes on such a PR always go to the operator. With
-  `[roles.supervisor]` as a table (#408), the PR is the supervisor's agent's when the `kind` or
-  the `model` of its implementer, as the PR's marker records them, is the supervisor actor's;
-  the keys are never compared ([The supervisor app](reference.md#the-supervisor-app));
+  (`supervisor_refused`). The other classes on such a PR always go to the operator. The PR is
+  the supervisor's agent's when the `kind`, the `model` or the provider of its implementer, as
+  the PR's marker records them, is the supervisor's: the supervisor actor's, with `[roles.supervisor]` as a table
+  (#408), or the agent's that `roles.supervisor` names (#407, which also counts a PR whose
+  implementer is that key). So the check keeps firing when the keys are renamed by role
+  ([The supervisor app](reference.md#the-supervisor-app),
+  [the keys by role](reference.md#the-implementer-app-and-the-keys-by-role));
 - the issue was opened by someone outside `trusted_users` and devloop's apps, or its text is no
   longer approved by `agent:ready`;
 - the issue (or the PR) has the label `phase:design`;
@@ -918,6 +937,9 @@ one wins; without one, the latest that does not apply is answered.
   PR in a `budget_grantable` escalation, as described in
   [Extending the budget envelope](#extending-the-budget-envelope). It needs a reason, which may
   go on in the lines below the command.
+- `/devloop capacity` is not a command of an escalation: on one it is answered as not applicable
+  and the escalation stays where it is. It applies only on `[report] issue`, as described in
+  [Temporary capacity limits](#temporary-capacity-limits).
 
 An escalation whose class is critical or unknown, or that was not routed to the supervisor,
 accepts no command: the command is refused and the item goes to `agent:needs-operator`. A command
@@ -1056,6 +1078,69 @@ escalation to the operator does not apply.
 
 **Trace.** Every command applied leaves a dispatcher record, described in
 [Supervision trace](protocol.md#supervision-trace).
+
+#### Temporary capacity limits
+
+A delegation of the operator to the supervisor (#412, [ADR 0005](../adr/0005-deleghe-e-ruoli-degli-agent.md#capacità),
+P5-8), **off by default**: `[delegations] capacity = false`. It lets the supervisor raise or lower
+`max_open_prs` or `max_parked_prs` for a while, without touching the configuration or the
+overlay, which stay the operator's. It needs `[report] issue`: the command is written there, on
+the issue of the [daily summary](#daily-summary), never on an escalation. With `capacity = true`
+and no `[report] issue` devloop does not start.
+
+With `capacity = true`, in merge mode `"auto"`, the supervisor (or a trusted user) writes, as the
+first line of a comment on that issue:
+
+```text
+/devloop capacity <key> <value> <duration> <reason>
+```
+
+- `<key>` is `max_open_prs` or `max_parked_prs`. `max_parallel_actions` is refused: it sizes the
+  workers when `devloop run` starts, so only a restart applies it, and only the operator changes
+  it. Any other key is refused.
+- `<value>` is a whole number from 1 to the cap of the key: **6** for `max_open_prs` and **6** for
+  `max_parked_prs`. A value lower than the configured one applies too.
+- `<duration>` is `<N>h` or `<N>m`, at most **24 hours**, counted from when the command was
+  written: a command the dispatcher reads late applies only for what is left, and one whose
+  duration is already over is refused.
+- `<reason>` is required, may go on in the lines below, and carries the analysis of the causes,
+  or cites it in the diary issue, as for [granting a round](#granting-a-review-round).
+
+The caps are constants of the code (`MAX_CAPACITY` and `MAX_CAPACITY_HOURS` in
+`devloop/supervision.py`); `capacity_max_open_prs`, `capacity_max_parked_prs` and
+`capacity_max_hours` in `[delegations]` may only lower them, and a higher value is refused at
+startup. Every grant counts against the daily cap of the delegations (`max_grants_per_day`, 3,
+with the rounds granted), checked and written in the [turn journal](protocol.md#turn-journal) in
+one step: without a journal that can be read no grant applies.
+
+At every tick, with the delegation on, the dispatcher reads the comments of the issue, answers the
+commands written after the latest one it answered, and plans with the limits in force: for each
+key the latest grant, until its end. The configuration itself does not change: when the limit
+expires the next tick plans with the configured value again, and the log says
+`capacity: <key> back to the configured <value>`. A later command on the same key replaces the
+earlier one, even when it ends sooner. A grant whose value is above a cap the operator lowered
+afterwards stops applying. When the issue cannot be read, the configured values apply. A command
+from anyone but the supervisor's identity or a trusted user is ignored and only logged; any other
+`/devloop` command on the issue is answered as not applicable.
+
+Each answer is a `supervision` record on the issue (see
+[Supervision trace](protocol.md#supervision-trace)): `refused`, with why, changes nothing; a grant
+(`granted`) records the key, the value, the configured value, the cap and the end, and the
+same figures go in a ledger `event` `delegation_grant` and in a `grant` event of the turn journal.
+
+With the delegation off, the dispatcher still reads the issue at every tick that is not a dry run
+and answers each command with a `refused` record, "not applicable": the delegation is off. The
+answer spends the command, so turning the delegation on later grants nothing written before: the
+supervisor writes the command again.
+
+A value or a duration in characters other than the ASCII digits `0`-`9` (such as `²`), or with
+more than 9 digits, makes the command malformed: it is refused, and the tick goes on.
+
+`devloop status` reads the issue like a dry run, without answering any command, and shows the
+counters and the `next:` lines with the limits in force, the same a tick plans with.
+
+**Revocation.** `capacity = false` revokes the delegation from the next tick: the limits in force
+stop applying, and the commands written from then on are refused as not applicable.
 
 ### Commands on escalations to the operator
 
@@ -1265,19 +1350,22 @@ in `[roles]` of the configuration ([reference](reference.md#configuration)).
 ## Usage
 
 ```bash
-python3 -m devloop setup            # create the agent:* labels, the priority:* labels and the review level labels (reviews:0 only when level 0 is on)
-python3 -m devloop status           # running action, devloop PRs (with rounds counted on max_review_rounds, merge state and conflicts), ready issues in start order with their priority, planned actions; with [budget] on, the budget of the stories in progress; a pinned copy behind origin/main in the files of the installation
-python3 -m devloop apps             # check the GitHub App of each actor
-python3 -m devloop tick --dry-run   # print the ready issues in start order and the plan, change nothing (no lock: it runs beside a dispatcher)
-python3 -m devloop tick             # run one round
-python3 -m devloop run --idle-timeout 900  # tick continuously (see Continuous loop)
-python3 -m devloop cleanup          # remove worktrees left by failed steps
-python3 -m devloop gc               # clean up state_dir now: old pinned copies, worktrees of closed issues and PRs, old logs (see Cleanup of the state directory)
-python3 -m devloop follow issue-52  # follow live the implementer of issue #52 (pr-<N>: reviewer or fixer)
-python3 -m devloop watch --timeout 3600  # wait for the next change on GitHub, for the supervising agent
-python3 -m devloop pin origin/main  # pin a commit of origin, after its smoke test (see Run from a pinned installation)
-python3 -m devloop report --day 2026-11-16  # print the summary of a UTC day from devloop's records (default: today; --publish: on [report] issue, see Daily summary)
-python3 -m devloop fallback reset agy  # forget the models agy remembers unavailable (see Memory of unavailable models)
+# Run directly, devloop needs the project file and the overlay of the state_dir, before the
+# command (the launcher, scripts/devloop-pinned, passes them itself):
+devloop="python3 -m devloop --project-config .ssdlc/devloop/project.toml --local-config .ssdlc/devloop/config.local.toml"
+$devloop setup            # create the agent:* labels, the priority:* labels and the review level labels (reviews:0 only when level 0 is on)
+$devloop status           # running action, devloop PRs (with rounds counted on max_review_rounds, merge state and conflicts), ready issues in start order with their priority, planned actions; with [budget] on, the budget of the stories in progress; a pinned copy behind origin/main in the files of the installation
+$devloop apps             # check the GitHub App of each actor
+$devloop tick --dry-run   # print the ready issues in start order and the plan, change nothing (no lock: it runs beside a dispatcher)
+$devloop tick             # run one round
+$devloop run --idle-timeout 900  # tick continuously (see Continuous loop)
+$devloop cleanup          # remove worktrees left by failed steps
+$devloop gc               # clean up state_dir now: old pinned copies, worktrees of closed issues and PRs, old logs (see Cleanup of the state directory)
+$devloop follow issue-52  # follow live the implementer of issue #52 (pr-<N>: reviewer or fixer)
+$devloop watch --timeout 3600  # wait for the next change on GitHub, for the supervising agent
+$devloop pin origin/main  # pin a commit of origin, after its smoke test (see Run from a pinned installation)
+$devloop report --day 2026-11-16  # print the summary of a UTC day from devloop's records (default: today; --publish: on [report] issue, see Daily summary)
+$devloop fallback reset agy  # forget the models agy remembers unavailable (see Memory of unavailable models)
 ```
 
 Run it from any checkout of this repository. Worktrees, agent prompts and logs, and the lock that
@@ -1289,9 +1377,14 @@ For the same reason they never use the [publication outbox](protocol.md#publicat
 Not even its git commands write to the repository: it does not fetch, so it plans from the remote branches as last fetched (a
 branch never fetched leaves its merge mode not computable), and the objects that `git
 merge-tree` writes go to a temporary directory. In daily use run it from the pinned copy, through
-`scripts/devloop-pinned` ([Run from a pinned installation](#run-from-a-pinned-installation)).
+`scripts/devloop-pinned` ([Run from a pinned installation](#run-from-a-pinned-installation)),
+which also passes the [project file](reference.md#project-file) of the `state_dir`: since
+ADR 0006, R3 `devloop/config.toml` has no `test_cmd`, so run directly devloop needs
+`--project-config <state_dir>/project.toml`, before the command, as in the block above (from the
+main checkout).
 `--local-config <file>`, before the command, applies a local overlay to the configuration
-([Local config as an overlay](#local-config-as-an-overlay)). `state_dir` does not grow without
+([Local config as an overlay](#local-config-as-an-overlay)); the launcher passes
+`<state_dir>/config.local.toml` when it exists, and so does the block above. `state_dir` does not grow without
 limits: see [Cleanup of the state directory](#cleanup-of-the-state-directory).
 
 ### Cleanup of the state directory
@@ -1823,10 +1916,16 @@ From the beginning to the end, as root or with `sudo`:
 
 5. **Pin.** The first pin runs the clone's devloop; every later command runs the pinned copy,
    through the [launcher](#launcher). The pin applies the overlay and runs the
-   [smoke test](#pin), so a key the copy refuses stops here.
+   [smoke test](#pin), so a key the copy refuses stops here. Before it, the
+   [project file](reference.md#project-file) is in the `state_dir` (copied from
+   [`ops/host/ssdlc/project.toml`](../../ops/host/ssdlc/project.toml), with the keys of
+   [`ops/host/ssdlc/overlay.toml`](../../ops/host/ssdlc/overlay.toml) in the overlay, ADR 0006,
+   R3): the clone's devloop gets it and the overlay before the command, as the launcher would.
 
    ```bash
-   sudo -u devloop -H sh -c 'cd ~/ssdlc && python3 -m devloop pin origin/main'
+   sudo -u devloop -H sh -c 'cd ~/ssdlc && python3 -m devloop \
+       --project-config .ssdlc/devloop/project.toml \
+       --local-config .ssdlc/devloop/config.local.toml pin origin/main'
    ```
 
 6. **Checks.** From the pinned copy, as the `devloop` user: every app, its installation and its
@@ -1993,8 +2092,9 @@ A systemd unit does the same with restarts on a crash: see [Continuous loop](#co
 
 #### Pin
 
-`python3 -m devloop pin <ref>`, from the main checkout (or `scripts/devloop-pinned pin <ref>`),
-takes the commit from the [installation's source](#installation-source), which is this clone
+`python3 -m devloop --project-config <state_dir>/project.toml --local-config
+<state_dir>/config.local.toml pin <ref>`, from the main checkout (or `scripts/devloop-pinned pin
+<ref>`, which passes both itself), takes the commit from the [installation's source](#installation-source), which is this clone
 unless `source` names another:
 
 1. updates the branches and tags of `origin`, dropping those deleted on `origin` (the tags of
@@ -2004,8 +2104,10 @@ unless `source` names another:
    of `origin`. A commit only local, or reachable only from a local tag or from a branch deleted
    on `origin`, is refused. The commit of a copy already pinned (also abbreviated) is used
    without a fetch: that is the rollback;
-2. reads `devloop/config.toml` of that commit with the local overlay applied, and takes the files
-   of `review_policy.sensitive_path_lists`: each must be a relative path inside the root and a
+2. reads `devloop/config.toml` of that commit with the [project file](reference.md#project-file)
+   of the `state_dir` and the local overlay applied, and takes the files
+   of `review_policy.sensitive_path_lists` (ssdlc's come from its project file since ADR 0006,
+   R3): each must be a relative path inside the root and a
    regular file of the commit. The documents of the [documentation map](reference.md#documentation-map) are
    not taken: they belong to the repository, not to the installation;
 3. extracts `devloop/`, `core/` when the commit has it (devloop imports it for the
@@ -2105,11 +2207,13 @@ state_dir = "/var/lib/devloop/widget"
 - The launcher is installed on the host from the source at the pinned tag, outside the pinned
   copy and the managed repository, and gets the `state_dir` with `--state-dir`; the
   [ops guide](../../ops/README.md) does it with `SOURCE_REPO` and `SOURCE_REF`.
-- The first pin runs devloop of the source clone in the managed checkout, with the overlay:
+- The first pin runs devloop of the source clone in the managed checkout, with the project file
+  (below; since ADR 0006, R3 the installation has no `test_cmd`) and the overlay:
 
   ```bash
   cd /home/devloop/widget
   PYTHONPATH=/home/devloop/devloop-source python3 -P -m devloop \
+      --project-config /var/lib/devloop/widget/project.toml \
       --local-config /var/lib/devloop/widget/config.local.toml pin v1.2.0
   ```
 
@@ -2203,6 +2307,14 @@ enters the default commands of agy: the overlay alone admits it. It must be a re
 its own: a symbolic link, or a file with other hard links, stops devloop. Its hash is part of
 the policy version, and each start and reload records the configuration in the journal.
 
+Since ADR 0006, R3 the installation's `config.toml` holds none of these keys: ssdlc's facts and
+restrictions are in its project file, whose example is
+[`ops/host/ssdlc/project.toml`](../../ops/host/ssdlc/project.toml), and the agy commands derived
+from its tests in its overlay ([`ops/host/ssdlc/overlay.toml`](../../ops/host/ssdlc/overlay.toml)).
+Without a project file, or a `test_cmd` in the overlay, devloop stops at startup (`missing
+'test_cmd'`), and so does the pin of a copy, whose check loads the configuration. The migration
+of a host is in [ops/host/migrate.md](../../ops/host/migrate.md#configurazione-di-ssdlc-nel-suo-file-di-progetto).
+
 #### Changes while the loop runs
 
 A running `devloop run` reads `devloop/config.toml` of its copy, the overlay and the
@@ -2217,10 +2329,14 @@ keys take effect without a restart:
   tick, with a line `config: <key> <old> -> <new> from this tick` in the log. The actions already
   running go on and are not interrupted: a higher `max_open_prs` lets the next tick start an
   issue alongside them.
-- `[delegations]` (#405, #406, #411): a delegation turned off, `rounds`, `retry_own_prs` or
-  `budget`, is revoked from the next tick ([Granting a review round](#granting-a-review-round),
+- `[delegations]` (#405, #406, #411, #412): a delegation turned off, `rounds`, `retry_own_prs`,
+  `budget` or `capacity`, is revoked from the next tick
+  ([Granting a review round](#granting-a-review-round),
   [Extending the budget envelope](#extending-the-budget-envelope),
-  [Escalations to the supervisor](#escalations-to-the-supervisor)).
+  [Escalations to the supervisor](#escalations-to-the-supervisor),
+  [Temporary capacity limits](#temporary-capacity-limits)). A temporary capacity limit of the
+  supervisor is not a change of the configuration: it applies over the configured value of
+  `max_open_prs` or `max_parked_prs` until it expires.
 
 **Every other key needs a restart**, including the merge modes (`[merge]`), `[pin]`, the roles,
 `trusted_users`, the agents, the identities (`[apps]`), `state_dir`, `max_parallel_actions` and

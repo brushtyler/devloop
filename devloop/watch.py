@@ -54,7 +54,7 @@ import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .apps import DISPATCHER, MERGER, SUPERVISOR, AppAuth, Identities
+from .apps import DISPATCHER, IMPLEMENTER, MERGER, SUPERVISOR, AppAuth, Identities, used
 from .dispatch_actions import ready_approval
 from .github import GitHubError, GitHubNotFound, author_login
 from .markdown import read_marker
@@ -127,13 +127,20 @@ class Trust:
         """The logins of the configured apps, the agents' and the dispatcher's, as the
         dispatcher derives them (``Identities.login``); not the ``merger``'s, which writes
         nothing, nor the supervisor's role app (#408) unless ``[roles.supervisor]`` is the
-        supervisor actor that signs with it. Only slugs are needed: no private key is read."""
+        supervisor actor that signs with it, nor the implementer's (#407) unless an agent
+        declares it. Each agent key writes with the app it declares (``Config.app_of``). Only
+        slugs are needed: no private key is read."""
         identities = Identities(cfg.repo, {actor: AppAuth(app.app_id, app.slug, None, cfg.repo)
                                            for actor, app in cfg.apps.items()
                                            if actor != MERGER and (
                                                actor != SUPERVISOR
-                                               or cfg.supervisor_actor is not None)})
+                                               or cfg.supervisor_actor is not None)
+                                           and (actor != IMPLEMENTER or used(cfg, actor))})
         writers = {actor: identities.login(actor) for actor in identities.apps}
+        # An agent key writes with the app it declares (#407): an implementer with the role app
+        # ``implementer``, a reviewer with its agent's app.
+        writers.update({key: identities.login(cfg.app_of(key)) for key in cfg.agents
+                        if cfg.app_of(key) in identities.apps})
         return cls(cfg.trusted_users, writers, cfg.labels.ready)
 
     def trusted(self, login):

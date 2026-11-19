@@ -9,13 +9,14 @@ from unittest import mock
 
 from devloop import journal as journal_mod
 from devloop import markdown
-from devloop.config import ConfigError, load_config, parse_config, load_data
+from devloop.config import ConfigError, parse_config
 from devloop.dispatcher import Dispatcher
 from devloop.github import GitHubError
 from devloop.journal import (JOURNAL, LEGACY, SNAPSHOT, JournalError, TurnJournal,
                              reconcile_command)
 from devloop.ledger import Ledger
 from devloop.planning import Action, Snapshot
+from helpers import ssdlc_project
 from test_devloop import CFG, META, REV, implemented, pr, raw_review
 from test_devloop_ledger import LedgerGH, ReportingRunner, TreeWS
 
@@ -750,8 +751,8 @@ class DispatcherJournalTests(unittest.TestCase):
 
 class ConfigTests(unittest.TestCase):
     def test_the_block_is_off_by_default(self):
-        self.assertFalse(load_config().block_uncertain_turns)
-        data = load_data()
+        self.assertFalse(ssdlc_project.load().block_uncertain_turns)
+        data = ssdlc_project.data()
         data.pop('block_uncertain_turns', None)
         self.assertFalse(parse_config(data).block_uncertain_turns)
         self.assertTrue(parse_config(dict(data, block_uncertain_turns=True)).block_uncertain_turns)

@@ -1,0 +1,14 @@
+# The keys ssdlc's overlay gains with R3 (ADR 0006): add them to <state_dir>/config.local.toml of
+# ssdlc's host, beside the keys it already has (ops/host/migrate.md, "Configurazione di ssdlc nel
+# suo file di progetto"). Not an overlay of its own: devloop never reads it from here.
+#
+# The agents' permissions derived from the project's tests are the overlay's alone (ADR 0006,
+# D2): the test_cmd of the project file never becomes a command of agy. Before R3 agy's default
+# commands derived from the test_cmd of devloop/config.toml; the installation no longer has one,
+# so the overlay admits the same commands, in the same order (docs/devloop/reference.md, "agy
+# permissions"). The values are those agy had: the policy version keeps its reviewers' part.
+[agents.agy]
+write_commands = ["python3 scripts/run-tests.py", "python3 -m unittest", "git status",
+                  "git diff", "git log", "git show"]
+review_commands = ["python3 scripts/run-tests.py", "python3 -m unittest", "git status",
+                   "git diff", "git log", "git show"]

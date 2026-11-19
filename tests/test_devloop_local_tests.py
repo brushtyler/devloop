@@ -3,7 +3,6 @@
 import dataclasses
 import subprocess
 import tempfile
-import tomllib
 import unittest
 from pathlib import Path
 
@@ -12,6 +11,7 @@ from devloop.dispatcher import Dispatcher
 from devloop.localtests import module_command, select_modules
 from devloop.workspace import Workspace
 
+from helpers import ssdlc_project
 from helpers.devloop_fakes import FakeGH
 from test_devloop import (CFG, FakeRunner, FakeWS, finding, fixed, implemented, norm, pr,
                           raw_review)
@@ -21,8 +21,7 @@ MODULES = ['test_devloop.py', 'test_devloop_ledger.py', 'test_impact.py', 'test_
 
 
 def config_data():
-    with open(config.DEFAULT_CONFIG, 'rb') as fh:
-        return tomllib.load(fh)
+    return ssdlc_project.data()
 
 
 def cmd(*modules):
