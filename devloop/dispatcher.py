@@ -213,14 +213,14 @@ from .planning import (BASE_CHANGED, MERGE_LANE, MERGING, RESYNC_AFTER_APPROVAL,
                        Snapshot,
                        admit, changes_before_ci, ci_unknown, counted_rounds, issue_priority,
                        label_names, numbers_of, operator_blocked, operator_held,
-                       pending_reviewers, plan, pr_counts, queue_lines, round_reasons, schedule,
-                       waived_rounds, zero_labels_hold)
+                       pending_reviewers, plan, pr_counts, queue_lines, round_reasons,
+                       runs_issue_step, schedule, waived_rounds, zero_labels_hold)
 from .policy import (BINDING, MAX_LISTED_PATHS, agent_profile, differences, profile_of,
                      receipt_of)
 from .ports import Backend, Tracker, summarize_checks
 from .review import (CI, OPERATOR, current_round, finding_commands, finding_key, flow_verdict,
                      open_findings, owner_of, round_verdict, trust_policy_parts)
-from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, DECIDE, ISSUE_STEPS, RETRY,
+from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, DECIDE, RETRY,
                           ROUND_GRANTABLE, TOOL_FAILURE, UNCERTAIN_TURN, supervisor_command)
 from .workspace import WorkspaceError
 
@@ -1207,15 +1207,16 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             view = self._supervisor_view(number, read(number), operator)
             if view is not None:
                 found.append(dict(view, number=number, pr=is_pr))
-        # A retry of an issue's step waits while the issue is blocked (#277), as a ready issue
-        # does: ``blocked_by`` holds its open blocks.
-        retries = [item for item in found if item['command'] == RETRY and not item['pr']
-                   and item.get('step') in ISSUE_STEPS and not item.get('refusal')]
+        # A retry of an issue's step, or an extension of the budget envelope that runs it
+        # (#411), waits while the issue is blocked (#277), as a ready issue does: ``blocked_by``
+        # holds its open blocks.
+        retries = [item for item in found if runs_issue_step(item)]
         views = self._dependency_view([item['number'] for item in retries]) if retries else {}
         for item in retries:
             item['blocked_by'] = views[item['number']]['blocked_by']
             if item['blocked_by']:
-                self.log(f'  issue #{item["number"]}: the retry waits, blocked by '
+                what = 'the retry' if item['command'] == RETRY else 'the extension'
+                self.log(f'  issue #{item["number"]}: {what} waits, blocked by '
                          + ', '.join(item['blocked_by']))
         return found
 

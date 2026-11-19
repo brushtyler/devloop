@@ -1023,19 +1023,27 @@ with:
 /devloop grant-budget <reason>
 ```
 
-The reason is required and carries the analysis of the causes, as for `grant-round`. Before
-granting, the dispatcher checks every condition again on data read then; a delegation turned
-off, a story extended in the meantime, a cap reached or an extension that would no longer cover
-the turn hand the item to the operator as `budget`. The extension is written in the turn journal
+The reason is required and carries the analysis of the causes, as for `grant-round`. As a retry,
+the extension is bound to the input of the refused turn: on an issue a merged devloop PR already
+resolved the command is refused and the issue becomes a `merged_issue` escalation, and when the
+input changed after the escalation (the PR's head, the issue's base or request) the command is
+refused and spent while the escalation stays with the supervisor; nothing is extended in either
+case. Before granting, the dispatcher checks every condition again on data read then; a
+delegation turned off, a story extended in the meantime, a cap reached or an extension that
+would no longer cover the turn hand the item to the operator as `budget`. The extension is
+written in the turn journal
 first, in one step with the checks that the story has none and that the daily cap is not
 reached: two commands applied together never extend a story twice. From then on it is part of
 the envelope of the story, across restarts: the frozen limits stay those of the first booking,
 and the journal's extension is added on top of them. A PR goes back to `agent:review` or
 `agent:changes`, where it was; an issue leaves `agent:needs-supervisor` and its implementation
-runs at once, as after a retry (while the issue is blocked by an open issue the command waits,
-unspent). The grant leaves a `grant` event in the turn
-journal with the story and the extension, a `supervision` record with outcome `granted` and a
-ledger `event` `delegation_grant` (see [Supervision trace](protocol.md#supervision-trace));
+runs at once, as after a retry: as a retry it takes a free PR slot of `max_open_prs`, waiting for
+a later tick without one, and while the issue is blocked by an open issue the command waits,
+unspent, taking no slot. The grant leaves a `grant` event in the turn
+journal with the story and the extension, a ledger `event` `delegation_grant` and a
+`supervision` record with outcome `granted`, in this order (see
+[Supervision trace](protocol.md#supervision-trace)): a dispatcher stopped before the record
+completes the same command at its next tick, without extending the story again;
 `devloop status` and the refusals show the extension in the state of the budget. A later turn
 the extended envelope refuses goes to the operator as `budget`: a second extension, the dollars
 and the values of the envelope stay the operator's (ADR 0004, D2).
@@ -1063,8 +1071,8 @@ no command applies, and the answer gives the manual steps. The commands valid th
   key of its input. Every escalation of a failed agent, `gh` or git step (`tool_failure`,
   `failure`, `untrusted`) and of a sync with conflicts that failed (`sync_failed`,
   `sync_sensitive`, `tool_failure`) records it, also when it goes to the operator; so do `supervisor_escalated` and `supervisor_refused`
-  of a `tool_failure` or `sync_failed` escalation, which keep the step of the supervisor's
-  escalation. Their comment says that `/devloop retry` applies. An issue whose readiness check
+  of a `tool_failure`, `sync_failed` or `budget_grantable` escalation, which keep the step of
+  the supervisor's escalation. Their comment says that `/devloop retry` applies. An issue whose readiness check
   failed this way keeps `agent:ready`, so that the check can run again. The
   class may be critical: a retry runs the step again and bypasses none of its checks. The
   conditions are the supervisor's: the input of the step must still be the one that failed (the

@@ -462,7 +462,11 @@ never passes the cap. An extension of the budget envelope granted with `/devloop
 and the `turns`, `role_turns`, `phase_turns` and `wall_seconds` it adds) and the same daily
 figures; its ledger `event` `delegation_grant` has the `delegation` `budget`, and its `grant`
 event in the turn journal, written first, also records the story and the extension, which from
-then on are part of the envelope of the story. The record is
+then on are part of the envelope of the story. Here the ledger event comes before the
+`supervision` record, which spends the command: a dispatcher stopped after the journal and
+before the record finds the command still to apply and the `grant` of its comment in the
+journal, so it completes what is missing (the ledger event only if absent, the record, the
+labels) without checking nor extending the story again. The record is
 written before the labels change, so a
 lost label change never runs a retry twice. A command that does not apply (#321) gets the same
 record, `refused`, with the reason and how to resume in the comment: it spends the command, which
@@ -472,8 +476,9 @@ supervisor's and the operator's.
 **Escalation.** The `notice` marker of an escalation to the operator records, as one to the
 supervisor does, the step that failed, the key of its input and, for a PR, the label a retry
 resumes from, when the step is one a retry runs again (#321). A supervisor's escalation handed to
-the operator (`supervisor_escalated`, `supervisor_refused`) keeps them only for `tool_failure` and
-`sync_failed`: the key of a `preflight_default` or `merged_issue` escalation only routes it.
+the operator (`supervisor_escalated`, `supervisor_refused`) keeps them only for `tool_failure`,
+`sync_failed` and `budget_grantable` (#411), whose step the operator may retry as on a `budget`
+escalation: the key of a `preflight_default` or `merged_issue` escalation only routes it.
 
 ## Dependency cycles
 
