@@ -4,7 +4,7 @@
 # docs/devloop/reference.md.
 #
 # The facts of the managed repository and the restrictions it adds (test_cmd, local_tests,
-# language, priority_labels, [docs.map], protected_paths, blocked_labels, sensitive_paths,
+# [tests], language, priority_labels, [docs.map], protected_paths, blocked_labels, sensitive_paths,
 # sensitive_path_lists, operator_only_paths) are not here: they are in the project file on the
 # host, <state_dir>/project.toml (ADR 0006, R3; docs/devloop/reference.md, "Project file"). ssdlc's
 # is ops/host/ssdlc/project.toml. Without a project file, or a test_cmd in the overlay, devloop
@@ -24,7 +24,9 @@ state_dir = ".ssdlc/devloop"
 # A first CI failure on a head whose failed test modules (the `FAILED MODULE` lines of
 # scripts/run-tests.py) are not pertinent to the PR's diff, with the same correspondence as
 # local_tests = "changed", is re-run once instead of becoming a round (issue #200). It needs
-# `actions: write` on the dispatcher's app; without it the failure is a round, as before.
+# `actions: write` on the dispatcher's app; without it the failure is a round, as before. It
+# also needs the project's [tests] selection and ci_log_format (ADR 0006, R5): without either
+# it is off.
 ci_rerun_unrelated = true
 # The journal of the turns in state_dir (issue #362) records each turn's intent before its CLI
 # starts, and its outcome. A turn left without outcome becomes `uncertain` and is never re-run
@@ -117,6 +119,25 @@ label = "reviews:2"
 # local overlay turns it on, e.g. advisory_reviewer = "claude". It is not part of the policy
 # version.
 advisory_reviewer = ""
+# The reviewer rules of ADR 0005, P5-5 (issue #409), off by default (D10): turning them on is the
+# operator's decision, best with no PR close to its merge (the policy version changes). On, every
+# agent and every fallback model declares its `provider` (checked against the prefix of the
+# model's name: a claude-* model declared with another provider stops devloop), and at both
+# levels a reviewer differs by GitHub identity and (kind, model, effort) from everyone who wrote
+# the PR, with at least one reviewer of a provider other than every author's (the only one at
+# level 1, quorum rule (ii) of D8): claude-reviewer with Sonnet may then review the code of
+# claude-implementer beside codex or agy. A new round skips a reviewer whose models are all
+# remembered unavailable, unless it owns an open finding; a round keeps its reviewers until it
+# ends.
+# provider_quorum = false
+# The ban of ADR 0005, P5-6 (issue #410), off by default (D10), independent of provider_quorum:
+# at both levels a reviewer's fallback model never runs when its provider is that of an author of
+# the PR (the implementer, every fixer and sync, with the fallbacks they actually ran); with no
+# model of the chain left the review turn fails (`tool_failure`). On, every agent and fallback
+# model declares its `provider`, and a reviewer of the pool with a fallback of a provider other
+# than its own model's and the same as an agent's that may implement (agy falling back on Claude
+# while claude implements) stops devloop at startup. It enters the policy version.
+# fallback_provider_ban = false
 
 # Level 0 (issue #107): no review. It applies only when a trusted user added `label` to the PR
 # (the latest event of that label added it), the level computed above is 1, and the PR's full
@@ -235,8 +256,9 @@ required_timeout_minutes = 30
 # claude. The limits a story gets at its first booking stay its own: a later change applies to
 # new stories. Token caps are refused: not supported yet. Off here: the values and turning it on
 # are the operator's decisions (ADR 0004, D2 and D8). enabled = true is refused at startup until
-# a story at its limit can be extended (grant-budget, ADR 0005; docs/devloop/reference.md,
-# "Prerequisites of activation").
+# the operator lifts the gate of the activation (BUDGET_EXTENSION in devloop/config.py); the
+# extension of a story at its limit is [delegations] budget below (grant-budget, ADR 0005;
+# docs/devloop/reference.md, "Prerequisites of activation").
 # The shape, with no value: the values are not decided yet (D2).
 [budget]
 enabled = false
@@ -273,16 +295,22 @@ enabled = false
 # startup. retry_own_prs (issue #406, P5-2): in "auto", a tool_failure escalation on a PR
 # implemented by the agent of roles.supervisor goes to the supervisor, who may retry it with
 # /devloop retry within the 2 retries it shares with the operator; every other class on such a PR
-# still goes to the operator. capacity (issue #412, P5-8): in "auto", `/devloop capacity <key>
-# <value> <duration> <reason>` on [report] issue (required when on) sets max_open_prs or
-# max_parked_prs to value for duration (<N>h or <N>m), then the configured value is back; each
-# grant counts against max_grants_per_day. max_parallel_actions is refused: it needs a restart.
-# When off, a command on [report] issue is refused as not applicable and spent.
+# still goes to the operator. budget (issue #411, P5-7): in "auto", a turn the budget envelope of
+# its story refused at a limit (LIMIT_REACHED) that one extension would cover, on a story never
+# extended, goes to the supervisor as budget_grantable, and `/devloop grant-budget <reason>`
+# extends the envelope of that story once: each turn cap and the time by 25% of their value,
+# rounded down (ADR 0005, D3), never dollars nor tokens, within max_grants_per_day; turned off,
+# the refused turn goes to the operator, as before. capacity (issue #412, P5-8): in "auto",
+# `/devloop capacity <key> <value> <duration> <reason>` on [report] issue (required when on) sets
+# max_open_prs or max_parked_prs to value for duration (<N>h or <N>m), then the configured value
+# is back; each grant counts against max_grants_per_day. max_parallel_actions is refused: it
+# needs a restart. When off, a command on [report] issue is refused as not applicable and spent.
 # capacity_max_open_prs, capacity_max_parked_prs and capacity_max_hours may only lower the caps of
 # the code (6, 6 and 24 hours).
 [delegations]
 rounds = false
 retry_own_prs = false
+budget = false
 capacity = false
 # max_rounds_per_pr = 2
 # max_grants_per_day = 3
@@ -350,7 +378,13 @@ implementer = "claude"
 # Level 2 takes the first pair that differs both in GitHub identity (app) and in (kind, model,
 # effort, review_args), and neither of which shares the identity or (kind, model, effort) of the
 # implementer or of a fixer of the PR; without such a pair the PR goes to agent:needs-operator.
-# `reviewer = "codex"` is a pool of one.
+# `reviewer = "codex"` is a pool of one. With review_policy.provider_quorum (issue #409) the
+# quorum rule on the provider replaces the check of the same agent, and once the keys are renamed
+# claude joins the pool as the third reviewer, last, with another model than the implementer's
+# and the app of claude (D8):
+#   reviewers = ["codex-reviewer", "agy-reviewer", "claude-reviewer"]
+#   [agents.claude-reviewer]      (the table of [agents.claude], with app = "claude",
+#                                  provider = "anthropic", model = "claude-sonnet-5-5")
 reviewers = ["codex", "agy"]
 
 [agents.claude]
@@ -391,7 +425,9 @@ effort = "high"
 # Argon has a budget of its own: when a turn fails because the model is unavailable (quota or
 # budget exhausted, model not available, rate limit), the same turn runs again on the next
 # fallback model, each at most once per action (issue #121). A fallback inherits `effort` when
-# it sets none, and never reasons below high. What counts as unavailable: `unavailable_patterns`
+# it sets none, and never reasons below high. Its `provider` (issue #409) is its own, never the
+# agent's: required, as the agent's, only with review_policy.provider_quorum or
+# review_policy.fallback_provider_ban (#410). What counts as unavailable: `unavailable_patterns`
 # (default "RESOURCE_EXHAUSTED", "quota", "429", "model .* not available") in the output of a
 # failed turn, each as a delimited word or code (#443), or an exit code in
 # `unavailable_exit_codes` (default none). An output with only `(code 400)` never counts, not

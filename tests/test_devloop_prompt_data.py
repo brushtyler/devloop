@@ -9,7 +9,9 @@ The reference is ``tests/fixtures/ssdlc-pre-r4/prompts/``: the templates of ``de
 as they were at 52495a5d (``main`` before R4), the same as at the commit before R3
 (28eaf945), copied as they were. With ssdlc's project file the prompts render to the same bytes:
 every placeholder of the reference is filled with a value of its own, so the whole text is
-compared, not only the part R4 changed.
+compared, not only the part R4 changed. The changes of the templates after R4 are listed, each
+with its issue, in ``ssdlc_project.SINCE_R4``: the frozen files stay as they were, and the
+reference is them with those changes, nothing else.
 """
 
 import re
@@ -41,13 +43,14 @@ def placeholders(text):
 
 def sentinels(name):
     """A value of its own for each placeholder of the reference of ``name``."""
-    text = (FROZEN / f'{name}.md').read_text(encoding='utf-8')
+    text = ssdlc_project.pre_r4_prompt(name)
     return {key: f'<{key}>' for key in placeholders(text)}
 
 
 def before(name, values):
-    """The prompt ``name`` as the code before R4 rendered it."""
-    text = (FROZEN / f'{name}.md').read_text(encoding='utf-8')
+    """The prompt ``name`` as the code before R4 rendered it, with the changes of the templates
+    made since (``ssdlc_project.SINCE_R4``, each with its issue)."""
+    text = ssdlc_project.pre_r4_prompt(name)
     return string.Template(text).safe_substitute(values)
 
 

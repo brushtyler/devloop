@@ -23,7 +23,9 @@ class SchemaError(ValueError):
 # A review without ``operator_reason`` (#434) is read as before, a ``decision``: the field gets
 # ``none``, the value of the verdicts other than ``needs_operator``. No ``enum`` holds an empty
 # string, which Gemini rejects in a structured-output schema (#441).
-DEFAULTS = {'review': {'operator_reason': 'none'}}
+# An implementation or a fix without ``host_step`` (#462) declares no step on the host.
+DEFAULTS = {'review': {'operator_reason': 'none'}, 'implement': {'host_step': ''},
+            'fix': {'host_step': ''}}
 
 
 def with_defaults(name, value):

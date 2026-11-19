@@ -13,7 +13,10 @@ overlay that gains the keys of ``ops/host/ssdlc/overlay.toml``. Each side runs i
 its own, with only its installation on the module path, as ``devloop pin`` checks a copy. For
 R4 (the project's data in the prompts) on a host already migrated to R3, "before" is the
 installation of R3 with its project file (``--before-project``), and "after" the installation
-of R4 with the project file that gains ``[prompts]``. The script compares, side by side:
+of R4 with the project file that gains ``[prompts]``. For R5 (the project's tests, ADR 0006),
+"before" is the installation in use with its project file (``--before-project``), and "after"
+the installation of R5 with the project file that gains ``[tests]``. The script compares, side
+by side:
 
 - the values of the effective configuration, key by key. The SHA-256 of the project file
   (``review_policy.project``) is left out on purpose: R2 puts it in the policy version by
@@ -25,7 +28,9 @@ of R4 with the project file that gains ``[prompts]``. The script compares, side 
   the project's data in the prompts); the other placeholders stay as they are, the same on both
   sides;
 - the test modules ``local_tests`` selects: the mode, and with ``changed`` the modules picked for
-  each file the checkout ``--root`` tracks (default: the checkout of this script).
+  each file the checkout ``--root`` tracks (default: the checkout of this script). An
+  installation of before R5 has its selection and its format of the CI logs built in: its
+  ``tests`` are those built-in values, and its own code selects the modules.
 
 Relative paths are taken from the current directory, as usual, even though each side runs in
 its installation. It prints every difference and ends with 0 when there is none, 1 when there is
@@ -73,13 +78,21 @@ if hasattr(context, 'prompt_values'):  # R4: the project's data in the prompts
     values.update(context.prompt_values(cfg))
 prompts ={path.stem: context._template(path.stem, **values)
            for path in sorted(context.PROMPT_DIR.glob('*.md'))}
+effective = dataclasses.asdict(cfg)
+tests = getattr(cfg, 'tests', None)
+if tests is None:
+    # Before R5 (ADR 0006): the selection and the format of the CI logs were in the code.
+    effective['tests'] = {'selection': 'python-unittest-modules', 'source_prefixes': ['ssdlc_'],
+                       'dir_modules': [[localtests.DEVLOOP_DIR, localtests.DEVLOOP_TESTS]],
+                       'ci_log_format': 'run-tests'}
 selected = {}
 if cfg.local_tests == 'changed':
     modules = sorted(p.name for p in (root / 'tests').glob('test_*.py'))
     files = subprocess.run(['git', 'ls-files', '-z'], cwd=root, check=True,
                            capture_output=True, text=True).stdout.split('\0')
-    selected = {f: localtests.select_modules([f], modules) for f in files if f}
-print(json.dumps({'config': dataclasses.asdict(cfg), 'version': bare.version(),
+    extra = () if tests is None else (tests,)
+    selected = {f: localtests.select_modules([f], modules, *extra) for f in files if f}
+print(json.dumps({'config': effective, 'version': bare.version(),
                   'prompts': prompts,
                   'tests': {'local_tests': cfg.local_tests, 'selected': selected}},
                  default=str))
@@ -150,7 +163,8 @@ def main(argv=None):
     parser.add_argument('--before-local', metavar='FILE', help='the overlay of before R3')
     parser.add_argument('--before-project', metavar='FILE',
                         help='the project file of before, when the installation of before is '
-                             'R3 or later (R4: the file without [prompts])')
+                             'R3 or later (R4: the file without [prompts]; R5: the file '
+                             'without [tests])')
     parser.add_argument('--after', required=True, metavar='DIR',
                         help='the installation of R3')
     parser.add_argument('--after-local', metavar='FILE', help='the overlay of after R3')

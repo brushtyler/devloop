@@ -16,6 +16,7 @@ promotion, its receipt and the merge that follows it. ``Dispatcher`` inherits th
 
 import itertools
 from dataclasses import replace
+from types import SimpleNamespace
 
 from .acceptance import acceptance_criteria, acceptance_findings, latest_map
 from .apps import MERGER
@@ -23,6 +24,8 @@ from .context import _describe_bases, _open_findings_reason
 from .dispatch_supervision import RELEASE_COMMAND
 from . import receipt as pr_receipt
 from .github import GitHubError
+from .hoststep import UNREADABLE as UNREADABLE_STEP
+from .hoststep import latest as latest_host_step
 from .ledger import collect as ledger_collect
 from .ledger import timestamp as ledger_timestamp
 from .markdown import (MAX_BODY, dispatcher_header, publishable, read_marker, split_markers,
@@ -32,7 +35,7 @@ from .policy import describe as describe_receipt
 from .policy import (MAX_LISTED_PATHS, ZERO_LEVEL, changes_requested, check_outcome,
                      check_states, differences, distinct, evaluate, independent, profile_of,
                      receipt_of, recorded_level, zero_refused)
-from .config import same_agent
+from .config import provider_quorum, same_agent
 from .receipt import CONFLICT as RECEIPT_CONFLICT
 from .review import (FINDING_COMMAND, current_round, open_findings, round_verdict,
                      trust_policy_parts)
@@ -72,8 +75,10 @@ class MergeMixin:
         event of the level label on the PR, and the highest level already recorded on it."""
         return self._receipt_and_paths(pr)[0]
 
-    def _receipt_and_paths(self, pr):
-        """``_receipt`` and every path of the diff it was computed on."""
+    def _receipt_and_paths(self, pr, reviews=None):
+        """``_receipt`` and every path of the diff it was computed on. ``reviews``: every review
+        of the PR up to the round being promoted, which the snapshot may not have yet
+        (``_promote``): the reviewers that round chose are read from them (#409)."""
         policy = self.cfg.review_policy
         base, head, changes = self.ws.review_diff(pr.head_ref)
         records = pr.reviews + pr.policy
@@ -84,7 +89,7 @@ class MergeMixin:
                            labelers=self.gh.labelers(pr.number, policy.label),
                            trusted_users=self.cfg.trusted_users,
                            previous_level=recorded_level(records),
-                           select=lambda level: self._select(pr, level)[0],
+                           select=lambda level: self._select(pr, level, reviews=reviews)[0],
                            profile=lambda key: self._profile(key, 'review'),
                            zero_events=zero, refused=zero_refused(records))
         return receipt, sorted({c['path'] for c in changes})
@@ -154,7 +159,7 @@ class MergeMixin:
             authors += cfg.agent(implementer).chain()
         return authors
 
-    def _select(self, pr, level):
+    def _select(self, pr, level, fresh=False, reviews=None):
         """``(reviewers, problem)``: the reviewers ``level`` requires on the PR, in order, or
         none and why.
 
@@ -171,7 +176,12 @@ class MergeMixin:
         excluded, never by comparing keys (ADR 0005, P5-3, #407): ``claude-implementer`` and
         ``claude-reviewer`` are different keys of the same agent. Nor does an agent that signs
         with a role app review. The review turn checks each model it actually runs, fallbacks
-        included, in the same way (``ActionsMixin._do_review``)."""
+        included, in the same way (``ActionsMixin._do_review``).
+
+        With ``review_policy.provider_quorum`` (ADR 0005, P5-5, #409) the reviewers are chosen
+        by ``_select_by_provider`` instead; ``fresh`` and ``reviews`` matter only there."""
+        if self.cfg.review_policy.provider_quorum:
+            return self._select_by_provider(pr, level, fresh, reviews)
         cfg, implementer = self.cfg, pr.meta['implementer']
 
         def eligible(key, authors):
@@ -204,6 +214,103 @@ class MergeMixin:
                     'come distinti solo se differiscono sia per identità GitHub sia per la tupla '
                     '(kind, model, effort, review_args), e nessuno può avere l\'identità o il '
                     'modello (kind, model, effort) dell\'implementer o di chi ha corretto la PR')
+
+    def _select_by_provider(self, pr, level, fresh, reviews=None):
+        """``(reviewers, problem)`` with the reviewer rules of ADR 0005, P5-5 (#409), at both
+        levels:
+
+        - a reviewer is independent of every author of the PR (``_authors``: the implementer,
+          every fixer, every sync with conflicts, the models of the implementer's key): another
+          GitHub identity and another ``(kind, model, effort)``. The kind or the provider alone
+          no longer excludes it: ``claude-reviewer`` with Sonnet may review Opus's code;
+        - the quorum rule (ii) of D8 (``provider_quorum``): at level 1 the only reviewer is of a
+          provider other than every author's; at level 2 at least one of the pair is, and the
+          two are distinct (``distinct``);
+        - candidates in order: at level 1 the PR's recorded reviewer, then the pool; at level 2
+          the pairs of the pool in configuration order.
+
+        Without ``fresh``, the reviewers of the latest round's receipt are kept while they still
+        meet these rules: a reviewer is never replaced in the middle of a round, and the receipt
+        a promotion or a merge recomputes is the one the round was approved with. The latest
+        round is read from ``reviews`` when given, else from the snapshot's: a promotion passes
+        the records of the round it applies, which the snapshot does not have when the round
+        ended in the same action (parallel reviewers), so that a round that chose other
+        reviewers than the previous one is promoted with its own. ``fresh`` (a
+        new round, ``_fresh_receipt``) chooses again: first the groups that leave out fewest
+        owners of open findings, who alone may close them; among those, a group without a
+        reviewer whose whole chain is remembered unavailable (``_unavailable_reviewer``), so
+        the next valid reviewer of the pool takes its place; then the configuration order.
+        When every valid group has such a reviewer, the first is kept, as before: its turn
+        fails as ``tool_failure``."""
+        cfg = self.cfg
+        authors = self._authors(pr)
+        if authors is None:
+            return [], ('non è verificabile che i reviewer siano indipendenti da chi ha scritto '
+                        'il codice: la PR, una sua correzione o una risoluzione di conflitti '
+                        'non registra identità e tupla dell\'agent (marker precedenti a #111)')
+        keys = (pr.meta['reviewer'], *cfg.pool()) if level == 1 else cfg.pool()
+        candidates = {}
+        for key in dict.fromkeys(keys):
+            if key in cfg.agents and not cfg.signs_for_role(key):
+                profile = self._profile(key, 'review')
+                if all(independent(profile, a) for a in authors):
+                    candidates[key] = profile
+
+        def valid(group):
+            profiles = [candidates.get(key) for key in group]
+            return (len(set(group)) == level and None not in profiles
+                    and all(distinct(a, b) for a, b in itertools.combinations(profiles, 2))
+                    and provider_quorum(profiles, authors))
+        kept = None if fresh else self._round_reviewers(
+            pr.reviews if reviews is None else reviews, level)
+        if kept is not None and valid(kept):
+            return kept, ''
+        groups = [list(g) for g in itertools.combinations(candidates, level) if valid(g)]
+        if not groups:
+            pool = ', '.join(f'`{key}`' for key in cfg.pool())
+            return [], (f'il pool di reviewer ({pool}) non ne ha abbastanza: ogni reviewer deve '
+                        'avere un\'identità GitHub e una tupla (kind, model, effort) diverse da '
+                        'quelle di chi ha scritto il codice della PR, due reviewer contano come '
+                        'distinti solo se differiscono sia per identità sia per la tupla (kind, '
+                        'model, effort, review_args), e almeno un reviewer deve essere di un '
+                        'fornitore diverso da quello di tutti gli autori (al livello 1, l\'unico)')
+        # The owners of open findings who may review: only they close their findings.
+        owners = {f['owner'] for f in open_findings(pr.reviews, pr.closures)} & set(candidates)
+        out = {key for key in candidates if self._unavailable_reviewer(key)}
+        # ``min`` keeps the first of equals: the configuration order decides the rest.
+        chosen = min(groups, key=lambda g: (len(owners - set(g)), bool(out & set(g))))
+        for key in sorted(out & (set(groups[0]) - set(chosen))):
+            self.log(f'  reviewer {key} skipped: every model of its chain is remembered '
+                     'unavailable')
+        return chosen, ''
+
+    def _round_reviewers(self, reviews, level):
+        """The reviewers the receipt of the latest agent round of ``reviews`` requires, when it
+        was given at ``level``; else None."""
+        records = [r for r in current_round(reviews) if r.get('source') == 'agent']
+        receipt = receipt_of(records[0]) if records else None
+        if receipt is None or receipt['level'] != level or len(receipt['reviewers']) != level:
+            return None
+        return list(receipt['reviewers'])
+
+    def _unavailable_reviewer(self, key):
+        """Whether every model of the chain of reviewer ``key`` is remembered unavailable
+        (#151): its turn would run no CLI. Only an agent with fallback models is remembered."""
+        agent = self.cfg.agent(key)
+        if self.memory is None or not agent.fallback_models:
+            return False
+        return all(self.memory.active(key, m.model) is not None for m in agent.chain())
+
+    def _fresh_receipt(self, pr, receipt):
+        """``receipt`` with the reviewers a new round chooses (``_select_by_provider`` with
+        ``fresh``), with ``review_policy.provider_quorum``; else ``receipt`` as it is."""
+        if not self.cfg.review_policy.provider_quorum or receipt['level'] == ZERO_LEVEL:
+            return receipt
+        reviewers = self._select(pr, receipt['level'], fresh=True)[0]
+        if reviewers == receipt['reviewers']:
+            return receipt
+        return dict(receipt, reviewers=reviewers,
+                    profiles=[self._profile(key, 'review') for key in reviewers])
 
     def _policy_comment(self, pr, title, text, receipt, event, bases=(), cls=None,
                         prepared=None):
@@ -266,7 +373,7 @@ class MergeMixin:
         and leave the PR in review for a new review of the same head. ``reviews``: every review
         of the PR up to the round included, for its receipt (#135); the snapshot's by default."""
         lb = self.cfg.labels
-        current, paths = self._receipt_and_paths(pr)
+        current, paths = self._receipt_and_paths(pr, reviews)
         if current['level'] == ZERO_LEVEL:
             return self._promote_zero(pr, current)
         if len(current['reviewers']) < current['level']:
@@ -564,13 +671,18 @@ class MergeMixin:
         policy records and commands rebuilt from the comments read now: the PR still open,
         ``agent:ready-to-merge`` without ``agent:needs-operator`` nor ``agent:merge-hold``, no hold
         or release command waiting, the head unchanged, ``MERGEABLE`` and ``CLEAN``, CI
-        ``pass``, no open finding, the merge mode of the recomputed receipt, no reviewer who said
-        the PR touches the trust policy (#434, ``trust_policy_parts``), no work of the PR
-        restarted after a conclave (#142, ``_human_merge``), and the conditions
+        ``pass``, no open finding, the merge mode of the recomputed receipt, no reviewer whose
+        ``trust_policy`` still holds the merge (#434, #461, ``trust_policy_parts``), no work of
+        the PR restarted after a conclave (#142, ``_human_merge``), and the conditions
         of the promotion: the approvals of every required reviewer with a matching receipt, or
         at level 0 the checks of a level-0 promotion. When one is missing devloop does not
         merge: what the per-tick checks of a ready PR revoke is left to the next tick, a stale
-        receipt or an open finding is handled as at promotion."""
+        receipt or an open finding is handled as at promotion.
+
+        A PR that declares a step on the host (``host_step``, #462) is merged too, but with
+        ``[pin] auto`` its merge holds the auto-pin (``AutoPin.hold``, recorded before the merge)
+        instead of requesting it, and an alarm with the step goes to ``[run].alert_issue``
+        (``_alert_host_step``)."""
         cfg, lb, rp = self.cfg, self.cfg.labels, self.cfg.review_policy
         fresh = self.gh.pr_state(pr.number)
         labels = label_names(fresh.get('labels') or [])
@@ -620,7 +732,8 @@ class MergeMixin:
         if mode not in MERGING:
             return skip(f'the merge mode of this PR is {mode}')
         if trust_policy_parts(pr.reviews):
-            # A reviewer said the PR touches the trust policy (#434): the merge is human.
+            # A reviewer said the PR touches the trust policy (#434), and no later approval of
+            # the same reviewer cleared it (#461): the merge is human.
             return skip('a reviewer said it touches the trust policy: the merge is human')
         unblocked = self._human_merge(pr)
         if unblocked is not None:
@@ -647,9 +760,37 @@ class MergeMixin:
             bases = self._approvals_match(pr, latest, current, paths, step='merge')
             if bases is None:
                 return None
-        self.merger.merge_pr(pr.number, head)
+        # A step on the host declared by the PR (#462) holds the auto-pin before the merge, so
+        # that no tick pins the merged base first: a hold that cannot be recorded stops it.
+        step = latest_host_step(pr.meta, pr.fixes)
+        holding = bool(step) and self.pinner is not None and cfg.pin.auto
+        attempt = None  # the merge attempt the hold names (``pin.hold``)
+        if holding:
+            try:
+                attempt = self.pinner.hold(pr.number, head, step)
+            except OSError as exc:
+                return skip(f'it declares a step on the host and the hold of the auto-pin '
+                            f'could not be recorded: {exc}')
+        try:
+            self.merger.merge_pr(pr.number, head)
+        except BaseException:
+            if holding:
+                # The outcome is unknown: GitHub may have merged and its answer be lost (a
+                # timeout). The hold stays, marked uncertain, until a later tick reads the PR
+                # (``_settle_host_steps``): it goes if the PR was not merged, else it alerts.
+                try:
+                    self.pinner.doubt(pr.number, attempt, pr.meta.get('issue'))
+                    self.log(f'  the merge failed: the hold of the auto-pin stays until a '
+                             f'later tick reads whether #{pr.number} was merged')
+                except OSError as exc:
+                    self.log(f'  the merge failed and its hold of the auto-pin stays, release '
+                             f'it with a pin by hand: {exc}')
+            raise
         self.log(f'  merged {head[:12]} at level {current["level"]} in mode {mode}')
-        if self.pinner is not None and cfg.pin.auto and cfg.pin.touches(paths):
+        if holding:
+            self.log(f'  auto-pin held: #{pr.number} declares a step on the host; pin by hand '
+                     'after it')
+        elif self.pinner is not None and cfg.pin.auto and cfg.pin.touches(paths):
             # The next tick pins the base with this merge, before planning (#174).
             try:
                 self.pinner.request(pr.number, head)
@@ -681,7 +822,85 @@ class MergeMixin:
             # The PR is merged: escalating it would only label a closed PR.
             self.log(f'  the merged record could not be written: {exc}')
         self._close_merged_issue(pr, head, mode)
+        if step:
+            self._alert_host_step(pr, head, step, holding)
         return None
+
+    def _settle_host_steps(self):
+        """The holds of the auto-pin whose merge failed with an unknown outcome (#462,
+        ``pin.doubt``): the PR, read on GitHub, says how it went. Merged (the answer was lost),
+        the hold stays and the alarm of its step goes out now; not merged, the hold goes, and a
+        new merge of that PR holds again. A PR that cannot be read is tried at the next tick.
+        The settle names the merge attempt of the hold read here, before the state of the PR:
+        a new attempt of the same PR that the merge worker makes meanwhile writes a hold of its
+        own, which a state read for the earlier attempt never touches."""
+        for held in self.pinner.held() or []:
+            number = held.get('pr')
+            if not held.get('uncertain') or not isinstance(number, int):
+                continue
+            try:
+                state = (self.gh.pr_state(number) or {}).get('state')
+            except GitHubError as exc:
+                self.log(f'auto-pin: whether #{number} was merged is not known, next tick: '
+                         f'{exc}')
+                continue
+            if state not in ('MERGED', 'OPEN', 'CLOSED'):
+                self.log(f'auto-pin: #{number} is {state or "in an unknown state"}: its hold '
+                         'stays')
+                continue
+            merged = state == 'MERGED'
+            try:
+                if not self.pinner.settle(number, merged, held.get('attempt')):
+                    continue  # held again by a new merge attempt meanwhile
+            except OSError as exc:
+                self.log(f'auto-pin: the hold of #{number} not settled, next tick: {exc}')
+                continue
+            if not merged:
+                self.log(f'auto-pin: #{number} was not merged: its hold of the auto-pin goes')
+                continue
+            self.log(f'auto-pin: #{number} was merged despite the error: its step on the host '
+                     'holds the auto-pin')
+            head = held.get('head') if isinstance(held.get('head'), str) else ''
+            step = held.get('step') if isinstance(held.get('step'), str) and held['step'] \
+                else UNREADABLE_STEP
+            pr = SimpleNamespace(number=number, meta={'issue': held.get('issue')})
+            self._alert_host_step(pr, head, step, True)
+
+    def _alert_host_step(self, pr, head, step, holding):
+        """The alarm of a merged PR that declares a step on the host (#462): a comment on
+        ``[run].alert_issue`` with the step, and ``agent:needs-operator`` on the issue the PR
+        closes. One attempt each; a failure is logged, and the hold of the auto-pin stays."""
+        lb = self.cfg.labels
+        number = pr.meta.get('issue')
+        issue = self.cfg.run.alert_issue
+        if holding:
+            pinning = ('devloop non fa il pin automatico di questo commit né dei successivi: '
+                       'il pin automatico riprende dopo un pin a mano (`devloop pin`), da fare '
+                       'dopo il passo.')
+        else:
+            pinning = 'Il pin automatico è spento: il pin a mano va fatto dopo il passo.'
+        if issue:
+            body = publishable(
+                dispatcher_header() + '\n## Passo sull\'host da fare prima del pin\n\n'
+                f'devloop ha mergiato la PR #{pr.number} (head `{head[:12]}`'
+                + (f', issue #{number}' if isinstance(number, int) else '') + '), che dichiara '
+                'un passo sull\'host da fare a loop fermo prima del pin del nuovo codice:\n\n'
+                + '\n'.join('> ' + line for line in step.splitlines()) + '\n\n' + pinning)
+            try:
+                self.gh.comment(issue, body)
+                self.log(f'  alert of the step on the host published on #{issue}')
+            except Exception as exc:  # one attempt only: its class, never its output
+                self.log(f'  the alert of the step on the host on #{issue} could not be '
+                         f'published ({type(exc).__name__})')
+        else:
+            self.log('  no [run].alert_issue is configured: no alert for the step on the host')
+        if not isinstance(number, int):
+            return
+        try:
+            self.gh.edit_labels(number, add=[lb.needs_operator])
+            self.log(f'  issue #{number}: {lb.needs_operator} for the step on the host')
+        except GitHubError as exc:
+            self.log(f'  issue #{number}: {lb.needs_operator} not added: {exc}')
 
     def _record_merge(self, pr, thread, head, receipt, section, payload):
         """Write the ``merged`` record ``payload`` of the merge of ``head``, with ``section``,

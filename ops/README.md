@@ -474,8 +474,8 @@ Il pin dopo un merge resta spento: un nuovo tag si fissa a mano, con `devloop-pi
 --state-dir … pin <tag>`. I dati del progetto nei prompt (le istruzioni da leggere, il comando
 di un solo modulo di test, le regole sugli ADR) stanno nella tabella `[prompts]` del file di
 progetto (ADR 0006, R4, [docs/devloop/reference.md](../docs/devloop/reference.md#project-data-in-the-prompts)):
-senza, i prompt tolgono le frasi che li citano. Test locali e lettura della CI sono ancora quelli
-di ssdlc (issue R5 dell'ADR 0006): vale quanto sotto per `local_tests` e `ci_rerun_unrelated`.
+senza, i prompt tolgono le frasi che li citano. I test locali e la lettura della CI seguono
+`[tests]` del file di progetto (R5): vale quanto sotto per `local_tests` e `ci_rerun_unrelated`.
 
 **devloop nel repository gestito**, come ssdlc:
 
@@ -495,10 +495,12 @@ di ssdlc (issue R5 dell'ADR 0006): vale quanto sotto per `local_tests` e `ci_rer
    descrive ogni chiave):
    - `base_branch`, `branch_prefix`, `language`. `repo`, `trusted_users` e `[apps]` non stanno
      in `devloop/config.toml` ma nell'overlay dello `state_dir` sull'host (ADR 0006, R6);
-   - `test_cmd` con la suite del progetto. `local_tests = "changed"` e `ci_rerun_unrelated`
-     presuppongono la struttura di questo repository (`tests/test_*.py`, le righe `FAILED MODULE`
-     di `scripts/run-tests.py`): altrove usare `local_tests = "full"` o `"none"` e
-     `ci_rerun_unrelated = false`;
+   - `test_cmd` con la suite del progetto. `local_tests = "changed"` vuole una selezione in
+     `[tests]` (oggi `selection = "python-unittest-modules"`, che presuppone i moduli
+     `tests/test_*.py` di `unittest`, con le regole di nome del progetto come parametri); senza,
+     vale `"full"`. `ci_rerun_unrelated` vuole anche `[tests] ci_log_format = "run-tests"` (le
+     righe `FAILED MODULE` di `scripts/run-tests.py`); senza, è spento
+     ([docs/devloop/reference.md](../docs/devloop/reference.md#local-tests));
    - nell'overlay, `[apps]`: `app_id` e `slug` delle app create al passo 2, con un `APP_PREFIX`
      nuovo, e la `key_dir` del progetto;
    - `[roles]` e `[agents.*]`: implementer, reviewer, supervisore e modelli;

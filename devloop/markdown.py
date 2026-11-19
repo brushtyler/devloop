@@ -21,6 +21,7 @@ from pathlib import Path
 from .acceptance import render_map
 from .config import INSTALL_ROOT
 from .github import GitHubError
+from .hoststep import render_step
 from .journal import ATTEMPT_ID, PHASES, STORY_ID
 from .policy import EVENTS, valid_receipt
 from .review import LEGACY_VERDICT, current_verdict, own_open_findings, trust_policy
@@ -727,6 +728,12 @@ def render_fix(fix, head, round_no):
         # The latest map of the PR from now on (#134).
         parts += ['', render_map(fix['acceptance_map'])]
         payload['acceptance_map'] = fix['acceptance_map']
+    if 'host_step' in fix:
+        # The step on the host of the PR from now on (#462), '' when there is none.
+        step = (fix['host_step'] or '').strip() if isinstance(fix['host_step'], str) else ''
+        if step:
+            parts += ['', render_step(step)]
+        payload['host_step'] = step
     if 'profile' in fix:
         payload['profile'] = fix['profile']  # who wrote the fix (#111)
     if 'local_tests' in fix:
@@ -803,6 +810,9 @@ SUPERVISOR_RESUME = (
     '- `/devloop grant-round <motivo>`: concede un round di review in più a una PR al limite dei '
     'round (`round_grantable`), entro i tetti della delega; il motivo, che può continuare nelle '
     'righe successive, riporta o cita l\'analisi delle cause;\n'
+    '- `/devloop grant-budget <motivo>`: estende una volta l\'envelope di budget della storia, solo '
+    'in turni e tempo (`budget_grantable`), entro i tetti della delega; il motivo, come per '
+    '`grant-round`, riporta o cita l\'analisi delle cause;\n'
     '- `/devloop escalate <motivo>`: passa l\'escalation all\'operatore (`agent:needs-operator`).')
 
 

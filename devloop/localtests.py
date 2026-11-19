@@ -15,14 +15,42 @@ reads the modules ``scripts/run-tests.py`` reports as failed in a CI log, and a 
 whose modules ``select_modules`` picks for the PR's diff is re-run once instead of becoming a
 round. ``suite_summary`` reads the final lines of ``scripts/run-tests.py`` in a CI job log, for
 the summary of the CI in the review and fix prompts (#300).
+
+The project declares both (ADR 0006, R5, ``Tests``): the selection is a strategy of the
+installation, with a name, and the project's name rules as its parameters (``SELECTIONS``); the
+format of the CI logs has a name too (``CI_LOG_FORMATS``). The code holds no rule of a project.
+Without a selection ``changed`` is ``full``; without a format no CI log is read for the summary,
+and ``ci_rerun_unrelated`` is off (``config.parse_config``).
 """
 
 import re
 import shlex
+from dataclasses import dataclass
 
 MODES = ('full', 'changed', 'none')
-DEVLOOP_DIR = 'devloop/'
-DEVLOOP_TESTS = 'test_devloop'
+# The selection strategies of the installation (ADR 0006, R5): ``python-unittest-modules`` is the
+# algorithm of #169, with its name rules as parameters (``Tests.source_prefixes`` and
+# ``Tests.dir_modules``).
+UNITTEST_MODULES = 'python-unittest-modules'
+SELECTIONS = (UNITTEST_MODULES,)
+# The formats of the CI logs the dispatcher reads (ADR 0006, R5): ``run-tests`` is what
+# ``scripts/run-tests.py`` prints (``failed_modules``, ``suite_summary``).
+RUN_TESTS_LOG = 'run-tests'
+CI_LOG_FORMATS = (RUN_TESTS_LOG,)
+
+
+@dataclass(frozen=True)
+class Tests:
+    """``[tests]`` of the configuration (ADR 0006, R5), facts of the project. ``selection``:
+    the strategy of ``local_tests = "changed"``, '' without one. ``source_prefixes``: with each
+    ``<prefix>``, a changed ``<prefix><name>.py`` also selects ``test_<name>*.py``.
+    ``dir_modules``: ``(directory, module prefix)`` pairs, any file under the directory
+    selecting the modules whose name starts with the prefix. ``ci_log_format``: the format of
+    the CI logs, '' without one."""
+    selection: str = ''
+    source_prefixes: tuple = ()
+    dir_modules: tuple = ()
+    ci_log_format: str = ''
 # What scripts/run-tests.py prints for each failed module and at the end of a failed suite.
 # In a `gh run view --log-failed` log each line starts with the job, the step and a timestamp.
 _FAILED_MODULE = re.compile(r'(?:^|\s)FAILED MODULE (\S+)\s*$')
@@ -73,36 +101,47 @@ def suite_summary(log):
             'slowest': slowest[:SUITE_LINE_LIMIT] if slowest is not None else None}
 
 
-def _prefixes(stem):
+def _prefixes(stem, source_prefixes):
     """The name prefixes of the test modules of a source module named ``stem``: ``test_<stem>``,
-    and for ``ssdlc_<name>`` also ``test_<name>``."""
+    and for ``<prefix><name>``, with ``<prefix>`` one of ``source_prefixes``, also
+    ``test_<name>``."""
     prefixes = [f'test_{stem}']
-    if stem.startswith('ssdlc_') and len(stem) > len('ssdlc_'):
-        prefixes.append(f'test_{stem[len("ssdlc_"):]}')
+    for prefix in source_prefixes:
+        if stem.startswith(prefix) and len(stem) > len(prefix):
+            prefixes.append(f'test_{stem[len(prefix):]}')
     return prefixes
 
 
-def select_modules(changed, modules):
+def select_modules(changed, modules, tests):
     """The names among ``modules`` (the ``tests/test_*.py`` files of the worktree) that the
-    changed paths ``changed`` make pertinent, sorted:
+    changed paths ``changed`` make pertinent with the strategy of ``tests`` (``Tests``), sorted.
+    With ``python-unittest-modules``:
 
     - a changed or added ``tests/test_*.py`` that still exists;
     - for every other changed ``X.py`` (or ``pkg/X.py``), the modules ``test_X*.py``, and for
-      ``ssdlc_<name>.py`` also ``test_<name>*.py``;
-    - for any file under ``devloop/``, the modules ``test_devloop*.py``."""
+      ``<prefix><name>.py``, with ``<prefix>`` one of ``source_prefixes``, also
+      ``test_<name>*.py``;
+    - for any file under a directory of ``dir_modules``, the modules whose name starts with
+      its prefix.
+
+    Without a strategy nothing can tell which modules are pertinent: ValueError. The
+    configuration makes ``changed`` ``full`` then, and turns ``ci_rerun_unrelated`` off."""
+    if tests.selection != UNITTEST_MODULES:
+        raise ValueError(f'no test selection strategy {tests.selection!r}')
     available = set(modules)
     chosen = set()
     for path in changed:
         name = path.rsplit('/', 1)[-1]
-        if path.startswith(DEVLOOP_DIR):
-            chosen.update(m for m in available if m.startswith(DEVLOOP_TESTS))
+        for directory, prefix in tests.dir_modules:
+            if path.startswith(directory):
+                chosen.update(m for m in available if m.startswith(prefix))
         if path == f'tests/{name}' and name.startswith('test_') and name.endswith('.py'):
             if name in available:
                 chosen.add(name)
             continue
         stem = name[:-len('.py')] if name.endswith('.py') else ''
         if stem:
-            prefixes = _prefixes(stem)
+            prefixes = _prefixes(stem, tests.source_prefixes)
             chosen.update(m for m in available if m.startswith(tuple(prefixes)))
     return sorted(chosen)
 

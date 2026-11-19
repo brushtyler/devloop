@@ -191,7 +191,10 @@ resolved, a new review of the same head or of a new one; a round the CI failure 
 joined adds `con la CI fallita dello stesso head`, and `che ne ha fatto decadere l'approvazione`
 when the round had approved), then the rounds that do not count with theirs, and recalls that the operator can grant more rounds by raising `max_review_rounds` (#289).
 A `round_grantable` escalation (#405) has the same lists and says instead that the supervisor
-may grant one more round with `/devloop grant-round <reason>`.
+may grant one more round with `/devloop grant-round <reason>`. A `budget_grantable` escalation
+(#411) of a turn the budget refused records, besides the step and its key, the `story`, the
+`extension` the supervisor may grant with `/devloop grant-budget <reason>`, and the `kind` and
+`agent` of the refused turn.
 `devloop status` shows the counted rounds of each PR on the limit, as `rounds=<counted>/<max>`,
 with the rounds granted in `<max>` and `(+<n> granted)` after it when the supervisor granted some,
 followed by `(+<n> not counted)` when some rounds did not count. It reads them from the thread
@@ -356,10 +359,10 @@ Every agent review, CI round and promotion records a **receipt** in its marker:
 | Field | Content |
 |---|---|
 | `pr`, `base`, `head` | The PR, the base branch commit and the head the level was computed for |
-| `policy` | The policy version: the SHA-256 of the loaded policy configuration, including key, app, kind, model, effort and `review_args` of every reviewer of the pool and, when there is one, the SHA-256 of the [project file](reference.md#project-file) (ADR 0006, R2) |
+| `policy` | The policy version: the SHA-256 of the loaded policy configuration, including key, app, kind, model, effort and `review_args` of every reviewer of the pool, the providers it declares and `provider_quorum` when on ([Reviewers by provider](reference.md#reviewers-by-provider-and-the-third-reviewer), #409), `fallback_provider_ban` when on ([No fallback on the authors' provider](reference.md#no-fallback-on-the-authors-provider), #410), and, when there is one, the SHA-256 of the [project file](reference.md#project-file) (ADR 0006, R2) |
 | `level`, `reasons` | The effective level and why: default, label with its author, sensitive paths, earlier level, and with level 0 enabled the `reviews:0` label with its author, time, whether it applied and the paths outside the allowlist |
-| `reviewers` | The reviewers the level requires, in order (none at level 0, or when the pool has not enough independent ones) |
-| `profiles` | The identity and tuple `(kind, model, effort, review_args)` each required reviewer reviews with now. At level 1 the PR's recorded reviewer stays required even when it is no longer in the pool, so the policy version does not cover it: its profile does |
+| `reviewers` | The reviewers the level requires, in order (none at level 0, or when the pool has not enough independent ones). With `review_policy.provider_quorum` (#409) a round keeps the reviewers its receipt recorded while they still meet the rules, and only a new round chooses again |
+| `profiles` | The identity and tuple `(kind, model, effort, review_args)` each required reviewer reviews with now, and its `provider` when declared (#409). At level 1 the PR's recorded reviewer stays required even when it is no longer in the pool, so the policy version does not cover it: its profile does |
 
 Promotions and escalations for a pool without enough independent reviewers are dispatcher
 comments with a `policy` marker, read only from the dispatcher's identity. Before promoting a
@@ -454,7 +457,27 @@ these records are what raises the round limit of the PR. The same figures go in 
 command's comment, and, before both, a `grant` event in the
 [turn journal](#turn-journal), which counts the grants of the day across every PR: the daily cap
 is checked again and the event written in one step, so `daily` is the count with this grant and
-never passes the cap. A temporary capacity limit set with `/devloop capacity` (#412,
+never passes the cap. An extension of the budget envelope granted with `/devloop grant-budget`
+(#411) carries the analysis of the causes in `reason`, the `story`, the `extension` (`percent`,
+and the `turns`, `role_turns`, `phase_turns` and `wall_seconds` it adds) and the same daily
+figures; its ledger `event` `delegation_grant` has the `delegation` `budget`, and its `grant`
+event in the turn journal, written first, also records the story, the extension and the text of
+the command (`reason`), which from then on are part of the envelope of the story. Here the
+ledger event comes before the `supervision` record, which spends the command: a dispatcher
+stopped after the journal and before the record, or whose write failed there, finds, for the
+story of any `budget_grantable` escalation of the thread, the `grant` of the item in the
+journal that no `supervision` record of the thread carries. It completes that grant before any
+other command, the latest one included, rebuilding the command from the journal (comment,
+author, text): the ledger event only if absent and the record `granted`, without checking nor
+extending the story again. The labels change and the step resumes only on an item still in
+`agent:needs-supervisor` whose latest escalation is that `budget_grantable` one: an issue that a
+merged devloop PR resolved meanwhile gets the records and then a `merged_issue` escalation,
+without running its step, and an issue blocked by an open issue waits, with nothing written.
+Anywhere else, for instance on an item that the `failure` escalation of a `GitHubError` while
+the records were written handed to the operator, or behind a later escalation, only the records
+are written, with `trace_only: true`, and the item stays where it is: such a record does not end
+the operator's block. A temporary capacity limit
+set with `/devloop capacity` (#412,
 [Temporary capacity limits](guide.md#temporary-capacity-limits)) has its record on
 `[report] issue`, with no class: the analysis of the causes in `reason`, the key (`setting`), the
 `value`, the `configured` value, the `cap` of the key, the duration in `minutes`, its end
@@ -472,8 +495,9 @@ supervisor's and the operator's.
 **Escalation.** The `notice` marker of an escalation to the operator records, as one to the
 supervisor does, the step that failed, the key of its input and, for a PR, the label a retry
 resumes from, when the step is one a retry runs again (#321). A supervisor's escalation handed to
-the operator (`supervisor_escalated`, `supervisor_refused`) keeps them only for `tool_failure` and
-`sync_failed`: the key of a `preflight_default` or `merged_issue` escalation only routes it.
+the operator (`supervisor_escalated`, `supervisor_refused`) keeps them only for `tool_failure`,
+`sync_failed` and `budget_grantable` (#411), whose step the operator may retry as on a `budget`
+escalation: the key of a `preflight_default` or `merged_issue` escalation only routes it.
 
 ## Dependency cycles
 
@@ -543,8 +567,14 @@ green the PR is promoted, then handed to the operator once for the review and th
 [Changes to the trust policy](guide.md#changes-to-the-trust-policy)). A round with a `decision`
 is a `needs_operator` round, whatever the other verdicts; the round limit, the CI joining a round
 and the quorum read the same verdicts. Once a reviewer of the PR has given `trust_policy`, the
-merge is the operator's for good: the snapshot plans the PR as mode `off`, the operator merge
-notice lists the parts each reviewer named, and the merge checks it again just before.
+merge is the operator's: the snapshot plans the PR as mode `off`, the operator merge notice lists
+the parts each reviewer named in its latest `trust_policy`, and the merge checks it again just
+before. By the operator's decision of 2026-11-19 (#461, ADR 0005, D10) the `trust_policy` of a
+reviewer no longer counts when the same reviewer approves the head of the latest round, every
+blocking finding its `trust_policy` records left open (opened there, or carried unresolved) was
+closed by a later review of its own, not by a `finding` record of the operator or the CI, and no
+record of that round, a duplicate included, is a `trust_policy`. A reviewer missing from that
+round, or a CI round, keeps it; one `trust_policy` in that round keeps every earlier one.
 
 **Trust policy** (#399). The review prompt asks for `needs_operator` when the change touches the
 trust policy and needs the operator for it, at every review level, with the parts touched in
@@ -657,6 +687,15 @@ implementer is recorded in the PR marker and shown in the PR description; each f
 full map again in its `fix` marker and comment. The latest map holds: that of the latest fix
 that carries one, otherwise that of the PR. A sync carries no map, so the previous one still
 holds after it.
+
+Implementer and fixer also return `host_step` (#462): empty, or the short text of a step the
+operator makes on the host before the code is pinned, with a reference to its document. A
+non-empty one is recorded in the PR marker (`host_step`) and shown in the PR description under
+"Passo sull'host"; each fix records its declaration again in its `fix` marker (`host_step`, empty
+when there is none), and the latest holds, as for the map. The reviewer receives it and checks
+that it is there when the PR needs it and empty otherwise. When devloop merges a PR whose latest
+declaration is not empty, it holds the auto-pin instead of requesting it, and alerts the operator
+([Step on the host](guide.md#step-on-the-host)).
 
 The reviewer receives the criteria and the latest map, and must verify them: a criterion without
 real coverage, or with tests that do not actually verify it, is a blocking finding. A
@@ -874,7 +913,7 @@ readiness check, on the PR for review, fix, sync and CI. The turns of a review r
 | `request` | The issue goes from `agent:ready` to `agent:working` | SHA-256 of title and body, author and time of the trusted `labeled` event of `agent:ready`, ids of the trusted comments given to the implementer, time of the takeover, and the key of the implementer chosen for the issue (`implementer`, #407: an `impl:<kind>` label, the area map or the default, [the choice of the implementer](reference.md#the-implementer-app-and-the-keys-by-role)). It is a snapshot **at the takeover**, not at the time of the label |
 | `turn` | Every invocation of an agent CLI, retries, fallback models and failures included: implement, fix, sync with an agent, review, readiness check, conclave call, [advisory review](guide.md#advisory-review-for-the-operator) (`advisory`, on the PR, in a comment of its own) | Kind, agent, GitHub identity (none: the operator's `gh` login), configured model and effort (for a fallback, the fallback model and the model it replaces), real model, start, end, duration, outcome (`success`, `failure`, `unavailable`), the error if any, telemetry, and the last command the turn ran or started when the CLI exposes it (`last_command`: only codex, from the `command_execution` items of `--json`; cleaned like the tail of a timeout, on one line, at most 200 characters; absent otherwise), also for a turn that timed out. With `attempt_identity` on, the id of the [attempt](#attempt-identity) the turn belongs to (`attempt`; absent for a turn of no attempt) |
 | `verification` | Every test command the dispatcher runs after a writing turn (none when the [local tests](reference.md#local-tests) select nothing), and the full suite it runs before a review of a head without CI, or before the promotion of an approval given while no CI was known | Command, outcome, duration, the tree hash before and after the test, and the commit (none before a review) |
-| `event` | The CI of a head (`ci_round`): a failed CI round, the checks a review round saw whatever its verdict (`approve`, `request_changes` or `needs_operator`), or the passing checks read again just before the PR is promoted to `agent:ready-to-merge` (also at level 0); a sync without an agent, or the merge of `main` before a fix (`sync`) | For the CI, the head, the state (`fail`, `pass`, or `none` without checks), the review round (none at level 0) and each check with its outcome, the id of its GitHub Actions run (none for a commit status or a check outside Actions) and its duration in seconds (`duration_s`: none while it runs and for a commit status, #300). Every CI round also records `tests`, the [summary of the suite](reference.md#summary-of-the-ci-in-the-prompts) that the dispatcher reads for the review and fix prompts (read again from the job logs when a promotion records the round, for instance after a review that saw the CI pending): for each job whose log holds the final lines of `scripts/run-tests.py`, its name with `ran` and `slowest`, and for a job whose log could not be read, its name with `log: unavailable`; absent when no job has either. The same checks read again for the same head and round are not recorded twice, a new run is. A failure that joined a round that had approved its head carries `voided_approval: true` (#359). For a sync, the merged base commit and the old and new heads |
+| `event` | The CI of a head (`ci_round`): a failed CI round, the checks a review round saw whatever its verdict (`approve`, `request_changes` or `needs_operator`), or the passing checks read again just before the PR is promoted to `agent:ready-to-merge` (also at level 0); a sync without an agent, or the merge of `main` before a fix (`sync`) | For the CI, the head, the state (`fail`, `pass`, or `none` without checks), the review round (none at level 0) and each check with its outcome, the id of its GitHub Actions run (none for a commit status or a check outside Actions) and its duration in seconds (`duration_s`: none while it runs and for a commit status, #300). Every CI round also records `tests`, the [summary of the suite](reference.md#summary-of-the-ci-in-the-prompts) that the dispatcher reads for the review and fix prompts (read again from the job logs when a promotion records the round, for instance after a review that saw the CI pending): for each job whose log holds the final lines of `scripts/run-tests.py`, its name with `ran` and `slowest`, and for a job whose log could not be read, its name with `log: unavailable`; absent when no job has either, as always when the project declares no format of its CI logs (`[tests] ci_log_format`, ADR 0006, R5: no log is read). The same checks read again for the same head and round are not recorded twice, a new run is. A failure that joined a round that had approved its head carries `voided_approval: true` (#359). For a sync, the merged base commit and the old and new heads |
 
 **Telemetry** is what the CLI attests, not authenticated:
 
@@ -1023,7 +1062,11 @@ their format does not change. The journal is append-only, one JSON event per lin
   the PR, the id of the command's comment and its author; written before the grant applies, the
   grants of a UTC day count against the daily cap, which is checked again under the journal's
   lock in the same step as the write: past the cap nothing is written and the grant does not
-  apply ([Granting a review round](guide.md#granting-a-review-round)). The events of the
+  apply ([Granting a review round](guide.md#granting-a-review-round)). The extension of a budget
+  envelope (#411, `/devloop grant-budget`) is a `grant` of the delegation `budget` that also
+  records the `story` and the `extension` it adds; one per story, ever, checked under the lock in
+  the same step as the daily cap and the write, and from then on part of the envelope of that
+  story ([Extending the budget envelope](guide.md#extending-the-budget-envelope)). The events of the
   [publication outbox](#publication-outbox) start with `publication`.
 - `config` (ADR 0006, R2, trace T1 of K1): the configuration the dispatcher read, at each start
   of `tick` and `run` (`when: start`, before any tick: a start whose record cannot be written

@@ -18,17 +18,20 @@ from concurrent.futures import ThreadPoolExecutor
 from .acceptance import acceptance_criteria, format_criteria, format_map, latest_map, render_map
 from .agents import AgentError
 from .apps import DISPATCHER, IMPLEMENT, PR_COMMENT, RERUN, REVIEW
+from .budget import BudgetRefused
 from .context import (_failure_text, _format_conflicts, _format_findings, _review_failure,
                       _start_failure, _template, _trusted_comments, docs_diff_section,
                       docs_map_section, docs_review_section, format_ci_summary,
                       format_fix_requests, format_operator_comments, format_previous_rounds,
                       prompt_values)
 from .github import GitHubError, GitHubUncertain, job_id
+from .hoststep import format_step, render_step
+from .hoststep import latest as latest_host_step
 from .ledger import attempt_branch, attempt_marker, fix_register
-from .localtests import failed_modules, select_modules, suite_summary
+from .localtests import RUN_TESTS_LOG, failed_modules, select_modules, suite_summary
 from .markdown import (dispatcher_header, publishable, render_fix, render_native_review,
                        render_review, without_attribution)
-from .config import same_agent
+from .config import foreign, provider_quorum, same_agent
 from .planning import (BASE_CHANGED, FIX_COMMAND, RESYNC_AFTER_APPROVAL, ci_joins_round,
                        counted_rounds, implementer_choice, pending_reviewers, preflight_state,
                        voided_approval, waived_rounds, waiting_reviewers)
@@ -180,7 +183,9 @@ class ActionsMixin:
             result, failure, used, tested, local = self._write_turn(
                 agent, prompt, 'implement', path, f'issue-{number}-implement',
                 where=(number, 'implement'))
-        except AgentError as exc:
+        except (AgentError, BudgetRefused) as exc:
+            # A turn the budget refused (#411) keeps its input too: the escalation that the
+            # supervisor may answer with an extension is bound to it, as a retry is.
             exc.key = key
             raise
         if result['status'] == 'blocked':
@@ -205,11 +210,20 @@ class ActionsMixin:
         self.ws.push(path, branch, replace=True, auth=auth)
         self._pushed(path)
         # The marker keeps the map the reviewer checks until a fix replaces it (#134). Its
-        # reviewer is the first of the pool that is not the implementer's agent (#407).
-        reviewer = next((k for k in cfg.pool() if not cfg.signs_for_role(k)
-                         and not same_agent(cfg.agent(k), agent)), cfg.reviewer)
+        # reviewer is the first of the pool that is not the implementer's agent (#407); with the
+        # reviewer rules of P5-5 (#409), the first of another provider and another tuple.
+        profile = self._profile(agent.key, 'write', used)
+        if cfg.review_policy.provider_quorum:
+            authors = [profile] + [self._profile(agent.key, 'write', m) for m in agent.chain()]
+            reviewer = next((k for k in cfg.pool() if not cfg.signs_for_role(k)
+                             and foreign(self._profile(k, 'review'), authors)
+                             and all(independent(self._profile(k, 'review'), a)
+                                     for a in authors)), cfg.reviewer)
+        else:
+            reviewer = next((k for k in cfg.pool() if not cfg.signs_for_role(k)
+                             and not same_agent(cfg.agent(k), agent)), cfg.reviewer)
         meta = {'issue': number, 'implementer': agent.key, 'reviewer': reviewer,
-                'profile': self._profile(agent.key, 'write', used),
+                'profile': profile,
                 'acceptance_map': result['acceptance_map'],
                 # Informative only (#169): no receipt nor approval depends on it.
                 'local_tests': local, **skipped_models(used)}
@@ -217,7 +231,12 @@ class ActionsMixin:
             meta['conclave'] = decision  # the resolution its prompt had (#142)
         if attempt is not None:
             meta['attempt'] = attempt_marker(attempt)  # the PR of this attempt (#384)
+        # The step on the host the PR declares (#462): its merge holds the auto-pin.
+        step = (result.get('host_step') or '').strip()
+        if step:
+            meta['host_step'] = step
         body = publishable(self.runner.header(used) + '\n' + result['pr_body'].strip()
+                           + (('\n\n' + render_step(step)) if step else '')
                            + '\n\n' + render_map(result['acceptance_map'])
                            + f'\n\nCloses #{number}', 'pr', meta)
         pr_number, url = self._as(agent.key, IMPLEMENT).create_pr(
@@ -313,8 +332,12 @@ class ActionsMixin:
         ``paths``,
         the PR's diff, as ``local_tests = "changed"`` would select them (``select_modules``).
         A re-run that GitHub refuses, such as a 403 without ``actions: write``, is logged and
-        the failure is a round, as before."""
-        if not self.cfg.ci_rerun_unrelated or rerun_of(pr.reruns, pr.head_sha) is not None:
+        the failure is a round, as before. It needs the format of the CI logs and the selection
+        of the project (``[tests]``, ADR 0006, R5), without which the configuration turns
+        ``ci_rerun_unrelated`` off."""
+        tests = self.cfg.tests
+        if (not self.cfg.ci_rerun_unrelated or tests.ci_log_format != RUN_TESTS_LOG
+                or not tests.selection or rerun_of(pr.reruns, pr.head_sha) is not None):
             return False
         details = self.gh.check_details(pr.head_sha)
         failed = [c for c in details if c.get('bucket') == 'fail']
@@ -337,7 +360,7 @@ class ActionsMixin:
                 return False
             modules.update(found)
         modules = sorted(modules)
-        pertinent = select_modules(paths, modules)
+        pertinent = select_modules(paths, modules, self.cfg.tests)
         if pertinent:
             self.log(f'  CI rerun: failed modules pertinent to the PR: {", ".join(pertinent)}; '
                      'CI round')
@@ -369,14 +392,17 @@ class ActionsMixin:
         (#300): ``{name, outcome, bucket, duration_s}``, and for a completed GitHub Actions job
         ``tests``, the final lines of ``scripts/run-tests.py`` its log holds
         (``suite_summary``, None when it holds none), or ``log: unavailable`` when the log
-        could not be read: that only leaves the summary out, it never stops the action."""
+        could not be read: that only leaves the summary out, it never stops the action. Without
+        the format of the CI logs (``[tests] ci_log_format``, ADR 0006, R5) no log is read: each
+        job has its outcome and duration only."""
         jobs = []
+        readable = self.cfg.tests.ci_log_format == RUN_TESTS_LOG
         for check in details:
             job = {'name': check.get('name'), 'outcome': check.get('conclusion')
                    or check.get('bucket'), 'bucket': check.get('bucket'),
                    'duration_s': check.get('duration_s')}
             number = job_id(check.get('link')) if check.get('run_id') is not None else None
-            if number is not None and check.get('bucket') != 'pending':
+            if readable and number is not None and check.get('bucket') != 'pending':
                 try:
                     log = self.gh.job_log(number)
                 except GitHubError as exc:
@@ -464,6 +490,9 @@ class ActionsMixin:
         else:
             round_no, done, comments = last_round(pr.reviews) + 1, [], pr.operator_comments
             counted = counted_rounds(pr.reviews) + 1
+            # A new round chooses its reviewers again (#409): one whose chain is remembered
+            # unavailable gives its place to the next valid one of the pool.
+            receipt = self._fresh_receipt(pr, receipt)
             if bases:
                 # Abandoned only because the base advanced: the round does not count.
                 restarts = {'round': latest[0]['round'], 'bases': bases}
@@ -520,13 +549,15 @@ class ActionsMixin:
                            pr_body=without_attribution(pr.body),
                            acceptance_criteria=format_criteria(criteria),
                            acceptance_map=format_map(acceptance_map),
+                           host_step=format_step(latest_host_step(pr.meta, pr.fixes)),
                            docs=docs_review_section(self._mapped_docs(path)),
                            diff_stat=self.ws.diff_stat(path),
                            previous=format_previous_rounds(earlier, pr.fixes, pr.closures),
                            operator_comments=format_operator_comments(comments),
                            language=cfg.language, conclave=resolution)
         level2 = receipt['level'] > 1
-        authors = (self._authors(pr) or []) if level2 else []
+        by_provider = cfg.review_policy.provider_quorum
+        authors = (self._authors(pr) or []) if level2 or by_provider else []
         peers = [p for p in map(profile_of, done) if p]
         # The profile each reviewer of this action runs with, reserved before any turn starts
         # and replaced atomically when a fallback model takes over (#176); a reviewer that
@@ -539,7 +570,32 @@ class ActionsMixin:
         # selection reads the implementer (``_implementer_agents``), at level 2 every author.
         same = authors if level2 else self._implementer_agents(pr)
 
+        def allowed_by_provider(key):
+            # With the reviewer rules of P5-5 (#409) a model keeps what the selection checked:
+            # independent by tuple of every author, distinct from the round's other reviewers,
+            # and the quorum rule (ii) of D8 on the round with this model in it, the reviewers
+            # not yet run counted with the model they would run now. A fallback model is also
+            # never of an author's provider, whatever the quorum (D8, "Fallback dello stesso
+            # fornitore"): only the reviewer's primary model is subject to the quorum alone.
+            def allowed(candidate):
+                p = self._profile(key, 'review', candidate)
+                if candidate.fallback_for and not foreign(p, authors):
+                    return False
+                with reserving:
+                    others = [q for k, q in reserved.items() if k != key]
+                    waiting = [self._profile(k, 'review') for k in receipt['reviewers']
+                               if k not in reviewed and k not in reserved and k != key]
+                    if not (all(independent(p, a) for a in authors)
+                            and all(distinct(p, q) for q in peers + others)
+                            and provider_quorum(peers + others + waiting + [p], authors)):
+                        return False
+                    reserved[key] = p
+                    return True
+            return allowed
+
         def allowed_for(key):
+            if by_provider:
+                return allowed_by_provider(key)
             if not level2:
                 return lambda candidate: not any(same_agent(candidate, a) for a in same)
 
@@ -559,6 +615,27 @@ class ActionsMixin:
                     return True
             return allowed
 
+        # The ban of ADR 0005, P5-6 (#410), with ``review_policy.fallback_provider_ban``: at both
+        # levels and whatever the quorum rule, a reviewer's fallback model is never of the
+        # provider of an author of the PR, the fallbacks the implementer, the fixers and the
+        # syncs actually ran included, as their markers record them. When a marker does not
+        # record who wrote the code no fallback is admitted. Only the primary model is left to
+        # the other rules; with no model admitted the turn fails as ``tool_failure``.
+        banned = self._authors(pr) if cfg.review_policy.fallback_provider_ban else []
+
+        def admitted(key):
+            rules = allowed_for(key)
+            if not cfg.review_policy.fallback_provider_ban:
+                return rules
+
+            def allowed(candidate):
+                if candidate.fallback_for and (
+                        banned is None
+                        or not foreign(self._profile(key, 'review', candidate), banned)):
+                    return False
+                return rules(candidate)
+            return allowed
+
         def review_turn(key):
             # The reviewer works in a disposable copy, where its tests may write; the PR
             # worktree must come out of the review untouched, or the verdict is discarded.
@@ -567,7 +644,7 @@ class ActionsMixin:
             try:
                 # Every turn of the round goes to the round's register (#325).
                 return self._turn(Models(cfg.agent(key)), 'review', prompt, 'review', copy,
-                                  f'pr-{pr.number}-review', allowed_for(key),
+                                  f'pr-{pr.number}-review', admitted(key),
                                   where=(pr.number, 'review', round_no))
             except BaseException as exc:
                 with reserving:
@@ -789,6 +866,7 @@ class ActionsMixin:
                              acceptance_criteria=format_criteria(
                                  acceptance_criteria(issue.get('body'))),
                              acceptance_map=format_map(latest_map(pr.meta, pr.fixes)),
+                             host_step=format_step(latest_host_step(pr.meta, pr.fixes)),
                              docs=docs_diff_section(self._mapped_docs(path)),
                              requests='', base_branch=cfg.base_branch, language=cfg.language,
                              conclave=resolution)
@@ -932,6 +1010,7 @@ class ActionsMixin:
                              acceptance_criteria=format_criteria(
                                  acceptance_criteria(issue.get('body'))),
                              acceptance_map=format_map(latest_map(pr.meta, pr.fixes)),
+                             host_step=format_step(latest_host_step(pr.meta, pr.fixes)),
                              docs=docs_diff_section(self._mapped_docs(path)),
                              base_branch=cfg.base_branch, language=cfg.language,
                              conclave=resolution)

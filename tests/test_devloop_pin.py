@@ -896,9 +896,44 @@ class FakePinner:
     def __init__(self):
         self.requests, self.pins = [], []
         self.request_ = None
+        self.holds = []  # the steps on the host that hold the auto-pin (#462)
 
     def request(self, pr, head):
         self.requests.append((pr, head))
+
+    def hold(self, pr, head, step):
+        self.unhold(pr)
+        self.holds.append((pr, head, step))
+        self.attempts = dict(getattr(self, 'attempts', {}), **{str(pr): f'attempt-{pr}-'
+                                                                f'{len(self.holds)}'})
+        getattr(self, 'doubts', {}).pop(str(pr), None)
+        return self.attempts[str(pr)]
+
+    def unhold(self, pr):
+        self.holds = [h for h in self.holds if h[0] != pr]
+
+    def doubt(self, pr, attempt, issue=None):
+        """A merge with an unknown outcome (#462): its hold stays, uncertain."""
+        if getattr(self, 'attempts', {}).get(str(pr)) != attempt:
+            return False
+        self.doubts = dict(getattr(self, 'doubts', {}), **{str(pr): issue})
+        return any(h[0] == pr for h in self.holds)
+
+    def settle(self, pr, merged, attempt):
+        doubts = getattr(self, 'doubts', {})
+        if str(pr) not in doubts or getattr(self, 'attempts', {}).get(str(pr)) != attempt:
+            return False
+        del doubts[str(pr)]
+        if not merged:
+            self.unhold(pr)
+        return True
+
+    def held(self):
+        doubts, attempts = getattr(self, 'doubts', {}), getattr(self, 'attempts', {})
+        return [dict({'pr': pr, 'head': head, 'step': step, 'attempt': attempts.get(str(pr))},
+                     **({'uncertain': True, 'issue': doubts[str(pr)]} if str(pr) in doubts
+                        else {}))
+                for pr, head, step in self.holds] or None
 
     def pending(self):
         return {'pr': self.requests[-1][0]} if self.requests else None
