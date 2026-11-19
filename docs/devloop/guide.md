@@ -44,7 +44,8 @@ is enabled, has no review to start early: it still waits for its CI.
 
 The review and fix prompts carry a summary of the CI of the head, read by the dispatcher: each
 job with its outcome and duration and, for a job that runs `scripts/run-tests.py`, its final
-`Ran N tests in S (…)` and `Slowest` lines (#300). The agents, without network, can use those
+`Ran N tests in S (…)` and `Slowest` lines (#300), when the project declares that format of its
+CI logs (`[tests] ci_log_format = "run-tests"`, ADR 0006, R5). The agents, without network, can use those
 measures instead of asking the supervisor for them; a job log that cannot be read only leaves
 its summary out (see [Summary of the CI in the prompts](reference.md#summary-of-the-ci-in-the-prompts)).
 
@@ -2227,7 +2228,7 @@ replace it.
 
 Beside it, `.ssdlc/devloop/project.toml` is the [project file](reference.md#project-file)
 (ADR 0006, R2), with the same permissions: the facts of the managed repository (`test_cmd`,
-`local_tests`, `language`, `priority_labels`, `[docs.map]`) and the restrictions it adds
+`local_tests`, `[tests]`, `language`, `priority_labels`, `[docs.map]`) and the restrictions it adds
 (`protected_paths`, `blocked_labels`, sensitive paths and lists, level-0 checks,
 `operator_only_paths`). The order is installation < project file < overlay, but a restriction
 of the project file only adds to those of the installation and the overlay. Any other key in it

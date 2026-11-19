@@ -8,7 +8,7 @@ from pathlib import Path
 
 from devloop import config, markdown
 from devloop.dispatcher import Dispatcher
-from devloop.localtests import module_command, select_modules
+from devloop.localtests import UNITTEST_MODULES, Tests, module_command, select_modules
 from devloop.workspace import Workspace
 
 from helpers import ssdlc_project
@@ -28,27 +28,52 @@ def cmd(*modules):
     return module_command(list(modules))
 
 
+def select(changed, modules=MODULES):
+    """The selection with ssdlc's ``[tests]`` (ADR 0006, R5)."""
+    return select_modules(changed, modules, CFG.tests)
+
+
 class SelectionTests(unittest.TestCase):
     def test_a_source_module_selects_its_tests(self):
         # ssdlc_<name>.py: test_ssdlc_<name>*.py and test_<name>*.py.
-        self.assertEqual(select_modules(['ssdlc_impact.py'], MODULES),
+        self.assertEqual(select(['ssdlc_impact.py']),
                          ['test_impact.py', 'test_impact_more.py', 'test_ssdlc_impact_x.py'])
-        self.assertEqual(select_modules(['orchestrator.py'], MODULES),
-                         ['test_orchestrator_cli.py'])
-        self.assertEqual(select_modules(['pkg/other.py'], MODULES), ['test_other.py'])
+        self.assertEqual(select(['orchestrator.py']), ['test_orchestrator_cli.py'])
+        self.assertEqual(select(['pkg/other.py']), ['test_other.py'])
 
     def test_any_file_under_devloop_selects_the_devloop_tests(self):
         for path in ('devloop/dispatcher.py', 'devloop/config.toml', 'devloop/prompts/fix.md'):
             with self.subTest(path=path):
-                self.assertEqual(select_modules([path], MODULES),
-                                 ['test_devloop.py', 'test_devloop_ledger.py'])
+                self.assertEqual(select([path]), ['test_devloop.py', 'test_devloop_ledger.py'])
 
     def test_a_changed_test_module_selects_itself_if_it_exists(self):
-        self.assertEqual(select_modules(['tests/test_other.py'], MODULES), ['test_other.py'])
-        self.assertEqual(select_modules(['tests/test_gone.py'], MODULES), [])  # deleted
+        self.assertEqual(select(['tests/test_other.py']), ['test_other.py'])
+        self.assertEqual(select(['tests/test_gone.py']), [])  # deleted
 
     def test_documentation_only_selects_nothing(self):
-        self.assertEqual(select_modules(['docs/devloop.md', 'README.md', '.py'], MODULES), [])
+        self.assertEqual(select(['docs/devloop.md', 'README.md', '.py']), [])
+
+    def test_the_name_rules_are_the_projects_parameters(self):
+        # ADR 0006, R5: the same strategy with another project's rules; ssdlc's are not in the
+        # code, so ssdlc_<name>.py selects only test_ssdlc_<name>*.py.
+        other = Tests(selection=UNITTEST_MODULES, source_prefixes=('lib_', 'pkg_'),
+                      dir_modules=(('app/', 'test_app'), ('tools/cli/', 'test_orch')))
+        modules = MODULES + ['test_app.py', 'test_app_more.py', 'test_parse.py']
+        self.assertEqual(select_modules(['ssdlc_impact.py'], modules, other),
+                         ['test_ssdlc_impact_x.py'])
+        self.assertEqual(select_modules(['src/lib_parse.py'], modules, other), ['test_parse.py'])
+        self.assertEqual(select_modules(['pkg_other.py'], modules, other), ['test_other.py'])
+        self.assertEqual(select_modules(['app/x.txt', 'tools/cli/run.sh'], modules, other),
+                         ['test_app.py', 'test_app_more.py', 'test_orchestrator_cli.py'])
+        self.assertEqual(select_modules(['devloop/dispatcher.py'], modules, other), [])
+        bare = Tests(selection=UNITTEST_MODULES)
+        self.assertEqual(select_modules(['ssdlc_impact.py', 'devloop/x.md'], modules, bare),
+                         ['test_ssdlc_impact_x.py'])
+
+    def test_without_a_strategy_nothing_selects(self):
+        for tests in (Tests(), Tests(ci_log_format='run-tests')):
+            with self.subTest(tests=tests), self.assertRaises(ValueError):
+                select_modules(['ssdlc_impact.py'], MODULES, tests)
 
     def test_the_command_runs_each_module_on_its_own(self):
         self.assertEqual(cmd('test_a.py', "test_b'.py"),
@@ -69,6 +94,117 @@ class ConfigTests(unittest.TestCase):
         for bad in ('all', 'Changed', '', 1, True, ['full']):
             with self.subTest(bad=bad), self.assertRaises(config.ConfigError):
                 config.parse_config(dict(data, local_tests=bad))
+
+
+class ProjectTestsConfigTests(unittest.TestCase):
+    """``[tests]`` (ADR 0006, R5): the selection and the format of the CI logs, facts of the
+    project, each optional."""
+
+    def without_tests(self, **keys):
+        data = {k: v for k, v in config_data().items() if k != 'tests'}
+        return dict(data, **keys)
+
+    def test_ssdlc_declares_the_strategy_of_before_with_its_rules_and_format(self):
+        self.assertEqual(CFG.tests, Tests(selection='python-unittest-modules',
+                                          source_prefixes=('ssdlc_',),
+                                          dir_modules=(('devloop/', 'test_devloop'),),
+                                          ci_log_format='run-tests'))
+
+    def test_the_installation_and_the_code_declare_none(self):
+        self.assertEqual(config.Config.tests, Tests())
+        self.assertNotIn('tests', config.read_toml(config.DEFAULT_CONFIG))
+
+    def test_without_a_selection_changed_is_full(self):
+        cfg = config.parse_config(self.without_tests(local_tests='changed'))
+        self.assertEqual((cfg.local_tests, cfg.tests), ('full', Tests()))
+        only_format = self.without_tests(local_tests='changed',
+                                         tests={'ci_log_format': 'run-tests'})
+        self.assertEqual(config.parse_config(only_format).local_tests, 'full')
+        for mode in ('full', 'none'):
+            self.assertEqual(config.parse_config(self.without_tests(local_tests=mode)).local_tests,
+                             mode)
+        with_selection = self.without_tests(local_tests='changed',
+                                            tests={'selection': 'python-unittest-modules'})
+        self.assertEqual(config.parse_config(with_selection).local_tests, 'changed')
+
+    def test_wrong_values_stop_devloop(self):
+        for bad, message in (
+                ({'selection': 'pytest'}, 'tests.selection: must be one of'),
+                ({'selection': 1}, 'tests.selection'),
+                ({'ci_log_format': 'junit'}, 'tests.ci_log_format: must be one of'),
+                ({'other': 1}, 'unknown keys'),
+                ({'source_prefixes': ['ssdlc_']}, 'need tests.selection'),
+                ({'dir_modules': {'devloop/': 'test_devloop'}}, 'need tests.selection'),
+                ({'selection': 'python-unittest-modules', 'source_prefixes': 'ssdlc_'},
+                 'expected a list of strings'),
+                ({'selection': 'python-unittest-modules', 'source_prefixes': ['a-b']},
+                 'not a name prefix'),
+                ({'selection': 'python-unittest-modules', 'source_prefixes': ['']},
+                 'not a name prefix'),
+                ({'selection': 'python-unittest-modules', 'dir_modules': ['devloop/']},
+                 'expected a table'),
+                ({'selection': 'python-unittest-modules', 'dir_modules': {'devloop': 'test_d'}},
+                 'relative directory'),
+                ({'selection': 'python-unittest-modules', 'dir_modules': {'/abs/': 'test_d'}},
+                 'relative directory'),
+                ({'selection': 'python-unittest-modules', 'dir_modules': {'../up/': 'test_d'}},
+                 'relative directory'),
+                ({'selection': 'python-unittest-modules', 'dir_modules': {'a//': 'test_d'}},
+                 'relative directory'),
+                ({'selection': 'python-unittest-modules', 'dir_modules': {'a/': 'devloop'}},
+                 'test_<name>'),
+                ({'selection': 'python-unittest-modules', 'dir_modules': {'a/': 'test_*'}},
+                 'test_<name>'),
+                ('python-unittest-modules', 'tests: expected a table')):
+            with self.subTest(bad=bad), self.assertRaisesRegex(config.ConfigError, message):
+                config.parse_config(self.without_tests(tests=bad))
+
+    def test_the_project_file_declares_them_and_the_overlay_may_replace_them(self):
+        project = {'test_cmd': 'make test', 'local_tests': 'changed',
+                   'tests': {'selection': 'python-unittest-modules',
+                             'source_prefixes': ['lib_'], 'dir_modules': {'app/': 'test_app'},
+                             'ci_log_format': 'run-tests'}}
+        installation = self.without_tests()
+        for key in ('test_cmd', 'local_tests'):
+            installation.pop(key, None)
+        cfg = config.parse_config(config.compose(installation, project))
+        self.assertEqual(cfg.tests, Tests(selection='python-unittest-modules',
+                                          source_prefixes=('lib_',),
+                                          dir_modules=(('app/', 'test_app'),),
+                                          ci_log_format='run-tests'))
+        self.assertEqual(cfg.local_tests, 'changed')
+        overlay = {'tests': {'source_prefixes': ['core_']}}
+        cfg = config.parse_config(config.compose(installation, project, overlay))
+        self.assertEqual(cfg.tests.source_prefixes, ('core_',))
+        self.assertEqual(cfg.tests.dir_modules, (('app/', 'test_app'),))
+        with self.assertRaisesRegex(config.ConfigError, "unknown key 'tests.rules'"):
+            config.compose(installation, {'tests': {'rules': []}})
+
+    def test_the_tests_of_the_project_never_become_permissions_of_the_agents(self):
+        # ADR 0006, D2: the agents' commands derived from the project's tests are the
+        # overlay's alone. The project file's [tests] and test_cmd change no agent's commands.
+        installation = self.without_tests()
+        installation.pop('test_cmd')
+        project = {'test_cmd': 'make check', 'local_tests': 'changed',
+                   'tests': {'selection': 'python-unittest-modules',
+                             'ci_log_format': 'run-tests'}}
+        bare = {'test_cmd': 'make check', 'local_tests': 'changed'}
+        # As parse_composed: the agents' commands derive from the test command of the
+        # installation or the overlay (``agent_test_cmd``), none here.
+        tables = {'config': installation, 'project': project}
+        self.assertEqual(config.agent_test_cmd(tables), '')
+        with_tests, without = (
+            config.parse_config(config.compose(installation, table), agent_test_cmd='')
+            for table in (project, bare))
+        self.assertEqual(with_tests.tests.selection, 'python-unittest-modules')
+        for key, agent in with_tests.agents.items():
+            with self.subTest(agent=key):
+                other = without.agents[key]
+                self.assertEqual((agent.write_args, agent.review_args, agent.write_commands,
+                                  agent.review_commands),
+                                 (other.write_args, other.review_args, other.write_commands,
+                                  other.review_commands))
+                self.assertNotIn('make check', agent.write_commands + agent.review_commands)
 
 
 class DispatcherTests(unittest.TestCase):

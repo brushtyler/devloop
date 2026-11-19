@@ -58,6 +58,29 @@ FROZEN_COMMIT = '28eaf9455bad6ff52dcbdbc29ecc07d7dde83e2a'
 # The prompt templates of before R4 (ADR 0006), the same as at FROZEN_COMMIT: with R4 the text of
 # ssdlc in them is data of the project file.
 PRE_R4_PROMPTS = REPO / 'tests' / 'fixtures' / 'ssdlc-pre-r4' / 'prompts'
+# devloop/localtests.py of 96b24b83e0e8b63217d956c3766cdc282865c693, the last commit of main
+# before R5 (#424), as it was: the selection of the test modules and the reading of the CI logs
+# with ssdlc's rules in the code.
+PRE_R5 = REPO / 'tests' / 'fixtures' / 'ssdlc-pre-r5' / 'localtests.py'
+
+
+def pre_r5():
+    """The module ``PRE_R5``, loaded without byte code beside it."""
+    spec = importlib.util.spec_from_file_location('localtests_pre_r5', PRE_R5)
+    module = importlib.util.module_from_spec(spec)
+    dont_write, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = dont_write
+    return module
+
+
+def tracked():
+    """The files the repository's checkout tracks."""
+    out = subprocess.run(['git', 'ls-files', '-z'], cwd=REPO, check=True, capture_output=True,
+                         text=True).stdout
+    return [name for name in out.split('\0') if name]
 
 
 def frozen():
@@ -168,6 +191,23 @@ class EquivalenceTests(unittest.TestCase):
                 values = without_hash(as_json(composed(project=project)))
                 self.assertEqual(differing(values, without_hash(self.frozen['config'])), {key})
 
+    def test_tests_left_behind_are_a_difference(self):
+        # ADR 0006, R5: without [tests] "changed" is "full" and the re-run of unrelated
+        # failures is off; without one rule the selection differs.
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        old = ssdlc_project.PROJECT.read_text(encoding='utf-8')
+        start, end = old.index('[tests]\n'), old.index('[review_policy]\n')
+        for name, text, keys in (
+                ('none', old[:start] + old[end:], {'tests', 'local_tests', 'ci_rerun_unrelated'}),
+                ('prefixes', old.replace('source_prefixes = ["ssdlc_"]\n', ''), {'tests'})):
+            with self.subTest(name=name):
+                self.assertNotEqual(text, old)
+                project = tmp / f'{name}.toml'
+                project.write_text(text, encoding='utf-8')
+                values = without_hash(as_json(composed(project=project)))
+                self.assertEqual(differing(values, without_hash(self.frozen['config'])), keys)
+
     def test_the_helper_of_the_other_tests_is_the_reference(self):
         # tests/helpers/ssdlc_project.py rebuilds the configuration of before for the other
         # modules: it is the frozen one, with the overlay keys or without.
@@ -204,13 +244,39 @@ class EquivalenceTests(unittest.TestCase):
         self.assertIn('python3 scripts/run-tests.py', after['implement'])
 
     def test_the_selected_test_modules_are_the_same(self):
-        # The selection reads no configuration but local_tests (its rules stay in the code
-        # until R5, #424): the same mode selects the same modules. The script compares them
-        # file by file on two installations (CheckScriptTests).
+        # ADR 0006, R5: the rules of the selection are ssdlc's [tests], no longer the code's.
+        # The code of before, frozen (PRE_R5), and the code of now with ssdlc's project file
+        # pick the same modules for every file the repository tracks, on its own and together.
         self.assertEqual((self.frozen['config']['local_tests'], self.after.local_tests),
                          ('changed', 'changed'))
-        self.assertEqual(list(inspect.signature(localtests.select_modules).parameters),
+        old = pre_r5()
+        self.assertEqual(list(inspect.signature(old.select_modules).parameters),
                          ['changed', 'modules'])
+        modules = sorted(p.name for p in (REPO / 'tests').glob('test_*.py'))
+        files = tracked() + ['ssdlc_new.py', 'devloop/new/x.md', 'tests/test_gone.py',
+                             'pkg/ssdlc_impact.py', 'ssdlc_.py', 'scripts/devloop-pinned']
+        self.assertGreater(len(files), 100)
+        for path in files:
+            self.assertEqual(localtests.select_modules([path], modules, self.after.tests),
+                             old.select_modules([path], modules), path)
+        self.assertEqual(localtests.select_modules(files, modules, self.after.tests),
+                         old.select_modules(files, modules))
+        self.assertEqual(localtests.module_command(modules), old.module_command(modules))
+
+    def test_the_ci_logs_are_read_as_before(self):
+        # The format of ssdlc's CI logs is the one the code of before read, so the re-run of
+        # unrelated failures (#200) and the summary of the suite (#300) stay on.
+        self.assertEqual((self.after.tests.ci_log_format, self.after.ci_rerun_unrelated),
+                         ('run-tests', True))
+        old = pre_r5()
+        prefix = 'Unit Tests\tRun tests\t2026-11-16T10:00:00Z '
+        log = '\n'.join(prefix + line for line in (
+            'FAILED MODULE tests.test_impact', 'FAILED MODULE test_devloop_parallel',
+            'Slowest: test_a 12s', 'Ran 9 tests in 2.500s (4 modules, 1 split by class, 2 jobs)',
+            'FAILED (modules=2, worker problems=0)'))
+        for text in (log, '', 'Ran 3 tests in 1.0s', log.replace('problems=0', 'problems=1')):
+            self.assertEqual(localtests.failed_modules(text), old.failed_modules(text))
+            self.assertEqual(localtests.suite_summary(text), old.suite_summary(text))
 
     def test_the_restrictions_ssdlc_wants_guaranteed_are_on_the_host(self):
         # ADR 0006, section 3.2, requirement 5: devloop/ and schemas/ sensitive, from the
@@ -271,11 +337,21 @@ class InstallationTests(unittest.TestCase):
 
     def test_the_code_values_left_to_other_issues_are_declared(self):
         # Without a key of the project file, they stay in the code (R3 defines no key):
-        # the level-0 exclusions for good, the selection of the tests until R5 (#424).
+        # the level-0 exclusions for good.
         self.assertEqual(policy.ZERO_EXCLUDED,
                          ('devloop/prompts/', 'standards/', '.github/', 'schemas/'))
-        self.assertEqual((localtests.DEVLOOP_DIR, localtests.DEVLOOP_TESTS),
-                         ('devloop/', 'test_devloop'))
+
+    def test_the_code_has_no_rule_of_ssdlc_for_its_tests(self):
+        # ADR 0006, R5: the name rules of the selection are parameters of the project file.
+        self.assertEqual(config.Config.tests, localtests.Tests())
+        self.assertFalse(hasattr(localtests, 'DEVLOOP_DIR'))
+        self.assertFalse(hasattr(localtests, 'DEVLOOP_TESTS'))
+        source = inspect.getsource(localtests)
+        rules = ssdlc_project.project()['tests']
+        for rule in (*rules['source_prefixes'], *rules['dir_modules'].items()):
+            for text in ([rule] if isinstance(rule, str) else rule):
+                self.assertNotIn(repr(text), source)
+                self.assertNotIn(f'"{text}"', source)
 
 
 class ExampleFilesTests(unittest.TestCase):
@@ -404,11 +480,15 @@ class CheckScriptTests(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp)
 
-    def check(self, project=None, overlay=ssdlc_project.OVERLAY, before=()):
+    def check(self, project=None, overlay=ssdlc_project.OVERLAY, before=(), before_project=None):
         argv = ['--before', str(self.tmp / 'before'), *before, '--after', str(self.tmp / 'after'),
                 '--after-project', str(project or self.project), '--root', str(REPO)]
         if overlay:
             argv += ['--after-local', str(overlay)]
+        if before_project:
+            # The installation of before is R3 or later: its project file and overlay.
+            argv = ['--before', str(self.tmp / 'after'), '--before-project', str(before_project),
+                    '--before-local', str(ssdlc_project.OVERLAY)] + argv[2:]
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
             try:
@@ -479,6 +559,32 @@ class CheckScriptTests(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn('config language:', out)
         self.assertIn('prompt implement: rendered differently', out)
+
+    def test_a_project_file_without_tests_is_a_difference(self):
+        # ADR 0006, R5: the host's project file must gain [tests] before the pin of R5, or
+        # "changed" becomes "full" and every file selects differently.
+        old = ssdlc_project.PROJECT.read_text(encoding='utf-8')
+        project = self.tmp / 'no-tests.toml'
+        project.write_text(old[:old.index('[tests]\n')] + old[old.index('[review_policy]\n'):],
+                           encoding='utf-8')
+        code, out = self.check(project)
+        self.assertEqual(code, 1, out)
+        self.assertIn('local_tests: before changed, after full', out)
+        self.assertIn('config tests.selection: before "python-unittest-modules", after ""', out)
+        self.assertIn('config ci_rerun_unrelated: before true, after false', out)
+
+    def test_the_installation_of_before_may_read_a_project_file(self):
+        # As on a host already migrated to R3: before is an installation with its project
+        # file (--before-project). The same file on both sides is equivalent.
+        code, out = self.check(before_project=self.project)
+        self.assertEqual(code, 0, out)
+        self.assertIn('equivalent:', out)
+        other = self.tmp / 'english-before.toml'
+        other.write_text(ssdlc_project.PROJECT.read_text(encoding='utf-8').replace(
+            'language = "Italian"', 'language = "English"'), encoding='utf-8')
+        code, out = self.check(before_project=other)
+        self.assertEqual(code, 1, out)
+        self.assertIn('config language: before "English", after "Italian"', out)
 
     def test_r4_on_a_host_already_on_r3_is_equivalent(self):
         # The installation of R3 with its project file, against R4 with [prompts] added: the
