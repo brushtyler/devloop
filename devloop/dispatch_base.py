@@ -9,8 +9,9 @@ fails there too is the step ``base_broken`` (``BaseBroken``): no other attempt o
 escalation. The dispatcher writes a ``basebroken`` record on the issue (implement) or on the PR
 (fix), with the base commit and the failed tests, and the step waits for the base branch to move
 past that commit, as a readiness check that depends on the repository (#270). An issue keeps
-``agent:working`` and starts again in a free slot of ``max_open_prs``; the fix of a PR runs again
-on its next tick. A failure only on the branch, identities that cannot be told (a timeout, an
+``agent:working`` and starts again in a free slot of ``max_open_prs``, unless its labels block
+it, and through the readiness check when one is configured (``planning.base_restart``); the fix
+of a PR runs again on its next tick. A failure only on the branch, identities that cannot be told (a timeout, an
 output without them, a module that does not start), a project whose test selection is not
 ``python-unittest-modules`` (the check reads what unittest prints), or any error of the check
 leaves the failure as it was: further attempts, then ``tests_failed``.

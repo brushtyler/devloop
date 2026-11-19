@@ -1189,20 +1189,28 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                         and not issue['labels'] & waiting and issue['number'] not in pr_issues):
                     issue['preflight'] = self._preflight_view(issue['number'], issue['labels'],
                                                               base_head)
-        working = [raw['number'] for raw in self.gh.issues_with_label(lb.working)]
+        working_raw = self.gh.issues_with_label(lb.working)
+        working = [raw['number'] for raw in working_raw]
         # An implementation whose failed tests fail on the base too (#459): whether it still
-        # waits for the base branch to advance.
+        # waits for the base branch to advance, the issue's labels, which may hold its restart,
+        # and, with ``preflight``, the view of its readiness check once it may start again.
         waits = {}
-        for number in working:
+        for raw in working_raw:
+            number = raw['number']
             if number in pr_issues:
                 continue
             wait = self._base_wait(self.gh.issue_comments(number), 'implement')
-            if wait is not None:
-                waits[number] = self._base_holds(wait, base_head)
-                self.log(f'  issue #{number}: the implementation '
-                         + (f'waits for {self.cfg.base_branch} to move past {wait["base"][:12]}'
-                            if waits[number] else f'starts again: {self.cfg.base_branch} moved '
-                            f'past {wait["base"][:12]}'))
+            if wait is None:
+                continue
+            labels = label_names(raw.get('labels') or [])
+            holds = self._base_holds(wait, base_head)
+            waits[number] = {'holds': holds, 'labels': labels, 'preflight': None}
+            if not holds and self.cfg.preflight:
+                waits[number]['preflight'] = self._preflight_view(number, labels, base_head)
+            self.log(f'  issue #{number}: the implementation '
+                     + (f'waits for {self.cfg.base_branch} to move past {wait["base"][:12]}'
+                        if holds else f'may start again: {self.cfg.base_branch} moved '
+                        f'past {wait["base"][:12]}'))
         return Snapshot(prs=prs, ready_issues=ready, working_issues=working, base_waits=waits,
                         supervised=self._supervised_items(prs),
                         conclaves=self._conclave_items(prs),

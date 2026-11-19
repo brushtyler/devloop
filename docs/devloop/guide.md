@@ -735,9 +735,15 @@ modules, one at a time, on the base commit of the branch, in a disposable worktr
   a `basebroken` record (the base commit and the failed tests) on the issue or on the PR, and
   nothing is pushed. The issue keeps `agent:working`, the PR its label. When `main` moves past
   that commit the step starts again by itself: the issue as a new implementation, in a free slot
-  of `max_open_prs`; the fix at its next tick. Until then the issue is not `stale`;
+  of `max_open_prs`; the fix at its next tick. Until then the issue is not `stale`. The blocks of
+  the issue hold its restart as they hold a ready issue: `agent:needs-operator`,
+  `agent:needs-supervisor` or a label of `blocked_labels`. With the readiness check (`preflight`)
+  the restart goes through it: an issue whose request changed during the wait, or with a new
+  `/devloop recheck`, is checked again before the implementation, and one whose check failed is
+  blocked as a ready issue is;
 - **a test fails only on the branch**, or the failed tests cannot be identified (a timeout, an
-  output without them, a module that does not start, a project whose `[tests].selection` is not
+  output without them, a module that does not start, whose id unittest makes up the same whatever
+  the error, a project whose `[tests].selection` is not
   `python-unittest-modules`): the failure stays the implementer's, as before:
   `implement_test_retries` more attempts, then `tests_failed`.
 

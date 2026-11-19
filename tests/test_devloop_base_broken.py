@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from devloop import markdown
+from devloop.config import LEGACY_NEEDS_OPERATOR
 from devloop.dispatch_base import MAX_CASES_LISTED, MainAlerts
 from devloop.dispatcher import Dispatcher
 from devloop.github import GitHubError
@@ -17,8 +18,9 @@ from devloop.planning import BASE_REPAIRED, Snapshot, plan
 from devloop.workspace import Workspace
 
 from helpers.devloop_fakes import FakeGH
-from test_devloop import (BASE, CFG, FakeRunner, FakeWS, finding, fixed, implemented, norm, pr,
-                          raw_review)
+from test_devloop import (BASE, CFG, REV, FakeRunner, FakeWS, finding, fixed, implemented, norm,
+                          pr, raw_review)
+from test_devloop_preflight import PCFG, IssueGH, checked
 
 SEP = '=' * 70
 DASH = '-' * 70
@@ -42,11 +44,20 @@ class FailedCasesTests(unittest.TestCase):
     def test_the_identities_of_failures_errors_and_subtests(self):
         out = unittest_output(('test_a', 'test_x.Case.test_a'),
                               ('test_s', 'test_x.Case.test_s', '(i=1)'),
-                              errors=[('test_y', 'unittest.loader._FailedTest.test_y')])
+                              errors=[('test_e', 'test_y.Case.test_e')])
         cases = failed_cases(out)
         self.assertEqual(cases, ['test_x.Case.test_a', 'test_x.Case.test_s (i=1)',
-                                 'unittest.loader._FailedTest.test_y'])
+                                 'test_y.Case.test_e'])
         self.assertEqual(case_modules(cases), ['test_x.py', 'test_y.py'])
+
+    def test_a_module_that_does_not_load_cannot_be_compared(self):
+        # Its synthetic id is the same whatever the error: it tells nothing of the tests.
+        one = ('test_a', 'test_x.Case.test_a')
+        for label, failed in [('3.11 and later', ('test_y', 'unittest.loader._FailedTest.test_y')),
+                              ('before 3.11', ('test_y', 'unittest.loader._FailedTest'))]:
+            with self.subTest(label):
+                self.assertIsNone(failed_cases(unittest_output(one, errors=[failed])))
+                self.assertIsNone(failed_cases(unittest_output(errors=[failed])))
 
     def test_an_id_before_python_3_11_names_the_test_too(self):
         out = unittest_output(('test_a', 'test_x.Case'))
@@ -105,12 +116,36 @@ class FailedCasesTests(unittest.TestCase):
             self.assertFalse(ws.run_tests(tmp, command, 60)[0])
             self.assertEqual(ws.failed_cases(tmp), ['test_real.Case.test_bad',
                                                     'test_real.Case.test_sub (i=1)'])
+            # A module that does not start has no identity to compare.
             command = module_command(['test_broken.py']).replace('python3', python)
             self.assertFalse(ws.run_tests(tmp, command, 60)[0])
-            cases = ws.failed_cases(tmp)
-            self.assertEqual(case_modules(cases), ['test_broken.py'])
+            self.assertIsNone(ws.failed_cases(tmp))
             self.assertTrue(ws.run_tests(tmp, 'true', 60)[0])
             self.assertEqual(ws.failed_cases(tmp), [])
+
+    def test_distinct_import_errors_on_branch_and_base_stay_tests_failed(self):
+        # The same module fails to import on the branch and on the base, each for its own
+        # missing module: real unittest output, read by the workspace, then the dispatcher.
+        outputs = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            python = shlex.quote(sys.executable)
+            command = module_command(['test_broken.py']).replace('python3', python)
+            for side, missing in (('issue-7', 'missing_on_branch_459'),
+                                  ('issue-7-base', 'missing_on_base_459')):
+                root = Path(tmp) / side
+                (root / 'tests').mkdir(parents=True)
+                (root / 'tests' / 'test_broken.py').write_text(f'import {missing}\n')
+                ws = Workspace(root, '.state', 'main')
+                self.assertFalse(ws.run_tests(root, command, 60)[0])
+                outputs[side] = ws.failed_cases(root)
+        self.assertEqual(outputs, {'issue-7': None, 'issue-7-base': None})
+        test = ImplementTests()
+        runner = test.implement(outputs['issue-7'], outputs['issue-7-base'])
+        self.assertEqual(len(runner.calls), 1 + CFG.implement_test_retries)
+        self.assertEqual(test.gh.labels[7], {'agent:needs-operator'})
+        self.assertEqual(markdown.read_marker(test.gh.comments[-1][1], 'notice')['class'],
+                         'tests_failed')
+        self.assertEqual(test.records(), [])
 
 
 BRANCH = ['test_x.Case.test_a', 'test_x.Case.test_b']
@@ -223,7 +258,8 @@ class WorkingGH(FakeGH):
 
     def issues_with_label(self, label):
         if label in self._working:
-            return [{'number': 7, 'title': 'Issue 7', 'labels': [{'name': label}],
+            return [{'number': 7, 'title': 'Issue 7',
+                     'labels': [{'name': n} for n in sorted(self._working)],
                      'author': {'login': 'brushtyler'}}]
         return []
 
@@ -250,19 +286,41 @@ class WaitTests(unittest.TestCase):
 
     def test_the_issue_waits_while_the_base_stays(self):
         snap, logs = self.snapshot(BASE, [self.broken_comment()])
-        self.assertEqual(snap.base_waits, {7: True})
+        self.assertEqual(snap.base_waits, {7: {'holds': True, 'labels': {'agent:working'},
+                                               'preflight': None}})
         self.assertEqual([(a.kind, a.number) for a in plan(snap, CFG)], [])
         self.assertTrue(any('waits for main' in line for line in logs))
 
     def test_the_issue_starts_again_once_the_base_advances(self):
         snap, _ = self.snapshot('e' * 40, [self.broken_comment()])
-        self.assertEqual(snap.base_waits, {7: False})
+        self.assertEqual(snap.base_waits, {7: {'holds': False, 'labels': {'agent:working'},
+                                               'preflight': None}})
         actions = plan(snap, CFG)
         self.assertEqual([(a.kind, a.number, a.reason) for a in actions],
                          [('implement', 7, BASE_REPAIRED)])
         # Not while it still runs, nor without a free slot.
         self.assertEqual(plan(snap, CFG, busy=frozenset({7})), [])
         self.assertEqual(plan(snap, dataclasses.replace(CFG, max_open_prs=0)), [])
+
+    def test_a_block_of_the_operator_or_the_supervisor_holds_the_restart(self):
+        for block in ('agent:needs-operator', LEGACY_NEEDS_OPERATOR, 'agent:needs-supervisor',
+                      'bloccata'):
+            with self.subTest(block):
+                labels = ('agent:working', block)
+                snap, _ = self.snapshot('e' * 40, [self.broken_comment()], labels=labels)
+                self.assertEqual(snap.base_waits[7]['labels'], set(labels))
+                self.assertEqual(plan(snap, CFG), [])
+                # A whole tick: no turn, no PR, the block stays.
+                gh = WorkingGH(labels)
+                gh.comments = [self.broken_comment()]
+                gh.labels[7] = set(labels)
+                ws = FakeWS(files=['ssdlc_impact.py'], modules=['test_impact.py'])
+                ws.base_head = lambda: 'e' * 40
+                runner = FakeRunner(implemented())
+                Dispatcher(CFG, gh, ws, runner, log=lambda m: None).tick()
+                self.assertEqual(runner.calls, [])
+                self.assertEqual(gh.created, [])
+                self.assertEqual(gh.labels[7], set(labels))
 
     def test_a_notice_after_the_record_ends_the_wait(self):
         notice = (7, markdown.render_escalation('stop', cls='failure'))
@@ -282,6 +340,79 @@ class WaitTests(unittest.TestCase):
         Dispatcher(CFG, gh, ws, runner, log=lambda m: None)._do_implement(7)
         self.assertEqual(len(gh.created), 1)
         self.assertEqual(gh.labels[7], set())
+
+
+def check_view(record=None, owned=False, **extra):
+    """The view of a readiness check (``_preflight_view``) for the hash ``h``."""
+    return dict({'hash': 'h', 'record': record, 'recheck': False, 'owned': owned,
+                 'relabeled': None, 'refused': None, 'base': None}, **extra)
+
+
+def check_record(ready):
+    return {'hash': 'h', 'ready': ready, 'gaps': [] if ready else [{'kind': 'x'}],
+            'split': '', 'agent': REV}
+
+
+class PreflightRestartTests(unittest.TestCase):
+    """With the readiness check the restart goes through it, as a ready issue does."""
+
+    def restart(self, view, labels=('agent:working',), cfg=None):
+        cfg = cfg or PCFG
+        wait = {'holds': False, 'labels': set(labels), 'preflight': view}
+        return [(a.kind, a.number) for a in plan(Snapshot([], [], [7], base_waits={7: wait}),
+                                                  cfg)]
+
+    def test_the_restart_follows_the_state_of_the_check(self):
+        self.assertEqual(self.restart(check_view(check_record(True))), [('implement', 7)])
+        self.assertEqual(self.restart(check_view()), [('preflight', 7)])
+        self.assertEqual(self.restart(check_view(dict(check_record(True), hash='old'))),
+                         [('preflight', 7)])
+        self.assertEqual(self.restart(check_view(check_record(False))),
+                         [('preflight_block', 7)])
+        # A view not read: nothing is known about the check.
+        self.assertEqual(self.restart(None), [])
+        # Without free slots no check nor implementation starts.
+        full = dataclasses.replace(PCFG, max_open_prs=0)
+        self.assertEqual(self.restart(check_view(), cfg=full), [])
+
+    def test_under_a_block_only_a_check_owning_it_runs_on_a_changed_text(self):
+        blocked = ('agent:working', 'agent:needs-operator')
+        changed = check_record(False) | {'hash': 'old'}
+        self.assertEqual(self.restart(check_view(changed, owned=True), blocked),
+                         [('preflight', 7)])
+        self.assertEqual(self.restart(check_view(changed), blocked), [])
+        self.assertEqual(self.restart(check_view(check_record(True)), blocked), [])
+        self.assertEqual(self.restart(check_view(check_record(False), owned=True), blocked), [])
+
+    def test_a_request_added_during_the_wait_is_checked_before_the_restart(self):
+        gh = IssueGH()
+        ws = FakeWS(files=['ssdlc_impact.py'], modules=['test_impact.py'], tests=(False,))
+        ws.cases = {'issue-7': BRANCH, 'issue-7-base': BRANCH}
+        current = [BASE]
+        ws.base_head = lambda: current[0]
+        runner = FakeRunner(checked(True), implemented())
+        d = Dispatcher(PCFG, gh, ws, runner, log=lambda m: None)
+
+        def planned():
+            return [(a.kind, a.number) for a in plan(d.snapshot(), PCFG)]
+
+        self.assertEqual([a.kind for a in d.tick()], ['preflight'])
+        self.assertEqual([a.kind for a in d.tick()], ['implement'])
+        self.assertEqual(gh.labels[7], {'agent:working'})
+        self.assertTrue(any(markdown.read_marker(c['body'], 'basebroken') for c in gh.thread))
+        gh.say('Un requisito in più, scritto durante l\'attesa.')
+        self.assertEqual(planned(), [])
+        # The base advances: the changed request is checked first, then implemented.
+        current[0] = 'e' * 40
+        ws.tests = [True]
+        self.assertEqual(planned(), [('preflight', 7)])
+        runner.outputs += [checked(True), implemented()]
+        self.assertEqual([a.kind for a in d.tick()], ['preflight'])
+        self.assertIn('Un requisito in più', runner.calls[-1][3])
+        self.assertEqual(planned(), [('implement', 7)])
+        self.assertEqual([a.kind for a in d.tick()], ['implement'])
+        self.assertEqual(len(gh.created), 1)
+        self.assertEqual(planned(), [])
 
 
 class FixTests(unittest.TestCase):

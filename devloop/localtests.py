@@ -74,8 +74,9 @@ _SEPARATOR = '=' * 70
 _CASE = re.compile(r'(?:FAIL|ERROR): (\S+) \(([\w.]+)\)(.*)')
 _UNITTEST_FAILED = re.compile(r'FAILED \(([^()]*)\)')
 _COUNT = re.compile(r'([a-z ]+)=(\d+)')
-# The module of a test that unittest could not import: ``unittest.loader._FailedTest.<module>``.
-_IMPORT_FAILURE = 'unittest.loader._FailedTest.'
+# A test module, or a test, that unittest could not load (an import error, a broken
+# ``load_tests``): ``unittest.loader._FailedTest.<name>``, the same id whatever the error.
+_LOAD_FAILURE = 'unittest.loader.'
 
 
 def failed_modules(log):
@@ -121,7 +122,10 @@ def failed_cases(output):
     parameters of a subtest, if any (``test_x.Case.test_y (i=1)``); None when they cannot be
     told for sure: no failed test reported, no summary of unittest, a count that differs from
     its summaries (``failures`` plus ``errors``), an unexpected success, which has no report of
-    its own, or a worker problem of ``scripts/run-tests.py``."""
+    its own, a worker problem of ``scripts/run-tests.py``, or a module that unittest could not
+    load: its synthetic id (``unittest.loader._FailedTest.<module>``) is the same whatever the
+    error, so it tells nothing of which tests fail, and a module that does not start stays a
+    failure of the branch."""
     lines = (output or '').splitlines()
     cases, counted, summaries = [], 0, 0
     for before, line in zip([''] + lines, lines):
@@ -136,6 +140,8 @@ def failed_cases(output):
             counted += counts.get('failures', 0) + counts.get('errors', 0)
         elif before.strip() == _SEPARATOR and (match := _CASE.fullmatch(line)):
             name, test_id, rest = match.groups()
+            if test_id.startswith(_LOAD_FAILURE):
+                return None
             if not test_id.endswith(f'.{name}'):
                 test_id = f'{test_id}.{name}'  # before Python 3.11: "(module.Case)"
             cases.append(test_id + (f' {rest.strip()}' if rest.strip() else ''))
@@ -147,14 +153,11 @@ def failed_cases(output):
 def case_modules(cases):
     """The test modules (``test_x.py``) of the failed tests ``cases`` (``failed_cases``), sorted,
     or None when one of them belongs to no module of ``tests/``: its id does not start with
-    ``test_<name>.``, nor names a module that unittest could not import."""
+    ``test_<name>.``."""
     modules = set()
     for case in cases:
         test_id = case.split(' ', 1)[0]
-        if test_id.startswith(_IMPORT_FAILURE):
-            module = test_id[len(_IMPORT_FAILURE):]
-        else:
-            module = test_id.split('.', 1)[0] if '.' in test_id else ''
+        module = test_id.split('.', 1)[0] if '.' in test_id else ''
         if not _MODULE.fullmatch(module):
             return None
         modules.add(f'{module}.py')

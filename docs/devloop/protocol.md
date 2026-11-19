@@ -542,7 +542,9 @@ counts only from the dispatcher's identity, and only the latest one, while no no
 dispatcher follows it (an escalation, a block):
 
 - an issue in `agent:working` without a PR whose latest record is of `implement` is not `stale`:
-  it waits while `origin/main` is at `base`, then starts again as an implementation;
+  it waits while `origin/main` is at `base`, then starts again as an implementation, unless
+  `agent:needs-operator`, `agent:needs-supervisor` or a label of `blocked_labels` holds it; with
+  `preflight`, through the readiness check of its current request, as a ready issue;
 - a PR whose latest record is of `fix` on its current head runs no fix while `origin/main` is at
   `base`. A base that cannot be read keeps the wait.
 
