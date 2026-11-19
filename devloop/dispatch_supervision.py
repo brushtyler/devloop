@@ -279,8 +279,11 @@ class SupervisionMixin:
         start, kind, record = anchors[-1] if anchors else (-1, None, {})
         moved = {p for p, r in checks if r['ready']}
         moved |= {p for p, r in policy if not r.get('class')}
+        # The records of an extension of the budget envelope completed on an item already with
+        # the operator (``trace_only``, #411) move nothing: the item stays the operator's.
         moved |= {p for p, r in self._dispatcher_records(comments, 'supervision')
-                  if r.get('outcome') in ('applied', 'accepted', 'decided', 'granted')}
+                  if r.get('outcome') in ('applied', 'accepted', 'decided', 'granted')
+                  and r.get('trace_only') is not True}
         for position, comment in enumerate(comments):
             body = comment.get('body', '')
             if any(read_marker(body, kind) is not None for kind in ('review', 'fix', 'sync')) \
@@ -417,8 +420,9 @@ class SupervisionMixin:
         escalations to the operator keep the step a retry runs and its key (#321).
 
         Before any command, an extension of the budget envelope that the journal recorded and a
-        stopped run did not trace (``_pending_extension``, #411) is completed with its own
-        command (``_finish_extension``), whatever command is the latest now."""
+        stopped or failed run did not trace (``_pending_extension``, #411) is completed with its
+        own command (``_finish_extension``), whatever command is the latest now, also on an item
+        in ``agent:needs-operator``, where only its records are written."""
         lb = self.cfg.labels
         is_pr = isinstance(target, PullRequest)
         number = target.number if is_pr else target
@@ -450,15 +454,18 @@ class SupervisionMixin:
                 self.log(f'  {name} by {by}: {outcome}')
             return trace
 
-        # An extension of the budget envelope the journal recorded, whose records a stopped run
-        # did not write (#411), is completed first, whatever command is the latest now and
-        # whatever changed since: it is part of the envelope of the story already.
-        pending = None if operator else self._pending_extension(number, comments, is_pr)
+        # An extension of the budget envelope the journal recorded, whose records a stopped or
+        # failed run did not write (#411), is completed first, whatever command is the latest
+        # now, whatever changed since and wherever the item is: it is part of the envelope of
+        # the story already. Its step resumes only from its own escalation, still the
+        # supervisor's; on an item with the operator only the records are written.
+        pending = self._pending_extension(number, comments, is_pr, operator)
         if pending is not None:
             escalation, command = pending['escalation'], pending['command']
             return self._finish_extension(number, is_pr, comments, escalation, command,
                                           tracer(command, escalation.get('class')),
-                                          pending['grant'], pending['daily'], recovered=True)
+                                          pending['grant'], pending['daily'], recovered=True,
+                                          resume=pending['resume'], operator=operator)
         command = self._supervisor_view(number, comments, operator)
         if command is None:
             self.log('  no command to apply')
@@ -796,42 +803,57 @@ class SupervisionMixin:
             return None, f'la delega del budget non si applica: {why}'
         return dict(route, **found, category=exc.category), ''
 
-    def _pending_extension(self, number, comments, is_pr):
+    def _pending_extension(self, number, comments, is_pr, operator=False):
         """The extension of the budget envelope that the journal recorded for a command on
-        issue or PR ``number`` and whose records a stopped run did not write (#411):
-        ``{escalation, command, grant, daily}``, or None.
+        issue or PR ``number`` and whose records a stopped or failed run did not write (#411):
+        ``{escalation, command, grant, daily, resume}``, or None.
 
-        It is pending when the latest escalation of the dispatcher in ``comments`` is a
-        ``budget_grantable`` one to the supervisor, with the step of the refused turn, and the
-        journal holds the one extension of its story, granted on ``number`` by a command that no
-        dispatcher ``supervision`` record of the thread carries. The command is rebuilt from the
-        journal (its comment, author and text), so it does not depend on the command that is
-        the latest now; a text the journal lacks is read from the comment, when still there.
-        ``daily`` is the count of the grants of its UTC day up to it. None too when the journal
-        cannot be read."""
+        It is pending when a ``budget_grantable`` escalation of the dispatcher to the supervisor
+        in ``comments``, any of them and not only the latest, names a story whose one extension
+        the journal holds, granted on ``number`` by a command that no dispatcher
+        ``supervision`` record of the thread carries; ``escalation`` is the latest one of that
+        story. The command is rebuilt from the journal (its comment, author and text), so it
+        does not depend on the command that is the latest now; a text the journal lacks is read
+        from the comment, when still there. ``daily`` is the count of the grants of its UTC day
+        up to it. None too when the journal cannot be read.
+
+        Completing the records never depends on where the item is now: on an item handed to the
+        operator meanwhile (``operator``, for instance by the ``failure`` escalation of a
+        ``GitHubError`` while the records were written) or behind a later escalation they are
+        written all the same. ``resume`` says whether the step of the refused turn resumes too:
+        only on an item still in ``agent:needs-supervisor`` whose latest escalation is that
+        one, with a step the supervisor may resume (``_retryable``)."""
         escalations = self._dispatcher_records(comments, 'notice', 'escalation')
-        if not escalations:
-            return None
-        escalation = escalations[-1][1]
-        story = escalation.get('story')
-        if escalation.get('class') != BUDGET_GRANTABLE or escalation.get('to') != 'supervisor' \
-                or not isinstance(story, str) or not self._retryable(escalation, is_pr):
-            return None
+        candidates = {}
+        for position, record in escalations:
+            story = record.get('story')
+            if record.get('class') == BUDGET_GRANTABLE and record.get('to') == 'supervisor' \
+                    and isinstance(story, str):
+                candidates[story] = (position, record)  # the latest escalation of each story
         journal = getattr(self.ledger, 'journal', None)
-        if journal is None:
+        if not candidates or journal is None:
             return None
+        traced = {r.get('comment') for _, r in self._dispatcher_records(comments, 'supervision')}
+        found = None
         try:
-            grant = journal.extension(story)
-            if grant is None or grant.get('number') != number:
+            for story, (position, escalation) in sorted(candidates.items(),
+                                                       key=lambda item: -item[1][0]):
+                grant = journal.extension(story)
+                if grant is not None and grant.get('number') == number \
+                        and grant.get('comment') not in traced:
+                    found = position, escalation, grant
+                    break
+            if found is None:
                 return None
+            position, escalation, grant = found
             ident = grant.get('comment')
-            if any(r.get('comment') == ident
-                   for _, r in self._dispatcher_records(comments, 'supervision')):
-                return None
             day = [g.get('comment') for g in journal.grants(str(grant.get('at', ''))[:10])]
         except JournalError as exc:
-            self.log(f'  the extension of story {story} cannot be read: {exc}')
+            self.log(f'  the extensions of stories {", ".join(sorted(candidates))} cannot be '
+                     f'read: {exc}')
             return None
+        resume = (not operator and position == escalations[-1][0]
+                  and self._retryable(escalation, is_pr))
         reason = grant.get('reason')
         if not isinstance(reason, str):
             parsed = [supervisor_command(c.get('body') or '') for c in comments
@@ -840,7 +862,7 @@ class SupervisionMixin:
         command = {'command': GRANT_BUDGET, 'by': grant.get('by'), 'reason': reason,
                    'comment': ident}
         return {'escalation': escalation, 'command': command, 'grant': grant,
-                'daily': day.index(ident) + 1 if ident in day else 1}
+                'daily': day.index(ident) + 1 if ident in day else 1, 'resume': resume}
 
     def _issue_blocked(self, number):
         """Whether issue ``number`` is blocked by an open issue (#277), read now: its step
@@ -884,8 +906,8 @@ class SupervisionMixin:
         an open issue (#277) waits, with nothing recorded nor spent.
 
         A run stopped after the journal recorded the extension and before the ``supervision``
-        record is completed by ``_do_supervise`` before any command (``_pending_extension`` and
-        ``_finish_extension``), never here."""
+        record, or failed there and handed to the operator, is completed by ``_do_supervise``
+        before any command (``_pending_extension`` and ``_finish_extension``), never here."""
         lb = self.cfg.labels
         rules = self.cfg.delegations
         by = command['by']
@@ -968,7 +990,7 @@ class SupervisionMixin:
                                       {'story': story, 'extension': extension}, daily)
 
     def _finish_extension(self, number, is_pr, comments, escalation, command, trace, grant,
-                          daily, recovered=False):
+                          daily, recovered=False, resume=True, operator=False):
         """Write the records of the extension ``grant`` (``{story, extension}``) of the budget
         envelope that the journal recorded for ``command`` on issue or PR ``number``, in the
         ``budget_grantable`` escalation ``escalation`` (#411), and resume its step: ``daily``
@@ -983,13 +1005,18 @@ class SupervisionMixin:
         checked nor applied again, whatever changed since: an issue a merged devloop PR resolved
         meanwhile (#228) gets its records without running its step, and becomes a
         ``merged_issue`` escalation; an issue blocked by an open issue (#277) waits, with nothing
-        written, until the last block closes."""
+        written, until the last block closes.
+
+        ``resume`` false (``_pending_extension``): only the records are completed, and the item
+        stays where it is, its labels unchanged and no step run. So on an item handed to the
+        operator meanwhile (``operator``), whose block the record does not end
+        (``trace_only``, ``_operator_anchor``), or behind a later escalation."""
         lb = self.cfg.labels
         rules = self.cfg.delegations
         by, ident, step = command['by'], command['comment'], escalation.get('step')
         story, extension = grant['story'], grant['extension']
-        merged = self._merged_prs(number) if recovered and not is_pr else []
-        if recovered and not is_pr and not merged and self._issue_blocked(number):
+        merged = self._merged_prs(number) if resume and recovered and not is_pr else []
+        if resume and recovered and not is_pr and not merged and self._issue_blocked(number):
             return None
         if recovered:
             self.log(f'  the extension of the command of comment {ident} is in the journal '
@@ -1002,10 +1029,19 @@ class SupervisionMixin:
         if not self._granted_event(comments, ident):
             self.ledger.event(number, 'delegation_grant', delegation='budget', by=by,
                               comment=ident, **figures)
-        if is_pr:
-            resume = escalation.get('resume')
-            resume = resume if resume in (lb.review, lb.changes) else lb.review
-            where = f'La PR torna in `{resume}`.'
+        extra = {}
+        if not resume:
+            held = lb.needs_operator if operator else lb.needs_supervisor
+            what = 'La PR' if is_pr else 'L\'issue'
+            where = (f'{what} resta in `{held}`' + (', dove decide l\'operatore come prima'
+                                                    if operator else
+                                                    ', con la sua escalation più recente')
+                     + f': il passo `{step}` non riparte da qui.')
+            extra['trace_only'] = True
+        elif is_pr:
+            label = escalation.get('resume')
+            label = label if label in (lb.review, lb.changes) else lb.review
+            where = f'La PR torna in `{label}`.'
         elif merged:
             where = ('L\'issue è però già risolta da una PR devloop mergiata ('
                      + ', '.join(f'#{m["number"]}' for m in merged) + f'): il passo `{step}` '
@@ -1024,11 +1060,13 @@ class SupervisionMixin:
               f'del giorno: {daily} di {rules.max_grants_per_day}. {where}\n\n**Motivo e '
               'analisi delle cause:**\n\n'
               + '\n'.join(f'> {line}'.rstrip() for line in reason.splitlines()),
-              **figures)
+              **figures, **extra)
+        if not resume:
+            return None
         if merged:
             return self._do_merged_issue(number, merged)
         if is_pr:
-            self.gh.edit_labels(number, add=[resume], remove=[lb.needs_supervisor])
+            self.gh.edit_labels(number, add=[label], remove=[lb.needs_supervisor])
             return None
         self.gh.edit_labels(number, remove=[lb.needs_supervisor])
         try:

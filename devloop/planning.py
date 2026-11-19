@@ -256,8 +256,10 @@ def runs_issue_step(item):
     issue's step when it applies, as the step itself would: a retry of an issue's step (#182),
     or a ``grant-budget`` on an issue's ``budget_grantable`` escalation (#411), which runs the
     step the envelope refused. It then waits while the issue is blocked (#277) and takes a free
-    PR slot. A command only to answer (#321) runs nothing."""
-    if item['pr'] or item.get('refusal') or item.get('step') not in ISSUE_STEPS:
+    PR slot. A command only to answer (#321), or the records of an extension that only
+    complete its trace (``trace_only``), run nothing."""
+    if item['pr'] or item.get('refusal') or item.get('trace_only') \
+            or item.get('step') not in ISSUE_STEPS:
         return False
     if item['command'] == GRANT_BUDGET:
         return (item.get('anchor') or {}).get('record', {}).get('class') == BUDGET_GRANTABLE

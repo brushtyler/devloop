@@ -18,6 +18,7 @@ from unittest import mock
 from devloop import budget, config, markdown, supervision
 from devloop.budget import BudgetRefused
 from devloop.config import BudgetPolicy, ConfigError, DelegationPolicy, parse_delegations
+from devloop.github import GitHubError
 from devloop.journal import TurnJournal
 from devloop.planning import Action, plan, runs_issue_step
 from helpers import ssdlc_project
@@ -447,6 +448,59 @@ class RecoveryTests(BudgetCase):
         self.assert_completed(d)
         self.assertEqual(self.decisions(100)[0]['reason'], REASON)
 
+    def test_a_github_error_handed_to_the_operator_is_traced_and_stays_there(self):
+        # A GitHubError while the ledger event is written, after the journal: the action fails
+        # and the item goes to the operator with a failure escalation. The next tick completes
+        # the records of the grant without resuming the review: the operator keeps the item.
+        d = self.make(ON, raw_review())
+        first = self.command(d)
+        with mock.patch.object(d.ledger, 'event', side_effect=GitHubError('gh down')):
+            self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertEqual(self.escalations(100)[-1]['class'], 'failure')
+        self.assertIn(HUMAN, self.gh.labels[100])
+        self.assertEqual((self.decisions(100), self.events()), ([], []))
+        labels = set(self.gh.labels[100])
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        (decision,) = self.decisions(100)
+        self.assertEqual((decision['outcome'], decision['comment'], decision['story'],
+                          decision['extension'], decision['reason'], decision['daily']),
+                         ('granted', first, self.story, EXTENSION, REASON, 1))
+        self.assertEqual([e['comment'] for e in self.events()], [first])
+        self.assertIn('resta in `agent:needs-operator`', self.gh.threads[100][-1]['body'])
+        self.assertEqual(self.gh.labels[100], labels)  # the operator keeps the item
+        self.assertEqual(len(d.ledger.journal.grants()), 1)
+        self.assertEqual(budget.of_issue(d.cfg.budget, d.ledger.journal, REPO,
+                                         7)['turns']['cap'], 5)
+        # Spent: nothing more to complete, nothing runs, and the operator's block holds.
+        self.assertEqual(self.tick(d), [])
+        self.assertEqual(self.runner.calls, [])
+        start, anchor = d._operator_anchor(d._pr_thread(100))
+        self.assertEqual((anchor['kind'], anchor['record'].get('class')), ('notice', 'failure'))
+        # The operator still decides: a retry of a trusted user is answered after the trace.
+        self.gh.command(100, '/devloop retry', login='brushtyler')
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertEqual(len(self.decisions(100)), 2)
+        self.assertEqual(len(d.ledger.journal.grants()), 1)
+
+    def test_a_stopped_grant_behind_a_later_escalation_is_only_traced(self):
+        # The escalation of the grant is no longer the latest one to the supervisor: the trace
+        # is completed, and the later escalation keeps the item.
+        d = self.make(ON, raw_review())
+        first = self.command(d)
+        with mock.patch.object(d.ledger, 'event', side_effect=RuntimeError('stopped')):
+            with self.assertRaises(RuntimeError):
+                self.tick(d)
+        d._escalate(100, 'Un\'altra escalation.', cls='tool_failure',
+                    supervised={'step': 'review', 'key': {'step': 'review', 'head': SHA1},
+                                'resume': REVIEW})
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        (decision,) = self.decisions(100)
+        self.assertEqual((decision['outcome'], decision['comment']), ('granted', first))
+        self.assertEqual(len(self.events()), 1)
+        self.assertEqual(self.gh.labels[100], {SUPER})
+        self.assertEqual(self.escalations(100)[-1]['class'], 'tool_failure')
+        self.assertEqual(self.runner.calls, [])
+
     def test_another_command_on_an_extended_story_is_refused(self):
         d = self.make()
         comment = self.command(d)
@@ -526,6 +580,31 @@ class IssueTests(BudgetCase):
         self.assertEqual(self.runner.calls, [])
         self.assertEqual(self.gh.created, [])
         self.assertEqual(len(d.ledger.journal.grants()), 1)
+
+    def test_a_github_error_on_an_issue_is_traced_without_running_the_step(self):
+        d = self.escalate()
+        self.gh.command(7, '/devloop grant-budget ' + REASON)
+        first = self.gh.threads[7][-1]['id']
+        with mock.patch.object(d.ledger, 'event', side_effect=GitHubError('gh down')):
+            self.assertEqual(self.tick(d), [('supervise', 7)])
+        self.assertIn(HUMAN, self.gh.labels[7])
+        self.assertEqual(self.decisions(7), [])
+        snap = d.snapshot()
+        (item,) = snap.supervised
+        self.assertTrue(item['trace_only'])
+        self.assertFalse(runs_issue_step(item))  # no PR slot, no wait on the blocks
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        (decision,) = self.decisions(7)
+        self.assertEqual((decision['outcome'], decision['comment'], decision['trace_only']),
+                         ('granted', first, True))
+        events = [r for r in self.gh.records(7, 'ledger')
+                  if r.get('event') == 'delegation_grant']
+        self.assertEqual([e['comment'] for e in events], [first])
+        self.assertIn(HUMAN, self.gh.labels[7])
+        self.assertEqual(self.escalations(7)[-1]['class'], 'failure')
+        self.assertEqual(self.runner.calls, [])
+        self.assertEqual(self.gh.created, [])
+        self.assertEqual(self.tick(d), [])
 
     def test_a_stopped_grant_on_a_blocked_issue_waits(self):
         d = self.escalate()

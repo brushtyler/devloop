@@ -464,14 +464,19 @@ figures; its ledger `event` `delegation_grant` has the `delegation` `budget`, an
 event in the turn journal, written first, also records the story, the extension and the text of
 the command (`reason`), which from then on are part of the envelope of the story. Here the
 ledger event comes before the `supervision` record, which spends the command: a dispatcher
-stopped after the journal and before the record finds, on an item still in
-`agent:needs-supervisor` whose latest escalation is the `budget_grantable` one of that story,
-the `grant` of the item in the journal that no `supervision` record of the thread carries. It
-completes that grant before any other command, the latest one included, rebuilding the command
-from the journal (comment, author, text): the ledger event only if absent, the record `granted`
-and the labels, without checking nor extending the story again. An issue that a merged devloop
-PR resolved meanwhile gets the records and then a `merged_issue` escalation, without running its
-step; an issue blocked by an open issue waits, with nothing written. A temporary capacity limit
+stopped after the journal and before the record, or whose write failed there, finds, for the
+story of any `budget_grantable` escalation of the thread, the `grant` of the item in the
+journal that no `supervision` record of the thread carries. It completes that grant before any
+other command, the latest one included, rebuilding the command from the journal (comment,
+author, text): the ledger event only if absent and the record `granted`, without checking nor
+extending the story again. The labels change and the step resumes only on an item still in
+`agent:needs-supervisor` whose latest escalation is that `budget_grantable` one: an issue that a
+merged devloop PR resolved meanwhile gets the records and then a `merged_issue` escalation,
+without running its step, and an issue blocked by an open issue waits, with nothing written.
+Anywhere else, for instance on an item that the `failure` escalation of a `GitHubError` while
+the records were written handed to the operator, or behind a later escalation, only the records
+are written, with `trace_only: true`, and the item stays where it is: such a record does not end
+the operator's block. A temporary capacity limit
 set with `/devloop capacity` (#412,
 [Temporary capacity limits](guide.md#temporary-capacity-limits)) has its record on
 `[report] issue`, with no class: the analysis of the causes in `reason`, the key (`setting`), the

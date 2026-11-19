@@ -1253,11 +1253,13 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         found = []
         for number, is_pr, read, operator in items:
             comments = read(number)
-            # An extension of the budget envelope whose records a stopped run did not write
-            # (#411) is the command to complete, whatever command is the latest now.
-            pending = None if operator else self._pending_extension(number, comments, is_pr)
+            # An extension of the budget envelope whose records a stopped or failed run did not
+            # write (#411) is the command to complete, whatever command is the latest now and
+            # wherever the item is; ``trace_only`` when its step does not resume from it.
+            pending = self._pending_extension(number, comments, is_pr, operator)
             view = (dict(pending['command'], step=pending['escalation'].get('step'),
-                         anchor={'kind': 'notice', 'record': pending['escalation']})
+                         anchor={'kind': 'notice', 'record': pending['escalation']},
+                         trace_only=not pending['resume'])
                     if pending else self._supervisor_view(number, comments, operator))
             if view is not None:
                 found.append(dict(view, number=number, pr=is_pr))
