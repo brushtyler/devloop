@@ -708,6 +708,11 @@ booking, rounded down, and never touches `metered_usd`, `cli_estimate_usd` or to
 of `devloop status` and of the receipt is the frozen one with that extension. An extension that
 would add nothing to the exhausted limit (3 turns × 25% = 0), or that a dollar cap, an uncertain
 outcome or a role outside the envelope would make useless, is not offered and is not spent.
+The grant books the extension, and the first turn of the story booked after it spends it (#466):
+if that turn is refused all the same (a PR's turn that waited past even the extended deadline),
+the extension lapses with a `grant_lapsed` event in the journal, does not spend the story's one
+extension, and the refusal goes through the delegation again; the lapsed grant still counts
+against the daily cap.
 
 **Consumption** is cumulative: every turn booked for a story counts, whatever its issue, attempt,
 model, outcome or process, and nothing refunds a booking. A failed turn, one not dispatched and
