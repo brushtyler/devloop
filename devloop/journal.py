@@ -37,6 +37,12 @@ before it (``previous``) and its own (``sha256``), like the journal of the local
   such as a review round granted with ``/devloop grant-round``: the ``delegation``, the issue or
   PR ``number``, the ``comment`` of the command and its author (``by``). It is written before
   the grant applies, and the grants of a UTC day count against the daily cap of the delegations.
+- ``config``: the configuration the dispatcher read (ADR 0006, R2, trace T1 of K1), at its start
+  (``when: start``) and at each reload of ``devloop run`` that found the files changed
+  (``when: reload``): the SHA-256 of the local overlay and of the project file (null without the
+  file), that of the effective configuration (null, with the ``error``, for one that does not
+  load) and the trust keys whose value changed since the previous ``config`` event, each with its
+  ``key``, ``old`` and ``new`` value (null when not set). The first one lists every trust key.
 
 With ``story_identity`` on (#363, ADR 0004, P2-3a) it also holds the stories, the unit of the
 budget:
@@ -120,6 +126,8 @@ MAX_BYTES = 64 * MIB
 WARN_RATIO = 0.8
 SIZE_WARNING = 'size_warning'  # the event of that warning
 GRANT = 'grant'  # a grant of a delegation to the supervisor (#405), for the daily cap
+CONFIG = 'config'  # the configuration read at a start or a reload (ADR 0006, T1)
+CONFIG_HASHES = ('overlay', 'project', 'effective')
 # A turn's id: its sequence (or, for a legacy one, its number) and 8 hex digits that differ
 # between journals, so that a command written for the turns of a journal since lost never
 # reconciles a turn of a new one.
@@ -880,6 +888,63 @@ class TurnJournal:
                 self._append(GRANT, {'delegation': delegation, 'number': number,
                                      'comment': comment, 'by': by})
             return others + 1
+
+    # Configuration (ADR 0006, R2, T1) ---------------------------------------
+    def _configurations(self):
+        return [e['data'] for e in self._events if e['event'] == CONFIG]
+
+    def configurations(self):
+        """The ``config`` events, oldest first."""
+        with self._lock:
+            self._load()
+            return self._configurations()
+
+    def trust(self):
+        """The trust values as the ``config`` events recorded them, by dotted key."""
+        with self._lock:
+            self._load()
+            return self._trust()
+
+    def _trust(self):
+        values = {}
+        for data in self._configurations():
+            for change in data.get('changes') or ():
+                if change.get('new') is None:
+                    values.pop(change.get('key'), None)
+                else:
+                    values[change.get('key')] = change['new']
+        return values
+
+    def configuration(self, when, fingerprint, only_if_changed=False):
+        """Record the configuration of ``fingerprint`` (``config.fingerprint``, or the hashes of
+        a configuration that does not load with ``trust`` None and its ``error``) read at
+        ``when`` (``start`` or ``reload``): its hashes and the trust values that changed since
+        the previous ``config`` event, before and after. With ``only_if_changed``, nothing is
+        written when the hashes are those of the previous ``config`` event. Returns the changes
+        recorded, or None when nothing was written. Raises ``JournalError`` if it cannot be
+        written."""
+        if self.read_only:
+            raise JournalError(f'{self.path}: read-only journal: no configuration is recorded '
+                               'in it')
+        hashes = {key: fingerprint.get(key) for key in CONFIG_HASHES}
+        with self._lock:
+            self._load()
+            previous = self._configurations()
+            if (only_if_changed and previous
+                    and all(previous[-1].get(k) == v for k, v in hashes.items())):
+                return None
+            changes = []
+            trust = fingerprint.get('trust')
+            if trust is not None:
+                before = self._trust()
+                changes = [{'key': key, 'old': before.get(key), 'new': trust.get(key)}
+                           for key in sorted(set(before) | set(trust))
+                           if before.get(key) != trust.get(key)]
+            data = {'when': when, **hashes, 'changes': changes}
+            if fingerprint.get('error'):
+                data['error'] = fingerprint['error']
+            self._append(CONFIG, data)
+            return changes
 
     # Attempts (#384) -------------------------------------------------------
     def _attempts(self):

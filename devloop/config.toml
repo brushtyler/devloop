@@ -522,7 +522,9 @@ effort = "high"
 # fallback model, each at most once per action (issue #121). A fallback inherits `effort` when
 # it sets none, and never reasons below high. What counts as unavailable: `unavailable_patterns`
 # (default "RESOURCE_EXHAUSTED", "quota", "429", "model .* not available") in the output of a
-# failed turn, or an exit code in `unavailable_exit_codes` (default none).
+# failed turn, each as a delimited word or code (#443), or an exit code in
+# `unavailable_exit_codes` (default none). An output with only `(code 400)` never counts, not
+# even with a listed exit code.
 fallback_models = [
     { model = "gemini-4-hydrogen-high", model_label = "Gemini 4 Hydrogen" },
 ]

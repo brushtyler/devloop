@@ -41,7 +41,7 @@ def finding(title='bug', file='x.py', line=3, security=False):
             'security': security}
 
 
-def raw_review(verdict='approve', blocking=(), previous=(), human='', reason=''):
+def raw_review(verdict='approve', blocking=(), previous=(), human='', reason='none'):
     return {'verdict': verdict, 'summary': 'ok', 'blocking_findings': list(blocking),
             'non_blocking_findings': [], 'previous_findings': list(previous),
             'human_reason': human, 'operator_reason': reason, 'checks_performed': ['read diff']}
@@ -73,6 +73,36 @@ def norm(raw, previous_open=(), round_no=1, head=SHA1, bound=True):
     return record
 
 
+SCHEMA_KEYWORDS = {'type', 'properties', 'required', 'additionalProperties', 'items', 'enum'}
+
+
+def incompatible(node, path):
+    """The constructs of an output schema that some CLI rejects (#441): a keyword outside the
+    subset devloop uses, a type other than its own, an ``enum`` that is not a non-empty list of
+    distinct, non-blank strings on a string field. Gemini (agy) refuses an empty value."""
+    problems = [f'{path}: keyword {k}' for k in sorted(set(node) - SCHEMA_KEYWORDS)]
+    kind = node.get('type')
+    if kind not in ('object', 'array', 'string', 'integer', 'boolean'):
+        return problems + [f'{path}: type {kind!r}']
+    if 'enum' in node:
+        enum = node['enum']
+        if kind != 'string':
+            problems.append(f'{path}: enum on a {kind}')
+        if not isinstance(enum, list) or not enum:
+            problems.append(f'{path}: empty or malformed enum')
+        else:
+            if len(set(map(repr, enum))) != len(enum):
+                problems.append(f'{path}: repeated enum value')
+            problems += [f'{path}: enum value {v!r}' for v in enum
+                         if not isinstance(v, str) or not v.strip()]
+    if kind == 'object':
+        for key, sub in node.get('properties', {}).items():
+            problems += incompatible(sub, f'{path}.{key}')
+    elif kind == 'array':
+        problems += incompatible(node.get('items', {}), f'{path}[]')
+    return problems
+
+
 class SchemaTests(unittest.TestCase):
     def test_every_schema_is_strict_for_all_clis(self):
         def walk(node, path):
@@ -85,6 +115,28 @@ class SchemaTests(unittest.TestCase):
                 walk(node['items'], f'{path}[]')
         for name in schema.SCHEMA_NAMES:
             walk(schema.load_schema(name), name)
+
+    def test_every_schema_is_accepted_by_every_cli(self):
+        # agy (Gemini) rejects a schema with an empty value in an ``enum`` (#441), and with it
+        # every turn that uses it. Every output schema keeps to the subset all three CLIs accept.
+        names = set(schema.SCHEMA_NAMES)
+        self.assertLessEqual({'review', 'implement', 'fix', 'preflight', 'advisory',
+                              'conclave_proposal', 'conclave_vote', 'sync'}, names)
+        self.assertEqual(names, {p.stem for p in schema.SCHEMA_DIR.glob('*.json')})
+        for name in schema.SCHEMA_NAMES:
+            with self.subTest(schema=name):
+                self.assertEqual(incompatible(schema.load_schema(name), name), [])
+        # The check sees the constructs Gemini rejects.
+        string = {'type': 'string'}
+        for bad in (dict(string, enum=['', 'decision']), dict(string, enum=[]),
+                    dict(string, enum=['a', 'a']), dict(string, enum=[1]),
+                    {'type': 'integer', 'enum': [1]}, dict(string, enum='a'),
+                    dict(string, minLength=1), {'type': 'null'},
+                    {'type': 'array', 'items': dict(string, enum=[' '])},
+                    {'type': 'object', 'additionalProperties': False, 'required': ['a'],
+                     'properties': {'a': dict(string, enum=[''])}}):
+            with self.subTest(bad=bad):
+                self.assertNotEqual(incompatible(bad, 'x'), [])
 
     def test_every_schema_file_can_be_used_by_a_turn(self):
         # A schema left out of SCHEMA_NAMES fails every turn that asks for it (#381).

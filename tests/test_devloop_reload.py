@@ -217,7 +217,7 @@ class RunLoopTests(FilesCase):
                                   lambda cfg, state, d, timeout, reloader: seen.append(reloader)
                                   or 0):
             cli.main(['--config', str(self.base), '--local-config', str(self.local), 'run'])
-        self.assertEqual(seen[0].paths, (self.base, self.local))
+        self.assertEqual(seen[0].paths, {'config': self.base, 'local': self.local})
         self.assertIs(seen[0].cfg, self.cfg)
 
 

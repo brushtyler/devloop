@@ -24,8 +24,6 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config import AGENT_KINDS, key_role
-
 FILE = 'model-unavailability.json'
 LOCK = 'model-unavailability.lock'
 
@@ -41,6 +39,13 @@ def reset_seconds(text):
             hours, minutes, seconds = (int(g or 0) for g in match.groups())
             return hours * 3600 + minutes * 60 + seconds
     return None
+
+
+def delimited(pattern):
+    """The regular expression of the unavailability ``pattern`` matched as a delimited word or
+    code (#443): not preceded nor followed by a letter or a digit, so that ``429`` never matches
+    inside an identifier such as ``1c42429607c6``."""
+    return rf'(?<![^\W_])(?:{pattern})(?![^\W_])'
 
 
 def iso(epoch):
@@ -145,6 +150,8 @@ class Memory:
         roles. Of two records of the same model the later ``until`` stays. A key that is still
         configured, or whose agent has no key with a role, is left as it is. Returns ``(old,
         [new keys])`` for each key moved."""
+        # Imported here: ``config`` imports ``delimited`` from this module (#443).
+        from .config import AGENT_KINDS, key_role
         moved = []
         with self._locked() as data:
             for old in sorted(data):

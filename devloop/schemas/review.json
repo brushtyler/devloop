@@ -52,7 +52,7 @@
       }
     },
     "human_reason": {"type": "string"},
-    "operator_reason": {"type": "string", "enum": ["", "trust_policy", "decision"]},
+    "operator_reason": {"type": "string", "enum": ["none", "trust_policy", "decision"]},
     "checks_performed": {"type": "array", "items": {"type": "string"}}
   }
 }

@@ -356,7 +356,7 @@ Every agent review, CI round and promotion records a **receipt** in its marker:
 | Field | Content |
 |---|---|
 | `pr`, `base`, `head` | The PR, the base branch commit and the head the level was computed for |
-| `policy` | The policy version: the SHA-256 of the loaded policy configuration, including key, app, kind, model, effort and `review_args` of every reviewer of the pool |
+| `policy` | The policy version: the SHA-256 of the loaded policy configuration, including key, app, kind, model, effort and `review_args` of every reviewer of the pool and, when there is one, the SHA-256 of the [project file](reference.md#project-file) (ADR 0006, R2) |
 | `level`, `reasons` | The effective level and why: default, label with its author, sensitive paths, earlier level, and with level 0 enabled the `reviews:0` label with its author, time, whether it applied and the paths outside the allowlist |
 | `reviewers` | The reviewers the level requires, in order (none at level 0, or when the pool has not enough independent ones) |
 | `profiles` | The identity and tuple `(kind, model, effort, review_args)` each required reviewer reviews with now. At level 1 the PR's recorded reviewer stays required even when it is no longer in the pool, so the policy version does not cover it: its profile does |
@@ -518,11 +518,13 @@ security finding with *(sicurezza)*. devloop then enforces consistency:
 - `request_changes` with nothing to fix becomes `needs_operator`;
 - an earlier finding the reviewer does not assess stays open;
 - `operator_reason` (#434) says why a reviewer asks for the operator: `trust_policy` or
-  `decision`, empty with the other verdicts. The record keeps it only with `needs_operator`, as
-  `decision` when the reviewer gave none; a record without the field, written before #434, is a
-  `decision`. A `trust_policy` with another verdict becomes `needs_operator`. The schema keeps
-  the field required for the CLIs, but the runner fills it in (empty) before checking an output
-  that lacks it: such a review is a `decision`, not a failure of the tool.
+  `decision`, `none` with the other verdicts. The record keeps it only with `needs_operator`, as
+  `decision` when the reviewer gave none or `none`; a record without the field, written before
+  #434, is a `decision`. A `trust_policy` with another verdict becomes `needs_operator`. The
+  schema keeps the field required for the CLIs, but the runner fills it in (`none`) before
+  checking an output that lacks it: such a review is a `decision`, not a failure of the tool. No
+  `enum` of an output schema holds an empty string (#441): Gemini rejects the schema, and agy
+  with it every turn that uses it.
 
 **What devloop does with the verdict** (#434). Only a `needs_operator` for a `decision` stops the
 loop: escalation `reviewer_decision`, the round suspended with a conclave. A `needs_operator`
@@ -537,11 +539,20 @@ merge is the operator's for good: the snapshot plans the PR as mode `off`, the o
 notice lists the parts each reviewer named, and the merge checks it again just before.
 
 **Trust policy** (#399). The review prompt asks for `needs_operator` when the change touches the
-trust policy, at every review level, with the parts touched in `human_reason`, and to assess it
-again at every round on the whole diff of the PR against its base, not only on the latest fix;
-the advisory review prompt asks instead for the opinion `dubbi` (`contrario` when a check is
-weakened) and a first residual risk beginning with "Policy di fiducia toccata:". Both carry the
-same closed list of five points and the same examples, described in
+trust policy and needs the operator for it, at every review level, with the parts touched in
+`human_reason`, and to assess it again at every round on the whole diff of the PR against its
+base, not only on the latest fix; the advisory review prompt asks instead for the opinion `dubbi`
+(`contrario` when a check is weakened) and a first residual risk beginning with "Policy di
+fiducia toccata:". Both carry the same closed list of five points and the same examples. Since
+#447 a change to the policy needs the operator only when it goes beyond or against a decision of
+the operator (or no decision covers it), weakens a check that no decision authorizes, or changes
+the rule itself (the "Trust policy" section of the two prompts, or `NON_CRITICAL`): the operator
+decides the policy, not every change that carries it out
+([ADR 0002](../adr/0002-ruoli-e-responsabilita.md)). A faithful implementation of a decision
+recorded in an ADR on `main`, which the issue cites and the reviewer cites in its review (file,
+section and point), gets the technical verdict, `approve` or `request_changes`, and nothing in
+the merge changes for it; without the citation, or with a deviation, it is `needs_operator` as
+before. All of it is described in
 [Changes to the trust policy](guide.md#changes-to-the-trust-policy). The rule lives only in the
 prompts: the schema `advisory.json` does not change, `review.json` only gains `operator_reason`
 (#434) for it, and devloop does not check in code whether a verdict should have been
@@ -1004,6 +1015,18 @@ their format does not change. The journal is append-only, one JSON event per lin
   lock in the same step as the write: past the cap nothing is written and the grant does not
   apply ([Granting a review round](guide.md#granting-a-review-round)). The events of the
   [publication outbox](#publication-outbox) start with `publication`.
+- `config` (ADR 0006, R2, trace T1 of K1): the configuration the dispatcher read, at each start
+  of `tick` and `run` (`when: start`, before any tick: a start whose record cannot be written
+  stops devloop) and at each reload of `run` whose hashes differ from the last `config` event
+  (`when: reload`). It holds the SHA-256 of the local overlay (`overlay`) and of the
+  [project file](reference.md#project-file) (`project`), null without the file, that of the
+  effective configuration (`effective`, the canonical JSON of the composed files), and
+  `changes`: the trust keys (`repo`, `trusted_users`, `[apps]`, `[merge]`, roles,
+  `[review_policy]`, the agents, `[budget]`, `[delegations]`, `test_cmd`, the restrictions, …,
+  each value by dotted key) whose value differs from the one the earlier `config` events
+  recorded, each as `{key, old, new}`, null for a value not set. The first lists every trust
+  key. A reload that does not load has `effective` null, no `changes` and its `error`. The
+  values are those of the files: a trust key changed by a reload still waits for a restart.
 - With the [budget envelope](reference.md#budget-envelope) on (`[budget] enabled`, #365), the
   intent of a turn charged to a story carries its booking, `budget`: `{story, role, phase,
   engine}` (the role is the kind of the turn, the engine the kind of the agent's CLI) and, when

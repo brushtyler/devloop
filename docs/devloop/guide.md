@@ -71,13 +71,21 @@ when, it does one of these five things (a closed list):
    `write_args`, `review_args` and the other permissions of the agents;
 2. it changes the constants that cap the delegations and the retries, such as `MAX_RETRIES`;
 3. it changes who is believed: the filter of the trusted authors of the comments, the check of
-   the identity of markers and records, the identity required for `/devloop` commands;
+   the identity of markers and records, the identity required for `/devloop` commands, the names
+   by which devloop recognises trusted commands and records (#417): renaming, removing or
+   changing the meaning of a `/devloop` command or of a kind of the `<!-- devloop:<kind>:v1 ... -->`
+   markers;
 4. it changes when a PR is merged or promoted, or who decides on it: the merge conditions, the
    quorum of the reviewers, the checks of `operator_only_paths` and `protected_paths`, the choice
    of the review level, the classes of escalation the supervisor decides in `auto` mode
    (`NON_CRITICAL` in `devloop/supervision.py`) and those that stay with the operator: moving
    `reviewer_decision` among the non-critical ones, for example, would take from the operator
-   the very `needs_operator` of this rule;
+   the very `needs_operator` of this rule. So do the names of the labels that govern merge, hold
+   and escalation, defined in the `Labels` dataclass of `devloop/config.py` and not configurable
+   (`agent:ready-to-merge`, `agent:merge-hold`, `agent:needs-operator`,
+   `agent:needs-supervisor`, #417): renaming, removing or changing the meaning of one of them
+   would bypass the hold or the escalations, because devloop would look for a name nobody puts
+   any more;
 5. it changes one of these prompts in `devloop/prompts/`: the review prompt, the advisory review
    prompt, the conclave prompts (`conclave_proposal.md`, `conclave_vote.md`, which define the
    perimeter reserved to the operator), the parts of `implement.md`, `fix.md` and `preflight.md`
@@ -87,12 +95,38 @@ Nothing else is policy, unless it also does one of the five things: refactoring 
 of behaviour, new functions, texts and comments, operational keys such as timeouts, capacities
 and intervals. The prompts give examples of both. A change that is not policy is not reported.
 
-- **Review of the quorum.** A reviewer who finds the policy touched gives the verdict
+**When the operator decides** (#447). The operator decides the policy, not every change that
+carries it out ([ADR 0002](../adr/0002-ruoli-e-responsabilita.md): the operator takes the
+reserved decisions, devloop and the agents carry them out). A change that touches the policy
+needs the operator when, and only when, at least one of these three things holds:
+
+1. it goes beyond or against a decision of the operator, or no decision covers it: a decision
+   recorded in the section "Decise dall'operatore" of an ADR approved with the
+   [cycle of the ADRs](../adr/README.md#ciclo-di-un-adr) and present on `main`, or written by the
+   operator in the body of the issue; the points an ADR leaves open are not decisions;
+2. it weakens a check and no decision of the operator authorizes that weakening;
+3. it changes the rule itself: the "Trust policy" section of the review or the advisory review
+   prompt, or the classes of escalation (`NON_CRITICAL` in `devloop/supervision.py`), even when
+   an ADR asks for it.
+
+A **faithful implementation** does not need the operator: the issue cites the section of an ADR
+on `main`, and the change carries out its decision with no deviation. The reviewer checks the
+conformity of the whole change to the decision, read on `main` and never in the diff of the PR,
+and cites it in the review (file of the ADR, section and point); its verdict is then the technical
+one, `approve` or `request_changes`, and devloop merges the PR like any other of its level.
+Without the citation the PR needs the operator as before; every deviation found needs the
+operator, with its reason and the decision it departs from. The prompts give an example of each
+case: a conforming implementation of an ADR, a deviation, a weakening without a decision, a
+change of the rule. Unchanged: `operator_only_paths` (`docs/adr/`, `AGENTS.md`, `CLAUDE.md`)
+keeps the merge with the operator whatever the reviewers say, the activations of ADR 0005 (D10)
+are not PRs and stay with the operator, and a `needs_operator` for a `decision` works as below.
+
+- **Review of the quorum.** A reviewer for whom the change needs the operator gives the verdict
   `needs_operator`, even when the change is correct and the issue asks for it, and writes in
-  `human_reason` the parts touched, each with its point of the list and its file. The review
-  prompt asks to assess the rule again at every round, on the whole diff of the PR against its
-  base and not only on what the latest fix changed: a PR already flagged stays `needs_operator`
-  after a fix, as long as its diff still touches the policy.
+  `human_reason` the parts touched, each with its point of the list and its file, and which of
+  the three points holds. The review prompt asks to assess the rule again at every round, on the
+  whole diff of the PR against its base and not only on what the latest fix changed: a PR already
+  flagged stays `needs_operator` after a fix, as long as its diff still needs the operator.
 - **One hand-off to the operator** (#434). The reviewer says why it asks for the operator in
   `operator_reason`: `trust_policy` for this rule, `decision` for anything else (an ambiguous
   issue, a product or authority decision, a disagreement that cannot be settled technically), and
@@ -112,15 +146,18 @@ and intervals. The prompts give examples of both. A change that is not policy is
   a round or opens a [conclave](#conclave-on-a-block). With a conclave configured, trust rules are
   in its reserved perimeter.
 - **Advisory review.** It has no verdict and does not count for the quorum
-  ([Advisory review for the operator](#advisory-review-for-the-operator)): its opinion is `dubbi`,
-  or `contrario` when the change weakens a check, and the first of its residual risks begins with
-  "Policy di fiducia toccata:" and lists the parts touched. Its schema does not change.
+  ([Advisory review for the operator](#advisory-review-for-the-operator)): when the change needs
+  the operator, its opinion is `dubbi`, or `contrario` when the change weakens a check, and the
+  first of its residual risks begins with "Policy di fiducia toccata:" and lists the parts
+  touched; a faithful implementation gets an opinion on its merits, with the decision cited in
+  the summary. Its schema does not change.
 
 **Residual risks**, accepted by the operator (ADR 0005, section 4):
 
 - the rule depends on the attention of the reviewers, at every round: at level 2 they are two,
   of different vendors, but they may both miss a change, and a reviewer of a later round who
-  looks only at the latest fix may approve a PR an earlier round flagged. devloop checks nothing
+  looks only at the latest fix may approve a PR an earlier round flagged. Since #447 they also
+  judge whether a change conforms to the decision it cites. devloop checks nothing
   of it in code: no file is reserved to the operator for the policy, and `devloop/config.toml` is
   not in `operator_only_paths`;
 - a change deliberately disguised as something else is not covered;
@@ -1107,8 +1144,8 @@ does not have the implementer's context, and having the same model it could neve
 quorum anyway. Like the review prompt, the advisory one is blind to the author (#389): it names
 neither the implementer nor its model, tells the agent it is not the author, and passes on the
 issue and the PR description without attribution headers and markers (see
-[What the reviewers read](protocol.md#attribution)). A change to the trust policy gets the
-opinion `dubbi` or `contrario` and a first residual risk that says so (see
+[What the reviewers read](protocol.md#attribution)). A change to the trust policy that needs
+the operator gets the opinion `dubbi` or `contrario` and a first residual risk that says so (see
 [Changes to the trust policy](#changes-to-the-trust-policy)).
 
 - **One per head.** An `advisory` action, which takes a slot of `max_actions_per_tick`, runs one
@@ -1940,7 +1977,9 @@ without a smoke test, but checked again against the current overlay: if a file i
 missing, the pin fails. Earlier copies stay for the rollback, up to `[gc] keep_pins` (default
 5) besides `current`: after a successful pin the older ones that no process uses are removed
 ([Cleanup of the state directory](#cleanup-of-the-state-directory)). `pin` uses the
-overlay given with `--local-config`, or `.ssdlc/devloop/config.local.toml` when it exists. A
+overlay given with `--local-config`, or `.ssdlc/devloop/config.local.toml` when it exists, and
+the [project file](reference.md#project-file) of the `state_dir` when it exists: the lists it
+adds are extracted, and a copy that cannot read it is refused. A
 `run` already started keeps the code it started with: restart it after a pin by hand (a pin
 after a merge restarts it by itself, see below). `devloop cleanup` removes only the agent
 worktrees under `state_dir/worktrees`, never a pinned copy; `devloop gc` removes the pinned
@@ -1958,7 +1997,9 @@ sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned tick --dry
 ```
 
 It runs `python3 -P -m devloop` from the root of its clone, with `PYTHONPATH` on the copy only
-and, when `.ssdlc/devloop/config.local.toml` exists, `--local-config` on it. It imports nothing
+and, when `.ssdlc/devloop/config.local.toml` exists, `--local-config` on it; when
+`.ssdlc/devloop/project.toml` exists, `--project-config` on it (the
+[project file](reference.md#project-file), ADR 0006, R2). It imports nothing
 from the clone, and works both run directly by the `devloop` user and through `sudo -u devloop
 -H`. Without a pin it stops and says so. It refuses to run as root, unless `--allow-root` is its
 first argument. `-P` is required: without it `python3 -m` puts the current directory first on
@@ -1967,8 +2008,9 @@ commands do not inherit that `PYTHONPATH`: the tests of a worktree import the wo
 It exports `DISABLE_AUTOUPDATER=1`, which the agents inherit, so that Claude Code does not update
 itself while devloop runs it; a value already in the environment (the operator's) is kept.
 
-With `--state-dir DIR` (ADR 0006, R1), an absolute path, the launcher takes the copy and the
-overlay from `DIR/current` and `DIR/config.local.toml` instead of `.ssdlc/devloop` of its clone,
+With `--state-dir DIR` (ADR 0006, R1), an absolute path, the launcher takes the copy, the
+overlay and the project file from `DIR/current`, `DIR/config.local.toml` and `DIR/project.toml`
+instead of `.ssdlc/devloop` of its clone,
 so it can live anywhere, for example installed on the host as
 `/usr/local/lib/devloop/devloop-pinned` (see [Installation source](#installation-source)). It then
 runs devloop in the current directory, which must be in the checkout of the managed repository
@@ -2014,8 +2056,10 @@ state_dir = "/var/lib/devloop/widget"
   later pins go through the launcher (`devloop-pinned --state-dir /var/lib/devloop/widget pin
   <tag>`).
 
-The configuration, the prompts and the tests are still those of ssdlc: the project keys go in
-the overlay until the project file of ADR 0006 (R2) exists.
+The facts of the project (`test_cmd`, `[docs.map]`, …) and the restrictions it adds go in the
+[project file](reference.md#project-file) `DIR/project.toml` (ADR 0006, R2), on the host; the
+trust keys stay in the overlay. The prompts and the selection of the tests are still those of
+ssdlc.
 
 #### Local config as an overlay
 
@@ -2043,11 +2087,25 @@ the one of the copy. A new pin therefore needs no realignment of the config by h
 any value the copy's config would refuse. An overlay cannot remove a key of the copy, only
 replace it.
 
+Beside it, `.ssdlc/devloop/project.toml` is the [project file](reference.md#project-file)
+(ADR 0006, R2), with the same permissions: the facts of the managed repository (`test_cmd`,
+`local_tests`, `language`, `priority_labels`, `[docs.map]`) and the restrictions it adds
+(`protected_paths`, `blocked_labels`, sensitive paths and lists, level-0 checks,
+`operator_only_paths`). The order is installation < project file < overlay, but a restriction
+of the project file only adds to those of the installation and the overlay. Any other key in it
+stops devloop, naming the key; the trust keys stay in the overlay, and its `test_cmd` never
+enters the default commands of agy: the overlay alone admits it. It must be a regular file of
+its own: a symbolic link, or a file with other hard links, stops devloop. Its hash is part of
+the policy version, and each start and reload records the configuration in the journal.
+
 #### Changes while the loop runs
 
-A running `devloop run` reads `devloop/config.toml` of its copy and the overlay again before
+A running `devloop run` reads `devloop/config.toml` of its copy, the overlay and the
+[project file](reference.md#project-file) again before
 each tick (#278), and loads them at the first tick and then when their content changed (the hash
-of each file), so a change made while the loop was starting is not missed. Only these
+of each file), so a change made while the loop was starting is not missed. Each load whose
+hashes differ from the last recorded ones leaves a `config` event in the
+[turn journal](protocol.md#turn-journal), with the trust keys changed (ADR 0006, T1). Only these
 keys take effect without a restart:
 
 - `max_open_prs`, `max_parked_prs` and `max_review_rounds`: the new values apply from the next
@@ -2072,7 +2130,8 @@ overlay removed or unreadable) does not stop the loop: the log says
 `config: changed but not valid, the previous configuration stays in use: <error>`, the tick goes
 on with the previous configuration, and the files are loaded again at their next change. The
 overlay must exist when the loop starts: the [launcher](#launcher) passes `--local-config` only
-for an overlay it finds, so an overlay created later needs a restart. `devloop tick` reads the
+for an overlay it finds, so an overlay created later needs a restart; the same holds for the
+project file and `--project-config`. `devloop tick` reads the
 configuration at each run, as before.
 
 #### Rollback

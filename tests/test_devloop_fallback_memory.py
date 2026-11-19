@@ -1,6 +1,7 @@
 """devloop: memory of the models found unavailable, skipped until they are back (#151)."""
 
 import contextlib
+import dataclasses
 import io
 import json
 import tempfile
@@ -27,6 +28,14 @@ FIXTURE_STDERR = (
 FIXTURE = (3, '', FIXTURE_STDERR)
 FIXTURE_RESET = 152 * 3600 + 4 * 60 + 35
 T0 = 1_800_000_000  # 2027-01-15T08:00:00Z
+# The output of agy on gemini-4-hydrogen-high that #443 reports (2026-11-19, diary #76): an
+# INVALID_ARGUMENT (code 400) envelope, with exit 0, whose conversation_id holds `429`. The
+# conversation_id, the status and the error are those of model-unavailability.json; the text
+# the registry elided with `…` is filled in.
+INVALID_ARGUMENT_STDOUT = (
+    '{"conversation_id":"b60f1b4e-134e-42d4-836f-1c42429607c6","status":"ERROR",'
+    '"response":"INVALID_ARGUMENT (code 400): Request contains an invalid argument."}')
+INVALID_ARGUMENT = (0, INVALID_ARGUMENT_STDOUT, '')
 
 
 class Clock:
@@ -68,6 +77,126 @@ class ResetFormatTests(unittest.TestCase):
             agents.AgentRunner(tmp, 10, run=cli, clock=Clock()).run(
                 CFG.agent('agy'), 'review', 'p', 'review', tmp, 'pr-1')
         self.assertIsNone(ctx.exception.resets_at)
+
+
+class DelimitedPatternTests(unittest.TestCase):
+    """#443: the patterns match delimited words and codes; a request error is no unavailability."""
+
+    def test_429_inside_an_identifier_with_a_400_error_is_no_unavailability(self):
+        agy = CFG.agent('agy')
+        self.assertIn('429', INVALID_ARGUMENT_STDOUT)  # what the substring match found
+        self.assertIsNone(agents.unavailable_reason(agy, None, f'{INVALID_ARGUMENT_STDOUT}\n'))
+        # The same, as agy's structured error on stderr after a non-zero exit.
+        stderr = ('AGY_ERROR: {"short_error":"INVALID_ARGUMENT (code 400): Request contains an '
+                  'invalid argument.","status":"INVALID_ARGUMENT","error_code":400,'
+                  '"code_kind":"http","retryable":false,'
+                  '"conversation_id":"b60f1b4e-134e-42d4-836f-1c42429607c6"}')
+        self.assertIsNone(agents.unavailable_reason(agy, 1, f'\n{stderr}'))
+        # An explicit 400 is never unavailability, whatever pattern the text matches.
+        self.assertIsNone(agents.unavailable_reason(
+            agy, 1, 'INVALID_ARGUMENT (code 400): field quota of the schema is invalid'))
+        # Without any code, a 429 inside an identifier matches nothing either.
+        self.assertIsNone(agents.unavailable_reason(
+            agy, 1, 'request 1c42429607c6 failed: internal error'))
+
+    def test_a_listed_exit_code_does_not_override_a_400_error(self):
+        agy = dataclasses.replace(CFG.agent('agy'), unavailable_exit_codes=(3,))
+        self.assertIsNone(agents.unavailable_reason(agy, 3, INVALID_ARGUMENT_STDOUT))
+        self.assertEqual(agents.unavailable_reason(agy, 3, 'try later'), 'exit code 3')
+        # Through the runner: no ModelUnavailable, so no fallback and no memory.
+        cli = FakeCLI(gemini_4_argon_high=(3, '', INVALID_ARGUMENT_STDOUT))
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaises(
+                agents.AgentError) as ctx:
+            agents.AgentRunner(tmp, 10, run=cli, clock=Clock()).run(
+                agy, 'review', 'p', 'review', tmp, 'pr-1')
+        self.assertNotIsInstance(ctx.exception, agents.ModelUnavailable)
+
+    def test_the_real_400_output_neither_falls_back_nor_is_remembered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / 'state'
+            cli = FakeCLI(gemini_4_argon_high=INVALID_ARGUMENT)
+            with self.assertRaises(agents.AgentError) as ctx:
+                agents.AgentRunner(tmp, 10, run=cli, clock=Clock()).run(
+                    CFG.agent('agy'), 'review', 'p', 'review', tmp, 'pr-1')
+            self.assertNotIsInstance(ctx.exception, agents.ModelUnavailable)
+            self.assertIn('INVALID_ARGUMENT (code 400)', str(ctx.exception))
+            # In a review: no fallback to Hydrogen, no record in the memory.
+            memory = unavailability.Memory(state, clock=Clock())
+            d = Dispatcher(CFG, FakeGH(), FakeWS(), agents.AgentRunner(
+                Path(tmp) / 'logs', 10, run=cli, clock=Clock()), log=lambda _: None,
+                memory=memory)
+            p = pr()
+            p.meta['reviewer'] = 'agy'
+            d.gh.labels[100] = set(p.labels)
+            cli.calls.clear()
+            with self.assertRaises(agents.AgentError) as ctx:
+                d._do_review(p)
+            self.assertNotIsInstance(ctx.exception, agents.ModelsUnavailable)
+            self.assertNotIsInstance(ctx.exception, agents.ModelUnavailable)
+            self.assertEqual(cli.models(), [ARGON])
+            self.assertEqual(memory.entries(), [])
+            self.assertFalse((state / unavailability.FILE).exists())
+
+    def test_a_real_resource_exhausted_code_429_still_counts(self):
+        agy = CFG.agent('agy')
+        line = FIXTURE_STDERR.splitlines()[1]
+        self.assertEqual(agents.unavailable_reason(agy, 3, FIXTURE_STDERR),
+                         f'`RESOURCE_EXHAUSTED` in "{line[:200]}…"')
+        # Only the 429 pattern: it matches the delimited code, not the identifier.
+        only_429 = dataclasses.replace(agy, unavailable_patterns=('429',))
+        text = ('{"conversation_id":"b60f1b4e-134e-42d4-836f-1c42429607c6","status":"ERROR",'
+                '"response":"RESOURCE_EXHAUSTED (code 429): Individual quota reached."}')
+        code = text.index('429)')  # the code, past the identifier
+        self.assertEqual(agents.unavailable_reason(only_429, None, text),
+                         f'`429` in "…{text[code - agents.EXCERPT_BEFORE:]}"')
+        for text in ('HTTP 429 Too Many Requests', 'code 429', 'error_429_rate'):
+            with self.subTest(text):
+                self.assertIsNotNone(agents.unavailable_reason(only_429, 1, text))
+        for text in ('id 1c42429607c6', 'abc429', '4290 tokens'):
+            with self.subTest(text):
+                self.assertIsNone(agents.unavailable_reason(only_429, 1, text))
+        # A 429 next to a 400 still counts: the model may be out of quota.
+        self.assertIsNotNone(agents.unavailable_reason(
+            agy, 1, 'INVALID_ARGUMENT (code 400)\nRESOURCE_EXHAUSTED (code 429)'))
+        # The real fixture through the runner: a ModelUnavailable, as before.
+        cli = FakeCLI(gemini_4_argon_high=FIXTURE)
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaises(
+                agents.ModelUnavailable) as ctx:
+            agents.AgentRunner(tmp, 10, run=cli, clock=Clock()).run(
+                agy, 'review', 'p', 'review', tmp, 'pr-1')
+        self.assertIn('RESOURCE_EXHAUSTED', ctx.exception.reason)
+
+    def test_the_reason_quotes_the_text_cut_around_the_match(self):
+        only_429 = dataclasses.replace(CFG.agent('agy'), unavailable_patterns=('429',))
+        before, after = 'x' * 300, 'y' * 300
+        reason = agents.unavailable_reason(
+            only_429, 1, f'first line\n{before} RESOURCE_EXHAUSTED (code 429) {after}\nlast')
+        quoted = reason.split(' in "', 1)[1][:-1]
+        self.assertTrue(reason.startswith('`429` in "…'))
+        self.assertTrue(quoted.endswith('…'))
+        self.assertIn('RESOURCE_EXHAUSTED (code 429)', quoted)
+        self.assertEqual(len(quoted), agents.EXCERPT + 2)
+        self.assertEqual(quoted.index('429') - 1, agents.EXCERPT_BEFORE)
+        self.assertNotIn('line', quoted)
+        # A short line is quoted whole, without marks.
+        self.assertEqual(agents.unavailable_reason(only_429, 1, 'a\n  HTTP 429 \nb'),
+                         '`429` in "HTTP 429"')
+        # A match longer than the limit is cut too.
+        reason = agents.unavailable_reason(
+            CFG.agent('agy'), 1, f'model {"x" * 500} not available')
+        quoted = reason.split(' in "', 1)[1][:-1]
+        self.assertTrue(reason.startswith('`model .* not available` in "model xxx'))
+        self.assertEqual(quoted, f'model {"x" * (agents.EXCERPT - 6)}…')
+        self.assertEqual(len(quoted), agents.EXCERPT + 1)
+
+    def test_patterns_are_validated_as_they_are_matched(self):
+        for pattern in ('(?i)quota', '('):
+            with self.subTest(pattern), self.assertRaises(config.ConfigError):
+                config.parse_config(with_agent('agy', unavailable_patterns=[pattern]))
+        cfg = config.parse_config(with_agent('agy', unavailable_patterns=['quota|429']))
+        agy = cfg.agent('agy')
+        self.assertIsNotNone(agents.unavailable_reason(agy, 1, 'HTTP 429'))
+        self.assertIsNone(agents.unavailable_reason(agy, 1, 'quotation 14290'))
 
 
 class MemoryConfigTests(unittest.TestCase):
@@ -154,7 +283,7 @@ class MemoryTests(unittest.TestCase):
         agy = CFG.agent('agy')
         line = FIXTURE_STDERR.splitlines()[1]
         self.assertTrue(line.startswith('AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED'))
-        reason = f'`RESOURCE_EXHAUSTED` in "{line[:200]}"'
+        reason = f'`RESOURCE_EXHAUSTED` in "{line[:200]}…"'  # cut after the match (#443)
         self.assertEqual(agents.unavailable_reason(agy, 3, f'\n{FIXTURE_STDERR}'), reason)
         self.assertNotIn(3, agy.unavailable_exit_codes)  # the pattern decides, not the code
         # The control: another error with the same exit code is no unavailability.

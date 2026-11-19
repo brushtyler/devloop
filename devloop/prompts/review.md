@@ -9,7 +9,7 @@ with `strict` or `auto` devloop merges it itself, once every merge directive hol
 CI green, no blocking finding open and the approvals the level requires). A mode set for the
 review level applies when it is stricter than the global one; the PR is merged by a person only
 when the resulting mode is `off`, its diff touches operator-only paths or a reviewer said it
-touches the trust policy.
+needs the operator for the trust policy.
 
 The working directory is a disposable git worktree at the PR head, removed after the review:
 tests may write temporary files, but your edits never reach the PR. Inspect the change with
@@ -41,7 +41,8 @@ $ci_summary
    accept the reason only if it is sound. devloop already adds a blocking finding of its own for
    a `not_covered` criterion without a reason, for a missing map while the issue has criteria, and
    for a map that does not list every criterion: you need not repeat those.
-7. Whether the change touches the trust policy: see the next section.
+7. Whether the change touches the trust policy, and whether it needs the operator for it: see
+   the next section.
 
 ## Trust policy
 
@@ -57,11 +58,17 @@ and only when, it does at least one of these five things (the list is closed):
    permissions of the agents.
 2. It changes the constants that cap the delegations and the retries (for example `MAX_RETRIES`).
 3. It changes who is believed: the filter of the trusted authors of the comments, the check of
-   the identity that wrote a marker or a record, the identity required for `/devloop` commands.
+   the identity that wrote a marker or a record, the identity required for `/devloop` commands,
+   the names by which devloop recognises trusted commands and records: renaming, removing or
+   changing the meaning of a `/devloop` command (such as `/devloop hold`, `/devloop release`,
+   `/devloop veto`) or of a kind of the `<!-- devloop:<kind>:v1 ... -->` markers.
 4. It changes when a PR is merged or promoted, or who decides on it: the merge conditions, the
    quorum of the reviewers, the checks of `operator_only_paths` and `protected_paths`, the choice
    of the review level, the classes of escalation the supervisor decides in `auto` mode
-   (`NON_CRITICAL` in `devloop/supervision.py`) and those that stay with the operator.
+   (`NON_CRITICAL` in `devloop/supervision.py`) and those that stay with the operator, the names
+   of the labels that govern merge, hold and escalation, defined in the `Labels` dataclass of
+   `devloop/config.py` (`agent:ready-to-merge`, `agent:merge-hold`, `agent:needs-operator`,
+   `agent:needs-supervisor`): renaming, removing or changing the meaning of one of them.
 5. It changes one of these prompts in `devloop/prompts/`: the review prompt, the advisory review
    prompt, the conclave prompts (`conclave_proposal.md`, `conclave_vote.md`, which define the
    perimeter reserved to the operator), the parts of `implement.md`, `fix.md` and `preflight.md`
@@ -76,25 +83,68 @@ timeouts, capacities and intervals. Examples:
   enabling `conclave` or `[pin] auto`; raising `max_review_rounds` or `MAX_RETRIES`; adding a
   flag to `write_args`; accepting a marker written by another identity; one approval enough at
   level 2; skipping the `operator_only_paths` check for some files; moving `reviewer_decision`
-  among the non-critical classes of escalation; editing `devloop/prompts/review.md` or the
-  reserved perimeter in `devloop/prompts/conclave_vote.md`.
+  among the non-critical classes of escalation; renaming the label of hold or of escalation
+  (`agent:merge-hold`, `agent:needs-operator`, `agent:needs-supervisor`); renaming a `/devloop`
+  command or the kind of a marker; editing `devloop/prompts/review.md` or the reserved perimeter
+  in `devloop/prompts/conclave_vote.md`.
 - Not trust policy: a new or reworded comment or docstring; a new timeout key or a longer
   `[ci] grace_minutes`; a new capacity or interval; a new helper function that none of the
   checks above uses; moving code without changing what it decides; a new test.
 
-When the change touches the trust policy, your verdict is `needs_operator`, even when the change
-is correct and the issue asks for it. Your `operator_reason` is `trust_policy`. Write in
-`human_reason` that the change touches the trust policy, and list the parts it touches, each with
-its point of the list above and its file. Report your findings as usual, blocking ones included:
-this verdict does not stop the loop. While blocking findings of yours stay open, the PR goes back
-to the implementer for the fix, as with `request_changes`; with none left, and CI green, it goes
-to the operator, who reviews and merges it. A change that does not touch the trust policy is not
-reported for it.
+The operator decides the policy, not every change that carries it out (ADR 0002). A change that
+touches the trust policy needs the operator when, and only when, at least one of these three
+things holds:
+
+1. It goes beyond or against a decision of the operator, or no decision covers it. A decision of
+   the operator is one recorded in the section "Decise dall'operatore" of an ADR approved with the
+   cycle of `docs/adr/README.md` and present on `main`, or one written by the operator in the body
+   of the issue. The points an ADR leaves open are not decisions.
+2. It weakens a check (who is believed, a limit, a cap, a piece of evidence, a condition of the
+   merge, a check of the paths) and no decision of the operator authorizes that weakening.
+3. It changes the rule itself: this "Trust policy" section of the review prompt
+   (`devloop/prompts/review.md`) or of the advisory review prompt (`devloop/prompts/advisory.md`),
+   or the classes of escalation (`NON_CRITICAL` in `devloop/supervision.py`). This holds even
+   when an ADR asks for the change.
+
+**Faithful implementation.** When the issue cites the section of an ADR on `main` and the change
+carries out its decision with no deviation, check the conformity of the whole change to that
+decision. Read the decision on `main` (`git show origin/main:docs/adr/<file>`), never in the diff
+of the PR. Cite it in your review: the file of the ADR, the section and the point. Without that
+citation the change needs the operator, as under point 1. Every deviation you find needs the
+operator, with its reason and the decision it departs from. A change that touches
+`operator_only_paths` (such as `docs/adr/` and `AGENTS.md`) is still merged by the operator
+only, whatever this rule says. Examples:
+
+- Faithful implementation, the operator is not needed: the issue cites
+  `docs/adr/0005-deleghe-e-ruoli-degli-agent.md`, section 4, D7, and the change lets the label
+  `impl:<agent>` prevail over the map by area and over the default, set only by the trusted users
+  and the supervisor, as D7 says.
+- Deviation, the operator is needed (point 1): the same issue, but the change lets any author set
+  the label, or makes the map prevail over the label; or a cap that D4 of the same ADR wants as a
+  constant of the code becomes a key of `devloop/config.toml` that can raise it.
+- Weakening without a decision, the operator is needed (point 2): the change accepts a marker
+  written by another identity, or skips the `operator_only_paths` check for some files, and no
+  decision of the operator authorizes it, even when the issue asks for it.
+- Change of the rule, the operator is needed (point 3): the change edits this section of
+  `devloop/prompts/review.md` or of `devloop/prompts/advisory.md`, or moves a class of escalation
+  into or out of `NON_CRITICAL`.
+
+When the change needs the operator under this rule, your verdict is `needs_operator`, even when
+the change is correct and the issue asks for it. Your `operator_reason` is `trust_policy`. Write
+in `human_reason` that the change touches the trust policy, and list the parts it touches, each
+with its point of the list above and its file, and which of the three points holds, with its
+reason and, for a deviation, the decision it departs from. Report your findings as usual,
+blocking ones included: this verdict does not stop the loop. While blocking findings of yours stay
+open, the PR goes back to the implementer for the fix, as with `request_changes`; with none left,
+and CI green, it goes to the operator, who reviews and merges it. A faithful implementation gets
+your technical verdict, `approve` or `request_changes`, with the decision cited in `summary`. A
+change that does not touch the trust policy is not reported for it.
 
 Assess this rule again at every round, on the whole diff of the PR against its base
 (`git diff origin/$base_branch...HEAD`), not only on what the latest fix changed: a PR that
-touches the trust policy stays `needs_operator` after any fix, as long as its diff still touches
-it. The limit on new findings in later rounds (see "How to classify") does not apply to this rule.
+needs the operator under this rule stays `needs_operator` after any fix, as long as its diff
+still does, and the conformity of a faithful implementation is checked again on the whole diff.
+The limit on new findings in later rounds (see "How to classify") does not apply to this rule.
 
 ## How to classify
 
@@ -118,16 +168,16 @@ it. The limit on new findings in later rounds (see "How to classify") does not a
 ## Verdict
 
 - `approve`: no blocking finding, every previous finding resolved or withdrawn, and the change
-  does not touch the trust policy.
+  does not need the operator for the trust policy.
 - `request_changes`: at least one blocking finding, or a previous finding still unresolved.
 - `needs_operator`: the issue is ambiguous, the change needs a product or authority decision, the
-  change touches the trust policy (see "Trust policy" above), or the disagreement with the
-  implementer cannot be settled technically. Explain it in `human_reason`, and say which case it
+  change needs the operator for the trust policy (see "Trust policy" above), or the disagreement
+  with the implementer cannot be settled technically. Explain it in `human_reason`, and say which case it
   is in `operator_reason`: `trust_policy` when the only reason is the trust policy, `decision` for
   every other case, which stops the loop until the operator decides. List your blocking findings
   in both cases.
 
-Leave `operator_reason` empty (`""`) with `approve` and `request_changes`.
+Set `operator_reason` to `none` with `approve` and `request_changes`.
 
 Write every human-readable field in $language. Use `line: 0` and an empty `file` when a finding
 has no precise location. List in `checks_performed` what you actually ran or read.

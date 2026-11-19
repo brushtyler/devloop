@@ -20,8 +20,10 @@ class SchemaError(ValueError):
 
 # Fields that the schema keeps required, so that the CLIs always write them, but that an output
 # may lack because it was written before they existed: devloop fills them in before validating.
-# A review without ``operator_reason`` (#434) is read as before, a ``decision``.
-DEFAULTS = {'review': {'operator_reason': ''}}
+# A review without ``operator_reason`` (#434) is read as before, a ``decision``: the field gets
+# ``none``, the value of the verdicts other than ``needs_operator``. No ``enum`` holds an empty
+# string, which Gemini rejects in a structured-output schema (#441).
+DEFAULTS = {'review': {'operator_reason': 'none'}}
 
 
 def with_defaults(name, value):
