@@ -25,7 +25,7 @@ from .context import (_failure_text, _format_conflicts, _format_findings, _revie
                       prompt_values)
 from .github import GitHubError, GitHubUncertain, job_id
 from .ledger import attempt_branch, attempt_marker, fix_register
-from .localtests import failed_modules, select_modules, suite_summary
+from .localtests import RUN_TESTS_LOG, failed_modules, select_modules, suite_summary
 from .markdown import (dispatcher_header, publishable, render_fix, render_native_review,
                        render_review, without_attribution)
 from .config import foreign, provider_quorum, same_agent
@@ -322,8 +322,12 @@ class ActionsMixin:
         ``paths``,
         the PR's diff, as ``local_tests = "changed"`` would select them (``select_modules``).
         A re-run that GitHub refuses, such as a 403 without ``actions: write``, is logged and
-        the failure is a round, as before."""
-        if not self.cfg.ci_rerun_unrelated or rerun_of(pr.reruns, pr.head_sha) is not None:
+        the failure is a round, as before. It needs the format of the CI logs and the selection
+        of the project (``[tests]``, ADR 0006, R5), without which the configuration turns
+        ``ci_rerun_unrelated`` off."""
+        tests = self.cfg.tests
+        if (not self.cfg.ci_rerun_unrelated or tests.ci_log_format != RUN_TESTS_LOG
+                or not tests.selection or rerun_of(pr.reruns, pr.head_sha) is not None):
             return False
         details = self.gh.check_details(pr.head_sha)
         failed = [c for c in details if c.get('bucket') == 'fail']
@@ -346,7 +350,7 @@ class ActionsMixin:
                 return False
             modules.update(found)
         modules = sorted(modules)
-        pertinent = select_modules(paths, modules)
+        pertinent = select_modules(paths, modules, self.cfg.tests)
         if pertinent:
             self.log(f'  CI rerun: failed modules pertinent to the PR: {", ".join(pertinent)}; '
                      'CI round')
@@ -378,14 +382,17 @@ class ActionsMixin:
         (#300): ``{name, outcome, bucket, duration_s}``, and for a completed GitHub Actions job
         ``tests``, the final lines of ``scripts/run-tests.py`` its log holds
         (``suite_summary``, None when it holds none), or ``log: unavailable`` when the log
-        could not be read: that only leaves the summary out, it never stops the action."""
+        could not be read: that only leaves the summary out, it never stops the action. Without
+        the format of the CI logs (``[tests] ci_log_format``, ADR 0006, R5) no log is read: each
+        job has its outcome and duration only."""
         jobs = []
+        readable = self.cfg.tests.ci_log_format == RUN_TESTS_LOG
         for check in details:
             job = {'name': check.get('name'), 'outcome': check.get('conclusion')
                    or check.get('bucket'), 'bucket': check.get('bucket'),
                    'duration_s': check.get('duration_s')}
             number = job_id(check.get('link')) if check.get('run_id') is not None else None
-            if number is not None and check.get('bucket') != 'pending':
+            if readable and number is not None and check.get('bucket') != 'pending':
                 try:
                     log = self.gh.job_log(number)
                 except GitHubError as exc:

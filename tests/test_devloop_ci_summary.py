@@ -6,6 +6,7 @@ the CI of the head (each job with its outcome and duration, and the final lines 
 ``ci_round`` event of the ledger. A log it cannot read leaves the summary out, nothing more.
 """
 
+import dataclasses
 import unittest
 from types import SimpleNamespace
 
@@ -183,6 +184,25 @@ class PromptTests(unittest.TestCase):
                          [('Unit Tests (Python 3.12)', 372), ('devloop tests', 45),
                           ('ext', None)])
         self.assertEqual(event['tests'], [{'name': 'Unit Tests (Python 3.12)', **SUITE_SUMMARY}])
+
+    def test_without_the_format_of_the_ci_logs_no_log_is_read(self):
+        # ADR 0006, R5: the project declares no format, so the summary has each check with its
+        # outcome and duration, and no suite lines; the round records no tests.
+        runner = FakeRunner(raw_review())
+        self.gh = SummaryGH()
+        # Every check completed: the round records them.
+        self.gh.details = [dict(c) for c in DETAILS if c['bucket'] != 'pending']
+        self.gh.labels[100] = {'agent:review'}
+        cfg = dataclasses.replace(CFG, tests=dataclasses.replace(CFG.tests, ci_log_format=''))
+        d = Dispatcher(cfg, self.gh, FakeWS(), runner, log=lambda m: None, ledger=Ledger(self.gh))
+        d._do_review(d.snapshot().prs[0])
+        prompt = runner.calls[0][3]
+        self.assertIn('- `Unit Tests (Python 3.12)`: success, 372s (6m 12s)\n', prompt)
+        self.assertNotIn(SUITE_SUMMARY['ran'], prompt)
+        self.assertNotIn('could not be read', prompt)
+        self.assertEqual(getattr(self.gh, 'job_log_reads', []), [])
+        (event,) = self.ci_events()
+        self.assertNotIn('tests', event)
 
     def test_the_review_prompt_summarizes_the_ci_without_a_ledger_too(self):
         runner = FakeRunner(raw_review())

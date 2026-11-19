@@ -226,6 +226,20 @@ class RerunTests(unittest.TestCase):
         self.assertFalse(hasattr(self.gh, 'reruns'))
         self.assertEqual(len(self.reviews()), 1)
 
+    def test_without_the_format_or_the_selection_of_the_project_it_keeps_the_round(self):
+        # ADR 0006, R5: nothing tells the failed modules, or their pertinence, so no re-run,
+        # even with the option on and no log read.
+        for tests in (dataclasses.replace(CFG.tests, ci_log_format=''),
+                      dataclasses.replace(CFG.tests, selection='', source_prefixes=(),
+                                          dir_modules=())):
+            with self.subTest(tests=tests):
+                cfg = dataclasses.replace(CFG, tests=tests)
+                self.assertTrue(cfg.ci_rerun_unrelated)
+                d = self.make(cfg=cfg)
+                self.assertEqual(self.step(d, cfg), ['ci_failed'])
+                self.assertFalse(hasattr(self.gh, 'reruns'))
+                self.assertEqual(len(self.reviews()), 1)
+
     def test_a_rerun_marker_from_another_identity_does_not_count(self):
         body = markdown.publishable('x', 'rerun', {'head': SHA1, 'runs': [RUN], 'modules': [],
                                                    'checks': [LINK]})
@@ -301,6 +315,22 @@ class ConfigTests(unittest.TestCase):
         data['ci_rerun_unrelated'] = 'yes'
         with self.assertRaisesRegex(config.ConfigError, 'ci_rerun_unrelated'):
             config.parse_config(data)
+
+    def test_off_without_the_format_of_the_ci_logs_or_the_selection(self):
+        # ADR 0006, R5: the project declares both; without either the option is off, whatever
+        # the installation or the overlay say.
+        data = self.data()
+        data['ci_rerun_unrelated'] = True
+        self.assertEqual(config.parse_config(data).tests.ci_log_format, 'run-tests')
+        self.assertTrue(config.parse_config(data).ci_rerun_unrelated)
+        no_format = self.data()
+        del no_format['tests']['ci_log_format']
+        no_selection = self.data()
+        no_selection['tests'] = {'ci_log_format': 'run-tests'}
+        for name, table in (('format', no_format), ('selection', no_selection),
+                            ('tests', {k: v for k, v in data.items() if k != 'tests'})):
+            with self.subTest(without=name):
+                self.assertFalse(config.parse_config(table).ci_rerun_unrelated)
 
 
 if __name__ == '__main__':

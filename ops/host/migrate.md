@@ -337,3 +337,110 @@ sudo systemctl start devloop
 ```
 
 `<sha12>` è la copia di R3 (`pinned-<sha12>` nello `state_dir`).
+
+## Test di ssdlc nel file di progetto
+
+Con l'ADR 0006, R5, le regole con cui devloop sceglie i moduli di test di `local_tests =
+"changed"` (`ssdlc_<nome>.py` → `test_<nome>*.py`, `devloop/` → `test_devloop*.py`) e il formato
+dei log della CI (le righe di `scripts/run-tests.py`) non stanno più nel codice: sono la tabella
+`[tests]` del file di progetto
+([docs/devloop/reference.md](../../docs/devloop/reference.md#local-tests)). Le due copie non
+accettano lo stesso file:
+
+- la copia di R5 **senza** `[tests]` parte, ma `local_tests = "changed"` vale `"full"` (ogni
+  turno di scrittura esegue l'intera suite) e `ci_rerun_unrelated` è spento;
+- la copia di prima **con** `[tests]` non parte: la chiave è sconosciuta.
+
+Il file di progetto sull'host e la copia fissata cambiano quindi insieme, a loop fermo.
+
+Il pin della copia di R5 non passa da `scripts/devloop-pinned`: il launcher esegue la copia
+fissata, che carica la configurazione con il file di progetto prima di aggiornare il pin, e la
+copia di prima rifiuta `[tests]` (`project file: unknown key 'tests'`). Il pin si fa una volta con
+il codice di R5, da un checkout del suo commit, passando file di progetto e overlay (passo 5 qui
+sotto). I pin successivi tornano al launcher.
+
+Se l'host non ha ancora fatto la migrazione di R3, basta quella di [Migrazione di R3 su un host
+attivo](#migrazione-di-r3-su-un-host-attivo) con l'esempio di R5, nel caso "Dopo il merge" (loop
+fermo): la copia di prima non accetterebbe il file nuovo a un riavvio. Il passo 6, però, non usa
+`devloop-pinned`: il pin si fa come al passo 5 qui sotto, come utente `devloop` e con un checkout
+di R5 del suo clone, poi `sudo systemctl start devloop`. Per il rollback, come qui sotto, prima si
+tolgono dal file di progetto le tabelle che la copia di prima non conosce (`[tests]` con
+`[tests.dir_modules]`, e `[prompts]` con `[prompts.adr]` se è anteriore a R4), poi si fa il pin
+della copia di prima. Altrimenti, dopo il
+merge della PR di R5, **come root** con il checkout dell'operatore, come per R3:
+
+1. **Fermare il loop**: `sudo systemctl stop devloop`. Una copia di prima in corso rifiuterebbe
+   il file nuovo a ogni rilettura, e un pin automatico di R5 con il file vecchio passerebbe a
+   `"full"`.
+2. **Il checkout aggiornato** e la **copia del file di progetto di prima**, per il confronto e il
+   rollback:
+
+   ```bash
+   cd /root/repos/ssdlc && git fetch origin
+   git worktree add --detach /tmp/ssdlc-r5 origin/main
+   install -o devloop -m 600 /home/devloop/ssdlc/.ssdlc/devloop/project.toml \
+       /home/devloop/ssdlc/.ssdlc/devloop/project.toml.prima-r5
+   ```
+
+3. **La tabella `[tests]`** (con `[tests.dir_modules]`) di
+   `/tmp/ssdlc-r5/ops/host/ssdlc/project.toml` va aggiunta al file di progetto sull'host, come
+   `devloop`: `sudo -u devloop -H "${EDITOR:-vi}" /home/devloop/ssdlc/.ssdlc/devloop/project.toml`.
+   Se il file sull'host è ancora l'esempio di R3 senza modifiche, si può copiare l'esempio intero
+   come al passo 3 della migrazione di R3.
+4. **Verifica dell'equivalenza**: prima la copia fissata in uso con il file di progetto di prima,
+   dopo il checkout aggiornato con quello nuovo, lo stesso overlay sui due lati:
+
+   ```bash
+   python3 /tmp/ssdlc-r5/ops/host/ssdlc/check-equivalence.py \
+       --before /home/devloop/ssdlc/.ssdlc/devloop/current \
+       --before-local /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml \
+       --before-project /home/devloop/ssdlc/.ssdlc/devloop/project.toml.prima-r5 \
+       --after /tmp/ssdlc-r5 \
+       --after-local /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml \
+       --after-project /home/devloop/ssdlc/.ssdlc/devloop/project.toml
+   ```
+
+   Per la copia di prima, che aveva le regole nel codice, i valori di `tests` sono quelli che il
+   suo codice applicava, e i moduli li sceglie il suo codice: per ogni file del checkout
+   aggiornato devono essere gli stessi. I codici di uscita sono quelli della migrazione di R3. Con
+   `[tests]` mancante o diversa le righe dicono `local_tests: before changed, after full` o
+   `config tests.…`.
+5. **Pin con il codice di R5**, non con `devloop-pinned`, che eseguirebbe la copia di prima. Il
+   pin gira come `devloop`, dal suo clone e con un checkout di R5 suo: il checkout di root in
+   `/tmp/ssdlc-r5` non è di `devloop`. Come utente `devloop` (`sudo -u devloop -i`):
+
+   ```bash
+   cd /home/devloop/ssdlc && git fetch origin
+   git worktree add --detach /tmp/ssdlc-r5-pin origin/main
+   git -C /tmp/ssdlc-r5-pin rev-parse HEAD
+   PYTHONPATH=/tmp/ssdlc-r5-pin python3 -P -m devloop \
+       --project-config /home/devloop/ssdlc/.ssdlc/devloop/project.toml \
+       --local-config /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml pin origin/main
+   git worktree remove /tmp/ssdlc-r5-pin
+   ```
+
+   L'hash stampato da `rev-parse` deve essere quello del checkout verificato al passo 4
+   (`git -C /tmp/ssdlc-r5 rev-parse HEAD`, come root): se `origin/main` è andato avanti, si
+   rifà il passo 4 sul commit nuovo prima del pin. Solo se il pin riesce, di nuovo come root:
+   `sudo systemctl start devloop`. Se il pin fallisce (`pin failed, the pinned copy is
+   unchanged`), `current` è ancora la copia di prima: prima di avviare il loop si rimette il file
+   di progetto di prima (rollback qui sotto, senza il pin).
+6. **Pulizia**: `git -C /root/repos/ssdlc worktree remove /tmp/ssdlc-r5`. La copia
+   `project.toml.prima-r5` si cancella quando la copia di R5 gira.
+
+L'hash del file di progetto cambia ed entra nella versione della policy: le approvazioni delle PR
+aperte decadono. Meglio con la coda vuota.
+
+**Rollback.** Prima il file di progetto di prima, poi il pin della copia di prima, nell'ordine: la
+copia di R5 accetta il file senza `[tests]`, mentre quella di prima rifiuta il file con `[tests]`,
+e il pin la verifica con il file di progetto dell'host. Come utente `devloop`, con loop fermo
+(`sudo systemctl stop devloop`, come root):
+
+```bash
+cd /home/devloop/ssdlc
+cp -p .ssdlc/devloop/project.toml.prima-r5 .ssdlc/devloop/project.toml
+python3 scripts/devloop-pinned pin <sha12>
+```
+
+Poi, come root, `sudo systemctl start devloop`. `<sha12>` è la copia di prima (`pinned-<sha12>`
+nello `state_dir`).

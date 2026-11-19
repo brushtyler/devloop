@@ -31,7 +31,8 @@ and `agent_stall_action` (`"warn"`, the default, or `"abort"`) control the
 open PRs in progress and those waiting for a person ([Open PR limits](guide.md#open-pr-limits)).
 `ci_rerun_unrelated` (a boolean, default `true`) re-runs once a CI failure in test modules not
 pertinent to the PR ([CI failures not pertinent to the PR](#ci-failures-not-pertinent-to-the-pr));
-another value stops devloop at startup. `block_uncertain_turns` (a boolean, default `false`)
+another value stops devloop at startup. It needs the selection and the format of the CI logs of
+the project's [`[tests]`](#local-tests): without either it is off, whatever its value. `block_uncertain_turns` (a boolean, default `false`)
 turns on the block on uncertain turns of the [turn journal](protocol.md#turn-journal) (#362): a
 turn left without outcome refuses every new turn of its work, with an escalation, until a trusted
 user reconciles it with `/devloop reconcile`. Off, the journal records the turns all the same;
@@ -211,10 +212,15 @@ the commands agy had by default from the `test_cmd` of `config.toml`, which the 
 admits now. `repo`, `trusted_users` and `[apps]` stay in `config.toml` until R6, for
 `scripts/agent-token.py` and `scripts/supervisor-token.py`, which read only them, with no
 project file. Without a project file, or a `test_cmd` in the overlay, devloop stops at startup:
-`test_cmd` is required. `ops/host/ssdlc/check-equivalence.py` compares two installations on a
+`test_cmd` is required. Since R5 the rules of ssdlc's test selection and the format of its CI
+logs are its project file's `[tests]` too ([Local tests](#local-tests)).
+`ops/host/ssdlc/check-equivalence.py` compares two installations on a
 host (the one of before R3 with its overlay, the one of R3 with the project file and the
-overlay): the values of the configuration key by key, the rendered prompts and the test modules
-`local_tests` selects. The hash of the project file is left out, since it is in the policy
+overlay; with `--before-project`, an installation of R3 or later with its project file, as for
+R5): the values of the configuration key by key, the rendered prompts and the test modules
+`local_tests` selects. An installation of before R5 had its selection and its format in the
+code: its `tests` are those built-in values, and its own code selects the modules
+([ops/host/migrate.md](../../ops/host/migrate.md#test-di-ssdlc-nel-file-di-progetto)). The hash of the project file is left out, since it is in the policy
 version by construction: the version is compared without it. It exits with 0 when the two are
 equivalent, 1 when they differ, 2 when a side does not load; it writes nothing, not even byte
 code, so the operator runs it as root
@@ -226,13 +232,13 @@ names it (a key of the overlay is told so: `set it in the local overlay`):
 
 | Kind | Keys | How it composes |
 |---|---|---|
-| Facts | `test_cmd`, `local_tests`, `language`, `priority_labels`, `[docs.map]`, `[prompts]` ([data in the prompts](#project-data-in-the-prompts)) | replace the installation's value (`[docs.map]` and `[prompts]` merge key by key); the overlay replaces them in turn |
+| Facts | `test_cmd`, `local_tests`, [`[tests]`](#local-tests), `language`, `priority_labels`, `[docs.map]`, `[prompts]` ([data in the prompts](#project-data-in-the-prompts)) | replace the installation's value (`[docs.map]`, `[tests]` and `[prompts]` merge key by key); the overlay replaces them in turn |
 | Restrictions | `protected_paths`, `blocked_labels`, `[review_policy] sensitive_paths` and `sensitive_path_lists`, `[review_policy.zero] checks`, `[merge] operator_only_paths` | only add: the entries of the installation and of the overlay (or the code's default) stay, those of the project file that are not there follow. An empty list removes nothing. `[review_policy.zero] checks` only add to the checks of the installation and the overlay: the project file never turns level 0 on, and a check with none below stops devloop |
 
 Every other key, the trust keys (`repo`, `trusted_users`, `[apps]`, `[merge] mode`, roles, review
 levels, the level-0 allowlist, the agents and their permissions, `[budget]`, `preflight`,
 `conclave`, `[delegations]`), the limits and `state_dir`, is the overlay's alone. The
-`test_cmd` of the project file is the dispatcher's test command, never a permission of the
+`test_cmd` and the `[tests]` of the project file are the dispatcher's, never a permission of the
 agents: the default commands of agy (`write_commands` and `review_commands`, see
 [agy permissions](#agy-permissions)) still derive from the `test_cmd` of the overlay, or of the
 installation without one there; the overlay alone admits the project's test command. The lists of
@@ -367,19 +373,37 @@ worktree before committing (#169). `local_tests` says which:
 | `local_tests` | Local tests |
 |---|---|
 | `"full"` (default) | `test_cmd`, the whole suite, as before #169 |
-| `"changed"` (this repository) | Only the test modules pertinent to the diff, each with `python3 -m unittest discover -s tests -p '<module>'`, one after the other, stopping at the first that fails |
+| `"changed"` (ssdlc) | Only the test modules pertinent to the diff, chosen by the project's selection (`[tests] selection`), each with `python3 -m unittest discover -s tests -p '<module>'`, one after the other, stopping at the first that fails. Without a selection, `"full"` |
 | `"none"` | None |
 
 Any other value stops devloop at startup. With `"changed"` the diff is the whole one from the
 merge base with `origin/main` to the current content of the worktree: the branch's commits, the
 index, unstaged changes and new files git does not ignore, computed again after every attempt.
-The pertinent modules, among the `tests/test_*.py` files of the worktree, are:
+
+**`[tests]`** (ADR 0006, R5) declares how the dispatcher reads the project's tests. It is a fact
+of the project: it belongs in the [project file](#project-file), the overlay may replace its
+keys, and the installation sets none. Every key is optional:
+
+| Key | Value | Without it |
+|---|---|---|
+| `selection` | The installation's strategy, by name. The only one is `"python-unittest-modules"` | `local_tests = "changed"` is `"full"`: the project loses no test, only time. `ci_rerun_unrelated` is off |
+| `source_prefixes` | Parameter of the selection: name prefixes, letters, digits and `_` (ssdlc: `["ssdlc_"]`) | No such rule |
+| `[tests.dir_modules]` | Parameter of the selection: `"<directory>/" = "test_<prefix>"`, a relative directory and the prefix of test module names (ssdlc: `"devloop/" = "test_devloop"`) | No such rule |
+| `ci_log_format` | The format of the CI logs, by name. The only one is `"run-tests"`, what `scripts/run-tests.py` prints | `ci_rerun_unrelated` is off, and the [summary of the CI](#summary-of-the-ci-in-the-prompts) has no suite lines: no job log is read |
+
+An unknown key or name, a parameter without `selection`, a prefix or a directory of another
+form stop devloop at startup. `[tests]` never becomes a permission of the agents: the commands
+they may run are the installation's and the overlay's (ADR 0006, D2). With
+`"python-unittest-modules"` the pertinent modules, among the `tests/test_*.py` files of the
+worktree, are:
 
 - every changed or added `tests/test_*.py`;
 - for every other changed `<module>.py` (or `<package>/<module>.py`), the modules
-  `test_<module>*.py`; for `ssdlc_<name>.py` also `test_<name>*.py` (`ssdlc_impact.py` selects
-  `test_ssdlc_impact*.py` and `test_impact*.py`);
-- for any file under `devloop/`, the modules `tests/test_devloop*.py`.
+  `test_<module>*.py`; for `<prefix><name>.py`, with `<prefix>` one of `source_prefixes`, also
+  `test_<name>*.py` (with ssdlc's, `ssdlc_impact.py` selects `test_ssdlc_impact*.py` and
+  `test_impact*.py`);
+- for any file under a directory of `[tests.dir_modules]`, the modules whose name starts with its
+  prefix (with ssdlc's, any file under `devloop/` selects `tests/test_devloop*.py`).
 
 When no module is pertinent, for example when only documentation changed, and with `"none"`,
 no test runs locally and the PR goes on to the CI. `implement_test_retries` applies to the tests
@@ -477,7 +501,10 @@ The rerun needs **`actions: write`** on the dispatcher's app. Its token is minte
 permission. Without it (GitHub answers 403, or refuses to mint the token; also when the
 dispatcher has no app and uses a `gh` login without the permission), or on any other GitHub error,
 the dispatcher writes one line to the tick log (`CI rerun refused, …`) and the failure is a round,
-as before. `ci_rerun_unrelated = false` turns the re-run off; the default is `true`. A marker of
+as before. `ci_rerun_unrelated = false` turns the re-run off; the default is `true`. The re-run
+also needs the project's `[tests]` with a `selection` and `ci_log_format = "run-tests"`
+([Local tests](#local-tests)): without either nothing tells the failed modules or their
+pertinence, and every CI failure is a round. A marker of
 the `rerun` kind counts only when the dispatcher's identity wrote it.
 
 Only a `ci_failed` is re-run this way: a CI failure on a PR that has no round left goes to
@@ -497,7 +524,9 @@ a **CI of the head** section that the dispatcher reads with its own identity (#3
   (`gh run view --job <id> --log`; the job is the one in the check's link) and, when the job
   runs `scripts/run-tests.py`, shows its final lines `Ran N tests in S (… modules, … split by
   class, … jobs)` and `Slowest: …`. A job without the first of these lines (unittest's own
-  `Ran N tests in S` has no parentheses) shows only its outcome and duration.
+  `Ran N tests in S` has no parentheses) shows only its outcome and duration. The dispatcher
+  reads the logs only when the project declares `[tests] ci_log_format = "run-tests"`
+  ([Local tests](#local-tests)); without it every job shows only its outcome and duration.
 - **Log not readable.** A log `gh` cannot read (expired, deleted, an error from GitHub) shows
   `the job log could not be read: its test summary is not available`, and the action goes on;
   checks that cannot be read at all leave the section saying the summary is not available. The

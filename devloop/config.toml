@@ -4,7 +4,7 @@
 # docs/devloop/reference.md.
 #
 # The facts of the managed repository and the restrictions it adds (test_cmd, local_tests,
-# language, priority_labels, [docs.map], protected_paths, blocked_labels, sensitive_paths,
+# [tests], language, priority_labels, [docs.map], protected_paths, blocked_labels, sensitive_paths,
 # sensitive_path_lists, operator_only_paths) are not here: they are in the project file on the
 # host, <state_dir>/project.toml (ADR 0006, R3; docs/devloop/reference.md, "Project file"). ssdlc's
 # is ops/host/ssdlc/project.toml. Without a project file, or a test_cmd in the overlay, devloop
@@ -18,7 +18,9 @@ state_dir = ".ssdlc/devloop"
 # A first CI failure on a head whose failed test modules (the `FAILED MODULE` lines of
 # scripts/run-tests.py) are not pertinent to the PR's diff, with the same correspondence as
 # local_tests = "changed", is re-run once instead of becoming a round (issue #200). It needs
-# `actions: write` on the dispatcher's app; without it the failure is a round, as before.
+# `actions: write` on the dispatcher's app; without it the failure is a round, as before. It
+# also needs the project's [tests] selection and ci_log_format (ADR 0006, R5): without either
+# it is off.
 ci_rerun_unrelated = true
 # The journal of the turns in state_dir (issue #362) records each turn's intent before its CLI
 # starts, and its outcome. A turn left without outcome becomes `uncertain` and is never re-run
