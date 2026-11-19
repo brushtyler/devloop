@@ -219,8 +219,10 @@ project file. Without a project file, or a `test_cmd` in the overlay, devloop st
 host (the one of before R3 with its overlay, the one of R3 with the project file and the
 overlay): the values of the configuration key by key, the rendered prompts and the test modules
 `local_tests` selects. The hash of the project file is left out, since it is in the policy
-version by construction: the version is compared without it
-([ops/host/migrate.md](../../ops/host/migrate.md#configurazione-di-ssdlc-nel-suo-file-di-progetto)).
+version by construction: the version is compared without it. It exits with 0 when the two are
+equivalent, 1 when they differ, 2 when a side does not load; it writes nothing, not even byte
+code, so the operator runs it as root
+([ops/host/migrate.md](../../ops/host/migrate.md#migrazione-di-r3-su-un-host-attivo)).
 
 **Precedence:** installation (`devloop/config.toml` of the pinned copy) < project file <
 overlay. The schema is closed, and a key outside it stops devloop at startup with a message that
