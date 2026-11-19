@@ -1614,9 +1614,10 @@ claude becomes the third reviewer of the pool, as a reserve. **Off by default** 
     provider, whatever the quorum (D8, "Fallback dello stesso fornitore"): on a PR implemented
     by claude, agy does not fall back on a Claude model even when codex already gives the round
     another provider. Only a reviewer's primary model is subject to the quorum rule alone. The
-    authors are those of the selection, with every model of the implementer's chain; recording
-    the fallbacks the implementer and the fixers actually used, and the check at startup, are
-    P5-6's.
+    authors are those of the selection, with every model of the implementer's chain. The same
+    ban without the quorum rule, at both levels, the check at startup and the providers recorded
+    for the fallbacks the implementer and the fixers ran are `fallback_provider_ban` (P5-6,
+    [No fallback on the authors' provider](#no-fallback-on-the-authors-provider)).
   - **The reviewer the marker records** is the first of the pool of another provider and
     another tuple than the implementer's models.
 - **Unavailable reviewer.** When a **new round** chooses its reviewers, a reviewer whose whole
@@ -1672,3 +1673,43 @@ model_label = "Claude Sonnet 5.5"
 
 Changing the pool, the providers or the rule changes the policy version and voids the approvals
 of the open PRs: turn it on when no PR is close to its merge.
+
+### No fallback on the authors' provider
+
+ADR 0005, P5-6 (#410): a reviewer's fallback model never runs on a PR when its provider is that
+of an author of the PR. It is a rule apart from the quorum rule of D8: it holds with
+`provider_quorum` on or off. **Off by default** (D10): `[review_policy] fallback_provider_ban =
+false`. Both keys may be set in the local overlay.
+
+- **Every provider declared.** On, every agent and every fallback model declares its `provider`
+  (`agents.<key>.provider: required with review_policy.fallback_provider_ban` stops devloop
+  otherwise), checked against the prefixes of the model names as in
+  [Reviewers by provider](#reviewers-by-provider-and-the-third-reviewer). So the profile a PR,
+  fix or sync marker records carries the provider of the model the turn actually ran, a fallback
+  included.
+- **At runtime**, at level 1 and at level 2, a fallback model of a reviewer is skipped without
+  running when its provider is not another one than every author's: the implementer, every
+  fixer and every sync with conflicts as their markers record them, with the models they
+  actually ran, and every model of the agent configured now under the implementer's key. A
+  provider that is not known, the fallback's or an author's, is never another one; a PR whose
+  markers do not record who wrote the code admits no fallback. Another reviewer of the round of
+  another provider does not make the fallback admissible: on a PR implemented by claude,
+  reviewed by codex and agy, agy does not fall back on a Claude model. When no model of the
+  chain is left the turn fails without a review (`tool_failure`). The reviewer's primary model
+  stays subject only to the other rules (the exclusion of the same agent, or the quorum rule with
+  `provider_quorum`).
+- **At startup**, as an early check, the configuration is refused when a reviewer of the pool
+  has a fallback model of a provider other than its own model's and the same as the model of an
+  agent that may implement: `roles.implementer`, the keys of `[roles.implementers]` and every
+  `<kind>-implementer` an `impl:<kind>` label may choose (`agents.agy-reviewer.fallback_models[0]
+  .provider: 'anthropic' is the provider of 'claude-implementer', which may implement, …`). It is
+  the case of agy with a Claude fallback. The check at runtime still holds the rule: the authors
+  of a PR are known only per PR.
+- **Policy version.** On, the ban enters the policy version: turning it on voids the approvals
+  of the open PRs, so that none given by a fallback of an author's provider survives. Off, the
+  version is the one before.
+
+```toml
+[review_policy]
+fallback_provider_ban = true
+```

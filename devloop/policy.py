@@ -33,7 +33,9 @@ review_args)`` differ; keys and descriptions do not count. At level 2 a reviewer
 of who wrote the code (the implementer, every fixer) only if both its identity and its ``(kind,
 model, effort)`` differ from theirs. With ``provider_quorum`` (ADR 0005, P5-5, #409) that holds
 at level 1 too, and at least one reviewer is of a provider other than every author's
-(``config.provider_quorum``).
+(``config.provider_quorum``). With ``fallback_provider_ban`` (ADR 0005, P5-6, #410) a
+reviewer's fallback model is never of an author's provider, at both levels and whatever the
+quorum.
 """
 
 import hashlib
@@ -106,6 +108,11 @@ class ReviewPolicy:
     # all remembered unavailable is skipped when a new round chooses its reviewers. Off, the
     # reviewers are chosen as before (``config.same_agent``).
     provider_quorum: bool = False
+    # The ban of ADR 0005, P5-6 (#410), off by default (D10): at both levels, whatever the
+    # quorum rule, a reviewer's fallback model is never of the provider of an author of the PR,
+    # and a reviewer of the pool whose fallback is of the provider of an agent that may implement,
+    # other than its own model's, stops devloop at startup. Every provider is then declared.
+    fallback_provider_ban: bool = False
 
     def zero_enabled(self):
         return bool(self.zero_allowlist) and bool(self.zero_checks)
@@ -135,6 +142,10 @@ class ReviewPolicy:
         # before.
         if self.provider_quorum:
             data['provider_quorum'] = True
+        # The ban of P5-6 (#410) likewise: on, an approval a fallback of an author's provider
+        # may have given no longer holds.
+        if self.fallback_provider_ban:
+            data['fallback_provider_ban'] = True
         if self.zero_enabled():
             data['zero'] = {'label': self.zero_label,
                             'allowlist': sorted({_norm(p) for p in self.zero_allowlist}),

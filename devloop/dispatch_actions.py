@@ -607,6 +607,27 @@ class ActionsMixin:
                     return True
             return allowed
 
+        # The ban of ADR 0005, P5-6 (#410), with ``review_policy.fallback_provider_ban``: at both
+        # levels and whatever the quorum rule, a reviewer's fallback model is never of the
+        # provider of an author of the PR, the fallbacks the implementer, the fixers and the
+        # syncs actually ran included, as their markers record them. When a marker does not
+        # record who wrote the code no fallback is admitted. Only the primary model is left to
+        # the other rules; with no model admitted the turn fails as ``tool_failure``.
+        banned = self._authors(pr) if cfg.review_policy.fallback_provider_ban else []
+
+        def admitted(key):
+            rules = allowed_for(key)
+            if not cfg.review_policy.fallback_provider_ban:
+                return rules
+
+            def allowed(candidate):
+                if candidate.fallback_for and (
+                        banned is None
+                        or not foreign(self._profile(key, 'review', candidate), banned)):
+                    return False
+                return rules(candidate)
+            return allowed
+
         def review_turn(key):
             # The reviewer works in a disposable copy, where its tests may write; the PR
             # worktree must come out of the review untouched, or the verdict is discarded.
@@ -615,7 +636,7 @@ class ActionsMixin:
             try:
                 # Every turn of the round goes to the round's register (#325).
                 return self._turn(Models(cfg.agent(key)), 'review', prompt, 'review', copy,
-                                  f'pr-{pr.number}-review', allowed_for(key),
+                                  f'pr-{pr.number}-review', admitted(key),
                                   where=(pr.number, 'review', round_no))
             except BaseException as exc:
                 with reserving:

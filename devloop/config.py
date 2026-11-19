@@ -736,17 +736,37 @@ def _providers(agent):
     return (providers,) if any(providers) else ()
 
 
-def _check_providers(agents):
-    """With ``review_policy.provider_quorum`` (P5-5, #409) every agent and every fallback model
-    declares its provider (D8, option (c)): the quorum rule never reads it from a prefix."""
+def _check_providers(agents, rule='review_policy.provider_quorum'):
+    """With ``review_policy.provider_quorum`` (P5-5, #409) or ``fallback_provider_ban`` (P5-6,
+    #410), ``rule``, every agent and every fallback model declares its provider (D8, option
+    (c)): the rule never reads it from a prefix, and the fallbacks the implementer and the fixers
+    run are recorded with theirs."""
     for key, agent in agents.items():
         if not agent.provider:
-            raise ConfigError(f'agents.{key}.provider: required with '
-                              'review_policy.provider_quorum')
+            raise ConfigError(f'agents.{key}.provider: required with {rule}')
         for position, fallback in enumerate(agent.fallback_models):
             if not fallback.provider:
                 raise ConfigError(f'agents.{key}.fallback_models[{position}].provider: required '
-                                  'with review_policy.provider_quorum')
+                                  f'with {rule}')
+
+
+def _check_reviewer_fallbacks(agents, pool, implementers):
+    """With ``review_policy.fallback_provider_ban`` (ADR 0005, P5-6, #410), the check at
+    startup: no reviewer of ``pool`` has a fallback model of a provider other than its own
+    model's and the same as an agent's of ``implementers``, the keys that may implement (agy
+    falling back on Claude while claude implements). The ban at runtime still holds the rule:
+    the authors of a PR are known only per PR."""
+    providers = {provider_of(agents[key]): key for key in sorted(implementers)}
+    providers.pop('', None)
+    for key in pool:
+        agent = agents[key]
+        for position, fallback in enumerate(agent.fallback_models):
+            provider = provider_of(fallback)
+            if provider != provider_of(agent) and provider in providers:
+                raise ConfigError(
+                    f'agents.{key}.fallback_models[{position}].provider: {provider!r} is the '
+                    f'provider of {providers[provider]!r}, which may implement, and not of the '
+                    'reviewer\'s model: refused with review_policy.fallback_provider_ban')
 
 
 def _memory_seconds(table, where):
@@ -878,10 +898,14 @@ def parse_review_policy(table, root, reviewers=(), agents=None):
     quorum = default.provider_quorum
     if 'provider_quorum' in table:
         quorum = _require(table, 'provider_quorum', bool, where)
+    ban = default.fallback_provider_ban
+    if 'fallback_provider_ban' in table:
+        ban = _require(table, 'fallback_provider_ban', bool, where)
     return ReviewPolicy(default_level=level, label=label, sensitive_paths=paths,
                         sensitive_files=tuple(files), reviewers=tuple(reviewers),
                         zero_label=zero_label, zero_allowlist=allowlist, zero_checks=checks,
-                        advisory_reviewer=advisory, provider_quorum=quorum)
+                        advisory_reviewer=advisory, provider_quorum=quorum,
+                        fallback_provider_ban=ban)
 
 
 def _zero_policy(table, level_label, default):
@@ -1705,6 +1729,9 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
          + _providers(agents[k]) for k in pool], agents)
     if review_policy.provider_quorum:
         _check_providers(agents)
+    if review_policy.fallback_provider_ban:
+        _check_providers(agents, 'review_policy.fallback_provider_ban')
+        _check_reviewer_fallbacks(agents, pool, selectable)
     if project:
         review_policy = dataclasses.replace(review_policy, project=project)
     # The roles whose turns can run (#365): conclave and advisory only when configured.
@@ -1830,7 +1857,7 @@ OVERLAY_KEYS = {
                      'protected_paths')),
     'review_policy': {**dict.fromkeys(('default_level', 'label', 'sensitive_paths',
                                        'sensitive_path_lists', 'advisory_reviewer',
-                                       'provider_quorum')),
+                                       'provider_quorum', 'fallback_provider_ban')),
                       'zero': dict.fromkeys(('label', 'allowlist', 'checks'))},
     'merge': {'mode': None, 'operator_only_paths': None, 'levels': {'*': None}},
     'roles': {**dict.fromkeys(('implementer', 'reviewer', 'reviewers', 'supervisor')),
