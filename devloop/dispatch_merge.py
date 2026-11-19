@@ -23,6 +23,7 @@ from .context import _describe_bases, _open_findings_reason
 from .dispatch_supervision import RELEASE_COMMAND
 from . import receipt as pr_receipt
 from .github import GitHubError
+from .hoststep import latest as latest_host_step
 from .ledger import collect as ledger_collect
 from .ledger import timestamp as ledger_timestamp
 from .markdown import (MAX_BODY, dispatcher_header, publishable, read_marker, split_markers,
@@ -674,7 +675,12 @@ class MergeMixin:
         of the promotion: the approvals of every required reviewer with a matching receipt, or
         at level 0 the checks of a level-0 promotion. When one is missing devloop does not
         merge: what the per-tick checks of a ready PR revoke is left to the next tick, a stale
-        receipt or an open finding is handled as at promotion."""
+        receipt or an open finding is handled as at promotion.
+
+        A PR that declares a step on the host (``host_step``, #462) is merged too, but with
+        ``[pin] auto`` its merge holds the auto-pin (``AutoPin.hold``, recorded before the merge)
+        instead of requesting it, and an alarm with the step goes to ``[run].alert_issue``
+        (``_alert_host_step``)."""
         cfg, lb, rp = self.cfg, self.cfg.labels, self.cfg.review_policy
         fresh = self.gh.pr_state(pr.number)
         labels = label_names(fresh.get('labels') or [])
@@ -751,9 +757,31 @@ class MergeMixin:
             bases = self._approvals_match(pr, latest, current, paths, step='merge')
             if bases is None:
                 return None
-        self.merger.merge_pr(pr.number, head)
+        # A step on the host declared by the PR (#462) holds the auto-pin before the merge, so
+        # that no tick pins the merged base first: a hold that cannot be recorded stops it.
+        step = latest_host_step(pr.meta, pr.fixes)
+        holding = bool(step) and self.pinner is not None and cfg.pin.auto
+        if holding:
+            try:
+                self.pinner.hold(pr.number, head, step)
+            except OSError as exc:
+                return skip(f'it declares a step on the host and the hold of the auto-pin '
+                            f'could not be recorded: {exc}')
+        try:
+            self.merger.merge_pr(pr.number, head)
+        except BaseException:
+            if holding:
+                try:
+                    self.pinner.unhold(pr.number)
+                except OSError as exc:
+                    self.log(f'  the hold of the auto-pin stays, release it with a pin by '
+                             f'hand: {exc}')
+            raise
         self.log(f'  merged {head[:12]} at level {current["level"]} in mode {mode}')
-        if self.pinner is not None and cfg.pin.auto and cfg.pin.touches(paths):
+        if holding:
+            self.log(f'  auto-pin held: #{pr.number} declares a step on the host; pin by hand '
+                     'after it')
+        elif self.pinner is not None and cfg.pin.auto and cfg.pin.touches(paths):
             # The next tick pins the base with this merge, before planning (#174).
             try:
                 self.pinner.request(pr.number, head)
@@ -785,7 +813,45 @@ class MergeMixin:
             # The PR is merged: escalating it would only label a closed PR.
             self.log(f'  the merged record could not be written: {exc}')
         self._close_merged_issue(pr, head, mode)
+        if step:
+            self._alert_host_step(pr, head, step, holding)
         return None
+
+    def _alert_host_step(self, pr, head, step, holding):
+        """The alarm of a merged PR that declares a step on the host (#462): a comment on
+        ``[run].alert_issue`` with the step, and ``agent:needs-operator`` on the issue the PR
+        closes. One attempt each; a failure is logged, and the hold of the auto-pin stays."""
+        lb = self.cfg.labels
+        number = pr.meta.get('issue')
+        issue = self.cfg.run.alert_issue
+        if holding:
+            pinning = ('devloop non fa il pin automatico di questo commit né dei successivi: '
+                       'il pin automatico riprende dopo un pin a mano (`devloop pin`), da fare '
+                       'dopo il passo.')
+        else:
+            pinning = 'Il pin automatico è spento: il pin a mano va fatto dopo il passo.'
+        if issue:
+            body = publishable(
+                dispatcher_header() + '\n## Passo sull\'host da fare prima del pin\n\n'
+                f'devloop ha mergiato la PR #{pr.number} (head `{head[:12]}`'
+                + (f', issue #{number}' if isinstance(number, int) else '') + '), che dichiara '
+                'un passo sull\'host da fare a loop fermo prima del pin del nuovo codice:\n\n'
+                + '\n'.join('> ' + line for line in step.splitlines()) + '\n\n' + pinning)
+            try:
+                self.gh.comment(issue, body)
+                self.log(f'  alert of the step on the host published on #{issue}')
+            except Exception as exc:  # one attempt only: its class, never its output
+                self.log(f'  the alert of the step on the host on #{issue} could not be '
+                         f'published ({type(exc).__name__})')
+        else:
+            self.log('  no [run].alert_issue is configured: no alert for the step on the host')
+        if not isinstance(number, int):
+            return
+        try:
+            self.gh.edit_labels(number, add=[lb.needs_operator])
+            self.log(f'  issue #{number}: {lb.needs_operator} for the step on the host')
+        except GitHubError as exc:
+            self.log(f'  issue #{number}: {lb.needs_operator} not added: {exc}')
 
     def _record_merge(self, pr, thread, head, receipt, section, payload):
         """Write the ``merged`` record ``payload`` of the merge of ``head``, with ``section``,

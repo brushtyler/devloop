@@ -24,6 +24,8 @@ from .context import (_failure_text, _format_conflicts, _format_findings, _revie
                       format_fix_requests, format_operator_comments, format_previous_rounds,
                       prompt_values)
 from .github import GitHubError, GitHubUncertain, job_id
+from .hoststep import format_step, render_step
+from .hoststep import latest as latest_host_step
 from .ledger import attempt_branch, attempt_marker, fix_register
 from .localtests import RUN_TESTS_LOG, failed_modules, select_modules, suite_summary
 from .markdown import (dispatcher_header, publishable, render_fix, render_native_review,
@@ -226,7 +228,12 @@ class ActionsMixin:
             meta['conclave'] = decision  # the resolution its prompt had (#142)
         if attempt is not None:
             meta['attempt'] = attempt_marker(attempt)  # the PR of this attempt (#384)
+        # The step on the host the PR declares (#462): its merge holds the auto-pin.
+        step = (result.get('host_step') or '').strip()
+        if step:
+            meta['host_step'] = step
         body = publishable(self.runner.header(used) + '\n' + result['pr_body'].strip()
+                           + (('\n\n' + render_step(step)) if step else '')
                            + '\n\n' + render_map(result['acceptance_map'])
                            + f'\n\nCloses #{number}', 'pr', meta)
         pr_number, url = self._as(agent.key, IMPLEMENT).create_pr(
@@ -539,6 +546,7 @@ class ActionsMixin:
                            pr_body=without_attribution(pr.body),
                            acceptance_criteria=format_criteria(criteria),
                            acceptance_map=format_map(acceptance_map),
+                           host_step=format_step(latest_host_step(pr.meta, pr.fixes)),
                            docs=docs_review_section(self._mapped_docs(path)),
                            diff_stat=self.ws.diff_stat(path),
                            previous=format_previous_rounds(earlier, pr.fixes, pr.closures),
@@ -834,6 +842,7 @@ class ActionsMixin:
                              acceptance_criteria=format_criteria(
                                  acceptance_criteria(issue.get('body'))),
                              acceptance_map=format_map(latest_map(pr.meta, pr.fixes)),
+                             host_step=format_step(latest_host_step(pr.meta, pr.fixes)),
                              docs=docs_diff_section(self._mapped_docs(path)),
                              requests='', base_branch=cfg.base_branch, language=cfg.language,
                              conclave=resolution)
@@ -977,6 +986,7 @@ class ActionsMixin:
                              acceptance_criteria=format_criteria(
                                  acceptance_criteria(issue.get('body'))),
                              acceptance_map=format_map(latest_map(pr.meta, pr.fixes)),
+                             host_step=format_step(latest_host_step(pr.meta, pr.fixes)),
                              docs=docs_diff_section(self._mapped_docs(path)),
                              base_branch=cfg.base_branch, language=cfg.language,
                              conclave=resolution)

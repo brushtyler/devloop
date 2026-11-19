@@ -56,8 +56,8 @@ UNTIL_R6 = ('repo', 'trusted_users', 'apps')
 FROZEN = REPO / 'tests' / 'fixtures' / 'ssdlc-pre-r3'
 FROZEN_COMMIT = '28eaf9455bad6ff52dcbdbc29ecc07d7dde83e2a'
 # The prompt templates of before R4 (ADR 0006), the same as at FROZEN_COMMIT: with R4 the text of
-# ssdlc in them is data of the project file.
-PRE_R4_PROMPTS = REPO / 'tests' / 'fixtures' / 'ssdlc-pre-r4' / 'prompts'
+# ssdlc in them is data of the project file. They are ``ssdlc_project.PRE_R4_PROMPTS``, read with
+# the changes made since R4 (``ssdlc_project.pre_r4_prompts``).
 # devloop/localtests.py of 96b24b83e0e8b63217d956c3766cdc282865c693, the last commit of main
 # before R5 (#424), as it was: the selection of the test modules and the reading of the CI logs
 # with ssdlc's rules in the code.
@@ -237,7 +237,10 @@ class EquivalenceTests(unittest.TestCase):
                          self.frozen['policy_version'])
 
     def test_the_rendered_prompts_are_the_same(self):
-        before, after = prompts(self.before, PRE_R4_PROMPTS), prompts(self.after)
+        # The templates of before R4 with the changes made since (``ssdlc_project.SINCE_R4``).
+        with tempfile.TemporaryDirectory() as tmp:
+            before = prompts(self.before, ssdlc_project.pre_r4_prompts(tmp))
+        after = prompts(self.after)
         self.assertTrue(before)
         self.assertEqual(after, before)
         self.assertIn('Italian', after['implement'])
@@ -460,16 +463,17 @@ class CheckScriptTests(unittest.TestCase):
             (cls.tmp / side / LIST).parent.mkdir(parents=True)
             shutil.copy(REPO / LIST, cls.tmp / side / LIST)
         shutil.copy(FROZEN / 'config.toml', cls.tmp / 'before' / 'devloop' / 'config.toml')
-        # The installation of before R3 had the prompts of before R4, with the text of ssdlc.
+        # The installation of before R3 had the prompts of before R4, with the text of ssdlc;
+        # the changes of the templates made since R4 are in both (``ssdlc_project.SINCE_R4``).
         shutil.rmtree(cls.tmp / 'before' / 'devloop' / 'prompts')
-        shutil.copytree(PRE_R4_PROMPTS, cls.tmp / 'before' / 'devloop' / 'prompts')
+        ssdlc_project.pre_r4_prompts(cls.tmp / 'before' / 'devloop' / 'prompts')
         cls.project = cls.tmp / 'project.toml'
         shutil.copy(ssdlc_project.PROJECT, cls.project)
         # A host already on R3 (R4): the installation of R3, with the configuration of this one
         # and the prompts of before R4, and its project file, without [prompts].
         shutil.copytree(cls.tmp / 'after', cls.tmp / 'r3')
         shutil.rmtree(cls.tmp / 'r3' / 'devloop' / 'prompts')
-        shutil.copytree(PRE_R4_PROMPTS, cls.tmp / 'r3' / 'devloop' / 'prompts')
+        ssdlc_project.pre_r4_prompts(cls.tmp / 'r3' / 'devloop' / 'prompts')
         text = ssdlc_project.PROJECT.read_text(encoding='utf-8')
         start = text.index("# The project's data in the prompts")
         cls.r3_project = cls.tmp / 'project-r3.toml'

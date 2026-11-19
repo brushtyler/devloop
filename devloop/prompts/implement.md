@@ -40,6 +40,15 @@ Return only the structured result:
   `status` (`covered` or `not_covered`) and `reason` (why it is not covered, in $language; empty
   when it is). A `not_covered` criterion without a reason always blocks the review. An empty
   list (`[]`) when the issue has no recognisable acceptance criteria.
+- `host_step`: empty, unless the code of your change cannot run as intended, once devloop pins
+  it, without a step the operator makes on the host first, with the loop stopped: for example
+  a new table or key of the project file or of the local overlay that the code reads, a change
+  to the schema of either, or to the procedures of the host (such as `ops/host/`). Then a short
+  text, in $language, of what the operator must do, with a reference to the document that
+  describes it (for example the section of the migration guide of the host). devloop merges a
+  pull request that declares it as any other, but holds the automatic pin of that commit and
+  of the later ones until the operator pins by hand, after the step. The reviewer checks that
+  the declaration is there when it is needed and empty otherwise.
 - `blocked_reason`: empty unless `status` is `blocked`.
 
 ## Acceptance criteria

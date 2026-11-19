@@ -199,8 +199,10 @@ class ReviewRoundTests(unittest.TestCase):
                 with self.assertRaises(agents.AgentError) as ctx:
                     turn(raw_review(reason='other'), kind)
                 self.assertIsInstance(ctx.exception.__cause__, SchemaError)
-        # The default belongs to the review: the other schemas are unchanged.
-        self.assertEqual(with_defaults('fix', {}), {})
+        # The default belongs to the review: the other schemas do not get it. ``fix`` has
+        # only its own default, ``host_step`` (#462); ``sync`` has none.
+        self.assertEqual(with_defaults('fix', {}), {'host_step': ''})
+        self.assertEqual(with_defaults('sync', {}), {})
         self.assertIn('operator_reason', agents.load_schema('review')['required'])
 
     def test_the_round_limit_holds_as_before(self):

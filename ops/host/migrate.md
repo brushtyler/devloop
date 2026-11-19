@@ -254,6 +254,17 @@ Una PR che richiede un passo sull'host (un file nello `state_dir`, una chiave de
 comando di root) dice nella descrizione e nella guida di `ops/` **che cosa fare prima del merge**,
 con i comandi completi, l'utente che li esegue e cosa fare se devloop ha già preso la copia nuova.
 
+Dal #462 il passo è anche dichiarato nell'output strutturato dell'implementer (`host_step`: un
+testo breve con il rimando a questa guida), e il reviewer controlla che ci sia. devloop mergia la
+PR come le altre, ma con `[pin] auto = true` **non fa il pin automatico** di quel commit né dei
+successivi: scrive un allarme con il passo su `[run].alert_issue` e mette `agent:needs-operator`
+sull'issue chiusa. Dopo il passo, a loop fermo, il pin a mano (`scripts/devloop-pinned pin
+origin/main`, oppure il pin con il codice nuovo come nelle sezioni qui sotto) fissa la copia e
+fa riprendere il pin automatico ([docs/devloop/guide.md](../../docs/devloop/guide.md#step-on-the-host)).
+All'avvio, e a ogni rilettura, devloop scrive nel log, e una volta su `[run].alert_issue`, le
+tabelle del file di progetto che la copia in uso conosce e che la configurazione non ha
+(`[prompts]`, `[tests]`).
+
 ## Dati di ssdlc nei prompt
 
 Con l'ADR 0006, R4, i prompt di `devloop/prompts/` non contengono più il testo di ssdlc: le

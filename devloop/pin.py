@@ -21,6 +21,11 @@ head last seen (``pin-base.json``; the first time, since the commit of ``current
 to those paths, requests the pin of the new head. ``devloop status`` says when the copy it runs
 from is behind ``origin/<base_branch>`` on those paths (``AutoPin.behind``).
 
+A PR that declares a step on the host (``host_step``, #462) is merged as the others, but its
+merge holds the auto-pin (``hold``, ``pin-held.json``): no auto-pin runs, of that commit nor of
+the later ones, until the operator does the step and pins by hand (``devloop pin``, which calls
+``release``).
+
 The installation's source (ADR 0006, R1) is the clone the pin takes the code from: the
 managed repository itself, as for ssdlc, unless the configuration names another clone in
 ``source`` (``source_root``). The smoke test still runs in the managed repository. The pin after
@@ -61,6 +66,9 @@ LOCAL_CONFIG = 'config.local.toml'
 # section 3.4), which devloop imports for the budget envelope (#365).
 CODE_PACKAGES = ('core',)
 PENDING = 'pin-pending.json'
+# The merges of PRs that declared a step on the host (#462): while it exists no auto-pin runs,
+# and only a pin by hand (``devloop pin``, ``release``) removes it.
+HELD = 'pin-held.json'
 # The head of origin/<base_branch> the last tick saw (#430): an advance from it requests a pin.
 BASE_SEEN = 'pin-base.json'
 LOCK = 'pin.lock'
@@ -729,6 +737,67 @@ def clear_pending(state):
         pass
 
 
+def held(state):
+    """The steps on the host that hold the auto-pin (#462): a list of ``{pr, head, step, at}``,
+    or None when nothing holds it. A file that cannot be read holds it all the same, with one
+    step of unknown PR: only a pin by hand releases it."""
+    try:
+        data = json.loads((Path(state) / HELD).read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return [{'pr': None, 'head': None, 'step': None}]
+    steps = data.get('steps') if isinstance(data, dict) else None
+    if not isinstance(steps, list) or not all(isinstance(s, dict) for s in steps) or not steps:
+        return [{'pr': None, 'head': None, 'step': None}]
+    return steps
+
+
+def held_prs(steps):
+    """The PRs of the steps on the host ``steps`` (``held``), as the log names them."""
+    return ', '.join(f'#{s["pr"]}' if isinstance(s.get('pr'), int) else 'an unknown PR'
+                     for s in steps)
+
+
+def _write_held(state, steps):
+    path = Path(state) / HELD
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f'.{HELD}-{os.getpid()}')
+    tmp.write_text(json.dumps({'steps': steps}, indent=2, ensure_ascii=False) + '\n',
+                   encoding='utf-8')
+    os.replace(tmp, path)
+
+
+def hold(state, pr, head, step):
+    """Hold the auto-pin for the step on the host ``step`` that PR ``pr``, merged at ``head``,
+    declared (#462): no auto-pin runs until a pin by hand. The steps of earlier PRs stay."""
+    steps = [s for s in (held(state) or []) if s.get('pr') != pr]
+    steps.append({'pr': pr, 'head': head, 'step': step, 'at': int(time.time())})
+    _write_held(state, steps)
+
+
+def unhold(state, pr):
+    """Drop the step of ``pr`` (a merge that did not happen); the file goes with the last one."""
+    steps = held(state)
+    if steps is None:
+        return
+    left = [s for s in steps if s.get('pr') != pr]
+    if left:
+        _write_held(state, left)
+    else:
+        release(state)
+
+
+def release(state):
+    """Release the auto-pin (#462), after a pin by hand: the steps that held it, or None."""
+    steps = held(state)
+    try:
+        (Path(state) / HELD).unlink()
+    except FileNotFoundError:
+        pass
+    return steps
+
+
 def copy_commit(copy):
     """The commit of the pinned copy ``copy``, read in its stamp, or None when ``copy`` is not
     one (devloop running from a checkout)."""
@@ -788,6 +857,15 @@ class AutoPin:
     def cancel(self):
         """Drop the request: a copy refused by the smoke test is not tried again (#260)."""
         clear_pending(self.state)
+
+    def hold(self, pr, head, step):
+        hold(self.state, pr, head, step)
+
+    def unhold(self, pr):
+        unhold(self.state, pr)
+
+    def held(self):
+        return held(self.state)
 
     def _seen(self):
         try:

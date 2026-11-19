@@ -896,9 +896,19 @@ class FakePinner:
     def __init__(self):
         self.requests, self.pins = [], []
         self.request_ = None
+        self.holds = []  # the steps on the host that hold the auto-pin (#462)
 
     def request(self, pr, head):
         self.requests.append((pr, head))
+
+    def hold(self, pr, head, step):
+        self.holds.append((pr, head, step))
+
+    def unhold(self, pr):
+        self.holds = [h for h in self.holds if h[0] != pr]
+
+    def held(self):
+        return [{'pr': pr, 'head': head, 'step': step} for pr, head, step in self.holds] or None
 
     def pending(self):
         return {'pr': self.requests[-1][0]} if self.requests else None
