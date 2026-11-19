@@ -143,6 +143,9 @@ class PullRequest:
     # A trusted user's ``/devloop veto`` of the latest conclave decision on the PR or its issue
     # that the dispatcher has not applied yet (#142): ``{comment, by, reason, conclave}``.
     veto: dict = None
+    # The ``basebroken`` record of a fix of the current head whose failed tests fail on the base
+    # commit too (#459), while the base branch has not moved past that commit: no fix runs.
+    base_broken: dict = None
 
 
 def operator_blocked(labels, lb):
@@ -196,6 +199,10 @@ class Snapshot:
     # With ``review_policy.advisory_reviewer`` (#369), the devloop PRs in agent:needs-operator
     # whose head has no advisory review yet: dicts ``{number, head}``, one action each.
     advisories: list = field(default_factory=list)
+    # The issues of ``working_issues`` without a PR whose implementation failed with tests that
+    # fail on the base commit too (#459): whether each still waits for the base branch to move
+    # past that commit (True), or starts again (False).
+    base_waits: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -484,10 +491,17 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
             free -= 1
         actions.append(Action('supervise', item['number'], f'{item["command"]} by {item["by"]}'))
     for number in snapshot.working_issues:
-        if number not in pr_issues:
-            actions.append(Action('stale', number, 'agent:working without an open devloop PR'))
-        else:
+        if number in pr_issues:
             actions.append(Action('settle', number, 'agent:working but its PR is open'))
+        elif number in snapshot.base_waits:
+            # Its failed tests failed on the base too (#459): it waits for the base branch to
+            # advance, then starts again in a free slot, as a new implementation.
+            if snapshot.base_waits[number] or free <= 0 or not implement or number in busy:
+                continue
+            free -= 1
+            actions.append(Action('implement', number, BASE_REPAIRED))
+        else:
+            actions.append(Action('stale', number, 'agent:working without an open devloop PR'))
     for pr in snapshot.prs:
         # The dispatcher's own label of an operator merge (#248) does not stop devloop.
         if lb.needs_supervisor in pr.labels or operator_held(pr, lb):
@@ -572,6 +586,8 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
             actions.append(Action('findings', pr.number, 'CI passed on the head' if ci_green
                                   else 'operator command'))
             continue
+        if pr.fix_requests and pr.base_broken:
+            continue  # the fix waits for the base branch to advance (#459)
         if pr.fix_requests:
             # A fix of the current head asked by a trusted user or the supervisor (#195): no
             # review first, and no round, since it writes no review record.
@@ -598,6 +614,8 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
             elif blind and pr.checks == 'fail':
                 actions.append(Action('ci_failed', pr.number, 'CI failed after the review')
                                if rounds_left else Action('round_limit', pr.number))
+            elif pr.base_broken:
+                continue  # the fix waits for the base branch to advance (#459)
             else:
                 actions.append(Action('fix', pr.number))
         elif lb.review in pr.labels:
@@ -809,6 +827,9 @@ def _plan_preflight(snapshot, cfg, pr_issues, free, urgent='', implement=True):
 
 
 BASE_ADVANCED = 'the base branch advanced since the failed readiness check, whose gaps depend on it'
+# The reason of an implementation that starts again after its failed tests failed on the base
+# too (#459), once the base branch moved past that commit.
+BASE_REPAIRED = 'the base branch moved past the commit where its failed tests failed too'
 
 
 def repository_bound(record):

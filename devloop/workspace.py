@@ -14,6 +14,7 @@ from contextlib import nullcontext
 from pathlib import Path
 
 from .agentuser import SHARED_DIR, TMP, SharedDir
+from .localtests import failed_cases
 
 # The opening and closing lines git writes around a conflict (`=======` alone also underlines
 # Markdown and reST headings, so it is not a reliable sign).
@@ -213,6 +214,9 @@ class Workspace:
         self._shared = threading.RLock()
         self._read_only = None
         self._common = None
+        # The identities of the failed tests of the latest run in each worktree (#459,
+        # ``failed_cases``), read from its whole output.
+        self._failed = {}
 
     @property
     def shared_lock(self):
@@ -641,6 +645,13 @@ class Workspace:
             touched.update(name for name in out.split('\0') if name)
         return sorted(touched)
 
+    def first_parents(self, commit, limit):
+        """``(sha, subject)`` of the first-parent chain of ``commit``, ``commit`` first, at most
+        ``limit`` commits (#459): on the base branch, one per merge or direct push."""
+        out = self._git('log', '--first-parent', f'--max-count={int(limit)}', '--format=%H%x00%s',
+                        commit)
+        return [tuple(line.split('\0', 1)) for line in out.splitlines() if '\0' in line]
+
     def merge_check(self, base, head):
         """``(clean, files)``: whether ``head`` merges into ``base`` without conflicts, computed
         by git on these two exact commits without touching any worktree (#160), and the files
@@ -813,7 +824,9 @@ class Workspace:
 
     def run_tests(self, path, command, timeout):
         """``(passed, output_tail)`` for the project test command in ``path``. With an agent
-        user (#415) the command runs as that user."""
+        user (#415) the command runs as that user. The identities of the failed tests, read from
+        the whole output, are kept for ``failed_cases`` (#459)."""
+        self._failed[str(path)] = None
         kwargs = {'env': self._test_env} if self._test_env is not None else {}
         run = run_in_group if self._run is subprocess.run else self._run
         argv = ['bash', '-c', command]
@@ -839,5 +852,24 @@ class Workspace:
                 self._remove_agent_tmp(tmp)
             elif tmp is not None:
                 shutil.rmtree(tmp, ignore_errors=True)
-        tail = '\n'.join((done.stdout + '\n' + done.stderr).strip().splitlines()[-60:])
+        output = (done.stdout + '\n' + done.stderr).strip()
+        tail = '\n'.join(output.splitlines()[-60:])
+        self._failed[str(path)] = [] if done.returncode == 0 else failed_cases(output)
         return done.returncode == 0, tail
+
+    def failed_cases(self, path):
+        """The identities of the tests that failed in the latest ``run_tests`` in ``path``
+        (#459, ``localtests.failed_cases``): ``[]`` when it passed, None when they cannot be
+        told (a timeout, an output without them, no run)."""
+        return self._failed.get(str(path))
+
+    def merge_base_copy(self, path):
+        """``(name, copy, commit)``: a disposable worktree detached at ``commit``, the merge base
+        of the HEAD of ``path`` with ``origin/<base>``, the base commit of the branch, for its
+        failed tests (#459); removed with :meth:`remove`."""
+        commit = self._git('merge-base', 'HEAD', f'origin/{self.base_branch}', cwd=path).strip()
+        name = f'{Path(path).name}-base'
+        copy = self.path(name)
+        self._fresh(copy)
+        self._git('worktree', 'add', '--force', '--detach', str(copy), commit)
+        return name, copy, commit

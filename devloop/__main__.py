@@ -22,6 +22,7 @@ from .config import (INSTALL_ROOT, PROJECT_CONFIG, ConfigError, Reloader, compos
                      repo_lock_name)
 from .context import both_labels_warning, label_transition
 from .dispatch_advisory import AdvisoryFailures, AdvisoryResults
+from .dispatch_base import MainAlerts
 from .dispatcher import (Dispatcher, TickLog, Workers, ensure_labels, pr_counts_line,
                          pr_status_line)
 from .github import GitHub, GitHubError
@@ -427,6 +428,7 @@ def build(args):
                             memory=unavailability.Memory(state),
                             advisory_results=AdvisoryResults(state),
                             advisory_failures=AdvisoryFailures(state),
+                            main_alerts=MainAlerts(state),
                             housekeeping=Housekeeping(state, ws, gh, ledger=ledger,
                                                       log=tick_log))
     # What the trace T1 (ADR 0006, K1) records of the start: the files this configuration came

@@ -722,6 +722,35 @@ from anyone else, a bot or a devloop app included, is ignored and logged.
 - Commits already published are not reverted. A veto after the merge has no effect: the merge
   stays a human act.
 
+### Tests red on the base too
+
+PRs green on their own base can leave `main` red once merged together. An issue started from
+that `main` then fails its local tests for a defect that is not its own (#459). So, when the
+local tests of an implementation or of a fix fail, before counting the failure against the
+implementer devloop reads the identities of the failed tests from the whole output and runs their
+modules, one at a time, on the base commit of the branch, in a disposable worktree:
+
+- **every failed test fails on the base too**: the step is `base_broken`. No other attempt of
+  the agent and no escalation: the dispatcher writes a comment "Test rossi anche sulla base" with
+  a `basebroken` record (the base commit and the failed tests) on the issue or on the PR, and
+  nothing is pushed. The issue keeps `agent:working`, the PR its label. When `main` moves past
+  that commit the step starts again by itself: the issue as a new implementation, in a free slot
+  of `max_open_prs`; the fix at its next tick. Until then the issue is not `stale`;
+- **a test fails only on the branch**, or the failed tests cannot be identified (a timeout, an
+  output without them, a module that does not start, a project whose `[tests].selection` is not
+  `python-unittest-modules`): the failure stays the implementer's, as before:
+  `implement_test_retries` more attempts, then `tests_failed`.
+
+### Red CI on `main`
+
+With `[run].alert_issue`, at each tick (not in a dry run) devloop reads the checks of the current
+commit of `origin/main`. When one ended with a failure, it publishes **one** alert "CI rossa su
+`main`" on that issue, with the commit, the failed checks and the commits of `main` since the
+latest green one, at most 10 back on its first-parent chain. A new alert comes only for a new red
+commit; the commit alerted is kept in `state_dir` (`main-ci-alert.json`), so a restart does not
+repeat it. Pending, missing or unreadable checks give no alert, and without `[run].alert_issue`
+nothing is read. It is only a report: merges go on as before.
+
 ## Merge modes
 
 This is the only description of the merge modes in this guide; the other sections link here.
