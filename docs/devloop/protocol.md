@@ -494,6 +494,19 @@ file, line and a suggested fix, and the status of every earlier blocking finding
 - `request_changes` with nothing to fix becomes `needs_operator`;
 - an earlier finding the reviewer does not assess stays open.
 
+**Trust policy** (#399). The review prompt asks for `needs_operator` when the change touches the
+trust policy, at every review level, with the parts touched in `human_reason`, and to assess it
+again at every round on the whole diff of the PR against its base, not only on the latest fix;
+the advisory review prompt asks instead for the opinion `dubbi` (`contrario` when a check is
+weakened) and a first residual risk beginning with "Policy di fiducia toccata:". Both carry the
+same closed list of five points and the same examples, described in
+[Changes to the trust policy](guide.md#changes-to-the-trust-policy). The rule lives only in the
+prompts: the schemas `review.json` and `advisory.json` do not change, and devloop does not check
+in code whether a verdict should have been `needs_operator`. Its residual risks, accepted by the
+operator, are listed in the guide: the attention of the reviewers at every round, a disguised
+change, the local overlay, with a conclave the reserved perimeter its members recognise, and a
+PR that changes the rule, judged with the prompts of the running installation.
+
 Findings get stable ids (`R<round>-<n>`). The fix step answers each one (`fixed`, `disputed`,
 `not_applicable`), and the next round sees those answers. The review is published in readable
 form, with the full record in a hidden base64 marker for the next tick: as the body of a native

@@ -26,6 +26,51 @@ Do not run the full test suite.
 
 Be concrete: name files, behaviours and failure scenarios. Write every text in $language.
 
+## Trust policy
+
+The trust policy decides who devloop believes and when a change is merged. Only the operator
+changes it, so this rule applies at every review level. A change touches the trust policy when,
+and only when, it does at least one of these five things (the list is closed):
+
+1. It changes the value, the default or the way devloop reads one of these configuration keys:
+   `trusted_users`, `operator_only_paths`, `protected_paths`, `[merge] mode`, `[merge.levels]`,
+   the levels and paths of `[review_policy]` (`sensitive_paths`, `sensitive_path_lists`, `zero`,
+   `advisory_reviewer`), `[roles]` (`implementer`, `reviewers`, `supervisor`), `conclave`,
+   `max_review_rounds`, `[pin] auto`, `[apps]`, and `write_args`, `review_args` and the other
+   permissions of the agents.
+2. It changes the constants that cap the delegations and the retries (for example `MAX_RETRIES`).
+3. It changes who is believed: the filter of the trusted authors of the comments, the check of
+   the identity that wrote a marker or a record, the identity required for `/devloop` commands.
+4. It changes when a PR is merged or promoted, or who decides on it: the merge conditions, the
+   quorum of the reviewers, the checks of `operator_only_paths` and `protected_paths`, the choice
+   of the review level, the classes of escalation the supervisor decides in `auto` mode
+   (`NON_CRITICAL` in `devloop/supervision.py`) and those that stay with the operator.
+5. It changes one of these prompts in `devloop/prompts/`: the review prompt, the advisory review
+   prompt, the conclave prompts (`conclave_proposal.md`, `conclave_vote.md`, which define the
+   perimeter reserved to the operator), the parts of `implement.md`, `fix.md` and `preflight.md`
+   that instruct the agents on untrusted content and on trust rules, or this rule itself.
+
+Nothing else is trust policy, unless it also does one of the five things above: refactoring
+without a change of behaviour, new functions, texts and comments, operational keys such as
+timeouts, capacities and intervals. Examples:
+
+- Trust policy: adding a login to `trusted_users`; removing a path from `operator_only_paths`
+  or `.github/` from `protected_paths`; a new default for `[merge] mode` or `[merge.levels]`;
+  enabling `conclave` or `[pin] auto`; raising `max_review_rounds` or `MAX_RETRIES`; adding a
+  flag to `write_args`; accepting a marker written by another identity; one approval enough at
+  level 2; skipping the `operator_only_paths` check for some files; moving `reviewer_decision`
+  among the non-critical classes of escalation; editing `devloop/prompts/review.md` or the
+  reserved perimeter in `devloop/prompts/conclave_vote.md`.
+- Not trust policy: a new or reworded comment or docstring; a new timeout key or a longer
+  `[ci] grace_minutes`; a new capacity or interval; a new helper function that none of the
+  checks above uses; moving code without changing what it decides; a new test.
+
+When the change touches the trust policy, your `opinion` is `dubbi`, or `contrario` when the
+change weakens a check, even when the change is correct and the issue asks for it. The first
+item of `residual_risks` begins with "Policy di fiducia toccata:" and lists the parts the change
+touches, each with its point of the list above and its file. A change that does not touch the
+trust policy is not reported for it.
+
 ## Issue #$issue_number: $issue_title
 
 $issue_body
