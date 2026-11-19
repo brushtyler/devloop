@@ -1,0 +1,29 @@
+# Unità template del loop continuo di devloop, per più progetti sullo stesso host
+# (ops/host/devloop@.service, ADR 0006, R8). L'istanza è il progetto: devloop@<progetto>.
+# setup-devloop.sh, con PROJECT in params.env, la installa in SYSTEMD_DIR/devloop@.service, e i
+# parametri del progetto (utente, clone, avviatore, log) in una drop-in della sua istanza,
+# SYSTEMD_DIR/devloop@<progetto>.service.d/project.conf (ops/host/devloop-project.conf). Un'istanza
+# senza drop-in non parte: manca ExecStart. Non la avvia e non la abilita: l'attivazione è
+# dell'operatore. Le impostazioni sono quelle di ops/host/devloop.service.
+[Unit]
+Description=devloop continuous loop (%i)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# Ogni riga arriva subito nel log, così un crash lascia le sue ultime righe.
+Environment=PYTHONUNBUFFERED=1
+# SIGTERM solo al processo principale: devloop smette di pianificare e aspetta le azioni in
+# corso, al più agent_timeout_seconds (3600). Il default control-group fermerebbe anche loro.
+KillMode=mixed
+# Più di agent_timeout_seconds: dopo, systemd ferma anche le azioni ancora in corso.
+TimeoutStopSec=4200
+# Un crash riavvia il loop; un'uscita pulita (0, anche per il file STOP) no. Il codice 4 (tre
+# tick falliti di fila, allarme inviato) lascia il servizio fermo finché l'operatore non lo riavvia.
+Restart=on-failure
+RestartSec=60
+RestartPreventExitStatus=4
+
+[Install]
+WantedBy=multi-user.target

@@ -370,6 +370,11 @@ class Config:
     # code from: absolute, with ``~``, or relative to the managed repository's main checkout.
     # '' when the source is the managed repository itself, as for ssdlc.
     source: str = ''
+    # The host directory of the repository locks (ADR 0006, R8), common to every devloop user of
+    # the host: absolute, or with ``~``. A dispatcher holds ``<dir>/<owner>--<name>.lock`` of
+    # its ``repo`` while it ticks, so that two of them on the same repository never run together
+    # whatever their state_dir. '' when it is not set: only the lock of state_dir, as before.
+    repo_lock_dir: str = ''
     # The reviewer pool, in order (``roles.reviewers``; ``roles.reviewer`` is a pool of one).
     reviewers: tuple = ()
     # The agent of the readiness check before implement (#114), or '' when it is disabled.
@@ -1242,6 +1247,7 @@ def parse_config(data, root=INSTALL_ROOT):
         branch_prefix=data.get('branch_prefix', 'agent/issue-'),
         state_dir=data.get('state_dir', '.ssdlc/devloop'),
         source=_source(data),
+        repo_lock_dir=_repo_lock_dir(data),
         test_cmd=test_cmd,
         language=data.get('language', 'English'),
         implementer=implementer, reviewer=pool[0], reviewers=pool, agents=agents,
@@ -1279,6 +1285,39 @@ def _source(data):
     return value
 
 
+# ``repo`` as GitHub names a repository: an owner of letters and digits with single hyphens
+# inside, and a name of letters, digits, ``.``, ``_`` and ``-``.
+_REPO = re.compile(r'([A-Za-z0-9](?:-?[A-Za-z0-9])*)/([A-Za-z0-9._-]+)')
+
+
+def repo_lock_name(repo):
+    """The name of the lock file of ``repo`` (ADR 0006, R8): owner and name in lower case,
+    ``<owner>--<name>.lock``. An owner never has two hyphens in a row, so two repositories never
+    share a name. ``ConfigError`` when ``repo`` is not ``owner/name``."""
+    match = _REPO.fullmatch(repo) if isinstance(repo, str) else None
+    if not match or match.group(2) in ('.', '..'):
+        raise ConfigError(f'repo: expected owner/name for the repository lock, not {repo!r}')
+    return f'{match.group(1).lower()}--{match.group(2).lower()}.lock'
+
+
+def _repo_lock_dir(data):
+    """``repo_lock_dir`` (ADR 0006, R8): an absolute path, or one starting with ``~``, with a
+    ``repo`` of the form ``owner/name``; '' when the key is not set."""
+    if 'repo_lock_dir' not in data:
+        return ''
+    value = _require(data, 'repo_lock_dir', str, 'config')
+    try:
+        absolute = Path(value).expanduser().is_absolute()
+    except RuntimeError:  # ~user of a user that does not exist
+        absolute = False
+    if not absolute:
+        raise ConfigError('repo_lock_dir: expected the absolute path of the directory of the '
+                          'repository locks, common to the devloop users of the host; leave the '
+                          'key out to keep only the lock of state_dir')
+    repo_lock_name(data.get('repo'))
+    return value
+
+
 def sensitive_lists(data):
     """The names in ``review_policy.sensitive_path_lists`` of the raw configuration ``data``."""
     table = data.get('review_policy', {})
@@ -1296,6 +1335,7 @@ _AGENT_KEYS = dict.fromkeys(('kind', 'display_name', 'model', 'model_label', 'ef
                              'write_commands', 'review_commands'))
 OVERLAY_KEYS = {
     **dict.fromkeys(('repo', 'base_branch', 'branch_prefix', 'state_dir', 'source',
+                     'repo_lock_dir',
                      'test_cmd', 'local_tests', 'ci_rerun_unrelated', 'block_uncertain_turns', 'story_identity',
                      'publication_outbox', 'attempt_identity', 'journal_max_mib',
                      'language', 'trusted_users', 'preflight',

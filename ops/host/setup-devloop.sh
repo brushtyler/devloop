@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Prepara l'host per devloop: pacchetti, utente dedicato, clone, state_dir, overlay d'esempio,
-# key_dir 700, impostazioni di Claude Code senza aggiornamenti automatici, unità systemd. Con
-# SOURCE_REPO anche il clone della sorgente dell'installazione e l'avviatore dal suo tag.
+# Prepara l'host per devloop: pacchetti, utente dedicato, directory dei lock per repository,
+# clone, state_dir, overlay d'esempio, key_dir 700, impostazioni di Claude Code senza
+# aggiornamenti automatici, unità systemd. Con SOURCE_REPO anche il clone della sorgente
+# dell'installazione e l'avviatore dal suo tag. Con PROJECT (ADR 0006, R8) prepara uno dei
+# progetti dell'host: l'unità template devloop@.service e la drop-in della sua istanza.
 # Idempotente: si può rieseguire, fa solo ciò che manca. Non scrive segreti e non avvia il
 # servizio. L'utente degli agent e le sue CLI li prepara setup-agent-user.sh (#415); i login
 # delle CLI, le chiavi delle app e il pin restano passi manuali (ops/README.md).
@@ -48,6 +50,34 @@ if user_exists "$DEVLOOP_USER"; then
     ok "l'utente $DEVLOOP_USER esiste"
 else
     run useradd --create-home --home-dir "$DEVLOOP_HOME" --shell /bin/bash "$DEVLOOP_USER"
+fi
+
+step "Lock per repository: $REPO_LOCK_DIR, gruppo $REPO_LOCK_GROUP (ADR 0006, R8)"
+# Una directory comune a tutti gli utenti devloop dell'host, e a nessun altro: il dispatcher vi
+# prende il lock del suo repository, così due servizi sullo stesso repository non partono insieme.
+if getent group "$REPO_LOCK_GROUP" >/dev/null; then
+    ok "il gruppo $REPO_LOCK_GROUP esiste"
+else
+    run groupadd --system "$REPO_LOCK_GROUP"
+fi
+if id -nG "$DEVLOOP_USER" 2>/dev/null | tr ' ' '\n' | grep -qxF "$REPO_LOCK_GROUP"; then
+    ok "$DEVLOOP_USER è nel gruppo $REPO_LOCK_GROUP"
+else
+    # Vale dal prossimo avvio del servizio.
+    run usermod -aG "$REPO_LOCK_GROUP" "$DEVLOOP_USER"
+fi
+if [ -d "$REPO_LOCK_DIR" ] && [ "$(stat -c '%U %G' "$REPO_LOCK_DIR")" != "root $REPO_LOCK_GROUP" ] \
+    && [ -n "$(find "$REPO_LOCK_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+    # systemd-tmpfiles ne cambierebbe modo e proprietario: non si tocca una directory d'altri.
+    die "$REPO_LOCK_DIR esiste già, non è vuota e non è di root:$REPO_LOCK_GROUP: scegliere un altro REPO_LOCK_DIR"
+fi
+if put_file "$TMPFILES_FILE" 644 root "$(render "$OPS_DIR/host/tmpfiles-devloop-repos.conf")" \
+    || [ ! -d "$REPO_LOCK_DIR" ]; then
+    run systemd-tmpfiles --create "$TMPFILES_FILE"
+    [ "$DRY_RUN" = 1 ] || [ -d "$REPO_LOCK_DIR" ] \
+        || die "systemd-tmpfiles non ha creato $REPO_LOCK_DIR: crearne a mano le directory superiori"
+else
+    ok "$REPO_LOCK_DIR esiste"
 fi
 
 step "Clone di $REPO"
@@ -108,16 +138,19 @@ else
     put_file "$STATE/config.local.toml" 644 "$DEVLOOP_USER" "$(<"$OPS_DIR/host/config.local.toml.example")" || true
 fi
 # Con l'avviatore che riceve lo state_dir (LAUNCHER_ARGS), devloop si ferma se l'overlay ne
-# nomina un altro; con la sorgente a parte, l'overlay dice dove è il suo clone.
+# nomina un altro; con la sorgente a parte, l'overlay dice dove è il suo clone. Sempre, l'overlay
+# nomina la directory dei lock per repository (ADR 0006, R8).
+overlay_lines=("repo_lock_dir = \"$REPO_LOCK_DIR\"")
 if [ -n "$LAUNCHER_ARGS" ]; then
-    for line in "state_dir = \"$STATE_PATH\"" ${SOURCE_REPO:+"source = \"$SOURCE_CLONE\""}; do
-        if [ -f "$STATE/config.local.toml" ] && grep -qxF "$line" "$STATE/config.local.toml"; then
-            ok "l'overlay ha $line"
-        else
-            todo "scrivere $line in $STATE/config.local.toml"
-        fi
-    done
+    overlay_lines+=("state_dir = \"$STATE_PATH\"" ${SOURCE_REPO:+"source = \"$SOURCE_CLONE\""})
 fi
+for line in "${overlay_lines[@]}"; do
+    if [ -f "$STATE/config.local.toml" ] && grep -qxF "$line" "$STATE/config.local.toml"; then
+        ok "l'overlay ha $line"
+    else
+        todo "scrivere $line in $STATE/config.local.toml"
+    fi
+done
 
 step 'Directory private (700)'
 ensure_dir "$DEVLOOP_KEY_DIR" 700 "$DEVLOOP_USER"
@@ -153,8 +186,15 @@ step 'CLI degli agent'
 say "  le CLI e i loro login sono dell'utente $AGENT_USER (#415): setup-agent-user.sh"
 
 step "Servizio $SERVICE_NAME"
-UNIT="$SYSTEMD_DIR/$SERVICE_NAME.service"
-if put_file "$UNIT" 644 root "$(render "$OPS_DIR/host/devloop.service")"; then
+# Con PROJECT (ADR 0006, R8) l'unità template, comune ai progetti, e la drop-in del progetto.
+unit_changed=0
+put_file "$UNIT_FILE" 644 root "$(render "$OPS_DIR/host/$UNIT_TEMPLATE")" && unit_changed=1
+if [ -n "$DROPIN_FILE" ]; then
+    ensure_dir "$(dirname "$DROPIN_FILE")" 755 root
+    put_file "$DROPIN_FILE" 644 root "$(render "$OPS_DIR/host/devloop-project.conf")" \
+        && unit_changed=1
+fi
+if [ "$unit_changed" = 1 ]; then
     run systemctl daemon-reload
 fi
 say "  il servizio non viene avviato né abilitato: lo fa l'operatore (ops/README.md)"

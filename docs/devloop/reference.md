@@ -80,7 +80,15 @@ checkout stops every command that needs it (the pin and the dispatcher's command
 source other than the managed repository the pin after a merge is off. `state_dir` (default
 `.ssdlc/devloop`) is relative to the managed repository's main checkout, or absolute: a directory
 of the host. When the [launcher](guide.md#launcher) is given `--state-dir`, the configuration's
-`state_dir` must be that directory, or devloop stops. Both apply at the next start. `[run]` (`alert_issue`, unset by
+`state_dir` must be that directory, or devloop stops. Both apply at the next start.
+`repo_lock_dir` (unset by default, a key of the host's overlay) is the host's directory of the
+[repository locks](guide.md#several-projects-on-one-host) (ADR 0006, R8), common to every devloop
+user of the host: `tick` and `run` hold `<repo_lock_dir>/<owner>--<name>.lock` of `repo` (owner
+and name in lower case) besides `state_dir/dispatcher.lock`, and stop when another dispatcher
+holds it, whatever its `state_dir`. A value that is not an absolute path (or one starting with
+`~`), or a `repo` that is not `owner/name` with it, stops devloop at startup; a directory that
+does not exist stops `tick` and `run`, and devloop does not create it. Unset, only the lock of
+`state_dir`, as before. It applies at the next start. `[run]` (`alert_issue`, unset by
 default) names the issue of the alert of the [continuous loop](guide.md#continuous-loop); a value that
 is not an issue number (an integer of at least 1), or an unknown key, stops devloop at startup.
 `[report]` (`issue`, unset by default; `interval`, default 15) sets the

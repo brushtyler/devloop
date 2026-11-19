@@ -27,7 +27,7 @@ VERIFIED_ARCH=aarch64
 OPS_STATE_DIR=.ssdlc/devloop
 
 # I segnaposto @NOME@ che `render` sostituisce nei file dichiarativi (unità, sudoers).
-OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER DEVLOOP_HOME AGENT_HOME DEVLOOP_CLONE STATE_DIR STATE_PATH LAUNCHER_CMD DEVLOOP_PATH AGENT_PATH SERVICE_NAME'
+OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER DEVLOOP_HOME AGENT_HOME DEVLOOP_CLONE STATE_DIR STATE_PATH LAUNCHER_CMD DEVLOOP_PATH AGENT_PATH SERVICE_NAME REPO_LOCK_DIR REPO_LOCK_GROUP'
 
 say() { printf '%s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }
@@ -81,6 +81,22 @@ ops_load_params() {
     set +a
     : "${REPO:?REPO non impostato in $PARAMS_FILE}"
     : "${APP_PREFIX:?APP_PREFIX non impostato in $PARAMS_FILE}"
+    # Più progetti sullo stesso host (ADR 0006, R8): con PROJECT i default sono del progetto,
+    # con un utente di sistema per progetto (D6) e l'istanza devloop@<progetto> dell'unità
+    # template. Senza, un solo progetto con devloop.service, come prima.
+    : "${PROJECT:=}"
+    if [ -n "$PROJECT" ]; then
+        [[ $PROJECT =~ ^[a-z0-9]([a-z0-9-]{0,14}[a-z0-9])?$ ]] \
+            || die "PROJECT ammette minuscole, cifre e '-' interni, al più 16 caratteri: '$PROJECT'"
+        : "${DEVLOOP_USER:=devloop-$PROJECT}"
+        : "${AGENT_USER:=devloop-$PROJECT-agent}"
+        : "${SERVICE_NAME:=devloop@$PROJECT}"
+        : "${SUDOERS_FILE:=/etc/sudoers.d/devloop-supervisor-$PROJECT}"
+        : "${AGENT_SUDOERS_FILE:=/etc/sudoers.d/devloop-agent-$PROJECT}"
+        : "${SUPERVISOR_KEY_DIR:=${SUPERVISOR_HOME:-/home/${SUPERVISOR_USER:-supervisor}}/.ghapps-$PROJECT}"
+        [ "$SERVICE_NAME" = "devloop@$PROJECT" ] \
+            || die "con PROJECT il servizio è l'istanza devloop@$PROJECT dell'unità template: '$SERVICE_NAME'"
+    fi
     : "${DEVLOOP_USER:=devloop}"
     : "${SUPERVISOR_USER:=supervisor}"
     : "${AGENT_USER:=devloop-agent}"
@@ -107,6 +123,9 @@ ops_load_params() {
     : "${SOURCE_REF:=}"
     : "${SOURCE_CLONE:=$DEVLOOP_HOME/devloop-source}"
     : "${LAUNCHER_DIR:=/usr/local/lib/devloop}"
+    : "${REPO_LOCK_DIR:=/run/devloop/repos}"
+    : "${REPO_LOCK_GROUP:=devloop-repos}"
+    : "${TMPFILES_FILE:=/etc/tmpfiles.d/devloop-repos.conf}"
 
     [[ $REPO =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || die "REPO deve essere owner/nome: '$REPO'"
     [[ $APP_PREFIX =~ ^[a-z0-9-]*$ ]] || die "APP_PREFIX ammette solo minuscole, cifre e '-': '$APP_PREFIX'"
@@ -145,7 +164,27 @@ ops_load_params() {
         LAUNCHER_ARGS="--state-dir $STATE_PATH"
         LAUNCHER_CMD="/usr/bin/env -C $DEVLOOP_CLONE /usr/bin/python3 $LAUNCHER $LAUNCHER_ARGS"
     fi
-    [[ $SERVICE_NAME =~ ^[A-Za-z0-9_-]+$ ]] || die "SERVICE_NAME non valido: '$SERVICE_NAME'"
+    # L'unità del servizio: devloop.service, oppure con PROJECT l'unità template devloop@.service
+    # con i parametri del progetto in una drop-in della sua istanza.
+    if [ -n "$PROJECT" ]; then
+        UNIT_FILE=$SYSTEMD_DIR/devloop@.service
+        UNIT_TEMPLATE=devloop@.service
+        DROPIN_FILE=$SYSTEMD_DIR/$SERVICE_NAME.service.d/project.conf
+    else
+        [[ $SERVICE_NAME =~ ^[A-Za-z0-9_-]+$ ]] || die "SERVICE_NAME non valido: '$SERVICE_NAME'"
+        UNIT_FILE=$SYSTEMD_DIR/$SERVICE_NAME.service
+        UNIT_TEMPLATE=devloop.service
+        DROPIN_FILE=''
+    fi
+    # La directory dei lock per repository (ADR 0006, R8): comune agli utenti devloop dell'host,
+    # fuori dalle loro home e dagli state_dir, almeno due livelli sotto la radice.
+    [[ $REPO_LOCK_DIR =~ ^/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$ ]] && ! [[ $REPO_LOCK_DIR/ =~ /\.\.?/ ]] \
+        || die "REPO_LOCK_DIR deve essere un percorso assoluto di almeno due livelli, senza spazi né '.' o '..': '$REPO_LOCK_DIR'"
+    local inside
+    for inside in "$DEVLOOP_HOME" "$STATE_PATH" "$DEVLOOP_CLONE"; do
+        [[ $REPO_LOCK_DIR/ != "$inside"/* ]] && [[ $inside/ != "$REPO_LOCK_DIR"/* ]] \
+            || die "REPO_LOCK_DIR non può stare dentro né contenere $inside: è comune a tutti i progetti dell'host"
+    done
     [[ $DEVLOOP_PATH =~ ^[A-Za-z0-9._/:-]+$ ]] || die "DEVLOOP_PATH non valido: '$DEVLOOP_PATH'"
     [[ $AGENT_PATH =~ ^[A-Za-z0-9._/:-]+$ ]] || die "AGENT_PATH non valido: '$AGENT_PATH'"
     local sudoers
@@ -156,10 +195,12 @@ ops_load_params() {
     _require_name DEVLOOP_USER
     _require_name SUPERVISOR_USER
     _require_name AGENT_USER
+    _require_name REPO_LOCK_GROUP
     [ "$AGENT_USER" != "$DEVLOOP_USER" ] || die "AGENT_USER deve essere diverso da DEVLOOP_USER"
     local path
     for path in DEVLOOP_HOME SUPERVISOR_HOME AGENT_HOME DEVLOOP_CLONE SUPERVISOR_CLONE \
-        DEVLOOP_KEY_DIR SUPERVISOR_KEY_DIR SYSTEMD_DIR SUDOERS_FILE AGENT_SUDOERS_FILE; do
+        DEVLOOP_KEY_DIR SUPERVISOR_KEY_DIR SYSTEMD_DIR SUDOERS_FILE AGENT_SUDOERS_FILE \
+        TMPFILES_FILE; do
         _require_abs "$path"
     done
 }
