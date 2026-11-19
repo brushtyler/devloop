@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from .markdown import agent_bot, devloop_version, header, parse_version
-from .schema import load_schema, schema_path, validate, SchemaError
+from .schema import load_schema, schema_path, validate, with_defaults, SchemaError
 from .unavailability import reset_seconds
 from .workspace import git_config_env, partial_text, run_in_group
 
@@ -833,7 +833,9 @@ class AgentRunner:
             raise AgentError(message, log)
         try:
             output = extract_output(agent.kind, done.stdout, out_file)
-            return validate(output, load_schema(schema_name))
+            # A field the output may lack is filled in before the check (#434): a review
+            # without ``operator_reason`` is a ``decision``, not a failure of the tool.
+            return validate(with_defaults(schema_name, output), load_schema(schema_name))
         except EnvelopeError as exc:
             reason = unavailable_reason(agent, None, text)
             if reason:

@@ -11,7 +11,7 @@ these names: import them from here.
 from dataclasses import dataclass, field, replace
 
 from .policy import receipt_of
-from .review import CI, current_round, current_verdict, open_findings, owner_of, round_verdict
+from .review import CI, current_round, flow_verdict, open_findings, owner_of, round_verdict
 from .supervision import ISSUE_STEPS, RETRY
 
 RECHECK_COMMAND = '/devloop recheck'
@@ -781,8 +781,10 @@ def waiting_reviewers(records, conclave=()):
     """The reviewers the round ``records`` still waits for before its verdict counts: those of
     ``pending_reviewers``, or none with ``conclave`` configured (#141) once a reviewer of the
     round asked for the operator. The first ``needs_operator`` suspends the round: the verdict
-    applies at once, no other review of the round is asked, and the round opens one conclave."""
-    if conclave and any(current_verdict(r['verdict']) == 'needs_operator' for r in records):
+    applies at once, no other review of the round is asked, and the round opens one conclave.
+    A ``needs_operator`` for the trust policy (#434) asks for no decision: it suspends nothing,
+    and the round waits for every reviewer of the quorum."""
+    if conclave and any(flow_verdict(r) == 'needs_operator' for r in records):
         return []
     return pending_reviewers(records)
 
@@ -865,7 +867,9 @@ def ci_joins_round(pr):
             or pr.rereview or ci_in_round(latest)
             or any(f['round'] == latest[0]['round'] for f in pr.fixes)):
         return []
-    verdicts = {current_verdict(r['verdict']) for r in latest}
+    # A needs_operator for the trust policy (#434) counts as the request for changes or the
+    # approval it acts as (``flow_verdict``).
+    verdicts = {flow_verdict(r) for r in latest}
     if 'request_changes' in verdicts:
         return latest
     if (verdicts == {'approve'} and not pr.stale_receipt
@@ -878,7 +882,7 @@ def voided_approval(records):
     """Whether the CI failure in the round ``records`` voided its approval (#359): every
     reviewer of the round, the ``ci`` record aside, approved."""
     reviewers = [r for r in records if owner_of(r) != CI]
-    return bool(reviewers) and all(current_verdict(r['verdict']) == 'approve' for r in reviewers)
+    return bool(reviewers) and all(flow_verdict(r) == 'approve' for r in reviewers)
 
 
 def changes_before_ci(pr):

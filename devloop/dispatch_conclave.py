@@ -38,7 +38,7 @@ from .markdown import carries_record, read_marker
 from .planning import (Action, PullRequest, label_names, operator_blocked, operator_held,
                        preflight_state, waiting_reviewers)
 from .policy import independent
-from .review import current_round, owner_of, round_verdict
+from .review import current_round, flow_verdict, owner_of, round_verdict
 from .workspace import WorkspaceError
 
 # The steps whose ``blocked`` notice convenes a conclave (#141): the sync is not one of them.
@@ -180,7 +180,8 @@ class ConclaveMixin:
                 or round_verdict(records) != 'needs_operator'):
             return None
         latest = records[0]['round']
-        first = next(r for r in records if r['verdict'] == 'needs_operator')
+        # A needs_operator for the trust policy asks for no decision (#434): never the block.
+        first = next(r for r in records if flow_verdict(r) == 'needs_operator')
         reviewer = owner_of(first)
         position = max(p for p, r in entries if r['round'] == latest)
         block = {'kind': 'review', 'round': latest, 'reviewer': reviewer,

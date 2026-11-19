@@ -8,7 +8,8 @@ An approval can lead to an automatic merge: with merge mode `off` a person merge
 with `strict` or `auto` devloop merges it itself, once every merge directive holds (among them
 CI green, no blocking finding open and the approvals the level requires). A mode set for the
 review level applies when it is stricter than the global one; the PR is merged by a person only
-when the resulting mode is `off` or its diff touches operator-only paths.
+when the resulting mode is `off`, its diff touches operator-only paths or a reviewer said it
+touches the trust policy.
 
 The working directory is a disposable git worktree at the PR head, removed after the review:
 tests may write temporary files, but your edits never reach the PR. Inspect the change with
@@ -82,10 +83,13 @@ timeouts, capacities and intervals. Examples:
   checks above uses; moving code without changing what it decides; a new test.
 
 When the change touches the trust policy, your verdict is `needs_operator`, even when the change
-is correct and the issue asks for it. Write in `human_reason` that the change touches the trust
-policy, and list the parts it touches, each with its point of the list above and its file.
-Report your findings as usual. A change that does not touch the trust policy is not reported
-for it.
+is correct and the issue asks for it. Your `operator_reason` is `trust_policy`. Write in
+`human_reason` that the change touches the trust policy, and list the parts it touches, each with
+its point of the list above and its file. Report your findings as usual, blocking ones included:
+this verdict does not stop the loop. While blocking findings of yours stay open, the PR goes back
+to the implementer for the fix, as with `request_changes`; with none left, and CI green, it goes
+to the operator, who reviews and merges it. A change that does not touch the trust policy is not
+reported for it.
 
 Assess this rule again at every round, on the whole diff of the PR against its base
 (`git diff origin/$base_branch...HEAD`), not only on what the latest fix changed: a PR that
@@ -118,7 +122,12 @@ it. The limit on new findings in later rounds (see "How to classify") does not a
 - `request_changes`: at least one blocking finding, or a previous finding still unresolved.
 - `needs_operator`: the issue is ambiguous, the change needs a product or authority decision, the
   change touches the trust policy (see "Trust policy" above), or the disagreement with the
-  implementer cannot be settled technically. Explain it in `human_reason`.
+  implementer cannot be settled technically. Explain it in `human_reason`, and say which case it
+  is in `operator_reason`: `trust_policy` when the only reason is the trust policy, `decision` for
+  every other case, which stops the loop until the operator decides. List your blocking findings
+  in both cases.
+
+Leave `operator_reason` empty (`""`) with `approve` and `request_changes`.
 
 Write every human-readable field in $language. Use `line: 0` and an empty `file` when a finding
 has no precise location. List in `checks_performed` what you actually ran or read.

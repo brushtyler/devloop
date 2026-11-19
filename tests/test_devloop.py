@@ -41,10 +41,10 @@ def finding(title='bug', file='x.py', line=3, security=False):
             'security': security}
 
 
-def raw_review(verdict='approve', blocking=(), previous=(), human=''):
+def raw_review(verdict='approve', blocking=(), previous=(), human='', reason=''):
     return {'verdict': verdict, 'summary': 'ok', 'blocking_findings': list(blocking),
             'non_blocking_findings': [], 'previous_findings': list(previous),
-            'human_reason': human, 'checks_performed': ['read diff']}
+            'human_reason': human, 'operator_reason': reason, 'checks_performed': ['read diff']}
 
 
 BASE = 'd' * 40  # the base branch commit FakeWS reports

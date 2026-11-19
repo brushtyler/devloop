@@ -132,6 +132,19 @@ class TrustPolicyPromptTest(unittest.TestCase):
                       'withdrawn, and the change does not touch the trust policy.', verdicts)
         self.assertIn('the change touches the trust policy (see "Trust policy" above)', verdicts)
 
+    def test_the_review_tells_trust_policy_from_decision(self):
+        # #434: the reason of a needs_operator, and the findings listed in both cases.
+        text = flat(section('review'))
+        self.assertIn('Your `operator_reason` is `trust_policy`.', text)
+        self.assertIn('Report your findings as usual, blocking ones included: this verdict does '
+                      'not stop the loop.', text)
+        verdicts = flat((PROMPT_DIR / 'review.md').read_text(encoding='utf-8'))
+        self.assertIn('`trust_policy` when the only reason is the trust policy, `decision` for '
+                      'every other case, which stops the loop until the operator decides. List '
+                      'your blocking findings in both cases.', verdicts)
+        self.assertIn('Leave `operator_reason` empty (`""`) with `approve` and '
+                      '`request_changes`.', verdicts)
+
     def test_the_advisory_review_asks_for_doubts_and_the_first_residual_risk(self):
         text = flat(section('advisory'))
         self.assertIn('your `opinion` is `dubbi`, or `contrario` when the change weakens a check',
@@ -193,6 +206,14 @@ class TrustPolicyDocsTest(unittest.TestCase):
         self.assertIn('its opinion is `dubbi`, or `contrario` when the change weakens a check',
                       text)
         self.assertIn('"Policy di fiducia toccata:"', text)
+        # #434: one hand-off to the operator.
+        for words in ('`trust_policy` for this rule, `decision` for anything else',
+                      'A `trust_policy` does not stop the loop',
+                      'within `max_review_rounds` as usual',
+                      'gets `agent:needs-operator` with the',
+                      'devloop never merges the PR itself',
+                      'A `decision`, or a `needs_operator` without `operator_reason`'):
+            self.assertIn(words, text)
 
     def test_the_guide_lists_the_residual_risks(self):
         text = self.guide_section()
@@ -217,7 +238,8 @@ class TrustPolicyDocsTest(unittest.TestCase):
                       'the opinion `dubbi`', '"Policy di fiducia toccata:"',
                       'the same closed list of five points',
                       '[Changes to the trust policy](guide.md#changes-to-the-trust-policy)',
-                      'do not change', 'residual risks, accepted by the operator',
+                      '`advisory.json` does not change, `review.json` only gains '
+                      '`operator_reason` (#434)', 'residual risks, accepted by the operator',
                       'the attention of the reviewers at every round', 'a disguised change',
                       'the local overlay', 'the reserved perimeter'):
             self.assertIn(words, body)

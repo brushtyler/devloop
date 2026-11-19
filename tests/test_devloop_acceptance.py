@@ -235,7 +235,8 @@ class DispatcherTests(unittest.TestCase):
                       'once every merge directive holds', prompt)
         self.assertIn('A mode set for the review level applies when it is stricter than the '
                       'global one; the PR is merged by a person only when the resulting mode is '
-                      '`off` or its diff touches operator-only paths.', prompt)
+                      '`off`, its diff touches operator-only paths or a reviewer said it touches '
+                      'the trust policy.', prompt)
         self.assertNotIn('A stricter mode for the review level', prompt)
 
     def test_pr_without_map_gets_a_finding_and_the_fix_provides_it(self):

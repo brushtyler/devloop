@@ -23,7 +23,7 @@ from .config import INSTALL_ROOT
 from .github import GitHubError
 from .journal import ATTEMPT_ID, PHASES, STORY_ID
 from .policy import EVENTS, valid_receipt
-from .review import LEGACY_VERDICT, current_verdict
+from .review import LEGACY_VERDICT, current_verdict, own_open_findings, trust_policy
 from .supervision import COMMANDS, MAX_RETRIES, OUTCOMES, critical, describe
 
 UNKNOWN = 'non noto'
@@ -554,6 +554,8 @@ _VERDICT_TEXT = {
     'request_changes': 'Modifiche richieste',
     'needs_operator': 'Serve una decisione dell\'operatore',
 }
+# A ``needs_operator`` for the trust policy (#434).
+_TRUST_TEXT = 'Policy di fiducia: review e merge dell\'operatore'
 _STATUS_TEXT = {'resolved': 'risolto', 'unresolved': 'non risolto', 'withdrawn': 'ritirato'}
 _ACTION_TEXT = {'fixed': 'corretto', 'disputed': 'contestato', 'not_applicable': 'non applicabile'}
 
@@ -581,8 +583,10 @@ def _findings(findings):
 def render_review(review, head, native=None):
     """Markdown body (after the header) for a normalized review record. ``native``: the event
     of the native review that carries it, stated for a ``needs_operator`` verdict (#418)."""
+    trust = trust_policy(review)
+    verdict = _TRUST_TEXT if trust else _VERDICT_TEXT[review['verdict']]
     parts = [f'## Review automatica, round {review["round"]}/{review["max_rounds"]}', '',
-             f'**Verdetto:** {_VERDICT_TEXT[review["verdict"]]}  ',
+             f'**Verdetto:** {verdict}  ',
              f'**Commit:** `{review["head_sha"][:12]}` · **CI:** {review["ci"]}']
     receipt = review.get('receipt')
     if valid_receipt(receipt):
@@ -613,14 +617,23 @@ def render_review(review, head, native=None):
                       'limite dei round.']
     parts +=['', review['summary'].strip()]
     if review['verdict'] == 'needs_operator' and review['human_reason']:
-        parts += ['', '### Decisione richiesta', '', review['human_reason'].strip()]
+        title = 'Policy di fiducia toccata' if trust else 'Decisione richiesta'
+        parts += ['', f'### {title}', '', review['human_reason'].strip()]
+    if trust:
+        # #434: the loop goes on; only the merge is the operator's.
+        parts += ['', '> La PR tocca la policy di fiducia: devloop non si ferma. Con finding '
+                      'bloccanti aperti la PR torna all\'implementer per la correzione, come per '
+                      'una richiesta di modifiche; senza, e con la CI verde, va all\'operatore '
+                      'una sola volta, per la review e il merge.']
     if review['verdict'] == 'needs_operator' and native:
         outcome = ('restano aperti finding bloccanti del reviewer'
                    if native == 'REQUEST_CHANGES'
                    else 'non resta aperto nessun finding bloccante del reviewer')
+        wait = ('il merge resta all\'operatore' if trust
+                else 'la decisione resta all\'operatore, e devloop tiene la PR in attesa della '
+                     'sua decisione')
         parts += ['', f'> Review nativa `{native}`: {outcome}. Non è un\'approvazione del merge: '
-                      'la decisione resta all\'operatore, e devloop tiene la PR in attesa della '
-                      'sua decisione.']
+                      f'{wait}.']
     if review['blocking_findings']:
         parts += ['', '### Bloccanti', '', _findings(review['blocking_findings'])]
     if review['non_blocking_findings']:
@@ -657,16 +670,6 @@ def fitted(head, text, kind, payload, limit=MAX_BODY):
 
 
 _REVIEW_EVENT = {'approve': 'APPROVE', 'request_changes': 'REQUEST_CHANGES'}
-
-
-def own_open_findings(review):
-    """The blocking findings of its own that ``review`` leaves open: those it opens, and those
-    of its reviewer from earlier rounds it marks ``unresolved``. Another owner's finding is not
-    its to close (#111), so it does not count."""
-    owner = review.get('reviewer')
-    earlier = [p for p in review['previous_findings'] if p['status'] == 'unresolved'
-               and str(p.get('key', '')).split('/')[1:2] == [owner]]
-    return list(review['blocking_findings']) + earlier
 
 
 def native_event(review):
