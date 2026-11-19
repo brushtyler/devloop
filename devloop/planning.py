@@ -738,7 +738,9 @@ def _plan_preflight(snapshot, cfg, pr_issues, free, urgent='', implement=True):
     valid blocks the issue again if its ``agent:needs-operator`` was removed. An issue the check
     blocked is checked again, whatever ``free``, when its text changed, a trusted user asked
     for it or someone who may admit it added ``agent:ready`` again (#270); when the base branch
-    advanced past a failure that depends on it (#270), only within ``free``, as any check. Any
+    advanced past a failure that depends on it (#270), only within ``free``, as any check. On
+    such a request the block need only be the issue's latest (#468); a request that runs no
+    check is answered once (``recheck_refused``). Any
     other ``agent:needs-operator`` (or its name before #248) is left alone. An issue in
     ``agent:needs-supervisor`` waits for the supervisor (#182). Without ``implement`` (#342) an
     issue whose check passed waits, and takes no slot from the checks of the others."""
@@ -762,6 +764,12 @@ def _plan_preflight(snapshot, cfg, pr_issues, free, urgent='', implement=True):
                         continue
                     taken += 1
                 actions.append(Action('preflight', issue['number'], reason))
+            elif view.get('refused'):
+                # A request of a person that runs no check (#468): answered once, with why.
+                refused = view['refused']
+                actions.append(Action('recheck_refused', issue['number'],
+                                      f'{refused["request"]} by {refused["by"]} runs no '
+                                      f'readiness check: {refused["log"]}'))
         elif state == 'not_ready':
             actions.append(Action('preflight_block', issue['number'],
                                   'the readiness check of the current text failed'))
