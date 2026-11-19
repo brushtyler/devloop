@@ -146,7 +146,8 @@ fallisce (`config: missing 'test_cmd'`) e dopo tre tick falliti `devloop run` si
 codice 4, che systemd non riavvia (`RestartPreventExitStatus=4`).
 
 - **Prima del merge della PR di R3** (meglio): i passi 1–5 con il checkout della testa della PR,
-  poi `sudo systemctl restart devloop`, poi il merge. La copia di prima legge già il file di
+  l'aggiornamento del clone di devloop del passo 6, poi `sudo systemctl restart devloop`, poi il
+  merge. La copia di prima legge già il file di
   progetto (R2) e con le chiavi dell'overlay dà gli stessi valori; il pin dopo il merge (auto, o
   il passo 6 a mano) trova il file di progetto.
 - **Dopo il merge**: fermare il loop **prima** del merge (`sudo systemctl stop devloop`), così
@@ -232,12 +233,43 @@ come root legge lo `state_dir` di `devloop` e la copia fissata, e il checkout ag
    | 1 | una riga per differenza, poi `N difference(s): the migration is not equivalent` | niente merge né pin finché non si è capito perché. Di solito: le chiavi del passo 4 mancanti (`config agents.agy.…`), una chiave dell'overlay che sostituisce un valore del file di progetto, un file di progetto copiato da un altro commit. Correggere e rilanciare |
    | 2 | un lato non si carica, o un argomento è sbagliato: il messaggio dice quale (`not an installation of devloop`, `the configuration does not load: …`, `not a file`) | correggere il percorso o il file indicato (per esempio un file di progetto link, con più hard link o con un errore di sintassi) e rilanciare; il confronto non è stato fatto |
 
-6. **Pin e riavvio**, dopo il merge (prima del merge basta `sudo systemctl restart devloop`):
+6. **Clone di devloop, pin e riavvio.** Prima il clone di devloop, aggiornato con un
+   fast-forward e come `devloop`, perché resti suo; sempre, anche prima del merge, e **prima** del
+   pin e del riavvio:
+
+   ```bash
+   sudo -u devloop -H git -C /home/devloop/ssdlc fetch origin
+   sudo -u devloop -H git -C /home/devloop/ssdlc merge --ff-only origin/main
+   ```
+
+   Il launcher `scripts/devloop-pinned` viene dal clone, non dalla copia fissata: è lui che passa
+   `--project-config` alla copia, e quello di un clone vecchio non lo passa, così pin e loop
+   partono senza file di progetto anche dopo i passi 1–5. Se il fast-forward fallisce, il clone ha
+   commit o modifiche locali: vanno capite prima di andare avanti.
+
+   Prima del merge basta poi `sudo systemctl restart devloop`. Dopo il merge, il pin e il
+   riavvio:
 
    ```bash
    sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned pin origin/main
    sudo systemctl start devloop      # restart, se il loop è in esecuzione
    ```
+
+   **Quando la copia in uso è precedente a R3**, il pin si fa invece con il codice nuovo, dal
+   clone aggiornato, passando file di progetto e overlay:
+
+   ```bash
+   cd /home/devloop/ssdlc && sudo -u devloop -H python3 -m devloop \
+       --project-config /home/devloop/ssdlc/.ssdlc/devloop/project.toml \
+       --local-config /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml pin origin/main
+   sudo systemctl start devloop      # restart, se il loop è in esecuzione
+   ```
+
+   `devloop-pinned pin` non basta perché il pin lo fa la copia in uso: il launcher esegue la copia
+   fissata, che controlla la copia nuova con gli argomenti che conosce lei. Una copia precedente a
+   R2 non passa il file di progetto al controllo della copia nuova, che la rifiuta (`config:
+   missing 'test_cmd'`). `python3 -m devloop` dal clone esegue invece il codice del clone appena
+   aggiornato. I pin successivi tornano al launcher.
 
    Lo smoke test del pin usa il file di progetto. Un loop in corso legge un file di progetto
    nuovo solo al riavvio.
@@ -253,6 +285,11 @@ anche togliere, e la versione della policy torna quella di prima.
 Una PR che richiede un passo sull'host (un file nello `state_dir`, una chiave dell'overlay, un
 comando di root) dice nella descrizione e nella guida di `ops/` **che cosa fare prima del merge**,
 con i comandi completi, l'utente che li esegue e cosa fare se devloop ha già preso la copia nuova.
+
+Se la PR cambia il launcher (`scripts/devloop-pinned`) o ciò che il pin deve passare alla copia
+nuova (un argomento, un file dello `state_dir`), la descrizione dice anche di aggiornare il clone
+di devloop prima del pin e del riavvio e di fare il pin con il codice nuovo, dal clone aggiornato,
+come al passo 6: la copia in uso non sa passare alla copia nuova ciò che ancora non conosce.
 
 Dal #462 il passo è anche dichiarato nell'output strutturato dell'implementer (`host_step`: un
 testo breve con il rimando a questa guida), e il reviewer controlla che ci sia. devloop mergia la
