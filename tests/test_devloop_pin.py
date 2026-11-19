@@ -387,16 +387,64 @@ class AutoPinTests(GitCase):
         self.assertEqual(snapshots, [1])
         self.assertEqual(self.pointed(), old.resolve())
 
-    def test_a_failed_pin_stops_the_tick_and_keeps_the_pointer(self):
+    def test_a_copy_failing_the_checks_keeps_the_pointer_and_the_tick_goes_on(self):
+        # #453: the commit is resolved, its copy fails the checks: not a failed tick.
         old = self.pin('main')
-        self.push('broken', 'devloop/__init__.py', "raise ImportError('broken on purpose')\n")
+        broken = self.push('broken', 'devloop/__init__.py',
+                           "raise ImportError('broken on purpose')\n")
         pin.request(self.state, 100, SHA1)
         d, snapshots = self.dispatcher(auto=True)
+        with self.assertRaisesRegex(AssertionError, 'plan'):
+            d.tick()  # planning goes on, from the running copy
+        self.assertEqual((snapshots, self.pointed()), ([1], old.resolve()))
+        self.assertIsNone(pin.pending(self.state))  # the request is dropped
+        self.assertTrue(any(line.startswith(
+            'auto-pin of origin/main failed the checks, the pinned copy is unchanged and the '
+            f'request is dropped: the copy of {broken[:12]} failed the checks: ')
+            and 'broken on purpose' in line for line in self.logs), self.logs)
+        record = pin.failed(self.state)
+        self.assertEqual((record['sha'], record['ref']), (broken, 'origin/main'))
+        self.assertIn('broken on purpose', record['reason'])
+        # A pin that succeeds forgets the failure.
+        self.push('fixed', 'devloop/__init__.py',
+                  (REPO / 'devloop' / '__init__.py').read_text(encoding='utf-8'))
+        self.pin('main')
+        self.assertIsNone(pin.failed(self.state))
+
+    def test_a_failure_after_the_pointer_moved_keeps_the_pin_and_restarts(self):
+        # #453: once current points at the new copy, a failure (here, the removal of the
+        # request) is logged: the pin stands, nothing records it as failed, and the process
+        # starts again from the new copy.
+        self.pin('main')
+        new_sha = self.push('merged', 'devloop/extra.txt', 'new\n')
+        pin.request(self.state, 100, new_sha)
+        d, snapshots = self.dispatcher(auto=True)
+        with mock.patch.object(pin, 'clear_pending', side_effect=OSError('disk hiccup')), \
+                self.assertRaises(pin.Repinned) as raised:
+            d.tick()
+        self.assertEqual(raised.exception.copy, self.state / f'pinned-{new_sha[:12]}')
+        self.assertEqual(self.pointed().name, f'pinned-{new_sha[:12]}')
+        self.assertEqual(snapshots, [])
+        self.assertIsNone(pin.failed(self.state))
+        self.assertIn(f'the request of the auto-pin not removed, the next tick pins '
+                      f'{new_sha[:12]} again: disk hiccup', self.logs)
+        self.assertFalse([line for line in self.logs if 'failed the checks' in line], self.logs)
+        # The request stayed: the next pin reuses the copy and removes it.
+        self.assertEqual(pin.pending(self.state)['pr'], 100)
+        self.pin('origin/main', fetch=False)
+        self.assertIsNone(pin.pending(self.state))
+
+    def test_a_pin_failing_before_the_commit_is_resolved_still_fails_the_tick(self):
+        old = self.pin('main')
+        pin.request(self.state, 100, SHA1)
+        d, snapshots = self.dispatcher(auto=True)
+        git(self.root, 'remote', 'set-url', 'origin', str(self.tmp / 'gone.git'))
         with self.assertRaisesRegex(pin.PinError, 'auto-pin of origin/main failed, the pinned '
-                                                  'copy is unchanged: .*broken on purpose'):
+                                                  'copy is unchanged: .*git fetch'):
             d.tick()
         self.assertEqual((snapshots, self.pointed()), ([], old.resolve()))
         self.assertEqual(pin.pending(self.state)['pr'], 100)  # tried again at the next tick
+        self.assertIsNone(pin.failed(self.state))  # no commit to record
         # `run` counts it as a failed tick and goes on with the next one, after the backoff.
         d.tick = mock.Mock(side_effect=[pin.PinError('auto-pin failed'), KeyboardInterrupt])
         loop = runloop.Loop(d.tick, None, self.tmp / 'STOP', log=self.logs.append,
@@ -495,6 +543,71 @@ class ExternalMergeTests(GitCase):
         self.assertEqual((len(self.smoked), snapshots), (1, [1, 1]))
         self.assertEqual(self.pointed(), old.resolve())
 
+    def test_a_commit_failing_the_checks_is_tried_again_only_at_a_new_commit(self):
+        # #453: the same commit is not tried at each tick; a new one of origin/main is.
+        old = self.pin('main')
+        d, snapshots = self.dispatcher(auto=True)
+        tries = []
+        real = pin.verify
+
+        def verify(copy, *args, **kw):
+            tries.append(Path(copy).name)
+            return real(copy, *args, **kw)
+        broken = self.push_elsewhere('merged by hand', 'devloop/__init__.py',
+                                     "raise ImportError('broken on purpose')\n")
+        with mock.patch.object(pin, 'verify', verify):
+            for _ in range(3):
+                with self.assertRaisesRegex(AssertionError, 'plan'):
+                    d.tick()
+            self.assertEqual((len(tries), snapshots), (1, [1, 1, 1]))
+            self.assertEqual(pin.failed(self.state)['sha'], broken)
+            self.assertEqual(self.pointed(), old.resolve())
+            newer = self.push_elsewhere('fixed by hand', 'devloop/__init__.py',
+                                        (REPO / 'devloop' / '__init__.py').read_text())
+            with self.assertRaises(pin.Repinned):
+                d.tick()
+        self.assertEqual(len(tries), 2)
+        self.assertEqual(self.pointed().name, f'pinned-{newer[:12]}')
+        self.assertIsNone(pin.failed(self.state))
+
+    def test_a_commit_failing_the_checks_after_an_advance_during_the_tick_is_not_tried_again(self):
+        # #453: origin/main advances from A to B between observe() and the fetch of the pin.
+        # The pin resolves B, which fails; observe() saw A, so the next tick requests B: the
+        # auto-pin does not check it again. A pin by hand does.
+        old = self.pin('main')
+        d, snapshots = self.dispatcher(auto=True)
+        tries = []
+        real_verify, real_observe = pin.verify, d.pinner.observe
+        broken = []
+
+        def verify(copy, *args, **kw):
+            tries.append(Path(copy).name)
+            return real_verify(copy, *args, **kw)
+
+        def observe(branch, touches):
+            requested = real_observe(branch, touches)
+            if not broken:  # the advance during the first tick only
+                broken.append(self.push_elsewhere('broken by hand', 'devloop/__init__.py',
+                                                  "raise ImportError('broken on purpose')\n"))
+            return requested
+        d.pinner.observe = observe
+        self.push_elsewhere('merged by hand', 'devloop/extra.txt', 'new\n')
+        with mock.patch.object(pin, 'verify', verify):
+            for _ in range(3):
+                with self.assertRaisesRegex(AssertionError, 'plan'):
+                    d.tick()
+            self.assertEqual((len(tries), snapshots), (1, [1, 1, 1]))
+            self.assertEqual(pin.failed(self.state)['sha'], broken[0])
+            self.assertEqual(self.pointed(), old.resolve())
+            self.assertIsNone(pin.pending(self.state))
+            self.assertTrue(any(f'the auto-pin of {broken[0][:12]} already failed' in line
+                                for line in self.logs), self.logs)
+            # By hand the same commit is checked again.
+            with self.assertRaisesRegex(pin.PinError, 'broken on purpose'):
+                self.pin('main')
+        self.assertEqual(len(tries), 2)
+        self.assertEqual(self.pointed(), old.resolve())
+
     def test_a_fetch_that_fails_is_logged_and_the_tick_goes_on(self):
         self.pin('main')
         d, snapshots = self.dispatcher(auto=True)
@@ -549,6 +662,40 @@ class BehindTests(GitCase):
             cli.main(['status'])
         self.assertTrue(any(line.startswith(f'pinned copy: {copy.name} ({self.first[:12]}) '
                                             'is behind origin/main') for line in lines), lines)
+
+    def test_status_shows_why_the_last_auto_pin_failed(self):
+        # #453: the copy is behind, and status says why the auto-pin did not move current.
+        copy = self.pin('main')
+        broken = self.push_elsewhere('merged by hand', 'devloop/__init__.py',
+                                     "raise ImportError('broken on purpose')\n")
+        pinner = pin.AutoPin(self.root, self.state, log=self.logs.append,
+                             smoke=self.passing_smoke)
+        with self.assertRaises(pin.CheckFailed):
+            pinner.pin('origin/main')
+        d = Dispatcher(CFG, None, FakeWS(), FakeRunner(), log=self.logs.append, pinner=pinner)
+        d.snapshot = lambda: Snapshot([], [], [])
+        lines = []
+        with mock.patch.object(cli, 'build', return_value=(CFG, self.state, d)), \
+                mock.patch.object(cli, 'log', lines.append), \
+                mock.patch.object(cli, 'label_transition', return_value=None), \
+                mock.patch.object(pin, 'INSTALL_ROOT', copy):
+            cli.main(['status'])
+        failed = [line for line in lines if line.startswith('auto-pin failed at ')]
+        self.assertEqual(len(failed), 1, lines)
+        self.assertIn(f': origin/main at {broken[:12]} is not pinned, the running copy stays: ',
+                      failed[0])
+        self.assertIn('the check failed: ImportError: broken on purpose', failed[0])
+        self.assertTrue(failed[0].endswith('; a new commit of origin/main or a pin by hand '
+                                           '(devloop pin) tries again'), failed[0])
+        # Nothing to say once a pin succeeds.
+        pin.clear_failed(self.state)
+        lines.clear()
+        with mock.patch.object(cli, 'build', return_value=(CFG, self.state, d)), \
+                mock.patch.object(cli, 'log', lines.append), \
+                mock.patch.object(cli, 'label_transition', return_value=None), \
+                mock.patch.object(pin, 'INSTALL_ROOT', copy):
+            cli.main(['status'])
+        self.assertFalse([line for line in lines if line.startswith('auto-pin failed')], lines)
 
 
 # A fake copy (#260): its `python3 -m devloop` does, for each step and attempt, what plan.json
@@ -887,14 +1034,59 @@ class AutoPinSmokeTests(GitCase):
         self.dispatcher(gh).tick()
         self.assertEqual(len(gh.comments), 1)
 
-    def test_other_pin_errors_still_fail_the_tick(self):
+    def test_a_copy_failing_the_checks_alerts_once_and_run_goes_on(self):
+        # #453: the copy fails the checks before the smoke test (here, its configuration).
         old = self.pin('main')
-        self.push('broken', 'devloop/__init__.py', "raise ImportError('broken on purpose')\n")
-        pin.request(self.state, 100, SHA1)
-        with self.assertRaisesRegex(pin.PinError, 'auto-pin of origin/main failed'):
-            self.dispatcher(AlertGH()).tick()
-        self.assertEqual(pin.pending(self.state)['pr'], 100)
+        self.smoked.clear()
+        broken = self.push('broken', 'devloop/config.toml',
+                           (self.root / 'devloop' / 'config.toml').read_text()
+                           .replace('test_cmd', 'test_cmd_gone'))
+        pin.request(self.state, 100, broken)
+        gh = AlertGH()
+        d = self.dispatcher(gh)
+        ticks = []
+
+        def tick():
+            ticks.append(1)
+            if len(ticks) > 3:
+                raise KeyboardInterrupt
+            if len(ticks) == 2:
+                pin.request(self.state, 101, broken)  # the same commit, requested again
+            return d.tick()
+
+        def watch(seconds, sleep, check):
+            return runloop.NOTHING_NEW
+        loop = runloop.Loop(tick, watch, self.tmp / 'STOP', log=self.logs.append,
+                            clock=lambda: 0, sleep=lambda s: None)
+        with self.assertRaises(KeyboardInterrupt):
+            loop.run()
+        self.assertEqual(self.smoked, [])  # refused before the smoke test
+        self.assertEqual(self.snapshots, [1, 1, 1])
+        self.assertFalse([line for line in self.logs if 'tick failed' in line], self.logs)
         self.assertEqual(self.pointed(), old.resolve())
+        self.assertIsNone(pin.pending(self.state))
+        (number, body), = gh.comments  # one alert for the commit
+        self.assertEqual(number, 7)
+        self.assertIn('## Pin automatico non riuscito', body)
+        self.assertIn(f'`{broken[:12]}`', body)
+        self.assertIn("missing 'test_cmd'", body)  # the reason
+        self.assertNotIn(str(self.tmp), body)  # never a path of the host
+        self.assertIn(f'  the refusal of {broken[:12]} was already reported on #7', self.logs)
+        # The record the daily summary reads (#453): the commit, the branch, when and why.
+        record = markdown.read_marker(body, 'pin')
+        self.assertEqual((record['sha'], record['ref']), (broken, 'origin/main'))
+        self.assertIn("missing 'test_cmd'", record['reason'])
+        self.assertNotIn(str(self.tmp), record['reason'])
+        self.assertRegex(record['at'], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
+
+    def test_the_public_reason_keeps_no_absolute_path(self):
+        self.assertEqual(pin.public_reason("pinned-abc: the check failed: config: missing "
+                                           "'test_cmd'"),
+                         "pinned-abc: the check failed: config: missing 'test_cmd'")
+        self.assertEqual(pin.public_reason('/home/op/state/project.toml: bad, see ~/x/y.toml '
+                                           'and devloop/config.toml\nsecond line'),
+                         '…/project.toml: bad, see …/y.toml and devloop/config.toml')
+        self.assertEqual(len(pin.public_reason('x' * 500)), 200)
 
 
 class FakePinner:

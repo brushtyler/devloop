@@ -348,6 +348,46 @@ class SummaryTest(unittest.TestCase):
         self.assertNotIn('ieri', text)
         self.assertNotIn('Causa', text)  # only the first line of the reason
 
+    def test_the_auto_pins_that_did_not_move_current(self):
+        # #453: the alert of a failed auto-pin on [run].alert_issue carries a ``pin`` record;
+        # the summary lists it on its day, with the commit left behind and the reason.
+        gh = ReportGH()
+        day = '2026-11-16'
+
+        def alert(number, at, login=DISPATCHER, **record):
+            gh.add(number, login, publishable('## Pin automatico non riuscito', 'pin', dict(
+                {'ref': 'origin/main', 'at': at}, **record)), at)
+
+        alert(76, f'{day}T13:03:00Z', sha='d' * 40,
+              reason="pinned-ddd: the check failed: config: missing `test_cmd`\nsecond line")
+        alert(76, f'{day}T09:00:00Z', sha='e' * 40, reason='smoke test: tick --dry-run')
+        # Not listed: another day, another identity, a malformed record.
+        alert(76, '2026-11-15T09:00:00Z', sha='f' * 40, reason='ieri')
+        alert(76, f'{day}T10:00:00Z', login=STRANGER, sha='a' * 40, reason='forged')
+        alert(76, f'{day}T11:00:00Z', sha='not a commit', reason='malformed')
+        when = report.parse_day(day)
+        s = report.Records(gh, TRUST, when, when, CFG.agents).summary(when)
+        self.assertEqual(s.pins, [
+            ('09:00', 76, 'origin/main', 'e' * 40, 'smoke test: tick --dry-run'),
+            ('13:03', 76, 'origin/main', 'd' * 40,
+             'pinned-ddd: the check failed: config: missing `test_cmd`')])
+        self.assertFalse(s.empty())
+        text = report.render_text(s)
+        self.assertIn('### Pin automatico non riuscito', text)
+        self.assertIn(f'- 13:03 #76: `origin/main` al commit `{"d" * 12}` non è fissato, la '
+                      'copia in esecuzione resta indietro. Motivo: `pinned-ddd: the check '
+                      "failed: config: missing 'test_cmd'`", text)
+        self.assertIn(f'- 09:00 #76: `origin/main` al commit `{"e" * 12}`', text)
+        for absent in ('ieri', 'forged', 'malformed', 'second line'):
+            self.assertNotIn(absent, text)
+        # Published in the body of [report] issue, as the rest of the day.
+        publisher = report.Publisher(gh, TRUST, CFG.repo, ISSUE, agents=CFG.agents,
+                                     log=lambda line: None,
+                                     clock=Clock(f'{day}T18:00:00Z'))
+        gh.clock = publisher._clock
+        publisher.publish()
+        self.assertIn(f'`origin/main` al commit `{"d" * 12}` non è fissato', gh.body)
+
     def test_an_empty_day(self):
         gh = ReportGH()
         day = report.parse_day('2026-11-10')

@@ -21,6 +21,15 @@ head last seen (``pin-base.json``; the first time, since the commit of ``current
 to those paths, requests the pin of the new head. ``devloop status`` says when the copy it runs
 from is behind ``origin/<base_branch>`` on those paths (``AutoPin.behind``).
 
+An auto-pin whose commit fails the checks once resolved (#453: the files, the import and the
+configuration of the copy, or the smoke test) is not a failed tick: ``AutoPin.pin`` records the
+commit and the reason in ``pin-failed.json`` and raises ``CheckFailed`` (or ``SmokeError``), the
+dispatcher drops the request and goes on with the running copy, and ``devloop status`` shows the
+reason (``failed_line``) until a pin succeeds. An auto-pin that resolves that same commit again
+(the branch advanced between ``observe`` and the pin) does not try it: only another commit, or a
+pin by hand, does. A failure before the commit is resolved (the fetch, the lock of the pins) is
+still a ``PinError`` of the tick; one after ``current`` moved is logged, and the pin stands.
+
 A PR that declares a step on the host (``host_step``, #462) is merged as the others, but its
 merge holds the auto-pin (``hold``, ``pin-held.json``): no auto-pin runs, of that commit nor of
 the later ones, until the operator does the step and pins by hand (``devloop pin``, which calls
@@ -95,6 +104,8 @@ LOCK = 'pin.lock'
 REJECTED = 'rejected-'
 # The commits whose refusal by the smoke test of an auto-pin was published as an alert (#260).
 ALERTED = 'pin-alerted.json'
+# The last auto-pin whose commit failed the checks (#453), until a pin succeeds.
+FAILED = 'pin-failed.json'
 MAX_ALERTED = 50
 SHA = re.compile(r'[0-9a-f]{40}')
 HEX = re.compile(r'[0-9a-f]{7,40}')
@@ -152,11 +163,24 @@ class PinError(Exception):
 
 
 class SmokeError(PinError):
-    """The smoke test of the copy of ``sha`` failed at ``step``; the copy is kept at ``copy``."""
+    """The smoke test of the copy of ``sha`` failed at ``step``; the copy is kept at ``copy``.
+    ``again`` (#453) when the auto-pin found ``sha`` refused already (``FAILED``) and did not
+    test it again."""
 
-    def __init__(self, message, sha, step, copy=None):
+    def __init__(self, message, sha, step, copy=None, again=False):
         super().__init__(message)
-        self.sha, self.step, self.copy = sha, step, copy
+        self.sha, self.step, self.copy, self.again = sha, step, copy, again
+
+
+class CheckFailed(PinError):
+    """The auto-pin resolved ``sha`` and its copy failed the checks (#453) before the smoke test
+    (a missing file, the import, the configuration): ``current`` stays and ``reason`` says why.
+    ``again`` when the auto-pin found ``sha`` failed already (``FAILED``) and did not check it
+    again."""
+
+    def __init__(self, message, sha, reason, again=False):
+        super().__init__(message)
+        self.sha, self.reason, self.again = sha, reason, again
 
 
 class PinHeld(PinError):
@@ -552,7 +576,11 @@ def pin(root, state, ref, local=None, log=print, fetch=True, smoke=True, fetch_l
     extracted: an exception it raises stops the pin with ``current`` as it was (the hold of the
     auto-pin, ``PinHeld``, #462). ``then``, when given, is called with the commit once
     ``current`` points at it, still under the lock of the pins: the release of the holds a pin
-    by hand makes (#473), so that no auto-pin runs in between."""
+    by hand makes (#473), so that no auto-pin runs in between.
+
+    Once ``current`` points at the new copy the pin stands: what follows (the request, the
+    record of a failed auto-pin, the time, the cleanup) is logged when it fails, never raised.
+    An exception of the pin therefore always means that ``current`` is as it was (#453)."""
     state = Path(state)
     state.mkdir(parents=True, exist_ok=True)
     with _locked(state):
@@ -595,7 +623,18 @@ def pin(root, state, ref, local=None, log=print, fetch=True, smoke=True, fetch_l
                                  + (f'the copy is kept in {kept}' if kept else
                                     'the copy could not be kept'), sha, step, kept)
         point(state, dest)
-        clear_pending(state)
+        # From here on the pin stands (#453): a failure is logged, never raised, so that a
+        # caller that sees an exception knows ``current`` did not move.
+        try:
+            clear_pending(state)
+        except OSError as exc:
+            log(f'the request of the auto-pin not removed, the next tick pins {sha[:12]} again: '
+                f'{exc}')
+        try:
+            clear_failed(state)
+        except OSError as exc:
+            log(f'the record of a failed auto-pin not removed, devloop status may still show '
+                f'it: {exc}')
         log(f'pinned {ref} at {sha[:12]}: {dest}' + (' (copy reused)' if reused else ''))
         if then is not None:
             then(sha)
@@ -778,6 +817,66 @@ def clear_pending(state):
         (Path(state) / PENDING).unlink()
     except FileNotFoundError:
         pass
+
+
+def failed(state):
+    """The last auto-pin whose commit failed the checks (#453): ``{sha, ref, reason, at}``, with
+    ``step`` when the smoke test refused it, or None. A successful pin removes it."""
+    try:
+        data = json.loads((Path(state) / FAILED).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get('sha'), str):
+        return None
+    return data
+
+
+def record_failed(state, sha, ref, reason, step=None):
+    """Record that the auto-pin of ``ref`` at ``sha`` failed the checks for ``reason`` (#453),
+    or the smoke test at ``step``."""
+    path = Path(state) / FAILED
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f'.{FAILED}-{os.getpid()}')
+    record = {'sha': sha, 'ref': ref, 'reason': reason, 'at': int(time.time())}
+    if step is not None:
+        record['step'] = step
+    tmp.write_text(json.dumps(record) + '\n', encoding='utf-8')
+    os.replace(tmp, path)
+
+
+def clear_failed(state):
+    try:
+        (Path(state) / FAILED).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def failed_line(state):
+    """The line of ``devloop status`` for the last auto-pin that failed the checks (#453), or
+    None."""
+    record = failed(state)
+    if record is None:
+        return None
+    at = record.get('at')
+    when = (time.strftime(' at %Y-%m-%dT%H:%M:%SZ', time.gmtime(at))
+            if isinstance(at, int) and not isinstance(at, bool) else '')
+    ref = record.get('ref') if isinstance(record.get('ref'), str) else 'the base branch'
+    reason = record.get('reason') if isinstance(record.get('reason'), str) else 'not recorded'
+    return (f'auto-pin failed{when}: {ref} at {record["sha"][:12]} is not pinned, the running '
+            f'copy stays: {reason}; a new commit of {ref} or a pin by hand (devloop pin) tries '
+            'again')
+
+
+# An absolute path in the reason of a failed auto-pin (#453): the alert keeps its last name.
+_ABSOLUTE = re.compile(r'(?<![\w.~-])~?/(?:[^\s/]+/)*([^\s/]*)')
+
+
+def public_reason(reason, limit=200):
+    """The reason of a failed auto-pin as an alert on GitHub may show it (#453): its first line,
+    each absolute path reduced to its last name, at most ``limit`` characters."""
+    line = (str(reason).strip().splitlines() or [''])[0]
+    line = _ABSOLUTE.sub(lambda m: '…/' + m.group(1), line)
+    return line if len(line) <= limit else line[:limit - 1] + '…'
 
 
 def held(state):
@@ -1222,10 +1321,57 @@ class AutoPin:
         commit is resolved, and raises ``PinHeld``: a merge by devloop writes its hold before it
         merges, so the hold of every such merge in the resolved commit is already written then;
         with ``lookup`` (``scan``, #473) the merges of that commit that devloop did not make are
-        held first."""
-        return pin(self.root, self.state, ref, self.local, log=self.log, smoke=self.smoke,
-                   fetch_lock=self.fetch_lock, keep=self.keep, project=self.project,
-                   check=lambda sha: self._check_held(sha, lookup))
+        held first. A failure of that scan (``ScanFailed``, git) raises as it was: it is not a
+        failure of the copy.
+
+        A commit that fails the checks once resolved (#453) is recorded (``FAILED``) and
+        raises ``CheckFailed``, or ``SmokeError`` for the smoke test; a failure before the
+        commit is resolved (the fetch, the lock of the pins) raises as it was. ``pin`` raises
+        only while ``current`` is as it was: once it moved, ``pin`` logs what fails.
+
+        The commit recorded as failed is not tried again: the same error, with ``again``, is
+        raised at once. The request, made when ``origin/<base_branch>`` advanced past the head
+        ``observe`` saw, may resolve that commit when the branch advanced meanwhile, between
+        ``observe`` and the fetch of the pin. A pin by hand (``devloop pin``) tries it all the
+        same."""
+        resolved = []
+
+        def check(sha):
+            self._check_held(sha, lookup)
+            resolved.append(sha)
+            last = failed(self.state)
+            if last is None or last['sha'] != sha:
+                return
+            reason = last.get('reason') if isinstance(last.get('reason'), str) else ''
+            why = (f'the auto-pin of {sha[:12]} already failed ({reason or "no reason recorded"})'
+                   ': not tried again until the branch advances, or a pin by hand (devloop pin)')
+            if isinstance(last.get('step'), str):
+                raise SmokeError(why, sha, last['step'], again=True)
+            raise CheckFailed(why, sha, reason, again=True)
+        try:
+            return pin(self.root, self.state, ref, self.local, log=self.log, smoke=self.smoke,
+                       fetch_lock=self.fetch_lock, keep=self.keep, project=self.project,
+                       check=check)
+        except (PinHeld, CheckFailed, ScanFailed):
+            raise
+        except SmokeError as exc:
+            if not exc.again:
+                self._record_failed(exc.sha, ref, f'smoke test failed at {exc.step}', exc.step)
+            raise
+        except (PinError, ConfigError, OSError) as exc:
+            if not resolved:
+                raise
+            reason = str(exc).strip() or type(exc).__name__
+            self._record_failed(resolved[0], ref, reason)
+            raise CheckFailed(f'the copy of {resolved[0][:12]} failed the checks: {reason}',
+                              resolved[0], reason) from exc
+
+    def _record_failed(self, sha, ref, reason, step=None):
+        try:
+            record_failed(self.state, sha, ref, reason, step)
+        except OSError as exc:
+            self.log(f'auto-pin: the failure of {sha[:12]} not recorded for devloop status: '
+                     f'{exc}')
 
     def current(self):
         """The copy ``current`` points at now, or None: the operator may pin another one by

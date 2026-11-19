@@ -208,7 +208,8 @@ from .markdown import (RESUME, carries_record, dispatcher_header, publishable, r
                        render_cycle, render_escalation, render_operator_merge)
 from .activity import iso, restart_line
 from .outbox import SENT as PUBLISHED, describe as outbox_describe
-from .pin import PREFIX, PinError, PinHeld, Repinned, ScanFailed, SmokeError, held_prs
+from .pin import (PREFIX, CheckFailed, PinError, PinHeld, Repinned, ScanFailed, SmokeError,
+                  held_prs, public_reason)
 from .planning import (BASE_CHANGED, MERGE_LANE, MERGING, RESYNC_AFTER_APPROVAL, PullRequest,
                        Snapshot,
                        admit, changes_before_ci, ci_unknown, counted_rounds, issue_priority,
@@ -1558,14 +1559,20 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
     def _auto_pin(self, dry_run, defer=False):
         """With ``[pin] auto = true`` and a pin requested by a merge (#174), pin
-        ``origin/<base_branch>`` before planning. A failed pin stops the tick with ``PinError``
-        and leaves the pointer and the request as they were; a new copy raises ``Repinned``, so
-        that the process starts again from it. With ``defer`` (actions run, #301) a new copy
-        only records the restart, which waits for them (``_set_restart``).
+        ``origin/<base_branch>`` before planning. A pin that fails before it resolves the
+        commit (the fetch, the lock of the pins) stops the tick with ``PinError`` and leaves the
+        pointer and the request as they were; a new copy raises ``Repinned``, so that the
+        process starts again from it. With ``defer`` (actions run, #301) a new copy only records
+        the restart, which waits for them (``_set_restart``).
 
-        A copy refused by the smoke test (``SmokeError``, #260) is not a failed tick: the request
-        is dropped, ``current`` stays, planning goes on from the running copy, and an alert goes
-        to ``[run].alert_issue`` once per refused commit.
+        A copy refused by the smoke test (``SmokeError``, #260), or one that fails the checks
+        before it (``CheckFailed``, #453: a missing file, the import, the configuration), is not
+        a failed tick: the request is dropped, ``current`` stays, planning goes on from the
+        running copy, and an alert goes to ``[run].alert_issue`` once per refused commit, with
+        the ``pin`` record the daily summary reads. The commit is tried again only when
+        ``origin/<base_branch>`` advances to another commit, or by a pin by hand: a request that
+        resolves the commit that failed last is dropped without trying it (``again``), and its
+        alert is not published twice.
 
         A merge devloop did not make (#430), such as one of the operator, requests the pin
         too: before reading the request, a tick that is not a dry run asks the pinner whether
@@ -1634,6 +1641,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                      f'is dropped: {exc}')
             self._alert_refused_pin(ref, exc)
             return
+        except CheckFailed as exc:
+            self.pinner.cancel()
+            self.log(f'auto-pin of {ref} failed the checks, the pinned copy is unchanged and the '
+                     f'request is dropped: {exc}')
+            self._alert_refused_pin(ref, exc)
+            return
         except (PinError, ConfigError, OSError) as exc:
             raise PinError(f'auto-pin of {ref} failed, the pinned copy is unchanged: {exc}') \
                 from exc
@@ -1657,9 +1670,13 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                  'after it (devloop pin)')
 
     def _alert_refused_pin(self, ref, exc):
-        """The alert of a copy refused by the smoke test of an auto-pin (#260), on
-        ``[run].alert_issue``, once per commit: its commit and failed step, never the error's
-        text (it stays in the local log). One attempt; a failure is logged."""
+        """The alert of a copy refused by the smoke test of an auto-pin (#260, ``SmokeError``)
+        or by the checks before it (#453, ``CheckFailed``), on ``[run].alert_issue``, once per
+        commit. For the smoke test: its commit and failed step, never the error's text (it stays
+        in the local log). For the checks: its commit and the reason (``public_reason``: first
+        line, absolute paths reduced to their last name). Both carry a ``pin`` record (#453):
+        the commit, ``ref``, the time and that reason, which the daily summary lists. One
+        attempt; a failure is logged."""
         issue = self.cfg.run.alert_issue
         if not issue:
             self.log('  no [run].alert_issue is configured: no alert for the refused pin')
@@ -1667,14 +1684,31 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         if self.pinner.alerted(exc.sha):
             self.log(f'  the refusal of {exc.sha[:12]} was already reported on #{issue}')
             return
-        body = publishable(
-            dispatcher_header()
-            + '\n## Pin automatico rifiutato dallo smoke test\n\n'
-            + f'La copia di `{ref}` al commit `{exc.sha[:12]}` non ha superato lo smoke test '
-              f'al passo `{exc.step}`. `current` resta sulla copia precedente, la richiesta di '
-              'pin è annullata e il ciclo continua.\n\n'
-            + 'Il dettaglio è nel log locale; la copia rifiutata resta in '
-              f'`rejected-{exc.sha[:12]}` nella directory di stato, per l\'analisi.')
+        if isinstance(exc, CheckFailed):
+            reason = public_reason(exc.reason).replace('`', "'")
+            text = (
+                dispatcher_header()
+                + '\n## Pin automatico non riuscito\n\n'
+                + f'La copia di `{ref}` al commit `{exc.sha[:12]}` non ha superato il controllo '
+                  'prima dello smoke test. `current` resta sulla copia precedente, la richiesta '
+                  'di pin è annullata e il ciclo continua con la copia in esecuzione.\n\n'
+                + f'Motivo: `{reason}`\n\n'
+                + f'Il pin riparte con un nuovo commit di `{ref}` che tocca l\'installazione, '
+                  'oppure a mano (`devloop pin`) dopo aver corretto la causa. `devloop status` '
+                  'mostra il motivo finché un pin non riesce.')
+        else:
+            reason = f'smoke test: {exc.step}'
+            text = (
+                dispatcher_header()
+                + '\n## Pin automatico rifiutato dallo smoke test\n\n'
+                + f'La copia di `{ref}` al commit `{exc.sha[:12]}` non ha superato lo smoke '
+                  f'test al passo `{exc.step}`. `current` resta sulla copia precedente, la '
+                  'richiesta di pin è annullata e il ciclo continua.\n\n'
+                + 'Il dettaglio è nel log locale; la copia rifiutata resta in '
+                  f'`rejected-{exc.sha[:12]}` nella directory di stato, per l\'analisi.')
+        # The record of the daily summary (#453): the commit not pinned, when and why, as above.
+        body = publishable(text, 'pin', {'sha': exc.sha, 'ref': ref, 'reason': reason,
+                                         'at': iso(self.clock())})
         try:
             self.gh.comment(issue, body)
         except Exception as exc_:  # one attempt only: its class, never its output
