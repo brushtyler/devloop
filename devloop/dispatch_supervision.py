@@ -87,7 +87,8 @@ class SupervisionMixin:
 
         Only in merge mode ``auto`` with a supervisor, and only when nothing makes the
         escalation critical: a PR whose own merge mode is not ``auto`` (the override of its
-        level, an ``operator_only_paths`` path), a PR the supervisor implemented, an issue
+        level, an ``operator_only_paths`` path), a PR the supervisor implemented (except for a
+        ``tool_failure`` with ``[delegations] retry_own_prs`` on, #406), an issue
         opened by someone else than a trusted user or a devloop app, an issue text no longer
         approved by ``agent:ready``, the ``phase:design`` label, or anything that cannot be
         verified."""
@@ -103,8 +104,13 @@ class SupervisionMixin:
                     return None, ('il corpo della PR non termina più con il suo marker: chi l\'ha '
                                   'implementata e la sua modalità di merge non sono verificabili')
                 labels |= pr.labels
-                if pr.meta.get('implementer') == cfg.supervisor:
-                    return None, 'il supervisore ha implementato questa PR'
+                if pr.meta.get('implementer') == cfg.supervisor and not (
+                        cls == TOOL_FAILURE and cfg.delegations.retry_own_prs):
+                    # A retry of a tool failure judges nothing (ADR 0005, P5-2, #406): with
+                    # the delegation on, only that class leaves the supervisor's own PRs.
+                    return None, 'il supervisore ha implementato questa PR' + (
+                        ' (la delega `[delegations] retry_own_prs` è spenta)'
+                        if cls == TOOL_FAILURE else '')
                 mode = self._merge_mode(pr)
                 if mode != 'auto':
                     return None, (f'la modalità di merge di questa PR è `{mode or "non calcolabile"}`'

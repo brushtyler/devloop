@@ -755,7 +755,12 @@ Any other class, or none (escalations written before #182), is critical.
 stays with the operator, with a comment that says why, when:
 
 - the [merge mode](#merge-modes) of the PR is not `"auto"`;
-- the supervisor's agent implemented the PR;
+- the supervisor's agent implemented the PR, except for a `tool_failure` with
+  `[delegations] retry_own_prs = true` (#406, ADR 0005, P5-2): a retry judges nothing, it runs
+  the same step on the same input, within the same two retries shared with the operator. The key
+  is off by default and turning it on is the operator's decision; off, every escalation on such a
+  PR goes to the operator, and one already waiting for the supervisor is refused at its retry
+  (`supervisor_refused`). The other classes on such a PR always go to the operator;
 - the issue was opened by someone outside `trusted_users` and devloop's apps, or its text is no
   longer approved by `agent:ready`;
 - the issue (or the PR) has the label `phase:design`;

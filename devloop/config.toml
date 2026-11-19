@@ -181,6 +181,14 @@ operator_only_paths = ["docs/adr/", "AGENTS.md", "CLAUDE.md"]
 # [merge.levels]
 # "2" = "off"
 
+# The delegations to the supervisor (ADR 0005), each with its revocation key, all off by default:
+# turning one on is the operator's decision (D10). retry_own_prs (issue #406, P5-2): in "auto", a
+# tool_failure escalation on a PR implemented by the agent of roles.supervisor goes to the
+# supervisor, who may retry it with /devloop retry within the 2 retries it shares with the
+# operator; every other class on such a PR still goes to the operator.
+[delegations]
+retry_own_prs = false
+
 # Pinned installation (issue #174, see docs/devloop/guide.md). With auto = true, after a merge by
 # devloop whose diff touches devloop/, core/ (issue #365) or a file of
 # review_policy.sensitive_path_lists, the next
