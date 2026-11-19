@@ -143,7 +143,9 @@ copia di R3, e il loop va riavviato perché li veda: il launcher passa `--projec
 all'avvio, e un pin dopo un merge riparte con gli stessi argomenti. Altrimenti, con
 `[pin] auto = true`, il primo tick dopo il merge fissa `origin/main`, il controllo della copia
 fallisce (`config: missing 'test_cmd'`) e dopo tre tick falliti `devloop run` si ferma con il
-codice 4, che systemd non riavvia (`RestartPreventExitStatus=4`).
+codice 4, che systemd non riavvia (`RestartPreventExitStatus=4`). Una copia in uso che contiene
+#453 non si ferma: lascia cadere la richiesta, avvisa una volta su `alert_issue`, mostra il motivo
+in `devloop status` e continua con la copia di prima; il pin a mano del passo 6 resta da fare.
 
 - **Prima del merge della PR di R3** (meglio): i passi 1–5 con il checkout della testa della PR,
   l'aggiornamento del clone di devloop del passo 6, poi `sudo systemctl restart devloop`, poi il
