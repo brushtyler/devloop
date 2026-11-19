@@ -264,8 +264,20 @@ Senza la tabella la copia di R4 parte, ma i prompt perdono quelle frasi; con la 
 di R3 non parte (chiave sconosciuta). Il file di progetto sull'host e la copia fissata cambiano
 quindi insieme, a loop fermo. Sono passi dell'operatore, dopo il merge della PR di R4.
 
+Il pin della copia di R4 non passa da `scripts/devloop-pinned`: il launcher esegue la copia
+fissata, che carica la configurazione con il file di progetto prima di aggiornare il pin, e la
+copia di prima rifiuta `[prompts]` (`project file: unknown key 'prompts'`). Il pin si fa una
+volta con il codice di R4, da un checkout del suo commit, passando file di progetto e overlay.
+I pin successivi tornano al launcher.
+
 Se l'host non ha ancora fatto la migrazione di R3, basta quella della sezione precedente con
 l'esempio di R4: il passo 3 copia anche `[prompts]`, e il passo 5 confronta anche i prompt resi.
+Il passo 6, però, non usa `devloop-pinned`: il pin si fa come al passo 5 qui sotto, come utente
+`devloop` e con un checkout di R4 del suo clone (`git -C /home/devloop/ssdlc worktree add
+--detach /tmp/ssdlc-r4 origin/main`, dopo `git -C /home/devloop/ssdlc fetch origin`; il
+checkout di root in `/tmp/ssdlc-r3` non è di `devloop`), poi `sudo systemctl start devloop`.
+Per il rollback, come qui sotto, prima si toglie `[prompts]` (con `[prompts.adr]`) dal file di
+progetto, poi si fa il pin della copia di prima.
 Altrimenti, come utente `devloop`, dal clone:
 
 1. **Quando.** L'hash del file di progetto cambia: le approvazioni delle PR aperte decadono.
@@ -295,10 +307,33 @@ Altrimenti, come utente `devloop`, dal clone:
 
    Lascia fuori, dichiarandoli, l'hash del file di progetto e i valori di `[prompts]`, che prima
    di R4 erano testo dei modelli: al loro posto confronta i prompt resi, che devono essere
-   identici. Esce con 0 ed `equivalent: …`; altrimenti il pin non va fatto. Poi
-   `git worktree remove /tmp/ssdlc-r4`.
-5. **Pin e avvio**: `scripts/devloop-pinned pin origin/main`, poi `sudo systemctl start devloop`.
+   identici. Esce con 0 ed `equivalent: …`; altrimenti il pin non va fatto. Il checkout
+   `/tmp/ssdlc-r4` resta fino alla fine del passo 5.
+5. **Pin con il codice di R4**, dal clone e con il checkout del passo 4 (non con
+   `devloop-pinned`, che eseguirebbe la copia di R3):
 
-**Rollback.** Il pin della copia di R3 (`scripts/devloop-pinned pin <sha12>`) **insieme** al file
-di progetto di prima (`project.toml.prima-r4`, rimesso al suo posto con `cp -p`): la copia di R3
-non legge `[prompts]`.
+   ```bash
+   cd /home/devloop/ssdlc
+   PYTHONPATH=/tmp/ssdlc-r4 python3 -P -m devloop \
+       --project-config /home/devloop/ssdlc/.ssdlc/devloop/project.toml \
+       --local-config /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml pin origin/main
+   git worktree remove /tmp/ssdlc-r4
+   sudo systemctl start devloop
+   ```
+
+   Se il pin fallisce (`pin failed, the pinned copy is unchanged`), `current` è ancora la copia
+   di R3: prima di avviare il loop si rimette il file di progetto di prima (rollback qui sotto).
+
+**Rollback.** Prima il file di progetto di prima, poi il pin della copia di R3, nell'ordine: la
+copia di R4 accetta il file senza `[prompts]`, mentre quella di R3 rifiuta il file con
+`[prompts]`, e il pin la verifica con il file di progetto dell'host.
+
+```bash
+sudo systemctl stop devloop
+cd /home/devloop/ssdlc
+cp -p .ssdlc/devloop/project.toml.prima-r4 .ssdlc/devloop/project.toml
+python3 scripts/devloop-pinned pin <sha12>
+sudo systemctl start devloop
+```
+
+`<sha12>` è la copia di R3 (`pinned-<sha12>` nello `state_dir`).
