@@ -92,11 +92,25 @@ and intervals. The prompts give examples of both. A change that is not policy is
   `human_reason` the parts touched, each with its point of the list and its file. The review
   prompt asks to assess the rule again at every round, on the whole diff of the PR against its
   base and not only on what the latest fix changed: a PR already flagged stays `needs_operator`
-  after a fix, as long as its diff still touches the policy. Nothing else
-  changes: the verdict is handled like any other `needs_operator`, with an escalation of class
-  `reviewer_decision`, which is critical and so stays with the operator in `auto` mode too
-  ([Escalations to the supervisor](#escalations-to-the-supervisor)). With a
-  [conclave](#conclave-on-a-block) configured, trust rules are in its reserved perimeter.
+  after a fix, as long as its diff still touches the policy.
+- **One hand-off to the operator** (#434). The reviewer says why it asks for the operator in
+  `operator_reason`: `trust_policy` for this rule, `decision` for anything else (an ambiguous
+  issue, a product or authority decision, a disagreement that cannot be settled technically), and
+  lists its blocking findings in both cases. A `trust_policy` does not stop the loop: while
+  blocking findings of that reviewer stay open the PR goes to `agent:changes` for the fix, as with
+  `request_changes`, with no escalation and within `max_review_rounds` as usual. With no blocking
+  finding of any reviewer of the quorum left open, and CI green on the same head, the round counts
+  as approved: the PR is promoted to `agent:ready-to-merge` and gets `agent:needs-operator` with
+  the [operator merge](#ready-prs-whose-merge-is-the-operators) notice, written once per head, that asks
+  for the operator's review and merge and lists the parts of the policy each reviewer named.
+  Once a reviewer of the PR has given `trust_policy`, devloop never merges the PR itself,
+  whatever `[merge]` says and even if a later round approves. A `decision`, or a
+  `needs_operator` without `operator_reason` (a reviewer or a record from before #434), is an
+  immediate escalation as before, of class `reviewer_decision`, which is critical and so stays
+  with the operator in `auto` mode too
+  ([Escalations to the supervisor](#escalations-to-the-supervisor)); only a `decision` suspends
+  a round or opens a [conclave](#conclave-on-a-block). With a conclave configured, trust rules are
+  in its reserved perimeter.
 - **Advisory review.** It has no verdict and does not count for the quorum
   ([Advisory review for the operator](#advisory-review-for-the-operator)): its opinion is `dubbi`,
   or `contrario` when the change weakens a check, and the first of its residual risks begins with
@@ -447,8 +461,9 @@ record, a command applied, a passed readiness check, a policy record of no escal
 - the implementer or a fixer that stopped as `blocked` (`Lavoro bloccato`): its notice, written
   with the agent's identity, records the agent, the step, the commit it started from and the
   reason. A sync that stops is not a block of the conclave;
-- a review round whose verdict is `needs_operator`. With `conclave` configured the **first**
-  `needs_operator` suspends the round: its verdict applies at once, even while the policy receipt
+- a review round whose verdict is `needs_operator` for a decision; one for the
+  [trust policy](#changes-to-the-trust-policy) is no block (#434). With `conclave` configured the
+  **first** such `needs_operator` suspends the round: its verdict applies at once, even while the policy receipt
   still waits for other reviewers, and none of them is asked. When several reviewers of the round
   asked for the operator, the first record of the round is the block and its author the
   proposer: the round opens one conclave.
@@ -655,8 +670,10 @@ routed as above.
 In `"auto"` or `"strict"`, `agent:ready-to-merge` usually means that devloop merges the PR. When
 it does not (#248), because the [merge mode](#merge-modes) of the PR is `"off"`, the dispatcher also adds
 `agent:needs-operator` once the PR is ready, with a comment ("Il merge spetta all'operatore")
-that says why: the reserved paths the diff touches, the mode or the level, or the restart of its
-work after a [conclave](#after-a-unanimous-decision) (#142). The comment
+that says why: the reserved paths the diff touches, the mode or the level, the restart of its
+work after a [conclave](#after-a-unanimous-decision) (#142), or a reviewer who said that it
+touches the [trust policy](#changes-to-the-trust-policy) (#434), with the parts each reviewer
+named; this last reason is stated with `[merge] mode = "off"` too. The comment
 carries a `notice` marker of event `operator_merge` with the head, how many `labeled` events of
 the label came before, and the promotion it belongs to (how many promotions the PR's policy
 records count). There is one comment per head: a head promoted again, after its CI ran again
@@ -726,7 +743,9 @@ Every escalation of the dispatcher has a **class** (#182), recorded in its marke
 marker of an escalation comment (`class`, `critical`, and `to`, `operator` or `supervisor`), the
 `notice` of an agent that stopped (`blocked`), the `preflight` marker of a failed readiness
 check, and the `policy` marker of a level that cannot be reviewed or promoted. A reviewer's
-`needs_operator` verdict gets an escalation comment of class `reviewer_decision` next to the review.
+`needs_operator` verdict for a decision gets an escalation comment of class `reviewer_decision`
+next to the review; one for the trust policy gets none (#434, see
+[Changes to the trust policy](#changes-to-the-trust-policy)).
 
 | Class | When | Critical |
 |---|---|---|

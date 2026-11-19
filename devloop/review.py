@@ -10,7 +10,12 @@ verdict machine-actionable:
   reviewer does not assess stays open;
 * the acceptance map of the PR (#134, :mod:`.acceptance`): a criterion ``not_covered`` without a
   reason, a missing map while the issue has criteria, or a map that does not list every criterion
-  is a blocking finding of the review, whatever verdict the reviewer proposes.
+  is a blocking finding of the review, whatever verdict the reviewer proposes;
+* a ``needs_operator`` says why (#434, ``operator_reason``): ``trust_policy`` when the PR touches
+  the trust policy, ``decision`` for anything else, and a record without the field is a
+  ``decision``. Only a ``decision`` stops the loop at once (``flow_verdict``): a ``trust_policy``
+  goes on as a request for changes while blocking findings of its own stay open, and otherwise
+  as an approval whose merge is the operator's.
 
 Every blocking finding has an owner and an identity, ``round/reviewer/ID`` (``2/codex/R2-1``),
 recorded in the marker. Only its owner closes it, in a later review. A finding of the reviewer
@@ -25,6 +30,10 @@ from .acceptance import acceptance_findings
 from .schema import load_schema, validate
 
 VERDICTS = ('approve', 'request_changes', 'needs_operator')
+# Why a reviewer asks for the operator (#434): the PR touches the trust policy, or anything else
+# needs the operator's decision. ``''`` with the other verdicts.
+TRUST_POLICY = 'trust_policy'
+DECISION = 'decision'
 # The name of ``needs_operator`` before #248: records published with it are still read, as
 # ``needs_operator`` (``current_verdict``).
 LEGACY_VERDICT = 'needs_human'
@@ -40,6 +49,35 @@ def current_verdict(verdict):
     """``verdict`` under its current name: ``LEGACY_VERDICT``, from a record published before
     #248, is ``needs_operator``."""
     return 'needs_operator' if verdict == LEGACY_VERDICT else verdict
+
+
+def trust_policy(review):
+    """Whether ``review`` asks for the operator because the PR touches the trust policy
+    (#434). A ``needs_operator`` without ``operator_reason``, recorded before #434, is a
+    ``decision``."""
+    return (current_verdict(review.get('verdict')) == 'needs_operator'
+            and review.get('operator_reason') == TRUST_POLICY)
+
+
+def own_open_findings(review):
+    """The blocking findings of its own that ``review`` leaves open: those it opens, and those
+    of its reviewer from earlier rounds it marks ``unresolved``. Another owner's finding is not
+    its to close (#111), so it does not count."""
+    owner = review.get('reviewer')
+    earlier = [p for p in review['previous_findings'] if p['status'] == 'unresolved'
+               and str(p.get('key', '')).split('/')[1:2] == [owner]]
+    return list(review['blocking_findings']) + earlier
+
+
+def flow_verdict(review):
+    """The verdict of ``review`` as devloop acts on it (#434). A ``needs_operator`` for the
+    trust policy does not stop the loop: ``request_changes`` while blocking findings of its
+    own stay open, otherwise ``approve``, whose merge stays the operator's
+    (``trust_policy_parts``). Every other verdict is itself, under its current name: a
+    ``needs_operator`` for a decision, or without a reason, stops the loop at once."""
+    if trust_policy(review):
+        return 'request_changes' if own_open_findings(review) else 'approve'
+    return current_verdict(review['verdict'])
 
 
 def finding_key(round_no, owner, finding_id):
@@ -146,7 +184,14 @@ def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, 
     ``criteria`` are the acceptance criteria of the issue and ``acceptance_map`` the latest map of
     the PR (None: none recorded). The findings ``acceptance_findings`` derives from them join
     the reviewer's blocking findings, so an ``approve`` with one of them is corrected.
+
+    ``operator_reason`` (#434) is recorded with a ``needs_operator`` only: ``trust_policy`` or
+    ``decision``, the latter also when the reviewer gives none. A ``trust_policy`` with another
+    verdict turns it into ``needs_operator``: the merge of a PR that touches the trust policy is
+    the operator's whatever the verdict.
     """
+    # An output without ``operator_reason`` (#434) is read as before: a ``decision``.
+    raw = dict(raw, operator_reason=raw.get('operator_reason', ''))
     validate(raw, load_schema('review'))
     notes = []
     derived = acceptance_findings(criteria, acceptance_map)
@@ -182,6 +227,11 @@ def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, 
 
     verdict = raw['verdict']
     human_reason = raw['human_reason']
+    reason = raw['operator_reason']
+    if reason == TRUST_POLICY and verdict != 'needs_operator':
+        notes.append(f'Verdetto corretto da {verdict} a needs_operator: il reviewer indica che la '
+                     'PR tocca la policy di fiducia.')
+        verdict = 'needs_operator'
     if verdict == 'approve' and (blocking or own_unresolved):
         verdict = 'request_changes'
         notes.append('Verdetto corretto da approve a request_changes: restano finding bloccanti aperti.')
@@ -190,13 +240,15 @@ def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, 
         human_reason = human_reason or 'Il reviewer ha chiesto modifiche senza indicare finding bloccanti.'
         notes.append('Verdetto incoerente: request_changes senza finding bloccanti.')
     elif verdict == 'needs_operator' and not human_reason.strip():
-        human_reason = 'Il reviewer non ha indicato la decisione richiesta.'
+        human_reason = ('Il reviewer non ha indicato le parti della policy di fiducia toccate.'
+                        if reason == TRUST_POLICY
+                        else 'Il reviewer non ha indicato la decisione richiesta.')
     if foreign:
         notes.append('Restano aperti i finding di altri proprietari che il reviewer considera '
                      'chiusi (' + ', '.join(foreign) + '): li chiude solo chi li ha aperti, la '
                      'CI o l\'operatore.')
 
-    return {
+    record = {
         'source': 'agent', 'reviewer': reviewer, 'verdict': verdict,
         'summary': raw['summary'], 'human_reason': human_reason,
         'blocking_findings': blocking, 'non_blocking_findings': non_blocking,
@@ -204,6 +256,9 @@ def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, 
         'round': round_no, 'max_rounds': max_rounds, 'head_sha': head_sha, 'ci': ci,
         'note': ' '.join(notes),
     }
+    if verdict == 'needs_operator':
+        record['operator_reason'] = TRUST_POLICY if reason == TRUST_POLICY else DECISION
+    return record
 
 
 def last_round(reviews):
@@ -224,13 +279,30 @@ def current_round(reviews):
 
 
 def round_verdict(records):
-    """The verdict of a complete round: ``needs_operator`` if any reviewer asked for the
-    operator, else ``request_changes`` if any asked for changes, else ``approve``."""
-    verdicts = {current_verdict(r['verdict']) for r in records}
+    """The verdict of a complete round, from the ``flow_verdict`` of each record:
+    ``needs_operator`` if any reviewer asked for the operator's decision, else
+    ``request_changes`` if any asked for changes, a ``needs_operator`` for the trust policy with
+    findings of its own included (#434), else ``approve``. Whether the merge of an approved PR
+    is the operator's for the trust policy is ``trust_policy_parts``."""
+    verdicts = {flow_verdict(r) for r in records}
     for verdict in ('needs_operator', 'request_changes'):
         if verdict in verdicts:
             return verdict
     return 'approve'
+
+
+def trust_policy_parts(reviews):
+    """The parts of the trust policy the reviewers of ``reviews`` say the PR touches (#434), as
+    ``[(reviewer, round, human_reason)]``: the latest ``trust_policy`` record of each reviewer,
+    in order of round. Empty when none ever said so. Once one did, the merge of the PR is the
+    operator's for good, as after a conclave restart: a later approval does not hand it back to
+    devloop."""
+    latest = {}
+    for record in reviews:
+        if trust_policy(record):
+            latest[owner_of(record)] = record
+    found = sorted(latest.values(), key=lambda r: r['round'])
+    return [(owner_of(r), r['round'], (r.get('human_reason') or '').strip()) for r in found]
 
 
 def ci_failure_review(*, failed_checks, log_tail, previous_open, round_no, max_rounds, head_sha):

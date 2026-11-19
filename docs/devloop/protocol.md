@@ -237,7 +237,8 @@ The same holds for a round still waiting for other reviewers when one of them al
 changes, or when every reviewer so far approved (#359): the failure joins it, and the round
 waits for the others as before. A round where a reviewer asked for the operator, and none for
 changes, does not take the failure: its `needs_operator` verdict keeps precedence and the PR
-waits for the operator. Nor does an approval already void, without a receipt or with a receipt
+waits for the operator. A `needs_operator` for the trust policy (#434) counts here as the
+`request_changes` or the approval it acts as. Nor does an approval already void, without a receipt or with a receipt
 found stale after it (see [Resync after approval](#resync-after-approval)): the failure is a CI
 round of its own, as before.
 
@@ -298,7 +299,7 @@ implementation, the PR's head for a fix or a sync). A notice without them, writt
 convenes no conclave. The durable reference of a block is `{kind: "blocked", comment, agent,
 step}`, `comment` being the id of the notice's comment, or, for a review round whose verdict is
 `needs_operator`, `{kind: "review", round, reviewer, head}` of the first `needs_operator` record
-of the round. With `conclave` configured that record suspends the round: it is the block even
+of the round for a decision (one for the trust policy is no block, #434). With `conclave` configured that record suspends the round: it is the block even
 while the receipt of the round still waits for other reviewers.
 
 **The conclave.** One dispatcher comment per block, edited as the conclave goes on, ending with a
@@ -492,7 +493,23 @@ file, line and a suggested fix, and the status of every earlier blocking finding
   unresolved, becomes `request_changes` (another owner's open finding does not change it: the
   dispatcher checks it before promoting);
 - `request_changes` with nothing to fix becomes `needs_operator`;
-- an earlier finding the reviewer does not assess stays open.
+- an earlier finding the reviewer does not assess stays open;
+- `operator_reason` (#434) says why a reviewer asks for the operator: `trust_policy` or
+  `decision`, empty with the other verdicts. The record keeps it only with `needs_operator`, as
+  `decision` when the reviewer gave none; a record without the field, written before #434, is a
+  `decision`. A `trust_policy` with another verdict becomes `needs_operator`.
+
+**What devloop does with the verdict** (#434). Only a `needs_operator` for a `decision` stops the
+loop: escalation `reviewer_decision`, the round suspended with a conclave. A `needs_operator`
+for the `trust_policy` acts as `request_changes` while blocking findings of its reviewer stay
+open (opened in the review, or of its earlier rounds and not resolved), and otherwise as
+`approve`: a round of such verdicts and approvals is approved, and with no open finding and CI
+green the PR is promoted, then handed to the operator once for the review and the merge (see
+[Changes to the trust policy](guide.md#changes-to-the-trust-policy)). A round with a `decision`
+is a `needs_operator` round, whatever the other verdicts; the round limit, the CI joining a round
+and the quorum read the same verdicts. Once a reviewer of the PR has given `trust_policy`, the
+merge is the operator's for good: the snapshot plans the PR as mode `off`, the operator merge
+notice lists the parts each reviewer named, and the merge checks it again just before.
 
 **Trust policy** (#399). The review prompt asks for `needs_operator` when the change touches the
 trust policy, at every review level, with the parts touched in `human_reason`, and to assess it
@@ -501,8 +518,9 @@ the advisory review prompt asks instead for the opinion `dubbi` (`contrario` whe
 weakened) and a first residual risk beginning with "Policy di fiducia toccata:". Both carry the
 same closed list of five points and the same examples, described in
 [Changes to the trust policy](guide.md#changes-to-the-trust-policy). The rule lives only in the
-prompts: the schemas `review.json` and `advisory.json` do not change, and devloop does not check
-in code whether a verdict should have been `needs_operator`. Its residual risks, accepted by the
+prompts: the schema `advisory.json` does not change, `review.json` only gains `operator_reason`
+(#434), and devloop does not check in code whether a verdict should have been `needs_operator`.
+Its residual risks, accepted by the
 operator, are listed in the guide: the attention of the reviewers at every round, a disguised
 change, the local overlay, with a conclave the reserved perimeter its members recognise, and a
 PR that changes the rule, judged with the prompts of the running installation.
@@ -525,7 +543,8 @@ Since #325 each review is **one element** of the PR's timeline:
   and not resolved), otherwise `APPROVE`, never `COMMENT`. A `COMMENT` does not withdraw the
   same reviewer's earlier `REQUEST_CHANGES`, which would block the merge after the operator's
   decision. The body states the verdict and the event, and devloop still keeps the PR in
-  `agent:needs-operator`: it reads the verdict from the record, never from the event. No review
+  `agent:needs-operator` for a decision, or goes on with the fix or the operator merge for the
+  trust policy (#434): it reads the verdict from the record, never from the event. No review
   is dismissed, neither the reviewer's own nor another reviewer's. That native review is the record devloop reads, and no review comment is
   written. Its submission is required: a failure is tried again, up to three attempts in all,
   after a pause of 5 seconds and then 10. Before each new attempt the dispatcher reads the PR's

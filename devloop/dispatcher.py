@@ -217,8 +217,8 @@ from .planning import (BASE_CHANGED, MERGE_LANE, MERGING, RESYNC_AFTER_APPROVAL,
 from .policy import (BINDING, MAX_LISTED_PATHS, agent_profile, differences, profile_of,
                      receipt_of)
 from .ports import Backend, Tracker, summarize_checks
-from .review import (CI, OPERATOR, current_round, finding_commands, finding_key, open_findings,
-                     owner_of, round_verdict)
+from .review import (CI, OPERATOR, current_round, finding_commands, finding_key, flow_verdict,
+                     open_findings, owner_of, round_verdict, trust_policy_parts)
 from .supervision import (ACCEPT_DEFAULTS, DECIDE, ISSUE_STEPS, RETRY, TOOL_FAILURE,
                           UNCERTAIN_TURN, supervisor_command)
 from .workspace import WorkspaceError
@@ -1047,8 +1047,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             if (self.cfg.merge.enabled() and pr.meta and lb.ready_to_merge in pr.labels
                     and not operator_held(pr, lb)):
                 pr.merge_mode = self._merge_mode(pr)
-                if pr.merge_mode in MERGING and self._human_merge(pr) is not None:
-                    # Work of this PR restarted after a conclave (#142): the merge is human.
+                if pr.merge_mode in MERGING and (trust_policy_parts(pr.reviews)
+                                                 or self._human_merge(pr) is not None):
+                    # Work of this PR restarted after a conclave (#142), or a reviewer said it
+                    # touches the trust policy (#434): the merge is human.
                     pr.merge_mode = 'off'
             if pr.meta:
                 pr.attempt_problem = self._attempt_problem(pr.number, pr.issue,
@@ -2879,7 +2881,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         bases = self._base_checks(records, current, paths) if changed == ['base'] else []
         if bases and all(c['outcome'] == 'disjoint' for c in bases):
             changed = []
-        approved = {owner_of(r) for r in records if r['verdict'] == 'approve'}
+        # A needs_operator for the trust policy without findings of its own approves the head
+        # (#434): the merge that follows is the operator's (``trust_policy_parts``).
+        approved = {owner_of(r) for r in records if flow_verdict(r) == 'approve'}
         missing = [key for key in current['reviewers'] if key not in approved]
         branch = self.cfg.base_branch
         if changed or missing:
@@ -3008,15 +3012,17 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
     def _operator_merge_reasons(self, pr):
         """Why devloop does not merge the ready ``pr`` (#248), as Markdown lines: ``[merge]``
-        off, a level ``off`` in ``[merge.levels]``, the operator-only paths its diff touches.
+        off, a level ``off`` in ``[merge.levels]``, the operator-only paths its diff touches,
+        the trust policy its reviewers say it touches (#434), with the parts they name.
         ``''`` (logged) when the head moved or devloop may merge it."""
         merge = self.cfg.merge
+        trust = _trust_policy_lines(trust_policy_parts(pr.reviews))
         if not merge.enabled():
-            return '- `[merge] mode = "off"`: devloop non mergia le PR.'
+            return '\n'.join([*trust, '- `[merge] mode = "off"`: devloop non mergia le PR.'])
         receipt, paths = self._current_receipt(pr)
         if receipt is None:
             return ''
-        lines = []
+        lines = list(trust)
         reserved = sorted(p for p in paths if merge.operator_only(p))
         if reserved:
             shown = ', '.join(f'`{p}`' for p in reserved[:MAX_LISTED_PATHS])
@@ -3140,6 +3146,26 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             self.ws.remove(name)
             tested = True
         self._apply_round(pr, records, announce=False, reviews=pr.reviews, tested=tested)
+
+
+MAX_TRUST_REASON = 2000
+
+
+def _trust_policy_lines(parts):
+    """The reason of an operator merge for the trust policy (#434), as Markdown lines, from
+    ``trust_policy_parts``: empty without parts."""
+    if not parts:
+        return []
+    lines = ['- la PR tocca la policy di fiducia: servono la review e il merge dell\'operatore. '
+             'Parti toccate dichiarate dai reviewer:']
+    for reviewer, round_no, reason in parts:
+        text = reason or 'il reviewer non le ha indicate.'
+        if len(text) > MAX_TRUST_REASON:
+            # The whole text is in the reviewer's review; the notice stays within GitHub's limit.
+            text = text[:MAX_TRUST_REASON].rstrip() + ' […]'
+        lines.append(f'  - `{reviewer}`, round {round_no}: '
+                     + text.replace('\n', '\n    '))
+    return lines
 
 
 def ensure_labels(gh: Tracker, labels, review_policy=None):

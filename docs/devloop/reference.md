@@ -782,7 +782,8 @@ pinned checkout, see [Run from a pinned installation](guide.md#run-from-a-pinned
 from a PR branch, so a PR that changes `devloop/config.toml`, the prompts or the lists cannot
 apply weaker rules to itself. A list that cannot be read stops devloop at startup. Whatever the
 level, a reviewer gives `needs_operator` to a change that touches the trust policy (#399, see
-[Changes to the trust policy](guide.md#changes-to-the-trust-policy)).
+[Changes to the trust policy](guide.md#changes-to-the-trust-policy)), with `operator_reason`
+`trust_policy`: the fix goes on as for `request_changes`, and the merge is the operator's (#434).
 
 The criterion for a sensitive path: **the code that decides permissions, fencing and
 authorizations goes to level 2**, besides devloop itself and the agents' instructions. So the
@@ -836,9 +837,11 @@ A round at level 2 works as follows:
   If a reviewer fails, the other verdict stays recorded and the round waits only for the
   missing reviewer; the failure goes to `agent:needs-operator` as any failure does, and once a
   human sends the PR back to `agent:review` the next action runs only that reviewer.
-- **Aggregation.** The verdicts are applied once both are in: `needs_operator` from either sends
-  the PR to `agent:needs-operator`; otherwise a `request_changes` from either starts a single fix
-  that receives every open finding of both; two approvals go to promotion.
+- **Aggregation.** The verdicts are applied once both are in: `needs_operator` for a decision
+  from either sends the PR to `agent:needs-operator`; otherwise a `request_changes` from either
+  starts a single fix that receives every open finding of both; two approvals go to promotion. A
+  `needs_operator` for the trust policy (#434) counts as `request_changes` while findings of its
+  reviewer stay open, else as an approval whose merge is the operator's.
 - **Quorum.** The PR is promoted only if every reviewer of the receipt recomputed just before
   approved the same head with that same receipt, and no blocking finding is open. A missing
   reviewer, one that timed out (the step goes to `agent:needs-operator`) or one that asked for a
