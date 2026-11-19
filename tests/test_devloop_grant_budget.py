@@ -280,6 +280,24 @@ class GrantTests(BudgetCase):
         state = budget.of_issue(d.cfg.budget, journal, REPO, 7)
         self.assertEqual((state['turns']['cap'], state['time']['cap']), (4, 86400))
 
+    def test_a_check_of_the_budget_does_not_make_the_extension_lapse(self):
+        # #466: the check, read only, of a step that records something before its turn or of
+        # the advisory review (``_check_budget``) refuses the turn without making the extension
+        # no turn used lapse: only the refusal of a booking does.
+        d = self.make(ON, raw_review())
+        self.escalate(d)
+        self.gh.command(100, '/devloop grant-budget ' + REASON)
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        journal = d.ledger.journal
+        grant = journal.extension(self.story)
+        later = journal.seconds() + 86400 + 21600 + 60  # past the extended deadline
+        journal._clock = lambda: later
+        with self.assertRaisesRegex(BudgetRefused, 'wall-time exhausted') as caught:
+            d._check_budget(100, 'review', d.cfg.agent(d.cfg.reviewer))
+        self.assertNotIn('decade', str(caught.exception))
+        self.assertEqual(journal.extension(self.story), grant)
+        self.assertFalse([e for e in journal._events if e['event'] == 'grant_lapsed'])
+
     def test_the_extension_survives_a_restart(self):
         tmp = self.enterContext(tempfile.TemporaryDirectory())
         journal = TurnJournal(tmp)
@@ -793,6 +811,25 @@ class EnvelopeTests(unittest.TestCase):
         read_only = TurnJournal(tmp, read_only=True)
         with self.assertRaises(JournalError):
             read_only.lapse(story, 1, 'LIMIT_REACHED')
+
+    def test_a_check_on_a_read_only_journal_refuses_without_a_lapse(self):
+        # #466: ``tick --dry-run`` opens the journal read only; a check of the budget there
+        # refuses the turn (``BudgetRefused``), never ``JournalError`` for a lapse.
+        tmp = self.enterContext(tempfile.TemporaryDirectory())
+        self.journal = TurnJournal(tmp, clock=lambda: self.now)
+        self.story = self.journal.story(REPO, 7, 'h1')['story']
+        policy = envelope(wall=3600)
+        self.book(policy)
+        self.now = START + 3600
+        _, extension, _ = self.grantable(policy)
+        self.assertEqual(self.journal.extend(self.story, extension, 7, 1, 'x', 3), (1, None))
+        self.now = START + 4501  # past the extended deadline too
+        read_only = TurnJournal(tmp, clock=lambda: self.now, read_only=True)
+        with self.assertRaisesRegex(BudgetRefused, 'wall-time exhausted') as caught:
+            budget.reserve(policy, read_only, repo=REPO, issue=7, kind='review',
+                           agent=CFG.agent('codex'), check_only=True)
+        self.assertNotIn('decade', str(caught.exception))
+        self.assertEqual(TurnJournal(tmp).extension(self.story)['extension'], extension)
 
     def test_a_time_past_the_extension_is_not_offered(self):
         policy = envelope(wall=3600)

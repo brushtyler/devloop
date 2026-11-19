@@ -2083,13 +2083,15 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         now: the check of the booking, read only, for a step that records something before its
         turn (a conclave call recorded as started) or that must not plan a turn already refused
         and escalated (the advisory review). The booking itself stays in ``_open_turn``, under
-        the journal's lock. Without a ledger, or with the budget off, nothing."""
+        the journal's lock: a check never makes an extension no turn used lapse (#466), only
+        the refusal of a booking does. Without a ledger, or with the budget off, nothing."""
         budget = self.cfg.budget
         if self.ledger is None or not budget.enabled or kind in OUTSIDE:
             return
         try:
             budget_reserve(budget, self.ledger.journal, repo=self.cfg.repo,
-                           issue=self._work_issue(number), kind=kind, agent=agent)
+                           issue=self._work_issue(number), kind=kind, agent=agent,
+                           check_only=True)
         except BudgetRefused as exc:
             self.log(f'  turn {kind} refused on #{number}: not covered by the budget envelope '
                      f'({exc.category})')

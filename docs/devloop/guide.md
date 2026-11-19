@@ -1111,7 +1111,10 @@ keeps its one extension. The refusal says so and goes through the delegation aga
 supervisor as `budget_grantable` when an extension would cover the turn now, otherwise to the
 operator as `budget` (for a deadline already past, an extension of 25% of `wall_seconds` usually
 no longer covers it). The lapsed grant still counts against the daily cap of its day, and the
-same command never applies again; a story never has more than one extension in force.
+same command never applies again; a story never has more than one extension in force. Only the
+refusal of a booking makes it lapse: the read-only check of the envelope before a conclave call
+or an advisory review, and `devloop tick --dry-run`, refuse the turn and leave the extension
+booked.
 
 **Revocation.** `budget = false` revokes the delegation from the next tick, as for `rounds`: a
 refused turn goes to the operator, and a `grant-budget` on an escalation already with the

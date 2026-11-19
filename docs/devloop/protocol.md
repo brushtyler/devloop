@@ -1074,7 +1074,8 @@ their format does not change. The journal is append-only, one JSON event per lin
 - `grant_lapsed` (#466): the extension of a story whose first turn after the grant was refused
   all the same, before any turn used it, with the `story`, the `comment` of the command, the
   issue or PR `number` and the `category` of the refusal. Written under the journal's lock in
-  the same step as the refusal of the booking; an extension a turn used never lapses. From then
+  the same step as the refusal of the booking, never by a read-only check of the envelope; an
+  extension a turn used never lapses. From then
   on the extension does not extend the envelope and the story keeps its one extension; the
   grant still counts against the daily cap of its day, and the same command never applies
   again. The events of the
