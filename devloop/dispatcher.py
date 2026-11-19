@@ -1468,14 +1468,29 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
         A copy refused by the smoke test (``SmokeError``, #260) is not a failed tick: the request
         is dropped, ``current`` stays, planning goes on from the running copy, and an alert goes
-        to ``[run].alert_issue`` once per refused commit."""
+        to ``[run].alert_issue`` once per refused commit.
+
+        A merge devloop did not make (#430), such as one of the operator, requests the pin
+        too: before reading the request, a tick that is not a dry run asks the pinner whether
+        ``origin/<base_branch>`` advanced with changes to ``[pin] paths`` (``observe``). A
+        failure there is logged, and the next tick tries again."""
         if self.pinner is None or not self.cfg.pin.auto:
             return
+        ref = f'origin/{self.cfg.base_branch}'
+        if not dry_run:
+            try:
+                self.pinner.observe(self.cfg.base_branch, self.cfg.pin.touches)
+            except (PinError, OSError) as exc:
+                self.log(f'auto-pin: the advance of {ref} not checked, next tick: {exc}')
         request = self.pinner.pending()
         if not request:
             return
-        ref = f'origin/{self.cfg.base_branch}'
-        why = f'the merge of #{request.get("pr")}' if request.get('pr') else 'a merge'
+        if request.get('pr'):
+            why = f'the merge of #{request["pr"]}'
+        elif isinstance(request.get('head'), str) and request['head']:
+            why = f'the advance of {ref} to {request["head"][:12]}'
+        else:
+            why = 'a merge'
         if dry_run:
             self.log(f'[dry-run] auto-pin of {ref} pending after {why}')
             return
