@@ -198,6 +198,13 @@ class FakeGH:
         raw = self.any_prs.get(number)
         return dict(raw) if raw is not None else None
 
+    # The merged PRs of each commit, by commit, as `commit_prs` returns them (#473): none by
+    # default.
+    commit_raw = {}
+
+    def commit_prs(self, sha):
+        return list(self.commit_raw.get(sha, ()))
+
     def branch_prs(self, branch):
         """The PRs of ``any_prs`` from head branch ``branch``, newest first (#384)."""
         return [dict(raw) for _, raw in sorted(self.any_prs.items(), reverse=True)

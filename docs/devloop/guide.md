@@ -2521,9 +2521,12 @@ A PR whose code needs a step on the host before it is pinned (#462), such as a n
 project file or of the overlay, declares it: implementer and fixer return `host_step` in their
 structured output (a short text with a reference to the document of the step, such as a section
 of `ops/host/migrate.md`; empty when there is none), the PR description shows it under
-"Passo sull'host", and the reviewer checks that it is there when the PR changes the schema of
-the project file or of the overlay, or `ops/host/`, and empty otherwise. The latest declaration
-holds: the PR's, or that of its latest fix.
+"Passo sull'host", and the reviewer checks it (#473): a declaration is needed when, and only
+when, the pinned code cannot run as intended without a file in the `state_dir`, a key or table
+of the project file or of the overlay that is required, or a command run as root or on the
+service; a change only to the documents of `ops/host/`, or an optional key or table with a
+default, needs none. A missing declaration is a blocking finding, a superfluous one only a
+non-blocking finding. The latest declaration holds: the PR's, or that of its latest fix.
 
 devloop merges such a PR as any other: the queue does not stop. With `[pin] auto = true`,
 though, the merge does not request the pin. Before merging, devloop records a hold of the
@@ -2542,11 +2545,34 @@ while a pin is fetching writes its hold first, so a commit that contains it is n
 While the hold stays, no auto-pin runs, of that commit nor of later ones:
 a pending request (of a later merge, or of an advance of `origin/main`) waits, and the log says
 `auto-pin of origin/main held: the step on the host of #<N> waits for the operator, who pins by
-hand after it (devloop pin)`; `devloop status` shows `auto-pin held: …`. The operator does the
+hand after it (devloop pin)`; `devloop status` shows `auto-pin held: …` and, for each hold, its
+PR, its merge commit, whether its alert went out, and its step. The operator does the
 step with the loop stopped, then pins by hand (`devloop pin`, also through the
-[launcher](#launcher)): that pin releases the hold (`auto-pin resumed: the hold after the step on
-the host of #<N> is released`) and drops the pending request, and the auto-pin resumes with the
-next merge.
+[launcher](#launcher)): that pin releases, under the lock of the pins, the holds whose merge the
+pinned commit contains (`auto-pin resumed: the hold after the step on the host of #<N> is
+released`) and drops the pending request, and the auto-pin resumes with the next merge. A hold
+whose merge the pinned commit does not contain, such as after a rollback to an older commit or
+for a merge that landed during the pin, stays (`auto-pin held: the pinned commit does not
+contain the merge of #<N>; …`), until a pin by hand of a commit that contains it. Before devloop
+knows the merge commit of its own merge, the head of the PR stands for it; a hold that names no
+commit (a `pin-held.json` that cannot be read) goes with any pin by hand.
+
+A merge devloop did not make (#473), such as the operator's merge on GitHub of a PR in
+`agent:needs-operator`, holds the auto-pin too. At each tick, after it has looked at
+`origin/main` (`observe`), and again once an auto-pin has resolved its commit, devloop reads on
+GitHub the PRs merged by each commit of the first-parent line of `origin/main` that neither the
+pinned copy nor its last look contains (`.ssdlc/devloop/pin-scanned.json`; with neither, it
+starts from the head it sees). A devloop PR, recognised by its branch and its marker, whose
+latest declaration (of the marker or of a fix its implementer recorded) is not empty gets a hold
+with its merge commit, and the alert says `La PR #<N> è stata mergiata fuori da devloop`. When
+the PRs of the commit about to be pinned cannot be read, nothing is pinned and the log says
+`auto-pin of origin/main waits for the next tick, the pinned copy is unchanged: …`.
+
+Each hold records whether its alert went out (`alerted` in `pin-held.json`, and `commented` for
+the comment alone). A comment or a label that failed, or a process stopped between the merge and
+the alert, is tried again at each tick until it goes out, without repeating the part that did; a
+hold whose PR turns out closed without merge goes. With no `[run].alert_issue` there is nothing to
+publish, and the alert counts as gone out after the label.
 
 At the start of `tick` and `run`, and at each reload of `run`, devloop checks the tables of the
 project file that change its behaviour (`[prompts]`, `[tests]`): when the running copy reads one

@@ -398,6 +398,15 @@ class GitHub:
                                                     'mergeCommit')
         return [dict(raw, author={'login': author_login(raw.get('author'))}) for raw in prs]
 
+    def commit_prs(self, sha):
+        """The numbers of the merged PRs that GitHub associates with commit ``sha`` (#473): for
+        a commit of the base branch, the PR whose merge (a merge commit, a squash or the last
+        commit of a rebase) brought it there."""
+        prs = self._json('api', f'repos/{self.repo}/commits/{sha}/pulls') or []
+        return [raw['number'] for raw in prs
+                if isinstance(raw, dict) and raw.get('merged_at')
+                and isinstance(raw.get('number'), int)]
+
     def branch_prs(self, branch):
         """The PRs whose head branch is ``branch``, in any state, newest first, with the fields
         of :meth:`open_prs` (the mergeability ones aside), ``state`` and ``createdAt`` (#384)."""
