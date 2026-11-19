@@ -15,7 +15,8 @@ verdict machine-actionable:
   the trust policy, ``decision`` for anything else, and a record without the field is a
   ``decision``. Only a ``decision`` stops the loop at once (``flow_verdict``): a ``trust_policy``
   goes on as a request for changes while blocking findings of its own stay open, and otherwise
-  as an approval whose merge is the operator's.
+  as an approval whose merge is the operator's, unless the same reviewer later approves the
+  latest round as the operator decided on 2026-11-19 (#461, ``trust_policy_parts``).
 
 Every blocking finding has an owner and an identity, ``round/reviewer/ID`` (``2/codex/R2-1``),
 recorded in the marker. Only its owner closes it, in a later review. A finding of the reviewer
@@ -291,16 +292,50 @@ def round_verdict(records):
     return 'approve'
 
 
+def _closed_by_owner(key, owner, round_no, reviews):
+    """Whether ``owner`` closed the finding ``key``, opened by or carried in its record of round
+    ``round_no``, with a review of its own of a later round: never a closure of the operator or
+    of the CI."""
+    return bool(key) and any(
+        owner_of(r) == owner and r['round'] > round_no
+        and any(p.get('key') == key and p.get('status') in CLOSING
+                for p in r.get('previous_findings', ()))
+        for r in reviews)
+
+
+def _trust_cleared(owner, reviews, final):
+    """Whether the ``trust_policy`` of ``owner`` no longer holds the merge (#461): ``owner``
+    approves the head of ``final``, the latest round, without the trust policy, and closed with
+    its own reviews every finding its ``trust_policy`` records left open. That no reviewer of
+    ``final`` gives ``trust_policy`` is the caller's to check."""
+    if not any(owner_of(r) == owner and current_verdict(r.get('verdict')) == 'approve'
+               for r in final):
+        return False
+    return all(_closed_by_owner(f.get('key'), owner, record['round'], reviews)
+               for record in reviews if owner_of(record) == owner and trust_policy(record)
+               for f in own_open_findings(record))
+
+
 def trust_policy_parts(reviews):
     """The parts of the trust policy the reviewers of ``reviews`` say the PR touches (#434), as
-    ``[(reviewer, round, human_reason)]``: the latest ``trust_policy`` record of each reviewer,
-    in order of round. Empty when none ever said so. Once one did, the merge of the PR is the
-    operator's for good, as after a conclave restart: a later approval does not hand it back to
-    devloop."""
+    ``[(reviewer, round, human_reason)]``: the latest ``trust_policy`` record of each reviewer
+    whose ``trust_policy`` still holds the merge, in order of round. Empty when none does, and
+    then devloop merges as for any other PR.
+
+    A ``trust_policy`` holds the merge for good, as after a conclave restart, unless the
+    operator's decision of 2026-11-19 (#461, ADR 0005, D10) clears it: the reviewer who gave it
+    approves the head of the latest round, it closed with its own reviews the findings its
+    ``trust_policy`` records left open (not the operator, not the CI), and no reviewer of that
+    round gives ``trust_policy``. One ``trust_policy`` in the latest round, even in a record
+    that duplicates another of its reviewer, keeps every earlier one."""
     latest = {}
     for record in reviews:
         if trust_policy(record):
             latest[owner_of(record)] = record
+    final = current_round(reviews)
+    if not any(trust_policy(r) for r in reviews if r['round'] == last_round(reviews)):
+        latest = {owner: r for owner, r in latest.items()
+                  if not _trust_cleared(owner, reviews, final)}
     found = sorted(latest.values(), key=lambda r: r['round'])
     return [(owner_of(r), r['round'], (r.get('human_reason') or '').strip()) for r in found]
 

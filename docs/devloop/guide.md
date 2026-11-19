@@ -138,8 +138,17 @@ are not PRs and stay with the operator, and a `needs_operator` for a `decision` 
   as approved: the PR is promoted to `agent:ready-to-merge` and gets `agent:needs-operator` with
   the [operator merge](#ready-prs-whose-merge-is-the-operators) notice, written once per head, that asks
   for the operator's review and merge and lists the parts of the policy each reviewer named.
-  Once a reviewer of the PR has given `trust_policy`, devloop never merges the PR itself,
-  whatever `[merge]` says and even if a later round approves. A `decision`, or a
+  Once a reviewer of the PR has given `trust_policy`, devloop does not merge the PR itself,
+  whatever `[merge]` says, with one exception decided by the operator on 2026-11-19 (#461,
+  [ADR 0005](../adr/0005-deleghe-e-ruoli-degli-agent.md#4-decisioni-riservate-alloperatore),
+  D10): the `trust_policy` of a reviewer no longer holds the merge when that same reviewer
+  approves the head of the latest round, it closed its own blocking findings itself with its
+  reviews (not the operator with `/devloop finding`, nor the CI), and no reviewer of that round
+  gives `trust_policy`. It is the case of a PR that broke a rule in its first round and then
+  carried out the decision faithfully: devloop merges it like any other of its level. Otherwise
+  the PR goes to the operator as above, and the notice lists the parts each reviewer whose
+  `trust_policy` still holds named in its latest one: on the approved head when a reviewer of
+  that round gives it. A `decision`, or a
   `needs_operator` without `operator_reason` (a reviewer or a record from before #434), is an
   immediate escalation as before, of class `reviewer_decision`, which is critical and so stays
   with the operator in `auto` mode too
@@ -157,8 +166,9 @@ are not PRs and stay with the operator, and a `needs_operator` for a `decision` 
 
 - the rule depends on the attention of the reviewers, at every round: at level 2 they are two,
   of different vendors, but they may both miss a change, and a reviewer of a later round who
-  looks only at the latest fix may approve a PR an earlier round flagged. Since #447 they also
-  judge whether a change conforms to the decision it cites. devloop checks nothing
+  looks only at the latest fix may approve a PR an earlier round flagged; since #461 that
+  approval, by the reviewer who flagged it, also gives the merge back to devloop. Since #447
+  they also judge whether a change conforms to the decision it cites. devloop checks nothing
   of it in code: no file is reserved to the operator for the policy, and `devloop/config.toml` is
   not in `operator_only_paths`;
 - a change deliberately disguised as something else is not covered;
@@ -748,8 +758,8 @@ it does not (#248), because the [merge mode](#merge-modes) of the PR is `"off"`,
 `agent:needs-operator` once the PR is ready, with a comment ("Il merge spetta all'operatore")
 that says why: the reserved paths the diff touches, the mode or the level, the restart of its
 work after a [conclave](#after-a-unanimous-decision) (#142), or a reviewer who said that it
-touches the [trust policy](#changes-to-the-trust-policy) (#434), with the parts each reviewer
-named; this last reason is stated with `[merge] mode = "off"` too. The comment
+touches the [trust policy](#changes-to-the-trust-policy) (#434) and whose `trust_policy` a
+later approval did not clear (#461), with the parts each such reviewer named; this last reason is stated with `[merge] mode = "off"` too. The comment
 carries a `notice` marker of event `operator_merge` with the head, how many `labeled` events of
 the label came before, and the promotion it belongs to (how many promotions the PR's policy
 records count). There is one comment per head: a head promoted again, after its CI ran again

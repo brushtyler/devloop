@@ -1003,7 +1003,9 @@ level, a reviewer gives `needs_operator` to a change that touches the trust poli
 operator for it: since #447 a faithful implementation of a decision of the operator recorded in
 an ADR on `main` gets the technical verdict, unless it changes the rule itself (#399, see
 [Changes to the trust policy](guide.md#changes-to-the-trust-policy)), with `operator_reason`
-`trust_policy`: the fix goes on as for `request_changes`, and the merge is the operator's (#434).
+`trust_policy`: the fix goes on as for `request_changes`, and the merge is the operator's (#434)
+unless the same reviewer then approves the latest round as the operator decided on 2026-11-19
+(#461, see [Changes to the trust policy](guide.md#changes-to-the-trust-policy)).
 
 The criterion for a sensitive path: **the code that decides permissions, fencing and
 authorizations goes to level 2**, besides devloop itself and the agents' instructions. So
@@ -1066,7 +1068,8 @@ A round at level 2 works as follows:
   from either sends the PR to `agent:needs-operator`; otherwise a `request_changes` from either
   starts a single fix that receives every open finding of both; two approvals go to promotion. A
   `needs_operator` for the trust policy (#434) counts as `request_changes` while findings of its
-  reviewer stay open, else as an approval whose merge is the operator's.
+  reviewer stay open, else as an approval whose merge is the operator's (until the same reviewer
+  clears it by approving a later round, #461).
 - **Quorum.** The PR is promoted only if every reviewer of the receipt recomputed just before
   approved the same head with that same receipt, and no blocking finding is open. A missing
   reviewer, one that timed out (the step goes to `agent:needs-operator`) or one that asked for a
