@@ -12,6 +12,7 @@ from pathlib import Path
 from .localtests import MODES as LOCAL_TESTS_MODES
 from .policy import MAX_LEVEL, MIN_LEVEL, ZERO_LEVEL, ReviewPolicy
 from .supervision import MAX_DAILY_GRANTS, MAX_GRANTED_ROUNDS
+from .unavailability import delimited
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / 'config.toml'
 # The root of the running dispatcher's installation (a pinned checkout, see docs/devloop/guide.md):
@@ -533,7 +534,7 @@ def _unavailable(table, where):
         if not pattern:
             raise ConfigError(f'{where}.unavailable_patterns: empty pattern')
         try:
-            re.compile(pattern)
+            re.compile(delimited(pattern))  # as unavailable_reason uses it (#443)
         except re.error as exc:
             raise ConfigError(f'{where}.unavailable_patterns: {pattern!r}: {exc}') from exc
     codes = table.get('unavailable_exit_codes', [])

@@ -412,7 +412,7 @@ class PreflightFallbackTests(unittest.TestCase):
         self.assertNotIn('pull request', FALLBACK_NOTE['preflight'])
         self.assertIn('Do the thing.', again)
         line = FIXTURE_STDERR.splitlines()[1]
-        self.assertIn(f'agy: model {ARGON} unavailable: `RESOURCE_EXHAUSTED` in "{line[:200]}"',
+        self.assertIn(f'agy: model {ARGON} unavailable: `RESOURCE_EXHAUSTED` in "{line[:200]}…"',
                       log)
         self.assertIn(f'agy ran on fallback model {HYDROGEN}', log)
         self.assertIn('issue-7-preflight', self.ws.removed)
