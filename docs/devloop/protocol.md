@@ -512,7 +512,10 @@ record adds no label and blocks nothing by itself: the open blocks do.
 ## Daily summary
 
 The [daily summary](guide.md#daily-summary) (#256) reads only records bound to identities: the
-`ledger`, `merged` and `notice` (escalation) records the dispatcher signed, the `review` records
+`ledger`, `merged` and `notice` (escalation) records the dispatcher signed, its
+[`supervision`](#supervision-trace) records of `grant-round`, `grant-budget` and `capacity`
+(#466: the grants of the supervisor of the day, with the caps left their figures record: `left`
+of `cap` for the rounds of the PR, `daily_left` of `daily_cap` for the day), the `review` records
 of a configured reviewer written with its identity (a CI round with the dispatcher's), and the
 `pr` marker of a PR opened by the implementer it names. It reads the comments of the repository,
 not the native reviews: a round whose reviews are native reviews is counted from its
@@ -1051,7 +1054,15 @@ their format does not change. The journal is append-only, one JSON event per lin
   envelope (#411, `/devloop grant-budget`) is a `grant` of the delegation `budget` that also
   records the `story` and the `extension` it adds; one per story, ever, checked under the lock in
   the same step as the daily cap and the write, and from then on part of the envelope of that
-  story ([Extending the budget envelope](guide.md#extending-the-budget-envelope)). The events of the
+  story ([Extending the budget envelope](guide.md#extending-the-budget-envelope)). The grant
+  books the extension; the first turn of the story booked after it spends it (#466).
+- `grant_lapsed` (#466): the extension of a story whose first turn after the grant was refused
+  all the same, before any turn used it, with the `story`, the `comment` of the command, the
+  issue or PR `number` and the `category` of the refusal. Written under the journal's lock in
+  the same step as the refusal of the booking; an extension a turn used never lapses. From then
+  on the extension does not extend the envelope and the story keeps its one extension; the
+  grant still counts against the daily cap of its day, and the same command never applies
+  again. The events of the
   [publication outbox](#publication-outbox) start with `publication`.
 - `config` (ADR 0006, R2, trace T1 of K1): the configuration the dispatcher read, at each start
   of `tick` and `run` (`when: start`, before any tick: a start whose record cannot be written

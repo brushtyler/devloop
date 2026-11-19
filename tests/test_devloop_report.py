@@ -17,7 +17,7 @@ import devloop.__main__ as cli
 from devloop import config, ledger, report
 from devloop.config import ConfigError, ReportPolicy
 from devloop.github import GitHub, GitHubError
-from devloop.markdown import publishable, read_marker, render_escalation
+from devloop.markdown import publishable, read_marker, render_escalation, render_supervision
 from devloop.watch import NOTHING_NEW, Trust
 
 from helpers import ssdlc_project
@@ -292,6 +292,61 @@ class SummaryTest(unittest.TestCase):
                      '- Round di review aperti: 2', '- Turni con un modello di fallback: 1'):
             self.assertIn(line, text)
         self.assertNotIn('forged', text)
+
+    def test_the_grants_of_the_supervisor_with_the_caps_left(self):
+        # #466 (ADR 0005, section 3.1, rule 4): every grant-round, grant-budget and capacity
+        # the dispatcher answered on the day, granted or refused, with the time, the number,
+        # the first line of the reason, the outcome and the caps left.
+        gh = ReportGH()
+        day = '2026-11-16'
+
+        def supervision(number, at, login=DISPATCHER, **record):
+            gh.add(number, login, render_supervision(
+                dict({'by': 'supervisor', 'comment': 1}, **record), 'testo'), at)
+
+        supervision(12, f'{day}T09:00:00Z', command='grant-round', outcome='granted',
+                    reason='CI rossa per un flake.\nCausa: test instabile.', head='a' * 40,
+                    granted=1, cap=2, left=1, daily=1, daily_cap=3, daily_left=2)
+        supervision(5, f'{day}T10:00:00Z', command='grant-budget', outcome='granted',
+                    reason='Issue troppo larga.', story='story-1-abcdef01',
+                    extension={'turns': 1}, daily=2, daily_cap=3, daily_left=1)
+        supervision(ISSUE, f'{day}T11:00:00Z', command='capacity', outcome='granted',
+                    reason='Coda lunga | molte PR.', setting='max_open_prs', value=4,
+                    configured=3, cap=6, minutes=120, until=f'{day}T13:00:00Z', daily=3,
+                    daily_cap=3, daily_left=0)
+        supervision(13, f'{day}T12:00:00Z', command='grant-round', outcome='refused',
+                    reason='x' * 200)
+        # Not listed: another command, another day, another identity.
+        supervision(14, f'{day}T12:30:00Z', command='retry', outcome='applied', reason='')
+        supervision(15, '2026-11-15T12:00:00Z', command='grant-round', outcome='granted',
+                    reason='ieri', granted=1, cap=2, left=1, daily=1, daily_cap=3,
+                    daily_left=2)
+        supervision(16, f'{day}T12:40:00Z', login=STRANGER, command='grant-budget',
+                    outcome='granted', reason='forged', daily=1, daily_cap=3, daily_left=2)
+        when = report.parse_day(day)
+        s = report.Records(gh, TRUST, when, when, CFG.agents).summary(when)
+        self.assertEqual(s.grants, [
+            ('09:00', 12, 'grant-round', 'CI rossa per un flake.', 'concessa',
+             'PR: 1 di 2 round; giorno: 2 di 3'),
+            ('10:00', 5, 'grant-budget', 'Issue troppo larga.', 'concessa',
+             'storia: 0 di 1 estensioni (prenotata fino all\'avvio del turno); giorno: 1 di 3'),
+            ('11:00', ISSUE, 'capacity', 'Coda lunga | molte PR.', 'concessa',
+             f'`max_open_prs` = 4 fino a {day}T13:00:00Z; giorno: 0 di 3'),
+            ('12:00', 13, 'grant-round', 'x' * 119 + '…', 'rifiutata', '—')])
+        self.assertFalse(s.empty())
+        self.assertEqual(s.actions, [])
+        text = report.render_text(s)
+        for line in ('### Concessioni del supervisore',
+                     '| Ora (UTC) | Numero | Comando | Motivo | Esito | Tetti residui |',
+                     '| 09:00 | #12 | `grant-round` | CI rossa per un flake. | concessa '
+                     '| PR: 1 di 2 round; giorno: 2 di 3 |',
+                     f'| 11:00 | #{ISSUE} | `capacity` | Coda lunga \\| molte PR. | concessa '
+                     f'| `max_open_prs` = 4 fino a {day}T13:00:00Z; giorno: 0 di 3 |',
+                     '| 12:00 | #13 | `grant-round` | ' + 'x' * 119 + '… | rifiutata | — |'):
+            self.assertIn(line, text)
+        self.assertNotIn('forged', text)
+        self.assertNotIn('ieri', text)
+        self.assertNotIn('Causa', text)  # only the first line of the reason
 
     def test_an_empty_day(self):
         gh = ReportGH()

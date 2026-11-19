@@ -54,7 +54,13 @@ behaves as before.
   stays the one of the first booking, and the extension is added on top of it when the envelope
   is read (``envelope_of``). An extension that would not cover the refused turn (a nothing
   added, such as 25% of 3 turns, a limit in dollars, an outcome still uncertain) is not
-  grantable (``grantable``): it is refused and does not spend the story's extension.
+  grantable (``grantable``): it is refused and does not spend the story's extension. The grant
+  only books the extension, and the first turn of the story booked after it spends it (#466): a
+  turn waits for capacity or a reviewer, and meanwhile even the extended deadline may pass. If
+  that first turn is refused all the same, the extension lapses (``TurnJournal.lapse``) without
+  spending the story's one extension, and the refusal goes through the delegation again: to the
+  supervisor when an extension would cover the turn now, otherwise to the operator. Never more
+  than one extension applies to a story, and its value is always the one of ``increments``.
 """
 
 import calendar
@@ -401,6 +407,9 @@ def reserve(budget, journal, *, repo, issue, kind, agent, extension=None):
     The envelope is the frozen one with the extension the journal records for the story
     (``envelope_of``, #411); ``extension``, when given, is checked instead of it, and nothing
     is written (``grantable``). The booking records the frozen limits, never the extension.
+    An extension no turn of the story used yet makes the first turn after it spend it, when
+    booked; when that turn is refused it lapses instead (``TurnJournal.lapse``, #466), and the
+    refusal says so.
 
     A role without a cap in the envelope, configured after the first booking of the story, is
     refused as ``ROLE_NOT_IN_ENVELOPE`` (#396): the story keeps its envelope, with no default
@@ -418,8 +427,17 @@ def reserve(budget, journal, *, repo, issue, kind, agent, extension=None):
     if extension is not None:
         envelope, granted = extended(base, extension), extension
     start = started(story, turns, now)
+    # An extension no turn used yet is only booked (#466): if this turn, the first after the
+    # grant, is refused all the same, it lapses and the story keeps its one extension.
+    booked = (extension is None and grant is not None
+              and not journal.extension_used(story['story']))
 
     def refused(message, category):
+        if booked and journal.lapse(story['story'], grant.get('comment'), category):
+            message += (f'. L\'estensione concessa dal supervisore (`grant-budget`: '
+                        f'{extension_text(grant["extension"])}) non era ancora stata usata da '
+                        'nessun turno: decade ora, senza spendere l\'unica estensione della '
+                        'storia, e un\'altra concessione può darla alle stesse condizioni')
         return BudgetRefused(message, category, story=story['story'], kind=kind,
                              agent=agent.key)
 
