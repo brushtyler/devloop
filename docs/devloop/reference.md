@@ -708,8 +708,9 @@ fallback_models = [
   devloop at startup. An
   output whose explicit error codes (`(code 400)`, agy's `"error_code":400`) are all `400`, a
   request the model rejected such as `INVALID_ARGUMENT (code 400)`, never counts, whatever else
-  it matches. The reason recorded and logged names the pattern and quotes at most 200
-  characters of the line around the match, starting at most 80 before it, `…` where cut. A
+  it matches and even with an exit code in `unavailable_exit_codes`. The reason recorded and
+  logged names the pattern and quotes at most 200 characters of the line around the match,
+  starting at most 80 before it, `…` where cut, even when the match itself is longer. A
   structured result, valid or not against the schema, and output that cannot be parsed (stdout
   that is not JSON or not a JSON object, a codex final message that is not JSON) take
   precedence even with a non-zero exit: only a missing or empty output, an envelope without

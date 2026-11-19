@@ -99,6 +99,18 @@ class DelimitedPatternTests(unittest.TestCase):
         self.assertIsNone(agents.unavailable_reason(
             agy, 1, 'request 1c42429607c6 failed: internal error'))
 
+    def test_a_listed_exit_code_does_not_override_a_400_error(self):
+        agy = dataclasses.replace(CFG.agent('agy'), unavailable_exit_codes=(3,))
+        self.assertIsNone(agents.unavailable_reason(agy, 3, INVALID_ARGUMENT_STDOUT))
+        self.assertEqual(agents.unavailable_reason(agy, 3, 'try later'), 'exit code 3')
+        # Through the runner: no ModelUnavailable, so no fallback and no memory.
+        cli = FakeCLI(gemini_4_argon_high=(3, '', INVALID_ARGUMENT_STDOUT))
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaises(
+                agents.AgentError) as ctx:
+            agents.AgentRunner(tmp, 10, run=cli, clock=Clock()).run(
+                agy, 'review', 'p', 'review', tmp, 'pr-1')
+        self.assertNotIsInstance(ctx.exception, agents.ModelUnavailable)
+
     def test_the_real_400_output_neither_falls_back_nor_is_remembered(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp) / 'state'
@@ -169,6 +181,13 @@ class DelimitedPatternTests(unittest.TestCase):
         # A short line is quoted whole, without marks.
         self.assertEqual(agents.unavailable_reason(only_429, 1, 'a\n  HTTP 429 \nb'),
                          '`429` in "HTTP 429"')
+        # A match longer than the limit is cut too.
+        reason = agents.unavailable_reason(
+            CFG.agent('agy'), 1, f'model {"x" * 500} not available')
+        quoted = reason.split(' in "', 1)[1][:-1]
+        self.assertTrue(reason.startswith('`model .* not available` in "model xxx'))
+        self.assertEqual(quoted, f'model {"x" * (agents.EXCERPT - 6)}…')
+        self.assertEqual(len(quoted), agents.EXCERPT + 1)
 
     def test_patterns_are_validated_as_they_are_matched(self):
         for pattern in ('(?i)quota', '('):

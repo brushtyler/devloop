@@ -298,7 +298,7 @@ def _excerpt(text, match):
     end = text.find('\n', match.end())
     end = len(text) if end < 0 else end
     first = max(start, match.start() - EXCERPT_BEFORE)
-    last = min(end, max(first + EXCERPT, match.end()))
+    last = min(end, first + EXCERPT)  # a longer match is cut too
     head = text[first:last]
     head = head.lstrip() if first == start else f'…{head}'
     return head.rstrip() if last == end else f'{head}…'
@@ -310,15 +310,15 @@ def unavailable_reason(agent, returncode, text):
     None); a valid result, a parse or schema error and a timeout never count.
 
     A pattern matches only as a delimited word or code (``delimited``). An output whose
-    explicit error codes are all request errors (``INVALID_ARGUMENT (code 400)``) never counts:
-    the model answered, and rejected the request (#443). The reason names the pattern and the
-    part of the line around the match."""
-    if returncode is not None and returncode in agent.unavailable_exit_codes:
-        return f'exit code {returncode}'
+    explicit error codes are all request errors (``INVALID_ARGUMENT (code 400)``) never counts,
+    not even with an exit code in ``unavailable_exit_codes``: the model answered, and rejected
+    the request (#443). The reason names the pattern and the part of the line around the match."""
     text = text or ''
     codes = explicit_codes(text)
     if codes and codes <= REQUEST_ERROR_CODES:
         return None
+    if returncode is not None and returncode in agent.unavailable_exit_codes:
+        return f'exit code {returncode}'
     for pattern in agent.unavailable_patterns:
         match = re.search(delimited(pattern), text, re.IGNORECASE)
         if match:
