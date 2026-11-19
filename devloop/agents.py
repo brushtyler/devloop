@@ -13,7 +13,7 @@ from pathlib import Path
 from .agentuser import SCHEMAS, TURNS, SharedDir
 from .markdown import agent_bot, devloop_version, header, parse_version
 from .schema import load_schema, schema_path, validate, with_defaults, SchemaError
-from .unavailability import reset_seconds
+from .unavailability import delimited, reset_seconds
 from .workspace import git_config_env, partial_text, run_in_group
 
 MODES = ('write', 'review')
@@ -276,19 +276,53 @@ class ModelsUnavailable(AgentError):
         self.tried = list(tried)
 
 
+# The explicit error codes of a CLI's output (#443): ``INVALID_ARGUMENT (code 400)`` in the text
+# and ``"error_code":400`` in agy's structured error (``AGY_ERROR {…}``).
+EXPLICIT_CODE = re.compile(r'\(code (\d{3})\)|"error_code"\s*:\s*(\d{3})(?!\d)')
+# A request the model rejected: never its unavailability, whatever else the output says.
+REQUEST_ERROR_CODES = frozenset({400})
+# How much of the line around a match the reason quotes: at most EXCERPT characters, starting
+# at most EXCERPT_BEFORE characters before the match.
+EXCERPT, EXCERPT_BEFORE = 200, 80
+
+
+def explicit_codes(text):
+    """The explicit error codes in ``text``, as a set of integers."""
+    return {int(a or b) for a, b in EXPLICIT_CODE.findall(text or '')}
+
+
+def _excerpt(text, match):
+    """The part of the line of ``match`` around it, at most ``EXCERPT`` characters, ``…`` where
+    it was cut."""
+    start = text.rfind('\n', 0, match.start()) + 1
+    end = text.find('\n', match.end())
+    end = len(text) if end < 0 else end
+    first = max(start, match.start() - EXCERPT_BEFORE)
+    last = min(end, max(first + EXCERPT, match.end()))
+    head = text[first:last]
+    head = head.lstrip() if first == start else f'…{head}'
+    return head.rstrip() if last == end else f'{head}…'
+
+
 def unavailable_reason(agent, returncode, text):
     """Why a failed turn of ``agent`` counts as its model being unavailable, or None. Call it
     only for a non-zero exit (``returncode``) or an explicit error envelope (``returncode``
-    None); a valid result, a parse or schema error and a timeout never count."""
+    None); a valid result, a parse or schema error and a timeout never count.
+
+    A pattern matches only as a delimited word or code (``delimited``). An output whose
+    explicit error codes are all request errors (``INVALID_ARGUMENT (code 400)``) never counts:
+    the model answered, and rejected the request (#443). The reason names the pattern and the
+    part of the line around the match."""
     if returncode is not None and returncode in agent.unavailable_exit_codes:
         return f'exit code {returncode}'
+    text = text or ''
+    codes = explicit_codes(text)
+    if codes and codes <= REQUEST_ERROR_CODES:
+        return None
     for pattern in agent.unavailable_patterns:
-        match = re.search(pattern, text or '', re.IGNORECASE)
+        match = re.search(delimited(pattern), text, re.IGNORECASE)
         if match:
-            start = text.rfind('\n', 0, match.start()) + 1
-            end = text.find('\n', match.end())
-            line = text[start:end if end >= 0 else len(text)].strip()
-            return f'`{pattern}` in "{line[:200]}"'
+            return f'`{pattern}` in "{_excerpt(text, match)}"'
     return None
 
 

@@ -701,7 +701,15 @@ fallback_models = [
   non-zero code, or its JSON envelope is explicitly an error (claude `is_error`, agy `status`
   other than `SUCCESS`), and its stdout or stderr matches one of `unavailable_patterns`
   (regular expressions, case-insensitive; default `RESOURCE_EXHAUSTED`, `quota`, `429`,
-  `model .* not available`), or the exit code is in `unavailable_exit_codes` (default none). A
+  `model .* not available`), or the exit code is in `unavailable_exit_codes` (default none).
+  A pattern matches only as a delimited word or code, never next to a letter or a digit: `429`
+  matches `HTTP 429` and `(code 429)`, not the `…1c42429607c6` of an identifier (#443); a
+  pattern that does not compile so, such as one opening with the global flag `(?i)`, stops
+  devloop at startup. An
+  output whose explicit error codes (`(code 400)`, agy's `"error_code":400`) are all `400`, a
+  request the model rejected such as `INVALID_ARGUMENT (code 400)`, never counts, whatever else
+  it matches. The reason recorded and logged names the pattern and quotes at most 200
+  characters of the line around the match, starting at most 80 before it, `…` where cut. A
   structured result, valid or not against the schema, and output that cannot be parsed (stdout
   that is not JSON or not a JSON object, a codex final message that is not JSON) take
   precedence even with a non-zero exit: only a missing or empty output, an envelope without
