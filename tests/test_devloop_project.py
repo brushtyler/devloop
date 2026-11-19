@@ -190,7 +190,13 @@ class SchemaTests(FilesCase):
     def test_the_schema_holds_only_the_project_keys(self):
         self.assertEqual(set(config.PROJECT_KEYS), {
             'test_cmd', 'local_tests', 'language', 'priority_labels', 'docs', 'protected_paths',
-            'blocked_labels', 'review_policy', 'merge'})
+            'blocked_labels', 'review_policy', 'merge', 'prompts'})
+        # The project's data in the prompts (ADR 0006, R4): a fact, which the overlay may set.
+        self.assertEqual(config.PROJECT_KEYS['prompts'], {
+            'instructions': None, 'fix_instructions': None, 'module_test_cmd': None,
+            'module_test_helpers': None,
+            'adr': {'dir': None, 'decided': None, 'open_value': None, 'open_choice': None}})
+        self.assertEqual(config.OVERLAY_KEYS['prompts'], config.PROJECT_KEYS['prompts'])
         self.assertEqual(config.PROJECT_KEYS['review_policy'],
                          {'sensitive_paths': None, 'sensitive_path_lists': None,
                           'zero': {'checks': None}})
