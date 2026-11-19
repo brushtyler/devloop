@@ -982,6 +982,10 @@ class SupervisionMixin:
         if problem == 'spent':
             return refuse(f'nel frattempo la storia `{story}` ha già avuto la sua unica '
                           'estensione')
+        if problem == 'lapsed':
+            return refuse('l\'estensione di questo comando è già decaduta, perché il primo '
+                          'turno dopo la concessione è stato rifiutato comunque: serve una '
+                          'nuova concessione')
         if problem:
             return refuse('nel frattempo le concessioni di oggi hanno raggiunto il massimo '
                           f'giornaliero (`[delegations] max_grants_per_day` = '

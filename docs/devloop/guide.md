@@ -1170,6 +1170,20 @@ same, and the item stays where it is, without resuming the step;
 the extended envelope refuses goes to the operator as `budget`: a second extension, the dollars
 and the values of the envelope stay the operator's (ADR 0004, D2).
 
+**The grant books the extension; the turn spends it** (#466). A PR's turn runs at a later tick,
+and may wait for capacity or a reviewer: meanwhile even the extended deadline (`wall_seconds`)
+may pass. The extension is spent by the first turn of the story booked after the grant. If that
+turn is refused all the same, before any turn used the extension, the extension lapses: the
+journal records a `grant_lapsed` event, the envelope goes back to the frozen one, and the story
+keeps its one extension. The refusal says so and goes through the delegation again, to the
+supervisor as `budget_grantable` when an extension would cover the turn now, otherwise to the
+operator as `budget` (for a deadline already past, an extension of 25% of `wall_seconds` usually
+no longer covers it). The lapsed grant still counts against the daily cap of its day, and the
+same command never applies again; a story never has more than one extension in force. Only the
+refusal of a booking makes it lapse: the read-only check of the envelope before a conclave call
+or an advisory review, and `devloop tick --dry-run`, refuse the turn and leave the extension
+booked.
+
 **Revocation.** `budget = false` revokes the delegation from the next tick, as for `rounds`: a
 refused turn goes to the operator, and a `grant-budget` on an escalation already with the
 supervisor is refused and hands the item to the operator. A trusted user's `grant-budget` on an
@@ -1887,6 +1901,13 @@ and writes nothing without `--publish`. The summary lists:
 - the merges: devloop's with their mode and level, a person's as such;
 - the escalations, with their class and whether they went to the operator or the supervisor;
 - the CI blocks (a failed CI round) and the re-runs of failed jobs;
+- the grants of the supervisor (#466, ADR 0005, section 3.1, rule 4), so that the coordinator
+  verifies them without reading each thread: every `grant-round`, `grant-budget` and `capacity`
+  the dispatcher answered that day, granted or refused, from its `supervision` records, with the
+  UTC time, the issue or PR, the first line of the reason, the outcome and the caps left: the
+  rounds still grantable to the PR, the story's one budget extension (booked until the turn
+  starts) or the capacity limit in force with its expiry, and the grants of the day still
+  available across every delegation;
 - the totals: PRs opened and merged that day, review rounds opened that day (each round once,
   on the day of its first review comment or of its [round register](protocol.md#round-register),
   counted once a review turn of the round succeeded or its CI was recorded: the native reviews
