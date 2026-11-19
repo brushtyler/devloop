@@ -40,6 +40,13 @@ def reset_seconds(text):
     return None
 
 
+def delimited(pattern):
+    """The regular expression of the unavailability ``pattern`` matched as a delimited word or
+    code (#443): not preceded nor followed by a letter or a digit, so that ``429`` never matches
+    inside an identifier such as ``1c42429607c6``."""
+    return rf'(?<![^\W_])(?:{pattern})(?![^\W_])'
+
+
 def iso(epoch):
     return datetime.fromtimestamp(epoch, timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 

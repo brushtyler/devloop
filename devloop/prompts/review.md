@@ -57,11 +57,17 @@ and only when, it does at least one of these five things (the list is closed):
    permissions of the agents.
 2. It changes the constants that cap the delegations and the retries (for example `MAX_RETRIES`).
 3. It changes who is believed: the filter of the trusted authors of the comments, the check of
-   the identity that wrote a marker or a record, the identity required for `/devloop` commands.
+   the identity that wrote a marker or a record, the identity required for `/devloop` commands,
+   the names by which devloop recognises trusted commands and records: renaming, removing or
+   changing the meaning of a `/devloop` command (such as `/devloop hold`, `/devloop release`,
+   `/devloop veto`) or of a kind of the `<!-- devloop:<kind>:v1 ... -->` markers.
 4. It changes when a PR is merged or promoted, or who decides on it: the merge conditions, the
    quorum of the reviewers, the checks of `operator_only_paths` and `protected_paths`, the choice
    of the review level, the classes of escalation the supervisor decides in `auto` mode
-   (`NON_CRITICAL` in `devloop/supervision.py`) and those that stay with the operator.
+   (`NON_CRITICAL` in `devloop/supervision.py`) and those that stay with the operator, the names
+   of the labels that govern merge, hold and escalation, defined in the `Labels` dataclass of
+   `devloop/config.py` (`agent:ready-to-merge`, `agent:merge-hold`, `agent:needs-operator`,
+   `agent:needs-supervisor`): renaming, removing or changing the meaning of one of them.
 5. It changes one of these prompts in `devloop/prompts/`: the review prompt, the advisory review
    prompt, the conclave prompts (`conclave_proposal.md`, `conclave_vote.md`, which define the
    perimeter reserved to the operator), the parts of `implement.md`, `fix.md` and `preflight.md`
@@ -76,8 +82,10 @@ timeouts, capacities and intervals. Examples:
   enabling `conclave` or `[pin] auto`; raising `max_review_rounds` or `MAX_RETRIES`; adding a
   flag to `write_args`; accepting a marker written by another identity; one approval enough at
   level 2; skipping the `operator_only_paths` check for some files; moving `reviewer_decision`
-  among the non-critical classes of escalation; editing `devloop/prompts/review.md` or the
-  reserved perimeter in `devloop/prompts/conclave_vote.md`.
+  among the non-critical classes of escalation; renaming the label of hold or of escalation
+  (`agent:merge-hold`, `agent:needs-operator`, `agent:needs-supervisor`); renaming a `/devloop`
+  command or the kind of a marker; editing `devloop/prompts/review.md` or the reserved perimeter
+  in `devloop/prompts/conclave_vote.md`.
 - Not trust policy: a new or reworded comment or docstring; a new timeout key or a longer
   `[ci] grace_minutes`; a new capacity or interval; a new helper function that none of the
   checks above uses; moving code without changing what it decides; a new test.
@@ -127,7 +135,7 @@ it. The limit on new findings in later rounds (see "How to classify") does not a
   every other case, which stops the loop until the operator decides. List your blocking findings
   in both cases.
 
-Leave `operator_reason` empty (`""`) with `approve` and `request_changes`.
+Set `operator_reason` to `none` with `approve` and `request_changes`.
 
 Write every human-readable field in $language. Use `line: 0` and an empty `file` when a finding
 has no precise location. List in `checks_performed` what you actually ran or read.

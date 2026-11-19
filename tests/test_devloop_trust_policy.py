@@ -24,13 +24,24 @@ POINTS = (
     ('3. It changes who is believed:',
      ('the filter of the trusted authors of the comments',
       'the identity that wrote a marker or a record',
-      'the identity required for `/devloop` commands')),
+      'the identity required for `/devloop` commands',
+      # #417: the names by which devloop recognises commands and records.
+      'the names by which devloop recognises trusted commands and records: renaming, removing '
+      'or changing the meaning of a `/devloop` command',
+      '`/devloop hold`', '`/devloop release`', '`/devloop veto`',
+      'a kind of the `<!-- devloop:<kind>:v1 ... -->` markers')),
     ('4. It changes when a PR is merged or promoted, or who decides on it:',
      ('the merge conditions', 'the quorum of the reviewers',
       'the checks of `operator_only_paths` and `protected_paths`',
       'the choice of the review level',
       'the classes of escalation the supervisor decides in `auto` mode '
-      '(`NON_CRITICAL` in `devloop/supervision.py`) and those that stay with the operator')),
+      '(`NON_CRITICAL` in `devloop/supervision.py`) and those that stay with the operator',
+      # #417: the names of the labels of merge, hold and escalation.
+      'the names of the labels that govern merge, hold and escalation, defined in the `Labels` '
+      'dataclass of `devloop/config.py`',
+      '`agent:ready-to-merge`', '`agent:merge-hold`', '`agent:needs-operator`',
+      '`agent:needs-supervisor`',
+      'renaming, removing or changing the meaning of one of them')),
     ('5. It changes one of these prompts in `devloop/prompts/`:',
      ('the review prompt', 'the advisory review prompt',
       'the conclave prompts (`conclave_proposal.md`, `conclave_vote.md`, which define the '
@@ -92,6 +103,10 @@ class TrustPolicyPromptTest(unittest.TestCase):
                 self.assertIn('enabling `conclave` or `[pin] auto`', text)
                 self.assertIn('moving `reviewer_decision` among the non-critical classes of '
                               'escalation', text)
+                # #417: renaming a label, a command or a marker is policy.
+                self.assertIn('renaming the label of hold or of escalation (`agent:merge-hold`, '
+                              '`agent:needs-operator`, `agent:needs-supervisor`); renaming a '
+                              '`/devloop` command or the kind of a marker;', text)
                 self.assertIn('- Not trust policy: a new or reworded comment or docstring; a new '
                               'timeout key', text)
 
@@ -105,6 +120,28 @@ class TrustPolicyPromptTest(unittest.TestCase):
         self.assertNotIn('reviewer_decision', supervision.NON_CRITICAL)
         config = (ROOT / 'devloop' / 'config.py').read_text(encoding='utf-8')
         self.assertIn("'protected_paths'", config)
+
+    def test_the_labels_commands_and_markers_in_the_list_exist(self):
+        # #417: the labels, commands and markers the rule names are those of the code.
+        from devloop.config import Labels
+        from devloop.conclave import VETO_COMMAND
+        from devloop.dispatch_supervision import HOLD_COMMAND, RELEASE_COMMAND
+        from devloop.markdown import marker, read_marker
+        labels = Labels()
+        named = (labels.ready_to_merge, labels.merge_hold, labels.needs_operator,
+                 labels.needs_supervisor)
+        self.assertEqual(named, ('agent:ready-to-merge', 'agent:merge-hold',
+                                 'agent:needs-operator', 'agent:needs-supervisor'))
+        commands = (HOLD_COMMAND, RELEASE_COMMAND, VETO_COMMAND)
+        self.assertEqual(commands, ('/devloop hold', '/devloop release', '/devloop veto'))
+        self.assertTrue(marker('hold', {}).startswith('<!-- devloop:hold:v1 '))
+        # The form the prompts quote is not itself a record.
+        self.assertIsNone(read_marker('<!-- devloop:hold:v1 ... -->', 'hold'))
+        for name in PROMPTS:
+            with self.subTest(prompt=name):
+                text = flat(section(name))
+                for word in (*named, *commands):
+                    self.assertIn(f'`{word}`', text)
 
     def test_the_review_reassesses_the_rule_at_every_round_on_the_whole_diff(self):
         text = flat(section('review'))
@@ -142,8 +179,8 @@ class TrustPolicyPromptTest(unittest.TestCase):
         self.assertIn('`trust_policy` when the only reason is the trust policy, `decision` for '
                       'every other case, which stops the loop until the operator decides. List '
                       'your blocking findings in both cases.', verdicts)
-        self.assertIn('Leave `operator_reason` empty (`""`) with `approve` and '
-                      '`request_changes`.', verdicts)
+        self.assertIn('Set `operator_reason` to `none` with `approve` and `request_changes`.',
+                      verdicts)
 
     def test_the_advisory_review_asks_for_doubts_and_the_first_residual_risk(self):
         text = flat(section('advisory'))
@@ -190,7 +227,15 @@ class TrustPolicyDocsTest(unittest.TestCase):
                      'the checks of `operator_only_paths` and `protected_paths`',
                      '`NON_CRITICAL` in `devloop/supervision.py`',
                      '`conclave_proposal.md`, `conclave_vote.md`',
-                     '`implement.md`, `fix.md` and `preflight.md`'):
+                     '`implement.md`, `fix.md` and `preflight.md`',
+                     # #417
+                     'the names by which devloop recognises trusted commands and records (#417)',
+                     'a kind of the `<!-- devloop:<kind>:v1 ... -->` markers',
+                     'the names of the labels that govern merge, hold and escalation, defined in '
+                     'the `Labels` dataclass of `devloop/config.py` and not configurable',
+                     '`agent:ready-to-merge`', '`agent:merge-hold`', '`agent:needs-operator`',
+                     '`agent:needs-supervisor`',
+                     'would bypass the hold or the escalations'):
             self.assertIn(word, text)
         for point in range(1, 6):
             self.assertIn(f'{point}. it changes', text)
