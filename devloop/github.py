@@ -142,6 +142,11 @@ class GitHub:
         # timeout of its own (``KILL_AFTER``): a `gh` stuck on the network never holds the lock
         # for ever.
         self.lock_fd = None
+        # The descriptor of the repository lock (ADR 0006, R8), set with ``lock_fd`` when
+        # devloop holds that lock too: the `gh` of each write keeps it open as well, so that no
+        # dispatcher with another state_dir takes over the repository while a publication of
+        # this one may still be running.
+        self.repo_lock_fd = None
         # Whether a ``submit_review`` or ``create_pr`` whose outcome is unknown raises
         # ``GitHubUncertain`` (#385): only for the outbox of the publications, which reconciles
         # it; without it they fail as any failed write, as before it (#397, ADR 0004, D8).
@@ -167,7 +172,8 @@ class GitHub:
             kwargs['env'] = dict(env, GH_TOKEN=self._token())
         held = write and self.lock_fd is not None
         if held:
-            kwargs['pass_fds'] = (self.lock_fd,)
+            kwargs['pass_fds'] = tuple(fd for fd in (self.lock_fd, self.repo_lock_fd)
+                                       if fd is not None)
         timeout = self.timeout
         left = self._time_left(args)  # what the mint of the token left
         if left is not None:

@@ -5,6 +5,7 @@ records any command that would change the host (``sudo``, ``apt-get``, ``useradd
 tests check that none ran.
 """
 import getpass
+import grp
 import html
 import importlib.util
 import json
@@ -31,7 +32,11 @@ DEVLOOP_KEYS = ('dispatcher', 'merger', 'claude-agent', 'codex-agent', 'agy-agen
 SUPERVISOR_KEYS = ('supervisor', 'claude-agent')
 # Commands that change the host: in --dry-run none of them may run.
 MUTATING = ('sudo', 'apt-get', 'useradd', 'setfacl', 'visudo', 'chown', 'chmod', 'install',
-            'git', 'npm', 'runuser', 'touch', 'mkdir', 'systemctl', 'rsync')
+            'git', 'npm', 'runuser', 'touch', 'mkdir', 'systemctl', 'rsync', 'groupadd',
+            'usermod', 'systemd-tmpfiles')
+# The primary group of the user running the tests: the group of the repository locks of the
+# checks (ADR 0006, R8), one the user is a member of.
+GROUP = grp.getgrgid(os.getgid()).gr_name
 LEVEL = {'read': 1, 'write': 2}
 
 
@@ -99,6 +104,9 @@ class OpsTestCase(unittest.TestCase):
             'SUDOERS_FILE': str(self.tmp / 'sudoers.d' / 'devloop-supervisor'),
             'AGENT_HOME': str(self.home / 'agent'),
             'AGENT_SUDOERS_FILE': str(self.tmp / 'sudoers.d' / 'devloop-agent'),
+            'REPO_LOCK_DIR': str(self.tmp / 'locks' / 'repos'),
+            'REPO_LOCK_GROUP': GROUP,
+            'TMPFILES_FILE': str(self.tmp / 'tmpfiles.d' / 'devloop-repos.conf'),
         }
         values.update(overrides)
         path = self.tmp / 'params.env'
@@ -112,6 +120,16 @@ class OpsTestCase(unittest.TestCase):
                    OPS_ARCH=arch, LC_ALL='C.UTF-8')
         return subprocess.run([BASH, str(OPS / script), *args], capture_output=True, text=True,
                               env=env, stdin=subprocess.DEVNULL, timeout=120)
+
+    def lock_dir(self, path):
+        """The directory of the repository locks as setup-devloop.sh leaves it (ADR 0006, R8),
+        owned by the user of the tests instead of root, with its tmpfiles.d file."""
+        path.mkdir(parents=True)
+        path.chmod(0o3770)
+        tmpfiles = self.tmp / 'tmpfiles.d/devloop-repos.conf'
+        tmpfiles.parent.mkdir()
+        tmpfiles.write_text(render('host/tmpfiles-devloop-repos.conf',
+                                   {'REPO_LOCK_DIR': str(path), 'REPO_LOCK_GROUP': GROUP}))
 
     def mutating_calls(self):
         return self.calls.read_text().splitlines() if self.calls.exists() else []
@@ -272,6 +290,43 @@ class DeclarativeFileTests(unittest.TestCase):
                      'RestartSec=60'):
             self.assertIn(line + '\n', unit)
 
+    @staticmethod
+    def directives(*names):
+        """``{(section, key): value}`` of the unit files ``names`` in order, as systemd merges a
+        drop-in over its unit: a later value of a key replaces the earlier one."""
+        merged = {}
+        for name in names:
+            section = None
+            for line in (OPS / 'host' / name).read_text().splitlines():
+                if not line.strip() or line.startswith('#'):
+                    continue
+                if line.startswith('['):
+                    section = line
+                    continue
+                key, value = line.split('=', 1)
+                if key == 'Environment':
+                    key, value = f'Environment {value.split("=", 1)[0]}', value
+                merged[section, key] = value
+        return merged
+
+    def test_the_template_with_the_project_drop_in_is_the_unit(self):
+        # ADR 0006, R8: devloop@<project> runs as devloop.service does, with the parameters of
+        # its project in the drop-in.
+        self.assertEqual(self.directives('devloop@.service', 'devloop-project.conf'),
+                         self.directives('devloop.service'))
+        template = self.directives('devloop@.service')
+        self.assertEqual(template['[Unit]', 'Description'], 'devloop continuous loop (%i)')
+        # Without the drop-in an instance has no command, user or directory: it cannot start.
+        for key in ('ExecStart', 'User', 'WorkingDirectory'):
+            self.assertNotIn(('[Service]', key), template)
+        self.assertNotRegex((OPS / 'host/devloop@.service').read_text(), r'@[A-Z_]+@')
+
+    def test_the_directory_of_the_repository_locks(self):
+        text = (OPS / 'host/tmpfiles-devloop-repos.conf').read_text()
+        body = [line for line in text.splitlines() if line.strip() and not line.startswith('#')]
+        # Root's, of the group of the devloop users only, setgid and sticky.
+        self.assertEqual(body, ['d @REPO_LOCK_DIR@ 3770 root @REPO_LOCK_GROUP@ -'])
+
     def test_the_sudoers_allows_only_the_listed_commands(self):
         text = (OPS / 'host/sudoers-supervisor').read_text()
         body = [line for line in text.replace('\\\n', ' ').splitlines()
@@ -362,7 +417,10 @@ class DryRunTests(OpsTestCase):
         (clone / '.git').mkdir(parents=True)
         state.mkdir(parents=True)
         (state / 'run.log').touch()
-        (state / 'config.local.toml').write_text('[merge]\nmode = "off"\n')
+        locks = self.tmp / 'locks/repos'
+        (state / 'config.local.toml').write_text(f'repo_lock_dir = "{locks}"\n'
+                                                 '[merge]\nmode = "off"\n')
+        self.lock_dir(locks)
         for name, mode in (('.ghapps', 0o700), ('.claude', 0o700), ('.codex', 0o700),
                            ('.local', 0o755), ('.local/bin', 0o755)):
             (devloop / name).mkdir(exist_ok=True)
@@ -626,6 +684,226 @@ class DryRunTests(OpsTestCase):
                 self.assertIn(message, done.stderr)
         self.assertEqual(self.mutating_calls(), [])
 
+    def test_setup_devloop_prepares_the_directory_of_the_repository_locks(self):
+        # ADR 0006, R8: a group of the devloop users, the directory from tmpfiles.d, the overlay.
+        params = self.params(DEVLOOP_USER='opsdry-nouser', REPO_LOCK_GROUP='opsdry-nogroup')
+        before = self.tree()
+        done = self.run_script('host/setup-devloop.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        out = done.stdout
+        locks, tmpfiles = self.tmp / 'locks/repos', self.tmp / 'tmpfiles.d/devloop-repos.conf'
+        self.assertIn('[dry-run] groupadd --system opsdry-nogroup\n', out)
+        self.assertIn('[dry-run] usermod -aG opsdry-nogroup opsdry-nouser\n', out)
+        self.assertIn(f'scriverebbe {tmpfiles} (mode 644, proprietario root)', out)
+        self.assertIn(f'    | d {locks} 3770 root opsdry-nogroup -\n', out)
+        self.assertIn(f'[dry-run] systemd-tmpfiles --create {tmpfiles}\n', out)
+        self.assertIn(f'da fare a mano: scrivere repo_lock_dir = "{locks}" in {self.home}/devloop/'
+                      'ssdlc/.ssdlc/devloop/config.local.toml', out)
+        self.assertEqual(self.mutating_calls(), [])
+        self.assertEqual(self.tree(), before)
+
+    def test_a_foreign_directory_is_never_taken_for_the_locks(self):
+        locks = self.tmp / 'locks/repos'
+        locks.mkdir(parents=True)
+        (locks / 'something').write_text('not ours\n')
+        done = self.run_script('host/setup-devloop.sh', '--dry-run', '--params',
+                               str(self.params(DEVLOOP_USER='opsdry-nouser')))
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn(f'{locks} esiste già, non è vuota e non è di root:{GROUP}', done.stderr)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_a_directory_of_the_locks_of_unknown_form_is_refused(self):
+        home = f'{self.home}/devloop'
+        for value, message in (('/locks', 'REPO_LOCK_DIR deve essere un percorso assoluto'),
+                               ('locks/repos', 'REPO_LOCK_DIR deve essere un percorso assoluto'),
+                               ('/run/../x', 'REPO_LOCK_DIR deve essere un percorso assoluto'),
+                               (f'{home}/locks', f'REPO_LOCK_DIR non può stare dentro né '
+                                                 f'contenere {home}'),
+                               (str(self.home), 'REPO_LOCK_DIR non può stare dentro né')):
+            for script in ('host/setup-devloop.sh', 'host/check-host.sh'):
+                with self.subTest(value=value, script=script):
+                    done = self.run_script(script, '--dry-run', '--params',
+                                           str(self.params(REPO_LOCK_DIR=f"'{value}'")))
+                    self.assertNotEqual(done.returncode, 0)
+                    self.assertIn(message, done.stderr)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def project_params(self, **overrides):
+        """A project of a host with several (ADR 0006, R8): the defaults of PROJECT for the
+        users, the service and the sudoers."""
+        values = dict(PROJECT='widget', REPO='acme/widget', APP_PREFIX='acme-devloop-',
+                      DEVLOOP_HOME=str(self.home / 'devloop-widget'),
+                      AGENT_HOME=str(self.home / 'devloop-widget-agent'),
+                      SUDOERS_FILE='', AGENT_SUDOERS_FILE='')
+        values.update(overrides)
+        return self.params(**values)
+
+    def test_a_project_installs_the_template_and_the_drop_in_of_its_instance(self):
+        params = self.project_params()
+        before = self.tree()
+        done = self.run_script('host/setup-devloop.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        out = done.stdout
+        systemd, home = self.tmp / 'systemd', self.home / 'devloop-widget'
+        # A system user per project (D6), with its clone, state_dir and key_dir.
+        self.assertIn(f'[dry-run] useradd --create-home --home-dir {home} --shell /bin/bash '
+                      'devloop-widget\n', out)
+        self.assertIn(f'install -d -m 700 -o devloop-widget -g devloop-widget {home}/.ghapps', out)
+        self.assertIn(f'[dry-run] usermod -aG {GROUP} devloop-widget\n', out)
+        self.assertIn(f'scriverebbe {systemd}/devloop@.service (mode 644', out)
+        self.assertIn('    | Description=devloop continuous loop (%i)\n', out)
+        self.assertIn(f'[dry-run] install -d -m 755 -o root -g root '
+                      f'{systemd}/devloop@widget.service.d\n', out)
+        self.assertIn(f'scriverebbe {systemd}/devloop@widget.service.d/project.conf (mode 644', out)
+        self.assertIn('    | Description=devloop continuous loop (acme/widget)\n', out)
+        self.assertIn('    | User=devloop-widget\n', out)
+        self.assertIn(f'    | WorkingDirectory={home}/widget\n', out)
+        self.assertIn(f'    | ExecStart=/usr/bin/python3 {home}/widget/scripts/devloop-pinned run\n',
+                      out)
+        self.assertIn(f'    | StandardOutput=append:{home}/widget/.ssdlc/devloop/run.log\n', out)
+        self.assertNotIn(f'{systemd}/devloop.service', out)
+        self.assertNotRegex(out, r'@[A-Z_]+@')
+        # The supervisor: one sudoers per unit, the key_dir of the project.
+        done = self.run_script('host/setup-supervisor.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        out = done.stdout
+        self.assertIn('scriverebbe /etc/sudoers.d/devloop-supervisor-widget (mode 440', out)
+        self.assertIn('    | supervisor ALL=(devloop-widget) NOPASSWD:', out)
+        self.assertIn('    /usr/bin/systemctl restart devloop@widget, \\\n', out)
+        self.assertIn('    /usr/bin/systemctl status devloop@widget *\n', out)
+        self.assertIn(f'{self.home}/supervisor/.ghapps-widget', out)
+        # The agent user of the project.
+        done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn('scriverebbe /etc/sudoers.d/devloop-agent-widget (mode 440', done.stdout)
+        self.assertIn('    | devloop-widget ALL=(devloop-widget-agent) NOPASSWD:SETENV:',
+                      done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+        self.assertEqual(self.tree(), before)
+
+    def test_a_project_has_a_valid_name_and_the_instance_of_the_template(self):
+        for overrides, message in (({'PROJECT': 'Widget'}, 'PROJECT ammette minuscole'),
+                                   ({'PROJECT': 'widget-'}, 'PROJECT ammette minuscole'),
+                                   ({'PROJECT': 'a' * 17}, 'PROJECT ammette minuscole'),
+                                   ({'SERVICE_NAME': 'devloop'}, "l'istanza devloop@widget")):
+            with self.subTest(overrides=overrides):
+                done = self.run_script('host/check-host.sh', '--dry-run', '--params',
+                                       str(self.project_params(**overrides)))
+                self.assertNotEqual(done.returncode, 0)
+                self.assertIn(message, done.stderr)
+        done = self.run_script('host/check-host.sh', '--dry-run', '--params',
+                               str(self.params(SERVICE_NAME='devloop@widget')))
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("SERVICE_NAME non valido: 'devloop@widget'", done.stderr)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_the_names_of_a_project_never_take_those_of_another_role(self):
+        # R1-1: devloop-<p>-agent is the agent user of project p, devloop-agent that of the
+        # installation without PROJECT: no project takes those names for its devloop user.
+        for project in ('agent', 'widget-agent'):
+            with self.subTest(project=project):
+                done = self.run_script('host/check-host.sh', '--dry-run', '--params',
+                                       str(self.project_params(PROJECT=project)))
+                self.assertNotEqual(done.returncode, 0)
+                self.assertIn("PROJECT non può essere 'agent' né finire con '-agent'",
+                              done.stderr)
+        done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params',
+                               str(self.params(AGENT_USER='supervisor')))
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn('AGENT_USER deve essere diverso da SUPERVISOR_USER', done.stderr)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def other_project(self, unit_user='devloop-gadget', agent_line=None, supervisor_line=None):
+        """Another project of the host, gadget, as its unit and its sudoers describe it."""
+        dropin = self.tmp / 'systemd/devloop@gadget.service.d/project.conf'
+        dropin.parent.mkdir(parents=True, exist_ok=True)
+        dropin.write_text('[Unit]\nDescription=devloop continuous loop (acme/gadget)\n\n'
+                          f'[Service]\nUser={unit_user}\nGroup={unit_user}\n')
+        sudoers = self.tmp / 'sudoers.d'
+        sudoers.mkdir(exist_ok=True)
+        (sudoers / 'devloop-agent-gadget').write_text(
+            'Defaults>devloop-gadget-agent !use_pty\n\n'
+            + (agent_line or 'devloop-gadget ALL=(devloop-gadget-agent) NOPASSWD:SETENV: \\')
+            + '\n    /usr/bin/bash\n')
+        (sudoers / 'devloop-supervisor-gadget').write_text(
+            'Defaults>devloop-gadget always_set_home\n\n'
+            + (supervisor_line or 'supervisor ALL=(devloop-gadget) NOPASSWD: \\')
+            + '\n    /usr/bin/true\n\nsupervisor ALL=(root) NOPASSWD: \\\n'
+              '    /usr/bin/systemctl start devloop@gadget\n')
+
+    def widget_params(self):
+        return self.project_params(
+            SUDOERS_FILE=str(self.tmp / 'sudoers.d/devloop-supervisor-widget'),
+            AGENT_SUDOERS_FILE=str(self.tmp / 'sudoers.d/devloop-agent-widget'))
+
+    def test_the_users_of_a_project_are_of_no_other_installation_of_the_host(self):
+        # R1-1: the scripts refuse a user that another installation of the host already has,
+        # in the same role or in another; the supervisor alone is the same in every project.
+        self.other_project()
+        for script in ('host/setup-devloop.sh', 'host/setup-supervisor.sh',
+                       'host/setup-agent-user.sh'):
+            with self.subTest(script=script):
+                done = self.run_script(script, '--dry-run', '--params',
+                                       str(self.widget_params()))
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        sudoers = self.tmp / 'sudoers.d'
+        for kwargs, message in (
+                ({'unit_user': 'devloop-widget'},
+                 "DEVLOOP_USER 'devloop-widget' è già l'utente devloop di un'altra installazione "
+                 f"di devloop dell'host ({self.tmp}/systemd/devloop@gadget.service.d/"
+                 "project.conf)"),
+                ({'agent_line': 'devloop-gadget ALL=(devloop-widget) NOPASSWD:SETENV: \\'},
+                 "DEVLOOP_USER 'devloop-widget' è già l'utente agent di un'altra installazione "
+                 f"di devloop dell'host ({sudoers}/devloop-agent-gadget)"),
+                ({'agent_line': 'devloop-widget-agent ALL=(devloop-gadget-agent) '
+                                'NOPASSWD:SETENV: \\'},
+                 "AGENT_USER 'devloop-widget-agent' è già l'utente devloop"),
+                ({'supervisor_line': 'devloop-widget-agent ALL=(devloop-gadget) NOPASSWD: \\'},
+                 "AGENT_USER 'devloop-widget-agent' è già l'utente supervisor"),
+                ({'supervisor_line': 'supervisor ALL=(supervisor) NOPASSWD: \\'},
+                 "SUPERVISOR_USER 'supervisor' è già l'utente devloop")):
+            with self.subTest(**kwargs):
+                self.other_project(**kwargs)
+                for script in ('host/setup-devloop.sh', 'host/check-host.sh'):
+                    done = self.run_script(script, '--dry-run', '--params',
+                                           str(self.widget_params()))
+                    self.assertNotEqual(done.returncode, 0)
+                    self.assertIn(message, done.stderr)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_the_supervisor_has_a_clone_per_project(self):
+        # R1-4: like its key_dir, the supervisor's clone is the project's.
+        clone = self.home / 'supervisor/devloop-widget'
+        done = self.run_script('host/setup-supervisor.sh', '--dry-run', '--params',
+                               str(self.project_params()))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn(f'git clone https://github.com/acme/widget.git {clone}\n', done.stdout)
+        self.assertIn(f'{self.home}/supervisor/.ghapps-widget', done.stdout)
+        # Without PROJECT, the clone of before.
+        done = self.run_script('host/setup-supervisor.sh', '--dry-run', '--params',
+                               str(self.params()))
+        self.assertIn(f'git clone https://github.com/brushtyler/ssdlc.git '
+                      f'{self.home}/supervisor/ssdlc\n', done.stdout)
+        # A clone already there of another repository is another project's: never shared.
+        (clone / '.git').mkdir(parents=True)
+        config = clone / '.git/config'
+        for url, refused in (('https://github.com/acme/gadget.git', True),
+                             ('git@github.com:Acme/Widget.git', False),
+                             ('https://github.com/acme/widget', False)):
+            with self.subTest(url=url):
+                config.write_text('[core]\n\tbare = false\n[remote "origin"]\n'
+                                  f'\turl = {url}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n')
+                done = self.run_script('host/setup-supervisor.sh', '--dry-run', '--params',
+                                       str(self.project_params()))
+                if refused:
+                    self.assertNotEqual(done.returncode, 0)
+                    self.assertIn(f"{clone} è un clone di '{url}', non di acme/widget",
+                                  done.stderr)
+                else:
+                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                    self.assertIn(f'ok: {clone} è già un clone di acme/widget', done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+
     def test_a_missing_params_file_is_explained(self):
         done = self.run_script('host/check-host.sh', '--dry-run', '--params',
                                str(self.tmp / 'missing.env'))
@@ -716,8 +994,12 @@ class CheckHostTests(OpsTestCase):
         self.state = state = self.devloop / 'ssdlc/.ssdlc/devloop'
         (state / 'current').mkdir(parents=True)
         (state / 'run.log').touch()
-        # The agent user of the checks (#415): an existing user other than devloop's.
-        (state / 'config.local.toml').write_text('[agent_user]\nname = "root"\n')
+        # The agent user of the checks (#415): an existing user other than devloop's. The
+        # directory of the repository locks (ADR 0006, R8).
+        self.locks = self.tmp / 'locks/repos'
+        self.lock_dir(self.locks)
+        (state / 'config.local.toml').write_text(f'repo_lock_dir = "{self.locks}"\n'
+                                                 '[agent_user]\nname = "root"\n')
         (self.tmp / 'systemd').mkdir()
         (self.tmp / 'systemd/devloop.service').write_text(render('host/devloop.service', {
             'REPO': 'brushtyler/ssdlc', 'DEVLOOP_USER': ME,
@@ -753,8 +1035,11 @@ class CheckHostTests(OpsTestCase):
     def check(self, *args):
         params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=ME, AGENT_USER='root')
         done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params), *args)
+        # Outside root the directory of the locks cannot be root's
+        # (test_the_directory_of_the_repository_locks_is_roots).
         errors = [line for line in done.stdout.splitlines()
-                  if 'ERRORE' in line and 'sudoers' not in line]
+                  if 'ERRORE' in line and 'sudoers' not in line
+                  and line != f'  ERRORE: {self.locks} è di {ME}, deve essere di root']
         return done, errors
 
     def test_a_correct_installation_has_no_errors(self):
@@ -793,7 +1078,8 @@ class CheckHostTests(OpsTestCase):
         self.assertEqual(self.mutating_calls(), [])
 
     def test_an_overlay_without_the_agent_user_is_an_error(self):
-        (self.state / 'config.local.toml').write_text('[merge]\nmode = "off"\n')
+        (self.state / 'config.local.toml').write_text(f'repo_lock_dir = "{self.locks}"\n'
+                                                      '[merge]\nmode = "off"\n')
         done, errors = self.check()
         self.assertEqual(done.returncode, 1)
         self.assertEqual(errors, [f'  ERRORE: {self.state}/config.local.toml non imposta '
@@ -864,6 +1150,88 @@ class CheckHostTests(OpsTestCase):
         self.assertEqual(done.returncode, 1)
         self.assertEqual(errors, [f'  ERRORE: {self.tmp}/systemd/devloop.service non esiste '
                                   '(setup-devloop.sh)'])
+
+    def test_the_repository_lock_is_checked(self):
+        # ADR 0006, R8: the directory, the group, the agent user outside it, the overlay.
+        done, errors = self.check()
+        out = done.stdout
+        self.assertEqual(errors, [], out)
+        self.assertIn(f'ok: {self.locks}: 3770, gruppo {GROUP}', out)
+        self.assertIn(f'ok: {ME} è nel gruppo {GROUP}', out)
+        self.assertIn(f'ok: {self.tmp}/tmpfiles.d/devloop-repos.conf coincide con '
+                      'ops/host/tmpfiles-devloop-repos.conf', out)
+        self.assertIn(f'ok: {self.state}/config.local.toml imposta repo_lock_dir = '
+                      f'"{self.locks}"', out)
+        self.assertIn(r'[dry-run] sudo -u root -H -- /usr/bin/bash -c \!\ \[\ -x\ \"\$1\"\ \]'
+                      f' _ {self.locks}\n', out)
+
+    @unittest.skipIf(os.geteuid() == 0, 'as root the directory of the tests is root\'s')
+    def test_the_directory_of_the_repository_locks_is_roots(self):
+        done, _ = self.check()
+        self.assertIn(f'  ERRORE: {self.locks} è di {ME}, deve essere di root\n', done.stdout)
+
+    def test_a_missing_repository_lock_is_an_error(self):
+        (self.state / 'config.local.toml').write_text('[agent_user]\nname = "root"\n')
+        self.locks.chmod(0o770)
+        (self.tmp / 'tmpfiles.d/devloop-repos.conf').unlink()
+        done, errors = self.check()
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(errors, [
+            f'  ERRORE: {self.locks} è 770 {GROUP}, deve essere 3770 del gruppo {GROUP}',
+            f'  ERRORE: {self.tmp}/tmpfiles.d/devloop-repos.conf non esiste (setup-devloop.sh): '
+            f'{self.locks} non tornerebbe dopo un riavvio',
+            f'  ERRORE: {self.state}/config.local.toml non imposta repo_lock_dir = '
+            f'"{self.locks}": un altro dispatcher sullo stesso repository non sarebbe escluso'])
+        self.locks.rmdir()
+        done, errors = self.check()
+        self.assertIn(f'  ERRORE: {self.locks} non esiste (setup-devloop.sh, systemd-tmpfiles)',
+                      errors)
+
+    def test_a_project_checks_its_instance_and_one_service_per_repository(self):
+        # ADR 0006, R8: the template and the drop-in of devloop@widget; another unit of the host
+        # on the same repository is an error.
+        systemd = self.tmp / 'systemd'
+        clone = self.devloop / 'widget'
+        state = clone / '.ssdlc/devloop'
+        (state / 'current').mkdir(parents=True)
+        (state / 'run.log').touch()
+        (state / 'config.local.toml').write_text(f'repo_lock_dir = "{self.locks}"\n'
+                                                 '[agent_user]\nname = "root"\n')
+        (systemd / 'devloop@.service').write_text(render('host/devloop@.service', {}))
+        # ssdlc, another installation of the host, has a user of its own (R1-1).
+        unit = systemd / 'devloop.service'
+        unit.write_text(unit.read_text().replace(f'User={ME}\n', 'User=opsdry-ssdlc\n'))
+        dropin = systemd / 'devloop@widget.service.d/project.conf'
+        dropin.parent.mkdir()
+        dropin.write_text(render('host/devloop-project.conf', {
+            'REPO': 'acme/widget', 'DEVLOOP_USER': ME, 'DEVLOOP_CLONE': str(clone),
+            'LAUNCHER_CMD': f'/usr/bin/python3 {clone}/scripts/devloop-pinned',
+            'STATE_PATH': str(state),
+            'DEVLOOP_PATH': f'{self.devloop}/.local/bin:/usr/local/bin:/usr/bin:/bin'}))
+        params = self.params(PROJECT='widget', REPO='acme/widget', DEVLOOP_USER=ME,
+                             SUPERVISOR_USER=ME, AGENT_USER='root',
+                             SUPERVISOR_KEY_DIR=str(self.supervisor / '.ghapps'),
+                             SUDOERS_FILE=str(self.tmp / 'sudoers.d/devloop-supervisor-widget'))
+        done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
+        out = done.stdout
+        self.assertIn(f'ok: {systemd}/devloop@.service coincide con ops/host/devloop@.service',
+                      out)
+        self.assertIn(f'ok: {dropin} coincide con ops/host/devloop-project.conf', out)
+        self.assertIn('==> Servizio devloop@widget', out)
+        self.assertNotIn('gestisce anche', out)
+        # devloop.service of ssdlc is another repository; a second instance on acme/widget is not.
+        other = systemd / 'devloop@widget2.service.d/project.conf'
+        other.parent.mkdir()
+        other.write_text(dropin.read_text().replace('Description=devloop continuous loop '
+                                                    '(acme/widget)',
+                                                    'Description=devloop continuous loop '
+                                                    '(Acme/Widget)')
+                         .replace(f'User={ME}\n', 'User=opsdry-widget2\n'))
+        done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 1)
+        self.assertIn(f'ERRORE: {other} gestisce anche acme/widget: un repository, un servizio',
+                      done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
 
     def test_a_separate_source_checks_the_launcher_and_the_state_dir_of_the_host(self):
         # ADR 0006, R1: the launcher installed from the source's tag, the host's state_dir.

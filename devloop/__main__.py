@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 from . import activity, follow, pin, report, runloop, unavailability, watch
@@ -17,7 +17,7 @@ from .agentuser import GH_CONFIG, SHARED_DIR, WORKTREES_DIR, AgentUser, AgentUse
 from .agentuser import check as check_isolation
 from .apps import DISPATCHER, MERGER, Identities
 from .config import (PROJECT_CONFIG, ConfigError, Reloader, fingerprint, load_config,
-                     read_sources)
+                     read_sources, repo_lock_name)
 from .context import both_labels_warning, label_transition
 from .dispatch_advisory import AdvisoryFailures, AdvisoryResults
 from .dispatcher import (Dispatcher, TickLog, Workers, ensure_labels, pr_counts_line,
@@ -33,6 +33,8 @@ from .workspace import Workspace
 
 # The descriptor of the dispatcher lock, passed on by a restart from a new pinned copy (#174).
 LOCK_FD = 'DEVLOOP_LOCK_FD'
+# The descriptor of the repository lock (ADR 0006, R8), passed on like ``LOCK_FD``.
+REPO_LOCK_FD = 'DEVLOOP_REPO_LOCK_FD'
 # The state_dir given to the launcher (``scripts/devloop-pinned --state-dir``, ADR 0006, R1).
 STATE_ENV = 'DEVLOOP_STATE_DIR'
 
@@ -179,10 +181,10 @@ def auto_pinner(cfg, root, state, local, log, **kw):
     return None
 
 
-def _inherited_lock(lock_path):
-    """The lock a process that restarted itself from a new pinned copy passed on open (#174),
-    or None. Only a descriptor of this very lock file counts."""
-    value = os.environ.pop(LOCK_FD, None)
+def _inherited_lock(lock_path, var=LOCK_FD, mode='w'):
+    """The lock a process that restarted itself from a new pinned copy passed on open in ``var``
+    (#174), or None. Only a descriptor of this very lock file counts."""
+    value = os.environ.pop(var, None)
     if not value or not value.isdigit():
         return None
     fd = int(value)
@@ -192,7 +194,7 @@ def _inherited_lock(lock_path):
     except OSError:
         return None
     os.set_inheritable(fd, False)
-    return open(fd, 'w')
+    return open(fd, mode)
 
 
 @contextmanager
@@ -205,6 +207,71 @@ def single_instance(lock_path):
             fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             sys.exit('devloop: another dispatcher is running (lock held)')
+        yield fh
+
+
+def repo_lock_path(cfg):
+    """``<repo_lock_dir>/<owner>--<name>.lock`` of ``cfg.repo`` (ADR 0006, R8), or None when
+    ``repo_lock_dir`` is not set."""
+    directory = getattr(cfg, 'repo_lock_dir', '')
+    if not directory:
+        return None
+    return Path(directory).expanduser() / repo_lock_name(cfg.repo)
+
+
+def _open_repo_lock(path):
+    """The descriptor of the repository lock ``path``, read-only and never through a symlink
+    (ADR 0006, R8). A lock that exists is opened as it is, without ``O_CREAT``: devloop neither
+    creates nor replaces it, and leaves its owner and its mode alone. Only a missing one is
+    created, with ``O_EXCL``, and made readable by the other devloop users of the host whatever
+    the umask: they open it too. ``OSError`` when it cannot be opened."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        return os.open(path, flags)
+    except FileNotFoundError:
+        pass
+    try:
+        fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        # Another dispatcher created it in between: it is theirs, opened as it is.
+        return os.open(path, flags)
+    try:
+        os.fchmod(fd, 0o644)
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
+
+
+@contextmanager
+def repo_lock(cfg):
+    """Hold the repository lock of ``cfg`` (ADR 0006, R8) while the block runs, taken without
+    waiting: while another dispatcher on the same ``repo`` holds it, whatever its state_dir and
+    its user, devloop stops with a message that names the repository. The directory is the
+    host's, prepared by the operator for every devloop user (ops): devloop does not create it.
+    The file is opened read-only, which is enough for ``flock``, and never through a symlink;
+    one that exists is opened without ``O_CREAT`` (``_open_repo_lock``). Yields the open file,
+    or None without ``repo_lock_dir``."""
+    path = repo_lock_path(cfg)
+    if path is None:
+        yield None
+        return
+    held = _inherited_lock(path, REPO_LOCK_FD, 'r')
+    if held is None:
+        if not path.parent.is_dir():
+            sys.exit(f'devloop: repo_lock_dir {path.parent} is not a directory: the host has to '
+                     'prepare it for every devloop user (ops/host/setup-devloop.sh)')
+        try:
+            fd = _open_repo_lock(path)
+        except OSError as exc:
+            sys.exit(f'devloop: the repository lock {path} cannot be opened: {exc.strerror}')
+        held = open(fd, 'r')
+    with held as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            sys.exit(f'devloop: another dispatcher is running on {cfg.repo} (repository lock '
+                     f'{path} held)')
         yield fh
 
 
@@ -334,16 +401,21 @@ def check_agent_user(cfg, state, local_config, agent_user, log=log, me=None, git
     check_isolation(agent_user, key_dir, state, local_config, me=me, git_dir=git_dir)
 
 
-def hold_lock(dispatcher, lock_fd):
+def hold_lock(dispatcher, lock_fd, repo_lock_fd=None):
     """With the outbox of the publications (#385), the `gh` of each write holds the dispatcher
     lock ``lock_fd`` too, under a timeout of its own (``GitHub.KILL_AFTER``): no next dispatcher
     starts while one of them may still publish, even after this process stopped. Without it
     (#397, ADR 0004, D8) no `gh` gets the lock: a dispatcher killed while a `gh` of its runs
-    leaves the lock free at once, as before #385. Returns whether the lock was passed on."""
+    leaves the lock free at once, as before #385. The repository lock (ADR 0006, R8), when held
+    on ``repo_lock_fd``, passes on with it: no dispatcher with another state_dir takes over the
+    repository in the middle of a publication either. Returns whether the locks were passed on."""
     identities = getattr(dispatcher, 'identities', None)
     if getattr(identities, 'outbox', None) is None:
         return False
-    identities.hold(lock_fd)
+    if repo_lock_fd is None:
+        identities.hold(lock_fd)
+    else:
+        identities.hold(lock_fd, repo_lock_fd)
     return True
 
 
@@ -718,8 +790,12 @@ def main(argv=None):
                                  git_dir=common() if callable(common) else None)
         except AgentUserError as exc:
             sys.exit(f'devloop: {exc}')
-    with single_instance(state / 'dispatcher.lock') as lock:
-        hold_lock(dispatcher, lock.fileno())
+    # tick and run, which act on the repository, hold its lock too (ADR 0006, R8): two
+    # dispatchers on the same repository with different state_dirs never run together.
+    acting = args.command in ('tick', 'run')
+    with single_instance(state / 'dispatcher.lock') as lock, \
+            (repo_lock(cfg) if acting else nullcontext()) as repo:
+        hold_lock(dispatcher, lock.fileno(), repo.fileno() if repo is not None else None)
         recorder = None
         if args.command in ('tick', 'run'):
             # The trace T1 of the configuration (ADR 0006, K1), under the lock: no record, no
@@ -759,6 +835,10 @@ def main(argv=None):
             # Configuration, policy and dispatcher load again from the new copy, with the same
             # arguments and the lock still held (#174).
             log(f'restarting from {exc.copy}')
+            if repo is not None:
+                # The repository lock passes on open as well: no other dispatcher in between.
+                os.set_inheritable(repo.fileno(), True)
+                os.environ[REPO_LOCK_FD] = str(repo.fileno())
             pin.reexec(exc.copy, argv, lock.fileno(), LOCK_FD)
 
 

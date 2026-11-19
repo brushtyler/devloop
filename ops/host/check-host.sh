@@ -2,7 +2,9 @@
 # Verifica l'installazione di devloop e del supervisore: utenti, directory private (700), chiavi
 # delle app (600, del proprietario giusto, solo quelle attese), ACL sulla home di devloop,
 # sudoers, l'utente degli agent (non legge key_dir né state_dir, non scrive .git né le directory
-# che contengono worktree e turni, è nell'overlay), servizio, CLI degli agent e `devloop apps`.
+# che contengono worktree e turni, è nell'overlay), il lock per repository (directory comune,
+# gruppo, overlay; ADR 0006, R8), servizio, CLI degli agent e `devloop apps`. Con più progetti
+# sullo stesso host si esegue una volta per progetto, con i suoi parametri (--params).
 # Non cambia nulla.
 # Esce con 0 se non trova errori, con 1 altrimenti; gli avvisi non contano come errori.
 # Va eseguito come root (sudo): alcune verifiche leggono file degli altri utenti.
@@ -214,15 +216,73 @@ fi
 step "sudoers dell'utente degli agent ($AGENT_SUDOERS_FILE)"
 check_sudoers "$AGENT_SUDOERS_FILE" sudoers-agent setup-agent-user.sh
 
-step "Servizio $SERVICE_NAME"
-UNIT="$SYSTEMD_DIR/$SERVICE_NAME.service"
-if [ ! -f "$UNIT" ]; then
-    fail "$UNIT non esiste (setup-devloop.sh)"
-elif cmp -s "$UNIT" <(render "$OPS_DIR/host/devloop.service"); then
-    ok "$UNIT coincide con ops/host/devloop.service"
+step "Lock per repository: $REPO_LOCK_DIR (ADR 0006, R8)"
+if [ ! -d "$REPO_LOCK_DIR" ]; then
+    fail "$REPO_LOCK_DIR non esiste (setup-devloop.sh, systemd-tmpfiles)"
 else
-    warn "$UNIT è diverso da ops/host/devloop.service con questi parametri"
+    actual=$(stat -c '%a %G' "$REPO_LOCK_DIR")
+    if [ "$actual" = "3770 $REPO_LOCK_GROUP" ]; then
+        ok "$REPO_LOCK_DIR: 3770, gruppo $REPO_LOCK_GROUP"
+    else
+        fail "$REPO_LOCK_DIR è $actual, deve essere 3770 del gruppo $REPO_LOCK_GROUP"
+    fi
+    owner=$(stat -c '%U' "$REPO_LOCK_DIR")
+    [ "$owner" = root ] && ok "$REPO_LOCK_DIR è di root" \
+        || fail "$REPO_LOCK_DIR è di $owner, deve essere di root"
 fi
+if id -nG "$DEVLOOP_USER" 2>/dev/null | tr ' ' '\n' | grep -qxF "$REPO_LOCK_GROUP"; then
+    ok "$DEVLOOP_USER è nel gruppo $REPO_LOCK_GROUP"
+else
+    fail "$DEVLOOP_USER non è nel gruppo $REPO_LOCK_GROUP (setup-devloop.sh)"
+fi
+# Il gruppo è solo degli utenti devloop: un agent che vi entrasse potrebbe tenere il lock d'altri.
+for user in "$AGENT_USER" "$SUPERVISOR_USER"; do
+    [ "$user" = "$DEVLOOP_USER" ] && continue
+    if id -nG "$user" 2>/dev/null | tr ' ' '\n' | grep -qxF "$REPO_LOCK_GROUP"; then
+        fail "$user è nel gruppo $REPO_LOCK_GROUP: deve restarne fuori"
+    fi
+done
+check_as "$AGENT_USER" "$AGENT_USER non entra in $REPO_LOCK_DIR" \
+    /usr/bin/bash -c '! [ -x "$1" ]' _ "$REPO_LOCK_DIR"
+if [ ! -f "$TMPFILES_FILE" ]; then
+    fail "$TMPFILES_FILE non esiste (setup-devloop.sh): $REPO_LOCK_DIR non tornerebbe dopo un riavvio"
+elif cmp -s "$TMPFILES_FILE" <(render "$OPS_DIR/host/tmpfiles-devloop-repos.conf"); then
+    ok "$TMPFILES_FILE coincide con ops/host/tmpfiles-devloop-repos.conf"
+else
+    warn "$TMPFILES_FILE è diverso da ops/host/tmpfiles-devloop-repos.conf con questi parametri"
+fi
+if [ -f "$OVERLAY" ] && python3 - "$OVERLAY" "$REPO_LOCK_DIR" <<'EOF'
+import sys, tomllib
+data = tomllib.load(open(sys.argv[1], 'rb'))
+sys.exit(0 if data.get('repo_lock_dir') == sys.argv[2] else 1)
+EOF
+then
+    ok "$OVERLAY imposta repo_lock_dir = \"$REPO_LOCK_DIR\""
+else
+    fail "$OVERLAY non imposta repo_lock_dir = \"$REPO_LOCK_DIR\": un altro dispatcher sullo stesso repository non sarebbe escluso"
+fi
+
+step "Servizio $SERVICE_NAME"
+check_unit() {
+    local file=$1 template=$2
+    if [ ! -f "$file" ]; then
+        fail "$file non esiste (setup-devloop.sh)"
+    elif cmp -s "$file" <(render "$OPS_DIR/host/$template"); then
+        ok "$file coincide con ops/host/$template"
+    else
+        warn "$file è diverso da ops/host/$template con questi parametri"
+    fi
+}
+check_unit "$UNIT_FILE" "$UNIT_TEMPLATE"
+[ -z "$DROPIN_FILE" ] || check_unit "$DROPIN_FILE" devloop-project.conf
+# Un repository, un host (ADR 0006, R8): nessun'altra unità di devloop di questo host lo gestisce.
+for other in "$SYSTEMD_DIR"/devloop*.service "$SYSTEMD_DIR"/devloop@*.service.d/project.conf; do
+    [ -f "$other" ] || continue
+    [ "$other" = "$UNIT_FILE" ] || [ "$other" = "$DROPIN_FILE" ] && continue
+    if grep -qixF "Description=devloop continuous loop ($REPO)" "$other"; then
+        fail "$other gestisce anche $REPO: un repository, un servizio"
+    fi
+done
 state=$(systemctl is-active "$SERVICE_NAME" 2>/dev/null)
 case $state in
     active) ok "$SERVICE_NAME è attivo" ;;
