@@ -287,10 +287,12 @@ class Ledger:
             self.gh.edit_comment(comment['id'], render(record))
 
     # Writes ----------------------------------------------------------------
-    def request(self, number, *, title, body, labeled, comments, story_repo=None):
+    def request(self, number, *, title, body, labeled, comments, story_repo=None,
+                implementer=None):
         """The snapshot of the request at the takeover. ``labeled``: ``(login, at)`` of the
         trusted ``labeled`` event of the ready label, or None; ``comments``: the trusted
-        comments given to the implementer.
+        comments given to the implementer; ``implementer``: the key of the implementer chosen
+        for the issue at the takeover (ADR 0005, D7, #407), recorded when given.
 
         With ``story_repo`` (#363, ``story_identity``) issue ``number`` of that repository is
         the root of a story: the journal records it first (``TurnJournal.story``: the story
@@ -302,6 +304,8 @@ class Ledger:
             'type': 'request', 'issue': number, 'hash': request_hash(title, body),
             'labeled_by': by, 'labeled_at': at, 'comments': [comment_ref(c) for c in comments],
             'taken_at': self._now()}
+        if implementer is not None:
+            record['implementer'] = implementer
         if story_repo is None:
             return self._post(number, record)
         story = story_marker(self.journal.story(story_repo, number, record['hash']), number)
@@ -573,6 +577,7 @@ def _render_request(r):
             _rows([('Hash di titolo e corpo (SHA-256)', r.get('hash')),
                    ('Label messa da', r.get('labeled_by')), ('Label messa il', r.get('labeled_at')),
                    ('Commenti fidati considerati', r.get('comments')),
+                   *([('Implementer scelto', r['implementer'])] if 'implementer' in r else []),
                    ('Presa in carico', r.get('taken_at'))])]
 
 

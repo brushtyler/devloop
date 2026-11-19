@@ -400,6 +400,21 @@ user's would. The label approves the title and the body as they are; an edit by 
 Without `[roles].supervisor`, or without an app for it (the supervisor then acts with the
 operator's `gh` login), only `trusted_users` count, as before.
 
+### Choosing the implementer
+
+Every issue goes to `roles.implementer` unless a label chooses another (#407, ADR 0005, D7): an
+`impl:<kind>` label (`impl:codex`) gives it to the key `<kind>-implementer`, and prevails; an
+area label of `[roles.implementers]` (empty by default) gives it to the implementer it maps to.
+These labels count under the same rules as the supervisor's labels above: only while the issue
+has them, and only when their latest `labeled` event comes from a trusted user, or from the
+supervisor on an issue of a trusted user or of devloop's apps. The implementer is chosen at the
+takeover and recorded in the `request` record and in the PR marker: changing the label later
+does not change the implementer of an open PR. Two `impl:` labels, an `impl:` label of an
+implementer that is not configured, area labels that lead to different implementers, or an
+implementer that is the same agent as the readiness check, send the issue to the operator as
+`configuration`. Every implementer signs with the implementer app once the keys are renamed by
+role ([the keys by role](reference.md#the-implementer-app-and-the-keys-by-role)); off by default.
+
 ### Readiness check before implementation
 
 With `preflight = "<agent>"` in the configuration, an issue is checked before the implementer
@@ -823,10 +838,13 @@ stays with the operator, with a comment that says why, when:
   the same step on the same input, within the same two retries shared with the operator. The key
   is off by default and turning it on is the operator's decision; off, every escalation on such a
   PR goes to the operator, and one already waiting for the supervisor is refused at its retry
-  (`supervisor_refused`). The other classes on such a PR always go to the operator. With
-  `[roles.supervisor]` as a table (#408), the PR is the supervisor's agent's when the `kind` or
-  the `model` of its implementer, as the PR's marker records them, is the supervisor actor's;
-  the keys are never compared ([The supervisor app](reference.md#the-supervisor-app));
+  (`supervisor_refused`). The other classes on such a PR always go to the operator. The PR is
+  the supervisor's agent's when the `kind`, the `model` or the provider of its implementer, as
+  the PR's marker records them, is the supervisor's: the supervisor actor's, with `[roles.supervisor]` as a table
+  (#408), or the agent's that `roles.supervisor` names (#407, which also counts a PR whose
+  implementer is that key). So the check keeps firing when the keys are renamed by role
+  ([The supervisor app](reference.md#the-supervisor-app),
+  [the keys by role](reference.md#the-implementer-app-and-the-keys-by-role));
 - the issue was opened by someone outside `trusted_users` and devloop's apps, or its text is no
   longer approved by `agent:ready`;
 - the issue (or the PR) has the label `phase:design`;

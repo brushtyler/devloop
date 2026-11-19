@@ -6,7 +6,8 @@ the time, the reason and the time it expects the model back: the one the error a
 ``Resets in <duration>`` (``reset_seconds``), else ``fallback_memory_seconds`` later. Until then
 the later turns of that agent start from the first model of its chain that is not remembered.
 The record survives a restart of the dispatcher; ``devloop fallback reset <agent>`` removes the
-records of that agent.
+records of that agent. When the keys are renamed by role (#407), ``migrate`` moves the records of
+the keys before (``claude``, ``codex``, ``agy``) to the new ones.
 
 Every change reads and writes the file under an exclusive ``flock`` of its own lock file, so
 that the threads of parallel actions and the reset command never lose each other's changes. A
@@ -140,6 +141,34 @@ class Memory:
             now = self.now()
             removed = data.pop(key, {})
         return sorted(model for model, entry in removed.items() if _epoch(entry['until']) > now)
+
+    def migrate(self, agents):
+        """Move the records of each key before the migration of the keys (ADR 0005, P5-3,
+        #407), ``claude``, ``codex`` or ``agy``, that is no longer among ``agents`` (the
+        configured keys) to the keys that name that agent with a role (``claude-implementer``,
+        ``claude-reviewer``): a model found unavailable for the agent is so for each of its
+        roles. Of two records of the same model the later ``until`` stays. A key that is still
+        configured, or whose agent has no key with a role, is left as it is. Returns ``(old,
+        [new keys])`` for each key moved."""
+        # Imported here: ``config`` imports ``delimited`` from this module (#443).
+        from .config import AGENT_KINDS, key_role
+        moved = []
+        with self._locked() as data:
+            for old in sorted(data):
+                if old in agents or old not in AGENT_KINDS:
+                    continue
+                keys = sorted(key for key in agents
+                              if key_role(key) is not None and key == f'{old}-{key_role(key)}')
+                if not keys:
+                    continue
+                models = data.pop(old)
+                for key in keys:
+                    for model, entry in models.items():
+                        current = data.setdefault(key, {}).get(model)
+                        if current is None or _epoch(current['until']) < _epoch(entry['until']):
+                            data[key][model] = dict(entry)
+                moved.append((old, keys))
+        return moved
 
     def entries(self):
         """``(key, model, record)`` for each record not yet expired, sorted."""

@@ -7,13 +7,16 @@ markers and records; the [index](../devloop.md) lists the three pages.
 ## Configuration
 
 [`devloop/config.toml`](../../devloop/config.toml) sets the repository, the test command, limits,
-the `implementer` and the `reviewers` pool (none of them the implementer, none listed twice;
-`reviewer = "<agent>"`, the form before #111, is a pool of one, and setting both is an error)
-and, for each agent, the
+the `implementer` and the `reviewers` pool (none of them a key that implements, none listed twice;
+`reviewer = "<agent>"`, the form before #111, is a pool of one, and setting both is an error),
+the implementers of the area labels (`[roles.implementers]`, #407)
+and, for each agent, the app it signs with (`app`,
+[the keys by role](#the-implementer-app-and-the-keys-by-role)), the
 model, reasoning effort and extra CLI arguments for writing and reviewing turns. Pass another file
 with `--config`. `preflight` (absent by default) names the agent of the
 [readiness check](guide.md#readiness-check-before-implementation); it must be a configured agent other
-than the implementer. `conclave` (absent by default) lists the three agents of the
+than every key that implements, and the implementer chosen for an issue must not be the same agent
+(same `kind` or `model`), or the issue goes to the operator (#407). `conclave` (absent by default) lists the three agents of the
 [conclave on a block](guide.md#conclave-on-a-block) (#141): exactly three configured agents,
 different from each other and with different `(kind, model, effort)`; anything else stops devloop
 at startup. Their fallback models are checked when each call runs: one whose tuple coincides with
@@ -66,6 +69,12 @@ table of the supervisor actor (`name`, `kind`, `provider`, `model`), which signs
 a missing or empty value, a `kind` that is not an agent kind, a `name` other than
 `<kind>-supervisor` or equal to a key of `[agents]`, or no `[apps.supervisor]` stops devloop at
 startup.
+The keys of `[agents]` may name agent and role in full, `<kind>-implementer` or
+`<kind>-reviewer`, with the `app` each signs with, and `[roles.implementers]` maps area labels
+to implementers ([The implementer app and the keys by role](#the-implementer-app-and-the-keys-by-role),
+#407); a key with a role used in another one, a key with a role whose kind is not the agent's,
+an app that the rules of that section refuse, or a value of `[roles.implementers]` that is not an
+implementer stops devloop at startup.
 `[pin]` (`auto`, default `false`; `restart_max_wait_minutes`, default 30) sets the
 [pin after a merge](guide.md#pin-after-a-merge), by devloop or by anyone else (#430), and how long, in the continuous mode, the restart
 from the new copy may wait for the running actions while new ones, except implementations, still
@@ -851,6 +860,11 @@ sometimes days later. So that each turn does not try it again first, devloop rem
   again, with a new time; a turn that succeeds on it forgets it.
 - **Reset.** `devloop fallback reset <agent>` forgets every model remembered for that agent,
   and only those: its next turn starts from the configured model.
+- **Keys by role** (#407). At the start of `tick` and `run`, the records of a key before the
+  migration (`claude`, `codex`, `agy`) that is no longer configured move to the keys that name
+  that agent with a role (`claude-implementer`, `claude-reviewer`), each with all of them; of two
+  records of the same model the later time stays. The log says so once
+  ([The implementer app and the keys by role](#the-implementer-app-and-the-keys-by-role)).
 - **Without fallback models** nothing is recorded and nothing is skipped: the agent behaves as
   before.
 
@@ -922,7 +936,9 @@ operator's login) and in the tuple `(kind, model, effort, review_args)`; keys an
 do not count. Neither may share the identity or the `(kind, model, effort)` of whoever wrote
 code on the PR: the implementer recorded in the PR marker, the author of every fix, also of
 earlier rounds, the agent that resolved the conflicts of every sync, and the agent configured
-now under the implementer's key, which runs fixes and syncs. The dispatcher scans the pool in configuration order and takes the first such pair. The
+now under the implementer's key, which runs fixes and syncs. Nor may either be the same agent in
+effect as one of them, the same `kind` or the same `model` (#407, at level 1 too, against the
+implementer: [the keys by role](#the-implementer-app-and-the-keys-by-role)). The dispatcher scans the pool in configuration order and takes the first such pair. The
 choice is deterministic, so it stays the same for the whole round, and it is recorded in the
 receipt (`reviewers`).
 
@@ -1301,11 +1317,13 @@ model = "claude-opus-5-5"
   supervisor stop counting. An issue the supervisor opens with its app counts as one of devloop's
   apps, as one opened with the agent's app did.
 - A PR counts as implemented by the supervisor's agent (ADR 0002, principle 4, and
-  `[delegations] retry_own_prs`) when the `kind` or the `model` of its implementer, as the
-  profile of the PR's marker records them, is the actor's (the configured agent the marker names,
-  for a marker without a profile); a PR whose agent cannot be read counts as the supervisor's.
-  The keys are never compared, since `claude-supervisor` is never an implementer's key.
-  `provider` is not compared yet: devloop's agents do not declare one (P5-5).
+  `[delegations] retry_own_prs`) when the `kind`, the `model` or the provider of its
+  implementer, as the profile of the PR's marker records them, is the actor's (the configured
+  agent the marker names, for a marker without a profile); a PR whose agent cannot be read counts
+  as the supervisor's. The actor's provider is the `provider` it declares; the implementer's is
+  read from the prefix of its model
+  ([the keys by role](#the-implementer-app-and-the-keys-by-role)). The keys are never compared,
+  since `claude-supervisor` is never an implementer's key.
 - devloop never reads the app's key and never writes with it: the key is in `key_dir` of the
   supervisor's system user, not in devloop's, and `python3 -m devloop apps` does not list it.
   `scripts/agent-token.py` refuses it, so no review or interactive session can write a command as
@@ -1328,3 +1346,106 @@ Turning it on is best done with an empty queue: a command or label of the old id
 before the switch, still unapplied, no longer counts afterwards (an issue admitted only by the
 agent's `agent:ready` is no longer admitted, and needs the label again), which stops the flow
 rather than widening it.
+
+### The implementer app and the keys by role
+
+The implementer has a role app of its own too (ADR 0005, P5-3, #407):
+`brushtyler-devloop-implementer`, created by the operator with `Contents: Read and write`,
+`Pull requests: Read and write`, `Issues: Read and write` and `Metadata: Read-only`, without
+`Workflows`. `config.toml` declares it:
+
+```toml
+[apps.implementer]
+app_id = 5824194
+slug = "brushtyler-devloop-implementer"
+```
+
+It signs the commits, the pushes, the PRs and the records of the fixes and of the syncs of every
+agent that declares it, whichever agent does the work; the agent and its model stay in the
+attribution header, in the `implementer` key and the profile of the PR marker (whose `identity`
+is the app's login), and in the commit trailer. Off by default (D10): `config.toml` keeps the
+keys `claude`, `codex` and `agy`, nothing declares the app, devloop does not read its key and
+`python3 -m devloop apps` does not list it. The operator turns it on with an **empty queue**, by
+renaming the keys in `config.toml`. Not in the
+local overlay: the overlay merges the tables key by key and cannot remove one, so the keys
+`claude`, `codex` and `agy` of `config.toml` would stay beside the new ones, and two keys that
+sign with the same app (`codex` and `codex-reviewer` with `[apps.codex]`) stop devloop at
+startup (`apps.codex: each app belongs to one actor`):
+
+```toml
+[roles]
+implementer = "claude-implementer"
+reviewers = ["codex-reviewer", "agy-reviewer"]
+
+[agents.claude-implementer]   # the table of [agents.claude]
+app = "implementer"
+# ...
+[agents.codex-reviewer]       # the table of [agents.codex]
+app = "codex"
+# ...
+[agents.agy-reviewer]         # the table of [agents.agy]
+app = "agy"
+# ...
+
+[review_policy]
+advisory_reviewer = "claude-reviewer"   # once claude-reviewer exists (P5-5); "" until then
+```
+
+- **One key, one role.** A key may name agent and role in full, `<kind>-implementer` or
+  `<kind>-reviewer`, where `<kind>` is the agent's `kind`. Such a key serves that role only:
+  `roles.implementer`, the values of `[roles.implementers]` and the `impl:` labels take
+  implementer keys; `roles.reviewers` and `review_policy.advisory_reviewer` reviewer keys;
+  `preflight`, `conclave` and `roles.supervisor` as an agent key take no key with a role, until
+  they get one. A key used in a role it does not name stops devloop at startup. A key without a
+  role (`claude`, the keys before the migration) serves the roles it is given, as before; it may
+  not be both a reviewer and a key that implements.
+- **Declared app.** An agent signs with `[apps.<app>]` of its `app`, or without `app` with the
+  table of its key, as before; without such a table, with the ambient `gh` login. Only a
+  `<kind>-implementer` key may declare `app = "implementer"`, and several may; an implementer
+  key signs with the implementer app or with the ambient login, never with an agent's app. No
+  agent declares `dispatcher`, `merger` or `supervisor`. Every other app belongs to one agent
+  only; an app no key declares is allowed only for devloop's own apps and for `claude`, `codex`
+  and `agy`, whose tables stay to read the records they signed. A declared app without its table
+  stops devloop at startup.
+- **Records.** The fixes and syncs of a PR count when the app of its implementer's key wrote
+  them; a review, a readiness check or a conclave's record never counts when written for a key
+  that signs with a role app. `scripts/agent-token.py` refuses `implementer`, as it refuses
+  `dispatcher` and `merger`. The records of before name `claude`, `codex` and `agy`: they are
+  read as they are, with the app of that name, and never rewritten; the daily summary counts a
+  review of `codex` when `codex-reviewer` is configured.
+- **Conflicts by agent, never by key.** A reviewer is skipped, at level 1 and at level 2, when
+  it is the same agent in effect as the PR's implementer (at level 2 as any author of the PR):
+  the same `kind`, the same `model` or the same provider, as the profile of the marker records
+  them, and the models of the agent configured under the implementer's key. The agents do not
+  declare a provider yet (P5-5): devloop reads it from the prefix of the model's name (`claude-`
+  Anthropic, `gpt-` OpenAI, `gemini-` Google), and a model with another prefix is compared only
+  by `kind` and `model`. So neither `claude-reviewer` nor agy run with a Claude model reviews the
+  code of `claude-implementer`. At level 2 this is stricter than the quorum rule (ii) of D8,
+  which admits one reviewer of the authors' provider: that rule comes with P5-5. A PR whose
+  implementer has no profile and no configured key has no reviewer at level 1, and goes to the
+  operator. The pool is no longer refused in the configuration because of the implementer's key.
+  The check on the PRs of the supervisor's agent compares the agent in the same way, with
+  `roles.supervisor` as an agent key too ([The supervisor app](#the-supervisor-app)). The
+  reviewer the PR marker records is the first of the pool that is not the implementer's agent.
+- **Fallback models of a reviewer.** The same check applies, at both levels, to every model a
+  reviewer's turn actually runs, fallbacks included: a model that is the same agent in effect
+  as an author of the PR (at level 1 the implementer, as the selection reads it) is skipped
+  without running, and when no model of the chain is left the turn fails without a review. At
+  level 2 the model must also stay independent by tuple of the authors and distinct from the
+  other reviewers of the round, as before.
+- **Choice of the implementer** (D7). At the takeover of an issue, in order: an `impl:<kind>`
+  label chooses `<kind>-implementer`; else the area labels of `[roles.implementers]`
+  (`"<label>" = "<implementer key>"`, empty by default); else `roles.implementer`. A label counts
+  only while the issue has it and its latest `labeled` event comes from a trusted user, or from
+  the supervisor on an issue opened by a trusted user or by one of devloop's apps, as for the
+  priority labels (#178); any other is ignored. Two `impl:` labels, an `impl:` label of an
+  implementer not configured, area labels that lead to different implementers, and an
+  implementer that is the same agent as `preflight` send the issue to the operator
+  (`configuration`), without a takeover. The key chosen is in the `request` record of the ledger
+  and in the PR marker, and a label changed later does not change the implementer of an open PR:
+  its fixes and syncs run with the key of its marker.
+- **Startup.** Before `tick` and `run` devloop moves the memory of the unavailable models to the
+  keys by role ([Memory of unavailable models](#memory-of-unavailable-models)), then stops when
+  an open devloop PR (of this repository, by a trusted user or one of devloop's apps, on a devloop
+  branch) has a marker whose implementer or reviewer is not a configured key, or a key of the
+  other role, and when the open PRs cannot be read. Nobody else's PR can stop devloop.

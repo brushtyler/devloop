@@ -401,6 +401,33 @@ def check_agent_user(cfg, state, local_config, agent_user, log=log, me=None, git
     check_isolation(agent_user, key_dir, state, local_config, me=me, git_dir=git_dir)
 
 
+def check_keys(dispatcher, log=log):
+    """The startup step of the agent keys (ADR 0005, P5-3, #407), before ``tick`` and ``run``:
+    the memory of the models found unavailable moves from the keys before the migration
+    (``claude``, ``codex``, ``agy``) to the keys that name their role
+    (``unavailability.Memory.migrate``); then devloop stops (``SystemExit``) when an open PR of
+    devloop has a marker that names a key not configured, or one of another role
+    (``Dispatcher.key_problems``), and when the open PRs cannot be read: the keys change with
+    an empty queue (D10). A dispatcher without the check (a stand-in) is left as it is."""
+    check = getattr(dispatcher, 'key_problems', None)
+    if not callable(check):
+        return
+    migrate = getattr(getattr(dispatcher, 'memory', None), 'migrate', None)
+    if callable(migrate):
+        for old, keys in migrate(dispatcher.cfg.agents):
+            log(f'fallback memory: the models remembered unavailable for {old} now hold for '
+                + ', '.join(keys))
+    try:
+        problems = check()
+    except GitHubError as exc:
+        sys.exit(f'devloop: the markers of the open PRs cannot be checked against the agent '
+                 f'keys: {exc}')
+    if problems:
+        sys.exit('devloop: open PRs name agent keys that this configuration does not have in '
+                 'that role; the keys change with an empty queue (ADR 0005, D10):\n'
+                 + '\n'.join(f'  {line}' for line in problems))
+
+
 def hold_lock(dispatcher, lock_fd, repo_lock_fd=None):
     """With the outbox of the publications (#385), the `gh` of each write holds the dispatcher
     lock ``lock_fd`` too, under a timeout of its own (``GitHub.KILL_AFTER``): no next dispatcher
@@ -548,7 +575,7 @@ def run_report(parser, args):
             report.build(cfg, gh, trust, state, log=log).publish(day)
             return
         day = day or report.utc_today()
-        summary = report.Records(gh, trust, day, day, cfg.agents).summary(day)
+        summary = report.Records(gh, trust, day, day, cfg.review_keys()).summary(day)
         print(report.render_text(summary), end='', flush=True)
     except (GitHubError, report.ReportError) as exc:
         sys.exit(f'devloop: report: {exc}')
@@ -721,7 +748,9 @@ def main(argv=None):
         return
     if args.command == 'apps':
         failed = False
-        for actor in [DISPATCHER, MERGER, *cfg.agents]:
+        # Each app once, by the actor of its table: the agents' declared apps, the implementer's
+        # role app among them (#407).
+        for actor in dict.fromkeys([DISPATCHER, MERGER, *map(cfg.app_of, cfg.agents)]):
             app = dispatcher.identities.apps.get(actor)
             if app is None:
                 log(f'{actor}: no app, uses the ambient gh login')
@@ -816,6 +845,9 @@ def main(argv=None):
                 return
             dispatcher.housekeeping.run(cfg, verbose=True)
             return
+        # Before any action (ADR 0005, P5-3, #407): the keys of the agents, renamed by role, and
+        # the open PRs that name the keys of before.
+        check_keys(dispatcher)
         try:
             if args.command == 'tick':
                 dispatcher.tick(dry_run=args.dry_run)
