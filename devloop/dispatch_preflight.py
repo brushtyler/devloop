@@ -11,7 +11,8 @@ from here, not re-exported by ``devloop/dispatcher.py``.
 
 from .agents import AgentError
 from .apps import DISPATCHER, ISSUE_COMMENT
-from .context import _render_issue_comments, _template, prompt_values
+from .context import (_render_issue_comments, _template, format_operator_decisions,
+                      prompt_values, trust_policy_rule)
 from .dispatch_actions import Models, ready_approval
 from .dispatch_supervision import UntrustedChange
 from .markdown import carries_record, read_marker, render_escalation, render_preflight
@@ -19,6 +20,11 @@ from .planning import (RECHECK_COMMAND, label_names, operator_blocked, preflight
                        repository_bound)
 from .supervision import ACCEPT_DEFAULTS, DECIDE, preflight_class
 from .workspace import WorkspaceError
+
+
+# The question of a readiness check to the operator on a change to the trust policy that no
+# decision covers (#472): the operator decides on the issue, before the implementation.
+TRUST_QUESTION = 'Approvi la modifica della policy di fiducia descritta qui?'
 
 
 def devloop_text(body):
@@ -29,12 +35,26 @@ def devloop_text(body):
 def normalize_preflight(raw):
     """The outcome of a readiness check: ready only without gaps and without a split, whatever
     the agent says (a ``default_available`` gap blocks too). A gap depends on the base branch
-    (``repository_dependent``, #270) only when the agent says so."""
+    (``repository_dependent``, #270) only when the agent says so.
+
+    A change to the trust policy that no decision of the operator covers (``trust_policy``
+    ``uncovered``, #472) is a first gap of kind ``operator_decision``, which devloop writes
+    itself: the question to the operator with the agent's reason. The schema requires the two
+    fields; an output without them (written before #472) is read as before."""
     gaps = [dict(g, code_refs=list(g['code_refs']),
                  repository_dependent=g.get('repository_dependent') is True)
             for g in raw['gaps']]
+    trust = {}
+    if 'trust_policy' in raw:
+        reason = (raw.get('trust_policy_reason') or '').strip()
+        trust = {'trust_policy': raw['trust_policy'], 'trust_policy_reason': reason}
+        if raw['trust_policy'] == 'uncovered':
+            gaps.insert(0, {'kind': 'operator_decision',
+                            'description': f'{TRUST_QUESTION} {reason}'.strip(),
+                            'code_refs': [], 'proposed_default': '',
+                            'repository_dependent': False})
     ready = bool(raw['ready']) and not gaps and not raw['split'].strip()
-    return {'ready': ready, 'gaps': gaps, 'split': raw['split']}
+    return {'ready': ready, 'gaps': gaps, 'split': raw['split'], **trust}
 
 
 class PreflightMixin:
@@ -250,6 +270,11 @@ class PreflightMixin:
                                comments, cfg.trusted_users,
                                [read_marker(c['body'], 'supervision')
                                 for c in comments if self._accepted(c)]),
+                           # #472: the rule of the reviewers, and the comments that may record
+                           # a decision of the operator on the trust policy.
+                           trust_policy=trust_policy_rule(),
+                           operator_decisions=format_operator_decisions(
+                               self._issue_decisions(comments, history)),
                            language=cfg.language)
         name = f'issue-{number}-preflight'
         path = self.ws.base_copy(name)
@@ -281,7 +306,8 @@ class PreflightMixin:
             self.log('  the readiness check changed since the snapshot; next tick')
             return
         record = view['record']
-        outcome = {k: record[k] for k in ('ready', 'gaps', 'split', 'base') if k in record}
+        outcome = {k: record[k] for k in ('ready', 'gaps', 'split', 'base', 'trust_policy',
+                                          'trust_policy_reason') if k in record}
         self._publish_preflight(number, outcome, view['hash'], record['agent'],
                                 note='Esito del controllo precedente, riusato: il testo '
                                      'dell\'issue non è cambiato.')

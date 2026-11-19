@@ -191,8 +191,8 @@ from .budget import reserve as budget_reserve
 from .budget import status_lines as budget_status_lines
 from .config import INSTALL_ROOT, LEGACY_NEEDS_OPERATOR, ConfigError, key_role
 from .context import (LABEL_STYLE, _describe_bases, _failure_text, _open_findings_reason,
-                      _render_issue_comments, both_labels_warning, label_transition,
-                      transition_labels)
+                      _render_issue_comments, both_labels_warning, issue_decisions,
+                      label_transition, transition_labels)
 from .dispatch_actions import ActionsMixin, Models, ready_approval, rerun_of
 from .dispatch_advisory import AdvisoryFailures, AdvisoryMixin, AdvisoryResults
 from .dispatch_conclave import ConclaveMixin
@@ -838,6 +838,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         if not supervisor:
             return set(self.cfg.trusted_users)
         return label_admitters(author, self.cfg.trusted_users, supervisor, self._devloop_logins())
+
+    def _issue_decisions(self, comments, history, taken=False):
+        """``issue_decisions`` of an issue (#472): neither the supervisor's identity nor any
+        other app of devloop decides for the operator."""
+        return issue_decisions(comments, history, self.cfg.trusted_users, self._devloop_logins(),
+                               self.cfg.labels.working, taken=taken)
 
     def _untrusted_change(self, history):
         """``untrusted_change`` of an issue, with the admitters of its author."""
@@ -1826,11 +1832,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         accepted = [c for c in listed if self._accepted(c)]
         # ``request``: the hash of the request as read here (#182), part of the key of an
         # implement turn's retries. ``thread``: the comments as read here, where the conclave
-        # records and the vetoes of the issue are (#142).
+        # records and the vetoes of the issue are (#142). ``decisions``: the comments that may
+        # record a decision of the operator for the reviewers (#472), written before the takeover.
         issue = dict(self.gh.issue(number), title=history['title'], body=history['body'],
                      labeled=history['labeled'], admitters=self._admitters(history['author']),
                      accepted=accepted, request=self._request_hash(history, listed),
-                     thread=listed)
+                     thread=listed, decisions=self._issue_decisions(listed, history, taken=True))
         return issue, _render_issue_comments(issue.get('comments') or [], self.cfg.trusted_users,
                                              [read_marker(c['body'], 'supervision')
                                               for c in accepted])

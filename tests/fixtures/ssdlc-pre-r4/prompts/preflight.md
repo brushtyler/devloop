@@ -49,17 +49,47 @@ function that does not exist yet. devloop then repeats the check when `$base_bra
 Use `false` for every other gap: one that only a decision, a change to the issue text or an
 external tool, access or resource can close.
 
+## Trust policy
+
+The operator decides a change to the trust policy on the issue, before anyone implements it, not
+on the pull request (#472). The reviewers of the pull request will apply this rule, from the
+review prompt of devloop; apply it now to the change the issue asks for:
+
+$trust_policy
+
+Declare in `trust_policy`, for the change the issue asks for:
+
+- `none`: it does not touch the trust policy (the closed list of five points above);
+- `covered`: it touches it, and a decision of the operator covers it with no deviation and
+  authorizes every weakening of a check it makes: a decision of an ADR as the rule says, one in
+  the body of the issue, or a comment of the operator that approves the change, listed under
+  "Decisions of the operator on the issue" below. Any other comment, also of a trusted user, is
+  not such a decision;
+- `uncovered`: it touches it, and no decision of the operator covers it, it goes beyond or
+  against one, or it weakens a check that no decision authorizes. A change of the rule itself is
+  `uncovered` too, unless a decision of the operator approves it.
+
+In `trust_policy_reason` list the parts of the trust policy the change touches, each with its
+point of the closed list, and the decision that covers them (the file, the section and the point
+of the ADR, or the author and the time of the comment) or why none does; `""` with `none`. With
+`uncovered` the issue is not ready: devloop adds a gap of kind `operator_decision` with the
+question to the operator and your `trust_policy_reason`, so do not list that gap yourself.
+
 ## Final answer
 
 - `ready`: `true` only when there is no gap and no split is needed.
 - `gaps`: the gaps, or an empty list.
 - `split`: when the issue is too large for one run, how to split it into issues that are each
   implementable in one run; otherwise `""`.
+- `trust_policy`: `none`, `covered` or `uncovered`, as above.
+- `trust_policy_reason`: the parts touched and the decision that covers them, or `""`.
 
-Write `description`, `proposed_default` and `split` in $language.
+Write `description`, `proposed_default`, `split` and `trust_policy_reason` in $language.
 
 ## Issue #$issue_number: $issue_title
 
 $issue_body
 
 $issue_comments
+
+$operator_decisions
