@@ -79,8 +79,9 @@ implementer stops devloop at startup.
 `[pin]` (`auto`, default `false`; `restart_max_wait_minutes`, default 30) sets the
 [pin after a merge](guide.md#pin-after-a-merge), by devloop or by anyone else (#430), and how long, in the continuous mode, the restart
 from the new copy may wait for the running actions while new ones, except implementations, still
-start; the merge of a PR that declares a [step on the host](guide.md#step-on-the-host) (#462)
-holds the auto-pin until a pin by hand; an `auto` that is
+start; the merge of a PR that declares a [step on the host](guide.md#step-on-the-host) (#462),
+by devloop or by anyone else (#473), holds the auto-pin until a pin by hand of a commit that
+contains it; an `auto` that is
 not a boolean, a `restart_max_wait_minutes` that is not a whole number of at least 0, or an
 unknown key, stops devloop at startup. `source` (unset by default, a key of the host's overlay)
 names the clone of the [installation's source](guide.md#installation-source) (ADR 0006, R1),
@@ -314,9 +315,10 @@ with them the prompts are the same, byte for byte, as before R4, which
 `tests/test_devloop_prompt_data.py` proves against the templates of before R4
 (`tests/fixtures/ssdlc-pre-r4/prompts/`), with the changes of the templates made since then
 listed one by one, each with its issue (`SINCE_R4` in `tests/helpers/ssdlc_project.py`, such as
-`host_step`, #462, or the trust policy, #472). The text of the trust policy in the review and advisory
-review prompts is the installation's and does not change; the readiness check gets the same text,
-read from the review prompt of the installation (#472). On a host, the project file gains the
+`host_step`, #462, with the review criterion made precise by #473, or the trust policy, #472). The
+text of the trust policy in the review and advisory review prompts is the installation's and does
+not change; the readiness check gets the same text, read from the review prompt of the
+installation (#472). On a host, the project file gains the
 `[prompts]` table before the pin of R4
 ([ops/host/migrate.md](../../ops/host/migrate.md#dati-di-ssdlc-nei-prompt)).
 

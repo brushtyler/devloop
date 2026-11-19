@@ -544,8 +544,10 @@ The [daily summary](guide.md#daily-summary) (#256) reads only records bound to i
 [`supervision`](#supervision-trace) records of `grant-round`, `grant-budget` and `capacity`
 (#466: the grants of the supervisor of the day, with the caps left their figures record: `left`
 of `cap` for the rounds of the PR, `daily_left` of `daily_cap` for the day), the `review` records
-of a configured reviewer written with its identity (a CI round with the dispatcher's), and the
-`pr` marker of a PR opened by the implementer it names. It reads the comments of the repository,
+of a configured reviewer written with its identity (a CI round with the dispatcher's), the `pin`
+records the dispatcher signed (#453: the alert on `[run].alert_issue` of an auto-pin that did not
+move `current`, with `sha`, `ref`, `at` and the `reason` the alert shows, never a path of the
+host), and the `pr` marker of a PR opened by the implementer it names. It reads the comments of the repository,
 not the native reviews: a round whose reviews are native reviews is counted from its
 [round register](#round-register), once a review turn of it succeeded or its CI was recorded. The
 records of a [fix register](#fix-register) are read one by one, and open no round. On `[report] issue` it writes two kinds of
@@ -737,8 +739,12 @@ operator makes on the host before the code is pinned, with a reference to its do
 non-empty one is recorded in the PR marker (`host_step`) and shown in the PR description under
 "Passo sull'host"; each fix records its declaration again in its `fix` marker (`host_step`, empty
 when there is none), and the latest holds, as for the map. The reviewer receives it and checks
-that it is there when the PR needs it and empty otherwise. When devloop merges a PR whose latest
-declaration is not empty, it holds the auto-pin instead of requesting it, and alerts the operator
+that it is there when the PR needs it (#473: a file in the `state_dir`, a required key or table of
+the project file or of the overlay, a command run as root or on the service); a missing one is a
+blocking finding, a superfluous one only a non-blocking finding. When devloop merges a PR whose
+latest declaration is not empty, it holds the auto-pin instead of requesting it, and alerts the
+operator; a PR with such a declaration merged by someone else holds it too, once devloop sees
+its merge commit on the base branch, and an alert that failed is tried again at each tick
 ([Step on the host](guide.md#step-on-the-host)).
 
 The reviewer receives the criteria and the latest map, and must verify them: a criterion without

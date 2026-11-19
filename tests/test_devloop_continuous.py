@@ -374,11 +374,14 @@ class SimPinner:
     def held(self):
         return None  # no PR of the simulation declares a step on the host (#462)
 
+    def scan(self, branch, lookup, target=None):
+        return []  # nor is merged outside devloop with one (#473)
+
     def cancel(self):
         self.cancelled += 1
         self.requests.clear()
 
-    def pin(self, ref):
+    def pin(self, ref, lookup=None):
         self.pins.append((self.clock(), ref,
                           [a for a, _ in self.dispatcher.workers.running()]))
         if self.refuse:
@@ -886,7 +889,8 @@ class ContinuousTickTests(unittest.TestCase):
         logs = []
         d.log.sink = logs.append
         self.assertEqual(d.tick(), [Action('review', 101)])
-        pinner.pin.assert_called_once_with('origin/main')
+        # The commit resolved is checked for merges outside devloop (#473).
+        pinner.pin.assert_called_once_with('origin/main', lookup=d._merged_host_steps)
         self.assertEqual(d._restart, ('0123456789ab', 1_000_000))
         line = 'restart to 0123456789ab pending since 1970-01-12T13:46:40Z'
         self.assertIn(f'{line} (1 running): no new implement until the restart', logs)
@@ -980,7 +984,7 @@ class ContinuousTickTests(unittest.TestCase):
         pinner.pin.assert_not_called()
         d.snapshot = lambda: Snapshot([], [], [])
         self.assertEqual(d.tick(), [])
-        pinner.pin.assert_called_once_with('origin/main')
+        pinner.pin.assert_called_once_with('origin/main', lookup=d._merged_host_steps)
         self.assertEqual(d._restart[0], '0123456789ab')
         self.release.set()
 

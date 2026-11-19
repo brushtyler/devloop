@@ -20,13 +20,14 @@ from devloop import config, hoststep, markdown, pin
 from devloop.config import MergePolicy, PinPolicy
 from devloop.dispatcher import Dispatcher
 from devloop.github import GitHubError
+from devloop.planning import Snapshot
 from devloop.schema import load_schema, validate, with_defaults
 from helpers import ssdlc_project
 from helpers.devloop_fakes import META, FakeGH
 from test_devloop import (CFG, REV_NAME, SHA1, FakeRunner, FakeWS, implemented, norm, raw_review,
                           receipt)
 from test_devloop_merge import Identities, MergeGH, header, records
-from test_devloop_pin import AutoPinTests, FakePinner, GitCase
+from test_devloop_pin import AutoPinTests, FakePinner, GitCase, git
 from test_devloop_zero import changes
 
 STEP = ('Aggiungere `[tests]` al file di progetto e verificare con check-equivalence.py '
@@ -66,7 +67,10 @@ class StatePinner(pin.AutoPin):
     def observe(self, branch, touches):
         return None
 
-    def pin(self, ref):
+    def scan(self, branch, lookup, target=None):
+        return []
+
+    def pin(self, ref, lookup=None):
         self.pins.append(ref)
 
 
@@ -254,6 +258,110 @@ class HostStepMergeTests(unittest.TestCase):
         self.assertEqual(self.pinner.holds, [(100, SHA1, STEP)])
         self.assertIn('  no [run].alert_issue is configured: no alert for the step on the host',
                       self.logs)
+        # Nothing to publish: the alarm counts as gone out, and is not tried again.
+        self.assertTrue(self.pinner.held()[0]['alerted'])
+
+
+class FailingAlertGH(HostStepGH):
+    """``HostStepGH`` whose alarm comment and label fail the first ``failures`` times."""
+
+    def __init__(self, failures=1, **kw):
+        super().__init__(**kw)
+        self.comment_failures = self.label_failures = failures
+
+    def comment(self, number, body):
+        if number == ALERT_ISSUE and self.comment_failures:
+            self.comment_failures -= 1
+            raise RuntimeError('gh: HTTP 502 with a token ghs_secret')
+        super().comment(number, body)
+
+    def edit_labels(self, number, add=(), remove=()):
+        if number == META['issue'] and self.label_failures and add:
+            self.label_failures -= 1
+            raise GitHubError('label refused')
+        super().edit_labels(number, add=add, remove=remove)
+
+
+class AlertRetryTests(unittest.TestCase):
+    """#473, 3: the alarm of a hold goes out at the next tick when it failed, and only once."""
+
+    merge = HostStepMergeTests.merge
+
+    def alerts(self, gh):
+        return [body for number, body in gh.comments if number == ALERT_ISSUE]
+
+    def test_a_failed_alarm_is_tried_again_at_the_next_tick(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        pinner = StatePinner(tmp, tmp / 'state')
+        gh = FailingAlertGH()
+        d = self.merge(gh, pinner=pinner)
+        self.assertEqual(gh.merged, [(100, SHA1)])
+        self.assertEqual(self.alerts(gh), [])
+        self.assertNotIn(CFG.labels.needs_operator, gh.labels.get(META['issue'], set()))
+        hold, = pinner.held()
+        self.assertIs(hold['alerted'], False)
+        self.assertIn(f'  the alert of the step on the host on #{ALERT_ISSUE} could not be '
+                      'published (RuntimeError)', self.logs)
+        self.assertFalse(any('ghs_secret' in line for line in self.logs))
+        self.assertIn('  auto-pin held: #100 declares a step on the host; pin by hand after it',
+                      self.logs)
+        # The next tick tries the comment and the label again: both go out now.
+        d._auto_pin(False)
+        alert, = self.alerts(gh)
+        self.assertIn('> ' + STEP, alert)
+        self.assertIn(CFG.labels.needs_operator, gh.labels[META['issue']])
+        hold, = pinner.held()
+        self.assertIs(hold['alerted'], True)
+        # Gone out: a later tick does not repeat it.
+        d._auto_pin(False)
+        self.assertEqual(len(self.alerts(gh)), 1)
+
+    def test_a_comment_that_went_out_is_not_repeated_for_a_failed_label(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        pinner = StatePinner(tmp, tmp / 'state')
+        gh = FailingAlertGH()
+        gh.comment_failures = 0
+        d = self.merge(gh, pinner=pinner)
+        self.assertEqual(len(self.alerts(gh)), 1)
+        hold, = pinner.held()
+        self.assertEqual((hold['commented'], hold['alerted']), (True, False))
+        d._auto_pin(False)
+        self.assertEqual(len(self.alerts(gh)), 1)
+        self.assertIn(CFG.labels.needs_operator, gh.labels[META['issue']])
+        self.assertIs(pinner.held()[0]['alerted'], True)
+
+    def test_a_hold_whose_process_stopped_before_the_alarm_alerts_at_the_next_tick(self):
+        # The hold was written and the PR merged, then the process stopped: no alarm yet.
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        pinner = StatePinner(tmp, tmp / 'state')
+        gh = HostStepGH(step='')
+        d = self.merge(gh, pinner=pinner)  # merged: GitHub reports the PR MERGED
+        pinner.hold(100, SHA1, STEP, META['issue'])
+        d._auto_pin(False)
+        alert, = self.alerts(gh)
+        self.assertIn('devloop ha mergiato la PR #100', alert)
+        self.assertIs(pinner.held()[0]['alerted'], True)
+
+    def test_a_hold_of_a_pr_closed_without_merge_goes(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        pinner = StatePinner(tmp, tmp / 'state')
+        gh = HostStepGH(step='')
+        d = self.merge(gh, pinner=pinner)
+        pinner.cancel()  # the pin requested by the merge of #100 is not under test
+        pinner.hold(101, SHA1, STEP)
+        gh.state = 'OPEN'  # an open PR: a merge that runs now alerts by itself
+        d._auto_pin(False)
+        self.assertEqual(pinner.held()[0]['pr'], 101)
+        gh.state = 'CLOSED'
+        d._auto_pin(False)
+        self.assertIsNone(pinner.held())
+        self.assertIn('auto-pin: #101 was closed without merge: its hold of the auto-pin goes',
+                      self.logs)
+        self.assertEqual(self.alerts(gh), [])
 
 
 class HeldPinTests(GitCase):
@@ -274,7 +382,7 @@ class HeldPinTests(GitCase):
     def test_a_held_auto_pin_waits_for_a_pin_by_hand_then_resumes(self):
         old = self.pin('main')
         merged = self.push('merged with a step', 'devloop/extra.txt', 'new\n')
-        pin.hold(self.state, 100, merged, STEP)
+        attempt = pin.hold(self.state, 100, merged, STEP)
         pin.request(self.state, 100, merged)
         d, snapshots = self.dispatcher(auto=True)
         with self.assertRaisesRegex(AssertionError, 'plan'):
@@ -290,6 +398,8 @@ class HeldPinTests(GitCase):
         with self.assertRaisesRegex(AssertionError, 'plan'):
             d.tick()
         self.assertEqual(self.pointed(), old.resolve())
+        # A tick read the merge commit of #100 on GitHub (#473, ``_alert_held_steps``).
+        self.assertTrue(pin.mark(self.state, 100, attempt, merge=merged))
         # The operator does the step, then pins by hand: the hold is released.
         self.pin_by_hand()
         self.assertIsNone(pin.held(self.state))
@@ -369,8 +479,246 @@ class HeldPinTests(GitCase):
         (self.state).mkdir(parents=True, exist_ok=True)
         (self.state / pin.HELD).write_text('not json', encoding='utf-8')
         self.assertEqual(pin.held_prs(pin.held(self.state)), 'an unknown PR')
-        self.assertEqual(len(pin.release(self.state)), 1)
+        self.assertEqual(len(pin.release(self.state, self.root, self.first)), 1)
         self.assertIsNone(pin.held(self.state))
+
+
+OUTSIDE = 200  # a devloop PR of issue 9 that the operator merges on GitHub (#473)
+
+
+class OutsideMergeTests(GitCase):
+    """#473, 1 and 2: a merge devloop did not make holds the auto-pin and alerts; a pin by hand
+    releases only the holds whose merge it contains, under the lock of the pins."""
+
+    def outside_gh(self, commit=None, in_fix=True):
+        """A GitHub where ``commit`` merged PR #200, which declares ``STEP`` in its latest fix
+        (or in its marker), and PR #201 of a stranger, which declares one too."""
+        gh = FakeGH()
+        meta = dict(META, issue=9)
+        raw = {'number': OUTSIDE, 'title': 't', 'labels': [{'name': 'agent:needs-operator'}],
+               'headRefName': 'agent/issue-9', 'headRefOid': SHA1,
+               'author': {'login': 'brushtyler'}, 'isCrossRepository': False, 'state': 'MERGED',
+               'mergeCommit': {'oid': commit} if commit else None,
+               'body': markdown.publishable('b', 'pr', meta if in_fix
+                                            else dict(meta, host_step=STEP))}
+        stranger = dict(raw, number=OUTSIDE + 1, author={'login': 'stranger'},
+                        headRefName='agent/issue-10',
+                        body=markdown.publishable('b', 'pr', dict(META, issue=10,
+                                                                  host_step='anything')))
+        gh.any_prs = {OUTSIDE: raw, OUTSIDE + 1: stranger}
+        gh.commit_raw = {commit: [OUTSIDE + 1, OUTSIDE]} if commit else {}
+        if in_fix:
+            fix = {'summary': 's', 'responses': [], 'head_sha': SHA1, 'host_step': STEP}
+            gh.comments.append((OUTSIDE, markdown.render_fix(fix, 'header', 1)))
+        return gh
+
+    def dispatcher(self, gh):
+        cfg = dataclasses.replace(CFG, pin=PinPolicy(auto=True),
+                                  run=config.RunPolicy(alert_issue=ALERT_ISSUE))
+        d = Dispatcher(cfg, gh, FakeWS(), FakeRunner(), log=self.logs.append,
+                       pinner=pin.AutoPin(self.root, self.state, log=self.logs.append,
+                                          smoke=self.passing_smoke))
+        d.labels_checked = True  # the label rename of #248 is not under test
+        d.snapshot = lambda: Snapshot([], [], [])
+        return d
+
+    def alerts(self, gh):
+        return [body for number, body in gh.comments if number == ALERT_ISSUE]
+
+    pin_by_hand = HeldPinTests.pin_by_hand
+
+    def test_a_merge_by_the_operator_holds_the_auto_pin_and_alerts(self):
+        old = self.pin('main')
+        merged = self.push_elsewhere('Merge pull request #200', 'devloop/step.txt', 'step\n')
+        gh = self.outside_gh(merged)
+        d = self.dispatcher(gh)
+        self.assertEqual(d.tick(), [])
+        # Not pinned: the step of #200 holds the auto-pin, and the request waits.
+        self.assertEqual(self.pointed(), old.resolve())
+        self.assertEqual(pin.pending(self.state)['head'], merged)
+        hold, = pin.held(self.state)  # never the stranger's PR
+        self.assertEqual((hold['pr'], hold['merge'], hold['step'], hold['issue']),
+                         (OUTSIDE, merged, STEP, 9))
+        self.assertTrue(hold['outside'])
+        self.assertIs(hold['alerted'], True)
+        self.assertIn('auto-pin of origin/main held: the step on the host of #200 waits for the '
+                      'operator, who pins by hand after it (devloop pin)', self.logs)
+        self.assertIn('auto-pin: #200, merged outside devloop, declares a step on the host: it '
+                      'holds the auto-pin', self.logs)
+        alert, = self.alerts(gh)
+        self.assertIn('La PR #200 è stata mergiata fuori da devloop', alert)
+        self.assertIn(f'`{merged[:12]}`', alert)
+        self.assertIn('> ' + STEP, alert)
+        self.assertIn(CFG.labels.needs_operator, gh.labels[9])
+        # The next tick: no new alarm, and still no pin.
+        d.tick()
+        self.assertEqual(len(self.alerts(gh)), 1)
+        self.assertEqual(self.pointed(), old.resolve())
+        self.assertEqual(json.loads((self.state / pin.SCANNED).read_text())['head'], merged)
+
+    def test_the_step_of_the_marker_holds_too_and_a_pr_without_one_does_not(self):
+        old = self.pin('main')
+        merged = self.push_elsewhere('Merge pull request #200', 'devloop/step.txt', 'step\n')
+        d = self.dispatcher(self.outside_gh(merged, in_fix=False))
+        d.tick()
+        self.assertEqual(pin.held(self.state)[0]['pr'], OUTSIDE)
+        # Without a step the operator's merge is pinned, as before #473.
+        later = self.push_elsewhere('Merge pull request #202', 'devloop/later.txt', 'later\n')
+        pin.release(self.state, self.root, merged)
+        gh = self.outside_gh()
+        gh.any_prs[OUTSIDE]['body'] = markdown.publishable('b', 'pr', dict(META, issue=9))
+        gh.comments.clear()
+        gh.commit_raw = {later: [OUTSIDE]}
+        with self.assertRaises(pin.Repinned) as raised:
+            self.dispatcher(gh).tick()
+        self.assertEqual(raised.exception.copy, self.state / f'pinned-{later[:12]}')
+        self.assertNotEqual(self.pointed(), old.resolve())
+
+    def test_a_merge_by_the_operator_while_the_pin_resolves_the_commit_holds_it(self):
+        old = self.pin('main')
+        before = self.push('merged without a step', 'devloop/extra.txt', 'new\n')
+        pin.request(self.state, 101, before)
+        gh = self.outside_gh()
+        d = self.dispatcher(gh)
+        resolve, landed = pin.resolve, []
+
+        def operator_merges_then_resolve(*args, **kwargs):
+            if not landed:
+                landed.append(self.push_elsewhere('Merge pull request #200',
+                                                  'devloop/step.txt', 'step\n'))
+                gh.commit_raw = {landed[0]: [OUTSIDE]}
+                gh.any_prs[OUTSIDE]['mergeCommit'] = {'oid': landed[0]}
+            return resolve(*args, **kwargs)
+        with mock.patch.object(pin, 'resolve', side_effect=operator_merges_then_resolve):
+            d.tick()
+        self.assertEqual(self.pointed(), old.resolve())
+        hold, = pin.held(self.state)
+        self.assertEqual((hold['pr'], hold['merge']), (OUTSIDE, landed[0]))
+        self.assertEqual(len(self.alerts(gh)), 1)
+        self.assertEqual(pin.pending(self.state)['pr'], 101)
+
+    def test_a_merge_whose_prs_cannot_be_read_is_not_pinned(self):
+        old = self.pin('main')
+        self.push_elsewhere('Merge pull request #200', 'devloop/step.txt', 'step\n')
+        gh = self.outside_gh()
+        gh.commit_prs = mock.Mock(side_effect=GitHubError('unreachable'))
+        d = self.dispatcher(gh)
+        self.assertEqual(d.tick(), [])  # planning goes on
+        self.assertEqual(self.pointed(), old.resolve())
+        self.assertIsNotNone(pin.pending(self.state))
+        self.assertIsNone(pin.held(self.state))
+        self.assertTrue(any(line.startswith('auto-pin of origin/main waits for the next tick, '
+                                            'the pinned copy is unchanged: the pull requests '
+                                            'merged by') for line in self.logs), self.logs)
+
+    def test_a_pin_by_hand_releases_only_the_holds_it_contains(self):
+        self.pin('main')
+        before = self.push('merged by devloop with a step', 'devloop/extra.txt', 'new\n')
+        pin.mark(self.state, 100, pin.hold(self.state, 100, before, 'first'), merge=before)
+        merged =self.push_elsewhere('Merge pull request #200', 'devloop/step.txt', 'step\n')
+        pin.hold_merged(self.state, OUTSIDE, SHA1, merged, STEP, 9)
+        # A rollback to the first commit contains neither merge: both holds stay.
+        self.pin_by_hand(self.first)
+        self.assertEqual([s['pr'] for s in pin.held(self.state)], [100, OUTSIDE])
+        self.assertIn('auto-pin held: the pinned commit does not contain the merge of #100, '
+                      '#200; pin by hand a commit that contains it, after its step', self.logs)
+        # The commit of #100 contains its merge, not that of #200.
+        self.pin_by_hand(before)
+        self.assertEqual([s['pr'] for s in pin.held(self.state)], [OUTSIDE])
+        self.assertIn('auto-pin still held: the hold after the step on the host of #100 is '
+                      'released', self.logs)
+        self.pin_by_hand('main')
+        self.assertIsNone(pin.held(self.state))
+        self.assertIn('auto-pin resumed: the hold after the step on the host of #200 is '
+                      'released', self.logs)
+
+    def test_the_release_runs_under_the_lock_of_the_pins(self):
+        pin.hold_merged(self.state, 100, SHA1, self.first, STEP)
+        released = []
+
+        def then(sha):
+            with self.assertRaisesRegex(pin.PinError, 'another pin is running'):
+                with pin._locked(self.state):
+                    pass
+            released.append(pin.release(self.state, self.root, sha))
+        self.pin('main', then=then)
+        self.assertEqual([s['pr'] for s in released[0]], [100])
+        self.assertIsNone(pin.held(self.state))
+
+    def test_a_rebased_pr_holds_with_its_last_commit(self):
+        # The operator rebases #200 onto main: GitHub associates the PR with both its commits,
+        # and its merge commit is the last one. The hold records that one, not the first commit
+        # the scan reads.
+        old = self.pin('main')
+        first = self.push_elsewhere('rebased 1/2', 'devloop/step.txt', 'step\n')
+        last = self.push_elsewhere('rebased 2/2', 'devloop/step.txt', 'step, 2\n')
+        gh = self.outside_gh(last)
+        gh.commit_raw = {first: [OUTSIDE], last: [OUTSIDE]}
+        self.dispatcher(gh).tick()
+        self.assertEqual(self.pointed(), old.resolve())
+        hold, = pin.held(self.state)
+        self.assertEqual((hold['pr'], hold['merge']), (OUTSIDE, last))
+        # The pin by hand of the first commit lacks the rest of the PR: the hold stays.
+        self.pin_by_hand(first)
+        self.assertEqual([s['pr'] for s in pin.held(self.state)], [OUTSIDE])
+        self.assertIn('auto-pin held: the pinned commit does not contain the merge of #200; pin '
+                      'by hand a commit that contains it, after its step', self.logs)
+        self.pin_by_hand(last)
+        self.assertIsNone(pin.held(self.state))
+
+    def test_the_head_of_the_pr_does_not_release_its_merge_commit(self):
+        # devloop merges #100 with a merge commit and its alarm goes out at once: the hold names
+        # the head of the PR, not yet its merge commit.
+        self.pin('main')
+        git(self.root, 'checkout', '--quiet', '-b', 'agent/issue-1')
+        head = self.push_branch('devloop/step.txt', 'step\n')
+        git(self.root, 'checkout', '--quiet', 'main')
+        self.push('on main meanwhile', 'devloop/other.txt', 'other\n')
+        git(self.root, 'merge', '--quiet', '--no-ff', '-m', 'Merge pull request #100',
+            'agent/issue-1')
+        git(self.root, 'push', '--quiet', 'origin', 'main')
+        merge = git(self.root, 'rev-parse', 'HEAD')
+        attempt = pin.hold(self.state, 100, head, STEP, 1)
+        pin.mark(self.state, 100, attempt, commented=True, alerted=True)
+        # A pin by hand of the head alone: the merge commit is not known, the hold stays.
+        self.pin_by_hand(head)
+        self.assertEqual([s['pr'] for s in pin.held(self.state)], [100])
+        self.assertIn('auto-pin held: the merge commit of #100 is not known yet (devloop reads it '
+                      'on GitHub at its next tick, or the merge outcome is uncertain); pin by '
+                      'hand again once devloop status shows it', self.logs)
+        # The tick reads it on GitHub, for a hold already alerted too, with no new alarm.
+        gh = self.outside_gh()
+        gh.pr_state = lambda number: {'state': 'MERGED', 'mergeCommit': {'oid': merge}}
+        self.dispatcher(gh)._alert_held_steps()
+        self.assertEqual(pin.held(self.state)[0]['merge'], merge)
+        self.assertEqual(self.alerts(gh), [])
+        # The head does not contain the merge commit: the hold stays; main releases it.
+        self.pin_by_hand(head)
+        self.assertEqual([s['pr'] for s in pin.held(self.state)], [100])
+        self.pin_by_hand('main')
+        self.assertIsNone(pin.held(self.state))
+
+    def push_branch(self, path, text):
+        """A commit on the current branch of the clone, pushed to the same branch of origin."""
+        (self.root / path).parent.mkdir(parents=True, exist_ok=True)
+        (self.root / path).write_text(text)
+        sha = self.commit('the head of the PR')
+        git(self.root, 'push', '--quiet', 'origin', 'HEAD')
+        return sha
+
+    def test_status_shows_each_hold_with_its_step(self):
+        merged = 'b' * 40
+        lines = pin.describe_held([
+            {'pr': OUTSIDE, 'merge': merged, 'step': 'one\ntwo', 'outside': True,
+             'alerted': False},
+            {'pr': 100, 'head': SHA1, 'step': STEP, 'alerted': True},
+            {'pr': 101, 'step': STEP, 'uncertain': True, 'alerted': False}])
+        self.assertEqual(lines[:3], [
+            f'  #200 (merge {merged[:12]}, merged outside devloop, alert not published yet, '
+            'tried again at each tick): step on the host:', '    one', '    two'])
+        self.assertEqual(lines[3], '  #100 (merge commit not known yet, alert published): step '
+                                   'on the host:')
+        self.assertIn('merge outcome not known yet', lines[5])
 
 
 class ImplementTests(unittest.TestCase):
@@ -431,10 +779,30 @@ class PromptTests(unittest.TestCase):
                 self.assertIn('`ops/host/`', text)
                 self.assertIn('pins by hand', text)
         review = ' '.join((PROMPT_DIR / 'review.md').read_text(encoding='utf-8').split())
-        self.assertIn('A declaration missing where it is needed, or present where it is not, is '
-                      'a blocking finding', review)
+        self.assertIn('A declaration missing where one is needed is a blocking finding', review)
         for name in ('fix', 'review'):
             self.assertIn('$host_step', (PROMPT_DIR / f'{name}.md').read_text(encoding='utf-8'))
+
+    def test_the_review_criterion_is_precise(self):
+        # #473: point 8 says when a step is needed, which cases need none, and that a
+        # superfluous declaration is not blocking.
+        from devloop.context import PROMPT_DIR
+        review = ' '.join((PROMPT_DIR / 'review.md').read_text(encoding='utf-8').split())
+        point = review[review.index('8. The declaration of a step on the host'):
+                       review.index('## Trust policy')]
+        for needed in ('needs one when, and only when,', 'a file the code needs in the '
+                       '`state_dir`', 'a key or table of the project file or of the local '
+                       'overlay that is required', 'a command run as root or on the service'):
+            self.assertIn(needed, point)
+        for excluded in ('None is needed for a change only to the documents of `ops/host/`',
+                         'nor for a key or table that is optional and has a default the code '
+                         'uses when it is absent'):
+            self.assertIn(excluded, point)
+        self.assertIn('A declaration where none is needed is only a non-blocking finding',
+                      point)
+        # The ambiguous wording of #462 is gone.
+        self.assertNotIn('or present where it is not', point)
+        self.assertNotIn('or the procedures of the host', point)
 
     def test_the_reviewer_and_the_fixer_get_the_declaration(self):
         self.assertEqual(hoststep.format_step(''), 'None: the pull request declares no step on '

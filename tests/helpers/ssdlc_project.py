@@ -124,14 +124,17 @@ _HOST_STEP_FIX = """\
 """
 _HOST_STEP_REVIEW = """\
 8. The declaration of a step on the host (`host_step`, under "Step on the host" below). A PR
-   needs one when its code cannot run as intended, once devloop pins it, without a step the
-   operator makes on the host first, with the loop stopped: it changes the schema of the
-   project file or of the local overlay (a new table or key the code reads), or the procedures
-   of the host (such as `ops/host/`). Then the declaration must be there, with a short text of
-   the step and a reference to the document that describes it; in every other case it must be
-   empty. A declaration missing where it is needed, or present where it is not, is a blocking
-   finding: devloop merges a PR that declares one, but holds the automatic pin until the
-   operator pins by hand after the step, and pins a PR that declares none without waiting.
+   needs one when, and only when, its code cannot run as intended, once devloop pins it,
+   without something the operator does on the host first, with the loop stopped: a file the
+   code needs in the `state_dir`; a key or table of the project file or of the local overlay
+   that is required, so that without it the code fails, refuses to start or runs degraded; or
+   a command run as root or on the service. Then the declaration must be there, with a short
+   text of the step and a reference to the document that describes it. None is needed for a
+   change only to the documents of `ops/host/`, nor for a key or table that is optional and has
+   a default the code uses when it is absent. A declaration missing where one is needed is a
+   blocking finding: devloop pins a PR that declares none without waiting. A declaration where
+   none is needed is only a non-blocking finding: devloop merges the PR all the same, and the
+   declaration only holds the automatic pin until the operator pins by hand.
 """
 
 
@@ -247,6 +250,8 @@ of the ADR, or the author and the time of the comment) or why none does; `""` wi
 question to the operator and your `trust_policy_reason`, so do not list that gap yourself.
 
 """
+# (#473 made the criterion of point 8 precise: the cases that need a declaration, those that do
+# not, and a superfluous declaration that is not blocking.)
 # The changes of the templates since R4, each as ``(anchor, text)``, where ``text`` follows the
 # only occurrence of ``anchor`` in the reference, or as ``Replaced(old, new)``. The frozen files
 # stay as they were; the prompts of now are the reference with these changes, and nothing else.
