@@ -69,8 +69,7 @@ class CapacityCase(Case):
 
 class OffTests(CapacityCase):
     def test_off_by_default(self):
-        # The installation's file has no test_cmd (R3): with ssdlc's project file.
-        defaults = config.load_config(project=ssdlc_project.PROJECT).delegations
+        defaults = ssdlc_project.load().delegations
         self.assertFalse(defaults.capacity)
         self.assertFalse(AUTO.delegations.capacity)
 
@@ -358,7 +357,7 @@ class ConfigTests(unittest.TestCase):
                     parse_delegations(table)
 
     def test_the_overlay_is_held_to_the_same_caps_and_needs_the_summary_issue(self):
-        data = config.load_data(project=ssdlc_project.PROJECT)  # no test_cmd without it (R3)
+        data = ssdlc_project.data()
         on = config.apply_overlay(data, {'delegations': {'capacity': True},
                                          'report': {'issue': 9}})
         self.assertTrue(config.parse_config(on).delegations.capacity)

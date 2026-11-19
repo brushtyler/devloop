@@ -194,11 +194,13 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(allowed, ['Bash(python3 -m unittest *)', 'Bash(git status *)',
                                    'Bash(git diff *)', 'Bash(git log *)', 'Bash(git show *)'])
         patterns = [re.fullmatch(r'Bash\((.*)\)', rule).group(1) for rule in allowed]
-        from devloop.context import PROMPT_DIR
+        from devloop.context import _template, prompt_values
         form = "python3 -m unittest discover -s tests -p 'test_name.py'"
+        # The form is ssdlc's datum in the prompts since ADR 0006, R4 (its project file).
+        self.assertEqual(CFG.prompts.module_test_cmd, form)
         for name in ('implement', 'fix', 'sync'):
             with self.subTest(prompt=name):
-                text = ' '.join((PROMPT_DIR / f'{name}.md').read_text().split())
+                text = ' '.join(_template(name, **prompt_values(CFG)).split())
                 self.assertIn(f'`{form}`', text)
                 self.assertNotIn('`python3 -m unittest tests.', text)
         self.assertTrue(any(fnmatch.fnmatchcase(form, p) for p in patterns))
@@ -1177,6 +1179,10 @@ class DispatcherTests(unittest.TestCase):
         prompt = runner.calls[0][3]
         self.assertIn('Also X.', prompt)
         self.assertNotIn('IGNORE ALL RULES', prompt)
+        # The project's data in the prompt (ADR 0006, R4), from ssdlc's project file.
+        self.assertIn('Read `AGENTS.md` and the README section "Developing SSDLC" before '
+                      'changing anything.', prompt)
+        self.assertNotIn('{{?', prompt)
         self.assertEqual(runner.calls[0][:3], (IMPL, 'write', 'implement'))
         self.assertEqual(self.gh.labels[7], set())
 
@@ -1532,6 +1538,7 @@ class DispatcherTests(unittest.TestCase):
         self.assertIn('`devloop/agents.py`', prompt)
         self.assertIn('`abc1234` fix: main changed it', prompt)
         self.assertIn('Do not run `git merge`', prompt)
+        self.assertIn('conflict markers. Read `AGENTS.md` before changing anything.', prompt)
         # The merge commit concludes the merge the dispatcher started, and is pushed as is.
         (message,) = self.ws.commits
         self.assertTrue(message.startswith('Merge origin/main into agent/issue-7\n'))

@@ -21,7 +21,8 @@ from .apps import DISPATCHER, IMPLEMENT, PR_COMMENT, RERUN, REVIEW
 from .context import (_failure_text, _format_conflicts, _format_findings, _review_failure,
                       _start_failure, _template, _trusted_comments, docs_diff_section,
                       docs_map_section, docs_review_section, format_ci_summary,
-                      format_fix_requests, format_operator_comments, format_previous_rounds)
+                      format_fix_requests, format_operator_comments, format_previous_rounds,
+                      prompt_values)
 from .github import GitHubError, GitHubUncertain, job_id
 from .ledger import attempt_branch, attempt_marker, fix_register
 from .localtests import failed_modules, select_modules, suite_summary
@@ -169,7 +170,7 @@ class ActionsMixin:
             # documents mapped to the diff it left.
             docs = (docs_map_section(self._mapped_entries(path)) if attempt == 0
                     else docs_diff_section(self._mapped_docs(path)))
-            return _template('implement', repo=cfg.repo, base_branch=cfg.base_branch,
+            return _template('implement', **prompt_values(cfg), repo=cfg.repo, base_branch=cfg.base_branch,
                              issue_number=number, issue_title=issue['title'],
                              issue_body=issue.get('body') or '', issue_comments=comments,
                              acceptance_criteria=format_criteria(criteria),
@@ -523,7 +524,7 @@ class ActionsMixin:
         decision, _, resolution = self._resolution_for(pr.issue, issue, pr, pr.head_sha)
         # Blind to the author (#389): no implementer key, no attribution header, no marker. The
         # key stays in the PR's marker and in the ledger, for the selection of the reviewers.
-        prompt = _template('review', repo=cfg.repo, base_branch=cfg.base_branch,
+        prompt = _template('review', **prompt_values(cfg), repo=cfg.repo, base_branch=cfg.base_branch,
                            pr_number=pr.number, round=round_no, max_rounds=max_rounds,
                            ci=ci, ci_summary=ci_summary, test_cmd=cfg.test_cmd,
                            issue_number=pr.issue, issue_title=issue['title'],
@@ -818,7 +819,8 @@ class ActionsMixin:
 
         def prompt(attempt):
             # The documents mapped to the diff each attempt starts from (#203).
-            return _template('fix', repo=cfg.repo, pr_number=pr.number, issue_number=pr.issue,
+            return _template('fix', **prompt_values(cfg), repo=cfg.repo, pr_number=pr.number,
+                             issue_number=pr.issue,
                              issue_title=issue['title'], issue_body=issue.get('body') or '',
                              findings=_format_findings(findings), test_cmd=cfg.test_cmd,
                              ci_summary=ci_summary,
@@ -959,7 +961,8 @@ class ActionsMixin:
         ci_summary = self._ci_summary(pr)[0]
 
         def prompt(attempt):
-            return _template('fix', repo=cfg.repo, pr_number=pr.number, issue_number=pr.issue,
+            return _template('fix', **prompt_values(cfg), repo=cfg.repo, pr_number=pr.number,
+                             issue_number=pr.issue,
                              issue_title=issue['title'], issue_body=issue.get('body') or '',
                              findings=_format_findings(findings), test_cmd=cfg.test_cmd,
                              ci_summary=ci_summary,
@@ -1063,7 +1066,8 @@ class ActionsMixin:
                                           f'riuscita. {reason}\n\nFile in conflitto:\n\n{listed}',
                                detail, remove=remove, cls=cls, supervised=supervised, why=why,
                                retry=None if supervised else self._retry_payload('sync', pr))
-            prompt = _template('sync', repo=cfg.repo, pr_number=pr.number, issue_number=pr.issue,
+            prompt = _template('sync', **prompt_values(cfg), repo=cfg.repo, pr_number=pr.number,
+                               issue_number=pr.issue,
                                issue_title=issue['title'], issue_body=issue.get('body') or '',
                                base_branch=cfg.base_branch, conflicts=listed,
                                test_cmd=cfg.test_cmd, language=cfg.language)

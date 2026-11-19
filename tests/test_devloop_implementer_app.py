@@ -38,7 +38,7 @@ from test_devloop_ledger import LedgerGH, ReportingRunner, TreeWS
 from test_devloop_quorum import FIRST, SECOND, Quorum
 
 ROOT = Path(__file__).resolve().parents[1]
-DATA = ssdlc_project.data()  # the installation's file has no test_cmd (R3)
+DATA = ssdlc_project.data()  # config.toml with ssdlc's project file (ADR 0006, R3)
 IMPL_APP = 'implementer[bot]'
 NEEDS_OPERATOR = 'agent:needs-operator'
 
@@ -92,7 +92,7 @@ def script(name):
 
 class ConfigTests(unittest.TestCase):
     def test_off_by_default_with_the_app_declared(self):
-        cfg = config.load_config(project=ssdlc_project.PROJECT)  # no test_cmd without it (R3)
+        cfg = ssdlc_project.load()
         self.assertEqual((cfg.implementer, cfg.reviewers), ('claude', ('codex', 'agy')))
         self.assertEqual(cfg.implementers, ())
         self.assertEqual(cfg.apps['implementer'],
@@ -203,7 +203,7 @@ class ConfigTests(unittest.TestCase):
             local = Path(tmp) / 'config.local.toml'
             local.write_text('[roles.implementers]\n"area:docs" = "claude"\n'
                              '[agents.claude]\napp = "claude"\n')
-            cfg = config.load_config(None, local, ssdlc_project.PROJECT)
+            cfg = ssdlc_project.load(local)
         self.assertEqual(cfg.implementers, (('area:docs', 'claude'),))
         self.assertEqual(cfg.app_of('claude'), 'claude')
 
