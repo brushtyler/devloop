@@ -868,7 +868,8 @@ fallback_models = [
 ```
 
 - **Schema.** Each entry has `model`, `model_label` and optionally `effort`, which otherwise is
-  the agent's. A fallback reasons at `high`, `xhigh` or `max`: any other level, or for agy a
+  the agent's, and `provider`, never the agent's
+  ([Reviewers by provider](#reviewers-by-provider-and-the-third-reviewer), #409). A fallback reasons at `high`, `xhigh` or `max`: any other level, or for agy a
   model whose name ends with `-minimal`, `-low` or `-medium`, stops devloop at startup, as does a
   model listed twice or equal to the agent's own. The list is optional: an agent without it
   behaves as before.
@@ -1034,7 +1035,9 @@ code on the PR: the implementer recorded in the PR marker, the author of every f
 earlier rounds, the agent that resolved the conflicts of every sync, and the agent configured
 now under the implementer's key, which runs fixes and syncs. Nor may either be the same agent in
 effect as one of them, the same `kind` or the same `model` (#407, at level 1 too, against the
-implementer: [the keys by role](#the-implementer-app-and-the-keys-by-role)). The dispatcher scans the pool in configuration order and takes the first such pair. The
+implementer: [the keys by role](#the-implementer-app-and-the-keys-by-role)); with
+`review_policy.provider_quorum` the quorum rule on the provider replaces this last condition
+([Reviewers by provider](#reviewers-by-provider-and-the-third-reviewer), #409). The dispatcher scans the pool in configuration order and takes the first such pair. The
 choice is deterministic, so it stays the same for the whole round, and it is recorded in the
 receipt (`reviewers`).
 
@@ -1484,7 +1487,7 @@ app = "agy"
 # ...
 
 [review_policy]
-advisory_reviewer = "claude-reviewer"   # once claude-reviewer exists (P5-5); "" until then
+advisory_reviewer = "claude-reviewer"   # once claude-reviewer exists (P5-5, #409); "" until then
 ```
 
 - **One key, one role.** A key may name agent and role in full, `<kind>-implementer` or
@@ -1512,12 +1515,15 @@ advisory_reviewer = "claude-reviewer"   # once claude-reviewer exists (P5-5); ""
 - **Conflicts by agent, never by key.** A reviewer is skipped, at level 1 and at level 2, when
   it is the same agent in effect as the PR's implementer (at level 2 as any author of the PR):
   the same `kind`, the same `model` or the same provider, as the profile of the marker records
-  them, and the models of the agent configured under the implementer's key. The agents do not
-  declare a provider yet (P5-5): devloop reads it from the prefix of the model's name (`claude-`
-  Anthropic, `gpt-` OpenAI, `gemini-` Google), and a model with another prefix is compared only
-  by `kind` and `model`. So neither `claude-reviewer` nor agy run with a Claude model reviews the
-  code of `claude-implementer`. At level 2 this is stricter than the quorum rule (ii) of D8,
-  which admits one reviewer of the authors' provider: that rule comes with P5-5. A PR whose
+  them, and the models of the agent configured under the implementer's key. The provider is the
+  one the agent or the fallback declares (`provider`), else the one the prefix of the model's
+  name gives (`claude-` Anthropic, `gpt-` OpenAI, `gemini-` Google), and a model with another
+  prefix and no declared provider is compared only by `kind` and `model`. So neither
+  `claude-reviewer` nor agy run with a Claude model reviews the code of `claude-implementer`.
+  At level 2 this is stricter than the quorum rule (ii) of D8, which admits one reviewer of the
+  authors' provider: that rule replaces this check with `review_policy.provider_quorum`
+  ([Reviewers by provider and the third reviewer](#reviewers-by-provider-and-the-third-reviewer)),
+  off by default. A PR whose
   implementer has no profile and no configured key has no reviewer at level 1, and goes to the
   operator. The pool is no longer refused in the configuration because of the implementer's key.
   The check on the PRs of the supervisor's agent compares the agent in the same way, with
@@ -1545,3 +1551,101 @@ advisory_reviewer = "claude-reviewer"   # once claude-reviewer exists (P5-5); ""
   an open devloop PR (of this repository, by a trusted user or one of devloop's apps, on a devloop
   branch) has a marker whose implementer or reviewer is not a configured key, or a key of the
   other role, and when the open PRs cannot be read. Nobody else's PR can stop devloop.
+
+### Reviewers by provider and the third reviewer
+
+ADR 0005, P5-5 (#409): the reviewers are excluded by the agent in effect and its provider, and
+claude becomes the third reviewer of the pool, as a reserve. **Off by default** (D10):
+`[review_policy] provider_quorum = false`, and the reviewers are chosen as in
+[the keys by role](#the-implementer-app-and-the-keys-by-role).
+
+- **Declared provider** (D8, option (c)). Every agent and every fallback model may declare who
+  makes its model: `provider = "anthropic"` in `[agents.<key>]`, and `provider` in each entry of
+  `fallback_models`, which never inherits the agent's (agy may fall back on a Claude model). It is
+  read lowercase. A table of the known prefixes of the model names (`claude-` Anthropic, `gpt-`
+  OpenAI, `gemini-` Google) is the check: a model with one of them declared with another
+  provider, or an empty provider, stops devloop at startup, with the rules on or off. Without a
+  declared provider devloop reads it from that prefix, as before. A declared provider is in the
+  profile of the markers and the receipts (`provider`) and in the policy version: declaring one
+  voids the approvals of the open PRs, as any change of the pool does. Without any declared
+  provider the version is the one before.
+- **Turning it on.** `provider_quorum = true` requires the provider of every agent and of every
+  fallback model (`agents.<key>.provider: required with review_policy.provider_quorum` stops
+  devloop otherwise), and enters the policy version. Both keys may be set in the local overlay.
+  The rules then apply at both levels, to every PR, and replace the exclusion of the same agent:
+  - **Independent by tuple** of every author of the PR, at level 1 too: the implementer, every
+    fixer, every sync with conflicts and the models of the agent configured under the
+    implementer's key, as at level 2. Another GitHub identity and another `(kind, model,
+    effort)`. The kind alone no longer excludes: `claude-reviewer` with Sonnet may review the
+    code of Opus.
+  - **Quorum rule (ii)** of D8: at level 1 the only reviewer is of a provider other than every
+    author's; at level 2 at least one of the two is, and the two are distinct as before. A
+    provider that is not known, the reviewer's or an author's, is never another one. Level 1
+    takes the PR's recorded reviewer, then the pool; level 2 the first valid pair of the pool, in
+    configuration order. Without one, the PR goes to `agent:needs-operator` as before.
+  - **Every model a turn runs**, fallbacks included, keeps the same rules: independent by tuple
+    of the authors, distinct from the round's other reviewers, and the quorum rule on the round
+    with that model in it (the reviewers not yet run counted with their configured model). A
+    model that breaks them is skipped without running; when none of the chain is left the turn
+    fails without a review (`tool_failure`). A fallback model is also never of an author's
+    provider, whatever the quorum (D8, "Fallback dello stesso fornitore"): on a PR implemented
+    by claude, agy does not fall back on a Claude model even when codex already gives the round
+    another provider. Only a reviewer's primary model is subject to the quorum rule alone. The
+    authors are those of the selection, with every model of the implementer's chain; recording
+    the fallbacks the implementer and the fixers actually used, and the check at startup, are
+    P5-6's.
+  - **The reviewer the marker records** is the first of the pool of another provider and
+    another tuple than the implementer's models.
+- **Unavailable reviewer.** When a **new round** chooses its reviewers, a reviewer whose whole
+  chain is remembered unavailable ([Memory of unavailable models](#memory-of-unavailable-models):
+  only an agent with fallback models) is skipped, and the next valid one of the pool takes its
+  place. It is never skipped when it owns an open finding of the PR, which only it may close in
+  a later review: the groups that keep the owners of the open findings come first. When every
+  valid group has an unavailable reviewer, the first is kept and its turn fails as
+  `tool_failure`, as before. A reviewer is never replaced in the middle of a round: until the
+  round ends, the receipt keeps the reviewers it recorded while they still meet the rules, so a
+  promotion or a merge recomputes the receipt the round was approved with, whatever the memory
+  says by then. The promotion reads the round from the records it applies, not only from the
+  snapshot: with parallel reviewers a round that chose another pair than the previous one ends
+  in the same action, and is promoted with its own pair. The log names the skipped reviewer.
+- **The third reviewer** (D8). `claude-reviewer`, kind `claude`, with a model other than the
+  implementer's (Sonnet 5.5 against Opus 5.5), last in the pool, signing with `claude-agent`
+  (`app = "claude"`). It needs the keys by role and the supervisor's role app first: before the
+  migration `claude-agent` also signs the implementer's work, and two keys that sign with the
+  same app stop devloop at startup (`apps.claude: each app belongs to one actor`). It reviews
+  only when one of the first two is missing, unavailable or not independent, and at level 2 a
+  PR of claude only beside a reviewer of another provider:
+
+```toml
+[review_policy]
+provider_quorum = true
+
+[roles]
+implementer = "claude-implementer"
+reviewers = ["codex-reviewer", "agy-reviewer", "claude-reviewer"]
+
+[agents.claude-implementer]   # the table of [agents.claude]
+app = "implementer"
+provider = "anthropic"
+# ...
+[agents.codex-reviewer]       # the table of [agents.codex]
+app = "codex"
+provider = "openai"
+# ...
+[agents.agy-reviewer]         # the table of [agents.agy]
+app = "agy"
+provider = "google"
+fallback_models = [
+    { model = "gemini-4-hydrogen-high", model_label = "Gemini 4 Hydrogen", provider = "google" },
+]
+# ...
+[agents.claude-reviewer]      # the table of [agents.claude], with Sonnet
+app = "claude"
+provider = "anthropic"
+model = "claude-sonnet-5-5"
+model_label = "Claude Sonnet 5.5"
+# ...
+```
+
+Changing the pool, the providers or the rule changes the policy version and voids the approvals
+of the open PRs: turn it on when no PR is close to its merge.

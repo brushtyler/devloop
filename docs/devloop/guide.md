@@ -417,6 +417,15 @@ implementer that is the same agent as the readiness check, send the issue to the
 `configuration`. Every implementer signs with the implementer app once the keys are renamed by
 role ([the keys by role](reference.md#the-implementer-app-and-the-keys-by-role)); off by default.
 
+Once the keys are renamed, claude can join the reviewer pool as its third reviewer,
+`claude-reviewer`, last and with another model than the implementer's (#409, ADR 0005, P5-5).
+With `[review_policy] provider_quorum = true`, off by default, every agent declares its
+`provider`; a reviewer must differ by tuple from everyone who wrote the PR, at least one
+reviewer of the round is of another provider, a reviewer never falls back on a model of an
+author's provider, and a new round skips a reviewer whose models are all remembered unavailable.
+See
+[Reviewers by provider and the third reviewer](reference.md#reviewers-by-provider-and-the-third-reviewer).
+
 ### Readiness check before implementation
 
 With `preflight = "<agent>"` in the configuration, an issue is checked before the implementer

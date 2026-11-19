@@ -2,7 +2,7 @@
  "source": {
   "commit": "28eaf9455bad6ff52dcbdbc29ecc07d7dde83e2a",
   "how": "dataclasses.asdict(devloop.config.load_config()) and review_policy.version(), computed by the code and the devloop/config.toml of that commit (origin/main before ADR 0006, R3), without overlay nor project file; tuples written as lists",
-  "updated": "later changes of the installation, not R3's, added to config.toml and here with only the values they add (the policy version does not change): [apps.implementer], implementers and agents.*.app (issue #407, PR #442); delegations.capacity and capacity_max_* (issue #412, PR #450); [tests], the selection of the test modules and the format of the CI logs that the code of that commit had built in (devloop/localtests.py), declared since ADR 0006, R5 (issue #424)"
+  "updated": "later changes of the installation, not R3's, added to config.toml and here with only the values they add (the policy version does not change): [apps.implementer], implementers and agents.*.app (issue #407, PR #442); delegations.capacity and capacity_max_* (issue #412, PR #450); [tests], the selection of the test modules and the format of the CI logs that the code of that commit had built in (devloop/localtests.py), declared since ADR 0006, R5 (issue #424); agents.*.provider, provider of the fallbacks and review_policy.provider_quorum (issue #409)"
  },
  "policy_version": "619dd4fda8b8e7870f12564883f49a790c9db939796fe17c90fba43b64e326d3",
  "config": {
@@ -68,7 +68,8 @@
     "skipped": [],
     "write_commands": [],
     "review_commands": [],
-    "app": ""
+    "app": "",
+    "provider": ""
    },
    "codex": {
     "key": "codex",
@@ -98,7 +99,8 @@
     "skipped": [],
     "write_commands": [],
     "review_commands": [],
-    "app": ""
+    "app": "",
+    "provider": ""
    },
    "agy": {
     "key": "agy",
@@ -118,7 +120,8 @@
      {
       "model": "gemini-4-hydrogen-high",
       "model_label": "Gemini 4 Hydrogen",
-      "effort": "high"
+      "effort": "high",
+      "provider": ""
      }
     ],
     "unavailable_patterns": [
@@ -148,7 +151,8 @@
      "git log",
      "git show"
     ],
-    "app": ""
+    "app": "",
+    "provider": ""
    }
   },
   "trusted_users": [
@@ -331,7 +335,8 @@
    "zero_allowlist": [],
    "zero_checks": [],
    "advisory_reviewer": "",
-   "project": ""
+   "project": "",
+   "provider_quorum": false
   },
   "merge": {
    "mode": "off",
