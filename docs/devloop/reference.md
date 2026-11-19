@@ -115,7 +115,8 @@ every tick with nothing running); a `pins`, `worktrees` or `logs` that is not a 
 not a whole number of at least 1, or an unknown key, stops devloop at startup.
 `[agent_user]` sets the [agent user](#agent-user) (#415): `name` (default `""`, off), the system
 user the agent CLIs and the test command run as, and `check` (default `true`), the startup check
-that it cannot read `key_dir` nor `state_dir`; a `name` that is not a system user name, a `check`
+that it cannot read `key_dir` nor `state_dir`, nor change the instructions, the configuration
+and the binaries of its CLIs (#438); a `name` that is not a system user name, a `check`
 that is not a boolean, or an unknown key, stops devloop at startup, and so does a `name` the
 system does not know.
 `[docs] map` sets the

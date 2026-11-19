@@ -2,7 +2,8 @@
 # Verifica l'installazione di devloop e del supervisore: utenti, directory private (700), chiavi
 # delle app (600, del proprietario giusto, solo quelle attese), ACL sulla home di devloop,
 # sudoers, l'utente degli agent (non legge key_dir né state_dir, non scrive .git né le directory
-# che contengono worktree e turni, è nell'overlay), il lock per repository (directory comune,
+# che contengono worktree e turni, è nell'overlay, non cambia istruzioni, configurazione e
+# binari delle sue CLI), il lock per repository (directory comune,
 # gruppo, overlay; ADR 0006, R8), servizio, CLI degli agent e `devloop apps`. Con più progetti
 # sullo stesso host si esegue una volta per progetto, con i suoi parametri (--params).
 # Non cambia nulla.
@@ -212,6 +213,62 @@ then
 else
     fail "$OVERLAY non imposta [agent_user] name = \"$AGENT_USER\": gli agent girerebbero come $DEVLOOP_USER"
 fi
+
+step "File delle CLI di $AGENT_USER: un turno non li cambia per i turni dopo (#438)"
+actual=$(stat -c '%a %U' "$AGENT_HOME" 2>/dev/null)
+if [ "$actual" = '1770 root' ]; then
+    ok "$AGENT_HOME: 1770, root"
+else
+    fail "$AGENT_HOME è ${actual:-assente}, deve essere 1770 root (setup-agent-user.sh)"
+fi
+# Come il controllo all'avvio di devloop (devloop/agentuser.py), come l'utente degli agent:
+# fixed PATH, PATH non è scrivibile né suo, e né PATH né una directory sopra si crea, si rinomina
+# o si rimuove (in una directory scrivibile solo lo sticky bit protegge una voce, e solo se né la
+# voce né la directory sono sue); sealed PATH, nemmeno nulla dentro PATH è scrivibile o suo;
+# bin PATH, anche il file a cui porta PATH, e la sua directory sigillata.
+CLI_PROBE='me=$(id -u); bad=0
+mine() { [ "$(stat -c %u -- "$1" 2>/dev/null)" = "$me" ]; }
+no() { printf "    %s %s\n" "$1" "$2" >&2; bad=1; }
+fixed() {
+    local q=$1 d
+    [ -e "$q" ] && [ -w "$q" ] && no "scrivibile:" "$q"
+    while [ "$q" != / ] && [ -n "$q" ]; do
+        mine "$q" && no "suo:" "$q"
+        d=${q%/*}; d=${d:-/}
+        if [ -w "$d" ]; then
+            if ! [ -e "$q" ] && ! [ -L "$q" ]; then no "creabile:" "$q"
+            elif ! [ -k "$d" ] || mine "$q" || mine "$d"; then no "sostituibile:" "$q"; fi
+        fi
+        q=$d
+    done
+}
+sealed() {
+    local w
+    fixed "$1"
+    [ -e "$1" ] || return 0
+    w=$(find "$1" \( -writable -o -user "$me" \) -print -quit 2>/dev/null)
+    [ -z "$w" ] || no "scrivibile o suo:" "$w"
+}
+case $1 in
+    fixed) fixed "$2" ;;
+    sealed) sealed "$2" ;;
+    bin) fixed "$2"
+         t=$(readlink -f -- "$2" 2>/dev/null) && [ -e "$t" ] && [ "$t" != "$2" ] \
+             && { fixed "$t"; sealed "${t%/*}"; } ;;
+esac
+[ "$bad" = 0 ]'
+for dir in "${AGENT_CLI_DIRS[@]}"; do
+    check_as "$AGENT_USER" "$AGENT_USER non crea nulla in $AGENT_HOME/$dir e non la sostituisce" \
+        /usr/bin/bash -c "$CLI_PROBE" _ fixed "$AGENT_HOME/$dir"
+done
+for entry in "${AGENT_CLI_SEALED[@]}"; do
+    check_as "$AGENT_USER" "$AGENT_USER non scrive né sostituisce $AGENT_HOME/$entry" \
+        /usr/bin/bash -c "$CLI_PROBE" _ sealed "$AGENT_HOME/$entry"
+done
+for cli in "${AGENT_CLIS[@]}"; do
+    check_as "$AGENT_USER" "$AGENT_USER non scrive né sostituisce $AGENT_HOME/.local/bin/$cli e il file a cui porta" \
+        /usr/bin/bash -c "$CLI_PROBE" _ bin "$AGENT_HOME/.local/bin/$cli"
+done
 
 step "sudoers dell'utente degli agent ($AGENT_SUDOERS_FILE)"
 check_sudoers "$AGENT_SUDOERS_FILE" sudoers-agent setup-agent-user.sh

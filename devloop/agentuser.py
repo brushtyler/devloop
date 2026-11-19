@@ -33,6 +33,19 @@ The mechanism, chosen by the operator on #415:
   it can write the repository's ``.git``, the worktrees directory or the fixed directories of the
   shared one; and when it cannot write the directories made for its turns and test runs.
   ``[agent_user] check = false`` turns it off, for development only.
+
+One user runs every agent, implementers and reviewers (#438): a turn must not change what the
+turns after it use. The files of the CLIs that carry instructions or configuration, and the CLIs
+themselves, belong to root (``ops/host/setup-agent-user.sh``); the agent user writes only its
+credentials, sessions, caches and logs. ``check`` refuses an installation where the agent user
+can write, own (an owner changes the mode), create, rename or remove any of them
+(``cli_items``): the directories of the CLIs
+(``CLI_DIRS``: no new entry, such as an instruction file, an agent, a skill or a hook a turn
+would add), what they hold that carries instructions or configuration and ``~/.local``
+(``CLI_SEALED``: nothing writable in them), and each CLI in ``~/.local/bin`` with the directory
+of the file it leads to (``CLIS``). A directory above them that the agent user can write protects
+them only when it is sticky and neither it nor the entry is the agent user's: the home, which
+the agent user writes, is root's and sticky.
 """
 
 import contextlib
@@ -59,26 +72,71 @@ SCHEMAS = 'schemas'
 TURNS = 'turns'
 TMP = 'tmp'
 GH_CONFIG = 'gh-config'
+# In the agent user's home (#438): the directories of the CLIs, where the agent user may create
+# nothing and that it may not rename; in them, what carries instructions or configuration, and
+# the installed CLIs, where nothing may be writable; the CLIs devloop starts from ``.local/bin``.
+CLI_DIRS = ('.claude', '.codex', '.gemini', '.gemini/antigravity-cli')
+CLI_SEALED = (
+    '.claude/settings.json', '.claude/CLAUDE.md', '.claude/agents', '.claude/commands',
+    '.claude/skills', '.claude/hooks', '.claude/output-styles', '.claude/plugins',
+    '.codex/config.toml', '.codex/AGENTS.md', '.codex/AGENTS.override.md', '.codex/prompts',
+    '.codex/rules', '.codex/skills', '.codex/packages',
+    '.gemini/settings.json', '.gemini/GEMINI.md', '.gemini/antigravity-cli/settings.json',
+    '.local')
+CLIS = ('claude', 'codex', 'agy')
 # Each argument is ``<kind>:<path>``; prints, NUL-terminated, ``<problem>:<path>`` for each
 # problem found: ``secret``, a path the user must neither read nor enter (r, x); ``list``, one it
 # must not read (r); ``ro``, one it must enter but not write (e, w); ``tree``, one where nothing
 # may be writable (w, the first path found); ``rw``, one it must write and enter (u); ``rd``,
-# one it must read (n).
+# one it must read (n). #438: ``fixed``, one it must neither write (w) nor own (o: an owner
+# changes the mode), nor create (c), nor rename or remove (m), and the same for every directory
+# above it: in a directory it writes, only the sticky bit protects an entry, and only when
+# neither the entry nor the directory is its own; ``sealed``, a fixed one where nothing may be
+# writable (w) or its own (o) either, the first path found; ``bin``, a fixed executable whose
+# resolved file is fixed too, and sealed its directory.
 _PROBE = r'''out() { printf '%s:%s\0' "$1" "$2"; }
+me=$(id -u)
+mine() { [ "$(stat -c %u -- "$1" 2>/dev/null)" = "$me" ]; }
+fixed() {
+    local q=$1 d
+    [ -e "$q" ] && [ -w "$q" ] && out w "$q"
+    while [ "$q" != / ] && [ -n "$q" ]; do
+        mine "$q" && out o "$q"
+        d=${q%/*}; d=${d:-/}
+        if [ -w "$d" ]; then
+            if ! [ -e "$q" ] && ! [ -L "$q" ]; then out c "$q"
+            elif ! [ -k "$d" ] || mine "$q" || mine "$d"; then out m "$q"; fi
+        fi
+        q=$d
+    done
+}
+writable() { [ -e "$1" ] && find "$1" -writable -printf 'w:%p\0' -quit 2>/dev/null; }
+sealed() {
+    fixed "$1"
+    [ -e "$1" ] || return 0
+    writable "$1"
+    find "$1" -user "$me" -printf 'o:%p\0' -quit 2>/dev/null
+}
 for a; do
     k=${a%%:*}; p=${a#*:}
     case $k in
         secret) [ -r "$p" ] && out r "$p"; [ -d "$p" ] && [ -x "$p" ] && out x "$p" ;;
         list) [ -r "$p" ] && out r "$p" ;;
         ro) [ -w "$p" ] && out w "$p"; { [ -r "$p" ] && [ -x "$p" ]; } || out e "$p" ;;
-        tree) [ -e "$p" ] && find "$p" -writable -printf 'w:%p\0' -quit 2>/dev/null ;;
+        tree) writable "$p" ;;
         rw) { [ -w "$p" ] && [ -x "$p" ]; } || out u "$p" ;;
         rd) [ -r "$p" ] || out n "$p" ;;
+        fixed) fixed "$p" ;;
+        sealed) sealed "$p" ;;
+        bin) fixed "$p"
+             t=$(readlink -f -- "$p" 2>/dev/null) && [ -e "$t" ] && [ "$t" != "$p" ] \
+                 && { fixed "$t"; sealed "${t%/*}"; } ;;
     esac
 done
 true'''
 _PROBLEMS = {'r': 'can read', 'x': 'can enter', 'w': 'can write', 'e': 'cannot enter',
-             'u': 'cannot write', 'n': 'cannot read'}
+             'u': 'cannot write', 'n': 'cannot read', 'c': 'can create', 'o': 'owns',
+             'm': 'can rename or remove'}
 # A directory opened without following a link in its last component.
 _DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
@@ -290,6 +348,15 @@ def _entries(path):
         return [path]
 
 
+def cli_items(home):
+    """The probe items of the CLIs in ``home``, the agent user's home (#438): what a turn must
+    not change for the turns after it."""
+    home = Path(home)
+    return ([('fixed', home / d) for d in CLI_DIRS]
+            + [('sealed', home / p) for p in CLI_SEALED]
+            + [('bin', home / '.local' / 'bin' / cli) for cli in CLIS])
+
+
 def check(agent_user, key_dir, state_dir, local_config=None, me=None, git_dir=None):
     """Refuse an agent user that does not isolate (#415). It must be another user than the
     dispatcher's (``me``, default: the effective user) and able to run through sudo. It must
@@ -299,7 +366,9 @@ def check(agent_user, key_dir, state_dir, local_config=None, me=None, git_dir=No
     itself (it only enters it). It must not write anything in ``git_dir`` (the repository's
     ``.git``), nor the worktrees directory and the fixed directories of the shared one, which
     it must enter; it must write the directories the dispatcher makes for its turns and test
-    runs, and read the schemas. Raises AgentUserError, listing every problem."""
+    runs, and read the schemas. It must not write, own, create, rename nor remove the files of
+    the CLIs in its home that later turns use (``cli_items``, #438). Raises AgentUserError, listing
+    every problem."""
     me = me if me is not None else pwd.getpwuid(os.geteuid()).pw_name
     if agent_user.name == me:
         raise AgentUserError(f'agent_user.name: {me!r} is the dispatcher\'s own user: agents '
@@ -313,6 +382,7 @@ def check(agent_user, key_dir, state_dir, local_config=None, me=None, git_dir=No
         items.append(('secret', Path(local_config)))
     if git_dir:
         items.append(('tree', Path(git_dir)))
+    items += cli_items(agent_user.home)
     shared = SharedDir(state / SHARED_DIR)
     items += [('ro', state / WORKTREES_DIR), ('ro', shared.path)]
     made = []
@@ -339,7 +409,8 @@ def check(agent_user, key_dir, state_dir, local_config=None, me=None, git_dir=No
                     shared.remove_dir(sub, path.name)
             except OSError:
                 pass
-    problems = [f'{agent_user.name} {_PROBLEMS[problem]} {path}' for problem, path in found]
+    problems = [f'{agent_user.name} {_PROBLEMS[problem]} {path}'
+                for problem, path in dict.fromkeys(found)]
     if problems:
         raise AgentUserError('the agent user does not isolate: ' + '; '.join(problems)
                              + ' (ops/host/setup-agent-user.sh prepares the permissions; '

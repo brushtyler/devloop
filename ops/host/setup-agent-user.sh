@@ -6,6 +6,12 @@
 # directory che le contengono; nessun accesso al resto dello state_dir; sessioni leggibili da
 # devloop) e il sudoers che permette a devloop di avviare solo le CLI, bash e kill come
 # quell'utente.
+# Un solo utente esegue implementer e reviewer (#438): la sua home e i file delle CLI che portano
+# istruzioni, configurazione o binari (AGENT_CLI_DIRS, AGENT_CLI_SEALED di ops/lib.sh, ~/.local
+# compreso) diventano di root, così un turno non li cambia per i turni dopo. L'utente degli agent
+# scrive solo credenziali, sessioni, cache e log: le voci che le CLI vi hanno già creato restano
+# sue. --unseal rende all'utente degli agent le directory delle CLI, per installarle, aggiornarle
+# o fare un login a loop fermo; devloop non parte finché lo script non viene rieseguito senza.
 # Idempotente: si può rieseguire, fa solo ciò che manca. Non scrive segreti. Le CLI, i loro
 # login e la chiave [agent_user] nell'overlay restano passi manuali (ops/README.md).
 # Va eseguito dopo setup-devloop.sh, e di nuovo dopo aver copiato file nello state_dir.
@@ -14,15 +20,20 @@ OPS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=../lib.sh
 . "$OPS_DIR/lib.sh"
 
+UNSEAL=0
+
 usage() {
-    say "Uso: sudo bash $0 [--params FILE] [--dry-run] [--yes]"
+    say "Uso: sudo bash $0 [--params FILE] [--dry-run] [--yes] [--unseal]"
     say
+    say "  --unseal        rende all'utente degli agent le directory delle sue CLI, per installarle,"
+    say "                  aggiornarle o fare un login a loop fermo; poi si riesegue senza"
     say "$OPS_COMMON_HELP"
 }
 
 while [ $# -gt 0 ]; do
     case $1 in
         -h | --help) usage; exit 0 ;;
+        --unseal) UNSEAL=1; shift ;;
         *) ops_common_arg "$@" || exit 2; shift "$OPS_SHIFT" ;;
     esac
 done
@@ -69,37 +80,95 @@ else
     run useradd --create-home --home-dir "$AGENT_HOME" --shell /bin/bash "$AGENT_USER"
 fi
 
-step "Directory delle CLI di $AGENT_USER"
-# ~/.claude e ~/.codex: i login delle CLI. Restano dell'utente degli agent; devloop le
-# attraversa soltanto, per leggere le sessioni (stallo, devloop follow).
-for dir in "$AGENT_HOME/.claude" "$AGENT_HOME/.codex"; do
-    if [ -d "$dir" ]; then
-        ok "$dir esiste"
+AGENT_GROUP=$(id -gn "$AGENT_USER" 2>/dev/null || printf '%s' "$AGENT_USER")
+
+# owned PATH MODE OWNER GROUP: la directory PATH con MODE, di OWNER:GROUP; la crea se manca.
+owned() {
+    local path=$1 mode=$2 owner=$3 group=$4
+    if [ ! -d "$path" ]; then
+        run install -d -m "$mode" -o "$owner" -g "$group" "$path"
+    elif [ "$(stat -c '%a %U %G' "$path")" = "$mode $owner $group" ]; then
+        ok "$path: $mode, $owner:$group"
     else
-        run install -d -m 700 -o "$AGENT_USER" -g "$AGENT_USER" "$dir"
+        run chown "$owner:$group" "$path"
+        run chmod "$mode" "$path"
     fi
-done
+}
+
+step "Home di $AGENT_USER: di root, sticky (#438)"
+# L'utente degli agent vi crea le voci di stato e di cache delle CLI, ma non rinomina né rimuove
+# quelle di root: le directory delle CLI e ~/.local.
+owned "$AGENT_HOME" 1770 root "$AGENT_GROUP"
+
+if [ "$UNSEAL" = 1 ]; then
+    step "Directory delle CLI aperte a $AGENT_USER (--unseal)"
+    for entry in "${AGENT_CLI_DIRS[@]}" .local; do
+        if [ -e "$AGENT_HOME/$entry" ]; then
+            run chown -hR "$AGENT_USER:$AGENT_GROUP" "$AGENT_HOME/$entry"
+        else
+            run install -d -m 755 -o "$AGENT_USER" -g "$AGENT_GROUP" "$AGENT_HOME/$entry"
+        fi
+    done
+    [ -d "$AGENT_HOME/.local/bin" ] \
+        || run install -d -m 755 -o "$AGENT_USER" -g "$AGENT_GROUP" "$AGENT_HOME/.local/bin"
+    warn "$AGENT_USER può ora cambiare istruzioni, configurazione e binari delle CLI: devloop non parte finché non si riesegue lo script senza --unseal"
+else
+    step "Directory delle CLI di $AGENT_USER: di root (#438)"
+    # Vi entra, ma non vi crea nulla (un file di istruzioni, un agent, una skill, un hook) e non
+    # le rinomina.
+    for dir in "${AGENT_CLI_DIRS[@]}" .local .local/bin; do
+        owned "$AGENT_HOME/$dir" 755 root root
+    done
+fi
+
+step "Sessioni di $AGENT_USER"
+# ~/.claude/projects e ~/.codex/sessions: le sessioni restano dell'utente degli agent, come i
+# login e le altre voci che le CLI creano; devloop le legge (stallo, devloop follow).
 for dir in "$AGENT_HOME/.claude/projects" "$AGENT_HOME/.codex/sessions"; do
     if [ -d "$dir" ]; then
         ok "$dir esiste"
     else
-        run install -d -m 750 -o "$AGENT_USER" -g "$AGENT_USER" "$dir"
+        run install -d -m 750 -o "$AGENT_USER" -g "$AGENT_GROUP" "$dir"
     fi
 done
-ensure_dir "$AGENT_HOME/.local" 755 "$AGENT_USER"
-ensure_dir "$AGENT_HOME/.local/bin" 755 "$AGENT_USER"
 
 step 'Claude Code senza aggiornamenti automatici'
 SETTINGS="$AGENT_HOME/.claude/settings.json"
 if [ -f "$SETTINGS" ]; then
     ok "$SETTINGS esiste: verificare a mano autoUpdates: false e DISABLE_AUTOUPDATER=1"
 else
-    put_file "$SETTINGS" 600 "$AGENT_USER" '{
+    put_file "$SETTINGS" 644 root '{
   "autoUpdates": false,
   "env": {
     "DISABLE_AUTOUPDATER": "1"
   }
 }' || true
+fi
+
+if [ "$UNSEAL" != 1 ]; then
+    step "Istruzioni, configurazione e binari delle CLI: di root, non scrivibili (#438)"
+    for entry in "${AGENT_CLI_SEALED[@]}"; do
+        path="$AGENT_HOME/$entry"
+        if ! [ -e "$path" ] && ! [ -L "$path" ]; then
+            ok "$path non esiste: $AGENT_USER non può crearlo"
+        elif [ -n "$(find "$path" \( ! -user root -o ! -group root -o \( ! -type l -perm /022 \) \) \
+                -print -quit 2>/dev/null)" ]; then
+            run chown -hR root:root "$path"
+            run chmod -R go-w "$path"
+        else
+            ok "$path: di root, non scrivibile"
+        fi
+    done
+    # Un eseguibile fuori da ~/.local: la directory del file a cui porta va resa di root a mano.
+    for cli in "${AGENT_CLIS[@]}"; do
+        exe="$AGENT_HOME/.local/bin/$cli"
+        [ -e "$exe" ] || continue
+        target=$(readlink -f -- "$exe")
+        case $target in
+            "$AGENT_HOME/.local/"* | "$AGENT_HOME/.codex/packages/"*) ;;
+            *) todo "$exe porta a $target: renderne la directory di root e non scrivibile da $AGENT_USER" ;;
+        esac
+    done
 fi
 
 step "Sessioni di $AGENT_USER leggibili da $DEVLOOP_USER"
@@ -177,11 +246,11 @@ fi
 put_file "$AGENT_SUDOERS_FILE" 440 root "$SUDOERS" || true
 
 step 'CLI degli agent (passi manuali, ops/README.md)'
-for cli in claude codex agy; do
+for cli in "${AGENT_CLIS[@]}"; do
     if [ -x "$AGENT_HOME/.local/bin/$cli" ]; then
         ok "$AGENT_HOME/.local/bin/$cli presente"
     else
-        todo "installare $cli come $AGENT_USER, con l'eseguibile in $AGENT_HOME/.local/bin/$cli, e fare il login"
+        todo "con --unseal, installare $cli come $AGENT_USER, con l'eseguibile in $AGENT_HOME/.local/bin/$cli, e fare il login; poi rieseguire senza --unseal"
     fi
 done
 
@@ -199,4 +268,8 @@ else
 fi
 
 step 'Fatto'
-say "Poi: CLI e login come $AGENT_USER, l'overlay, ops/host/check-host.sh, riavvio del servizio (ops/README.md)."
+if [ "$UNSEAL" = 1 ]; then
+    say "Poi: CLI e login come $AGENT_USER, e di nuovo questo script senza --unseal prima di avviare devloop (ops/README.md)."
+else
+    say "Poi: CLI e login come $AGENT_USER (con --unseal), l'overlay, ops/host/check-host.sh, riavvio del servizio (ops/README.md)."
+fi
