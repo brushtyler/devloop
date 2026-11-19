@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, replace
 from .config import IMPLEMENTER_LABEL
 from .policy import receipt_of
 from .review import CI, current_round, flow_verdict, open_findings, owner_of, round_verdict
-from .supervision import ISSUE_STEPS, RETRY
+from .supervision import BUDGET_GRANTABLE, GRANT_BUDGET, ISSUE_STEPS, RETRY
 
 RECHECK_COMMAND = '/devloop recheck'
 # A fix asked by a trusted user or the supervisor (#195): the first line of a comment, after the
@@ -251,6 +251,21 @@ def _lanes(batch, issue_of):
     return [entries for _, entries in lanes]
 
 
+def runs_issue_step(item):
+    """Whether the supervisor command ``item`` (``_supervisor_view``, with ``pr``) runs an
+    issue's step when it applies, as the step itself would: a retry of an issue's step (#182),
+    or a ``grant-budget`` on an issue's ``budget_grantable`` escalation (#411), which runs the
+    step the envelope refused. It then waits while the issue is blocked (#277) and takes a free
+    PR slot. A command only to answer (#321), or the records of an extension that only
+    complete its trace (``trace_only``), run nothing."""
+    if item['pr'] or item.get('refusal') or item.get('trace_only') \
+            or item.get('step') not in ISSUE_STEPS:
+        return False
+    if item['command'] == GRANT_BUDGET:
+        return (item.get('anchor') or {}).get('record', {}).get('class') == BUDGET_GRANTABLE
+    return item['command'] == RETRY
+
+
 def numbers_of(number, issue_of):
     """The numbers an action on ``number`` touches: ``number``, and its issue when it is a PR
     (``issue_of``: PR number to issue number)."""
@@ -457,12 +472,12 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
     parked_full = held >= cfg.max_parked_prs
     free = 0 if parked_full else slots
     for item in snapshot.supervised:
-        # A supervisor command (#182). A retry of an issue's step runs that step, and takes a
-        # free PR slot as the step itself would; without one it waits for a later tick. While
-        # the issue is blocked by an open issue (#277) it waits too, and takes no slot.
-        # A command only to answer (#321) takes no slot.
-        if (item['command'] == RETRY and not item['pr'] and item['step'] in ISSUE_STEPS
-                and not item.get('refusal')):
+        # A supervisor command (#182). A retry of an issue's step, or the extension of the
+        # budget envelope of an issue's refused step (#411), runs that step, and takes a free PR
+        # slot as the step itself would; without one it waits for a later tick. While the issue
+        # is blocked by an open issue (#277) it waits too, and takes no slot. A command only to
+        # answer (#321) takes no slot.
+        if runs_issue_step(item):
             if item.get('blocked_by') or free <= 0:
                 continue
             free -= 1

@@ -844,7 +844,8 @@ next to the review; one for the trust policy gets none (#434, see
 | `conclave_veto` | A trusted user annulled the latest decision of a [conclave](#conclave-on-a-block) with `/devloop veto` | Yes |
 | `uncertain_turn` | With `block_uncertain_turns` on, a turn refused because its work has [uncertain turns](protocol.md#turn-journal) a trusted user has not reconciled with `/devloop reconcile` | Yes |
 | `attempt` | With `attempt_identity` on, a PR whose [attempt](protocol.md#attempt-identity) the journal does not confirm, or concluded already (a PR reopened after it was merged or closed) | Yes |
-| `budget` | With `[budget] enabled` on, a turn the [budget envelope](reference.md#budget-envelope) of its story does not cover, refused before it starts | Yes |
+| `budget_grantable` | With `[budget] enabled` on, a turn the [budget envelope](reference.md#budget-envelope) of its story refused, with `[delegations] budget` on and every condition of [extending the budget envelope](#extending-the-budget-envelope) verified: the supervisor may extend the envelope once | No |
+| `budget` | With `[budget] enabled` on, a turn the [budget envelope](reference.md#budget-envelope) of its story does not cover, refused before it starts, when the supervisor may not extend it | Yes |
 
 Any other class, or none (escalations written before #182), is critical.
 
@@ -883,6 +884,7 @@ any, is one of:
 /devloop decide <decisions>
 /devloop escalate <reason>
 /devloop grant-round <reason>
+/devloop grant-budget <reason>
 ```
 
 They count only in `"auto"`, from the identity of `[roles].supervisor` (the GitHub App of that
@@ -950,6 +952,10 @@ one wins; without one, the latest that does not apply is answered.
 - `/devloop grant-round <reason>` grants one more review round to a PR in a `round_grantable`
   escalation, as described in [Granting a review round](#granting-a-review-round). It needs a
   reason, which may go on in the lines below the command.
+- `/devloop grant-budget <reason>` extends once the budget envelope of the story of an issue or
+  PR in a `budget_grantable` escalation, as described in
+  [Extending the budget envelope](#extending-the-budget-envelope). It needs a reason, which may
+  go on in the lines below the command.
 - `/devloop capacity` is not a command of an escalation: on one it is answered as not applicable
   and the escalation stays where it is. It applies only on `[report] issue`, as described in
   [Temporary capacity limits](#temporary-capacity-limits).
@@ -957,11 +963,13 @@ one wins; without one, the latest that does not apply is answered.
 An escalation whose class is critical or unknown, or that was not routed to the supervisor,
 accepts no command: the command is refused and the item goes to `agent:needs-operator`. A command
 the class does not admit (`accept-defaults` or `decide` on a tool failure, `retry` on defaults,
-`grant-round` on anything but `round_grantable`) is refused
+`grant-round` on anything but `round_grantable`, `grant-budget` on anything but
+`budget_grantable`) is refused
 and the escalation stays with the supervisor. The answer lists the commands that apply to the
 escalation (`retry` for `tool_failure` and `sync_failed`, `accept-defaults` and `decide` for
-`preflight_default`, `grant-round` for `round_grantable`, none of them for an input changed
-since, `escalate` always) and the manual steps without the supervisor.
+`preflight_default`, `grant-round` for `round_grantable`, `grant-budget` for `budget_grantable`,
+none of them for an input changed since, `escalate` always) and the manual steps without the
+supervisor.
 
 #### Granting a review round
 
@@ -1021,6 +1029,73 @@ before every tick, as it does `max_review_rounds`: from the next tick a round li
 operator, and a `grant-round` on an escalation already with the supervisor is refused and hands
 the PR to the operator. A trusted user's `grant-round` on an escalation to the operator does not
 apply: the operator grants more rounds by raising `max_review_rounds`, as before.
+
+#### Extending the budget envelope
+
+A delegation of the operator to the supervisor (#411, [ADR 0005](../adr/0005-deleghe-e-ruoli-degli-agent.md#budget-dopo-365),
+P5-7), **off by default**: `[delegations] budget = false`. It applies only with the
+[budget](reference.md#budget-envelope) on, whose activation is a decision of the operator of its
+own ([Prerequisites of activation](reference.md#prerequisites-of-activation)).
+
+With `budget = true`, in merge mode `"auto"`, a turn of `implement`, `review`, `fix` or `sync`
+that the envelope of its story refuses goes to `agent:needs-supervisor` as `budget_grantable`
+instead of `agent:needs-operator` as `budget`, when every one of these holds, each verified by
+the dispatcher:
+
+- the conditions of **Routing** above;
+- the story was **never extended**: the extension is once per story, ever;
+- the envelope refuses the turn at a limit (`LIMIT_REACHED`), and the envelope with the
+  extension would cover it now. The extension adds to every turn cap (in total, per role and per
+  kind of phase) and to `wall_seconds` **25%** of the value frozen at the story's first booking,
+  **rounded down** (`floor`), so that it never goes beyond 25%: 10 turns get 2 more, 3 turns
+  none. It never adds dollars nor tokens. An extension that would not cover the turn (a nothing
+  added to the exhausted cap, a dollar cap, an outcome still uncertain, a role not in the
+  envelope) is not offered and does not spend the story's extension: the turn goes to the
+  operator as today;
+- the daily cap of the delegations is not reached (`max_grants_per_day`, shared with the rounds
+  granted), read from the [turn journal](protocol.md#turn-journal).
+
+The tolerance is a constant of the code (`BUDGET_TOLERANCE_PERCENT` in `devloop/supervision.py`,
+ADR 0005, D3). Otherwise the escalation is `budget`, to the operator, and with the delegation on
+its comment says which condition failed. The supervisor answers a `budget_grantable` escalation
+with:
+
+```text
+/devloop grant-budget <reason>
+```
+
+The reason is required and carries the analysis of the causes, as for `grant-round`. As a retry,
+the extension is bound to the input of the refused turn: on an issue a merged devloop PR already
+resolved the command is refused and the issue becomes a `merged_issue` escalation, and when the
+input changed after the escalation (the PR's head, the issue's base or request) the command is
+refused and spent while the escalation stays with the supervisor; nothing is extended in either
+case. Before granting, the dispatcher checks every condition again on data read then; a
+delegation turned off, a story extended in the meantime, a cap reached or an extension that
+would no longer cover the turn hand the item to the operator as `budget`. The extension is
+written in the turn journal
+first, in one step with the checks that the story has none and that the daily cap is not
+reached: two commands applied together never extend a story twice. From then on it is part of
+the envelope of the story, across restarts: the frozen limits stay those of the first booking,
+and the journal's extension is added on top of them. A PR goes back to `agent:review` or
+`agent:changes`, where it was; an issue leaves `agent:needs-supervisor` and its implementation
+runs at once, as after a retry: as a retry it takes a free PR slot of `max_open_prs`, waiting for
+a later tick without one, and while the issue is blocked by an open issue the command waits,
+unspent, taking no slot. The grant leaves a `grant` event in the turn
+journal with the story and the extension, a ledger `event` `delegation_grant` and a
+`supervision` record with outcome `granted`, in this order (see
+[Supervision trace](protocol.md#supervision-trace)): a dispatcher stopped before the record
+completes the same command at its next tick, before any later command and even on an issue
+resolved meanwhile, without extending the story again. When the stop was a GitHub error that
+handed the item to the operator, or a later escalation came, the records are completed all the
+same, and the item stays where it is, without resuming the step;
+`devloop status` and the refusals show the extension in the state of the budget. A later turn
+the extended envelope refuses goes to the operator as `budget`: a second extension, the dollars
+and the values of the envelope stay the operator's (ADR 0004, D2).
+
+**Revocation.** `budget = false` revokes the delegation from the next tick, as for `rounds`: a
+refused turn goes to the operator, and a `grant-budget` on an escalation already with the
+supervisor is refused and hands the item to the operator. A trusted user's `grant-budget` on an
+escalation to the operator does not apply.
 
 **Trace.** Every command applied leaves a dispatcher record, described in
 [Supervision trace](protocol.md#supervision-trace).
@@ -1103,8 +1178,8 @@ no command applies, and the answer gives the manual steps. The commands valid th
   key of its input. Every escalation of a failed agent, `gh` or git step (`tool_failure`,
   `failure`, `untrusted`) and of a sync with conflicts that failed (`sync_failed`,
   `sync_sensitive`, `tool_failure`) records it, also when it goes to the operator; so do `supervisor_escalated` and `supervisor_refused`
-  of a `tool_failure` or `sync_failed` escalation, which keep the step of the supervisor's
-  escalation. Their comment says that `/devloop retry` applies. An issue whose readiness check
+  of a `tool_failure`, `sync_failed` or `budget_grantable` escalation, which keep the step of
+  the supervisor's escalation. Their comment says that `/devloop retry` applies. An issue whose readiness check
   failed this way keeps `agent:ready`, so that the check can run again. The
   class may be critical: a retry runs the step again and bypasses none of its checks. The
   conditions are the supervisor's: the input of the step must still be the one that failed (the
@@ -1163,8 +1238,10 @@ one. A PR reopened after its attempt concluded, or whose marker lost the attempt
 to it, is escalated (`attempt`). PRs opened before, without an attempt in their marker, are
 handled as before.
 
-The budget cannot be turned on yet: until a story at its limit can be extended (`grant-budget`,
-ADR 0005), `[budget] enabled = true` stops devloop at startup. The
+The budget cannot be turned on yet: `[budget] enabled = true` stops devloop at startup until the
+operator lifts the gate of its activation. A story at its limit can now be extended once, by the
+supervisor ([Extending the budget envelope](#extending-the-budget-envelope), ADR 0005, off by
+default); lifting the gate stays a decision of the operator. The
 [prerequisites of activation](reference.md#prerequisites-of-activation) list what is settled
 and what is still open (#396). What follows describes the envelope as it works once on.
 
@@ -2274,8 +2351,10 @@ keys take effect without a restart:
   tick, with a line `config: <key> <old> -> <new> from this tick` in the log. The actions already
   running go on and are not interrupted: a higher `max_open_prs` lets the next tick start an
   issue alongside them.
-- `[delegations]` (#405, #406, #412): a delegation turned off, `rounds`, `retry_own_prs` or
-  `capacity`, is revoked from the next tick ([Granting a review round](#granting-a-review-round),
+- `[delegations]` (#405, #406, #411, #412): a delegation turned off, `rounds`, `retry_own_prs`,
+  `budget` or `capacity`, is revoked from the next tick
+  ([Granting a review round](#granting-a-review-round),
+  [Extending the budget envelope](#extending-the-budget-envelope),
   [Escalations to the supervisor](#escalations-to-the-supervisor),
   [Temporary capacity limits](#temporary-capacity-limits)). A temporary capacity limit of the
   supervisor is not a change of the configuration: it applies over the configured value of

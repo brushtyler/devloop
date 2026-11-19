@@ -183,6 +183,10 @@ class DelegationPolicy:
       round limit (``/devloop grant-round``). ``max_rounds_per_pr`` and ``max_grants_per_day``
       lower the caps of the code (``supervision.MAX_GRANTED_ROUNDS`` and ``MAX_DAILY_GRANTS``),
       never raise them.
+    - ``budget`` (P5-7, #411): the supervisor may extend once the budget envelope of a story
+      whose turn it refused (``/devloop grant-budget``), in turns and time only, by the
+      tolerance of the code (``supervision.BUDGET_TOLERANCE_PERCENT``), within
+      ``max_grants_per_day``.
     - ``capacity`` (P5-8, #412): the supervisor may set a temporary capacity limit with
       ``/devloop capacity`` on ``[report] issue``. ``capacity_max_open_prs``,
       ``capacity_max_parked_prs`` and ``capacity_max_hours`` lower the caps of the code
@@ -190,6 +194,7 @@ class DelegationPolicy:
       counts against ``max_grants_per_day``."""
     retry_own_prs: bool = False
     rounds: bool = False
+    budget: bool = False
     max_rounds_per_pr: int = MAX_GRANTED_ROUNDS
     max_grants_per_day: int = MAX_DAILY_GRANTS
     capacity: bool = False
@@ -234,10 +239,13 @@ BUDGET_USAGE_MODELS = ('reserve_per_invocation', 'unmetered_quota')
 # the only ones that may declare a reserve in USD. With the budget on, every agent, these
 # included, needs a declared rule for unknown usage (#396).
 BUDGET_REPORTED_COST = ('claude',)
-# Whether devloop can extend the envelope of a story at its limit (``grant-budget``, ADR 0005).
-# Until it can, ``[budget] enabled = true`` is refused at startup (#396): a story at its limit
-# could leave it only by turning the budget off for every story. The tests of the envelope set
-# it; nothing else does.
+# The gate of the activation of the budget (#396): while it is off, ``[budget] enabled = true`` is
+# refused at startup, since a story at its limit could leave it only by turning the budget off
+# for every story. The extension exists since #411 (``grant-budget``, ADR 0005, P5-7), as a
+# delegation to the supervisor that is off by default (``[delegations] budget``) and applies once
+# per story; lifting the gate is the activation of the budget, a decision of the operator (D8 of
+# ADR 0004, D10 of ADR 0005), with the points still open before it. The tests of the envelope
+# set it; nothing else does.
 BUDGET_EXTENSION = False
 
 
@@ -1088,8 +1096,8 @@ def parse_tests(table):
 
 
 def parse_delegations(table):
-    """``[delegations]`` (ADR 0005): ``retry_own_prs`` (#406), ``rounds`` (#405) and
-    ``capacity`` (#412), true or false (default false, D10); ``max_rounds_per_pr`` and
+    """``[delegations]`` (ADR 0005): ``retry_own_prs`` (#406), ``rounds`` (#405), ``budget``
+    (#411) and ``capacity`` (#412), true or false (default false, D10); ``max_rounds_per_pr`` and
     ``max_grants_per_day``, whole numbers from 0 to the caps of the code;
     ``capacity_max_open_prs``, ``capacity_max_parked_prs`` and ``capacity_max_hours``, whole
     numbers from 1 to the caps of the code. A value above a cap is refused: the configuration
@@ -1100,7 +1108,7 @@ def parse_delegations(table):
     if unknown:
         raise ConfigError(f'delegations: unknown keys {sorted(unknown)}')
     values = {}
-    for key in ('retry_own_prs', 'rounds', 'capacity'):
+    for key in ('retry_own_prs', 'rounds', 'budget', 'capacity'):
         if key in table:
             if not isinstance(table[key], bool):
                 raise ConfigError(f'delegations.{key}: expected true or false')
@@ -1246,7 +1254,7 @@ def parse_budget(table, agents, roles=BUDGET_BASE_ROLES, story_identity=False):
     agent, claude included (#396): only ``unmetered_quota`` for those whose kind reports no
     dollar figure (codex, agy, D2), while a ``reserve_per_invocation`` is accepted only for
     claude. A story is the unit of the envelope: it needs ``story_identity``. Turning it on is
-    refused while a story at its limit has no extension (``BUDGET_EXTENSION``, #396). A token cap
+    refused while the gate of the activation is closed (``BUDGET_EXTENSION``, #396). A token cap
     is refused, on or off: not supported yet."""
     where = 'budget'
     if not isinstance(table, dict):
@@ -1263,10 +1271,11 @@ def parse_budget(table, agents, roles=BUDGET_BASE_ROLES, story_identity=False):
     if enabled:
         if not BUDGET_EXTENSION:
             raise ConfigError(
-                f'{where}.enabled: the budget cannot be turned on yet: a story that reaches '
-                'its limit has no extension (grant-budget, ADR 0005, not available), and the '
-                'only way out would be enabled = false for every story. Keep enabled = false '
-                'until the extension exists (#396)')
+                f'{where}.enabled: the budget cannot be turned on yet: the gate of its '
+                'activation (BUDGET_EXTENSION, #396) stays closed until the operator lifts it. '
+                'A story that reaches its limit has only the one extension the supervisor may '
+                'grant (grant-budget, ADR 0005, with [delegations] budget), and beyond it the '
+                'only way out would be enabled = false for every story. Keep enabled = false')
         if not story_identity:
             raise ConfigError(f'{where}.enabled: needs story_identity = true: the envelope is '
                               'per story')
@@ -1866,7 +1875,7 @@ OVERLAY_KEYS = {
     'tests': {'selection': None, 'source_prefixes': None, 'dir_modules': {'*': None},
               'ci_log_format': None},
     'prompts': _PROMPTS_KEYS,
-    'delegations': dict.fromkeys(('retry_own_prs', 'rounds', 'max_rounds_per_pr',
+    'delegations': dict.fromkeys(('retry_own_prs', 'rounds', 'budget', 'max_rounds_per_pr',
                                   'max_grants_per_day', 'capacity', 'capacity_max_open_prs',
                                   'capacity_max_parked_prs', 'capacity_max_hours')),
     # Every key of [budget] (#365) is checked by ``parse_budget``, a token cap with its message.

@@ -33,14 +33,14 @@ class ConfigTests(unittest.TestCase):
     def test_invalid_values_stop_devloop(self):
         for table, error in (({'retry_own_prs': 1}, 'delegations.retry_own_prs: expected true'),
                              ({'retry_own_prs': 'yes'}, 'delegations.retry_own_prs'),
-                             ({'budget': True}, 'delegations: unknown keys'),
+                             ({'unknown': True}, 'delegations: unknown keys'),
                              ([], 'delegations: expected a table')):
             with self.subTest(table=table), self.assertRaisesRegex(ConfigError, error):
                 config.parse_delegations(table)
 
     def test_the_overlay_refuses_an_unknown_key(self):
-        with self.assertRaisesRegex(ConfigError, 'delegations.budget'):
-            config.apply_overlay({}, {'delegations': {'budget': True}})
+        with self.assertRaisesRegex(ConfigError, 'delegations.unknown'):
+            config.apply_overlay({}, {'delegations': {'unknown': True}})
 
 
 class RoutingTests(Case):
