@@ -27,7 +27,7 @@ VERIFIED_ARCH=aarch64
 OPS_STATE_DIR=.ssdlc/devloop
 
 # I segnaposto @NOME@ che `render` sostituisce nei file dichiarativi (unità, sudoers).
-OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER DEVLOOP_HOME AGENT_HOME DEVLOOP_CLONE STATE_DIR STATE_PATH LAUNCHER_CMD DEVLOOP_PATH AGENT_PATH SERVICE_NAME'
+OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER DEVLOOP_HOME AGENT_HOME DEVLOOP_CLONE STATE_DIR STATE_PATH LAUNCHER_CMD DEVLOOP_PATH AGENT_PATH SERVICE_NAME REPO_LOCK_DIR REPO_LOCK_GROUP'
 
 say() { printf '%s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }
@@ -81,6 +81,30 @@ ops_load_params() {
     set +a
     : "${REPO:?REPO non impostato in $PARAMS_FILE}"
     : "${APP_PREFIX:?APP_PREFIX non impostato in $PARAMS_FILE}"
+    # Più progetti sullo stesso host (ADR 0006, R8): con PROJECT i default sono del progetto,
+    # con un utente di sistema per progetto (D6) e l'istanza devloop@<progetto> dell'unità
+    # template. Senza, un solo progetto con devloop.service, come prima.
+    : "${PROJECT:=}"
+    if [ -n "$PROJECT" ]; then
+        [[ $PROJECT =~ ^[a-z0-9]([a-z0-9-]{0,14}[a-z0-9])?$ ]] \
+            || die "PROJECT ammette minuscole, cifre e '-' interni, al più 16 caratteri: '$PROJECT'"
+        # Il suffisso -agent è dell'utente degli agent: con PROJECT=x-agent, devloop-x-agent
+        # sarebbe l'utente degli agent del progetto x, e con PROJECT=agent devloop-agent quello
+        # dell'installazione senza PROJECT. Così i nomi derivati non coincidono mai fra ruoli né
+        # fra progetti.
+        [[ $PROJECT != agent && $PROJECT != *-agent ]] \
+            || die "PROJECT non può essere 'agent' né finire con '-agent': devloop-$PROJECT sarebbe l'utente degli agent di un altro progetto"
+        : "${DEVLOOP_USER:=devloop-$PROJECT}"
+        : "${AGENT_USER:=devloop-$PROJECT-agent}"
+        : "${SERVICE_NAME:=devloop@$PROJECT}"
+        : "${SUDOERS_FILE:=/etc/sudoers.d/devloop-supervisor-$PROJECT}"
+        : "${AGENT_SUDOERS_FILE:=/etc/sudoers.d/devloop-agent-$PROJECT}"
+        # Il supervisore è uno per host: la sua key_dir e il suo clone sono del progetto.
+        : "${SUPERVISOR_KEY_DIR:=${SUPERVISOR_HOME:-/home/${SUPERVISOR_USER:-supervisor}}/.ghapps-$PROJECT}"
+        : "${SUPERVISOR_CLONE:=${SUPERVISOR_HOME:-/home/${SUPERVISOR_USER:-supervisor}}/devloop-$PROJECT}"
+        [ "$SERVICE_NAME" = "devloop@$PROJECT" ] \
+            || die "con PROJECT il servizio è l'istanza devloop@$PROJECT dell'unità template: '$SERVICE_NAME'"
+    fi
     : "${DEVLOOP_USER:=devloop}"
     : "${SUPERVISOR_USER:=supervisor}"
     : "${AGENT_USER:=devloop-agent}"
@@ -107,6 +131,9 @@ ops_load_params() {
     : "${SOURCE_REF:=}"
     : "${SOURCE_CLONE:=$DEVLOOP_HOME/devloop-source}"
     : "${LAUNCHER_DIR:=/usr/local/lib/devloop}"
+    : "${REPO_LOCK_DIR:=/run/devloop/repos}"
+    : "${REPO_LOCK_GROUP:=devloop-repos}"
+    : "${TMPFILES_FILE:=/etc/tmpfiles.d/devloop-repos.conf}"
 
     [[ $REPO =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || die "REPO deve essere owner/nome: '$REPO'"
     [[ $APP_PREFIX =~ ^[a-z0-9-]*$ ]] || die "APP_PREFIX ammette solo minuscole, cifre e '-': '$APP_PREFIX'"
@@ -145,7 +172,27 @@ ops_load_params() {
         LAUNCHER_ARGS="--state-dir $STATE_PATH"
         LAUNCHER_CMD="/usr/bin/env -C $DEVLOOP_CLONE /usr/bin/python3 $LAUNCHER $LAUNCHER_ARGS"
     fi
-    [[ $SERVICE_NAME =~ ^[A-Za-z0-9_-]+$ ]] || die "SERVICE_NAME non valido: '$SERVICE_NAME'"
+    # L'unità del servizio: devloop.service, oppure con PROJECT l'unità template devloop@.service
+    # con i parametri del progetto in una drop-in della sua istanza.
+    if [ -n "$PROJECT" ]; then
+        UNIT_FILE=$SYSTEMD_DIR/devloop@.service
+        UNIT_TEMPLATE=devloop@.service
+        DROPIN_FILE=$SYSTEMD_DIR/$SERVICE_NAME.service.d/project.conf
+    else
+        [[ $SERVICE_NAME =~ ^[A-Za-z0-9_-]+$ ]] || die "SERVICE_NAME non valido: '$SERVICE_NAME'"
+        UNIT_FILE=$SYSTEMD_DIR/$SERVICE_NAME.service
+        UNIT_TEMPLATE=devloop.service
+        DROPIN_FILE=''
+    fi
+    # La directory dei lock per repository (ADR 0006, R8): comune agli utenti devloop dell'host,
+    # fuori dalle loro home e dagli state_dir, almeno due livelli sotto la radice.
+    [[ $REPO_LOCK_DIR =~ ^/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$ ]] && ! [[ $REPO_LOCK_DIR/ =~ /\.\.?/ ]] \
+        || die "REPO_LOCK_DIR deve essere un percorso assoluto di almeno due livelli, senza spazi né '.' o '..': '$REPO_LOCK_DIR'"
+    local inside
+    for inside in "$DEVLOOP_HOME" "$STATE_PATH" "$DEVLOOP_CLONE"; do
+        [[ $REPO_LOCK_DIR/ != "$inside"/* ]] && [[ $inside/ != "$REPO_LOCK_DIR"/* ]] \
+            || die "REPO_LOCK_DIR non può stare dentro né contenere $inside: è comune a tutti i progetti dell'host"
+    done
     [[ $DEVLOOP_PATH =~ ^[A-Za-z0-9._/:-]+$ ]] || die "DEVLOOP_PATH non valido: '$DEVLOOP_PATH'"
     [[ $AGENT_PATH =~ ^[A-Za-z0-9._/:-]+$ ]] || die "AGENT_PATH non valido: '$AGENT_PATH'"
     local sudoers
@@ -156,12 +203,62 @@ ops_load_params() {
     _require_name DEVLOOP_USER
     _require_name SUPERVISOR_USER
     _require_name AGENT_USER
+    _require_name REPO_LOCK_GROUP
     [ "$AGENT_USER" != "$DEVLOOP_USER" ] || die "AGENT_USER deve essere diverso da DEVLOOP_USER"
+    [ "$AGENT_USER" != "$SUPERVISOR_USER" ] || die "AGENT_USER deve essere diverso da SUPERVISOR_USER"
     local path
     for path in DEVLOOP_HOME SUPERVISOR_HOME AGENT_HOME DEVLOOP_CLONE SUPERVISOR_CLONE \
-        DEVLOOP_KEY_DIR SUPERVISOR_KEY_DIR SYSTEMD_DIR SUDOERS_FILE AGENT_SUDOERS_FILE; do
+        DEVLOOP_KEY_DIR SUPERVISOR_KEY_DIR SYSTEMD_DIR SUDOERS_FILE AGENT_SUDOERS_FILE \
+        TMPFILES_FILE; do
         _require_abs "$path"
     done
+    ops_check_host_users
+}
+
+# Gli utenti delle altre installazioni di devloop dell'host (ADR 0006, R8), una riga
+# "<utente> <ruolo> <file>" ciascuno, con ruolo devloop, agent o supervisor: dalle loro unità
+# (User=) e dai loro sudoers (devloop-*: "<devloop> ALL=(<agent>) NOPASSWD:SETENV:" di
+# sudoers-agent, "<supervisore> ALL=(<devloop>) NOPASSWD:" di sudoers-supervisor). Salta i file
+# di questa installazione e quelli che non può leggere: i sudoers sono di root, quindi senza
+# root (--dry-run) legge solo le unità.
+_ops_host_users() {
+    local file dir
+    for file in "$SYSTEMD_DIR"/devloop*.service "$SYSTEMD_DIR"/devloop@*.service.d/project.conf; do
+        [ -f "$file" ] && [ -r "$file" ] || continue
+        [ "$file" = "$UNIT_FILE" ] || [ "$file" = "$DROPIN_FILE" ] && continue
+        sed -n "s|^User=\([a-z_][a-z0-9_-]*\)\$|\1 devloop $file|p" "$file"
+    done
+    for dir in $(printf '%s\n' "$(dirname "$SUDOERS_FILE")" "$(dirname "$AGENT_SUDOERS_FILE")" | sort -u); do
+        for file in "$dir"/devloop-*; do
+            [ -f "$file" ] && [ -r "$file" ] || continue
+            [ "$file" = "$SUDOERS_FILE" ] || [ "$file" = "$AGENT_SUDOERS_FILE" ] && continue
+            awk -v file="$file" '
+                $2 ~ /^ALL=[(][a-z_][a-z0-9_-]*[)]$/ && $1 ~ /^[a-z_][a-z0-9_-]*$/ \
+                        && $3 ~ /^NOPASSWD:/ {
+                    target = substr($2, 6, length($2) - 6)
+                    if ($3 ~ /^NOPASSWD:SETENV:/) {
+                        print $1 " devloop " file; print target " agent " file
+                    } else if (target != "root") {
+                        print $1 " supervisor " file; print target " devloop " file
+                    }
+                }' "$file"
+        done
+    done
+}
+
+# Rifiuta un utente di questa installazione che sull'host abbia già un ruolo in un'altra (ADR
+# 0006, R8; D6): ogni progetto ha il suo utente devloop e il suo utente degli agent, che non sono
+# di nessun altro progetto né di un altro ruolo. Solo il supervisore, uno per host, è lo stesso in
+# ogni progetto.
+ops_check_host_users() {
+    local user role file var
+    while read -r user role file; do
+        for var in DEVLOOP_USER AGENT_USER SUPERVISOR_USER; do
+            [ "${!var}" = "$user" ] || continue
+            [ "$var" = SUPERVISOR_USER ] && [ "$role" = supervisor ] && continue
+            die "$var '$user' è già l'utente $role di un'altra installazione di devloop dell'host ($file): ogni progetto ha i suoi utenti"
+        done
+    done < <(_ops_host_users)
 }
 
 # Esegue un comando, o con --dry-run lo stampa soltanto.

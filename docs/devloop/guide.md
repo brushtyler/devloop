@@ -1499,6 +1499,9 @@ running (lock held)`, and a loop does not start while a manual tick runs. To run
 stop the loop first. The `gh` of each GitHub write holds the lock too while it runs (#385): one
 that outlived a dispatcher killed meanwhile keeps the next one from starting until it ends. A [pin after a merge](#pin-after-a-merge) restarts the loop from the new
 copy with the same arguments and the lock still held, unless a stop was requested meanwhile.
+With `repo_lock_dir`, the loop and a tick hold the lock of the repository too, and a dispatcher
+on the same repository with another `state_dir` does not start
+([Several projects on one host](#several-projects-on-one-host)).
 
 **Activation is the operator's.** The loop runs unsupervised and spends the agents' quotas, so
 devloop installs no service. An example unit, `devloop.service`, for the
@@ -2060,6 +2063,51 @@ The facts of the project (`test_cmd`, `[docs.map]`, …) and the restrictions it
 [project file](reference.md#project-file) `DIR/project.toml` (ADR 0006, R2), on the host; the
 trust keys stay in the overlay. The prompts and the selection of the tests are still those of
 ssdlc.
+
+#### Several projects on one host
+
+One host can run devloop for several projects, each with its own system user (and agent user),
+clone, `state_dir`, `key_dir` with the keys of its own set of apps, and service (ADR 0006, R8,
+decision D6). The [ops guide](../../ops/README.md) does it with one parameters file per project
+and `PROJECT`: the template unit `devloop@.service`, an instance `devloop@<project>` per project
+with its parameters in a drop-in, a sudoers of the supervisor per unit, a clone and a `key_dir`
+of the supervisor per project, and `check-host.sh` run once per project. The scripts refuse a
+user that another installation of devloop on the host already has, in any role: only the
+supervisor is the same for every project.
+
+**One repository, one host.** A repository is served by exactly one dispatcher, on one host.
+The lock of `state_dir` (`state_dir/dispatcher.lock`) excludes only the dispatchers of the same
+`state_dir`: two services configured on the same `repo` with two `state_dir`s would both act on
+its issues and PRs, with double work and markers in conflict. So the host has a **repository
+lock** too (decision of the operator, L1 of ADR 0006, section 3.8):
+
+- with `repo_lock_dir` in the overlay ([reference](reference.md#configuration)), `tick` and
+  `run` take, without waiting, `<repo_lock_dir>/<owner>--<name>.lock`, owner and name of `repo`
+  in lower case, besides the lock of `state_dir`. While another dispatcher on the same repository
+  holds it, whatever its `state_dir` or its user, devloop stops with `another dispatcher is running
+  on <repo> (repository lock <path> held)`; dispatchers of different repositories run together;
+- the kernel releases it when the process ends; a [restart from a new copy](#pin-after-a-merge)
+  passes it on open, like the lock of `state_dir`. With the outbox of the publications, the `gh`
+  of each GitHub write holds it too while it runs, as it holds the lock of `state_dir`: a
+  dispatcher with another `state_dir` does not take over the repository while a publication of
+  one that stopped may still be running. `tick --dry-run`, `status`, `cleanup` and `gc` do not
+  take it;
+- the directory is the host's, the same for every project: `/run/devloop/repos` with the ops
+  scripts, created at every boot by `systemd-tmpfiles`, owned by root, mode `3770`, of a group
+  (`devloop-repos`) that holds the devloop users of the host and nobody else. The group gives no
+  access to the `state_dir`s; the agent users and the supervisor do not enter it. devloop does
+  not create it: a `repo_lock_dir` that does not exist stops `tick` and `run`. It opens a lock
+  read-only and never through a symlink. A lock that exists is opened as it is, without
+  creating or replacing it and with its owner and mode left alone; only a missing one is
+  created, readable by the other devloop users;
+- a container of devloop (ADR 0006, R7) has to mount that directory of the host, so that the
+  lock spans the containers and the services of the host;
+- it holds **on one host only**: the same repository from two hosts is not excluded. Serving a
+  repository from several hosts would need a lease on the tracker (L2 of the ADR), to be weighed
+  with the fencing of step 4 of ADR 0001.
+
+Without `repo_lock_dir` devloop holds only the lock of `state_dir`, as before; `check-host.sh`
+reports an overlay without it as an error.
 
 #### Local config as an overlay
 

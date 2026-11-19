@@ -29,6 +29,9 @@ ops/
     setup-supervisor.sh      utente supervisor, ACL di attraversamento su /home/<devloop>,
                              sudoers, clone, key_dir 700, impostazioni di Claude Code
     devloop.service          unità systemd (con segnaposto @NOME@)
+    devloop@.service         unità template, per più progetti sullo stesso host (PROJECT)
+    devloop-project.conf     drop-in di un progetto per devloop@<progetto> (con segnaposto)
+    tmpfiles-devloop-repos.conf  directory dei lock per repository, comune all'host
     sudoers-agent            sudoers con cui devloop avvia CLI e test come utente degli agent
     sudoers-supervisor       sudoers minimale del supervisore (con segnaposto @NOME@)
     config.local.toml.example  overlay di devloop, tutto commentato
@@ -52,6 +55,8 @@ ops/
   dal default, o con `SOURCE_REPO`, unità, sudoers e verifiche chiamano il launcher con
   `--state-dir <percorso>` e con `env -C <clone>`, perché giri nel clone gestito, e l'overlay deve
   avere lo stesso `state_dir` ([docs/devloop/guide.md](../docs/devloop/guide.md#launcher)).
+  Con `PROJECT` i parametri sono di uno dei progetti dell'host ([Più progetti sullo stesso
+  host](#più-progetti-sullo-stesso-host)).
 - **`--dry-run`.** Stampa ogni azione (`[dry-run] …`) e il contenuto dei file che scriverebbe,
   senza fare nulla. Le verifiche in sola lettura (un utente esiste, una directory ha già il modo
   giusto) si fanno lo stesso, così l'elenco mostra solo ciò che manca.
@@ -213,6 +218,13 @@ esiste), `~/.ghapps`, `~/.claude` e `~/.codex` con mode 700, `~/.claude/settings
 aggiornamenti automatici spenti (solo se non esiste), e l'unità `devloop.service`. Non avvia il
 servizio. Le CLI degli agent non sono di `devloop`: le prepara il passo 5.
 
+Prepara anche il **lock per repository** (ADR 0006, R8): il gruppo `REPO_LOCK_GROUP`
+(`devloop-repos`), con dentro l'utente `devloop`, e la directory comune `REPO_LOCK_DIR`
+(`/run/devloop/repos`, di root, mode 3770), che `systemd-tmpfiles` ricrea a ogni avvio da
+`TMPFILES_FILE` (`/etc/tmpfiles.d/devloop-repos.conf`). Non usa una directory che esiste già, non
+è vuota e non è di `root:<gruppo>`. L'overlay deve avere `repo_lock_dir` con lo stesso valore: lo
+script lo ricorda finché manca ([Più progetti sullo stesso host](#più-progetti-sullo-stesso-host)).
+
 Poi le **chiavi**: in `key_dir` di `devloop` (`/home/devloop/.ghapps`) quelle delle app che usa il
 dispatcher (`DEVLOOP_KEYS`: `dispatcher`, `merger`, `claude-agent`, `codex-agent`, `agy-agent`):
 
@@ -284,7 +296,8 @@ launcher esporta `DISABLE_AUTOUPDATER=1`. Le CLI si aggiornano a mano con il loo
 
 L'overlay `/home/devloop/ssdlc/.ssdlc/devloop/config.local.toml` contiene solo le chiavi che
 l'operatore sovrascrive (merge mode, `[pin] auto`, `[run] alert_issue`, …); quello d'esempio è
-tutto commentato. Poi il primo pin, che fa anche lo smoke test:
+tutto commentato. Su questo host ha anche `repo_lock_dir = "/run/devloop/repos"`. Poi il primo
+pin, che fa anche lo smoke test:
 
 ```bash
 sudo -u devloop -H sh -c 'cd ~/ssdlc && python3 -m devloop pin origin/main'
@@ -346,8 +359,12 @@ i due sudoers (440, root, accettati da `visudo`, uguali a quelli generati); che 
 legga `key_dir`, lo `state_dir` e l'overlay, non attraversi `key_dir`, non legga né attraversi le
 altre voci dello `state_dir`, entri senza scriverle in `worktrees`, `agent-shared`,
 `agent-shared/schemas`, `agent-shared/turns` e `agent-shared/tmp`, non scriva nulla in `.git`,
-e che l'overlay abbia `[agent_user] name = "devloop-agent"`; l'unità (uguale a
-quella generata, `KillMode=mixed`) e lo stato del servizio; `--version` di ogni CLI come
+e che l'overlay abbia `[agent_user] name = "devloop-agent"`; il lock per repository (la directory
+di root, 3770, del gruppo `devloop-repos`; `devloop` nel gruppo, `devloop-agent` e il supervisore
+fuori; `devloop-agent` che non vi entra; il file di `tmpfiles.d`; `repo_lock_dir` nell'overlay);
+l'unità (uguale a quella generata, `KillMode=mixed`; con `PROJECT` l'unità template e la drop-in),
+che nessun'altra unità di devloop dell'host gestisca lo stesso repository, e lo stato del
+servizio; `--version` di ogni CLI come
 `devloop-agent`; e `devloop apps`
 (ogni app, la sua installazione e i suoi permessi). Con `--dry-run` stampa, senza eseguirle, le
 verifiche che passano da `sudo` o dalla rete.
@@ -433,11 +450,75 @@ Il pin dopo un merge resta spento: un nuovo tag si fissa a mano, con `devloop-pi
      `merge.operator_only_paths` e `[docs.map]`, con i percorsi del progetto;
    - i check della CI in `[review_policy.zero] checks`, se si usa il livello 0.
 3. **Parametri**: un `ops/params.env` con `REPO`, `APP_PREFIX`, utenti e percorsi del progetto.
-   Due progetti sulla stessa macchina usano utenti distinti (`DEVLOOP_USER`, `SUPERVISOR_USER`),
-   un `SERVICE_NAME` e un `SUDOERS_FILE` distinti: ogni dispatcher ha il suo clone, il suo
+   Sulla stessa macchina di un altro progetto, con `PROJECT` ([Più progetti sullo stesso
+   host](#più-progetti-sullo-stesso-host)): ogni dispatcher ha il suo utente, il suo clone, il suo
    `state_dir`, le sue chiavi e il suo servizio.
 4. **GitHub**: app nuove dai manifest (`create-apps.sh`), installate solo sul nuovo repository;
    un ruleset con i check della sua CI; un token di sola lettura per il suo supervisore.
 5. **Host**: i passi 4-9 sopra, con quei parametri.
 6. **Label**: devloop lavora sulle issue con `agent:ready` e usa le label descritte nella sua
    guida; crearle sul nuovo repository se mancano.
+
+## Più progetti sullo stesso host
+
+Un host può servire più progetti (ADR 0006, R8), ciascuno con **il suo utente di sistema** e il suo
+utente degli agent (decisione D6), quindi con la sua home, il suo clone, il suo `state_dir`, la sua
+`key_dir` con le chiavi del suo insieme di app (D3) e il suo servizio. Un progetto di terzi sta
+sullo stesso host di ssdlc solo così, con utenti separati.
+
+**Un repository, un host.** Ogni repository ha un solo dispatcher, su un solo host. Il lock per
+repository lo garantisce sull'host: ogni dispatcher prende all'avvio, senza attendere, il lock del
+suo repository in `REPO_LOCK_DIR`, e si ferma con `another dispatcher is running on <repo>` se un
+altro, con un altro `state_dir` o un altro utente, lo tiene già
+([docs/devloop/guide.md](../docs/devloop/guide.md#several-projects-on-one-host)). Fra host diversi
+non c'è esclusione: lo stesso repository non va configurato su due host.
+
+**Parametri.** Un file per progetto (per esempio `ops/params-widget.env`), passato a ogni script
+con `--params`, con `PROJECT` (minuscole, cifre e `-` interni, al più 16 caratteri; non `agent` e
+non `…-agent`, il suffisso dell'utente degli agent). Con `PROJECT` i default diventano del
+progetto:
+
+| Parametro | Default con `PROJECT=widget` |
+|---|---|
+| `DEVLOOP_USER`, `AGENT_USER` | `devloop-widget`, `devloop-widget-agent` |
+| `DEVLOOP_HOME`, `AGENT_HOME`, `DEVLOOP_CLONE`, `DEVLOOP_KEY_DIR` | nella home dell'utente del progetto |
+| `SERVICE_NAME` | `devloop@widget`, l'unica forma ammessa |
+| `SUDOERS_FILE`, `AGENT_SUDOERS_FILE` | `/etc/sudoers.d/devloop-supervisor-widget`, `/etc/sudoers.d/devloop-agent-widget` |
+| `SUPERVISOR_KEY_DIR` | `/home/supervisor/.ghapps-widget`: le chiavi dell'insieme di app del progetto |
+| `SUPERVISOR_CLONE` | `/home/supervisor/devloop-widget`: il clone del supervisore per il progetto |
+
+`SUPERVISOR_USER`, `REPO_LOCK_DIR`, `REPO_LOCK_GROUP` e `TMPFILES_FILE` sono gli stessi per tutti i
+progetti dell'host. Un `params.env` senza `PROJECT`, come quello di ssdlc, continua a installare
+`devloop.service` come prima.
+
+**Utenti distinti.** I nomi derivati da `PROJECT` non coincidono mai con l'utente di un altro
+ruolo o di un altro progetto. Ogni script lo verifica anche sull'host: legge gli utenti delle altre
+installazioni di devloop dalle loro unità (`User=`) e dai loro sudoers (`devloop-*`), e si ferma
+se `DEVLOOP_USER` o `AGENT_USER` vi hanno già un ruolo, o se `SUPERVISOR_USER` vi è l'utente
+devloop o degli agent. Solo il supervisore è lo stesso in ogni progetto. I sudoers sono di root:
+senza root (`--dry-run`) la verifica legge solo le unità. `setup-supervisor.sh` si ferma anche se
+`SUPERVISOR_CLONE` è già un clone di un altro repository.
+
+**Unità.** Con `PROJECT`, `setup-devloop.sh` installa l'unità template `devloop@.service`, comune
+ai progetti, e i parametri del progetto (utente, clone, avviatore, log) nella drop-in
+`devloop@<progetto>.service.d/project.conf`. Un'istanza senza drop-in non parte. Il supervisore ha
+un sudoers per unità, con `systemctl start|stop|restart devloop@<progetto>` e lo stesso avviatore
+dell'unità:
+
+```bash
+sudo bash ops/host/setup-devloop.sh --params ops/params-widget.env
+sudo bash ops/host/setup-agent-user.sh --params ops/params-widget.env
+sudo bash ops/host/setup-supervisor.sh --params ops/params-widget.env
+sudo bash ops/host/check-host.sh --params ops/params-widget.env
+sudo systemctl start devloop@widget
+```
+
+**Lock per repository.** `setup-devloop.sh` aggiunge l'utente del progetto al gruppo
+`devloop-repos` (vale dal prossimo avvio del servizio) e prepara la directory comune; l'overlay del
+progetto ha `repo_lock_dir = "/run/devloop/repos"`. Il gruppo non dà accesso agli `state_dir`, e
+gli utenti degli agent e il supervisore ne restano fuori. Un container di devloop (ADR 0006, R7)
+monta la stessa directory dell'host.
+
+**Verifica.** `check-host.sh` si esegue una volta per progetto, con i suoi parametri. Oltre alle
+verifiche di sempre, controlla l'unità template e la drop-in del progetto, il lock per repository,
+e che nessun'altra unità di devloop dell'host gestisca lo stesso repository.

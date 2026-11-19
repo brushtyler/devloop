@@ -15,6 +15,11 @@
 # source = "/home/devloop/devloop-source"
 # state_dir = "/var/lib/devloop/progetto"
 
+# La directory comune dei lock per repository dell'host (ADR 0006, R8; REPO_LOCK_DIR di
+# params.env, preparata da setup-devloop.sh): tick e run prendono il lock del repository e si
+# fermano se un altro dispatcher, con un altro state_dir, lo tiene già. check-host.sh la richiede.
+# repo_lock_dir = "/run/devloop/repos"
+
 # Limiti (una modifica vale dal tick successivo, senza riavvio).
 # max_open_prs = 2
 # max_parked_prs = 3

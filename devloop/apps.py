@@ -245,6 +245,7 @@ class Identities:
         self._run = run
         self._ambient = GitHub(repo, run=run)
         self._lock_fd = None
+        self._repo_lock_fd = None
         # The app clients already handed out (``build`` creates the dispatcher's and the
         # merger's before the lock is taken): ``hold`` gives them the lock too (#385, R4-1).
         self._clients = weakref.WeakSet()
@@ -276,14 +277,17 @@ class Identities:
         for client in (self._ambient, *list(self._clients)):
             client.uncertain_publications = value is not None
 
-    def hold(self, lock_fd):
+    def hold(self, lock_fd, repo_lock_fd=None):
         """The dispatcher lock is held on ``lock_fd``: the `gh` of each write of the clients
         keeps it open while it runs (``GitHub.lock_fd``, #385), the clients created before
-        this call included. devloop calls it only with the outbox on (#397)."""
+        this call included. devloop calls it only with the outbox on (#397). The repository
+        lock (ADR 0006, R8), when devloop holds it on ``repo_lock_fd``, is kept open the same
+        way (``GitHub.repo_lock_fd``)."""
         self._lock_fd = lock_fd
-        self._ambient.lock_fd = lock_fd
-        for client in list(self._clients):
+        self._repo_lock_fd = repo_lock_fd
+        for client in (self._ambient, *list(self._clients)):
             client.lock_fd = lock_fd
+            client.repo_lock_fd = repo_lock_fd
 
     def github(self, actor, permissions=None) -> Backend:
         """The client ``actor`` acts with: the ports, on GitHub, holding only ``permissions``;
@@ -303,6 +307,7 @@ class Identities:
         client = GitHub(self.repo, run=self._run,
                         token=lambda: app.token(permissions, time_left=client.time_left))
         client.lock_fd = self._lock_fd
+        client.repo_lock_fd = self._repo_lock_fd
         client.uncertain_publications = self._outbox is not None
         self._clients.add(client)
         return client

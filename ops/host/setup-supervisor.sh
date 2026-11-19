@@ -94,7 +94,15 @@ put_file "$SUDOERS_FILE" 440 root "$SUDOERS" || true
 
 step "Clone di $REPO per $SUPERVISOR_USER"
 if [ -d "$SUPERVISOR_CLONE/.git" ]; then
-    ok "$SUPERVISOR_CLONE è già un clone"
+    # Un clone per progetto (ADR 0006, R8): uno di un altro repository è di un altro progetto,
+    # e non si condivide. L'origin si legge dal file, senza eseguire git nel clone d'altri.
+    origin=$(awk '/^[[:space:]]*\[/ { inside = ($0 ~ /^[[:space:]]*\[remote "origin"\]/) }
+                  inside && /^[[:space:]]*url[[:space:]]*=/ { sub(/^[^=]*=[[:space:]]*/, ""); print; exit }' \
+        "$SUPERVISOR_CLONE/.git/config" 2>/dev/null || true)
+    slug=$(printf '%s' "$origin" | sed -E 's#^.*github\.com[:/]##; s#/+$##; s#\.git$##')
+    [ "${slug,,}" = "${REPO,,}" ] \
+        || die "$SUPERVISOR_CLONE è un clone di '${origin:-origine sconosciuta}', non di $REPO: è di un altro progetto, scegliere un altro SUPERVISOR_CLONE"
+    ok "$SUPERVISOR_CLONE è già un clone di $REPO"
 else
     as_user "$SUPERVISOR_USER" git clone "https://github.com/$REPO.git" "$SUPERVISOR_CLONE"
 fi
