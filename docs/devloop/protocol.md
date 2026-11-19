@@ -739,8 +739,12 @@ operator makes on the host before the code is pinned, with a reference to its do
 non-empty one is recorded in the PR marker (`host_step`) and shown in the PR description under
 "Passo sull'host"; each fix records its declaration again in its `fix` marker (`host_step`, empty
 when there is none), and the latest holds, as for the map. The reviewer receives it and checks
-that it is there when the PR needs it and empty otherwise. When devloop merges a PR whose latest
-declaration is not empty, it holds the auto-pin instead of requesting it, and alerts the operator
+that it is there when the PR needs it (#473: a file in the `state_dir`, a required key or table of
+the project file or of the overlay, a command run as root or on the service); a missing one is a
+blocking finding, a superfluous one only a non-blocking finding. When devloop merges a PR whose
+latest declaration is not empty, it holds the auto-pin instead of requesting it, and alerts the
+operator; a PR with such a declaration merged by someone else holds it too, once devloop sees
+its merge commit on the base branch, and an alert that failed is tried again at each tick
 ([Step on the host](guide.md#step-on-the-host)).
 
 The reviewer receives the criteria and the latest map, and must verify them: a criterion without

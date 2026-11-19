@@ -51,6 +51,9 @@ Where a method went, when it was not obvious:
 - ``branch_prs`` (#384) is in ``CodeReview``: with ``attempt_identity``, before resuming an
   attempt without a recorded PR, the dispatcher looks on its branch for a PR already published
   for it, in any state.
+- ``commit_prs`` (#473) is in ``CodeReview``: with ``[pin] auto``, before an auto-pin the
+  dispatcher reads the PRs merged by each new commit of the base branch, so that a merge it did
+  not make that declares a step on the host holds the pin as one of its own.
 - ``issue_dependencies`` (#277) is in ``Tracker``: the native "blocked by" dependencies between
   issues, which the planner reads to hold back an issue while a trusted block is open.
 - ``repo_labels`` and ``rename_label`` (#248) are in ``Tracker`` next to ``ensure_label``:
@@ -144,7 +147,10 @@ class CodeReview(Protocol):
 
     def find_pr(self, number):
         """Pull request ``number`` in any state, as :meth:`open_prs` (the mergeability fields
-        aside) with ``state``, or None when ``number`` is an issue."""
+        aside) with ``state`` and ``mergeCommit``, or None when ``number`` is an issue."""
+
+    def commit_prs(self, sha):
+        """The numbers of the merged pull requests GitHub associates with commit ``sha``."""
 
     def branch_prs(self, branch):
         """The pull requests from head branch ``branch`` in any state, as :meth:`open_prs`

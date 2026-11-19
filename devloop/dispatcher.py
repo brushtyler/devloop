@@ -209,8 +209,8 @@ from .markdown import (RESUME, carries_record, dispatcher_header, publishable, r
                        render_cycle, render_escalation, render_operator_merge)
 from .activity import iso, restart_line
 from .outbox import SENT as PUBLISHED, describe as outbox_describe
-from .pin import (PREFIX, CheckFailed, PinError, PinHeld, Repinned, SmokeError, held_prs,
-                  public_reason)
+from .pin import (PREFIX, CheckFailed, PinError, PinHeld, Repinned, ScanFailed, SmokeError,
+                  held_prs, public_reason)
 from .planning import (BASE_CHANGED, MERGE_LANE, MERGING, RESYNC_AFTER_APPROVAL, PullRequest,
                        Snapshot,
                        admit, changes_before_ci, ci_unknown, counted_rounds, issue_priority,
@@ -1611,7 +1611,14 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         request is only logged: it stays until the operator pins by hand, after the step. The
         hold is read again once the pin resolved the commit (``PinHeld``): a merge that ran
         meanwhile wrote its hold before merging. A hold whose merge had an unknown outcome is
-        settled first (``_settle_host_steps``)."""
+        settled first (``_settle_host_steps``).
+
+        A merge devloop did not make (#473), such as one of the operator, holds the auto-pin as
+        well: after ``observe``, and again once the pin resolved its commit, the pinner reads
+        the PRs merged by the new commits of ``origin/<base_branch>`` (``scan``, with
+        ``_merged_host_steps``) and holds those that declare a step. Then the alarm of each hold
+        that has not gone out yet is tried again (``_alert_held_steps``). The PRs of the
+        resolved commit that cannot be read leave the pin to the next tick (``ScanFailed``)."""
         if self.pinner is None or not self.cfg.pin.auto:
             return
         ref = f'origin/{self.cfg.base_branch}'
@@ -1621,6 +1628,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             except (PinError, OSError) as exc:
                 self.log(f'auto-pin: the advance of {ref} not checked, next tick: {exc}')
             self._settle_host_steps()
+            try:
+                self.pinner.scan(self.cfg.base_branch, self._merged_host_steps)
+            except (PinError, OSError) as exc:
+                self.log(f'auto-pin: the merges of {ref} not checked for a step on the host, '
+                         f'next tick: {exc}')
+            self._alert_held_steps()
         request = self.pinner.pending()
         if not request:
             return
@@ -1639,10 +1652,16 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             return
         self.log(f'auto-pin of {ref} after {why}')
         try:
-            copy = self.pinner.pin(ref)
+            copy = self.pinner.pin(ref, lookup=self._merged_host_steps)
         except PinHeld as exc:
-            # A merge with a step on the host ran while the pin resolved the commit (#462).
+            # A merge with a step on the host ran while the pin resolved the commit (#462), or
+            # the commit holds one devloop did not make (#473): its alarm goes out now.
+            self._alert_held_steps()
             self._log_held_pin(ref, exc.steps, dry_run)
+            return
+        except ScanFailed as exc:
+            self.log(f'auto-pin of {ref} waits for the next tick, the pinned copy is unchanged: '
+                     f'{exc}')
             return
         except SmokeError as exc:
             self.pinner.cancel()

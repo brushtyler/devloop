@@ -41,7 +41,7 @@ EXPECTED = {
                     'pr_comments', 'issue_dependencies', 'labelers', 'label_events', 'labeled_events', 'edit_labels',
                     'comment', 'close_issue', 'edit_comment', 'ensure_label', 'repo_labels',
                     'rename_label'],
-    ports.CodeReview: ['open_prs', 'merged_prs', 'find_pr', 'branch_prs', 'merge_state', 'pr_head', 'pr_state', 'merge_pr',
+    ports.CodeReview: ['open_prs', 'merged_prs', 'find_pr', 'commit_prs', 'branch_prs', 'merge_state', 'pr_head', 'pr_state', 'merge_pr',
                        'pr_reviews', 'create_pr', 'submit_review'],
     ports.CI: ['checks', 'check_details', 'check_runs', 'failed_log', 'job_log', 'rerun_failed_jobs',
                'commit_date', 'required_checks'],
