@@ -1366,9 +1366,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         self._flag_incomplete(snap, dry_run)
         self._reconcile_turns(snap, dry_run)
         self._settle_attempts(snap, dry_run)
-        actions = plan(snap, self.cfg)
+        # The supervisor's temporary capacity limits in force (#412), for this plan only.
+        cfg = self._capacity(dry_run)
+        actions = plan(snap, cfg)
         prs = {pr.number: pr for pr in snap.prs}
-        self.log(f'{"[dry-run] " if dry_run else ""}{pr_counts_line(snap, self.cfg)}')
+        self.log(f'{"[dry-run] " if dry_run else ""}{pr_counts_line(snap, cfg)}')
         if dry_run:
             for line in queue_lines(snap):
                 self.log(f'[dry-run] {line}')
@@ -1437,12 +1439,14 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         # #342: no new implementation, the long action, while the restart waits; the plan
         # leaves its slots to the other actions.
         pending = bool(running) and self._restart is not None
-        actions = plan(snap, self.cfg, busy, reserved, merging, implement=not pending)
+        # The supervisor's temporary capacity limits in force (#412), for this plan only.
+        cfg = self._capacity()
+        actions = plan(snap, cfg, busy, reserved, merging, implement=not pending)
         # The limit may pass while the snapshot reads GitHub: checked again before any start.
         if pending and self._restart_wait_over(running):
             return []
         started = admit(actions, issue_of, running, workers.free())
-        self.log(f'{pr_counts_line(snap, self.cfg)}; running: '
+        self.log(f'{pr_counts_line(snap, cfg)}; running: '
                  + (', '.join(f'{a.kind} #{a.number}' for a, _ in running) or 'none'))
         for action in started:
             workers.start(action, numbers_of(action.number, issue_of),

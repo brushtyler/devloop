@@ -129,9 +129,17 @@ supervisor [grant a review round](guide.md#granting-a-review-round) to a PR at t
 the code, `MAX_GRANTED_ROUNDS` and `MAX_DAILY_GRANTS` in `devloop/supervision.py`;
 `retry_own_prs` (true or false, default false, #406) lets a `tool_failure` on a PR implemented by
 the supervisor's agent go to the supervisor, who may retry it
-([Escalations to the supervisor](guide.md#escalations-to-the-supervisor)). A value that is not a
-whole number from 0 to its cap, a `rounds` or `retry_own_prs` that is not a boolean, or an
-unknown key, stops devloop at startup.
+([Escalations to the supervisor](guide.md#escalations-to-the-supervisor)); `capacity` (true or
+false, default false, #412) lets the supervisor set a
+[temporary capacity limit](guide.md#temporary-capacity-limits) of `max_open_prs` or
+`max_parked_prs` with `/devloop capacity` on `[report] issue`, which it requires (off, with
+`[report] issue` set, the command there is refused as not applicable and spent);
+`capacity_max_open_prs` (default 6), `capacity_max_parked_prs` (default 6) and
+`capacity_max_hours` (default 24) may only lower the caps of the code, `MAX_CAPACITY` and
+`MAX_CAPACITY_HOURS` in `devloop/supervision.py`. `max_parallel_actions` is not delegated: it
+applies only at a restart. A value that is not a whole number from 0 (from 1 for the `capacity_`
+keys) to its cap, a `rounds`, `retry_own_prs` or `capacity` that is not a boolean, `capacity` on
+without `[report] issue`, or an unknown key, stops devloop at startup.
 `[review_policy]` sets the
 [review level](#review-level-and-policy-receipt): `default_level` (1 or 2, default 1), the level
 `label` (default `reviews:2`), `sensitive_paths` and `sensitive_path_lists`; changing any of them,

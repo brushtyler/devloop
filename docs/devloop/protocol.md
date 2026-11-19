@@ -454,7 +454,15 @@ these records are what raises the round limit of the PR. The same figures go in 
 command's comment, and, before both, a `grant` event in the
 [turn journal](#turn-journal), which counts the grants of the day across every PR: the daily cap
 is checked again and the event written in one step, so `daily` is the count with this grant and
-never passes the cap. The record is
+never passes the cap. A temporary capacity limit set with `/devloop capacity` (#412,
+[Temporary capacity limits](guide.md#temporary-capacity-limits)) has its record on
+`[report] issue`, with no class: the analysis of the causes in `reason`, the key (`setting`), the
+`value`, the `configured` value, the `cap` of the key, the duration in `minutes`, its end
+(`until`, counted from when the command was written) and the figures of the day (`daily`,
+`daily_cap`, `daily_left`). The latest `granted` record of a key, until its `until`, is the limit
+the dispatcher plans with; the same figures go in a ledger `event` `delegation_grant` with the
+`delegation` `capacity`, after a `grant` event in the turn journal. With the delegation off the
+command gets a `refused` record all the same, which spends it. The record is
 written before the labels change, so a
 lost label change never runs a retry twice. A command that does not apply (#321) gets the same
 record, `refused`, with the reason and how to resume in the comment: it spends the command, which
@@ -1009,7 +1017,9 @@ their format does not change. The journal is append-only, one JSON event per lin
   attempts, with `attempt_identity` on (see [Attempt identity](#attempt-identity)), and an
   intent of a turn of an attempt carries its id. `size_warning`: the operator was warned that
   the journal reached 80% of its limit (see below). `grant`: a grant of a delegation to the
-  supervisor (#405), such as a round granted with `/devloop grant-round`, with the `delegation`,
+  supervisor (#405), such as a round granted with `/devloop grant-round` or a temporary capacity
+  limit set with `/devloop capacity` (#412, `delegation` `capacity`, with the number of
+  `[report] issue`), with the `delegation`,
   the PR, the id of the command's comment and its author; written before the grant applies, the
   grants of a UTC day count against the daily cap, which is checked again under the journal's
   lock in the same step as the write: past the cap nothing is written and the grant does not

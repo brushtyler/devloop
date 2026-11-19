@@ -299,12 +299,22 @@ enabled = false
 # startup. retry_own_prs (issue #406, P5-2): in "auto", a tool_failure escalation on a PR
 # implemented by the agent of roles.supervisor goes to the supervisor, who may retry it with
 # /devloop retry within the 2 retries it shares with the operator; every other class on such a PR
-# still goes to the operator.
+# still goes to the operator. capacity (issue #412, P5-8): in "auto", `/devloop capacity <key>
+# <value> <duration> <reason>` on [report] issue (required when on) sets max_open_prs or
+# max_parked_prs to value for duration (<N>h or <N>m), then the configured value is back; each
+# grant counts against max_grants_per_day. max_parallel_actions is refused: it needs a restart.
+# When off, a command on [report] issue is refused as not applicable and spent.
+# capacity_max_open_prs, capacity_max_parked_prs and capacity_max_hours may only lower the caps of
+# the code (6, 6 and 24 hours).
 [delegations]
 rounds = false
 retry_own_prs = false
+capacity = false
 # max_rounds_per_pr = 2
 # max_grants_per_day = 3
+# capacity_max_open_prs = 6
+# capacity_max_parked_prs = 6
+# capacity_max_hours = 24
 
 # Documentation map (issue #203): code paths and the documents that describe them. A key is a
 # directory prefix ending in "/" or a file, relative to the root, with no pattern characters;

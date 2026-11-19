@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .localtests import MODES as LOCAL_TESTS_MODES
 from .policy import MAX_LEVEL, MIN_LEVEL, ZERO_LEVEL, ReviewPolicy
-from .supervision import MAX_DAILY_GRANTS, MAX_GRANTED_ROUNDS
+from .supervision import MAX_CAPACITY, MAX_CAPACITY_HOURS, MAX_DAILY_GRANTS, MAX_GRANTED_ROUNDS
 from .unavailability import delimited
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / 'config.toml'
@@ -178,11 +178,26 @@ class DelegationPolicy:
     - ``rounds`` (P5-1, #405): the supervisor may grant one more review round to a PR at the
       round limit (``/devloop grant-round``). ``max_rounds_per_pr`` and ``max_grants_per_day``
       lower the caps of the code (``supervision.MAX_GRANTED_ROUNDS`` and ``MAX_DAILY_GRANTS``),
-      never raise them."""
+      never raise them.
+    - ``capacity`` (P5-8, #412): the supervisor may set a temporary capacity limit with
+      ``/devloop capacity`` on ``[report] issue``. ``capacity_max_open_prs``,
+      ``capacity_max_parked_prs`` and ``capacity_max_hours`` lower the caps of the code
+      (``supervision.MAX_CAPACITY`` and ``MAX_CAPACITY_HOURS``), never raise them; every grant
+      counts against ``max_grants_per_day``."""
     retry_own_prs: bool = False
     rounds: bool = False
     max_rounds_per_pr: int = MAX_GRANTED_ROUNDS
     max_grants_per_day: int = MAX_DAILY_GRANTS
+    capacity: bool = False
+    capacity_max_open_prs: int = MAX_CAPACITY['max_open_prs']
+    capacity_max_parked_prs: int = MAX_CAPACITY['max_parked_prs']
+    capacity_max_hours: int = MAX_CAPACITY_HOURS
+
+    def capacity_cap(self, key):
+        """The cap of the temporary value of ``key`` (#412), None for a key the delegation does
+        not cover."""
+        return {'max_open_prs': self.capacity_max_open_prs,
+                'max_parked_prs': self.capacity_max_parked_prs}.get(key)
 
 
 @dataclass(frozen=True)
@@ -893,28 +908,34 @@ def parse_ci(table):
 
 
 def parse_delegations(table):
-    """``[delegations]`` (ADR 0005): ``retry_own_prs`` (#406) and ``rounds`` (#405), true or
-    false (default false, D10); ``max_rounds_per_pr`` and ``max_grants_per_day``, whole numbers
-    from 0 to the caps of the code. A value above a cap is refused: the configuration and the
-    overlay may only lower the caps (D4)."""
+    """``[delegations]`` (ADR 0005): ``retry_own_prs`` (#406), ``rounds`` (#405) and
+    ``capacity`` (#412), true or false (default false, D10); ``max_rounds_per_pr`` and
+    ``max_grants_per_day``, whole numbers from 0 to the caps of the code;
+    ``capacity_max_open_prs``, ``capacity_max_parked_prs`` and ``capacity_max_hours``, whole
+    numbers from 1 to the caps of the code. A value above a cap is refused: the configuration
+    and the overlay may only lower the caps (D4)."""
     if not isinstance(table, dict):
         raise ConfigError('delegations: expected a table')
     unknown = set(table) - {f.name for f in dataclasses.fields(DelegationPolicy)}
     if unknown:
         raise ConfigError(f'delegations: unknown keys {sorted(unknown)}')
     values = {}
-    for key in ('retry_own_prs', 'rounds'):
+    for key in ('retry_own_prs', 'rounds', 'capacity'):
         if key in table:
             if not isinstance(table[key], bool):
                 raise ConfigError(f'delegations.{key}: expected true or false')
             values[key] = table[key]
-    for key, cap in (('max_rounds_per_pr', MAX_GRANTED_ROUNDS),
-                     ('max_grants_per_day', MAX_DAILY_GRANTS)):
+    for key, low, cap in (('max_rounds_per_pr', 0, MAX_GRANTED_ROUNDS),
+                          ('max_grants_per_day', 0, MAX_DAILY_GRANTS),
+                          ('capacity_max_open_prs', 1, MAX_CAPACITY['max_open_prs']),
+                          ('capacity_max_parked_prs', 1, MAX_CAPACITY['max_parked_prs']),
+                          ('capacity_max_hours', 1, MAX_CAPACITY_HOURS)):
         if key in table:
             value = table[key]
-            if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= cap:
-                raise ConfigError(f'delegations.{key}: expected a whole number from 0 to {cap}, '
-                                  'the cap of the code, which the configuration may only lower')
+            if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= cap:
+                raise ConfigError(f'delegations.{key}: expected a whole number from {low} to '
+                                  f'{cap}, the cap of the code, which the configuration may only '
+                                  'lower')
             values[key] = value
     return DelegationPolicy(**values)
 
@@ -1454,6 +1475,12 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
     budget_roles = (BUDGET_BASE_ROLES + (('conclave',) if conclave else ())
                     + (('advisory',) if review_policy.advisory_reviewer else ()))
     budget = parse_budget(data.get('budget', {}), agents, budget_roles, story_identity)
+    report = parse_report(data.get('report', {}))
+    delegations = parse_delegations(data.get('delegations', {}))
+    if delegations.capacity and not report.issue:
+        # The command of a temporary capacity limit lives on the issue of the summary (#412).
+        raise ConfigError('delegations.capacity: needs [report] issue, where the supervisor '
+                          'writes `/devloop capacity`')
     return Config(
         repo=_require(data, 'repo', str, 'config'),
         base_branch=data.get('base_branch', 'main'),
@@ -1478,11 +1505,11 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
         supervisor_actor=supervisor_actor,
         pin=parse_pin(data.get('pin', {}), sensitive_lists(data)),
         run=parse_run(data.get('run', {})),
-        report=parse_report(data.get('report', {})),
+        report=report,
         ci=parse_ci(data.get('ci', {})),
         gc=parse_gc(data.get('gc', {})),
         agent_user=parse_agent_user(data.get('agent_user', {})),
-        delegations=parse_delegations(data.get('delegations', {})),
+        delegations=delegations,
         docs=parse_docs(data),
         review_policy=review_policy,
         **ints)
@@ -1577,7 +1604,8 @@ OVERLAY_KEYS = {
     'agent_user': dict.fromkeys(('name', 'check')),
     'docs': {'map': {'*': None}},
     'delegations': dict.fromkeys(('retry_own_prs', 'rounds', 'max_rounds_per_pr',
-                                  'max_grants_per_day')),
+                                  'max_grants_per_day', 'capacity', 'capacity_max_open_prs',
+                                  'capacity_max_parked_prs', 'capacity_max_hours')),
     # Every key of [budget] (#365) is checked by ``parse_budget``, a token cap with its message.
     'budget': {'*': None},
 }
