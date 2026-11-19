@@ -1309,11 +1309,13 @@ model = "claude-opus-5-5"
   supervisor stop counting. An issue the supervisor opens with its app counts as one of devloop's
   apps, as one opened with the agent's app did.
 - A PR counts as implemented by the supervisor's agent (ADR 0002, principle 4, and
-  `[delegations] retry_own_prs`) when the `kind` or the `model` of its implementer, as the
-  profile of the PR's marker records them, is the actor's (the configured agent the marker names,
-  for a marker without a profile); a PR whose agent cannot be read counts as the supervisor's.
-  The keys are never compared, since `claude-supervisor` is never an implementer's key.
-  `provider` is not compared yet: devloop's agents do not declare one (P5-5).
+  `[delegations] retry_own_prs`) when the `kind`, the `model` or the provider of its
+  implementer, as the profile of the PR's marker records them, is the actor's (the configured
+  agent the marker names, for a marker without a profile); a PR whose agent cannot be read counts
+  as the supervisor's. The actor's provider is the `provider` it declares; the implementer's is
+  read from the prefix of its model
+  ([the keys by role](#the-implementer-app-and-the-keys-by-role)). The keys are never compared,
+  since `claude-supervisor` is never an implementer's key.
 - devloop never reads the app's key and never writes with it: the key is in `key_dir` of the
   supervisor's system user, not in devloop's, and `python3 -m devloop apps` does not list it.
   `scripts/agent-token.py` refuses it, so no review or interactive session can write a command as
@@ -1355,8 +1357,12 @@ agent that declares it, whichever agent does the work; the agent and its model s
 attribution header, in the `implementer` key and the profile of the PR marker (whose `identity`
 is the app's login), and in the commit trailer. Off by default (D10): `config.toml` keeps the
 keys `claude`, `codex` and `agy`, nothing declares the app, devloop does not read its key and
-`python3 -m devloop apps` does not list it. The operator turns it on with an **empty queue**, in
-the local overlay or in `config.toml`, by renaming the keys:
+`python3 -m devloop apps` does not list it. The operator turns it on with an **empty queue**, by
+renaming the keys in `config.toml`. Not in the
+local overlay: the overlay merges the tables key by key and cannot remove one, so the keys
+`claude`, `codex` and `agy` of `config.toml` would stay beside the new ones, and two keys that
+sign with the same app (`codex` and `codex-reviewer` with `[apps.codex]`) stop devloop at
+startup (`apps.codex: each app belongs to one actor`):
 
 ```toml
 [roles]
@@ -1401,15 +1407,24 @@ advisory_reviewer = "claude-reviewer"   # once claude-reviewer exists (P5-5); ""
   review of `codex` when `codex-reviewer` is configured.
 - **Conflicts by agent, never by key.** A reviewer is skipped, at level 1 and at level 2, when
   it is the same agent in effect as the PR's implementer (at level 2 as any author of the PR):
-  the same `kind` or the same `model`, as the profile of the marker records them, and the models
-  of the agent configured under the implementer's key. So `claude-reviewer` never reviews the
-  code of `claude-implementer`, until the rule on the provider of P5-5. A PR whose implementer
-  has no profile and no configured key has no reviewer at level 1, and goes to the operator.
-  The pool is no longer refused in the configuration because of the implementer's key. The
-  check on the PRs of the supervisor's agent compares the agent in the same way, with
-  `roles.supervisor` as an agent key too ([The supervisor app](#the-supervisor-app)). Provider
-  is not compared yet (P5-5). The reviewer the PR marker records is the first of the pool that
-  is not the implementer's agent.
+  the same `kind`, the same `model` or the same provider, as the profile of the marker records
+  them, and the models of the agent configured under the implementer's key. The agents do not
+  declare a provider yet (P5-5): devloop reads it from the prefix of the model's name (`claude-`
+  Anthropic, `gpt-` OpenAI, `gemini-` Google), and a model with another prefix is compared only
+  by `kind` and `model`. So neither `claude-reviewer` nor agy run with a Claude model reviews the
+  code of `claude-implementer`. At level 2 this is stricter than the quorum rule (ii) of D8,
+  which admits one reviewer of the authors' provider: that rule comes with P5-5. A PR whose
+  implementer has no profile and no configured key has no reviewer at level 1, and goes to the
+  operator. The pool is no longer refused in the configuration because of the implementer's key.
+  The check on the PRs of the supervisor's agent compares the agent in the same way, with
+  `roles.supervisor` as an agent key too ([The supervisor app](#the-supervisor-app)). The
+  reviewer the PR marker records is the first of the pool that is not the implementer's agent.
+- **Fallback models of a reviewer.** The same check applies, at both levels, to every model a
+  reviewer's turn actually runs, fallbacks included: a model that is the same agent in effect
+  as an author of the PR (at level 1 the implementer, as the selection reads it) is skipped
+  without running, and when no model of the chain is left the turn fails without a review. At
+  level 2 the model must also stay independent by tuple of the authors and distinct from the
+  other reviewers of the round, as before.
 - **Choice of the implementer** (D7). At the takeover of an issue, in order: an `impl:<kind>`
   label chooses `<kind>-implementer`; else the area labels of `[roles.implementers]`
   (`"<label>" = "<implementer key>"`, empty by default); else `roles.implementer`. A label counts

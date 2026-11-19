@@ -23,7 +23,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import devloop.__main__ as cli
-from devloop import apps, config, markdown, unavailability
+from devloop import agents, apps, config, markdown, unavailability
 from devloop.apps import IMPLEMENT
 from devloop.config import AppConfig, ConfigError, SupervisorActor
 from devloop.dispatcher import Dispatcher
@@ -33,8 +33,9 @@ from devloop.planning import implementer_choice
 from devloop.policy import agent_profile
 from devloop.watch import Trust
 from helpers.devloop_fakes import META, SHA1, FakeGH, FakeIdentities
-from test_devloop import CFG, FakeRunner, FakeWS, implemented, pr
+from test_devloop import CFG, FakeRunner, FakeWS, implemented, pr, raw_review
 from test_devloop_ledger import LedgerGH, ReportingRunner, TreeWS
+from test_devloop_quorum import FIRST, SECOND, Quorum
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = tomllib.loads(config.DEFAULT_CONFIG.read_text())
@@ -336,6 +337,125 @@ class ConflictCheckTests(unittest.TestCase):
         d._do_implement(7)
         meta = markdown.read_marker(gh.created[0]['body'], 'pr')
         self.assertEqual(meta['reviewer'], 'codex-reviewer')
+
+
+# agy run with a Claude model: another CLI and another model, the same provider as claude.
+AGY_CLAUDE = parse(migrated({'agy-reviewer': dict(DATA['agents']['agy'], app='agy',
+                                                  model='claude-sonnet-5-5',
+                                                  model_label='Claude Sonnet 5.5')}))
+OPUS = 'claude-opus-5-5'
+
+
+class ProviderTests(unittest.TestCase):
+    """The conflict checks compare the provider too (ADR 0005, D8, P5-3, #407): another CLI with
+    another model of the same provider is the same agent in effect."""
+
+    def make(self, cfg):
+        gh = FakeGH()
+        return Dispatcher(cfg, gh, FakeWS(), FakeRunner(), log=lambda m: None,
+                          identities=RoleIdentities(gh))
+
+    def test_same_agent_compares_the_provider(self):
+        opus = {'kind': 'claude', 'model': OPUS}
+        for other, same in (({'kind': 'agy', 'model': 'claude-sonnet-5-5'}, True),
+                            ({'kind': 'codex', 'model': 'Claude-Haiku-5-5'}, True),
+                            ({'kind': 'agy', 'model': 'gemini-4-argon-high'}, False),
+                            ({'kind': 'codex', 'model': 'gpt-6.1-sol'}, False),
+                            # An unknown prefix: compared by kind and model only.
+                            ({'kind': 'agy', 'model': 'mystery-1'}, False),
+                            ({'kind': 'agy', 'model': OPUS}, True),
+                            ({'kind': 'claude', 'model': 'mystery-1'}, True)):
+            with self.subTest(other=other):
+                self.assertEqual(config.same_agent(other, opus), same)
+                self.assertEqual(config.same_agent(opus, other), same)
+        self.assertEqual(config.provider_of(AGY_CLAUDE.agent('agy-reviewer')), 'anthropic')
+        self.assertEqual(config.provider_of(ROLE.agent('codex-reviewer')), 'openai')
+        self.assertEqual(config.provider_of(ROLE.agent('agy-reviewer')), 'google')
+        # A declared provider prevails over the prefix (the supervisor actor of P5-4).
+        actor = SupervisorActor('claude-supervisor', 'claude', 'Anthropic', 'mystery-1')
+        self.assertEqual(config.provider_of(actor), 'anthropic')
+        self.assertTrue(config.same_agent({'kind': 'agy', 'model': 'claude-sonnet-5-5'}, actor))
+
+    def test_a_reviewer_of_the_implementers_provider_is_excluded(self):
+        d = self.make(AGY_CLAUDE)
+        change = pr()
+        change.meta = dict(role_meta(AGY_CLAUDE), reviewer='agy-reviewer')
+        # Level 1: agy with Claude Sonnet does not review the code of Claude Opus.
+        self.assertEqual(d._select(change, 1), (['codex-reviewer'], ''))
+        # Level 2: no pair without it.
+        reviewers, problem = d._select(change, 2)
+        self.assertEqual(reviewers, [])
+        self.assertIn('non ne ha abbastanza', problem)
+        # With only agy in the pool, level 1 has no reviewer at all.
+        alone = self.make(dataclasses.replace(AGY_CLAUDE, reviewers=('agy-reviewer',),
+                                              reviewer='agy-reviewer'))
+        reviewers, problem = alone._select(change, 1)
+        self.assertEqual(reviewers, [])
+        self.assertIn('nessun reviewer configurato è un agent diverso', problem)
+        # agy with Gemini still reviews it.
+        self.assertEqual(self.make(ROLE)._select(change, 1), (['agy-reviewer'], ''))
+
+    def test_the_supervisors_own_prs_by_provider(self):
+        actor = SupervisorActor('claude-supervisor', 'claude', 'anthropic', OPUS)
+        cfg = dataclasses.replace(ROLE, supervisor=actor.name, supervisor_actor=actor)
+        change = pr()
+        for model, own in (('claude-sonnet-5-5', True), ('gemini-4-argon-high', False)):
+            with self.subTest(model=model):
+                change.meta = dict(META, implementer='agy-implementer',
+                                   profile=dict(role_meta()['profile'], kind='agy', model=model))
+                self.assertEqual(self.make(cfg)._supervisor_implemented(change), own)
+
+
+def claude_fallback(cfg, key):
+    """``cfg`` with the reviewer ``key`` (agy, Gemini) falling back to the implementer's very
+    model, Claude Opus: another CLI, the same model."""
+    agent = dataclasses.replace(cfg.agent(key), fallback_models=(
+        config.FallbackModel(OPUS, 'Claude Opus 5.5', 'high'),))
+    return dataclasses.replace(cfg, agents=dict(cfg.agents, **{key: agent}))
+
+
+def unavailable_model(key):
+    return agents.ModelUnavailable(f'{key} exited with 1', reason='`quota` in "quota exhausted"')
+
+
+class FallbackSameAgentTests(unittest.TestCase):
+    """Every model a review turn actually runs, fallbacks included, is checked against the
+    authors (#407): the selection checks only the primary model."""
+
+    def test_level_one_never_falls_back_on_the_implementers_agent(self):
+        cfg = claude_fallback(ROLE, 'agy-reviewer')
+        gh = FakeGH()
+        runner = FakeRunner(unavailable_model('agy-reviewer'))
+        logs = []
+        d = Dispatcher(cfg, gh, FakeWS(), runner, log=logs.append,
+                       identities=RoleIdentities(gh))
+        change = pr()
+        change.meta = dict(role_meta(cfg), reviewer='agy-reviewer')
+        gh.labels[100] = set(change.labels)
+        self.assertEqual(d._select(change, 1), (['agy-reviewer'], ''))
+        with self.assertRaises(agents.ModelsUnavailable) as ctx:
+            d._do_review(change)
+        # Gemini ran and was unavailable; Claude Opus never ran, and no review is published.
+        self.assertEqual([call[0] for call in runner.calls], ['agy-reviewer'])
+        self.assertEqual(ctx.exception.tried[-1][0], OPUS)
+        self.assertIn('not independent', ctx.exception.tried[-1][1])
+        self.assertEqual(gh.comments, [])
+        self.assertEqual(gh.labels[100], {'agent:review'})
+        self.assertIn(f'model {OPUS} skipped', '\n'.join(logs))
+
+
+class FallbackSameAgentQuorumTests(Quorum):
+    def test_level_two_never_falls_back_on_an_authors_agent(self):
+        # The fallback differs from the implementer by kind, so the tuple alone would admit it.
+        self.assertEqual((CFG.implementer, CFG.agent(CFG.implementer).model), ('claude', OPUS))
+        cfg = claude_fallback(CFG, SECOND)
+        self.make(raw_review(), unavailable_model(SECOND), cfg=cfg)
+        self.d.tick()
+        self.d.tick()
+        self.assertEqual(self.reviewed(), [FIRST, SECOND])  # the fallback never ran
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
+        self.assertIn(f'- `{OPUS}`: not independent', self.gh.comments[-1][1])
+        self.assertEqual([r['reviewer'] for r in self.records('review')], [FIRST])
 
 
 class ChoiceTests(unittest.TestCase):

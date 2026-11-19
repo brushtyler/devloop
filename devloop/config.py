@@ -364,15 +364,43 @@ def legacy_key(key, role, agents):
     return renamed if renamed in agents else key
 
 
+# The providers of the models devloop knows, by the prefix of the model's name (ADR 0005, P5-3,
+# #407): ``kind`` is the CLI, not who makes the model, and agy also offers Claude models. Used
+# only where an agent declares no provider (``provider_of``), so it only adds conflicts; the
+# provider declared for every agent and fallback, with this table as a check, is P5-5's.
+MODEL_PROVIDERS = (('claude-', 'anthropic'), ('gpt-', 'openai'), ('gemini-', 'google'))
+
+
+def _field(x, name):
+    return x.get(name) if isinstance(x, dict) else getattr(x, name, None)
+
+
+def provider_of(x):
+    """The provider of the model of ``x`` (an ``AgentConfig``, a marker profile, a supervisor
+    actor), lowercase: the one it declares (``[roles.supervisor]``), else the one the prefix of
+    its model names (``MODEL_PROVIDERS``), else '' when unknown."""
+    declared = _field(x, 'provider')
+    if isinstance(declared, str) and declared.strip():
+        return declared.strip().lower()
+    model = _field(x, 'model')
+    if isinstance(model, str):
+        for prefix, provider in MODEL_PROVIDERS:
+            if model.lower().startswith(prefix):
+                return provider
+    return ''
+
+
 def same_agent(a, b):
     """Whether ``a`` and ``b`` (an ``AgentConfig``, a marker profile, a supervisor actor:
-    anything with ``kind`` and ``model``) are the same agent in effect (ADR 0005, D6, #407): the
-    same kind of CLI, or the same model. The conflict checks compare this, never the keys, which
-    differ by role for one same agent (``claude-implementer``, ``claude-reviewer``).
-    ``provider`` is not compared yet: the agents do not declare one (P5-5)."""
-    def get(x, name):
-        return x.get(name) if isinstance(x, dict) else getattr(x, name, None)
-    return get(a, 'kind') == get(b, 'kind') or get(a, 'model') == get(b, 'model')
+    anything with ``kind`` and ``model``) are the same agent in effect (ADR 0005, D6, D8, P5-3,
+    #407): the same kind of CLI, the same model, or the same provider (``provider_of``) when
+    both are known. The conflict checks compare this, never the keys, which differ by role for
+    one same agent (``claude-implementer``, ``claude-reviewer``): agy run with a Claude model
+    is the same provider as claude. At level 2 this is stricter than the quorum rule (ii) of D8,
+    which admits one reviewer of the authors' provider: that rule comes with P5-5."""
+    provider = provider_of(a)
+    return (_field(a, 'kind') == _field(b, 'kind') or _field(a, 'model') == _field(b, 'model')
+            or bool(provider and provider == provider_of(b)))
 
 
 @dataclass(frozen=True)

@@ -533,14 +533,21 @@ class ActionsMixin:
         reserved = {key: self._profile(key, 'review') for key in keys}
         reserving = threading.Lock()
 
+        # Every model a review turn actually runs, fallbacks included, is never the same agent
+        # in effect as an author (ADR 0005, P5-3, #407), at both levels: at level 1 as the
+        # selection reads the implementer (``_implementer_agents``), at level 2 every author.
+        same = authors if level2 else self._implementer_agents(pr)
+
         def allowed_for(key):
             if not level2:
-                return None
+                return lambda candidate: not any(same_agent(candidate, a) for a in same)
 
             def allowed(candidate):
                 # A fallback model must keep the independence the pair was selected for: of
                 # who wrote the code, of the round's other reviewers as their records show
                 # them, and of the reviewers running alongside it in this action.
+                if any(same_agent(candidate, a) for a in same):
+                    return False
                 p = self._profile(key, 'review', candidate)
                 with reserving:
                     others = [q for k, q in reserved.items() if k != key]

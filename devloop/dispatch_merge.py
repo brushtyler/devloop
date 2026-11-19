@@ -144,6 +144,16 @@ class MergeMixin:
         self.log(f'  {head[:12]} conflicts with the base {base[:12]}')
         return {'outcome': 'conflict', 'paths': files[:MAX_LISTED_PATHS]}
 
+    def _implementer_agents(self, pr):
+        """What a level 1 reviewer is compared with (``same_agent``, ADR 0005, P5-3, #407): the
+        profile of the PR's marker, if any, and each model of the agent configured under the
+        implementer's key, if configured; ``[]`` when neither is known."""
+        cfg, implementer = self.cfg, pr.meta['implementer']
+        authors = [p for p in [profile_of(pr.meta)] if p is not None]
+        if implementer in cfg.agents:
+            authors += cfg.agent(implementer).chain()
+        return authors
+
     def _select(self, pr, level):
         """``(reviewers, problem)``: the reviewers ``level`` requires on the PR, in order, or
         none and why.
@@ -157,19 +167,18 @@ class MergeMixin:
         independence cannot be verified.
 
         At both levels a reviewer that is the same agent in effect as the implementer
-        (``same_agent``: the same kind or the same model; at level 2 as any author) is
+        (``same_agent``: the same kind, model or provider; at level 2 as any author) is
         excluded, never by comparing keys (ADR 0005, P5-3, #407): ``claude-implementer`` and
         ``claude-reviewer`` are different keys of the same agent. Nor does an agent that signs
-        with a role app review."""
+        with a role app review. The review turn checks each model it actually runs, fallbacks
+        included, in the same way (``ActionsMixin._do_review``)."""
         cfg, implementer = self.cfg, pr.meta['implementer']
 
         def eligible(key, authors):
             return (key in cfg.agents and not cfg.signs_for_role(key)
                     and not any(same_agent(cfg.agent(key), a) for a in authors))
         if level == 1:
-            authors = [p for p in [profile_of(pr.meta)] if p is not None]
-            if implementer in cfg.agents:
-                authors += cfg.agent(implementer).chain()
+            authors = self._implementer_agents(pr)
             if not authors:
                 return [], (f'non è verificabile che il reviewer sia un agent diverso '
                             f'dall\'implementer della PR (`{implementer}`): il marker non ne '

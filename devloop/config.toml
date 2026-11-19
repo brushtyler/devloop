@@ -456,7 +456,10 @@ retry_own_prs = false
 # [apps.implementer]; the reviewers declare the app of their agent (app = "codex", ...). The
 # keys claude, codex and agy disappear: the records that name them are read as they are, and the
 # models remembered unavailable move to the new keys. Then also
-# review_policy.advisory_reviewer = "claude-reviewer". For example:
+# review_policy.advisory_reviewer = "claude-reviewer". The keys are renamed here, not in the
+# local overlay: the overlay merges tables and cannot remove the old keys, and an old key
+# beside its new one (codex and codex-reviewer, both with [apps.codex]) stops devloop at
+# startup. For example:
 #   implementer = "claude-implementer"
 #   reviewers = ["codex-reviewer", "agy-reviewer"]
 #   [agents.claude-implementer]   (the table of [agents.claude], with app = "implementer")

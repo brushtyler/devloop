@@ -82,13 +82,12 @@ class SupervisionMixin:
     def _supervisor_implemented(self, pr):
         """Whether the supervisor's agent implemented ``pr`` (ADR 0002, principle 4). The agent
         that actually ran is compared, not only the key (``same_agent``, ADR 0005, P5-3, #407):
-        the ``kind`` or the ``model`` of the profile in the PR's marker (of the configured agent
-        the marker names, for a marker without a profile) equal to those of the supervisor, the
-        supervisor actor (``[roles.supervisor]`` as a table, P5-4, #408) or the agent
-        ``roles.supervisor`` names. With an agent key, a PR whose implementer is that key is the
-        supervisor's in any case. A PR whose agent cannot be read counts as the supervisor's, so
-        it goes to the operator. ``provider`` is not compared yet: devloop's agents do not
-        declare one (P5-5)."""
+        the ``kind``, the ``model`` or the provider of the profile in the PR's marker (of the
+        configured agent the marker names, for a marker without a profile) equal to those of the
+        supervisor, the supervisor actor (``[roles.supervisor]`` as a table, P5-4, #408, with the
+        ``provider`` it declares) or the agent ``roles.supervisor`` names. With an agent key, a
+        PR whose implementer is that key is the supervisor's in any case. A PR whose agent
+        cannot be read counts as the supervisor's, so it goes to the operator."""
         cfg = self.cfg
         implementer = pr.meta.get('implementer')
         actor = cfg.supervisor_actor

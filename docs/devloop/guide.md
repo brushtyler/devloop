@@ -839,8 +839,8 @@ stays with the operator, with a comment that says why, when:
   is off by default and turning it on is the operator's decision; off, every escalation on such a
   PR goes to the operator, and one already waiting for the supervisor is refused at its retry
   (`supervisor_refused`). The other classes on such a PR always go to the operator. The PR is
-  the supervisor's agent's when the `kind` or the `model` of its implementer, as the PR's marker
-  records them, is the supervisor's: the supervisor actor's, with `[roles.supervisor]` as a table
+  the supervisor's agent's when the `kind`, the `model` or the provider of its implementer, as
+  the PR's marker records them, is the supervisor's: the supervisor actor's, with `[roles.supervisor]` as a table
   (#408), or the agent's that `roles.supervisor` names (#407, which also counts a PR whose
   implementer is that key). So the check keeps firing when the keys are renamed by role
   ([The supervisor app](reference.md#the-supervisor-app),
