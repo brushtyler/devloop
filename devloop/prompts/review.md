@@ -127,7 +127,7 @@ it. The limit on new findings in later rounds (see "How to classify") does not a
   every other case, which stops the loop until the operator decides. List your blocking findings
   in both cases.
 
-Leave `operator_reason` empty (`""`) with `approve` and `request_changes`.
+Set `operator_reason` to `none` with `approve` and `request_changes`.
 
 Write every human-readable field in $language. Use `line: 0` and an empty `file` when a finding
 has no precise location. List in `checks_performed` what you actually ran or read.

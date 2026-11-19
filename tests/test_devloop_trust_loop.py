@@ -74,7 +74,9 @@ class NormalizeTests(unittest.TestCase):
         self.assertEqual(review.flow_verdict(later), 'request_changes')
 
     def test_a_decision_or_no_reason_stays_a_decision(self):
+        # ``none`` (#441) is the value of the other verdicts: with ``needs_operator``, a decision.
         for raw in (raw_review('needs_operator', human='scelta di prodotto', reason='decision'),
+                    raw_review('needs_operator', human='scelta di prodotto', reason='none'),
                     without_reason(raw_review('needs_operator', human='scelta di prodotto'))):
             with self.subTest(raw=raw.get('operator_reason')):
                 record = norm(raw)
@@ -188,8 +190,12 @@ class ReviewRoundTests(unittest.TestCase):
                     CFG.agent(kind), 'review', 'p', 'review', tmp, 'pr-100')
         for kind in ('claude', 'codex', 'agy'):
             with self.subTest(kind=kind):
-                self.assertEqual(turn(without_reason(raw_review()), kind)['operator_reason'], '')
+                self.assertEqual(turn(without_reason(raw_review()), kind)['operator_reason'],
+                                 'none')
                 self.assertEqual(turn(trust(), kind)['operator_reason'], 'trust_policy')
+                with self.assertRaises(agents.AgentError) as ctx:
+                    turn(raw_review(reason=''), kind)  # no empty value in the enum (#441)
+                self.assertIsInstance(ctx.exception.__cause__, SchemaError)
                 with self.assertRaises(agents.AgentError) as ctx:
                     turn(raw_review(reason='other'), kind)
                 self.assertIsInstance(ctx.exception.__cause__, SchemaError)
