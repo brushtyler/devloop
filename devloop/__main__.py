@@ -857,6 +857,9 @@ def main(argv=None):
             behind = f'pinned copy: not compared with origin/{cfg.base_branch}: {exc}'
         if behind:
             log(behind)
+        failed = pin.failed_line(state)  # #453: why the last auto-pin did not move current
+        if failed:
+            log(failed)
         steps = pin.held(state)  # #462: a step on the host holds the auto-pin
         if steps:
             log(f'auto-pin held: the step on the host of {pin.held_prs(steps)} waits for a pin '

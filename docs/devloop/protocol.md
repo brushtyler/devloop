@@ -537,8 +537,10 @@ The [daily summary](guide.md#daily-summary) (#256) reads only records bound to i
 [`supervision`](#supervision-trace) records of `grant-round`, `grant-budget` and `capacity`
 (#466: the grants of the supervisor of the day, with the caps left their figures record: `left`
 of `cap` for the rounds of the PR, `daily_left` of `daily_cap` for the day), the `review` records
-of a configured reviewer written with its identity (a CI round with the dispatcher's), and the
-`pr` marker of a PR opened by the implementer it names. It reads the comments of the repository,
+of a configured reviewer written with its identity (a CI round with the dispatcher's), the `pin`
+records the dispatcher signed (#453: the alert on `[run].alert_issue` of an auto-pin that did not
+move `current`, with `sha`, `ref`, `at` and the `reason` the alert shows, never a path of the
+host), and the `pr` marker of a PR opened by the implementer it names. It reads the comments of the repository,
 not the native reviews: a round whose reviews are native reviews is counted from its
 [round register](#round-register), once a review turn of it succeeded or its CI was recorded. The
 records of a [fix register](#fix-register) are read one by one, and open no round. On `[report] issue` it writes two kinds of

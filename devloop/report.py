@@ -16,7 +16,11 @@ Days are UTC days:
   ``grant-budget`` and ``capacity`` the dispatcher answered that day, from its ``supervision``
   records, with the time, the issue or PR, the first line of the reason, the outcome and the
   caps left (per PR, or per story for the one extension of its budget, and per day), so that
-  the coordinator verifies them without reading each thread (rule 5).
+  the coordinator verifies them without reading each thread (rule 5);
+- the auto-pins that did not move ``current`` (#453): the ``pin`` record of the dispatcher's alert
+  on ``[run].alert_issue``, one per commit, with the time, the commit of ``origin/<base_branch>``
+  left behind and the reason the alert shows (the step of the smoke test, or the first line of
+  the failed check).
 
 With ``--publish`` the summary goes to ``[report] issue``, a dedicated issue whose body is the
 dispatcher's: today's summary on top, then the index of the past days. When the day changes the
@@ -109,6 +113,8 @@ class Summary:
     ci: list = field(default_factory=list)           # (time, number, text)
     # (time, number, command, reason, outcome, caps left): the grants of the supervisor (#466)
     grants: list = field(default_factory=list)
+    # (time, number, ref, commit, reason): the auto-pins that did not move ``current`` (#453)
+    pins: list = field(default_factory=list)
     opened: list = field(default_factory=list)       # PR numbers
     merged: list = field(default_factory=list)       # PR numbers
     rounds: int = 0
@@ -117,7 +123,7 @@ class Summary:
 
     def empty(self):
         return not (self.actions or self.merges or self.escalations or self.ci or self.grants
-                    or self.opened or self.merged or self.rounds)
+                    or self.pins or self.opened or self.merged or self.rounds)
 
 
 class Records:
@@ -235,6 +241,12 @@ class Records:
                 if at is not None and _day_of(at) == day:
                     out.merges.append((_hour(at), number, merged['mode'], merged['level']))
                 continue
+            pin = read_marker(body, 'pin')
+            if pin is not None:
+                if _day_of(pin['at']) == day:
+                    out.pins.append((_hour(pin['at']), number, pin['ref'], pin['sha'],
+                                     first_line(pin['reason'])))
+                continue
             supervision = read_marker(body, 'supervision')
             if supervision is not None:
                 if supervision['command'] in GRANT_COMMANDS and _day_of(created) == day:
@@ -254,7 +266,7 @@ class Records:
             if _day_of(merged) == day and number not in by_devloop:
                 out.merges.append((_hour(merged), number, None, None))
         out.merged = sorted(merged_numbers | by_devloop)
-        for rows in (out.actions, out.merges, out.escalations, out.ci, out.grants):
+        for rows in (out.actions, out.merges, out.escalations, out.ci, out.grants, out.pins):
             rows.sort(key=lambda row: (row[0], row[1]))
         return out
 
@@ -338,6 +350,11 @@ def _cell(value):
     return str(value).replace('|', '\\|').replace('\n', ' ')
 
 
+def _code(value):
+    """``value`` inside a code span: no backtick, no line break."""
+    return str(value).replace('`', "'").replace('\n', ' ')
+
+
 def render(summary):
     """The summary in Markdown, without heading."""
     if summary.empty():
@@ -375,6 +392,13 @@ def render(summary):
         for at, number, command, reason, outcome, left in summary.grants:
             parts.append(f'| {at} | #{number} | `{command}` | {_cell(reason)} '
                          f'| {_cell(outcome)} | {_cell(left)} |')
+        parts.append('')
+    if summary.pins:
+        parts += ['### Pin automatico non riuscito', '']
+        for at, number, ref, sha, reason in summary.pins:
+            parts.append(f'- {at} #{number}: `{_code(ref)}` al commit `{sha[:12]}` non è '
+                         'fissato, la copia in esecuzione resta indietro. Motivo: '
+                         f'`{_code(reason)}`')
         parts.append('')
 
     def listed(numbers):

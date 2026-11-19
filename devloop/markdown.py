@@ -488,6 +488,17 @@ def _valid_report(r):
             and isinstance(r.get('open', False), bool))
 
 
+def _valid_pin(p):
+    """An auto-pin that did not move ``current`` (#453), in the alert on ``[run].alert_issue``:
+    the commit of ``ref`` it resolved, when (``at``, ISO 8601 UTC) and why, as the alert shows it
+    (``reason``: the step of the smoke test, or the first line of the failed check, without
+    absolute paths). The daily summary reads it."""
+    return (isinstance(p.get('sha'), str) and _SHA.fullmatch(p['sha']) is not None
+            and isinstance(p.get('ref'), str) and bool(p['ref'])
+            and isinstance(p.get('reason'), str)
+            and isinstance(p.get('at'), str) and _DAY.match(p['at']) is not None)
+
+
 def _valid_conclave(c):
     """The conclave on a block (#141): its structure is checked by ``conclave.valid_record``,
     imported here because that module builds its comments with this one."""
@@ -530,7 +541,7 @@ _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy':
           'closed': _valid_closed, 'cycle': _valid_cycle, 'recheck': _valid_recheck,
           'report': _valid_report,
           'receipt': _valid_pr_receipt, 'conclave': _valid_conclave,
-          'advisory': _valid_advisory, 'story': _valid_story}
+          'advisory': _valid_advisory, 'story': _valid_story, 'pin': _valid_pin}
 
 
 def read_marker(text, kind):
