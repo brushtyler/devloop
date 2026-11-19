@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Prepara l'utente degli agent (#415): l'utente di sistema con cui devloop avvia le CLI degli
 # agent e i test, che non legge le chiavi delle app né lo state_dir. Crea l'utente, le sue
-# directory delle CLI, le ACL (attraversamento della home di devloop, worktree e directory
-# condivisa scrivibili, nessun accesso al resto dello state_dir, sessioni leggibili da devloop) e
-# il sudoers che permette a devloop di avviare solo le CLI, bash e kill come quell'utente.
+# directory delle CLI, le ACL (attraversamento della home di devloop; scrittura solo dentro i
+# worktree e nelle directory che devloop crea per i turni e i test, mai in .git né nelle
+# directory che le contengono; nessun accesso al resto dello state_dir; sessioni leggibili da
+# devloop) e il sudoers che permette a devloop di avviare solo le CLI, bash e kill come
+# quell'utente.
 # Idempotente: si può rieseguire, fa solo ciò che manca. Non scrive segreti. Le CLI, i loro
 # login e la chiave [agent_user] nell'overlay restano passi manuali (ops/README.md).
 # Va eseguito dopo setup-devloop.sh, e di nuovo dopo aver copiato file nello state_dir.
@@ -113,24 +115,44 @@ done
 step "Accesso di $AGENT_USER al clone di devloop"
 # Solo attraversamento della home di devloop: ~/.ghapps, ~/.claude e ~/.codex restano 700.
 ensure_acl "$DEVLOOP_HOME" "u:$AGENT_USER:--x" "user:$AGENT_USER:--x"
-# git scrive nell'indice di ogni worktree, in .git/worktrees/<nome>.
+# I metadati git del clone (.git, .git/worktrees/<nome> compresi) restano solo leggibili: chi li
+# scrive può far eseguire a devloop un hook o una configurazione sua quando committa in un
+# worktree. Le ACL che una versione precedente dava qui all'utente degli agent si tolgono.
 GIT_WORKTREES="$DEVLOOP_CLONE/.git/worktrees"
-[ -d "$GIT_WORKTREES" ] || as_user "$DEVLOOP_USER" mkdir -p "$GIT_WORKTREES"
-SHARED_SPEC="u:$AGENT_USER:rwx,d:u:$AGENT_USER:rwx,d:u:$DEVLOOP_USER:rwx"
-SHARED_ENTRIES=("user:$AGENT_USER:rwx" "default:user:$AGENT_USER:rwx" "default:user:$DEVLOOP_USER:rwx")
-ensure_acl "$GIT_WORKTREES" "$SHARED_SPEC" "${SHARED_ENTRIES[@]}"
+if [ -d "$GIT_WORKTREES" ] \
+    && getfacl -R -p "$GIT_WORKTREES" 2>/dev/null | grep -qE "^(default:)?user:$AGENT_USER:"; then
+    run setfacl -R -b "$GIT_WORKTREES"
+else
+    ok "nessuna ACL di $AGENT_USER in $GIT_WORKTREES"
+fi
 
-step "state_dir: worktree e directory condivisa sì, il resto no"
-for dir in worktrees agent-shared; do
+step "state_dir: dentro i worktree e le directory dei turni sì, il resto no"
+for dir in worktrees agent-shared agent-shared/schemas agent-shared/turns agent-shared/tmp \
+    agent-shared/gh-config; do
     [ -d "$STATE/$dir" ] || as_user "$DEVLOOP_USER" mkdir -p "$STATE/$dir"
 done
 # Lo state_dir: solo attraversamento, e nessun accesso alle voci che vi si creeranno.
 ensure_acl "$STATE" "u:$AGENT_USER:--x,d:u:$AGENT_USER:---" \
     "user:$AGENT_USER:--x" "default:user:$AGENT_USER:---"
-# Worktree e directory condivisa: scrivibili da entrambi, anche ciò che vi si creerà.
-for dir in worktrees agent-shared; do
-    ensure_acl "$STATE/$dir" "$SHARED_SPEC" "${SHARED_ENTRIES[@]}"
+# acl_container DIR: l'utente degli agent entra in DIR ma non lo scrive, così non sostituisce
+# né collega ciò che devloop vi crea; scrive in ciò che vi si creerà (un worktree, la directory
+# di un turno o dei test), che devloop può poi rimuovere.
+acl_container() {
+    ensure_acl "$1" "u:$AGENT_USER:r-x,d:u:$AGENT_USER:rwx,d:u:$DEVLOOP_USER:rwx" \
+        "user:$AGENT_USER:r-x" "default:user:$AGENT_USER:rwx" "default:user:$DEVLOOP_USER:rwx"
+}
+acl_container "$STATE/worktrees"
+# La directory condivisa e gli schemi: solo lettura, anche ciò che vi si creerà.
+for dir in agent-shared agent-shared/schemas; do
+    ensure_acl "$STATE/$dir" "u:$AGENT_USER:r-x,d:u:$AGENT_USER:r-x" \
+        "user:$AGENT_USER:r-x" "default:user:$AGENT_USER:r-x"
 done
+acl_container "$STATE/agent-shared/turns"
+acl_container "$STATE/agent-shared/tmp"
+# La configurazione vuota di gh: devloop non la legge né la scrive.
+ensure_acl "$STATE/agent-shared/gh-config" \
+    "u:$AGENT_USER:rwx,d:u:$AGENT_USER:rwx,d:u:$DEVLOOP_USER:rwx" \
+    "user:$AGENT_USER:rwx" "default:user:$AGENT_USER:rwx" "default:user:$DEVLOOP_USER:rwx"
 # Le voci già presenti (journal, log, overlay, copie fissate, …): nessun accesso.
 if [ -d "$STATE" ]; then
     for entry in "$STATE"/* "$STATE"/.[!.]*; do

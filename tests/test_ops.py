@@ -402,14 +402,20 @@ class DryRunTests(OpsTestCase):
         self.assertEqual(self.tree(), before)
 
     def test_setup_agent_user_dry_run_prints_the_user_the_acls_and_the_sudoers(self):
-        # #415: the agent user traverses the home of devloop and state_dir, writes the worktrees
-        # and the shared directory, and has no access to any other entry of state_dir.
+        # #415: the agent user traverses the home of devloop and state_dir, writes only in the
+        # worktrees and in the directories of its turns and tests, never in .git, and has no
+        # access to any other entry of state_dir.
         devloop = self.home / 'devloop'
         state = devloop / 'ssdlc/.ssdlc/devloop'
         (state / 'logs').mkdir(parents=True)
         (state / 'turn-journal.jsonl').write_text('')
         (state / 'config.local.toml').write_text('[merge]\nmode = "off"\n')
-        (devloop / 'ssdlc/.git/worktrees').mkdir(parents=True)
+        git_worktrees = devloop / 'ssdlc/.git/worktrees'
+        git_worktrees.mkdir(parents=True)
+        # The ACL an earlier version gave the agent user on .git/worktrees, nothing elsewhere.
+        self.shim('getfacl', f'for a in "$@"; do last=$a; done\n'
+                             f'if [ "$last" = "{git_worktrees}" ]; then '
+                             f'echo "default:user:opsdry-noagent:rwx"; fi')
         params = self.params(DEVLOOP_USER=ME, AGENT_USER='opsdry-noagent')
         before = self.tree()
         done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params', str(params))
@@ -426,9 +432,23 @@ class DryRunTests(OpsTestCase):
                       f'{agent}/.claude/projects', out)
         self.assertIn(f'[dry-run] setfacl -m u:opsdry-noagent:--x\\,d:u:opsdry-noagent:--- '
                       f'{state}\n', out)
-        shared = f'u:opsdry-noagent:rwx\\,d:u:opsdry-noagent:rwx\\,d:u:{ME}:rwx'
-        for path in (state / 'worktrees', state / 'agent-shared', devloop / 'ssdlc/.git/worktrees'):
-            self.assertIn(f'[dry-run] setfacl -m {shared} {path}\n', out)
+        # The agent user enters the directories that hold the worktrees and the directories of
+        # the turns and of the tests without writing them (1/codex/R1-2), and writes in what
+        # is created there; the shared directory and the schemas are read-only.
+        container = f'u:opsdry-noagent:r-x\\,d:u:opsdry-noagent:rwx\\,d:u:{ME}:rwx'
+        shared = state / 'agent-shared'
+        for path in (state / 'worktrees', shared / 'turns', shared / 'tmp'):
+            self.assertIn(f'[dry-run] setfacl -m {container} {path}\n', out)
+        for path in (shared, shared / 'schemas'):
+            self.assertIn(f'[dry-run] setfacl -m u:opsdry-noagent:r-x\\,d:u:opsdry-noagent:r-x '
+                          f'{path}\n', out)
+        self.assertIn(f'[dry-run] setfacl -m u:opsdry-noagent:rwx\\,d:u:opsdry-noagent:rwx'
+                      f'\\,d:u:{ME}:rwx {shared}/gh-config\n', out)
+        # Write access to an existing directory of devloop: the empty gh config only.
+        self.assertEqual(re.findall(r'setfacl -m u:opsdry-noagent:rwx\S* (\S+)', out),
+                         [f'{shared}/gh-config'])
+        # The git metadata: the ACL of an earlier version is removed (1/codex/R1-1).
+        self.assertIn(f'[dry-run] setfacl -R -b {git_worktrees}\n', out)
         for name in ('logs', 'turn-journal.jsonl', 'config.local.toml'):
             self.assertIn(f'[dry-run] setfacl -m u:opsdry-noagent:--- {state / name}\n', out)
         self.assertNotIn(f'u:opsdry-noagent:--- {state / "worktrees"}', out)
@@ -659,13 +679,22 @@ class CheckHostTests(OpsTestCase):
         self.assertIn(f'[dry-run] sudo -u root -H -- {self.agent}/.local/bin/claude --version',
                       out)
         self.assertRegex(out, r'\[dry-run\] sudo .*/scripts/devloop-pinned apps')
-        # The agent user reads neither the keys nor state_dir, and writes the worktrees (#415).
+        # The agent user reads neither the keys nor state_dir (#415).
         for path in (self.devloop / '.ghapps', self.state, self.state / 'config.local.toml'):
             self.assertIn(f'[dry-run] sudo -u root -H -- /usr/bin/bash -c ' + r"\!\ \[\ -r\ "
                           + r'\"\$1\"\ \]' + f' _ {path}\n', out)
-        self.assertIn(f'-r\\ \\"\\$1\\"\\ \\] _ {self.state}/turn-journal.jsonl', out)
-        self.assertRegex(out, r'\[dry-run\] sudo -u root -H -- /usr/bin/bash -c .*-w.* _ '
-                              + re.escape(f'{self.state}/worktrees'))
+        self.assertIn(r'\!\ \[\ -x\ \"\$1\"\ \]' + f' _ {self.devloop}/.ghapps\n', out)
+        # Every other entry of state_dir is neither read nor entered (1/codex/R1-3).
+        for name in ('run.log', 'current', 'config.local.toml'):
+            self.assertRegex(out, r'\[dry-run\] sudo -u root -H -- /usr/bin/bash -c .*-r.*-x.* _ '
+                                  + re.escape(f'{self.state}/{name}') + '\n')
+        # It enters the directories of the worktrees and of the turns without writing them,
+        # and writes nothing in .git (1/codex/R1-1, 1/codex/R1-2).
+        for name in ('worktrees', 'agent-shared', 'agent-shared/turns', 'agent-shared/tmp',
+                     'agent-shared/schemas'):
+            self.assertRegex(out, r'\[dry-run\] sudo -u root -H -- /usr/bin/bash -c .*\\!\\ '
+                                  r'\\\[\\ -w.* _ ' + re.escape(f'{self.state}/{name}') + '\n')
+        self.assertRegex(out, r'-writable.* _ ' + re.escape(f'{self.devloop}/ssdlc/.git') + '\n')
         self.assertIn(f'ok: {self.state}/config.local.toml imposta [agent_user] name = "root"',
                       out)
         self.assertEqual(self.mutating_calls(), [])

@@ -13,7 +13,7 @@ import time
 from contextlib import nullcontext
 from pathlib import Path
 
-from .agentuser import SHARED_DIR
+from .agentuser import SHARED_DIR, TMP, SharedDir
 
 # The opening and closing lines git writes around a conflict (`=======` alone also underlines
 # Markdown and reST headings, so it is not a reliable sign).
@@ -146,6 +146,25 @@ def git_config_env(pairs):
     return env
 
 
+def _with_git_config(env, pairs):
+    """``env`` with ``pairs`` applied after the ``GIT_CONFIG_*`` entries it already has."""
+    try:
+        count = max(int(env.get('GIT_CONFIG_COUNT') or 0), 0)
+    except ValueError:
+        count = 0
+    env = dict(env)
+    for i, (key, value) in enumerate(pairs, start=count):
+        env[f'GIT_CONFIG_KEY_{i}'] = key
+        env[f'GIT_CONFIG_VALUE_{i}'] = value
+    env['GIT_CONFIG_COUNT'] = str(count + len(pairs))
+    return env
+
+
+# Applied to every git command the dispatcher runs in a worktree (#415), over every config file:
+# no hook and no fsmonitor program runs, whatever a config says.
+WORKTREE_GIT_CONFIG = (('core.hooksPath', os.devnull), ('core.fsmonitor', 'false'))
+
+
 def _identity_env(author):
     """Variables that make ``author`` (``{name, email}``) both author and committer of one git
     command, or None for the ambient identity."""
@@ -170,8 +189,16 @@ class Workspace:
     one.
 
     ``agent_user`` (``agentuser.AgentUser``, #415), if given, runs the test command as that user,
-    and kills it as that user on a timeout; its private temporary directories are then in
-    ``<state_dir>/agent-shared/tmp``, which that user can write."""
+    and kills it as that user on a timeout; its private temporary directories are then new
+    directories of ``<state_dir>/agent-shared/tmp`` (``agentuser.SharedDir.new_dir``), which
+    that user can write.
+
+    The git commands run in a worktree (``cwd`` in :attr:`root`) never take the repository
+    from the worktree itself (#415): what an agent can change there, the ``.git`` file of the
+    worktree included, could point git to a configuration or a hook of its own, which the
+    dispatcher's user would then run. ``GIT_DIR``, ``GIT_COMMON_DIR`` and ``GIT_WORK_TREE`` are
+    set to the metadata of the repository (:meth:`common_dir`) the dispatcher created with
+    ``git worktree add``, and ``WORKTREE_GIT_CONFIG`` turns hooks and fsmonitor off."""
 
     def __init__(self, repo_root, state_dir, base_branch, run=subprocess.run, test_env=None,
                  private_tmp=False, agent_user=None):
@@ -182,8 +209,10 @@ class Workspace:
         self._test_env = test_env
         self.private_tmp = private_tmp
         self.agent_user = agent_user
+        self._shared_dir = SharedDir(self.root.parent / SHARED_DIR)
         self._shared = threading.RLock()
         self._read_only = None
+        self._common = None
 
     @property
     def shared_lock(self):
@@ -204,6 +233,76 @@ class Workspace:
                                str((self.repo_root / common).resolve() / 'objects'),
                            'GIT_OPTIONAL_LOCKS': '0'}
 
+    def common_dir(self):
+        """The git directory shared by the worktrees of the repository: ``<repo_root>/.git``,
+        or, when the repository root is itself a linked worktree, the common directory its
+        ``.git`` file leads to. The repository root is the operator's, never an agent's."""
+        if self._common is None:
+            dot = self.repo_root / '.git'
+            common = dot
+            try:
+                if dot.is_file():
+                    text = dot.read_text(encoding='utf-8').strip()
+                    if text.startswith('gitdir:'):
+                        own = self.repo_root / text[len('gitdir:'):].strip()
+                        try:
+                            common = own / (own / 'commondir').read_text(encoding='utf-8').strip()
+                        except FileNotFoundError:
+                            common = own
+            except OSError:
+                pass
+            self._common = Path(os.path.realpath(common))
+        return self._common
+
+    def _worktree_git_dir(self, common, work):
+        """The metadata of the worktree ``work`` in ``<common>/worktrees``: the entry whose
+        ``gitdir`` file, written by ``git worktree add``, names ``<work>/.git``; by default the
+        entry named as the worktree, as git names it. Raises WorkspaceError when its
+        ``commondir`` leads elsewhere than ``common``: git reads the refs from there whatever
+        ``GIT_COMMON_DIR`` says, and the agent user cannot write these metadata
+        (``agentuser.check``), so that only an alteration can do it."""
+        want = os.path.normpath(work / '.git')
+        meta = common / 'worktrees'
+        try:
+            entries = sorted(meta.iterdir())
+        except OSError:
+            entries = []
+        found = meta / work.name
+        for entry in entries:
+            try:
+                named = (entry / 'gitdir').read_text(encoding='utf-8').strip()
+            except OSError:
+                continue
+            if named and os.path.normpath(named) == want:
+                found = entry
+                break
+        try:
+            target = (found / 'commondir').read_text(encoding='utf-8').strip()
+        except FileNotFoundError:
+            return found  # no such worktree: git fails on its own
+        except OSError as exc:
+            raise WorkspaceError(f'the git metadata of {work}: {exc}') from exc
+        if Path(os.path.realpath(found / target)) != common:
+            raise WorkspaceError(f'the git metadata of {work} were altered: {found}/commondir '
+                                 f'leads to {target!r}, not to {common}; refusing to run git')
+        return found
+
+    def _worktree_env(self, cwd):
+        """The git variables of a command run in ``cwd`` (#415): None outside :attr:`root`,
+        otherwise ``GIT_DIR``, ``GIT_COMMON_DIR`` and ``GIT_WORK_TREE`` of the worktree that
+        holds ``cwd``. The worktree is named as a child of the real path of :attr:`root`: a
+        link an agent left in its place is not followed."""
+        try:
+            rel = Path(os.path.abspath(cwd)).relative_to(os.path.abspath(self.root))
+        except ValueError:
+            return None
+        if not rel.parts:
+            return None
+        work = Path(os.path.realpath(self.root)) / rel.parts[0]
+        common = self.common_dir()
+        return {'GIT_DIR': str(self._worktree_git_dir(common, work)),
+                'GIT_COMMON_DIR': str(common), 'GIT_WORK_TREE': str(work)}
+
     def _git(self, *args, cwd=None, check=True, stdin=None, env=None, unset=(), binary=False):
         return self._git_run(*args, cwd=cwd, check=check, stdin=stdin, env=env,
                              unset=unset, binary=binary).stdout
@@ -219,10 +318,15 @@ class Workspace:
             if args[0] not in _READ_GIT:
                 raise WorkspaceError(f'git {args[0]}: not run, the workspace is read-only')
             env = dict(env or {}, **self._read_only)
+        trusted = self._worktree_env(cwd) if cwd is not None else None
+        if trusted is not None:
+            env = dict(env or {}, **trusted)
         kwargs = {}
         if env or unset:
             inherited = {k: v for k, v in os.environ.items() if k not in unset}
             kwargs['env'] = dict(inherited, **(env or {}))
+            if trusted is not None:
+                kwargs['env'] = _with_git_config(kwargs['env'], WORKTREE_GIT_CONFIG)
         try:
             with self._shared if args[:1] and args[0] in _SHARED_GIT else nullcontext():
                 if binary:
@@ -258,13 +362,26 @@ class Workspace:
 
     def _agent_tmp(self):
         """A new private temporary directory the agent user can write (#415), in
-        ``<state_dir>/agent-shared/tmp``: mode ``0770``, so that the named entries of its
-        default ACL apply."""
-        parent = self.root.parent / SHARED_DIR / 'tmp'
-        parent.mkdir(parents=True, exist_ok=True)
-        tmp = tempfile.mkdtemp(prefix='devloop-tests-', dir=parent)
-        os.chmod(tmp, 0o770)
-        return tmp
+        ``<state_dir>/agent-shared/tmp`` (``SharedDir.new_dir``: no link followed, mode
+        ``0770``, so that the named entries of its default ACL apply)."""
+        try:
+            return str(self._shared_dir.new_dir(TMP, 'devloop-tests-'))
+        except OSError as exc:
+            raise WorkspaceError(f'the temporary directory of the tests in '
+                                 f'{self._shared_dir.path}: {exc}') from exc
+
+    def _remove_agent_tmp(self, tmp):
+        """Remove the directory of :meth:`_agent_tmp`, without following links; what the agent
+        user created with a restrictive mode is opened first. Never raises."""
+        name = Path(tmp).name
+        try:
+            self._shared_dir.remove_dir(TMP, name)
+        except OSError:
+            self.agent_user.release(tmp)
+            try:
+                self._shared_dir.remove_dir(TMP, name)
+            except OSError:
+                pass
 
     def _fresh(self, path):
         if path.exists():
@@ -718,7 +835,9 @@ class Workspace:
             except subprocess.TimeoutExpired:
                 return False, f'Test command timed out after {timeout}s'
         finally:
-            if tmp is not None:
-                self._rmtree(tmp, ignore_errors=True)
+            if tmp is not None and user is not None:
+                self._remove_agent_tmp(tmp)
+            elif tmp is not None:
+                shutil.rmtree(tmp, ignore_errors=True)
         tail = '\n'.join((done.stdout + '\n' + done.stderr).strip().splitlines()[-60:])
         return done.returncode == 0, tail

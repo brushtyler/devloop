@@ -18,14 +18,30 @@ The mechanism, chosen by the operator on #415:
   (``kill_group``): the dispatcher's user cannot signal processes of another user;
 - what the agents read or write besides their worktree (the codex final message, the schema of
   the turn, the empty ``gh`` config, the temporary directories of the tests) is in
-  ``<state_dir>/agent-shared``, a directory without secrets;
-- at startup ``check`` refuses to run when the agent user can read ``key_dir``, ``state_dir`` or
-  anything in them but the worktrees and the shared directory, or cannot write those two.
+  ``<state_dir>/agent-shared`` (``SharedDir``), a directory without secrets that the agent user
+  enters but cannot write. The dispatcher creates there, opening every component without
+  following links, the schemas (in ``schemas``, which the agent user cannot write either) and one
+  new directory per turn or test run (in ``turns`` and ``tmp``): the only places of the shared
+  directory the agent user writes. What it wrote is read back without following links, and only
+  from a regular file with a single link;
+- the git commands the dispatcher runs in a worktree take the repository metadata from where the
+  dispatcher put them, never from what the worktree points to, and run no hook
+  (``workspace.Workspace``); the agent user cannot write the repository's ``.git``;
+- at startup ``check`` refuses to run when the agent user can read or enter ``key_dir``, or
+  anything in ``state_dir`` but the worktrees and the shared directory (a directory it can enter
+  without listing it is refused too: its files would be in reach), or can read the overlay; when
+  it can write the repository's ``.git``, the worktrees directory or the fixed directories of the
+  shared one; and when it cannot write the directories made for its turns and test runs.
   ``[agent_user] check = false`` turns it off, for development only.
 """
 
+import contextlib
+import errno
 import os
 import pwd
+import secrets
+import shutil
+import stat
 import subprocess
 from pathlib import Path
 
@@ -37,11 +53,34 @@ KILL = '/usr/bin/kill'
 # In ``state_dir``: the only entries the agent user may reach besides the worktrees.
 SHARED_DIR = 'agent-shared'
 WORKTREES_DIR = 'worktrees'
-# Prints, NUL-terminated, ``r:<path>`` for each path before ``--`` the user can read (a
-# directory: list) and ``w:<path>`` for each path after it the user cannot write and enter.
-_PROBE = ('mode=r; for p; do if [ "$p" = -- ]; then mode=w; continue; fi; '
-          'if [ "$mode" = r ]; then [ -r "$p" ] && printf "r:%s\\0" "$p"; '
-          'else { [ -w "$p" ] && [ -x "$p" ]; } || printf "w:%s\\0" "$p"; fi; done; true')
+# In the shared directory: the schemas the dispatcher writes, the directories of the turns (the
+# codex final message) and of the test runs (TMPDIR), the empty ``gh`` config.
+SCHEMAS = 'schemas'
+TURNS = 'turns'
+TMP = 'tmp'
+GH_CONFIG = 'gh-config'
+# Each argument is ``<kind>:<path>``; prints, NUL-terminated, ``<problem>:<path>`` for each
+# problem found: ``secret``, a path the user must neither read nor enter (r, x); ``list``, one it
+# must not read (r); ``ro``, one it must enter but not write (e, w); ``tree``, one where nothing
+# may be writable (w, the first path found); ``rw``, one it must write and enter (u); ``rd``,
+# one it must read (n).
+_PROBE = r'''out() { printf '%s:%s\0' "$1" "$2"; }
+for a; do
+    k=${a%%:*}; p=${a#*:}
+    case $k in
+        secret) [ -r "$p" ] && out r "$p"; [ -d "$p" ] && [ -x "$p" ] && out x "$p" ;;
+        list) [ -r "$p" ] && out r "$p" ;;
+        ro) [ -w "$p" ] && out w "$p"; { [ -r "$p" ] && [ -x "$p" ]; } || out e "$p" ;;
+        tree) [ -e "$p" ] && find "$p" -writable -printf 'w:%p\0' -quit 2>/dev/null ;;
+        rw) { [ -w "$p" ] && [ -x "$p" ]; } || out u "$p" ;;
+        rd) [ -r "$p" ] || out n "$p" ;;
+    esac
+done
+true'''
+_PROBLEMS = {'r': 'can read', 'x': 'can enter', 'w': 'can write', 'e': 'cannot enter',
+             'u': 'cannot write', 'n': 'cannot read'}
+# A directory opened without following a link in its last component.
+_DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
 class AgentUserError(RuntimeError):
@@ -97,29 +136,149 @@ class AgentUser:
         except (OSError, subprocess.SubprocessError):
             pass
 
-    def probe(self, readable, writable):
-        """``(read, unwritable)``: the paths of ``readable`` the agent user can read, and those
-        of ``writable`` it cannot write and enter. Raises AgentUserError when the probe cannot
-        run as the agent user (no sudo rule, for example)."""
-        argv = self.command([BASH, '-c', _PROBE, 'probe', *map(str, readable), '--',
-                             *map(str, writable)])
+    def probe(self, items):
+        """The problems the agent user has with ``items``, ``(kind, path)`` pairs (``_PROBE``),
+        as ``(problem, path)`` pairs, ``problem`` a key of ``_PROBLEMS``. Raises AgentUserError
+        when the probe cannot run as the agent user (no sudo rule, for example)."""
+        argv = self.command([BASH, '-c', _PROBE, 'probe',
+                             *(f'{kind}:{path}' for kind, path in items)])
         env = self.environment({'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
                                 'LC_ALL': 'C'})
         try:
-            done = self._run(argv, capture_output=True, text=True, timeout=60, env=env)
+            done = self._run(argv, capture_output=True, text=True, timeout=120, env=env)
         except (OSError, subprocess.SubprocessError) as exc:
             raise AgentUserError(f'cannot run commands as {self.name}: {exc}') from exc
         if done.returncode != 0:
             detail = (done.stderr or done.stdout or '').strip()[:500]
             raise AgentUserError(f'cannot run commands as {self.name} through sudo (exit '
                                  f'{done.returncode}): {detail or "no output"}')
-        read, unwritable = [], []
+        found = []
         for item in (done.stdout or '').split('\0'):
-            if item.startswith('r:'):
-                read.append(item[2:])
-            elif item.startswith('w:'):
-                unwritable.append(item[2:])
-        return read, unwritable
+            problem, sep, path = item.partition(':')
+            if sep and problem in _PROBLEMS:
+                found.append((problem, path))
+        return found
+
+
+class UnsafeFile(OSError):
+    """What the agent user left in the shared directory is not a regular file of its own."""
+
+
+class SharedDir:
+    """``path``, the shared directory (``<state_dir>/agent-shared``), as the dispatcher's user
+    writes and reads it (#415). Its parent, ``state_dir``, is the dispatcher's; from there every
+    component is opened without following a link (``O_NOFOLLOW``, relative to the directory
+    opened before it), so that a link or a substitute in any component is refused, not
+    followed. The agent user cannot write the shared directory nor its fixed subdirectories
+    (``ops/host/setup-agent-user.sh``): what the dispatcher creates there, with an exclusive
+    creation, cannot be replaced; the agent user writes only in the directories :meth:`new_dir`
+    makes."""
+
+    MAX_READ = 16 * 1024 * 1024
+
+    def __init__(self, path):
+        self.path = Path(path)
+
+    @contextlib.contextmanager
+    def _dir(self, *parts, create=False):
+        """A descriptor of ``path/<parts>``; ``create``: make the missing directories, mode
+        ``0755`` (the default ACL of their parent applies)."""
+        if create:  # state_dir, the dispatcher's
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            for part in (self.path.name, *parts):
+                if create:
+                    try:
+                        os.mkdir(part, 0o755, dir_fd=fd)
+                    except FileExistsError:
+                        pass
+                inner = os.open(part, _DIR, dir_fd=fd)
+                os.close(fd)
+                fd = inner
+            yield fd
+        finally:
+            os.close(fd)
+
+    def ensure(self, name):
+        """The fixed subdirectory ``name`` (``GH_CONFIG``, for example), created if missing."""
+        with self._dir(name, create=True):
+            pass
+        return self.path / name
+
+    def write(self, sub, name, data):
+        """Create the new file ``sub/name`` with ``data`` (bytes), mode ``0644``: never an
+        existing file nor a link."""
+        with self._dir(sub, create=True) as fd:
+            out = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                          | os.O_CLOEXEC, 0o644, dir_fd=fd)
+            with os.fdopen(out, 'wb') as handle:
+                handle.write(data)
+        return self.path / sub / name
+
+    def new_dir(self, sub, prefix):
+        """A new directory ``sub/<prefix><random>``, mode ``0770``, so that the named entries of
+        the default ACL of ``sub`` apply: the agent user writes there."""
+        with self._dir(sub, create=True) as fd:
+            for _ in range(100):
+                name = f'{prefix}{secrets.token_hex(6)}'
+                try:
+                    os.mkdir(name, 0o770, dir_fd=fd)
+                except FileExistsError:
+                    continue
+                inner = os.open(name, _DIR, dir_fd=fd)
+                try:
+                    os.fchmod(inner, 0o770)  # the umask applies without a default ACL
+                finally:
+                    os.close(inner)
+                return self.path / sub / name
+        raise FileExistsError(errno.EEXIST, f'no free name in {self.path / sub}')
+
+    def read(self, sub, *names, limit=MAX_READ):
+        """The bytes of the file ``sub/<names>``, or None when it does not exist. Raises
+        UnsafeFile when it is not a regular file with a single link (a symbolic link, a hard
+        link to another file, a FIFO) or is larger than ``limit``, OSError when a component is
+        a link or not a directory."""
+        *dirs, name = names
+        try:
+            with self._dir(sub, *dirs) as fd:
+                try:
+                    handle = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                                     | os.O_CLOEXEC, dir_fd=fd)
+                except FileNotFoundError:
+                    return None
+                except OSError as exc:
+                    if exc.errno == errno.ELOOP:
+                        raise UnsafeFile(errno.ELOOP, 'a symbolic link', name) from None
+                    raise
+                with os.fdopen(handle, 'rb') as file:
+                    info = os.fstat(file.fileno())
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        raise UnsafeFile(errno.EPERM, 'not a regular file with a single link',
+                                         name)
+                    data = file.read(limit + 1)
+        except FileNotFoundError:
+            return None
+        if len(data) > limit:
+            raise UnsafeFile(errno.EFBIG, f'larger than {limit} bytes', name)
+        return data
+
+    def remove(self, sub, name):
+        """Remove the file ``sub/name``, if any (a link itself, never its target)."""
+        try:
+            with self._dir(sub) as fd:
+                os.unlink(name, dir_fd=fd)
+        except FileNotFoundError:
+            pass
+
+    def remove_dir(self, sub, name):
+        """Remove the directory ``sub/name`` and what it holds, without following links.
+        Raises OSError when something cannot be removed (``AgentUser.release`` first)."""
+        try:
+            with self._dir(sub) as fd:
+                shutil.rmtree(name, dir_fd=fd)
+        except FileNotFoundError:
+            pass
 
 
 def _entries(path):
@@ -131,26 +290,56 @@ def _entries(path):
         return [path]
 
 
-def check(agent_user, key_dir, state_dir, local_config=None, me=None):
+def check(agent_user, key_dir, state_dir, local_config=None, me=None, git_dir=None):
     """Refuse an agent user that does not isolate (#415). It must be another user than the
-    dispatcher's (``me``, default: the effective user), able to run through sudo, unable to read
-    ``key_dir``, any key in it, ``state_dir`` (to list it), any entry of ``state_dir`` but the
-    worktrees and the shared directory, and the local overlay ``local_config``; and able to
-    write the worktrees and the shared directory. Raises AgentUserError, listing every
-    problem."""
+    dispatcher's (``me``, default: the effective user) and able to run through sudo. It must
+    not read nor enter ``key_dir`` and any entry of ``state_dir`` but the worktrees and the
+    shared directory (refusing to enter covers what they hold, also in a directory it could
+    enter without listing it), nor read the keys, the overlay ``local_config`` and ``state_dir``
+    itself (it only enters it). It must not write anything in ``git_dir`` (the repository's
+    ``.git``), nor the worktrees directory and the fixed directories of the shared one, which
+    it must enter; it must write the directories the dispatcher makes for its turns and test
+    runs, and read the schemas. Raises AgentUserError, listing every problem."""
     me = me if me is not None else pwd.getpwuid(os.geteuid()).pw_name
     if agent_user.name == me:
         raise AgentUserError(f'agent_user.name: {me!r} is the dispatcher\'s own user: agents '
                              'need a user of their own')
     state = Path(state_dir)
     exempt = {state / WORKTREES_DIR, state / SHARED_DIR}
-    secret = _entries(Path(key_dir).expanduser())
-    secret += [p for p in _entries(state) if p not in exempt]
+    items = [('list', state)]
+    items += [('secret', p) for p in _entries(Path(key_dir).expanduser())]
+    items += [('secret', p) for p in _entries(state)[1:] if p not in exempt]
     if local_config:
-        secret.append(Path(local_config))
-    read, unwritable = agent_user.probe(secret, sorted(exempt))
-    problems = [f'{agent_user.name} can read {p}' for p in read]
-    problems += [f'{agent_user.name} cannot write {p}' for p in unwritable]
+        items.append(('secret', Path(local_config)))
+    if git_dir:
+        items.append(('tree', Path(git_dir)))
+    shared = SharedDir(state / SHARED_DIR)
+    items += [('ro', state / WORKTREES_DIR), ('ro', shared.path)]
+    made = []
+    try:
+        try:
+            for sub in (SCHEMAS, TURNS, TMP):
+                shared.ensure(sub)
+                items.append(('ro', shared.path / sub))
+            for sub in (TURNS, TMP):
+                made.append((sub, shared.new_dir(sub, '.check-')))
+                items.append(('rw', made[-1][1]))
+            schema = shared.write(SCHEMAS, f'.check-{secrets.token_hex(6)}.json', b'{}\n')
+            made.append((SCHEMAS, schema))
+            items.append(('rd', schema))
+        except OSError as exc:
+            raise AgentUserError(f'the shared directory {shared.path}: {exc}') from exc
+        found = agent_user.probe(items)
+    finally:
+        for sub, path in made:
+            try:
+                if sub == SCHEMAS:
+                    shared.remove(sub, path.name)
+                else:
+                    shared.remove_dir(sub, path.name)
+            except OSError:
+                pass
+    problems = [f'{agent_user.name} {_PROBLEMS[problem]} {path}' for problem, path in found]
     if problems:
         raise AgentUserError('the agent user does not isolate: ' + '; '.join(problems)
                              + ' (ops/host/setup-agent-user.sh prepares the permissions; '

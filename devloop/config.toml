@@ -221,8 +221,9 @@ interval_minutes = 60
 # `sudo -n -E -u <name>`, so that they cannot read the app keys (key_dir), state_dir nor the
 # local overlay. Empty: they run as the dispatcher's user, as before. The host prepared by
 # ops/host/setup-agent-user.sh sets name = "devloop-agent" in the local overlay. check: at the
-# start of `tick` and `run`, refuse to start when that user can read key_dir or state_dir, or
-# cannot write the worktrees; false only in development.
+# start of `tick` and `run`, refuse to start when that user can read or enter key_dir or
+# state_dir, can write the repository's .git or the directories that hold the worktrees and its
+# turns, or cannot write the directories of its turns; false only in development.
 [agent_user]
 name = ""
 check = true

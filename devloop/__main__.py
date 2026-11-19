@@ -13,7 +13,7 @@ from pathlib import Path
 
 from . import activity, follow, pin, report, runloop, unavailability, watch
 from .agents import AgentRunner, isolated_env
-from .agentuser import SHARED_DIR, WORKTREES_DIR, AgentUser, AgentUserError
+from .agentuser import GH_CONFIG, SHARED_DIR, WORKTREES_DIR, AgentUser, AgentUserError, SharedDir
 from .agentuser import check as check_isolation
 from .apps import DISPATCHER, MERGER, Identities
 from .config import ConfigError, Reloader, load_config
@@ -108,8 +108,12 @@ def build(args):
     # shared directory, the only entry of state_dir besides the worktrees that user reaches.
     agent_user = agent_user_of(cfg)
     shared = state / SHARED_DIR
-    gh_config = shared / 'gh-config' if agent_user else state / 'agent-gh-config'
-    gh_config.mkdir(parents=True, exist_ok=True)
+    if agent_user:
+        state.mkdir(parents=True, exist_ok=True)
+        gh_config = SharedDir(shared).ensure(GH_CONFIG)  # no link followed
+    else:
+        gh_config = state / 'agent-gh-config'
+        gh_config.mkdir(parents=True, exist_ok=True)
     agent_env = agent_environment(cfg, gh_config, agent_user)
     # With parallel actions (#176) each test run gets a temporary directory of its own.
     ws = Workspace(root, cfg.state_dir, cfg.base_branch, test_env=agent_env,
@@ -167,11 +171,13 @@ def agent_user_of(cfg, factory=AgentUser):
         raise ConfigError(str(exc)) from exc
 
 
-def check_agent_user(cfg, state, local_config, agent_user, log=log, me=None):
-    """The startup check of the agent user (#415), before ``tick`` and ``run``: an
-    ``AgentUserError`` when it can read ``key_dir`` (or ``$DEVLOOP_APP_KEY_DIR``), ``state_dir``
-    or the local overlay, or cannot write the worktrees and the shared directory. Nothing to
-    check without an agent user; with ``[agent_user] check = false`` a warning in the log."""
+def check_agent_user(cfg, state, local_config, agent_user, log=log, me=None, git_dir=None):
+    """The startup check of the agent user (#415), before ``tick`` and ``run``
+    (``agentuser.check``): an ``AgentUserError`` when it can read or enter ``key_dir`` (or
+    ``$DEVLOOP_APP_KEY_DIR``) or the entries of ``state_dir``, read the local overlay, write
+    ``git_dir`` (the repository's ``.git``), the worktrees directory or the fixed directories
+    of the shared one, or cannot write the directories of its turns. Nothing to check without
+    an agent user; with ``[agent_user] check = false`` a warning in the log."""
     if agent_user is None:
         return
     if not cfg.agent_user.check:
@@ -181,7 +187,7 @@ def check_agent_user(cfg, state, local_config, agent_user, log=log, me=None):
     for sub in (WORKTREES_DIR, SHARED_DIR):
         (state / sub).mkdir(parents=True, exist_ok=True)
     key_dir = os.environ.get('DEVLOOP_APP_KEY_DIR') or cfg.app_key_dir
-    check_isolation(agent_user, key_dir, state, local_config, me=me)
+    check_isolation(agent_user, key_dir, state, local_config, me=me, git_dir=git_dir)
 
 
 def hold_lock(dispatcher, lock_fd):
@@ -544,10 +550,13 @@ def main(argv=None):
         return
     if args.command in ('tick', 'run'):
         # Before any agent turn (#415): an agent user that can read the keys stops devloop.
-        agent_user = getattr(getattr(dispatcher, 'ws', None), 'agent_user', None)
+        ws = getattr(dispatcher, 'ws', None)
+        agent_user = getattr(ws, 'agent_user', None)
         try:
             if isinstance(agent_user, AgentUser):
-                check_agent_user(cfg, state, args.local_config, agent_user)
+                common = getattr(ws, 'common_dir', None)
+                check_agent_user(cfg, state, args.local_config, agent_user,
+                                 git_dir=common() if callable(common) else None)
         except AgentUserError as exc:
             sys.exit(f'devloop: {exc}')
     with single_instance(state / 'dispatcher.lock') as lock:

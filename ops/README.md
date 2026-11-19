@@ -234,8 +234,13 @@ Crea l'utente `devloop-agent`, i suoi `~/.claude` e `~/.codex` (700) con
 - `devloop-agent` attraversa soltanto la home di `devloop` (`--x`) e lo `state_dir` (`--x`), e
   non ha accesso a nessuna voce dello `state_dir` (journal, log, overlay, copie fissate), né a
   quelle che vi si creeranno (ACL di default `d:u:devloop-agent:---`);
-- `state_dir/worktrees`, `state_dir/agent-shared` e `.git/worktrees` del clone sono scrivibili
-  da entrambi gli utenti, anche ciò che vi si creerà (ACL di default);
+- `devloop-agent` entra in `state_dir/worktrees`, `state_dir/agent-shared/turns` e
+  `state_dir/agent-shared/tmp` ma non li scrive, e scrive in ciò che devloop vi crea (i worktree,
+  le directory dei turni e dei test; ACL di default anche per `devloop`); `agent-shared` e
+  `agent-shared/schemas` sono di sola lettura, `agent-shared/gh-config` è scrivibile;
+- i metadati git del clone (`.git`) restano di sola lettura per `devloop-agent`: chi li scrive
+  può far eseguire a devloop un hook suo quando committa. Lo script toglie le ACL che una
+  versione precedente dava a `devloop-agent` su `.git/worktrees`;
 - `devloop` legge le sessioni di `devloop-agent` (`~/.claude/projects`, `~/.codex/sessions`), per
   il controllo di stallo e `devloop follow`.
 
@@ -248,8 +253,9 @@ gruppo di processi a un timeout), con l'ambiente che devloop prepara (`SETENV`) 
 
 Poi l'**overlay** deve avere `[agent_user] name = "devloop-agent"` (lo script lo segnala se
 manca; `check-host.sh` lo considera un errore). All'avvio di `tick` e `run` devloop verifica come
-`devloop-agent` che non legga `key_dir`, `state_dir` né l'overlay e che scriva nei worktree, e
-altrimenti non parte.
+`devloop-agent` che non legga né attraversi `key_dir` e le voci private dello `state_dir`, che non
+legga l'overlay, che non scriva nulla in `.git` né le directory che contengono worktree e turni,
+e che scriva nelle directory dei suoi turni; altrimenti non parte.
 
 Le **CLI** e i loro login non sono automatizzati: il login è interattivo e ogni fornitore ha il
 suo installatore. Tutto come utente `devloop-agent` (`sudo -iu devloop-agent`), con gli
@@ -329,8 +335,10 @@ ogni chiave `*.pem` con mode 600 e del suo utente, una chiave per app attesa e, 
 del supervisore, nessuna chiave in più; l'ACL `user:supervisor:--x` sulla home di devloop e
 nessuna ACL per il supervisore sulle sue directory private; che il supervisore legga `run.log`;
 i due sudoers (440, root, accettati da `visudo`, uguali a quelli generati); che `devloop-agent` non
-legga `key_dir`, lo `state_dir`, l'overlay e il journal, che scriva in `worktrees` e
-`agent-shared`, e che l'overlay abbia `[agent_user] name = "devloop-agent"`; l'unità (uguale a
+legga `key_dir`, lo `state_dir` e l'overlay, non attraversi `key_dir`, non legga né attraversi le
+altre voci dello `state_dir`, entri senza scriverle in `worktrees`, `agent-shared`,
+`agent-shared/schemas`, `agent-shared/turns` e `agent-shared/tmp`, non scriva nulla in `.git`,
+e che l'overlay abbia `[agent_user] name = "devloop-agent"`; l'unità (uguale a
 quella generata, `KillMode=mixed`) e lo stato del servizio; `--version` di ogni CLI come
 `devloop-agent`; e `devloop apps`
 (ogni app, la sua installazione e i suoi permessi). Con `--dry-run` stampa, senza eseguirle, le

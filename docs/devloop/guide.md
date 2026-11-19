@@ -1665,17 +1665,26 @@ dispatcher's user, as before ([reference](reference.md#agent-user)).
   (`!use_pty`), so that the command stays in the process group devloop started.
 - A timeout or an `abort` of the [stall check](#stalled-agents) kills that process group as
   `devloop-agent`: the `devloop` user cannot signal another user's processes.
-- The worktrees (`state_dir/worktrees`) and a shared directory without secrets
-  (`state_dir/agent-shared`: the empty `gh` config, the schema and the final message of codex for
-  each turn, the temporary directories of the tests) are writable by both users, through default
-  ACLs. Every other entry of `state_dir` has an ACL entry that gives `devloop-agent` no access,
-  and `state_dir` itself only lets it through to those two.
+- `devloop-agent` writes only inside the worktrees (`state_dir/worktrees/<name>`) and in the
+  directories devloop creates for each turn and test run in a shared directory without secrets
+  (`state_dir/agent-shared`: the empty `gh` config, the schema and the final message of codex
+  for each turn, the temporary directories of the tests), through default ACLs. It enters but
+  cannot write `worktrees`, `agent-shared` and the directories in it that hold what devloop
+  creates, so that it cannot replace them with a link; devloop also opens those paths without
+  following links, and reads the final message of codex only from a regular file. Every other
+  entry of `state_dir` has an ACL entry that gives `devloop-agent` no access, and `state_dir`
+  itself only lets it through to those two.
+- `devloop-agent` cannot write the clone's `.git`. devloop's own git commands in a worktree take
+  the repository from `.git`, not from the worktree's `.git` file, and run no hook: an agent
+  cannot make devloop run a hook or a configuration of its own.
 - `devloop` reads the session transcripts in the home of `devloop-agent` (for the stall check and
   `devloop follow`) through read ACLs on `~/.claude/projects` and `~/.codex/sessions`.
-- At the start of `tick` and `run` devloop checks, as `devloop-agent`, that it cannot read
-  `key_dir` (or `$DEVLOOP_APP_KEY_DIR`), the keys in it, `state_dir`, its entries other than the
-  two above and the overlay, and that it can write those two; otherwise it refuses to start and
-  says what is wrong. `[agent_user] check = false` skips the check, in development only.
+- At the start of `tick` and `run` devloop checks, as `devloop-agent`, that it can neither read
+  nor enter `key_dir` (or `$DEVLOOP_APP_KEY_DIR`) and the entries of `state_dir` other than the
+  two above, that it cannot read the keys, `state_dir` and the overlay, that it can write
+  nothing in `.git` nor the directories that hold the worktrees and its turns, and that it can
+  write the directories devloop makes for its turns; otherwise it refuses to start and says
+  what is wrong. `[agent_user] check = false` skips the check, in development only.
 
 `ops/host/setup-agent-user.sh` creates the user, its directories, the ACLs and the sudoers rule;
 `ops/host/check-host.sh` verifies them ([ops guide](../../ops/README.md)). Run the setup script

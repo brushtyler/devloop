@@ -20,7 +20,7 @@ from unittest import mock
 import devloop.__main__ as cli
 from devloop import agents, agentuser, config
 from devloop.agentuser import AgentUser, AgentUserError
-from devloop.workspace import Workspace, run_in_group
+from devloop.workspace import Workspace, WorkspaceError, run_in_group
 
 CFG = dataclasses.replace(config.load_config(), max_parallel_actions=1)
 ME = getpass.getuser()
@@ -120,10 +120,14 @@ class LaunchTests(unittest.TestCase):
         self.assertEqual(result['verdict'], 'approve')
         argv = seen['argv']
         self.assertEqual(argv[:7], SUDO + ['codex'])
-        for flag in ('-o', '--output-schema'):
-            path = Path(argv[argv.index(flag) + 1])
-            self.assertEqual(path.parent, shared / 'turns', flag)
-            self.assertFalse(path.exists(), flag)  # removed after the turn
+        out = Path(argv[argv.index('-o') + 1])
+        schema = Path(argv[argv.index('--output-schema') + 1])
+        # The schema in the directory the agent user cannot write, the final message in a new
+        # directory of the turn; both removed after the turn.
+        self.assertEqual(schema.parent, shared / 'schemas')
+        self.assertEqual((out.parent.parent, out.name), (shared / 'turns', 'last.json'))
+        for path in (schema, out.parent):
+            self.assertFalse(path.exists(), path)
         self.assertEqual(seen['schema']['type'], 'object')
         self.assertEqual(seen['env'], {'HOME': '/home/devloop-agent'})
         # The final message stays in the log of the turn, the CLI's name in its first line.
@@ -163,6 +167,221 @@ class LaunchTests(unittest.TestCase):
         self.assertEqual(tmp.parent, self.tmp / 'state/agent-shared/tmp')
         self.assertEqual(seen['mode'], 0o770)
         self.assertFalse(tmp.exists())
+
+
+def git(*args, cwd):
+    """git for the set-up, without the config of the machine."""
+    env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1',
+               GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@x', GIT_COMMITTER_NAME='t',
+               GIT_COMMITTER_EMAIL='t@x')
+    return subprocess.run(['git', *args], cwd=cwd, check=True, capture_output=True, text=True,
+                          env=env).stdout
+
+
+class GitMetadataTests(unittest.TestCase):
+    """1/codex/R1-1: an agent rewrites the metadata a worktree points to (its ``.git`` file, or
+    ``commondir`` of the worktree's entry in ``.git/worktrees``) so that git takes a config of
+    its own, with a hook, when the dispatcher commits. The dispatcher's git commands take the
+    metadata from the repository and run no hook."""
+
+    def setUp(self):
+        self.tmp = Path(os.path.realpath(tempfile.mkdtemp(prefix='agent-user-git-')))
+        self.addCleanup(lambda: subprocess.run(['rm', '-rf', str(self.tmp)]))
+        self.repo = self.tmp / 'repo'
+        self.repo.mkdir()
+        git('init', '-q', '-b', 'main', cwd=self.repo)
+        (self.repo / 'a.txt').write_text('a\n')
+        git('add', 'a.txt', cwd=self.repo)
+        git('-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'base', cwd=self.repo)
+        self.ws = Workspace(self.repo, '.state', 'main')
+        self.wt = self.ws.path('pr-1')
+        git('worktree', 'add', '-q', '-b', 'agent/pr-1', str(self.wt), cwd=self.repo)
+        self.meta = self.repo / '.git/worktrees/pr-1'
+        # What the agent prepares: a copy of the repository metadata whose config runs a hook
+        # and an fsmonitor program of its own.
+        self.marker = self.tmp / 'ran-as-the-dispatcher'
+        self.evil = self.tmp / 'agent/common'
+        self.evil.parent.mkdir()
+        subprocess.run(['cp', '-a', str(self.repo / '.git'), str(self.evil)], check=True)
+        hooks = self.tmp / 'agent/hooks'
+        hooks.mkdir()
+        for name in ('pre-commit', 'post-commit', 'fsmonitor'):
+            script = hooks / name
+            script.write_text(f'#!/bin/sh\necho {name} >> {self.marker}\nexit 0\n')
+            script.chmod(0o755)
+        git('config', '--file', str(self.evil / 'config'), 'core.hooksPath', str(hooks),
+            cwd=self.tmp)
+        git('config', '--file', str(self.evil / 'config'), 'core.fsmonitor',
+            str(hooks / 'fsmonitor'), cwd=self.tmp)
+        self.author = {'name': 'x-agent[bot]', 'email': 'e@x'}
+
+    def attack_commondir(self):
+        (self.meta / 'commondir').write_text(f'{self.evil}\n')
+
+    def attack_dot_git(self):
+        own = self.tmp / 'agent/worktree'
+        subprocess.run(['cp', '-a', str(self.meta), str(own)], check=True)
+        (own / 'commondir').write_text(f'{self.evil}\n')
+        (self.wt / '.git').write_text(f'gitdir: {own}\n')
+
+    def assert_the_hook_runs_from_the_worktree(self):
+        """The attack works on git as discovered from the worktree, as the dispatcher ran it."""
+        git('commit', '-q', '--allow-empty', '-m', 'x', cwd=self.wt)
+        self.assertTrue(self.marker.exists())
+
+    def test_a_worktree_pointing_elsewhere_runs_no_hook_of_the_agent(self):
+        self.attack_dot_git()
+        (self.wt / 'b.txt').write_text('b\n')
+        self.assertTrue(self.ws.has_changes(self.wt))
+        head = self.ws.commit_all(self.wt, 'msg', author=self.author)
+        self.assertFalse(self.marker.exists())
+        # The commit is in the repository, on the branch of the worktree.
+        self.assertEqual(git('rev-parse', 'agent/pr-1', cwd=self.repo).strip(), head)
+        self.assertEqual(git('show', '-s', '--format=%an %s', head, cwd=self.repo).strip(),
+                         'x-agent[bot] msg')
+        self.assertFalse(self.ws.has_changes(self.wt))
+        self.assert_the_hook_runs_from_the_worktree()
+
+    def test_altered_metadata_of_the_worktree_stop_every_git_command(self):
+        # The agent user cannot write .git (the startup check); were the commondir of the
+        # worktree's entry altered all the same, git would read the refs there.
+        base = git('rev-parse', 'agent/pr-1', cwd=self.repo).strip()
+        self.attack_commondir()
+        (self.wt / 'b.txt').write_text('b\n')
+        for command in (lambda: self.ws.has_changes(self.wt),
+                        lambda: self.ws.commit_all(self.wt, 'msg', author=self.author),
+                        lambda: self.ws.push(self.wt, 'agent/pr-1')):
+            with self.assertRaisesRegex(WorkspaceError, 'were altered'):
+                command()
+        self.assertFalse(self.marker.exists())
+        self.assertEqual(git('rev-parse', 'agent/pr-1', cwd=self.repo).strip(), base)
+        self.assert_the_hook_runs_from_the_worktree()
+
+    def test_no_hook_runs_even_from_the_repository_config(self):
+        # Hooks are off for every git command in a worktree, the repository's own included.
+        hooks = self.repo / '.git/hooks'
+        (hooks / 'pre-commit').write_text(f'#!/bin/sh\ntouch {self.marker}\n')
+        (hooks / 'pre-commit').chmod(0o755)
+        (self.wt / 'b.txt').write_text('b\n')
+        self.ws.commit_all(self.wt, 'msg', author=self.author)
+        self.assertFalse(self.marker.exists())
+
+    def test_the_metadata_are_found_also_under_another_name(self):
+        # git names the entry pr-11 when pr-1 is taken: the entry is the one naming the worktree.
+        other = self.ws.path('x/pr-1')
+        git('worktree', 'add', '-q', '--detach', str(other), cwd=self.repo)
+        entries = sorted(p.name for p in (self.repo / '.git/worktrees').iterdir())
+        self.assertEqual(len(entries), 2)
+        env = self.ws._worktree_env(self.wt)
+        self.assertEqual(env, {'GIT_DIR': str(self.meta),
+                               'GIT_COMMON_DIR': str(self.repo / '.git'),
+                               'GIT_WORK_TREE': str(self.wt)})
+        self.assertIsNone(self.ws._worktree_env(self.repo))
+
+
+class SharedDirAttackTests(unittest.TestCase):
+    """1/codex/R1-2: links the agent user leaves in the shared directory. The dispatcher never
+    writes through them, nor reads through them what it then logs or parses."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='agent-user-links-'))
+        self.addCleanup(lambda: subprocess.run(['rm', '-rf', str(self.tmp)]))
+        self.state = self.tmp / 'state'
+        self.shared = self.state / 'agent-shared'
+        self.shared.mkdir(parents=True)
+        self.logs = self.state / 'logs'
+        # A directory and a key of the dispatcher's user: what the agent aims at.
+        self.private = self.tmp / 'ghapps'
+        self.private.mkdir()
+        self.key = self.private / 'dispatcher.pem'
+        self.key.write_text(json.dumps(review()))  # it would even parse as the final message
+        self.user = AgentUser('devloop-agent', home='/home/devloop-agent',
+                              run=lambda argv, **kw: SimpleNamespace(returncode=0, stdout='',
+                                                                     stderr=''))
+
+    def runner(self, fake_run):
+        return agents.AgentRunner(self.logs, 10, run=fake_run, agent_user=self.user,
+                                  shared_dir=self.shared)
+
+    def codex(self, final):
+        """A codex run that leaves ``final(path)`` where it should write its final message."""
+        def fake_run(argv, **kw):
+            final(Path(argv[argv.index('-o') + 1]))
+            return SimpleNamespace(returncode=0, stdout='', stderr='')
+        return fake_run
+
+    def logged(self):
+        return ''.join(p.read_text() for p in self.logs.glob('*') if p.is_file())
+
+    def test_a_link_in_a_component_of_the_path_is_refused(self):
+        for sub in ('schemas', 'turns'):
+            with self.subTest(sub=sub):
+                link = self.shared / sub
+                link.symlink_to(self.private)
+                runner = self.runner(self.codex(lambda out: out.write_text('{}')))
+                with self.assertRaisesRegex(agents.AgentError, 'Too many levels|Not a directory'):
+                    runner.run(CFG.agent('codex'), 'review', 'p', 'review', self.tmp, 'pr-1')
+                self.assertEqual(sorted(p.name for p in self.private.iterdir()),
+                                 ['dispatcher.pem'])
+                link.unlink()
+
+    def test_the_shared_directory_itself_as_a_link_is_refused(self):
+        self.shared.rmdir()
+        self.shared.symlink_to(self.private)
+        with self.assertRaises(agents.AgentError):
+            self.runner(self.codex(lambda out: None)).run(
+                CFG.agent('codex'), 'review', 'p', 'review', self.tmp, 'pr-1')
+        self.assertEqual(sorted(p.name for p in self.private.iterdir()), ['dispatcher.pem'])
+
+    def test_a_final_message_that_is_a_link_is_not_followed(self):
+        for name, plant in (('symbolic', lambda out: out.symlink_to(self.key)),
+                            ('hard', lambda out: os.link(self.key, out))):
+            with self.subTest(link=name):
+                with self.assertRaisesRegex(agents.AgentError, 'final message refused'):
+                    self.runner(self.codex(plant)).run(
+                        CFG.agent('codex'), 'review', 'p', 'review', self.tmp, f'pr-{name}')
+                self.assertEqual(list(self.logs.glob(f'*pr-{name}*.last.json')), [])
+                self.assertNotIn('approve', self.logged())
+                self.assertTrue(self.key.exists())
+        # The directories of the turns are gone, the links with them, not their targets.
+        self.assertEqual(list((self.shared / 'turns').iterdir()), [])
+        self.assertEqual(list((self.shared / 'schemas').iterdir()), [])
+
+    def test_a_fifo_as_final_message_does_not_block(self):
+        runner = self.runner(self.codex(lambda out: os.mkfifo(out)))
+        with self.assertRaisesRegex(agents.AgentError, 'final message refused'):
+            runner.run(CFG.agent('codex'), 'review', 'p', 'review', self.tmp, 'pr-1')
+
+    def test_the_temporary_directory_of_the_tests_is_never_made_through_a_link(self):
+        (self.shared / 'tmp').symlink_to(self.private)
+        ws = Workspace(self.tmp, 'state', 'main', run=mock.Mock(), private_tmp=True,
+                       agent_user=self.user)
+        with self.assertRaisesRegex(WorkspaceError, 'temporary directory'):
+            ws.run_tests(self.tmp, 'true', 5)
+        self.assertEqual(sorted(p.name for p in self.private.iterdir()), ['dispatcher.pem'])
+
+    def test_the_shared_directory_is_opened_without_following_links(self):
+        shared = agentuser.SharedDir(self.shared)
+        path = shared.write('schemas', 'a.json', b'{}')
+        self.assertEqual(path, self.shared / 'schemas/a.json')
+        with self.assertRaises(FileExistsError):  # never an existing file
+            shared.write('schemas', 'a.json', b'{}')
+        (self.shared / 'schemas/b.json').symlink_to(self.key)
+        with self.assertRaises(FileExistsError):  # nor a link
+            shared.write('schemas', 'b.json', b'{}')
+        self.assertIn('approve', self.key.read_text())
+        made = shared.new_dir('turns', 't-')
+        self.assertEqual(made.stat().st_mode & 0o777, 0o770)
+        (made / 'f').write_text('x')
+        self.assertEqual(shared.read('turns', made.name, 'f'), b'x')
+        self.assertIsNone(shared.read('turns', made.name, 'missing'))
+        nested = made / 'inner'
+        nested.symlink_to(self.private)
+        with self.assertRaises(OSError):  # a link as a directory of the path
+            shared.read('turns', made.name, 'inner', 'dispatcher.pem')
+        shared.remove_dir('turns', made.name)
+        self.assertFalse(made.exists())
+        self.assertTrue(self.key.exists())
 
 
 class TerminationTests(unittest.TestCase):
@@ -228,38 +447,77 @@ class StartupCheckTests(unittest.TestCase):
         (self.state / 'turn-journal.jsonl').write_text('')
         self.calls = []
 
-    def fake(self, readable=(), unwritable=(), returncode=0, stderr=''):
+    def fake(self, problems=(), returncode=0, stderr=''):
+        """An agent user whose probe reports ``problems``, ``(code, path)`` pairs."""
         def run(argv, **kw):
             self.calls.append(argv)
-            out = ''.join(f'r:{p}\0' for p in readable) + ''.join(f'w:{p}\0' for p in unwritable)
+            self.probed = [arg.split(':', 1) for arg in argv[argv.index('probe') + 1:]]
+            out = ''.join(f'{code}:{path}\0' for code, path in problems)
             return SimpleNamespace(returncode=returncode, stdout=out, stderr=stderr)
         return AgentUser('devloop-agent', home='/home/devloop-agent', run=run)
 
+    def kinds(self):
+        """The paths of the last probe by kind."""
+        found = {}
+        for kind, path in self.probed:
+            found.setdefault(kind, []).append(path)
+        return found
+
     def test_a_user_that_can_read_the_key_dir_is_refused(self):
-        user = self.fake(readable=[str(self.keys)])
+        user = self.fake([('r', str(self.keys))])
         with self.assertRaisesRegex(AgentUserError, f'devloop-agent can read {self.keys}'):
             agentuser.check(user, self.keys, self.state, me='devloop')
 
     def test_the_probe_covers_keys_state_and_overlay_but_not_the_worktrees(self):
         user = self.fake()
         overlay = self.state / 'config.local.toml'
-        agentuser.check(user, self.keys, self.state, overlay, me='devloop')
+        git_dir = self.tmp / 'repo/.git'
+        agentuser.check(user, self.keys, self.state, overlay, me='devloop', git_dir=git_dir)
         argv = self.calls[0]
         self.assertEqual(argv[:8], SUDO + ['/usr/bin/bash', '-c'])
-        args = argv[argv.index('probe') + 1:]
-        split = args.index('--')
-        readable, writable = args[:split], args[split + 1:]
+        kinds = self.kinds()
         key = str(next(self.keys.iterdir()))
-        for path in (self.keys, key, self.state, self.state / 'logs',
-                     self.state / 'pinned-abc', self.state / 'turn-journal.jsonl', overlay):
-            self.assertIn(str(path), readable)
-        self.assertEqual(writable, [str(self.state / 'agent-shared'),
-                                    str(self.state / 'worktrees')])
+        # Neither read nor entered: the keys, every entry of state_dir but two, the overlay.
+        self.assertEqual(sorted(kinds['secret']), sorted(str(p) for p in (
+            self.keys, key, self.state / 'logs', self.state / 'pinned-abc',
+            self.state / 'turn-journal.jsonl', overlay)))
+        self.assertEqual(kinds['list'], [str(self.state)])  # entered, never listed
+        self.assertEqual(kinds['tree'], [str(git_dir)])  # nothing in .git writable
+        shared = self.state / 'agent-shared'
+        self.assertEqual(kinds['ro'], [str(p) for p in (
+            self.state / 'worktrees', shared, shared / 'schemas', shared / 'turns',
+            shared / 'tmp')])
+        # The directories of the turns and of the tests are writable; the schemas readable.
+        self.assertEqual([Path(p).parent for p in kinds['rw']], [shared / 'turns', shared / 'tmp'])
+        self.assertEqual([Path(p).parent for p in kinds['rd']], [shared / 'schemas'])
+        # What the check made for the probe is gone.
+        for sub in ('schemas', 'turns', 'tmp'):
+            self.assertEqual(list((shared / sub).iterdir()), [], sub)
 
-    def test_a_user_that_cannot_write_the_worktrees_is_refused(self):
-        user = self.fake(unwritable=[str(self.state / 'worktrees')])
-        with self.assertRaisesRegex(AgentUserError, 'cannot write .*worktrees'):
+    def test_a_user_that_cannot_write_the_directory_of_its_turns_is_refused(self):
+        turn = self.state / 'agent-shared/turns/.check-x'
+        user = self.fake([('u', str(turn))])
+        with self.assertRaisesRegex(AgentUserError, 'cannot write .*turns'):
             agentuser.check(user, self.keys, self.state, me='devloop')
+
+    def test_a_user_that_can_write_the_metadata_of_git_is_refused(self):
+        # 1/codex/R1-1: writable .git/worktrees/<name>/commondir runs a hook as the dispatcher.
+        commondir = self.tmp / 'repo/.git/worktrees/pr-1/commondir'
+        user = self.fake([('w', str(commondir))])
+        with self.assertRaisesRegex(AgentUserError, f'can write {commondir}'):
+            agentuser.check(user, self.keys, self.state, me='devloop',
+                            git_dir=self.tmp / 'repo/.git')
+
+    def test_a_link_in_place_of_the_shared_directory_is_refused(self):
+        # 1/codex/R1-2: the check itself writes there, never through a link.
+        elsewhere = self.tmp / 'elsewhere'
+        elsewhere.mkdir()
+        (self.state / 'agent-shared').rmdir()
+        (self.state / 'agent-shared').symlink_to(elsewhere)
+        with self.assertRaisesRegex(AgentUserError, 'shared directory'):
+            agentuser.check(self.fake(), self.keys, self.state, me='devloop')
+        self.assertEqual(list(elsewhere.iterdir()), [])
+        self.assertEqual(self.calls, [])
 
     def test_the_dispatchers_own_user_is_refused(self):
         with self.assertRaisesRegex(AgentUserError, 'own user'):
@@ -273,21 +531,50 @@ class StartupCheckTests(unittest.TestCase):
 
     def test_the_real_probe_finds_what_the_user_can_read(self):
         # Run as the current user, who owns everything here: the probe must report the keys.
+        if os.geteuid() == 0:
+            self.skipTest('root reads and writes everything')
         user = LocalUser(self.tmp)
+        git_dir = self.tmp / 'repo/.git/worktrees/pr-1'
+        git_dir.mkdir(parents=True)
+        (git_dir / 'commondir').write_text('../..\n')
         with self.assertRaises(AgentUserError) as ctx:
-            agentuser.check(user, self.keys, self.state, me='devloop')
+            agentuser.check(user, self.keys, self.state, me='devloop',
+                            git_dir=self.tmp / 'repo/.git')
         message = str(ctx.exception)
         self.assertIn(f'can read {self.keys}', message)
+        self.assertIn(f'can enter {self.keys}', message)
         self.assertIn('private-key.pem', message)
-        self.assertIn(f'can read {self.state}', message)
+        self.assertIn(f'can read {self.state};', message)
+        self.assertIn(f'can enter {self.state / "logs"}', message)
         self.assertNotIn(f'can read {self.state / "worktrees"}', message)
-        self.assertNotIn('cannot write', message)
+        self.assertIn(f'can write {self.state / "worktrees"}', message)
+        self.assertIn(f'can write {self.state / "agent-shared"};', message)
+        self.assertIn(f'can write {self.tmp / "repo/.git"}', message)
+        self.assertNotIn('cannot', message)
         (self.state / 'worktrees').rmdir()
-        with self.assertRaisesRegex(AgentUserError, 'cannot write .*worktrees'):
-            agentuser.check(user, self.tmp / 'missing', self.tmp / 'missing', me='devloop')
+        with self.assertRaisesRegex(AgentUserError, 'cannot enter .*worktrees'):
+            agentuser.check(user, self.tmp / 'missing', self.state, me='devloop')
+
+    def test_a_directory_it_can_enter_but_not_list_is_refused(self):
+        # 1/codex/R1-3: `logs` cannot be listed, but a file in it is readable by name.
+        if os.geteuid() == 0:
+            self.skipTest('root reads and writes everything')
+        logs = self.state / 'logs'
+        (logs / 'turn.log').write_text('the prompt of a turn\n')
+        logs.chmod(0o300)
+        self.addCleanup(logs.chmod, 0o700)
+        found = LocalUser(self.tmp).probe([('secret', logs)])
+        self.assertEqual(found, [('x', str(logs))])  # not read, but entered: refused
+        self.assertEqual((logs / 'turn.log').read_text(), 'the prompt of a turn\n')
+        user = self.fake([('x', str(logs))])
+        with self.assertRaisesRegex(AgentUserError, f'devloop-agent can enter {logs}'):
+            agentuser.check(user, self.keys, self.state, me='devloop')
+        self.assertIn(['secret', str(logs)], self.probed)
+        logs.chmod(0o200)  # neither listed nor entered: nothing in it is in reach
+        self.assertEqual(LocalUser(self.tmp).probe([('secret', logs)]), [])
 
     def test_devloop_refuses_to_start_and_the_check_can_be_turned_off(self):
-        user = self.fake(readable=[str(self.keys)])
+        user = self.fake([('r', str(self.keys))])
         cfg = dataclasses.replace(CFG, app_key_dir=str(self.keys))
         with mock.patch.dict(os.environ):
             os.environ.pop('DEVLOOP_APP_KEY_DIR', None)
@@ -302,14 +589,17 @@ class StartupCheckTests(unittest.TestCase):
         cli.check_agent_user(cfg, self.state, None, None, me='x')  # no agent user: no check
 
     def test_main_exits_before_any_tick(self):
-        dispatcher = SimpleNamespace(ws=SimpleNamespace(agent_user=self.fake()), tick=mock.Mock())
+        ws = SimpleNamespace(agent_user=self.fake(), common_dir=lambda: Path('/repo/.git'))
+        dispatcher = SimpleNamespace(ws=ws, tick=mock.Mock())
         with mock.patch.object(cli, 'build', return_value=(CFG, self.state, dispatcher)), \
                 mock.patch.object(cli, 'check_agent_user',
-                                  side_effect=AgentUserError('devloop-agent can read /k')):
+                                  side_effect=AgentUserError('devloop-agent can read /k')) as run:
             with self.assertRaises(SystemExit) as ctx:
                 cli.main(['tick'])
         self.assertIn('devloop-agent can read /k', str(ctx.exception.code))
         dispatcher.tick.assert_not_called()
+        # The check covers the repository's .git too (1/codex/R1-1).
+        self.assertEqual(run.call_args.kwargs['git_dir'], Path('/repo/.git'))
 
 
 class ConfigTests(unittest.TestCase):

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Verifica l'installazione di devloop e del supervisore: utenti, directory private (700), chiavi
 # delle app (600, del proprietario giusto, solo quelle attese), ACL sulla home di devloop,
-# sudoers, l'utente degli agent (non legge key_dir né state_dir, scrive nei worktree, è
-# nell'overlay), servizio, CLI degli agent e `devloop apps`. Non cambia nulla.
+# sudoers, l'utente degli agent (non legge key_dir né state_dir, non scrive .git né le directory
+# che contengono worktree e turni, è nell'overlay), servizio, CLI degli agent e `devloop apps`.
+# Non cambia nulla.
 # Esce con 0 se non trova errori, con 1 altrimenti; gli avvisi non contano come errori.
 # Va eseguito come root (sudo): alcune verifiche leggono file degli altri utenti.
 #
@@ -176,12 +177,28 @@ check_sudoers "$SUDOERS_FILE" sudoers-supervisor setup-supervisor.sh
 
 step "Utente degli agent $AGENT_USER (#415)"
 STATE="$DEVLOOP_CLONE/$STATE_DIR"
-for private in "$DEVLOOP_KEY_DIR" "$STATE" "$STATE/config.local.toml" "$STATE/turn-journal.jsonl"; do
+for private in "$DEVLOOP_KEY_DIR" "$STATE" "$STATE/config.local.toml"; do
     check_as "$AGENT_USER" "$AGENT_USER non legge $private" /usr/bin/bash -c '! [ -r "$1" ]' _ "$private"
 done
-for shared in "$STATE/worktrees" "$STATE/agent-shared"; do
-    check_as "$AGENT_USER" "$AGENT_USER scrive in $shared" /usr/bin/bash -c '[ -w "$1" ] && [ -x "$1" ]' _ "$shared"
+check_as "$AGENT_USER" "$AGENT_USER non attraversa $DEVLOOP_KEY_DIR" /usr/bin/bash -c '! [ -x "$1" ]' _ "$DEVLOOP_KEY_DIR"
+# Le voci dello state_dir, tranne i worktree e la directory condivisa: né lette né attraversate,
+# così nemmeno un file in una directory non elencabile è alla sua portata.
+for entry in "$STATE"/* "$STATE"/.[!.]*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    case $(basename "$entry") in worktrees | agent-shared) continue ;; esac
+    check_as "$AGENT_USER" "$AGENT_USER non legge né attraversa $entry" \
+        /usr/bin/bash -c '! [ -r "$1" ] && ! { [ -d "$1" ] && [ -x "$1" ]; }' _ "$entry"
 done
+# Le directory che contengono ciò che devloop crea per gli agent: vi entra ma non le scrive,
+# così non sostituisce né collega quello che devloop vi apre (#415).
+for container in "$STATE/worktrees" "$STATE/agent-shared" "$STATE/agent-shared/schemas" \
+    "$STATE/agent-shared/turns" "$STATE/agent-shared/tmp"; do
+    check_as "$AGENT_USER" "$AGENT_USER entra in $container ma non lo scrive" \
+        /usr/bin/bash -c '[ -r "$1" ] && [ -x "$1" ] && ! [ -w "$1" ]' _ "$container"
+done
+# I metadati git: chi li scrive fa eseguire a devloop un hook suo quando committa.
+check_as "$AGENT_USER" "$AGENT_USER non scrive nulla in $DEVLOOP_CLONE/.git" \
+    /usr/bin/bash -c '[ -z "$(find "$1" -writable -print -quit 2>/dev/null)" ]' _ "$DEVLOOP_CLONE/.git"
 OVERLAY="$STATE/config.local.toml"
 if [ -f "$OVERLAY" ] && python3 - "$OVERLAY" "$AGENT_USER" <<'EOF'
 import sys, tomllib

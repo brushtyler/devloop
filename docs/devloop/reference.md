@@ -1069,19 +1069,38 @@ is in the [guide](guide.md#agent-user) and in the [ops guide](../../ops/README.m
   user, which may signal only its own processes. The sudoers rule sets `!use_pty`, so that the
   command stays in the process group devloop started and the stall check sees its processes.
 - **Files outside the worktree.** What a turn reads or writes besides its worktree is in
-  `<state_dir>/agent-shared`: the empty `gh` config (`gh-config`), the schema of each turn
-  (codex and agy read it from a path) and the final message of codex (`turns/`, removed after the turn; the final message is
-  copied to the turn's log first), the private temporary directories of the tests (`tmp/`, with
-  [parallel actions](#parallel-actions)). Without an agent user nothing changes: the `gh` config
-  stays in `<state_dir>/agent-gh-config`, the final message of codex in `logs/`, the schema in
-  `devloop/schemas/` and the temporary directories in the system's.
+  `<state_dir>/agent-shared`, which the agent user enters but cannot write: the empty `gh` config
+  (`gh-config`), the schema of each turn (`schemas/`, which it cannot write either; codex and agy
+  read it from a path), the final message of codex (`last.json` in a new directory of the turn
+  in `turns/`), the private temporary directories of the tests (a new directory in `tmp/`, with
+  [parallel actions](#parallel-actions)). The agent user writes only in those new directories,
+  which inherit a default ACL; `turns/` and `tmp/` themselves are read-only for it, so it cannot
+  replace what devloop creates there. devloop opens every component of these paths from
+  `state_dir` without following a link (`O_NOFOLLOW`), creates the schema exclusively
+  (`O_EXCL`), reads the final message back only from a regular file with a single link (a link,
+  a hard link or a FIFO fails the turn), copies it to the turn's log and parses that copy, and
+  removes the schema and the directory after the turn. Without an agent user nothing changes:
+  the `gh` config stays in `<state_dir>/agent-gh-config`, the final message of codex in `logs/`,
+  the schema in `devloop/schemas/` and the temporary directories in the system's.
+- **Git metadata.** The git commands devloop runs in a worktree (status, add, commit, merge,
+  push, …) get `GIT_DIR`, `GIT_COMMON_DIR` and `GIT_WORK_TREE` from the repository: the entry of
+  `.git/worktrees` whose `gitdir` names the worktree, never the worktree's own `.git` file, which
+  the agent can rewrite. A `commondir` of that entry leading elsewhere than the repository's
+  `.git` stops the command (git would read the refs there). Every such command runs with
+  `core.hooksPath=/dev/null` and `core.fsmonitor=false`: no hook nor fsmonitor program, not even
+  the repository's. The agent user cannot write `.git`: `worktrees/` is read-only for it, like
+  `turns/`, so a worktree cannot be replaced either.
 - **Startup check.** At the start of `tick` and `run` (not `tick --dry-run` nor `status`), a
-  probe run as the agent user must find that it cannot read `key_dir` (or
-  `$DEVLOOP_APP_KEY_DIR`), any entry of it, `state_dir` (list it), any entry of `state_dir` but
-  `worktrees` and `agent-shared`, and the `--local-config` file, and that it can write and enter
-  `worktrees` and `agent-shared`. The agent user must also differ from the dispatcher's. Otherwise
-  devloop exits, naming each path, before taking the lock. `[agent_user] check = false` skips the
-  probe and logs that it is off: for development only.
+  probe run as the agent user must find that it can neither read nor enter `key_dir` (or
+  `$DEVLOOP_APP_KEY_DIR`) and any entry of `state_dir` but `worktrees` and `agent-shared` (a
+  directory it can enter without listing it fails too: a file in it would be in reach by name),
+  that it cannot read the keys, the `--local-config` file and `state_dir` (list it), and that it
+  can write nothing in the repository's `.git`. It must enter but not write `worktrees`,
+  `agent-shared` and its `schemas`, `turns` and `tmp`; it must write a new directory devloop
+  makes in `turns` and in `tmp`, and read a schema devloop writes. The agent user must also
+  differ from the dispatcher's. Otherwise devloop exits, naming each path, before taking the
+  lock. `[agent_user] check = false` skips the probe and logs that it is off: for development
+  only.
 - **Transcripts.** The stall check and `devloop follow` read the session transcripts in the agent
   user's home.
 
