@@ -232,7 +232,7 @@ names it (a key of the overlay is told so: `set it in the local overlay`):
 
 | Kind | Keys | How it composes |
 |---|---|---|
-| Facts | `test_cmd`, `local_tests`, [`[tests]`](#local-tests), `language`, `priority_labels`, `[docs.map]` | replace the installation's value (`[docs.map]` and `[tests]` merge key by key); the overlay replaces them in turn |
+| Facts | `test_cmd`, `local_tests`, [`[tests]`](#local-tests), `language`, `priority_labels`, `[docs.map]`, `[prompts]` ([data in the prompts](#project-data-in-the-prompts)) | replace the installation's value (`[docs.map]`, `[tests]` and `[prompts]` merge key by key); the overlay replaces them in turn |
 | Restrictions | `protected_paths`, `blocked_labels`, `[review_policy] sensitive_paths` and `sensitive_path_lists`, `[review_policy.zero] checks`, `[merge] operator_only_paths` | only add: the entries of the installation and of the overlay (or the code's default) stay, those of the project file that are not there follow. An empty list removes nothing. `[review_policy.zero] checks` only add to the checks of the installation and the overlay: the project file never turns level 0 on, and a check with none below stops devloop |
 
 Every other key, the trust keys (`repo`, `trusted_users`, `[apps]`, `[merge] mode`, roles, review
@@ -271,6 +271,41 @@ before and after. The trust keys are `repo`, `base_branch`, `state_dir`, `source
 `[delegations]`, `[agent_user]` and `[pin]`. The start records the files the dispatcher was
 built from, as they were read, never a second read of them. Its log says the same. A start whose
 record cannot be written stops devloop.
+
+### Project data in the prompts
+
+The prompts of `devloop/prompts/` are templates of the installation (ADR 0006, R4). The text that
+belongs to one project is data of its [project file](#project-file) (or of the overlay), in the
+`[prompts]` table; the rules around it (permissions, verdicts, what an agent does not do, the
+decisions reserved to the operator) stay in the templates. Each key is optional:
+
+| Key | What the prompts do with it |
+|---|---|
+| `instructions` | What the agents read before an implement, preflight, review, advisory review or conclave turn: a list of Markdown fragments, joined as an English list (`` ['`AGENTS.md`', 'the README section "Developing SSDLC"'] `` gives ``Read `AGENTS.md` and the README section "Developing SSDLC" ``) |
+| `fix_instructions` | The same, before a fix or a sync |
+| `module_test_cmd` | The command that runs one test module, written with a placeholder name for the module (ssdlc's: `python3 -m unittest discover -s tests -p 'test_name.py'`): implement, fix and sync ask to run the pertinent modules one at a time with it, and never the full suite (`test_cmd`) |
+| `module_test_helpers` | The directory of the helpers the test modules import, which that command still lets them import (needs `module_test_cmd`) |
+| `[prompts.adr]` `dir`, `decided`, `open_value`, `open_choice` | The preflight's rule on the ADRs: a decision recorded under the heading `decided` of an ADR in `dir` on the base branch is the operator's and not a gap, while a point the ADR leaves open (`open_value`, `open_choice`: the words that mark a value and a choice still open) settles nothing. The four keys go together, and `dir` must be in `[merge] operator_only_paths`: the rule holds only because the operator alone merges that directory |
+
+A key that is missing drops, whole, the sentence that names it: no instruction to read, no
+command for one module (the agent is still told not to run the full suite), no rule on the ADRs
+(the preflight is then stricter: a decision in an ADR does not settle a gap). Every value is one
+line of text, not empty and without spaces around it; a value that is not, an unknown key, an
+incomplete `[prompts.adr]` or a `dir` outside `operator_only_paths` stops devloop at startup. A
+value is put in the prompt as it is, never read as a template. The installation's
+`devloop/config.toml` has no `[prompts]`.
+
+In a template a sentence of the project is an optional span, `{{?name:text}}`: `text` when the
+value `name` is not empty, nothing when it is; a span alone on its line takes the line with it.
+A span whose value the dispatcher did not give is an error, never a sentence dropped in silence.
+
+**ssdlc's values** are in its project file ([`ops/host/ssdlc/project.toml`](../../ops/host/ssdlc/project.toml)):
+with them the prompts are the same, byte for byte, as before R4, which
+`tests/test_devloop_prompt_data.py` proves against the templates of before R4
+(`tests/fixtures/ssdlc-pre-r4/prompts/`). The text of the trust policy in the review and advisory
+review prompts is the installation's and does not change. On a host, the project file gains the
+`[prompts]` table before the pin of R4
+([ops/host/migrate.md](../../ops/host/migrate.md#dati-di-ssdlc-nei-prompt)).
 
 ### No background work in a turn
 

@@ -455,9 +455,11 @@ sudo -u devloop -H sh -c 'cd ~/widget && PYTHONPATH=~/devloop-source python3 -P 
 ```
 
 Il pin dopo un merge resta spento: un nuovo tag si fissa a mano, con `devloop-pinned
---state-dir … pin <tag>`. I prompt sono ancora quelli di ssdlc (issue R4 dell'ADR 0006); i test
-locali e la lettura della CI seguono `[tests]` del file di progetto (R5): vale quanto sotto per
-`local_tests` e `ci_rerun_unrelated`.
+--state-dir … pin <tag>`. I dati del progetto nei prompt (le istruzioni da leggere, il comando
+di un solo modulo di test, le regole sugli ADR) stanno nella tabella `[prompts]` del file di
+progetto (ADR 0006, R4, [docs/devloop/reference.md](../docs/devloop/reference.md#project-data-in-the-prompts)):
+senza, i prompt tolgono le frasi che li citano. I test locali e la lettura della CI seguono
+`[tests]` del file di progetto (R5): vale quanto sotto per `local_tests` e `ci_rerun_unrelated`.
 
 **devloop nel repository gestito**, come ssdlc:
 
@@ -469,8 +471,9 @@ locali e la lettura della CI seguono `[tests]` del file di progetto (R5): vale q
    - `schemas/`, almeno i file che `review_policy.sensitive_path_lists` elenca: `pin` li estrae e
      rifiuta una copia in cui mancano;
    - `ops/`, per ricreare l'installazione;
-   - un `AGENTS.md` per gli agent: i prompt di `devloop/prompts/` chiedono di leggerlo, e citano la
-     sezione "Developing SSDLC" del README: adattarli al progetto.
+   - le istruzioni per gli agent (per esempio un `AGENTS.md`): i prompt di `devloop/prompts/`
+     chiedono di leggere quelle elencate in `[prompts]` del file di progetto (ADR 0006, R4),
+     senza modificare i prompt.
 2. **Configurare `devloop/config.toml`** ([docs/devloop/reference.md](../docs/devloop/reference.md)
    descrive ogni chiave):
    - `repo`, `base_branch`, `branch_prefix`, `language`, `trusted_users`;

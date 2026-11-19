@@ -33,6 +33,7 @@ import json
 import os
 import re
 import shutil
+import string
 import subprocess
 import sys
 import tempfile
@@ -54,6 +55,9 @@ UNTIL_R6 = ('repo', 'trusted_users', 'apps')
 # The reference of before R3, frozen at its last commit (see the module).
 FROZEN = REPO / 'tests' / 'fixtures' / 'ssdlc-pre-r3'
 FROZEN_COMMIT = '28eaf9455bad6ff52dcbdbc29ecc07d7dde83e2a'
+# The prompt templates of before R4 (ADR 0006), the same as at FROZEN_COMMIT: with R4 the text of
+# ssdlc in them is data of the project file.
+PRE_R4_PROMPTS = REPO / 'tests' / 'fixtures' / 'ssdlc-pre-r4' / 'prompts'
 # devloop/localtests.py of 96b24b83e0e8b63217d956c3766cdc282865c693, the last commit of main
 # before R5 (#424), as it was: the selection of the test modules and the reading of the CI logs
 # with ssdlc's rules in the code.
@@ -101,9 +105,11 @@ def as_json(cfg):
 
 def without_hash(values):
     """``values`` (``as_json``) without the hash of the project file (declared, see the
-    module)."""
+    module), nor the project's data in the prompts (ADR 0006, R4): before R4 that text was in
+    the templates, and the equivalence is that of the rendered prompts (``prompts``)."""
     values = json.loads(json.dumps(values))
     values['review_policy'].pop('project')
+    values.pop('prompts', None)
     return values
 
 
@@ -123,9 +129,16 @@ def strings(value):
     return set()
 
 
-def prompts(cfg):
+def prompts(cfg, templates=None):
+    """The prompts rendered with the values of ``cfg``: by this code, or, with ``templates``,
+    the templates of that directory as the code before R4 rendered them (the reference of
+    before R3, whose prompts are those of before R4: ``tests/test_devloop_prompt_data.py``)."""
     values = dict(repo=cfg.repo, base_branch=cfg.base_branch, test_cmd=cfg.test_cmd,
                   language=cfg.language, docs=context.docs_map_section(cfg.docs.entries))
+    if templates is not None:
+        return {p.stem: string.Template(p.read_text(encoding='utf-8')).safe_substitute(values)
+                for p in templates.glob('*.md')}
+    values.update(context.prompt_values(cfg))
     return {p.stem: context._template(p.stem, **values) for p in context.PROMPT_DIR.glob('*.md')}
 
 
@@ -144,8 +157,12 @@ class EquivalenceTests(unittest.TestCase):
         raw = config.read_toml(FROZEN / 'config.toml')
         self.assertEqual(raw['test_cmd'], 'python3 scripts/run-tests.py')
         self.assertEqual(raw['priority_labels'], ['prerequisito'])
-        # This code reads it as the code of that commit did: the reference of the prompts.
-        self.assertEqual(as_json(self.before), self.frozen['config'])
+        # This code reads it as the code of that commit did: the reference of the prompts. The
+        # project's data in the prompts (R4) is not in that file: its text is in the templates.
+        self.assertEqual(self.before.prompts, config.PromptFacts())
+        values = as_json(self.before)
+        values.pop('prompts')
+        self.assertEqual(values, self.frozen['config'])
         self.assertEqual(self.before.review_policy.version(), self.frozen['policy_version'])
 
     def test_the_values_are_the_same_key_by_key(self):
@@ -194,7 +211,9 @@ class EquivalenceTests(unittest.TestCase):
     def test_the_helper_of_the_other_tests_is_the_reference(self):
         # tests/helpers/ssdlc_project.py rebuilds the configuration of before for the other
         # modules: it is the frozen one, with the overlay keys or without.
-        self.assertEqual(as_json(ssdlc_project.load()), self.frozen['config'])
+        values = as_json(ssdlc_project.load())
+        values.pop('prompts')  # R4: compared through the rendered prompts
+        self.assertEqual(values, self.frozen['config'])
         self.assertEqual(without_hash(as_json(ssdlc_project.load(ssdlc_project.OVERLAY))),
                          without_hash(self.frozen['config']))
 
@@ -218,7 +237,7 @@ class EquivalenceTests(unittest.TestCase):
                          self.frozen['policy_version'])
 
     def test_the_rendered_prompts_are_the_same(self):
-        before, after = prompts(self.before), prompts(self.after)
+        before, after = prompts(self.before, PRE_R4_PROMPTS), prompts(self.after)
         self.assertTrue(before)
         self.assertEqual(after, before)
         self.assertIn('Italian', after['implement'])
@@ -288,7 +307,7 @@ class InstallationTests(unittest.TestCase):
 
     def test_config_toml_sets_no_fact_nor_restriction_of_the_project(self):
         installation = config.read_toml(config.DEFAULT_CONFIG)
-        for key in ('test_cmd', 'local_tests', 'language', 'priority_labels', 'docs'):
+        for key in ('test_cmd', 'local_tests', 'language', 'priority_labels', 'docs', 'prompts'):
             self.assertNotIn(key, installation, key)
         for path in config.PROJECT_RESTRICTIONS:
             node = installation
@@ -441,21 +460,34 @@ class CheckScriptTests(unittest.TestCase):
             (cls.tmp / side / LIST).parent.mkdir(parents=True)
             shutil.copy(REPO / LIST, cls.tmp / side / LIST)
         shutil.copy(FROZEN / 'config.toml', cls.tmp / 'before' / 'devloop' / 'config.toml')
+        # The installation of before R3 had the prompts of before R4, with the text of ssdlc.
+        shutil.rmtree(cls.tmp / 'before' / 'devloop' / 'prompts')
+        shutil.copytree(PRE_R4_PROMPTS, cls.tmp / 'before' / 'devloop' / 'prompts')
         cls.project = cls.tmp / 'project.toml'
         shutil.copy(ssdlc_project.PROJECT, cls.project)
+        # A host already on R3 (R4): the installation of R3, with the configuration of this one
+        # and the prompts of before R4, and its project file, without [prompts].
+        shutil.copytree(cls.tmp / 'after', cls.tmp / 'r3')
+        shutil.rmtree(cls.tmp / 'r3' / 'devloop' / 'prompts')
+        shutil.copytree(PRE_R4_PROMPTS, cls.tmp / 'r3' / 'devloop' / 'prompts')
+        text = ssdlc_project.PROJECT.read_text(encoding='utf-8')
+        start = text.index("# The project's data in the prompts")
+        cls.r3_project = cls.tmp / 'project-r3.toml'
+        cls.r3_project.write_text(text[:start] + text[text.index('\n[merge]\n', start) + 1:],
+                                  encoding='utf-8')
 
     @classmethod
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp)
 
-    def check(self, project=None, overlay=ssdlc_project.OVERLAY, before=None):
-        argv = ['--before', str(self.tmp / 'before'), '--after', str(self.tmp / 'after'),
+    def check(self, project=None, overlay=ssdlc_project.OVERLAY, before=(), before_project=None):
+        argv = ['--before', str(self.tmp / 'before'), *before, '--after', str(self.tmp / 'after'),
                 '--after-project', str(project or self.project), '--root', str(REPO)]
         if overlay:
             argv += ['--after-local', str(overlay)]
-        if before:
+        if before_project:
             # The installation of before is R3 or later: its project file and overlay.
-            argv = ['--before', str(self.tmp / 'after'), '--before-project', str(before),
+            argv = ['--before', str(self.tmp / 'after'), '--before-project', str(before_project),
                     '--before-local', str(ssdlc_project.OVERLAY)] + argv[2:]
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
@@ -544,15 +576,37 @@ class CheckScriptTests(unittest.TestCase):
     def test_the_installation_of_before_may_read_a_project_file(self):
         # As on a host already migrated to R3: before is an installation with its project
         # file (--before-project). The same file on both sides is equivalent.
-        code, out = self.check(before=self.project)
+        code, out = self.check(before_project=self.project)
         self.assertEqual(code, 0, out)
         self.assertIn('equivalent:', out)
         other = self.tmp / 'english-before.toml'
         other.write_text(ssdlc_project.PROJECT.read_text(encoding='utf-8').replace(
             'language = "Italian"', 'language = "English"'), encoding='utf-8')
-        code, out = self.check(before=other)
+        code, out = self.check(before_project=other)
         self.assertEqual(code, 1, out)
         self.assertIn('config language: before "English", after "Italian"', out)
+
+    def test_r4_on_a_host_already_on_r3_is_equivalent(self):
+        # The installation of R3 with its project file, against R4 with [prompts] added: the
+        # same configuration and the same rendered prompts; the data of [prompts] is declared.
+        self.assertNotIn('[prompts]', self.r3_project.read_text(encoding='utf-8'))
+        r3 = ['--before', str(self.tmp / 'r3'), '--before-local', str(ssdlc_project.OVERLAY),
+              '--before-project', str(self.r3_project)]
+        code, out = self.check(before=r3)
+        self.assertEqual(code, 0, out)
+        self.assertIn('equivalent:', out)
+        self.assertIn('prompts.*', out)
+
+    def test_r4_without_prompts_in_the_project_file_differs(self):
+        # Without [prompts] the sentences of ssdlc are dropped: the prompts differ.
+        r3 = ['--before', str(self.tmp / 'r3'), '--before-local', str(ssdlc_project.OVERLAY),
+              '--before-project', str(self.r3_project)]
+        code, out = self.check(self.r3_project, before=r3)
+        self.assertEqual(code, 1, out)
+        for name in ('implement', 'fix', 'sync', 'preflight', 'review', 'advisory',
+                     'conclave_proposal', 'conclave_vote'):
+            self.assertIn(f'prompt {name}: rendered differently', out)
+        self.assertNotIn('config ', out)
 
     def test_a_side_that_does_not_load_stops_the_check(self):
         project = self.tmp / 'bad.toml'

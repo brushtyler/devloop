@@ -6,7 +6,7 @@ You (`$agent`) stopped on this work: $block_description. Your reason is below. T
 will vote on what you write, `APPROVA` or `BLOCCA`, on exactly your text and without revisions.
 
 The working directory is a disposable checkout of commit `$commit`, removed afterwards. Read
-`AGENTS.md`, the README section "Developing SSDLC" and the code and docs the issue touches.
+{{?instructions:$instructions_items and }}the code and docs the issue touches.
 
 ## Your task
 

@@ -6,8 +6,11 @@ operator (#447); each then asks for its own signal to the operator."""
 
 import re
 import unittest
+from types import SimpleNamespace
 
-from devloop.context import PROMPT_DIR, _template
+from devloop.config import PromptFacts
+from devloop.context import PROMPT_DIR, _template, prompt_values
+from helpers import ssdlc_project
 
 PROMPTS = ('review', 'advisory')
 
@@ -269,10 +272,15 @@ class TrustPolicyPromptTest(unittest.TestCase):
         self.assertNotIn('needs_operator', text)
 
     def test_the_rendered_prompts_keep_the_rule_whole(self):
+        # With ssdlc's data in the prompts and without any (ADR 0006, R4): the rule is the
+        # installation's, whatever the project gives.
+        configs = (ssdlc_project.load(), SimpleNamespace(prompts=PromptFacts()))
         for name in PROMPTS:
-            with self.subTest(prompt=name):
-                rendered = _template(name, pr_number=7, repo='o/r', language='italiano')
-                self.assertIn(flat(shared(name)), flat(rendered))
+            for cfg in configs:
+                with self.subTest(prompt=name, data=bool(cfg.prompts.instructions)):
+                    rendered = _template(name, **prompt_values(cfg), pr_number=7, repo='o/r',
+                                         language='italiano')
+                    self.assertIn(flat(shared(name)), flat(rendered))
 
 
 def doc(path):

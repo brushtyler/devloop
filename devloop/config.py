@@ -288,6 +288,33 @@ class DocsMap:
 
 
 @dataclass(frozen=True)
+class PromptFacts:
+    """``[prompts]`` (ADR 0006, R4): the project's data the prompt templates of the
+    installation are filled with. Each is empty without its key, and the template then drops
+    the sentence that names it (``context._template``). The text around them stays the
+    installation's: the project gives data, never rules."""
+    # What the agents read before starting a turn on an issue or a PR, each a Markdown fragment
+    # (``\\`AGENTS.md\\```, ``the README section "Developing SSDLC"``), joined as an English list.
+    instructions: tuple = ()
+    # What the implementer reads before a fix or a sync of its pull request.
+    fix_instructions: tuple = ()
+    # The command that runs one test module, ``test_name.py`` standing for the module, and the
+    # directory of the helpers the modules import, which that form still lets them import.
+    module_test_cmd: str = ''
+    module_test_helpers: str = ''
+    # ``[prompts.adr]``: the directory of the ADRs, reserved to the operator, the heading of the
+    # operator's decisions in an ADR, and the words that mark a value and a choice it leaves
+    # open. All four or none.
+    adr_dir: str = ''
+    adr_decided: str = ''
+    adr_open_value: str = ''
+    adr_open_choice: str = ''
+
+
+PROMPT_ADR_KEYS = ('dir', 'decided', 'open_value', 'open_choice')
+
+
+@dataclass(frozen=True)
 class FallbackModel:
     """A model an agent falls back to when the ones before it are unavailable (issue #121)."""
     model: str
@@ -564,6 +591,8 @@ class Config:
     agent_user: AgentUserPolicy = field(default_factory=AgentUserPolicy)
     # Code paths and their documents, listed in the implement, fix and review prompts (#203).
     docs: DocsMap = field(default_factory=DocsMap)
+    # The project's data in the prompts (ADR 0006, R4).
+    prompts: PromptFacts = field(default_factory=PromptFacts)
 
     def agent(self, key):
         return self.agents[key]
@@ -1247,6 +1276,60 @@ def parse_docs(data):
     return DocsMap(entries=docs_entries(data))
 
 
+def _prompt_text(value, where):
+    """A value of ``[prompts]``: a string on one line, not empty, put in a prompt as it is."""
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f'{where}: expected a non-empty string')
+    if value != value.strip() or any(c in value for c in '\r\n'):
+        raise ConfigError(f'{where}: expected one line without leading or trailing spaces')
+    return value
+
+
+def parse_prompts(table, merge):
+    """``[prompts]`` (ADR 0006, R4): the project's data in the prompts (``PromptFacts``). The
+    ADR directory must be reserved to the operator (``merge``'s ``operator_only_paths``): the
+    preflight takes its decisions as settled because only the operator merges them there."""
+    if not isinstance(table, dict):
+        raise ConfigError('prompts: expected a table')
+    keys = {'instructions', 'fix_instructions', 'module_test_cmd', 'module_test_helpers', 'adr'}
+    unknown = set(table) - keys
+    if unknown:
+        raise ConfigError(f'prompts: unknown keys {sorted(unknown)}')
+    values = {}
+    for key in ('instructions', 'fix_instructions'):
+        items = table.get(key, [])
+        if not isinstance(items, list):
+            raise ConfigError(f'prompts.{key}: expected a list of strings')
+        values[key] = tuple(_prompt_text(item, f'prompts.{key}') for item in items)
+    for key in ('module_test_cmd', 'module_test_helpers'):
+        if key in table:
+            values[key] = _prompt_text(table[key], f'prompts.{key}')
+    if values.get('module_test_helpers') and not values.get('module_test_cmd'):
+        raise ConfigError('prompts.module_test_helpers: needs prompts.module_test_cmd, the '
+                          'command the helpers are imported with')
+    if 'adr' in table:
+        adr = table['adr']
+        if not isinstance(adr, dict):
+            raise ConfigError('prompts.adr: expected a table')
+        unknown = set(adr) - set(PROMPT_ADR_KEYS)
+        if unknown:
+            raise ConfigError(f'prompts.adr: unknown keys {sorted(unknown)}')
+        missing = [key for key in PROMPT_ADR_KEYS if key not in adr]
+        if missing:
+            raise ConfigError(f'prompts.adr: missing {missing}: the four keys go together')
+        for key in PROMPT_ADR_KEYS:
+            values[f'adr_{key}'] = _prompt_text(adr[key], f'prompts.adr.{key}')
+        directory = values['adr_dir']
+        _docs_path(directory, 'prompts.adr.dir', document=False)
+        if not directory.endswith('/'):
+            raise ConfigError(f'prompts.adr.dir: {directory!r} is not a directory (ending in "/")')
+        if not merge.operator_only(directory):
+            raise ConfigError(f'prompts.adr.dir: {directory!r} is not in [merge] '
+                              'operator_only_paths: the preflight takes the decisions of its '
+                              'ADRs as the operator\'s only when the operator alone merges them')
+    return PromptFacts(**values)
+
+
 def _check_role(key, role, where):
     """Refuse the key ``key`` given the role ``role`` when it names another one (ADR 0005,
     P5-3, #407): ``claude-reviewer`` as ``roles.implementer`` stops devloop at startup. A key
@@ -1548,6 +1631,7 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
         # The command of a temporary capacity limit lives on the issue of the summary (#412).
         raise ConfigError('delegations.capacity: needs [report] issue, where the supervisor '
                           'writes `/devloop capacity`')
+    merge = parse_merge(data.get('merge', {}), supervisor)
     return Config(
         repo=_require(data, 'repo', str, 'config'),
         base_branch=data.get('base_branch', 'main'),
@@ -1568,7 +1652,7 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
         local_tests=local_tests, ci_rerun_unrelated=ci_rerun, tests=tests,
         block_uncertain_turns=block_uncertain, story_identity=story_identity,
         publication_outbox=outbox, attempt_identity=attempt_identity, budget=budget,
-        merge=parse_merge(data.get('merge', {}), supervisor), supervisor=supervisor,
+        merge=merge, supervisor=supervisor,
         supervisor_actor=supervisor_actor,
         pin=parse_pin(data.get('pin', {}), sensitive_lists(data)),
         run=parse_run(data.get('run', {})),
@@ -1578,6 +1662,7 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
         agent_user=parse_agent_user(data.get('agent_user', {})),
         delegations=delegations,
         docs=parse_docs(data),
+        prompts=parse_prompts(data.get('prompts', {}), merge),
         review_policy=review_policy,
         **ints)
 
@@ -1641,6 +1726,9 @@ _AGENT_KEYS = dict.fromkeys(('kind', 'display_name', 'model', 'model_label', 'ef
                              'fallback_models', 'unavailable_patterns', 'unavailable_exit_codes',
                              'fallback_memory_seconds', 'denied_cooldown_hours',
                              'write_commands', 'review_commands', 'app'))
+_PROMPTS_KEYS = {**dict.fromkeys(('instructions', 'fix_instructions', 'module_test_cmd',
+                                  'module_test_helpers')),
+                 'adr': dict.fromkeys(PROMPT_ADR_KEYS)}
 OVERLAY_KEYS = {
     **dict.fromkeys(('repo', 'base_branch', 'branch_prefix', 'state_dir', 'source',
                      'repo_lock_dir',
@@ -1672,6 +1760,7 @@ OVERLAY_KEYS = {
     'docs': {'map': {'*': None}},
     'tests': {'selection': None, 'source_prefixes': None, 'dir_modules': {'*': None},
               'ci_log_format': None},
+    'prompts': _PROMPTS_KEYS,
     'delegations': dict.fromkeys(('retry_own_prs', 'rounds', 'max_rounds_per_pr',
                                   'max_grants_per_day', 'capacity', 'capacity_max_open_prs',
                                   'capacity_max_parked_prs', 'capacity_max_hours')),
@@ -1722,7 +1811,7 @@ def apply_overlay(data, overlay):
 PROJECT_CONFIG = 'project.toml'
 PROJECT_FACTS = {
     'test_cmd': None, 'local_tests': None, 'language': None, 'priority_labels': None,
-    'docs': {'map': {'*': None}},
+    'docs': {'map': {'*': None}}, 'prompts': _PROMPTS_KEYS,
     # The selection of the test modules and the format of the CI logs (ADR 0006, R5). Never a
     # permission of the agents: those are the installation's and the overlay's (D2).
     'tests': {'selection': None, 'source_prefixes': None, 'dir_modules': {'*': None},

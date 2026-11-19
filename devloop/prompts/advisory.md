@@ -12,7 +12,7 @@ commit trailers) may name an agent or a model: that does not make you the author
 
 The working directory is a disposable checkout of commit `$head`, the PR head, removed
 afterwards. Inspect the change with `git diff origin/$base_branch...HEAD` and read whatever
-surrounding code and docs you need. Read `AGENTS.md` and the README section "Developing SSDLC".
+surrounding code and docs you need.{{?instructions: Read $instructions.}}
 Do not run the full test suite.
 
 ## Your task
