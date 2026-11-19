@@ -91,6 +91,10 @@ class PullRequest:
     # CI events the dispatcher's ledger already recorded (#133), as ``(head, state, round,
     # checks)``: reading the same checks again for the same head and round records nothing new.
     ci_recorded: list = field(default_factory=list)
+    # The review rounds the supervisor granted to this PR beyond ``max_review_rounds`` (#405,
+    # ``/devloop grant-round``), as the dispatcher's ``supervision`` records say: its limit is
+    # ``max_review_rounds`` plus these, besides the rounds that do not count.
+    granted_rounds: int = 0
     # With a ledger, every check of the head from the read that gave ``checks`` (#133): the CI
     # a review round saw, recorded whatever its verdict. None when not read.
     check_details: list = None
@@ -463,7 +467,7 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
         pending = waiting_reviewers(latest, cfg.conclave)
         verdict = round_verdict(latest) if latest and not pending else None
         head = latest[0]['head_sha'] if latest else None
-        rounds_left = counted_rounds(pr.reviews) < cfg.max_review_rounds
+        rounds_left = counted_rounds(pr.reviews) < cfg.max_review_rounds + pr.granted_rounds
         if lb.ready_to_merge in pr.labels:
             # Readiness belongs to the approved commit: re-check it on every tick. A level-0
             # promotion belongs to its head and to the labels that allowed it, and the snapshot
@@ -895,6 +899,24 @@ def counted_rounds(reviews):
     """How many rounds count against ``max_review_rounds``: every round, CI rounds and rereviews
     included, except the waived ones (``waived_rounds``). Round numbers stay progressive."""
     return len({r['round'] for r in reviews} - waived_rounds(reviews))
+
+
+def last_counted_ci(reviews):
+    """Whether the latest round of ``reviews`` that counts against the limit (``counted_rounds``)
+    is a CI failure, as ``round_reasons`` names it (#405)."""
+    counted = sorted({r['round'] for r in reviews} - waived_rounds(reviews))
+    return bool(counted) and _round_records(reviews, counted[-1])[0]['source'] != 'agent'
+
+
+def findings_decreasing(reviews, closures=()):
+    """Whether the blocking findings left open after the latest round of ``reviews`` are fewer
+    than those left open after the round before it (#405), with the ``closures`` recorded. A PR
+    with a single round has none before: not decreasing."""
+    rounds = sorted({r['round'] for r in reviews})
+    if len(rounds) < 2:
+        return False
+    before = [r for r in reviews if r['round'] < rounds[-1]]
+    return len(open_findings(reviews, closures)) < len(open_findings(before, closures))
 
 
 def round_reasons(reviews, fixes=(), syncs=()):

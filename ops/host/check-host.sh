@@ -143,7 +143,7 @@ else
         fi
     done
 fi
-LOG="$DEVLOOP_CLONE/$STATE_DIR/run.log"
+LOG="$STATE_PATH/run.log"
 check_as "$SUPERVISOR_USER" "$SUPERVISOR_USER legge $LOG" test -r "$LOG"
 
 step "sudoers del supervisore ($SUDOERS_FILE)"
@@ -204,13 +204,27 @@ else
     fail "$exe non trovato"
 fi
 
+if [ -n "$SOURCE_REPO" ]; then
+    step "Avviatore ($LAUNCHER)"
+    if [ ! -f "$LAUNCHER" ]; then
+        fail "$LAUNCHER non esiste (setup-devloop.sh, dal tag $SOURCE_REF)"
+    else
+        actual=$(stat -c '%a %U' "$LAUNCHER")
+        [ "$actual" = '755 root' ] && ok "$LAUNCHER: 755, root" \
+            || fail "$LAUNCHER è $actual, deve essere 755 root"
+    fi
+    [ -d "$SOURCE_CLONE/.git" ] && ok "$SOURCE_CLONE è un clone della sorgente" \
+        || fail "$SOURCE_CLONE non è un clone (setup-devloop.sh)"
+fi
+
 step 'GitHub App (devloop apps)'
 if [ "$CHECK_APPS" = 1 ]; then
-    if [ -e "$DEVLOOP_CLONE/$STATE_DIR/current" ]; then
+    if [ -e "$STATE_PATH/current" ]; then
+        # shellcheck disable=SC2086  # LAUNCHER_ARGS: nessuna parola o "--state-dir <percorso>"
         check_as "$DEVLOOP_USER" 'devloop apps' \
-            env -C "$DEVLOOP_CLONE" /usr/bin/python3 "$DEVLOOP_CLONE/scripts/devloop-pinned" apps
+            env -C "$DEVLOOP_CLONE" /usr/bin/python3 "$LAUNCHER" $LAUNCHER_ARGS apps
     else
-        fail "nessuna copia fissata in $DEVLOOP_CLONE/$STATE_DIR/current: fare il primo pin"
+        fail "nessuna copia fissata in $STATE_PATH/current: fare il primo pin"
     fi
 else
     say '  saltato (--no-apps)'

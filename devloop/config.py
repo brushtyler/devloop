@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .localtests import MODES as LOCAL_TESTS_MODES
 from .policy import MAX_LEVEL, MIN_LEVEL, ZERO_LEVEL, ReviewPolicy
+from .supervision import MAX_DAILY_GRANTS, MAX_GRANTED_ROUNDS
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / 'config.toml'
 # The root of the running dispatcher's installation (a pinned checkout, see docs/devloop/guide.md):
@@ -153,11 +154,20 @@ class GCPolicy:
 
 @dataclass(frozen=True)
 class DelegationPolicy:
-    """``[delegations]`` (ADR 0005): the revocation keys of the delegations to the supervisor,
-    all off by default (D10). ``retry_own_prs`` (P5-2, #406): a ``tool_failure`` escalation on a
-    PR implemented by the supervisor's agent goes to the supervisor, who may retry it within
-    ``MAX_RETRIES``; every other class on such a PR still goes to the operator."""
+    """``[delegations]`` (ADR 0005): the delegations of the operator to the supervisor, each
+    with its revocation key, all off by default (D10) and revoked by turning them off.
+
+    - ``retry_own_prs`` (P5-2, #406): a ``tool_failure`` escalation on a PR implemented by the
+      supervisor's agent goes to the supervisor, who may retry it within ``MAX_RETRIES``; every
+      other class on such a PR still goes to the operator.
+    - ``rounds`` (P5-1, #405): the supervisor may grant one more review round to a PR at the
+      round limit (``/devloop grant-round``). ``max_rounds_per_pr`` and ``max_grants_per_day``
+      lower the caps of the code (``supervision.MAX_GRANTED_ROUNDS`` and ``MAX_DAILY_GRANTS``),
+      never raise them."""
     retry_own_prs: bool = False
+    rounds: bool = False
+    max_rounds_per_pr: int = MAX_GRANTED_ROUNDS
+    max_grants_per_day: int = MAX_DAILY_GRANTS
 
 
 # The roles of a turn in the budget envelope (#365): the kinds of the turns charged to a story.
@@ -328,6 +338,10 @@ class Config:
     reviewer: str  # the first of ``reviewers``, recorded in the PR marker
     agents: dict
     trusted_users: tuple
+    # The clone of the installation's source (ADR 0006, R1), where ``devloop pin`` takes the
+    # code from: absolute, with ``~``, or relative to the managed repository's main checkout.
+    # '' when the source is the managed repository itself, as for ssdlc.
+    source: str = ''
     # The reviewer pool, in order (``roles.reviewers``; ``roles.reviewer`` is a pool of one).
     reviewers: tuple = ()
     # The agent of the readiness check before implement (#114), or '' when it is disabled.
@@ -675,20 +689,6 @@ def parse_pin(table, lists):
                      restart_max_wait_minutes=wait)
 
 
-def parse_delegations(table):
-    """``[delegations]`` (ADR 0005): ``retry_own_prs``, a boolean, default false (D10)."""
-    if not isinstance(table, dict):
-        raise ConfigError('delegations: expected a table')
-    names = {f.name for f in dataclasses.fields(DelegationPolicy)}
-    unknown = set(table) - names
-    if unknown:
-        raise ConfigError(f'delegations: unknown keys {sorted(unknown)}')
-    for key, value in table.items():
-        if not isinstance(value, bool):
-            raise ConfigError(f'delegations.{key}: expected true or false')
-    return DelegationPolicy(**table)
-
-
 def parse_run(table):
     """``[run]`` (#177): ``alert_issue``, optional, the number of an issue (at least 1)."""
     if not isinstance(table, dict):
@@ -738,6 +738,33 @@ def parse_ci(table):
                 raise ConfigError(f'ci.{key}: expected a whole number of minutes, at least {low}')
             values[key] = value
     return CIPolicy(**values)
+
+
+def parse_delegations(table):
+    """``[delegations]`` (ADR 0005): ``retry_own_prs`` (#406) and ``rounds`` (#405), true or
+    false (default false, D10); ``max_rounds_per_pr`` and ``max_grants_per_day``, whole numbers
+    from 0 to the caps of the code. A value above a cap is refused: the configuration and the
+    overlay may only lower the caps (D4)."""
+    if not isinstance(table, dict):
+        raise ConfigError('delegations: expected a table')
+    unknown = set(table) - {f.name for f in dataclasses.fields(DelegationPolicy)}
+    if unknown:
+        raise ConfigError(f'delegations: unknown keys {sorted(unknown)}')
+    values = {}
+    for key in ('retry_own_prs', 'rounds'):
+        if key in table:
+            if not isinstance(table[key], bool):
+                raise ConfigError(f'delegations.{key}: expected true or false')
+            values[key] = table[key]
+    for key, cap in (('max_rounds_per_pr', MAX_GRANTED_ROUNDS),
+                     ('max_grants_per_day', MAX_DAILY_GRANTS)):
+        if key in table:
+            value = table[key]
+            if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= cap:
+                raise ConfigError(f'delegations.{key}: expected a whole number from 0 to {cap}, '
+                                  'the cap of the code, which the configuration may only lower')
+            values[key] = value
+    return DelegationPolicy(**values)
 
 
 def parse_gc(table):
@@ -1123,6 +1150,7 @@ def parse_config(data, root=INSTALL_ROOT):
         base_branch=data.get('base_branch', 'main'),
         branch_prefix=data.get('branch_prefix', 'agent/issue-'),
         state_dir=data.get('state_dir', '.ssdlc/devloop'),
+        source=_source(data),
         test_cmd=test_cmd,
         language=data.get('language', 'English'),
         implementer=implementer, reviewer=pool[0], reviewers=pool, agents=agents,
@@ -1136,15 +1164,26 @@ def parse_config(data, root=INSTALL_ROOT):
         block_uncertain_turns=block_uncertain, story_identity=story_identity,
         publication_outbox=outbox, attempt_identity=attempt_identity, budget=budget,
         merge=parse_merge(data.get('merge', {}), supervisor), supervisor=supervisor,
-        delegations=parse_delegations(data.get('delegations', {})),
         pin=parse_pin(data.get('pin', {}), sensitive_lists(data)),
         run=parse_run(data.get('run', {})),
         report=parse_report(data.get('report', {})),
         ci=parse_ci(data.get('ci', {})),
         gc=parse_gc(data.get('gc', {})),
+        delegations=parse_delegations(data.get('delegations', {})),
         docs=parse_docs(data),
         review_policy=review_policy,
         **ints)
+
+
+def _source(data):
+    """``source`` (ADR 0006, R1): a path that is not empty, or '' when the key is not set."""
+    if 'source' not in data:
+        return ''
+    value = _require(data, 'source', str, 'config')
+    if not value.strip():
+        raise ConfigError("source: expected the path of a clone of the installation's source; "
+                          'leave the key out when the source is the managed repository')
+    return value
 
 
 def sensitive_lists(data):
@@ -1163,8 +1202,8 @@ _AGENT_KEYS = dict.fromkeys(('kind', 'display_name', 'model', 'model_label', 'ef
                              'fallback_memory_seconds', 'denied_cooldown_hours',
                              'write_commands', 'review_commands'))
 OVERLAY_KEYS = {
-    **dict.fromkeys(('repo', 'base_branch', 'branch_prefix', 'state_dir', 'test_cmd',
-                     'local_tests', 'ci_rerun_unrelated', 'block_uncertain_turns', 'story_identity',
+    **dict.fromkeys(('repo', 'base_branch', 'branch_prefix', 'state_dir', 'source',
+                     'test_cmd', 'local_tests', 'ci_rerun_unrelated', 'block_uncertain_turns', 'story_identity',
                      'publication_outbox', 'attempt_identity', 'journal_max_mib',
                      'language', 'trusted_users', 'preflight',
                      'conclave', 'max_open_prs',
@@ -1179,7 +1218,6 @@ OVERLAY_KEYS = {
                       'zero': dict.fromkeys(('label', 'allowlist', 'checks'))},
     'merge': {'mode': None, 'operator_only_paths': None, 'levels': {'*': None}},
     'roles': dict.fromkeys(('implementer', 'reviewer', 'reviewers', 'supervisor')),
-    'delegations': {'retry_own_prs': None},
     'agents': {'*': _AGENT_KEYS},
     'apps': {'key_dir': None, '*': dict.fromkeys(('app_id', 'slug'))},
     'pin': {'auto': None},
@@ -1189,6 +1227,8 @@ OVERLAY_KEYS = {
     'gc': dict.fromkeys(('pins', 'keep_pins', 'worktrees', 'logs', 'log_days',
                          'interval_minutes')),
     'docs': {'map': {'*': None}},
+    'delegations': dict.fromkeys(('retry_own_prs', 'rounds', 'max_rounds_per_pr',
+                                  'max_grants_per_day')),
     # Every key of [budget] (#365) is checked by ``parse_budget``, a token cap with its message.
     'budget': {'*': None},
 }
@@ -1250,7 +1290,8 @@ def load_config(path=None, local=None):
 
 # The keys ``devloop run`` reads again before each tick (#278): the operating limits. Any other
 # key, merge modes, pin, roles, trust, identities and ``state_dir`` included, needs a restart.
-LIVE_KEYS = ('max_open_prs', 'max_parked_prs', 'max_review_rounds')
+# ``delegations`` (#405) too, so that the operator revokes a delegation from the next tick.
+LIVE_KEYS = ('max_open_prs', 'max_parked_prs', 'max_review_rounds', 'delegations')
 
 
 class Reloader:

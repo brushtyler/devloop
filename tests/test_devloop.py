@@ -36,8 +36,9 @@ IMPL, REV = CFG.implementer, CFG.reviewer
 IMPL_NAME, REV_NAME = CFG.agent(IMPL).display_name, CFG.agent(REV).display_name
 
 
-def finding(title='bug', file='x.py', line=3):
-    return {'file': file, 'line': line, 'title': title, 'detail': 'd', 'suggested_fix': 'f'}
+def finding(title='bug', file='x.py', line=3, security=False):
+    return {'file': file, 'line': line, 'title': title, 'detail': 'd', 'suggested_fix': 'f',
+            'security': security}
 
 
 def raw_review(verdict='approve', blocking=(), previous=(), human='', reason=''):

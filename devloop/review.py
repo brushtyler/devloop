@@ -312,7 +312,10 @@ def ci_failure_review(*, failed_checks, log_tail, previous_open, round_no, max_r
                'file': '', 'line': 0,
                'title': f'CI fallita: {names}',
                'detail': log_tail.strip() or 'Log non disponibile.',
-               'suggested_fix': 'Correggere la causa del fallimento e far passare la CI.'}
+               'suggested_fix': 'Correggere la causa del fallimento e far passare la CI.',
+               # Written by devloop, not by a reviewer (#405): a CI failure is not a security
+               # finding, so that the delegation of rounds may follow a CI round.
+               'security': False}
     return {
         'source': 'ci', 'reviewer': CI, 'verdict': 'request_changes',
         'summary': f'La CI non è verde ({names}). La review del codice riprende dopo la correzione.',

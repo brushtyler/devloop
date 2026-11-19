@@ -101,6 +101,12 @@ it. The limit on new findings in later rounds (see "How to classify") does not a
 - **Blocking**: a defect you can state concretely (file, line, failure scenario) that must be fixed
   before merge. Style preferences and optional improvements are never blocking.
 - **Non-blocking**: worthwhile but optional.
+- **Security**: set `security` to `true` on every finding, blocking or not, that concerns
+  security: a vulnerability, a secret or credential exposed, untrusted content reaching an agent,
+  a command or a prompt, a permission or an authentication or authorization check weakened, a
+  check of evidence or integrity bypassed. Set it to `false` on every other finding. When in
+  doubt, set it to `true`. A blocking finding marked `true` keeps the PR with the operator once
+  it reaches the limit of review rounds: the supervisor cannot grant it another round.
 - In rounds after the first, judge whether each previous finding is resolved, using the
   implementer's responses below. Accept a reasoned dispute when it is right (`withdrawn`).
   Do not raise new findings on code that did not change since the previous round unless they are

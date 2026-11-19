@@ -101,8 +101,9 @@ def latest_map(meta, fixes):
 
 
 def _finding(title, detail, suggested_fix):
+    # A finding of the coverage map (#134) is never one of security (#405, the review schema).
     return {'file': '', 'line': 0, 'title': title, 'detail': detail,
-            'suggested_fix': suggested_fix}
+            'suggested_fix': suggested_fix, 'security': False}
 
 
 def acceptance_findings(criteria, acceptance_map):

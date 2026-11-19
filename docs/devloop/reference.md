@@ -60,17 +60,21 @@ stops devloop at startup in any case, until a story at its limit can be extended
 ([prerequisites of activation](#prerequisites-of-activation), #396).
 `[merge]` (`mode`, `levels`, `operator_only_paths`) and `roles.supervisor` set the
 [merge modes](guide.md#merge-modes); an unknown mode, level or key stops devloop at startup.
-`[delegations]` holds the revocation keys of the delegations to the supervisor (ADR 0005), all
-off by default: `retry_own_prs` (a boolean, default `false`, #406) lets a `tool_failure` on a PR
-implemented by the supervisor's agent go to the supervisor, who may retry it
-([Escalations to the supervisor](guide.md#escalations-to-the-supervisor)); a value that is not a
-boolean, or an unknown key, stops devloop at startup. It applies at the next start.
 `[pin]` (`auto`, default `false`; `restart_max_wait_minutes`, default 30) sets the
 [pin after a merge](guide.md#pin-after-a-merge), by devloop or by anyone else (#430), and how long, in the continuous mode, the restart
 from the new copy may wait for the running actions while new ones, except implementations, still
 start; an `auto` that is
 not a boolean, a `restart_max_wait_minutes` that is not a whole number of at least 0, or an
-unknown key, stops devloop at startup. `[run]` (`alert_issue`, unset by
+unknown key, stops devloop at startup. `source` (unset by default, a key of the host's overlay)
+names the clone of the [installation's source](guide.md#installation-source) (ADR 0006, R1),
+where `devloop pin` takes the code from: absolute, with `~`, or relative to the managed
+repository's main checkout. Unset, the source is the managed repository, as for ssdlc. A value
+that is not a non-empty string stops devloop at startup, and one that is not the top of a git
+checkout stops every command that needs it (the pin and the dispatcher's commands); with a
+source other than the managed repository the pin after a merge is off. `state_dir` (default
+`.ssdlc/devloop`) is relative to the managed repository's main checkout, or absolute: a directory
+of the host. When the [launcher](guide.md#launcher) is given `--state-dir`, the configuration's
+`state_dir` must be that directory, or devloop stops. Both apply at the next start. `[run]` (`alert_issue`, unset by
 default) names the issue of the alert of the [continuous loop](guide.md#continuous-loop); a value that
 is not an issue number (an integer of at least 1), or an unknown key, stops devloop at startup.
 `[report]` (`issue`, unset by default; `interval`, default 15) sets the
@@ -87,9 +91,19 @@ not a whole number of at least 1, or an unknown key, stops devloop at startup.
 `[docs] map` sets the
 [documentation map](#documentation-map). Operator overrides go into the
 [local overlay](guide.md#local-config-as-an-overlay), not into this file. A running
-`devloop run` takes a new `max_open_prs`, `max_parked_prs` or `max_review_rounds` from the next
-tick; any other key needs a restart
+`devloop run` takes a new `max_open_prs`, `max_parked_prs`, `max_review_rounds` or
+`[delegations]` from the next tick; any other key needs a restart
 ([Changes while the loop runs](guide.md#changes-while-the-loop-runs)).
+`[delegations]` (#405, ADR 0005) sets the delegations of the operator to the supervisor, each
+with its revocation key and off by default: `rounds` (true or false, default false) lets the
+supervisor [grant a review round](guide.md#granting-a-review-round) to a PR at the round limit;
+`max_rounds_per_pr` (default 2) and `max_grants_per_day` (default 3) may only lower the caps of
+the code, `MAX_GRANTED_ROUNDS` and `MAX_DAILY_GRANTS` in `devloop/supervision.py`;
+`retry_own_prs` (true or false, default false, #406) lets a `tool_failure` on a PR implemented by
+the supervisor's agent go to the supervisor, who may retry it
+([Escalations to the supervisor](guide.md#escalations-to-the-supervisor)). A value that is not a
+whole number from 0 to its cap, a `rounds` or `retry_own_prs` that is not a boolean, or an
+unknown key, stops devloop at startup.
 `[review_policy]` sets the
 [review level](#review-level-and-policy-receipt): `default_level` (1 or 2, default 1), the level
 `label` (default `reviews:2`), `sensitive_paths` and `sensitive_path_lists`; changing any of them,
