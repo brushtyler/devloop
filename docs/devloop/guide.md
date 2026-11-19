@@ -740,7 +740,12 @@ modules, one at a time, on the base commit of the branch, in a disposable worktr
   `agent:needs-supervisor` or a label of `blocked_labels`. With the readiness check (`preflight`)
   the restart goes through it: an issue whose request changed during the wait, or with a new
   `/devloop recheck`, is checked again before the implementation, and one whose check failed is
-  blocked as a ready issue is;
+  blocked as a ready issue is. An escalation of that check keeps `agent:working` and the wait,
+  so the issue is never `stale` meanwhile: gaps that all have a default go to the supervisor,
+  and once `/devloop accept-defaults` or `/devloop decide` (or the operator, after a
+  `/devloop escalate`) settles them the check runs again; a check that failed with its step
+  recorded (a `tool_failure`, for one) resumes with `/devloop retry`, from the supervisor or,
+  in `agent:needs-operator`, from a trusted user;
 - **a test fails only on the branch**, or the failed tests cannot be identified (a timeout, an
   output without them, a module that does not start, whose id unittest makes up the same whatever
   the error, a project whose `[tests].selection` is not
@@ -1263,7 +1268,8 @@ no command applies, and the answer gives the manual steps. The commands valid th
   same head, base and request), the issue must not be resolved by a merged devloop PR, a blocked
   issue waits, and at most **two** retries run for the same key, the supervisor's and the
   operator's together (so not after `retry_limit`). The readiness check runs again only on an
-  issue that still has `agent:ready`. devloop removes `agent:needs-operator` (and
+  issue that still has `agent:ready`, or `agent:working` while its implementation waits for the
+  base branch ([Tests red on the base too](#tests-red-on-the-base-too)). devloop removes `agent:needs-operator` (and
   `agent:needs-supervisor`); a PR goes back to the label of its step and the next tick runs it,
   an issue's step runs at once.
 - `/devloop accept-defaults` and `/devloop decide <decisions>`, when that record is a failed

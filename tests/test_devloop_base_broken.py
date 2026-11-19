@@ -10,17 +10,21 @@ from pathlib import Path
 
 from devloop import markdown
 from devloop.config import LEGACY_NEEDS_OPERATOR
-from devloop.dispatch_base import MAX_CASES_LISTED, MainAlerts
+from devloop.dispatch_base import MAX_CASES_LISTED, BaseBroken, MainAlerts
 from devloop.dispatcher import Dispatcher
 from devloop.github import GitHubError
 from devloop.localtests import Tests, case_modules, failed_cases, module_command
-from devloop.planning import BASE_REPAIRED, Snapshot, plan
+from devloop.planning import BASE_REPAIRED, Action, Snapshot, plan
 from devloop.workspace import Workspace
 
 from helpers.devloop_fakes import FakeGH
 from test_devloop import (BASE, CFG, REV, FakeRunner, FakeWS, finding, fixed, implemented, norm,
                           pr, raw_review)
-from test_devloop_preflight import PCFG, IssueGH, checked
+from test_devloop_preflight import PCFG, IssueGH, checked, gap
+from test_devloop_supervision import (HUMAN, PREFLIGHT_AUTO, SUPER, SUPERVISOR_LOGIN, Case,
+                                      crash)
+
+WORKING = 'agent:working'
 
 SEP = '=' * 70
 DASH = '-' * 70
@@ -413,6 +417,76 @@ class PreflightRestartTests(unittest.TestCase):
         self.assertEqual([a.kind for a in d.tick()], ['implement'])
         self.assertEqual(len(gh.created), 1)
         self.assertEqual(planned(), [])
+
+
+class RestartEscalationTests(Case):
+    """An escalation of the readiness check that restarts the implementation keeps the wait and
+    ``agent:working``: the issue is never ``stale``, and resumes once the block is lifted."""
+
+    def waiting(self, cfg, *outputs):
+        """Issue 7 in ``agent:working`` whose implementation waits for a base that has already
+        moved on, with the readiness check of ``cfg``."""
+        d = self.make(cfg, *outputs, has_pr=False)
+        self.gh.labels[7] = {WORKING}
+        d._wait_base(7, 'implement', BaseBroken('f' * 40, BRANCH), 'f' * 40)
+        return d
+
+    def planned(self, d):
+        return [(a.kind, a.number) for a in plan(d.snapshot(), self.cfg)]
+
+    def implemented(self, d):
+        self.assertEqual(self.planned(d), [('implement', 7)])
+        self.runner.outputs.append(implemented())
+        self.assertEqual(self.tick(d), [('implement', 7)])
+        self.assertEqual(len(self.gh.created), 1)
+
+    def test_defaults_to_the_supervisor_wait_for_its_decision(self):
+        for how in ('accept-defaults', 'decide', 'escalate'):
+            with self.subTest(how):
+                d = self.waiting(PREFLIGHT_AUTO, checked(False, [gap('default_available',
+                                                                     'JSON')]))
+                self.assertEqual(self.tick(d), [('preflight', 7)])
+                self.assertEqual(self.gh.labels[7], {WORKING, SUPER})
+                self.assertEqual(self.escalations(7)[-1]['class'], 'preflight_default')
+                # Not stale: the issue waits for the supervisor.
+                self.assertEqual(self.planned(d), [])
+                if how == 'escalate':
+                    self.gh.command(7, '/devloop escalate da vedere')
+                    self.assertEqual(self.tick(d), [('supervise', 7)])
+                    self.assertEqual(self.gh.labels[7], {WORKING, HUMAN})
+                    self.assertEqual(self.planned(d), [])
+                    self.gh.command(7, '/devloop accept-defaults', login='brushtyler')
+                else:
+                    self.gh.command(7, f'/devloop {how} JSON')
+                self.assertEqual(self.tick(d), [('supervise', 7)])
+                self.assertEqual(self.gh.labels[7], {WORKING})
+                # The check runs again with the decision, then the implementation.
+                self.runner.outputs.append(checked(True))
+                self.assertEqual(self.tick(d), [('preflight', 7)])
+                self.assertEqual(self.gh.labels[7], {WORKING})
+                self.implemented(d)
+
+    def test_a_failed_check_keeps_the_issue_and_a_retry_resumes_it(self):
+        for cfg, label, by in [(dataclasses.replace(CFG, preflight=REV), HUMAN, 'brushtyler'),
+                               (PREFLIGHT_AUTO, SUPER, SUPERVISOR_LOGIN)]:
+            with self.subTest(label):
+                d = self.waiting(cfg, crash())
+                self.assertEqual(self.tick(d), [('preflight', 7)])
+                self.assertEqual(self.gh.labels[7], {WORKING, label})
+                self.assertEqual(self.escalations(7)[-1]['step'], 'preflight')
+                self.assertEqual(self.planned(d), [])
+                self.runner.outputs.append(checked(True))
+                self.gh.command(7, '/devloop retry', login=by)
+                self.assertEqual(self.tick(d), [('supervise', 7)])
+                self.assertEqual(self.decisions(7)[-1]['outcome'], 'applied')
+                self.assertEqual(self.gh.labels[7], {WORKING})
+                self.implemented(d)
+
+    def test_a_failure_without_the_step_ends_the_wait_as_before(self):
+        d = self.waiting(dataclasses.replace(CFG, preflight=REV))
+        d._escalate_failure(Action('preflight', 7), None, GitHubError('down'))
+        self.assertEqual(self.gh.labels[7], {HUMAN})
+        self.assertEqual(self.planned(d), [])
 
 
 class FixTests(unittest.TestCase):

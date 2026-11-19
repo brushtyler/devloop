@@ -10,8 +10,10 @@ escalation. The dispatcher writes a ``basebroken`` record on the issue (implemen
 (fix), with the base commit and the failed tests, and the step waits for the base branch to move
 past that commit, as a readiness check that depends on the repository (#270). An issue keeps
 ``agent:working`` and starts again in a free slot of ``max_open_prs``, unless its labels block
-it, and through the readiness check when one is configured (``planning.base_restart``); the fix
-of a PR runs again on its next tick. A failure only on the branch, identities that cannot be told (a timeout, an
+it, and through the readiness check when one is configured (``planning.base_restart``): an
+escalation of that check (its gaps to the supervisor or the operator, a failed check that
+records its step) keeps both ``agent:working`` and the wait, and the issue resumes once a retry
+or the decision on its gaps lifts the block. The fix of a PR runs again on its next tick. A failure only on the branch, identities that cannot be told (a timeout, an
 output without them, a module that does not start), a project whose test selection is not
 ``python-unittest-modules`` (the check reads what unittest prints), or any error of the check
 leaves the failure as it was: further attempts, then ``tests_failed``.
@@ -36,6 +38,7 @@ from .localtests import UNITTEST_MODULES, case_modules, module_command
 from .markdown import dispatcher_header, publishable
 from .outbox import SENT as PUBLISHED
 from .ports import summarize_checks
+from .supervision import PREFLIGHT_DEFAULT
 from .workspace import WorkspaceError
 
 # The failed tests a record and its comment list at most; the count is always the whole.
@@ -43,6 +46,12 @@ MAX_CASES_LISTED = 30
 # How many commits of the first-parent chain of the base branch the alert of a red CI walks back
 # to find the latest green one, reading the checks of each (#459).
 MAIN_HISTORY = 10
+# The classes of a failed readiness check: ``dispatch_preflight.PREFLIGHT_CLASSES``, which
+# imports this module through ``dispatch_actions``.
+CHECK_CLASSES = ('operator_decision', PREFLIGHT_DEFAULT)
+# The classes of the escalations with which the dispatcher hands an item in
+# ``agent:needs-supervisor`` to the operator (``SupervisionMixin._to_operator``).
+HANDOFFS = ('supervisor_escalated', 'supervisor_refused', 'retry_limit')
 
 
 class BaseBroken:
@@ -89,6 +98,25 @@ class MainAlerts:
             tmp = self._path.with_name(f'.{self._path.name}.{os.getpid()}.tmp')
             tmp.write_text(json.dumps({'alerted': sha}) + '\n', encoding='utf-8')
             os.replace(tmp, self._path)
+
+
+def _check_escalation(notice):
+    """Whether ``notice`` escalates the readiness check: it records the step ``preflight`` (a
+    failed check, to the supervisor or to the operator with its retry) or a class of the check's
+    gaps (``CHECK_CLASSES``)."""
+    return notice.get('step') == 'preflight' or notice.get('class') in CHECK_CLASSES
+
+
+def _of_check(notice, earlier):
+    """Whether ``notice``, after the notices ``earlier`` (oldest first), belongs to the readiness
+    check (#459): it escalates the check (``_check_escalation``), or it hands to the operator
+    (``HANDOFFS``) the latest escalation to the supervisor, which escalated the check."""
+    if _check_escalation(notice):
+        return True
+    if notice.get('class') not in HANDOFFS:
+        return False
+    handed = [n for n in earlier if n.get('event') == 'escalation' and n.get('to') == 'supervisor']
+    return bool(handed) and _check_escalation(handed[-1])
 
 
 def _listed(cases):
@@ -173,15 +201,19 @@ class BaseMixin:
     def _base_wait(self, comments, step, head=None):
         """The ``basebroken`` record of ``step`` that still holds in ``comments`` (#459), or
         None: the latest the dispatcher signed, on ``head`` when given (a PR's current head), with
-        no notice of the dispatcher after it (an escalation, a block)."""
+        no notice of the dispatcher after it (an escalation, a block) other than one of the
+        readiness check that restarts the implementation (``_of_check``): its blocks hold the
+        restart (``planning.base_restart``), and its retry or its decided gaps resume it."""
         records = self._dispatcher_records(comments, 'basebroken')
         if not records:
             return None
         position, record = records[-1]
         if record['step'] != step or head is not None and record['head'] != head:
             return None
-        if any(p > position for p, _ in self._dispatcher_records(comments, 'notice')):
-            return None
+        notices = self._dispatcher_records(comments, 'notice')
+        for index, (p, notice) in enumerate(notices):
+            if p > position and not _of_check(notice, [n for _, n in notices[:index]]):
+                return None
         return record
 
     def _base_holds(self, record, base_head):

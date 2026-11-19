@@ -1920,6 +1920,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 # A readiness check runs again only on an issue with agent:ready: one the
                 # operator may retry keeps it, as a failed check does.
                 remove = [label for label in remove if label != lb.ready]
+            if pr is None and (supervised or retry or {}).get('step') == 'preflight':
+                # The check that restarts an implementation waiting for its base keeps
+                # agent:working (#459): its escalation leaves the wait (``_base_wait``), and a
+                # retry resumes it.
+                remove = [label for label in remove if label != lb.working]
             # A budget refusal on a PR records its head (#396): an advisory review waits only
             # on the refusal of the head it would review (``_advisory_held``).
             extra = ({'category': exc.category,

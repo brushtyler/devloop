@@ -539,7 +539,11 @@ with a `basebroken` marker: `step` (`implement` or `fix`), `base` (the base comm
 base of the branch with `origin/main`), `head` (the commit the step started from: the PR's head
 for a fix), `count` (the failed tests) and `cases` (their identities, at most 30). A record
 counts only from the dispatcher's identity, and only the latest one, while no notice of the
-dispatcher follows it (an escalation, a block):
+dispatcher follows it (an escalation, a block) other than one of the readiness check that
+restarts the implementation: an escalation with `step` `preflight` or of class
+`operator_decision` or `preflight_default`, or a handoff to the operator
+(`supervisor_escalated`, `supervisor_refused`, `retry_limit`) of such an escalation to the
+supervisor. Those keep `agent:working` and the wait, and their block holds the restart:
 
 - an issue in `agent:working` without a PR whose latest record is of `implement` is not `stale`:
   it waits while `origin/main` is at `base`, then starts again as an implementation, unless
