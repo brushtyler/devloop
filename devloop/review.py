@@ -16,7 +16,11 @@ verdict machine-actionable:
   ``decision``. Only a ``decision`` stops the loop at once (``flow_verdict``): a ``trust_policy``
   goes on as a request for changes while blocking findings of its own stay open, and otherwise
   as an approval whose merge is the operator's, unless the same reviewer later approves the
-  latest round as the operator decided on 2026-11-19 (#461, ``trust_policy_parts``).
+  latest round as the operator decided on 2026-11-19 (#461, ``trust_policy_parts``);
+* a blocking finding states its ``evidence`` (#481): the scenario that shows it, or the code and
+  the rule it violates, with the quotation. One the reviewer leaves without evidence is recorded
+  as non-blocking (``without_evidence``) and does not send the PR to the fix, unless it is one of
+  security, which stays blocking: in doubt, devloop fails closed.
 
 Every blocking finding has an owner and an identity, ``round/reviewer/ID`` (``2/codex/R2-1``),
 recorded in the marker. Only its owner closes it, in a later review. A finding of the reviewer
@@ -92,6 +96,13 @@ def owner_of(review):
 
 def _with_ids(findings, round_no, start):
     return [dict(f, id=f'R{round_no}-{start + i}') for i, f in enumerate(findings)]
+
+
+def proven(finding):
+    """Whether a blocking finding of a reviewer stays blocking (#481): it states its
+    ``evidence``, or it is one of security, which stays blocking even without one."""
+    evidence = finding.get('evidence')
+    return finding.get('security') is True or (isinstance(evidence, str) and bool(evidence.strip()))
 
 
 def _keys(review):
@@ -190,6 +201,11 @@ def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, 
     ``decision``, the latter also when the reviewer gives none. A ``trust_policy`` with another
     verdict turns it into ``needs_operator``: the merge of a PR that touches the trust policy is
     the operator's whatever the verdict.
+
+    A blocking finding of the reviewer without ``evidence`` (#481), and not of security, is
+    recorded among the non-blocking ones with ``without_evidence``, and the note says so. A
+    ``request_changes`` left with nothing to fix by that alone becomes an ``approve``: the
+    finding does not send the PR to the fix.
     """
     # An output without ``operator_reason`` (#434) is read as before: a ``decision``.
     raw = with_defaults('review', raw)
@@ -199,9 +215,17 @@ def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, 
     if derived:
         notes.append(f'devloop ha aggiunto {len(derived)} finding bloccanti dalla mappa di '
                      'copertura dei criteri di accettazione.')
+    unproven = [dict(f, without_evidence=True) for f in raw['blocking_findings'] if not proven(f)]
     blocking = [dict(f, key=finding_key(round_no, reviewer, f['id']))
-                for f in _with_ids(raw['blocking_findings'] + derived, round_no, 1)]
-    non_blocking = _with_ids(raw['non_blocking_findings'], round_no, len(blocking) + 1)
+                for f in _with_ids([f for f in raw['blocking_findings'] if proven(f)] + derived,
+                                   round_no, 1)]
+    non_blocking = _with_ids(unproven + raw['non_blocking_findings'], round_no,
+                             len(blocking) + 1)
+    if unproven:
+        notes.append(f'devloop ha registrato come non bloccanti {len(unproven)} finding che il '
+                     'reviewer indicava come bloccanti senza evidenza ('
+                     + ', '.join(f['id'] for f in non_blocking[:len(unproven)])
+                     + '): non mandano la PR in correzione.')
     ids = [f['id'] for f in previous_open]
     by_ref = {f['id']: f for f in previous_open if ids.count(f['id']) == 1}
     by_ref.update({f['key']: f for f in previous_open})
@@ -236,6 +260,10 @@ def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, 
     if verdict == 'approve' and (blocking or own_unresolved):
         verdict = 'request_changes'
         notes.append('Verdetto corretto da approve a request_changes: restano finding bloccanti aperti.')
+    elif verdict == 'request_changes' and unproven and not (blocking or unresolved):
+        verdict = 'approve'
+        notes.append('Verdetto corretto da request_changes ad approve: nessun finding bloccante '
+                     'ha un\'evidenza.')
     elif verdict == 'request_changes' and not (blocking or unresolved):
         verdict = 'needs_operator'
         human_reason = human_reason or 'Il reviewer ha chiesto modifiche senza indicare finding bloccanti.'

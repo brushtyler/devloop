@@ -568,12 +568,28 @@ blocking finding whose `security` is not `false`, a finding of a review written 
 included, keeps a PR at the round limit with the operator: the supervisor may not
 [grant it a round](guide.md#granting-a-review-round). The findings devloop writes itself, of a CI
 failure and of the acceptance map, carry `security: false`; the published review marks a
-security finding with *(sicurezza)*. devloop then enforces consistency:
+security finding with *(sicurezza)*.
+
+**Evidence** (#481). A blocking finding also carries `evidence`, required by the schema of the
+blocking findings only: what shows the defect, so that the implementer can verify it. That is
+the scenario the reviewer reproduced (a test that fails, a command with its output, a concrete
+input and the behaviour observed) or, for a defect that cannot be run, the precise reference to
+the code and to the rule it violates (the issue, an ADR, a document) with the quotation. devloop
+records a blocking finding whose `evidence` is empty, or only blanks, among the non-blocking
+findings of the review, with `without_evidence: true`, and the `note` of the record names it: it
+opens no finding and does not send the PR to the fix. A finding with `security: true` stays
+blocking without evidence too: in doubt, the rule fails closed. The published review shows the
+evidence of each finding (*Evidenza:*) and marks a demoted one *(bloccante senza evidenza:
+registrato come non bloccante)*; the fix prompt and the previous rounds of the next review show
+it as `Evidence:`. The findings devloop writes itself, of a CI failure and of the acceptance
+map, stay blocking as before. devloop then enforces consistency:
 
 - `approve` with a blocking finding, or with one of the reviewer's own earlier findings
   unresolved, becomes `request_changes` (another owner's open finding does not change it: the
   dispatcher checks it before promoting);
-- `request_changes` with nothing to fix becomes `needs_operator`;
+- `request_changes` whose only blocking findings were demoted for lack of evidence (#481), with
+  no earlier finding left unresolved, becomes `approve`;
+- `request_changes` with nothing else to fix becomes `needs_operator`;
 - an earlier finding the reviewer does not assess stays open;
 - `operator_reason` (#434) says why a reviewer asks for the operator: `trust_policy` or
   `decision`, `none` with the other verdicts. The record keeps it only with `needs_operator`, as
@@ -626,7 +642,12 @@ change, the local overlay, with a conclave the reserved perimeter its members re
 PR that changes the rule, judged with the prompts of the running installation.
 
 Findings get stable ids (`R<round>-<n>`). The fix step answers each one (`fixed`, `disputed`,
-`not_applicable`), and the next round sees those answers. The review is published in readable
+`not_applicable`), and the next round sees those answers. The fix prompt asks the implementer
+to verify the evidence of each finding first, running its scenario again or reading again the
+code and the rule it cites, and to dispute (`disputed`) one whose evidence does not hold,
+reporting in its `note` how it verified it, instead of changing the code; the review prompt asks
+the reviewer who opened it to withdraw it (`withdrawn`) or to keep it `unresolved` with new
+evidence in its `note` (#481). Who closes a finding does not change. The review is published in readable
 form, with the full record in a hidden base64 marker for the next tick: as the body of a native
 GitHub review for an agent with an app of its own, as a comment for any other agent (see
 [Where a review is published](#where-a-review-is-published)).
@@ -670,7 +691,9 @@ PR in `agent:needs-operator` is always a native review of type `COMMENT`, with t
 the agent of `advisory_reviewer` (its app, or the ambient login without one), titled "Review
 consultiva: non conta per il quorum". The agent answers with JSON validated against
 [`devloop/schemas/advisory.json`](../../devloop/schemas/advisory.json) (prompt
-`devloop/prompts/advisory.md`). Its body ends with an `advisory` marker, never a `review`
+`devloop/prompts/advisory.md`); since #481 its `unfounded` field lists the findings of the
+quorum whose evidence does not hold and the fixes that were not needed, shown in the section
+"Finding senza evidenza o corretti senza necessità". Its body ends with an `advisory` marker, never a `review`
 one: `head`, `reviewer`, `outcome` (`done`) and `opinion` (`ok`, `dubbi`, `contrario`). It is
 never part of the PR's conversation as the review records see it, so it is no round, no verdict
 and no finding. The dispatcher's summary of it ("Review consultiva per l'operatore") ends with

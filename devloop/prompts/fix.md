@@ -12,6 +12,14 @@ merge or rebase the branch yourself.
 
 - Address every open finding listed below. For each one, either fix it or dispute it with a concrete
   technical reason (for example, the finding misreads the code or the issue). Do not dispute to avoid work.
+- Before fixing a finding, verify its evidence (`Evidence` below, when the reviewer gave one):
+  run its scenario again, or read again the code and the rule it cites. When the evidence does
+  not hold (the scenario does not fail, the code does not do what it says, the rule says
+  something else), dispute the finding (`disputed`) instead of changing the code, and report in
+  the `note` of its response how you verified it and what you observed. Do not fix a finding
+  only because fixing is the shorter way to converge: an unneeded change costs a round and can
+  add a defect. In the next round the reviewer who opened it either withdraws it or answers with
+  new evidence.
 - Do not make unrelated changes, and do not rewrite parts the reviewer did not question.
 - Before finishing, run the tests that cover what you changed{{?module_test_cmd:, one module at a time with
   `$module_test_cmd`}}{{?module_test_helpers:: this form works for every module,

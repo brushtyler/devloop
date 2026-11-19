@@ -315,7 +315,8 @@ with them the prompts are the same, byte for byte, as before R4, which
 `tests/test_devloop_prompt_data.py` proves against the templates of before R4
 (`tests/fixtures/ssdlc-pre-r4/prompts/`), with the changes of the templates made since then
 listed one by one, each with its issue (`SINCE_R4` in `tests/helpers/ssdlc_project.py`, such as
-`host_step`, #462, with the review criterion made precise by #473). The text of the trust policy in the review and advisory
+`host_step`, #462, with the review criterion made precise by #473, and the evidence of a
+blocking finding and its dispute, #481). The text of the trust policy in the review and advisory
 review prompts is the installation's and does not change. On a host, the project file gains the
 `[prompts]` table before the pin of R4
 ([ops/host/migrate.md](../../ops/host/migrate.md#dati-di-ssdlc-nei-prompt)).
@@ -548,6 +549,34 @@ a **CI of the head** section that the dispatcher reads with its own identity (#3
 The fix prompt shows the CI of the head the reviewer saw, the PR's head before the fix. A head
 without checks that conflicts with the base has no CI to show (#392): the section says so. The
 same values go to the `ci_round` event of the [ledger](protocol.md#evidence-and-telemetry).
+
+### Evidence of a blocking finding
+
+Each blocking finding of a review carries `evidence` (#481), a string required by the schema
+of the blocking findings in [`devloop/schemas/review.json`](../../devloop/schemas/review.json)
+(the non-blocking ones do not have it): the scenario that shows the defect (a test that fails,
+a command with its output, a concrete input and the behaviour observed) or, for a defect that
+cannot be run, the precise reference to the code and to the rule it violates (issue, ADR,
+document) with the quotation. The prompts use it this way:
+
+- **Review prompt** (`devloop/prompts/review.md`). It asks for the evidence of every blocking
+  finding, checked by the reviewer, and says what devloop does without it. In a later round, a
+  finding disputed because its evidence does not hold is withdrawn (`withdrawn`) or kept
+  `unresolved` with new evidence in its `note`.
+- **Fix prompt** (`devloop/prompts/fix.md`). Each open finding shows its `Evidence:`; the
+  implementer verifies it first (runs its scenario again, or reads again the code and the rule
+  it cites) and disputes (`disputed`) one whose evidence does not hold, with the outcome of the
+  verification in the `note` of its response, instead of fixing it to converge sooner.
+- **Advisory review prompt** (`devloop/prompts/advisory.md`). The field `unfounded` of
+  [`devloop/schemas/advisory.json`](../../devloop/schemas/advisory.json) lists the findings of
+  the quorum whose evidence does not hold and the fixes that were not needed, in the section
+  "Finding senza evidenza o corretti senza necessità" of the advisory review.
+
+A blocking finding with an empty `evidence` is recorded as non-blocking, with
+`without_evidence: true`, and does not send the PR to the fix; one with `security: true` stays
+blocking (see [Structured review](protocol.md#structured-review)). The field is in the output
+schema the CLIs enforce: a review whose blocking finding lacks it fails validation like any
+other incomplete answer.
 
 ### Documentation map
 

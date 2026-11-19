@@ -138,6 +138,40 @@ _HOST_STEP_REVIEW = """\
 """
 # (#473 made the criterion of point 8 precise: the cases that need a declaration, those that do
 # not, and a superfluous declaration that is not blocking.)
+# #481: the evidence of a blocking finding, and the dispute of one whose evidence does not hold.
+_EVIDENCE_REVIEW = """\
+- **Evidence**: every blocking finding states in `evidence` what shows the defect, so that the
+  implementer can verify it: the scenario you reproduced (a test that fails, a command with its
+  output, a concrete input and the behaviour you observed) or, for a defect that cannot be run,
+  the precise reference to the code and to the rule it violates (the issue, an ADR, a document)
+  with the quotation. Check it yourself before you write it. devloop records a blocking finding
+  with an empty `evidence` as non-blocking, and it does not send the PR to the fix; a finding
+  with `security` set to `true` stays blocking even without evidence, but give it one all the
+  same.
+"""
+_DISPUTE_REVIEW = """\
+  When the implementer disputes one of your findings because its evidence does not hold, and
+  reports how it verified it, check that verification: either withdraw the finding
+  (`withdrawn`), or keep it `unresolved` and give in `note` new evidence that answers the
+  dispute. Keeping it open without new evidence is not enough.
+"""
+_EVIDENCE_FIX = """\
+- Before fixing a finding, verify its evidence (`Evidence` below, when the reviewer gave one):
+  run its scenario again, or read again the code and the rule it cites. When the evidence does
+  not hold (the scenario does not fail, the code does not do what it says, the rule says
+  something else), dispute the finding (`disputed`) instead of changing the code, and report in
+  the `note` of its response how you verified it and what you observed. Do not fix a finding
+  only because fixing is the shorter way to converge: an unneeded change costs a round and can
+  add a defect. In the next round the reviewer who opened it either withdraws it or answers with
+  new evidence.
+"""
+_UNFOUNDED_ADVISORY = """\
+- `unfounded`: the findings of the reviews below whose evidence does not hold, and the fixes the
+  implementer made that were not needed, shown in the section "Finding senza evidenza o
+  corretti senza necessità". Verify each one: run its scenario again, or read again the code
+  and the rule it cites. Name the finding (`round/reviewer/ID`) and say what you observed;
+  `[]` when you see none.
+"""
 # The changes of the templates since R4, each as ``(anchor, text)``: ``text`` follows the only
 # occurrence of ``anchor`` in the reference. The frozen files stay as they were; the prompts of
 # now are the reference with these changes, and nothing else.
@@ -148,6 +182,9 @@ SINCE_R4 = {
          _HOST_STEP_IMPLEMENT),
     ),
     'fix': (
+        # #481
+        ('  technical reason (for example, the finding misreads the code or the issue). Do not '
+         'dispute to avoid work.\n', _EVIDENCE_FIX),
         ('  the issue has no recognisable acceptance criteria.\n', _HOST_STEP_FIX),
         ('Current acceptance map of the pull request:\n\n$acceptance_map\n\n',
          '## Step on the host\n\nCurrent declaration of the pull request (`host_step`):\n\n'
@@ -159,6 +196,16 @@ SINCE_R4 = {
          '$acceptance_map\n\n',
          '## Step on the host\n\nLatest declaration of the pull request (`host_step`), from the '
          'implementer or its latest fix:\n\n$host_step\n\n'),
+        # #481
+        ('  before merge. Style preferences and optional improvements are never blocking.\n',
+         _EVIDENCE_REVIEW),
+        ('  implementer\'s responses below. Accept a reasoned dispute when it is right '
+         '(`withdrawn`).\n', _DISPUTE_REVIEW),
+    ),
+    # #481: the findings of the quorum without evidence, or fixed without need.
+    'advisory': (
+        ('- `overlooked`: points the reviews below may have missed; `[]` when you see none.\n',
+         _UNFOUNDED_ADVISORY),
     ),
 }
 

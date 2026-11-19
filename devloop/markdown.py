@@ -597,9 +597,14 @@ def _findings(findings):
     for f in findings:
         # A finding the reviewer marked as one of security (#405, ADR 0005, D5).
         tag = ' *(sicurezza)*' if f.get('security') is True else ''
+        # A blocking finding without evidence, recorded as non-blocking (#481).
+        if f.get('without_evidence') is True:
+            tag += ' *(bloccante senza evidenza: registrato come non bloccante)*'
         lines.append(f'- **{f.get("key") or f["id"]}**{_location(f)}: {f["title"]}{tag}')
         if f['detail']:
             lines.append(f'  {f["detail"]}'.replace('\n', '\n  '))
+        if isinstance(f.get('evidence'), str) and f['evidence'].strip():
+            lines.append(f'  *Evidenza:* {f["evidence"].strip()}'.replace('\n', '\n  '))
         if f['suggested_fix']:
             lines.append(f'  *Correzione suggerita:* {f["suggested_fix"]}'.replace('\n', '\n  '))
     return '\n'.join(lines)

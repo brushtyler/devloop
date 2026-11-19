@@ -216,7 +216,11 @@ def _format_findings(findings):
     lines = []
     for f in findings:
         where = f' ({f["file"]}{":" + str(f["line"]) if f["line"] > 0 else ""})' if f['file'] else ''
+        evidence = f.get('evidence')
         lines.append(f'- **{f.get("key") or f["id"]}**{where}: {f["title"]}\n  {f["detail"]}'
+                     # The evidence the reviewer gave (#481), for the implementer to verify.
+                     + (f'\n  Evidence: {evidence.strip()}'
+                        if isinstance(evidence, str) and evidence.strip() else '')
                      + (f'\n  Suggested fix: {f["suggested_fix"]}' if f['suggested_fix'] else ''))
     return '\n'.join(lines) or '(none)'
 

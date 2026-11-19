@@ -55,6 +55,13 @@ an explicit statement that the reviewer is not the author (see
 [What the reviewers read](protocol.md#attribution)). devloop still keeps the implementer out of
 the reviewers, from the PR's marker.
 
+A blocking finding carries its evidence (#481): the scenario that shows it, or the code and the
+rule it violates with the quotation. One without evidence is recorded as non-blocking and does
+not send the PR to the fix, unless it is a security finding, which stays blocking. The fix
+prompt asks the implementer to verify the evidence before fixing, and to dispute a finding whose
+evidence does not hold; the reviewer who opened it then withdraws it or answers with new
+evidence (see [Evidence of a blocking finding](reference.md#evidence-of-a-blocking-finding)).
+
 ### Changes to the trust policy
 
 The trust policy decides who devloop believes and when a change is merged, and only the operator
@@ -1358,7 +1365,8 @@ the operator gets the opinion `dubbi` or `contrario` and a first residual risk t
   the issue, the PR, its changed files and the reviews of the quorum, and the schema
   [`devloop/schemas/advisory.json`](../../devloop/schemas/advisory.json): a summary of the PR,
   the residual risks, what the operator should look at, points the reviewers of the quorum may
-  have missed, and a non-binding opinion (`ok`, `dubbi`, `contrario`). A head gets one turn,
+  have missed, the findings of the quorum whose evidence does not hold and the fixes that were
+  not needed ("Finding senza evidenza o corretti senza necessità", #481), and a non-binding opinion (`ok`, `dubbi`, `contrario`). A head gets one turn,
   even when it failed or its publication did (an action that failed before its result was kept
   gets one retry, see below); a new head gets its own while the PR is still in
   `agent:needs-operator`. The PR is read again before the turn and after it: when it is no

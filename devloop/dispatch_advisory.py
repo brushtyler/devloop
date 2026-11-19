@@ -52,6 +52,9 @@ from . import receipt as pr_receipt
 from .review import current_round
 
 ADVISORY_TITLE = 'Review consultiva: non conta per il quorum'
+# The section of the findings of the quorum whose evidence does not hold, and of the fixes that
+# were not needed (#481).
+UNFOUNDED_TITLE = 'Finding senza evidenza o corretti senza necessità'
 # What the readable text keeps of the agent's answer: at most so many points per list.
 MAX_POINTS = 20
 # An action that failed on a head without a result of its turn kept (#381): the turn of that
@@ -84,6 +87,7 @@ def normalize_advisory(raw):
             :MAX_POINTS]
     return {'summary': text('summary'), 'residual_risks': points('residual_risks'),
             'operator_checks': points('operator_checks'), 'overlooked': points('overlooked'),
+            'unfounded': points('unfounded'),
             'opinion': raw['opinion'], 'opinion_reason': text('opinion_reason')}
 
 
@@ -112,6 +116,9 @@ def render_advisory_review(advisory, reviewer, head_sha, header):
              '### Cosa guarderebbe l\'operatore', '', *_bullets(advisory['operator_checks']), '',
              '### Punti che i reviewer del quorum potrebbero aver trascurato', '',
              *_bullets(advisory['overlooked']), '',
+             # #481: the findings of the quorum whose evidence does not hold, and the fixes
+             # that were not needed.
+             f'### {UNFOUNDED_TITLE}', '', *_bullets(advisory.get('unfounded', [])), '',
              '### Parere finale', '',
              f'**{advisory["opinion"]}**' + (f': {advisory["opinion_reason"]}'
                                               if advisory['opinion_reason'] else '')]
