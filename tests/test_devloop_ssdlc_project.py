@@ -7,6 +7,15 @@ ssdlc: the same values of the effective configuration, the same rendered prompts
 selected test modules. The SHA-256 of the project file is left out of the comparison on purpose:
 R2 puts it in the policy version by construction, so the version is compared without it.
 
+"Before" is a reference frozen at the last commit of ``main`` before R3,
+28eaf9455bad6ff52dcbdbc29ecc07d7dde83e2a, independent of the project file and of the helper that
+rebuilds the configuration from it: ``tests/fixtures/ssdlc-pre-r3/config.toml`` is the
+``devloop/config.toml`` of that commit, as it was, and ``effective.json`` the effective
+configuration and the policy version that the code of that commit computed from it, without
+overlay nor project file (its ``source`` says how). A value migrated wrongly, in the project file
+or in the overlay, is a difference from it. A later change to the installation's defaults is not
+R3's: it updates the frozen ``config.toml`` and ``effective.json`` with it, saying so.
+
 ``repo``, ``trusted_users`` and ``[apps]`` stay in ``devloop/config.toml`` until R6 (#425), which
 brings ``devloop token`` with the configuration of the project: ``scripts/agent-token.py`` and
 ``scripts/supervisor-token.py`` read them there. The check that the installation holds no value
@@ -18,13 +27,18 @@ import hashlib
 import importlib.util
 import inspect
 import io
+import json
+import os
+import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import tomllib
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from devloop import config, context, localtests, policy
 from devloop.config import PinPolicy
@@ -35,18 +49,42 @@ SCRIPT = REPO / 'ops' / 'host' / 'ssdlc' / 'check-equivalence.py'
 LIST = 'schemas/recovery-grader-baseline.json'
 # Left in the installation until R6 (#425): the token scripts read them from config.toml.
 UNTIL_R6 = ('repo', 'trusted_users', 'apps')
+# The reference of before R3, frozen at its last commit (see the module).
+FROZEN = REPO / 'tests' / 'fixtures' / 'ssdlc-pre-r3'
+FROZEN_COMMIT = '28eaf9455bad6ff52dcbdbc29ecc07d7dde83e2a'
 
 
-def composed(overlay=ssdlc_project.OVERLAY):
+def frozen():
+    """``effective.json``: ``source``, ``policy_version`` and ``config`` of before R3."""
+    return json.loads((FROZEN / 'effective.json').read_text(encoding='utf-8'))
+
+
+def frozen_config():
+    """The frozen ``config.toml`` of before R3, parsed by this code."""
+    return config.parse_config(config.read_toml(FROZEN / 'config.toml'))
+
+
+def composed(overlay=ssdlc_project.OVERLAY, project=ssdlc_project.PROJECT):
     """ssdlc's configuration as devloop composes it on the host since R3."""
-    return config.load_config(None, overlay, ssdlc_project.PROJECT)
+    return config.load_config(None, overlay, project)
 
 
-def without_hash(cfg):
-    """``cfg`` as a dict, without the hash of the project file (declared, see the module)."""
-    values = dataclasses.asdict(cfg)
+def as_json(cfg):
+    """``cfg`` as a dict in the form of ``effective.json``: tuples are lists."""
+    return json.loads(json.dumps(dataclasses.asdict(cfg)))
+
+
+def without_hash(values):
+    """``values`` (``as_json``) without the hash of the project file (declared, see the
+    module)."""
+    values = json.loads(json.dumps(values))
     values['review_policy'].pop('project')
     return values
+
+
+def differing(values, reference):
+    """The top-level keys whose values differ between ``values`` and ``reference``."""
+    return {key for key in set(values) | set(reference) if values.get(key) != reference.get(key)}
 
 
 def strings(value):
@@ -67,12 +105,56 @@ def prompts(cfg):
 
 
 class EquivalenceTests(unittest.TestCase):
-    """Before: ssdlc's configuration as one file, as ``devloop/config.toml`` was. After: the
+    """Before: the reference frozen at the last commit before R3 (see the module). After: the
     installation's file, ssdlc's project file and the keys the overlay gains."""
 
     def setUp(self):
-        self.before = ssdlc_project.load()
+        self.frozen = frozen()
+        self.before = frozen_config()
         self.after = composed()
+
+    def test_the_reference_is_frozen_at_the_commit_before_r3(self):
+        self.assertEqual(self.frozen['source']['commit'], FROZEN_COMMIT)
+        # The file of before as it was: the facts of ssdlc in the installation's file.
+        raw = config.read_toml(FROZEN / 'config.toml')
+        self.assertEqual(raw['test_cmd'], 'python3 scripts/run-tests.py')
+        self.assertEqual(raw['priority_labels'], ['prerequisito'])
+        # This code reads it as the code of that commit did: the reference of the prompts.
+        self.assertEqual(as_json(self.before), self.frozen['config'])
+        self.assertEqual(self.before.review_policy.version(), self.frozen['policy_version'])
+
+    def test_the_values_are_the_same_key_by_key(self):
+        self.assertEqual(self.frozen['config']['review_policy']['project'], '')
+        before, after = without_hash(self.frozen['config']), without_hash(as_json(self.after))
+        for key in sorted(set(before) | set(after)):
+            with self.subTest(key=key):
+                self.assertEqual(after.get(key), before.get(key))
+        self.assertEqual(after, before)
+
+    def test_a_value_migrated_wrongly_is_a_difference(self):
+        # One value changed in a copy of the project file, the rest as it is: the comparison
+        # with the reference names that key, and only it.
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        old = ssdlc_project.PROJECT.read_text(encoding='utf-8')
+        for key, before, wrong in (
+                ('priority_labels', 'priority_labels = ["prerequisito"]',
+                 'priority_labels = ["altra"]'),
+                ('language', 'language = "Italian"', 'language = "English"'),
+                ('local_tests', 'local_tests = "changed"', 'local_tests = "full"')):
+            with self.subTest(key=key):
+                self.assertIn(before, old)
+                project = tmp / f'{key}.toml'
+                project.write_text(old.replace(before, wrong), encoding='utf-8')
+                values = without_hash(as_json(composed(project=project)))
+                self.assertEqual(differing(values, without_hash(self.frozen['config'])), {key})
+
+    def test_the_helper_of_the_other_tests_is_the_reference(self):
+        # tests/helpers/ssdlc_project.py rebuilds the configuration of before for the other
+        # modules: it is the frozen one, with the overlay keys or without.
+        self.assertEqual(as_json(ssdlc_project.load()), self.frozen['config'])
+        self.assertEqual(without_hash(as_json(ssdlc_project.load(ssdlc_project.OVERLAY))),
+                         without_hash(self.frozen['config']))
 
     def test_the_one_file_form_is_the_installation_with_the_project_keys(self):
         self.assertEqual(tomllib.loads(ssdlc_project.text()), ssdlc_project.data())
@@ -84,23 +166,14 @@ class EquivalenceTests(unittest.TestCase):
             else:
                 self.assertNotIn(key, installation, key)
 
-    def test_the_values_are_the_same_key_by_key(self):
-        before, after = without_hash(self.before), without_hash(self.after)
-        for key in sorted(set(before) | set(after)):
-            with self.subTest(key=key):
-                self.assertEqual(after.get(key), before.get(key))
-        self.assertEqual(after, before)
-
     def test_the_hash_of_the_project_file_is_left_out_by_design(self):
         # R2: the hash enters the policy version, so the version differs; without it, the
         # policy of after is the one of before.
         digest = hashlib.sha256(ssdlc_project.PROJECT.read_bytes()).hexdigest()
         self.assertEqual(self.after.review_policy.project, digest)
-        self.assertEqual(self.before.review_policy.project, '')
-        self.assertNotEqual(self.after.review_policy.version(),
-                            self.before.review_policy.version())
+        self.assertNotEqual(self.after.review_policy.version(), self.frozen['policy_version'])
         self.assertEqual(dataclasses.replace(self.after.review_policy, project='').version(),
-                         self.before.review_policy.version())
+                         self.frozen['policy_version'])
 
     def test_the_rendered_prompts_are_the_same(self):
         before, after = prompts(self.before), prompts(self.after)
@@ -113,7 +186,8 @@ class EquivalenceTests(unittest.TestCase):
         # The selection reads no configuration but local_tests (its rules stay in the code
         # until R5, #424): the same mode selects the same modules. The script compares them
         # file by file on two installations (CheckScriptTests).
-        self.assertEqual((self.before.local_tests, self.after.local_tests), ('changed', 'changed'))
+        self.assertEqual((self.frozen['config']['local_tests'], self.after.local_tests),
+                         ('changed', 'changed'))
         self.assertEqual(list(inspect.signature(localtests.select_modules).parameters),
                          ['changed', 'modules'])
 
@@ -133,7 +207,7 @@ class EquivalenceTests(unittest.TestCase):
         bare = composed(overlay=None)
         self.assertNotIn('python3 scripts/run-tests.py', bare.agents['agy'].review_commands)
         self.assertNotEqual(dataclasses.replace(bare.review_policy, project='').version(),
-                            self.before.review_policy.version())
+                            self.frozen['policy_version'])
 
     def test_without_a_project_file_devloop_does_not_start(self):
         with self.assertRaisesRegex(config.ConfigError, "missing 'test_cmd'.*project file"):
@@ -212,6 +286,55 @@ class ExampleFilesTests(unittest.TestCase):
                 self.assertEqual(cfg.apps, ssdlc_project.load().apps)
 
 
+class FirstPinTests(unittest.TestCase):
+    """The first pin the documents give runs the clone's devloop, not the launcher: since R3
+    it passes the project file and the overlay itself, before the command."""
+
+    STATE = Path('.ssdlc') / 'devloop'
+    ARGV = ['--project-config', '.ssdlc/devloop/project.toml',
+            '--local-config', '.ssdlc/devloop/config.local.toml', 'pin', 'origin/main']
+    DOCS = ('ops/README.md', 'ops/host/migrate.md', 'docs/devloop/guide.md')
+
+    def setUp(self):
+        from devloop import __main__ as cli
+        self.cli = cli
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root)
+        state = self.root / self.STATE
+        state.mkdir(parents=True)
+        # The host as ops/host/migrate.md leaves it: the example project file copied, the
+        # overlay with the keys of ops/host/ssdlc/overlay.toml. The installation is this one.
+        shutil.copy(ssdlc_project.PROJECT, state / 'project.toml')
+        shutil.copy(ssdlc_project.OVERLAY, state / 'config.local.toml')
+        cwd = os.getcwd()
+        os.chdir(self.root)
+        self.addCleanup(os.chdir, cwd)
+
+    def pin(self, argv):
+        with mock.patch.dict(os.environ), \
+                mock.patch.object(self.cli, 'main_checkout', return_value=self.root), \
+                mock.patch.object(self.cli.pin, 'pin') as pinned:
+            os.environ.pop(self.cli.STATE_ENV, None)
+            self.cli.main(argv)
+        return pinned
+
+    def test_the_documents_give_the_command(self):
+        for doc in self.DOCS:
+            text = re.sub(r'\\\n\s*', '', (REPO / doc).read_text(encoding='utf-8'))
+            with self.subTest(doc=doc):
+                self.assertIn('python3 -m devloop ' + ' '.join(self.ARGV), text)
+
+    def test_it_pins_with_the_distributed_configuration(self):
+        pinned = self.pin(self.ARGV)
+        self.assertEqual(Path(pinned.call_args.kwargs['project']).resolve(),
+                         (self.root / self.STATE / 'project.toml').resolve())
+        self.assertEqual(pinned.call_args.args[2], 'origin/main')
+
+    def test_without_the_project_file_it_does_not_start(self):
+        with self.assertRaisesRegex(SystemExit, "missing 'test_cmd'"):
+            self.pin(['pin', 'origin/main'])
+
+
 def load_script():
     # No __pycache__ beside the script: ops/ holds only the files of the repository.
     spec = importlib.util.spec_from_file_location('check_equivalence', SCRIPT)
@@ -225,8 +348,9 @@ def load_script():
 
 
 class CheckScriptTests(unittest.TestCase):
-    """``ops/host/ssdlc/check-equivalence.py`` on two installations: before, ssdlc's
-    configuration as one file; after, the installation of R3 with the project file."""
+    """``ops/host/ssdlc/check-equivalence.py`` on two installations: before, with the
+    ``config.toml`` frozen at the commit before R3 (see the module); after, the installation of
+    R3 with the project file."""
 
     @classmethod
     def setUpClass(cls):
@@ -238,8 +362,7 @@ class CheckScriptTests(unittest.TestCase):
                                 ignore=shutil.ignore_patterns('__pycache__'))
             (cls.tmp / side / LIST).parent.mkdir(parents=True)
             shutil.copy(REPO / LIST, cls.tmp / side / LIST)
-        (cls.tmp / 'before' / 'devloop' / 'config.toml').write_text(ssdlc_project.text(),
-                                                                    encoding='utf-8')
+        shutil.copy(FROZEN / 'config.toml', cls.tmp / 'before' / 'devloop' / 'config.toml')
         cls.project = cls.tmp / 'project.toml'
         shutil.copy(ssdlc_project.PROJECT, cls.project)
 
@@ -265,6 +388,28 @@ class CheckScriptTests(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn('equivalent:', out)
         self.assertIn('review_policy.project', out)  # declared, not hidden
+
+    def test_relative_paths_are_the_callers(self):
+        # As in ops/host/migrate.md: run from a directory with relative paths, the
+        # installations in directories of their own; each side runs in its installation.
+        shutil.copy(ssdlc_project.OVERLAY, self.tmp / 'overlay.toml')
+        done = subprocess.run(
+            [sys.executable, '-B', str(SCRIPT), '--before', 'before', '--after', 'after',
+             '--after-local', 'overlay.toml', '--after-project', 'project.toml',
+             '--root', os.path.relpath(REPO, self.tmp)],
+            cwd=self.tmp, capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn('equivalent:', done.stdout)
+
+    def test_a_value_migrated_wrongly_is_a_difference(self):
+        old = ssdlc_project.PROJECT.read_text(encoding='utf-8')
+        text = old.replace('priority_labels = ["prerequisito"]', 'priority_labels = ["altra"]')
+        self.assertNotEqual(text, old)
+        project = self.tmp / 'priority.toml'
+        project.write_text(text, encoding='utf-8')
+        code, out = self.check(project)
+        self.assertEqual(code, 1, out)
+        self.assertIn('config priority_labels: before ["prerequisito"], after ["altra"]', out)
 
     def test_a_restriction_left_behind_is_a_difference(self):
         old = ssdlc_project.PROJECT.read_text(encoding='utf-8')

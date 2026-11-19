@@ -63,10 +63,14 @@ Dal supervisore, come utente `supervisor`:
 ## Da ricreare
 
 - **Le copie fissate** (`pinned-*` e `current`): non si copiano. Al primo avvio si fa un nuovo pin
-  del branch principale, che rifà anche lo smoke test sulla macchina nuova:
+  del branch principale, che rifà anche lo smoke test sulla macchina nuova. Lo esegue il devloop
+  del clone: il file di progetto e l'overlay copiati sopra si passano prima del comando, come fa
+  il launcher (senza file di progetto devloop non parte, ADR 0006, R3):
 
   ```bash
-  sudo -u devloop -H sh -c 'cd ~/ssdlc && python3 -m devloop pin origin/main'
+  sudo -u devloop -H sh -c 'cd ~/ssdlc && python3 -m devloop \
+      --project-config .ssdlc/devloop/project.toml \
+      --local-config .ssdlc/devloop/config.local.toml pin origin/main'
   ```
 
 - **I worktree** (`worktrees/`): non si copiano; devloop li ricrea dai branch su GitHub quando

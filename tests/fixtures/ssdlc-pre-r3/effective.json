@@ -1,0 +1,1042 @@
+{
+ "source": {
+  "commit": "28eaf9455bad6ff52dcbdbc29ecc07d7dde83e2a",
+  "how": "dataclasses.asdict(devloop.config.load_config()) and review_policy.version(), computed by the code and the devloop/config.toml of that commit (origin/main before ADR 0006, R3), without overlay nor project file; tuples written as lists"
+ },
+ "policy_version": "619dd4fda8b8e7870f12564883f49a790c9db939796fe17c90fba43b64e326d3",
+ "config": {
+  "repo": "brushtyler/ssdlc",
+  "base_branch": "main",
+  "branch_prefix": "agent/issue-",
+  "state_dir": ".ssdlc/devloop",
+  "test_cmd": "python3 scripts/run-tests.py",
+  "language": "Italian",
+  "implementer": "claude",
+  "reviewer": "codex",
+  "agents": {
+   "claude": {
+    "key": "claude",
+    "kind": "claude",
+    "display_name": "Claude Code",
+    "model": "claude-opus-5-5",
+    "model_label": "Claude Opus 5.5",
+    "effort": "high",
+    "version_cmd": [
+     "claude",
+     "--version"
+    ],
+    "write_args": [
+     "--permission-mode",
+     "acceptEdits",
+     "--allowedTools",
+     "Bash(python3 -m unittest *)",
+     "Bash(git status *)",
+     "Bash(git diff *)",
+     "Bash(git log *)",
+     "Bash(git show *)",
+     "--disallowedTools",
+     "WebFetch",
+     "WebSearch"
+    ],
+    "review_args": [
+     "--allowedTools",
+     "Bash(git diff *)",
+     "Bash(git log *)",
+     "Bash(git show *)",
+     "Bash(python3 -m unittest tests.*)",
+     "Bash(PYTHONPATH=tests python3 -m unittest tests.*)",
+     "--disallowedTools",
+     "Edit",
+     "Write",
+     "NotebookEdit",
+     "WebFetch",
+     "WebSearch"
+    ],
+    "commit_trailer": "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+    "fallback_models": [],
+    "unavailable_patterns": [
+     "RESOURCE_EXHAUSTED",
+     "quota",
+     "429",
+     "model .* not available"
+    ],
+    "unavailable_exit_codes": [],
+    "fallback_memory_seconds": 3600,
+    "denied_cooldown_hours": 6,
+    "fallback_for": "",
+    "skipped": [],
+    "write_commands": [],
+    "review_commands": []
+   },
+   "codex": {
+    "key": "codex",
+    "kind": "codex",
+    "display_name": "Codex",
+    "model": "gpt-6.1-sol",
+    "model_label": "gpt-6.1-sol",
+    "effort": "high",
+    "version_cmd": [
+     "codex",
+     "--version"
+    ],
+    "write_args": [],
+    "review_args": [],
+    "commit_trailer": "",
+    "fallback_models": [],
+    "unavailable_patterns": [
+     "RESOURCE_EXHAUSTED",
+     "quota",
+     "429",
+     "model .* not available"
+    ],
+    "unavailable_exit_codes": [],
+    "fallback_memory_seconds": 3600,
+    "denied_cooldown_hours": 6,
+    "fallback_for": "",
+    "skipped": [],
+    "write_commands": [],
+    "review_commands": []
+   },
+   "agy": {
+    "key": "agy",
+    "kind": "agy",
+    "display_name": "Antigravity",
+    "model": "gemini-4-argon-high",
+    "model_label": "Gemini 4 Argon",
+    "effort": "high",
+    "version_cmd": [
+     "agy",
+     "--version"
+    ],
+    "write_args": [],
+    "review_args": [],
+    "commit_trailer": "",
+    "fallback_models": [
+     {
+      "model": "gemini-4-hydrogen-high",
+      "model_label": "Gemini 4 Hydrogen",
+      "effort": "high"
+     }
+    ],
+    "unavailable_patterns": [
+     "RESOURCE_EXHAUSTED",
+     "quota",
+     "429",
+     "model .* not available"
+    ],
+    "unavailable_exit_codes": [],
+    "fallback_memory_seconds": 3600,
+    "denied_cooldown_hours": 6,
+    "fallback_for": "",
+    "skipped": [],
+    "write_commands": [
+     "python3 scripts/run-tests.py",
+     "python3 -m unittest",
+     "git status",
+     "git diff",
+     "git log",
+     "git show"
+    ],
+    "review_commands": [
+     "python3 scripts/run-tests.py",
+     "python3 -m unittest",
+     "git status",
+     "git diff",
+     "git log",
+     "git show"
+    ]
+   }
+  },
+  "trusted_users": [
+   "brushtyler"
+  ],
+  "source": "",
+  "repo_lock_dir": "",
+  "reviewers": [
+   "codex",
+   "agy"
+  ],
+  "preflight": "",
+  "conclave": [],
+  "max_open_prs": 2,
+  "max_parked_prs": 3,
+  "max_review_rounds": 3,
+  "max_actions_per_tick": 3,
+  "max_parallel_actions": 3,
+  "implement_test_retries": 1,
+  "local_tests": "changed",
+  "ci_rerun_unrelated": true,
+  "block_uncertain_turns": false,
+  "story_identity": false,
+  "publication_outbox": false,
+  "attempt_identity": false,
+  "journal_max_mib": 64,
+  "budget": {
+   "enabled": false,
+   "turns": 0,
+   "role_turns": [],
+   "phase_turns": [],
+   "wall_seconds": 0,
+   "metered_usd": 0.0,
+   "cli_estimate_usd": 0.0,
+   "usage": []
+  },
+  "agent_timeout_seconds": 3600,
+  "test_timeout_seconds": 3600,
+  "agent_command_timeout_seconds": 600,
+  "agent_stall_seconds": 900,
+  "agent_stall_action": "warn",
+  "blocked_labels": [
+   "bloccata"
+  ],
+  "priority_labels": [
+   "prerequisito"
+  ],
+  "protected_paths": [
+   ".github/"
+  ],
+  "apps": {
+   "dispatcher": {
+    "app_id": 5747835,
+    "slug": "brushtyler-devloop-dispatcher"
+   },
+   "claude": {
+    "app_id": 5735240,
+    "slug": "brushtyler-devloop-claude-agent"
+   },
+   "codex": {
+    "app_id": 5735296,
+    "slug": "brushtyler-devloop-codex-agent"
+   },
+   "agy": {
+    "app_id": 5735349,
+    "slug": "brushtyler-devloop-agy-agent"
+   },
+   "merger": {
+    "app_id": 5792929,
+    "slug": "brushtyler-devloop-merger"
+   },
+   "supervisor": {
+    "app_id": 5824243,
+    "slug": "brushtyler-devloop-supervisor"
+   }
+  },
+  "app_key_dir": "~/.ghapps",
+  "labels": {
+   "ready": "agent:ready",
+   "working": "agent:working",
+   "review": "agent:review",
+   "changes": "agent:changes",
+   "ready_to_merge": "agent:ready-to-merge",
+   "needs_operator": "agent:needs-operator",
+   "merge_hold": "agent:merge-hold",
+   "needs_supervisor": "agent:needs-supervisor"
+  },
+  "review_policy": {
+   "default_level": 1,
+   "label": "reviews:2",
+   "sensitive_paths": [
+    "devloop/",
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".github/",
+    "schemas/",
+    "ssdlc_writer_gate.py",
+    "ssdlc_role_fencing.py",
+    "ssdlc_container_holder.py",
+    "ssdlc_locks.py",
+    "ssdlc_fencing_proof.py",
+    "ssdlc_transitions.py",
+    "ssdlc_replay_gate.py",
+    "ssdlc_grader.py",
+    "ssdlc_feedback_delegation.py",
+    "ssdlc_feedback_admission.py",
+    "ssdlc_usage_admission.py",
+    "scripts/agent-token.py",
+    "scripts/supervisor-token.py"
+   ],
+   "sensitive_files": [
+    ".github/workflows/test.yml",
+    "ssdlc_grader.py",
+    "ssdlc_replay_gate.py",
+    "tests/replay/README.md",
+    "tests/replay/__init__.py",
+    "tests/replay/benchmark.py",
+    "tests/replay/fixtures/i2-recovery.json",
+    "tests/replay/fixtures/issue22-cache.json",
+    "tests/replay/repository_fixtures.py",
+    "tests/replay/test_candidate_capture.py",
+    "tests/replay/test_timeout_recovery.py",
+    "tests/test_design_recovery.py",
+    "tests/test_recovery_benchmark.py",
+    "tests/test_recovery_limits.py"
+   ],
+   "reviewers": [
+    [
+     "codex",
+     "brushtyler-devloop-codex-agent",
+     "codex",
+     "gpt-6.1-sol",
+     "high",
+     [],
+     [],
+     []
+    ],
+    [
+     "agy",
+     "brushtyler-devloop-agy-agent",
+     "agy",
+     "gemini-4-argon-high",
+     "high",
+     [],
+     [
+      [
+       "gemini-4-hydrogen-high",
+       "high"
+      ]
+     ],
+     [
+      "python3 scripts/run-tests.py",
+      "python3 -m unittest",
+      "git status",
+      "git diff",
+      "git log",
+      "git show"
+     ]
+    ]
+   ],
+   "zero_label": "reviews:0",
+   "zero_allowlist": [],
+   "zero_checks": [],
+   "advisory_reviewer": "",
+   "project": ""
+  },
+  "merge": {
+   "mode": "off",
+   "levels": [],
+   "operator_only_paths": [
+    "docs/adr/",
+    "AGENTS.md",
+    "CLAUDE.md"
+   ]
+  },
+  "supervisor": "",
+  "supervisor_actor": null,
+  "delegations": {
+   "retry_own_prs": false,
+   "rounds": false,
+   "max_rounds_per_pr": 2,
+   "max_grants_per_day": 3
+  },
+  "pin": {
+   "auto": false,
+   "paths": [
+    "devloop/",
+    "core/",
+    "schemas/recovery-grader-baseline.json"
+   ],
+   "restart_max_wait_minutes": 30
+  },
+  "run": {
+   "alert_issue": 0
+  },
+  "report": {
+   "issue": 0,
+   "interval": 15
+  },
+  "ci": {
+   "grace_minutes": 5,
+   "required_timeout_minutes": 30
+  },
+  "gc": {
+   "pins": true,
+   "keep_pins": 5,
+   "worktrees": true,
+   "logs": false,
+   "log_days": 14,
+   "interval_minutes": 60
+  },
+  "agent_user": {
+   "name": "",
+   "check": true
+  },
+  "docs": {
+   "entries": [
+    [
+     "devloop/",
+     [
+      "docs/devloop/guide.md"
+     ]
+    ],
+    [
+     "devloop/config.py",
+     [
+      "docs/devloop/reference.md"
+     ]
+    ],
+    [
+     "devloop/config.toml",
+     [
+      "docs/devloop/reference.md"
+     ]
+    ],
+    [
+     "devloop/budget.py",
+     [
+      "docs/devloop/reference.md",
+      "docs/devloop/protocol.md"
+     ]
+    ],
+    [
+     "devloop/agents.py",
+     [
+      "docs/devloop/reference.md"
+     ]
+    ],
+    [
+     "devloop/unavailability.py",
+     [
+      "docs/devloop/reference.md"
+     ]
+    ],
+    [
+     "devloop/localtests.py",
+     [
+      "docs/devloop/reference.md"
+     ]
+    ],
+    [
+     "devloop/workspace.py",
+     [
+      "docs/devloop/reference.md"
+     ]
+    ],
+    [
+     "devloop/apps.py",
+     [
+      "docs/devloop/reference.md"
+     ]
+    ],
+    [
+     "devloop/prompts/",
+     [
+      "docs/devloop/reference.md"
+     ]
+    ],
+    [
+     "devloop/markdown.py",
+     [
+      "docs/devloop/protocol.md"
+     ]
+    ],
+    [
+     "devloop/ledger.py",
+     [
+      "docs/devloop/protocol.md"
+     ]
+    ],
+    [
+     "devloop/acceptance.py",
+     [
+      "docs/devloop/protocol.md"
+     ]
+    ],
+    [
+     "devloop/review.py",
+     [
+      "docs/devloop/protocol.md"
+     ]
+    ],
+    [
+     "devloop/policy.py",
+     [
+      "docs/devloop/protocol.md",
+      "docs/devloop/reference.md"
+     ]
+    ],
+    [
+     "devloop/schemas/",
+     [
+      "docs/devloop/protocol.md"
+     ]
+    ],
+    [
+     "devloop/dispatcher.py",
+     [
+      "docs/devloop/reference.md",
+      "docs/devloop/protocol.md"
+     ]
+    ],
+    [
+     "devloop/context.py",
+     [
+      "docs/devloop/reference.md",
+      "docs/devloop/protocol.md"
+     ]
+    ],
+    [
+     "devloop/planning.py",
+     [
+      "docs/devloop/reference.md",
+      "docs/devloop/protocol.md"
+     ]
+    ],
+    [
+     "devloop/dispatch_supervision.py",
+     [
+      "docs/devloop/reference.md",
+      "docs/devloop/protocol.md"
+     ]
+    ],
+    [
+     "devloop/dispatch_preflight.py",
+     [
+      "docs/devloop/reference.md",
+      "docs/devloop/protocol.md"
+     ]
+    ],
+    [
+     "devloop/dispatch_merge.py",
+     [
+      "docs/devloop/reference.md",
+      "docs/devloop/protocol.md"
+     ]
+    ],
+    [
+     "devloop/dispatch_actions.py",
+     [
+      "docs/devloop/reference.md",
+      "docs/devloop/protocol.md"
+     ]
+    ],
+    [
+     "devloop/dispatch_conclave.py",
+     [
+      "docs/devloop/reference.md",
+      "docs/devloop/protocol.md"
+     ]
+    ],
+    [
+     "devloop/conclave.py",
+     [
+      "docs/devloop/protocol.md"
+     ]
+    ],
+    [
+     "devloop/ports.py",
+     [
+      "docs/architecture.md"
+     ]
+    ],
+    [
+     "devloop/github.py",
+     [
+      "docs/architecture.md"
+     ]
+    ],
+    [
+     "scripts/devloop-pinned",
+     [
+      "docs/devloop/guide.md"
+     ]
+    ],
+    [
+     "scripts/run-tests.py",
+     [
+      "docs/development.md"
+     ]
+    ],
+    [
+     "orchestrator.py",
+     [
+      "docs/getting-started.md",
+      "docs/architecture.md"
+     ]
+    ],
+    [
+     "ssdlc_tasks.py",
+     [
+      "docs/getting-started.md",
+      "docs/architecture.md"
+     ]
+    ],
+    [
+     "ssdlc_controller.py",
+     [
+      "docs/getting-started.md",
+      "docs/architecture.md"
+     ]
+    ],
+    [
+     "setup-ssdlc.sh",
+     [
+      "docs/getting-started.md",
+      "docs/configuration.md"
+     ]
+    ],
+    [
+     "ssdlc_writer_gate.py",
+     [
+      "docs/writer-fencing.md"
+     ]
+    ],
+    [
+     "ssdlc_role_fencing.py",
+     [
+      "docs/writer-fencing.md"
+     ]
+    ],
+    [
+     "ssdlc_container_holder.py",
+     [
+      "docs/writer-fencing.md"
+     ]
+    ],
+    [
+     "ssdlc_fencing_proof.py",
+     [
+      "docs/writer-fencing.md",
+      "docs/recovery.md"
+     ]
+    ],
+    [
+     "ssdlc_telemetry.py",
+     [
+      "docs/cost-telemetry.md",
+      "docs/bounded-recovery.md"
+     ]
+    ],
+    [
+     "ssdlc_quota.py",
+     [
+      "docs/cost-telemetry.md"
+     ]
+    ],
+    [
+     "ssdlc_recovery.py",
+     [
+      "docs/cost-telemetry.md",
+      "docs/bounded-recovery.md"
+     ]
+    ],
+    [
+     "ssdlc_feedback.py",
+     [
+      "docs/developer-feedback.md"
+     ]
+    ],
+    [
+     "ssdlc_feedback_admission.py",
+     [
+      "docs/developer-feedback.md"
+     ]
+    ],
+    [
+     "ssdlc_feedback_analysis.py",
+     [
+      "docs/developer-feedback.md"
+     ]
+    ],
+    [
+     "ssdlc_feedback_bindings.py",
+     [
+      "docs/developer-feedback.md"
+     ]
+    ],
+    [
+     "ssdlc_feedback_delegation.py",
+     [
+      "docs/developer-feedback.md"
+     ]
+    ],
+    [
+     "ssdlc_feedback_delivery.py",
+     [
+      "docs/developer-feedback.md"
+     ]
+    ],
+    [
+     "ssdlc_feedback_return.py",
+     [
+      "docs/developer-feedback.md"
+     ]
+    ],
+    [
+     "ssdlc_feedback_roles.py",
+     [
+      "docs/developer-feedback.md"
+     ]
+    ],
+    [
+     "ssdlc_feedback_workflow.py",
+     [
+      "docs/developer-feedback.md"
+     ]
+    ],
+    [
+     "ssdlc_scope_amendments.py",
+     [
+      "docs/scope-amendments.md",
+      "docs/recovery.md"
+     ]
+    ],
+    [
+     "ssdlc_continuations.py",
+     [
+      "docs/continuations.md",
+      "docs/historical-reconciliation.md",
+      "docs/recovery.md"
+     ]
+    ],
+    [
+     "ssdlc_historical.py",
+     [
+      "docs/continuations.md",
+      "docs/historical-reconciliation.md",
+      "docs/recovery.md"
+     ]
+    ],
+    [
+     "ssdlc_catalogues.py",
+     [
+      "docs/configuration.md"
+     ]
+    ],
+    [
+     "scripts/agent-token.py",
+     [
+      "AGENTS.md",
+      "docs/devloop/reference.md"
+     ]
+    ],
+    [
+     "scripts/supervisor-token.py",
+     [
+      "AGENTS.md",
+      "docs/devloop/reference.md"
+     ]
+    ],
+    [
+     "ssdlc_reconciliation.py",
+     [
+      "docs/historical-reconciliation.md",
+      "docs/recovery.md"
+     ]
+    ],
+    [
+     "ssdlc_transitions.py",
+     [
+      "docs/recovery.md"
+     ]
+    ],
+    [
+     "ssdlc_preparations.py",
+     [
+      "docs/continuations.md",
+      "docs/historical-reconciliation.md",
+      "docs/scope-amendments.md"
+     ]
+    ],
+    [
+     "ssdlc_supervisor.py",
+     [
+      "docs/supervision.md",
+      "docs/writer-fencing.md"
+     ]
+    ],
+    [
+     "ssdlc_bounce.py",
+     [
+      "docs/bounce-preview.md"
+     ]
+    ],
+    [
+     "ssdlc_corrective.py",
+     [
+      "docs/bounce-preview.md",
+      "docs/native-gate-convergence.md"
+     ]
+    ],
+    [
+     "ssdlc_corrective_owners.py",
+     [
+      "docs/bounce-preview.md",
+      "docs/developer-feedback.md"
+     ]
+    ],
+    [
+     "ssdlc_candidates.py",
+     [
+      "docs/candidate-capture.md"
+     ]
+    ],
+    [
+     "ssdlc_bootstrap.py",
+     [
+      "docs/task-mode.md",
+      "docs/native-gate-convergence.md"
+     ]
+    ],
+    [
+     "ssdlc_design.py",
+     [
+      "docs/task-mode.md",
+      "docs/bounded-recovery.md"
+     ]
+    ],
+    [
+     "ssdlc_planning.py",
+     [
+      "docs/task-mode.md"
+     ]
+    ],
+    [
+     "ssdlc_requirements.py",
+     [
+      "docs/task-mode.md"
+     ]
+    ],
+    [
+     "ssdlc_gate_reports.py",
+     [
+      "docs/native-gate-convergence.md",
+      "docs/task-mode.md"
+     ]
+    ],
+    [
+     "ssdlc_findings.py",
+     [
+      "docs/native-gate-convergence.md",
+      "docs/task-mode.md"
+     ]
+    ],
+    [
+     "ssdlc_usage_admission.py",
+     [
+      "docs/bounded-recovery.md",
+      "docs/cost-telemetry.md",
+      "docs/recovery.md"
+     ]
+    ],
+    [
+     "ssdlc_replay_gate.py",
+     [
+      "docs/bounded-recovery.md",
+      "docs/development.md"
+     ]
+    ],
+    [
+     "ssdlc_grader.py",
+     [
+      "docs/bounded-recovery.md"
+     ]
+    ],
+    [
+     "ssdlc_owner_revalidation.py",
+     [
+      "docs/developer-feedback.md",
+      "docs/task-mode.md"
+     ]
+    ],
+    [
+     "ssdlc_impact.py",
+     [
+      "docs/developer-feedback.md",
+      "docs/task-mode.md"
+     ]
+    ],
+    [
+     "ssdlc_operator_recovery.py",
+     [
+      "docs/developer-feedback.md"
+     ]
+    ],
+    [
+     "ssdlc_amendments.py",
+     [
+      "docs/scope-amendments.md"
+     ]
+    ],
+    [
+     "ssdlc_verification_repair.py",
+     [
+      "docs/scope-amendments.md",
+      "docs/recovery.md"
+     ]
+    ],
+    [
+     "ssdlc_deadline_extensions.py",
+     [
+      "docs/scope-amendments.md"
+     ]
+    ],
+    [
+     "ssdlc_limit_extensions.py",
+     [
+      "docs/limit-extensions.md",
+      "docs/recovery.md"
+     ]
+    ],
+    [
+     "ssdlc_locks.py",
+     [
+      "docs/writer-fencing.md"
+     ]
+    ],
+    [
+     "schemas/advisory-event.schema.json",
+     [
+      "docs/task-mode.md"
+     ]
+    ],
+    [
+     "schemas/advisory-proposals.schema.json",
+     [
+      "docs/task-mode.md"
+     ]
+    ],
+    [
+     "schemas/bootstrap-profile.schema.json",
+     [
+      "docs/task-mode.md"
+     ]
+    ],
+    [
+     "schemas/candidate-capture.schema.json",
+     [
+      "docs/candidate-capture.md"
+     ]
+    ],
+    [
+     "schemas/candidate-evidence.schema.json",
+     [
+      "docs/native-gate-convergence.md"
+     ]
+    ],
+    [
+     "schemas/context-disclosure.schema.json",
+     [
+      "docs/native-gate-convergence.md"
+     ]
+    ],
+    [
+     "schemas/continuation-proposal.schema.json",
+     [
+      "docs/continuations.md"
+     ]
+    ],
+    [
+     "schemas/continuation-snapshot.schema.json",
+     [
+      "docs/continuations.md"
+     ]
+    ],
+    [
+     "schemas/convergence-decision.schema.json",
+     [
+      "docs/native-gate-convergence.md"
+     ]
+    ],
+    [
+     "schemas/corrective-transaction.schema.json",
+     [
+      "docs/bounce-preview.md",
+      "docs/native-gate-convergence.md"
+     ]
+    ],
+    [
+     "schemas/design-review.schema.json",
+     [
+      "docs/task-mode.md"
+     ]
+    ],
+    [
+     "schemas/diagnosis-record.schema.json",
+     [
+      "docs/native-gate-convergence.md"
+     ]
+    ],
+    [
+     "schemas/gate-findings.schema.json",
+     [
+      "docs/task-mode.md"
+     ]
+    ],
+    [
+     "schemas/history-snapshot.schema.json",
+     [
+      "docs/native-gate-convergence.md"
+     ]
+    ],
+    [
+     "schemas/limit-extension-authorization.schema.json",
+     [
+      "docs/limit-extensions.md"
+     ]
+    ],
+    [
+     "schemas/limit-extension-proposal.schema.json",
+     [
+      "docs/limit-extensions.md"
+     ]
+    ],
+    [
+     "schemas/plan.schema.json",
+     [
+      "docs/task-mode.md"
+     ]
+    ],
+    [
+     "schemas/quality-contract.schema.json",
+     [
+      "docs/configuration.md"
+     ]
+    ],
+    [
+     "schemas/reconciliation-authorization.schema.json",
+     [
+      "docs/historical-reconciliation.md"
+     ]
+    ],
+    [
+     "schemas/reconciliation-proposal.schema.json",
+     [
+      "docs/historical-reconciliation.md"
+     ]
+    ],
+    [
+     "schemas/reconciliation-request.schema.json",
+     [
+      "docs/historical-reconciliation.md"
+     ]
+    ],
+    [
+     "schemas/recovery-grader-baseline.json",
+     [
+      "docs/bounded-recovery.md",
+      "docs/devloop/reference.md"
+     ]
+    ],
+    [
+     "schemas/recovery-limits.schema.json",
+     [
+      "docs/bounded-recovery.md",
+      "docs/historical-reconciliation.md"
+     ]
+    ],
+    [
+     "schemas/task-manifest.schema.json",
+     [
+      "docs/task-mode.md"
+     ]
+    ],
+    [
+     "schemas/task-plan-review.schema.json",
+     [
+      "docs/task-mode.md"
+     ]
+    ]
+   ]
+  }
+ }
+}

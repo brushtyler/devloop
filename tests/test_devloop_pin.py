@@ -1177,9 +1177,15 @@ class LauncherTests(unittest.TestCase):
             load_launcher().command(tmp, ['run'])
         message = str(raised.exception.code)
         command = message[message.index('`') + 1:message.rindex('`')]
-        self.assertEqual(command, 'python3 -m devloop pin origin/main')
+        # Run by the clone's devloop, it passes the project file and the overlay itself: the
+        # installation has no test_cmd since ADR 0006, R3.
+        self.assertEqual(command, 'python3 -m devloop --project-config '
+                                  '.ssdlc/devloop/project.toml --local-config '
+                                  '.ssdlc/devloop/config.local.toml pin origin/main')
         section = self.subsection('Installation as a dedicated user')
-        self.assertIn(f"sudo -u devloop -H sh -c 'cd ~/ssdlc && {command}'", section)
+        # The continuation lines of the block, as one (subsection joins the lines with spaces).
+        self.assertIn(f"sudo -u devloop -H sh -c 'cd ~/ssdlc && {command}'",
+                      section.replace(' \\ ', ' '))
         # Every later command runs the pinned copy as the devloop user, never as root.
         self.assertIn('sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned',
                       section)
@@ -1437,7 +1443,8 @@ class DryRunTests(GitCase):
 class DocsTests(unittest.TestCase):
     def test_the_installation_is_documented(self):
         text = (REPO / 'docs' / 'devloop' / 'guide.md').read_text()
-        for needle in ('python3 -m devloop pin', 'scripts/devloop-pinned', '--allow-root',
+        for needle in ('--local-config .ssdlc/devloop/config.local.toml pin origin/main',
+                       'scripts/devloop-pinned', '--allow-root',
                        'config.local.toml', 'sudo -u devloop -H', 'Rollback', '[pin]'):
             with self.subTest(needle=needle):
                 self.assertIn(needle, text)

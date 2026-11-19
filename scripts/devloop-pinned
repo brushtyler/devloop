@@ -50,8 +50,9 @@ def command(root, argv, python=sys.executable, state=None):
             sys.exit(f'devloop-pinned: no pinned copy at {pointer}: pin a tag of the '
                      "installation's source first (docs/devloop/guide.md, \"Installation "
                      'source\")')
-        sys.exit(f'devloop-pinned: no pinned copy at {pointer}: run '
-                 '`python3 -m devloop pin origin/main` from the main checkout first')
+        sys.exit(f'devloop-pinned: no pinned copy at {pointer}: run `python3 -m devloop '
+                 f'--project-config {STATE}/project.toml --local-config '
+                 f'{STATE}/config.local.toml pin origin/main` from the main checkout first')
     local = state / 'config.local.toml'
     extra = ['--local-config', str(local)] if local.is_file() else []
     # The project file on the host (ADR 0006, R2), beside the overlay. A link is passed too:

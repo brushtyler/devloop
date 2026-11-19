@@ -22,8 +22,9 @@ script compares, side by side:
 - the test modules ``local_tests`` selects: the mode, and with ``changed`` the modules picked for
   each file the checkout ``--root`` tracks (default: the checkout of this script).
 
-It prints every difference and ends with 0 when there is none, 1 when there is one, 2 when a
-side does not load. It reads the files it is given and writes nothing.
+Relative paths are taken from the current directory, as usual, even though each side runs in
+its installation. It prints every difference and ends with 0 when there is none, 1 when there is
+one, 2 when a side does not load. It reads the files it is given and writes nothing.
 """
 
 import argparse
@@ -138,6 +139,12 @@ def main(argv=None):
     parser.add_argument('--root', default=str(ROOT), metavar='CHECKOUT',
                         help='the checkout whose tracked files select the tests')
     args = parser.parse_args(argv)
+    # Each side runs in its installation: a relative path is the caller's, so it is made
+    # absolute here, before any process changes directory. Not resolved: a link stays a link,
+    # and the project file's read still refuses it.
+    for name in ('before', 'after', 'before_local', 'after_local', 'after_project', 'root'):
+        if getattr(args, name):
+            setattr(args, name, os.path.abspath(getattr(args, name)))
     for path in (args.before_local, args.after_local, args.after_project):
         if path and not Path(path).is_file():
             parser.error(f'{path}: not a file')

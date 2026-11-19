@@ -188,7 +188,9 @@ class LayoutTests(unittest.TestCase):
         migrate = (OPS / 'host/migrate.md').read_text()
         for phrase in ('ledger-open-turns.json', 'model-unavailability.json', 'activity.json',
                        'config.local.toml', 'turn-journal.jsonl', '~/supervisor',
-                       'memory', 'devloop pin', 'mai due dispatcher attivi', 'systemctl stop'):
+                       'memory', '--project-config .ssdlc/devloop/project.toml',
+                       '--local-config .ssdlc/devloop/config.local.toml pin origin/main',
+                       'mai due dispatcher attivi', 'systemctl stop'):
             self.assertIn(phrase, migrate)
 
     def test_the_guide_completes_the_manifest_flow_before_the_installation(self):
