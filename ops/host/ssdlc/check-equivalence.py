@@ -24,7 +24,8 @@ script compares, side by side:
 
 Relative paths are taken from the current directory, as usual, even though each side runs in
 its installation. It prints every difference and ends with 0 when there is none, 1 when there is
-one, 2 when a side does not load. It reads the files it is given and writes nothing.
+one, 2 when a side does not load. It reads the files it is given and writes nothing, not even
+byte code in the installations: the operator runs it as root (ops/host/migrate.md).
 """
 
 import argparse
@@ -81,7 +82,9 @@ def dump(install, local, project, root):
         raise SystemExit(2)
     env = {k: v for k, v in os.environ.items() if k not in ('PYTHONPATH', 'PYTHONHOME')}
     env['PYTHONPATH'] = str(install)
-    done = subprocess.run([sys.executable, '-P', '-c', DUMP, str(local or ''),
+    # -B: no bytecode either. Run as root (ops/host/migrate.md), Python would otherwise write
+    # __pycache__ into the read-only pinned copy, as pin.py avoids.
+    done = subprocess.run([sys.executable, '-P', '-B', '-c', DUMP, str(local or ''),
                            str(project or ''), str(root)],
                           cwd=install, env=env, capture_output=True, text=True)
     if done.returncode:

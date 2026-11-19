@@ -18,6 +18,7 @@ from devloop import config, dispatcher, markdown, supervision
 from devloop.config import ConfigError, DelegationPolicy, ReportPolicy, parse_delegations
 from devloop.github import GitHubError
 from devloop.ledger import Ledger
+from helpers import ssdlc_project
 from test_devloop_grant_round import GrantCase, ci_round
 from test_devloop_grant_round import ON as ROUNDS_ON
 from test_devloop_supervision import AUTO, SUPER, SUPERVISOR_LOGIN, Case, header
@@ -68,7 +69,8 @@ class CapacityCase(Case):
 
 class OffTests(CapacityCase):
     def test_off_by_default(self):
-        defaults = config.load_config().delegations
+        # The installation's file has no test_cmd (R3): with ssdlc's project file.
+        defaults = config.load_config(project=ssdlc_project.PROJECT).delegations
         self.assertFalse(defaults.capacity)
         self.assertFalse(AUTO.delegations.capacity)
 
@@ -356,7 +358,7 @@ class ConfigTests(unittest.TestCase):
                     parse_delegations(table)
 
     def test_the_overlay_is_held_to_the_same_caps_and_needs_the_summary_issue(self):
-        data = config.load_data()
+        data = config.load_data(project=ssdlc_project.PROJECT)  # no test_cmd without it (R3)
         on = config.apply_overlay(data, {'delegations': {'capacity': True},
                                          'report': {'issue': 9}})
         self.assertTrue(config.parse_config(on).delegations.capacity)

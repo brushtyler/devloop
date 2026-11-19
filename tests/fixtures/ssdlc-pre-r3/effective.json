@@ -1,7 +1,8 @@
 {
  "source": {
   "commit": "28eaf9455bad6ff52dcbdbc29ecc07d7dde83e2a",
-  "how": "dataclasses.asdict(devloop.config.load_config()) and review_policy.version(), computed by the code and the devloop/config.toml of that commit (origin/main before ADR 0006, R3), without overlay nor project file; tuples written as lists"
+  "how": "dataclasses.asdict(devloop.config.load_config()) and review_policy.version(), computed by the code and the devloop/config.toml of that commit (origin/main before ADR 0006, R3), without overlay nor project file; tuples written as lists",
+  "updated": "later changes of the installation, not R3's, added to config.toml and here with only the values they add (the policy version does not change): [apps.implementer], implementers and agents.*.app (issue #407, PR #442); delegations.capacity and capacity_max_* (issue #412, PR #450)"
  },
  "policy_version": "619dd4fda8b8e7870f12564883f49a790c9db939796fe17c90fba43b64e326d3",
  "config": {
@@ -66,7 +67,8 @@
     "fallback_for": "",
     "skipped": [],
     "write_commands": [],
-    "review_commands": []
+    "review_commands": [],
+    "app": ""
    },
    "codex": {
     "key": "codex",
@@ -95,7 +97,8 @@
     "fallback_for": "",
     "skipped": [],
     "write_commands": [],
-    "review_commands": []
+    "review_commands": [],
+    "app": ""
    },
    "agy": {
     "key": "agy",
@@ -144,7 +147,8 @@
      "git diff",
      "git log",
      "git show"
-    ]
+    ],
+    "app": ""
    }
   },
   "trusted_users": [
@@ -156,6 +160,7 @@
    "codex",
    "agy"
   ],
+  "implementers": [],
   "preflight": "",
   "conclave": [],
   "max_open_prs": 2,
@@ -219,6 +224,10 @@
    "supervisor": {
     "app_id": 5824243,
     "slug": "brushtyler-devloop-supervisor"
+   },
+   "implementer": {
+    "app_id": 5824194,
+    "slug": "brushtyler-devloop-implementer"
    }
   },
   "app_key_dir": "~/.ghapps",
@@ -326,7 +335,11 @@
    "retry_own_prs": false,
    "rounds": false,
    "max_rounds_per_pr": 2,
-   "max_grants_per_day": 3
+   "max_grants_per_day": 3,
+   "capacity": false,
+   "capacity_max_open_prs": 6,
+   "capacity_max_parked_prs": 6,
+   "capacity_max_hours": 24
   },
   "pin": {
    "auto": false,

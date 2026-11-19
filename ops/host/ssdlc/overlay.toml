@@ -1,6 +1,6 @@
 # The keys ssdlc's overlay gains with R3 (ADR 0006): add them to <state_dir>/config.local.toml of
-# ssdlc's host, beside the keys it already has (ops/host/migrate.md, "Configurazione di ssdlc nel
-# suo file di progetto"). Not an overlay of its own: devloop never reads it from here.
+# ssdlc's host, beside the keys it already has (ops/host/migrate.md, "Migrazione di R3 su un host
+# attivo"). Not an overlay of its own: devloop never reads it from here.
 #
 # The agents' permissions derived from the project's tests are the overlay's alone (ADR 0006,
 # D2): the test_cmd of the project file never becomes a command of agy. Before R3 agy's default

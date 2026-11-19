@@ -303,6 +303,8 @@ enabled = false
 [delegations]
 rounds = false
 retry_own_prs = false
+# Added after the freeze: the installation's capacity delegation (issue #412, PR #450), not R3's.
+capacity = false
 # max_rounds_per_pr = 2
 # max_grants_per_day = 3
 
@@ -556,3 +558,8 @@ slug = "brushtyler-devloop-merger"
 [apps.supervisor]
 app_id = 5824243
 slug = "brushtyler-devloop-supervisor"
+
+# Added after the freeze: the installation's implementer app (issue #407, PR #442), not R3's.
+[apps.implementer]
+app_id = 5824194
+slug = "brushtyler-devloop-implementer"
