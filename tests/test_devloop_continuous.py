@@ -367,6 +367,9 @@ class SimPinner:
     def request(self, number, head):
         self.requests.append({'pr': number, 'head': head})
 
+    def observe(self, branch, touches):
+        return None  # only the merges of the simulation advance the base (#430)
+
     def cancel(self):
         self.cancelled += 1
         self.requests.clear()

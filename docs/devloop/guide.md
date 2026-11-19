@@ -1055,7 +1055,7 @@ in `[roles]` of the configuration ([reference](reference.md#configuration)).
 
 ```bash
 python3 -m devloop setup            # create the agent:* labels, the priority:* labels and the review level labels (reviews:0 only when level 0 is on)
-python3 -m devloop status           # running action, devloop PRs (with rounds counted on max_review_rounds, merge state and conflicts), ready issues in start order with their priority, planned actions; with [budget] on, the budget of the stories in progress
+python3 -m devloop status           # running action, devloop PRs (with rounds counted on max_review_rounds, merge state and conflicts), ready issues in start order with their priority, planned actions; with [budget] on, the budget of the stories in progress; a pinned copy behind origin/main in the files of the installation
 python3 -m devloop apps             # check the GitHub App of each actor
 python3 -m devloop tick --dry-run   # print the ready issues in start order and the plan, change nothing (no lock: it runs beside a dispatcher)
 python3 -m devloop tick             # run one round
@@ -1710,7 +1710,7 @@ sudo -u devloop -H tail -f /home/devloop/ssdlc/.ssdlc/devloop/run.log   # follow
   sudo -u devloop -H rm /home/devloop/ssdlc/.ssdlc/devloop/STOP      # then start it again
   ```
 
-- **`[pin] auto`.** With `auto = true` in the overlay, a merge by devloop that touches
+- **`[pin] auto`.** With `auto = true` in the overlay, a merge, by devloop or by the operator, that touches
   `devloop/`, `core/` or a file of `sensitive_path_lists` pins `origin/main`, and the loop restarts by
   itself from the new copy, in the same process and log ([Pin after a merge](#pin-after-a-merge)). Otherwise, after a pin by hand, stop the loop and
   start it again: a running loop keeps the code it started with.
@@ -1888,6 +1888,26 @@ stays as it was, and the request stays: the next tick tries again (`run` counts 
 [failed tick](#continuous-loop), with its backoff; `tick` exits with it). With `auto = false` a merge requests nothing, and a request left
 from before is ignored.
 
+A merge devloop did not make (#430), such as a PR of `operator_only_paths` or one the operator
+merges by hand, requests the pin too. At each tick, before reading the request (not in
+`tick --dry-run`), devloop fetches `origin/main` and compares its head with the head the last
+tick saw, recorded in `.ssdlc/devloop/pin-base.json` (the first time, with the commit of
+`current`). When it advanced with changes to the same paths, the log says `auto-pin:
+origin/main advanced to <sha12> with <N> changed files of the installation (<files>): pin
+requested`, and the pin follows with the same rules as above (`auto-pin of origin/main after the
+advance of origin/main to <sha12>`). An advance that touches none of them requests nothing; nor
+does one whose head `current` already holds, nor one seen while a request is pending (the
+request of devloop's merge stays). The head is recorded as seen also when the copy is then
+refused by the smoke test, so a refused commit is not tried again until `origin/main` advances.
+A fetch that fails is logged (`auto-pin: the advance of origin/main not checked, next tick:
+<reason>`) and the tick goes on. With `auto = false` nothing is fetched or recorded.
+
+`devloop status` says when the pinned copy it runs from (the one `current` points at, through the
+[launcher](#launcher)) differs from `origin/main`, as last fetched, in those paths: `pinned copy:
+pinned-<sha12> (<sha12>) is behind origin/main (<sha12>, as last fetched) in <N> files of the
+installation: <files>` (`is not an ancestor of` for a copy of a commit off the branch). It says
+nothing when the copy is up to date in those paths, or when devloop runs from a checkout.
+
 In the [continuous mode](#continuous-mode) of `devloop run` (#301) the pin does not wait for
 the running actions. The next tick runs `pin origin/main` at once, smoke test included, and
 moves `current`; the actions already running, and those the tick and the next ones start, run
@@ -1916,7 +1936,8 @@ unchanged and the request is dropped: <reason>`, and the tick plans and runs its
 the running copy, so `run` goes on. With `[run].alert_issue` the dispatcher comments on that
 issue once per refused commit (its commit and failed step; the error stays in the local log),
 recorded in `.ssdlc/devloop/pin-alerted.json`; a comment that cannot be published is only
-logged. The next merge that requests a pin tries again, on the new `origin/main`.
+logged. The next merge that requests a pin, or the next advance of `origin/main` that touches
+the installation, tries again, on the new `origin/main`.
 
 devloop may import only the Python standard library, itself and the `core` package, and a test
 enforces this (`tests/test_devloop_boundary.py`). [ADR 0001](../adr/0001-prodotto-unico-fasi-su-tracker.md) keeps
