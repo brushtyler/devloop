@@ -518,9 +518,15 @@ GitHub review for an agent with an app of its own, as a comment for any other ag
 Since #325 each review is **one element** of the PR's timeline:
 
 - **An agent with its own GitHub App** submits one native review on the reviewed commit, with
-  its app: `APPROVE`, `REQUEST_CHANGES` or `COMMENT` (for `needs_operator`) mirrors the verdict
-  for GitHub and branch protection, and its body is the whole review, header, readable text and
-  `review` marker. That native review is the record devloop reads, and no review comment is
+  its app: `APPROVE` or `REQUEST_CHANGES` mirrors the verdict for GitHub and branch protection,
+  and its body is the whole review, header, readable text and `review` marker. For
+  `needs_operator` the event mirrors the reviewer's technical outcome (#418): `REQUEST_CHANGES`
+  while blocking findings of its own stay open (opened in this review, or of its earlier rounds
+  and not resolved), otherwise `APPROVE`, never `COMMENT`. A `COMMENT` does not withdraw the
+  same reviewer's earlier `REQUEST_CHANGES`, which would block the merge after the operator's
+  decision. The body states the verdict and the event, and devloop still keeps the PR in
+  `agent:needs-operator`: it reads the verdict from the record, never from the event. No review
+  is dismissed, neither the reviewer's own nor another reviewer's. That native review is the record devloop reads, and no review comment is
   written. Its submission is required: a failure is tried again, up to three attempts in all,
   after a pause of 5 seconds and then 10. Before each new attempt the dispatcher reads the PR's
   reviews again, and a review with the same body already published by that app (an answer lost
