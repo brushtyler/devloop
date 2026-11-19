@@ -451,7 +451,9 @@ UTC day with this one (`daily`), the daily cap (`daily_cap`) and what remains (`
 these records are what raises the round limit of the PR. The same figures go in a ledger
 `event` `delegation_grant` with the `delegation` (`rounds`), its author and the id of the
 command's comment, and, before both, a `grant` event in the
-[turn journal](#turn-journal), which counts the grants of the day across every PR. The record is
+[turn journal](#turn-journal), which counts the grants of the day across every PR: the daily cap
+is checked again and the event written in one step, so `daily` is the count with this grant and
+never passes the cap. The record is
 written before the labels change, so a
 lost label change never runs a retry twice. A command that does not apply (#321) gets the same
 record, `refused`, with the reason and how to resume in the comment: it spends the command, which
@@ -971,8 +973,9 @@ their format does not change. The journal is append-only, one JSON event per lin
   the journal reached 80% of its limit (see below). `grant`: a grant of a delegation to the
   supervisor (#405), such as a round granted with `/devloop grant-round`, with the `delegation`,
   the PR, the id of the command's comment and its author; written before the grant applies, the
-  grants of a UTC day count against the daily cap
-  ([Granting a review round](guide.md#granting-a-review-round)). The events of the
+  grants of a UTC day count against the daily cap, which is checked again under the journal's
+  lock in the same step as the write: past the cap nothing is written and the grant does not
+  apply ([Granting a review round](guide.md#granting-a-review-round)). The events of the
   [publication outbox](#publication-outbox) start with `publication`.
 - With the [budget envelope](reference.md#budget-envelope) on (`[budget] enabled`, #365), the
   intent of a turn charged to a story carries its booking, `budget`: `{story, role, phase,

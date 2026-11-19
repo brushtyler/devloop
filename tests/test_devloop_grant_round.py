@@ -9,17 +9,19 @@ that does not say counts as one.
 """
 
 import dataclasses
+import threading
 import unittest
 
 from devloop import acceptance, config, markdown, review, schema, supervision
-from devloop.config import ConfigError, Delegations, parse_delegations
+from devloop.config import ConfigError, DelegationPolicy, parse_delegations
+from devloop.journal import TurnJournal
 from devloop.ledger import Ledger
 from devloop.planning import Snapshot, findings_decreasing, last_counted_ci, plan
 from test_devloop import CFG, SHA1, SHA2, finding, norm, pr, raw_review
 from test_devloop_supervision import (AUTO, HUMAN, REVIEW, SUPER, SUPERVISOR_LOGIN, Case, crash)
 
-ON = dataclasses.replace(AUTO, max_review_rounds=1, delegations=Delegations(rounds=True))
-OFF = dataclasses.replace(ON, delegations=Delegations())
+ON = dataclasses.replace(AUTO, max_review_rounds=1, delegations=DelegationPolicy(rounds=True))
+OFF = dataclasses.replace(ON, delegations=DelegationPolicy())
 REASON = ('La CI è fallita per un test instabile, non per la modifica: corretto con #999.\n'
           'Causa: CI.')
 
@@ -152,7 +154,8 @@ class CapTests(GrantCase):
         self.assertIn('già stati concessi 2 round', self.body())
 
     def test_the_configuration_lowers_the_cap_of_the_pr(self):
-        cfg = dataclasses.replace(ON, delegations=Delegations(rounds=True, max_rounds_per_pr=1))
+        cfg = dataclasses.replace(ON, delegations=DelegationPolicy(rounds=True,
+                                                                   max_rounds_per_pr=1))
         d = self.make(cfg)
         self.gh.say(100, 'brushtyler', granted_record(1))
         record = self.at_limit(d, ci_round(1), ci_round(2))
@@ -162,13 +165,15 @@ class CapTests(GrantCase):
     def test_the_daily_cap_counts_every_pr(self):
         d = self.make()
         for n in range(supervision.MAX_DAILY_GRANTS):
-            d.ledger.journal.grant('rounds', 200 + n, 9000 + n, SUPERVISOR_LOGIN)
+            d.ledger.journal.grant('rounds', 200 + n, 9000 + n, SUPERVISOR_LOGIN,
+                                   supervision.MAX_DAILY_GRANTS)
         record = self.at_limit(d, ci_round())
         self.assertEqual(record['class'], 'round_limit')
         self.assertIn('il massimo giornaliero', self.body())
 
     def test_the_configuration_lowers_the_daily_cap(self):
-        cfg = dataclasses.replace(ON, delegations=Delegations(rounds=True, max_grants_per_day=0))
+        cfg = dataclasses.replace(ON, delegations=DelegationPolicy(rounds=True,
+                                                                   max_grants_per_day=0))
         record = self.at_limit(self.make(cfg), ci_round())
         self.assertEqual(record['class'], 'round_limit')
         self.assertIn('`[delegations] max_grants_per_day` = 0', self.body())
@@ -178,13 +183,74 @@ class CapTests(GrantCase):
         self.assertEqual(record['class'], 'round_limit')
         self.assertIn('non sono verificabili', self.body())
 
+    def test_two_grants_together_never_pass_the_daily_cap(self):
+        # Two grant-round commands on different PRs, applied together (parallel actions), on
+        # the last grant of the day: both pass the check of the conditions before either one
+        # records its grant. The cap is checked again when the grant is recorded, in one step,
+        # so the second one is refused and its PR goes to the operator.
+        d = self.make()
+        self.assertEqual(self.at_limit(d, ci_round())['class'], 'round_grantable')
+        journal, cap = d.ledger.journal, supervision.MAX_DAILY_GRANTS
+        for n in range(cap - 1):
+            journal.grant('rounds', 200 + n, 9000 + n, SUPERVISOR_LOGIN, cap)
+        check = d._round_grant
+        other = []
+
+        def together(p, reviews):
+            route, why = check(p, reviews)
+            self.assertIsNotNone(route)  # the last grant of the day is still free
+            # The command on the other PR records its grant now, before this one.
+            other.append(journal.grant('rounds', 300, 9999, SUPERVISOR_LOGIN, cap))
+            return route, why
+
+        d._round_grant = together
+        self.gh.command(100, '/devloop grant-round ' + REASON)
+        self.assertEqual(self.tick(d), [('supervise', 100)])
+        self.assertEqual(other, [cap])
+        self.assertEqual(len(journal.grants()), cap)
+        self.assertEqual([g['number'] for g in journal.grants()][-1], 300)
+        self.assertEqual(self.gh.labels[100], {HUMAN})
+        self.assertEqual(self.decisions(100)[-1]['outcome'], 'refused')
+        self.assertNotIn('granted', [r['outcome'] for r in self.decisions(100)])
+        record = self.escalations(100)[-1]
+        self.assertEqual((record['class'], record['to']), ('round_limit', 'operator'))
+        self.assertIn('nel frattempo le concessioni di oggi hanno raggiunto il massimo '
+                      'giornaliero', self.body())
+        self.assertEqual([r for r in self.gh.records(100, 'ledger')
+                          if r.get('event') == 'delegation_grant'], [])
+
+    def test_the_journal_checks_the_cap_and_records_the_grant_in_one_step(self):
+        journal, cap = TurnJournal(), supervision.MAX_DAILY_GRANTS
+        for n in range(cap - 1):
+            self.assertEqual(journal.grant('rounds', 200 + n, 9000 + n, 'x', cap), n + 1)
+        start, results = threading.Barrier(2), {}
+
+        def grant(number):
+            start.wait()
+            results[number] = journal.grant('rounds', number, number, 'x', cap)
+
+        threads = [threading.Thread(target=grant, args=(n,)) for n in (100, 101)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(sorted(results.values(), key=str), [cap, None])
+        self.assertEqual(len(journal.grants()), cap)
+        # Nothing is recorded past the cap; the same command counts once.
+        (winner,) = [n for n, daily in results.items() if daily == cap]
+        self.assertIsNone(journal.grant('rounds', 102, 102, 'x', cap))
+        self.assertEqual(journal.grant('rounds', winner, winner, 'x', cap), cap)
+        self.assertEqual(len(journal.grants()), cap)
+
     def test_the_caps_are_constants_the_configuration_may_only_lower(self):
         self.assertEqual((supervision.MAX_GRANTED_ROUNDS, supervision.MAX_DAILY_GRANTS), (2, 3))
-        self.assertEqual(parse_delegations({}), Delegations(rounds=False, max_rounds_per_pr=2,
-                                                            max_grants_per_day=3))
+        self.assertEqual(parse_delegations({}),
+                         DelegationPolicy(retry_own_prs=False, rounds=False, max_rounds_per_pr=2,
+                                          max_grants_per_day=3))
         self.assertEqual(parse_delegations({'rounds': True, 'max_rounds_per_pr': 1,
-                                            'max_grants_per_day': 0}),
-                         Delegations(rounds=True, max_rounds_per_pr=1, max_grants_per_day=0))
+                                            'max_grants_per_day': 0, 'retry_own_prs': True}),
+                         DelegationPolicy(retry_own_prs=True, rounds=True, max_rounds_per_pr=1,
+                                          max_grants_per_day=0))
         for table in ({'max_rounds_per_pr': 3}, {'max_grants_per_day': 4},
                       {'max_rounds_per_pr': -1}, {'max_grants_per_day': True},
                       {'rounds': 'yes'}, {'max_rounds': 1}):

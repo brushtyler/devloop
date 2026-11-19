@@ -897,7 +897,10 @@ command without a reason; the content of the analysis is checked by the coordina
 operator. Before granting, the dispatcher checks every condition again on the PR read then: a
 head moved since the escalation is refused and the escalation stays with the supervisor; a
 delegation turned off, a cap reached or a condition that no longer holds hand the PR to the
-operator as `round_limit`. Granted, the PR's limit becomes `max_review_rounds` plus the rounds
+operator as `round_limit`. The daily cap is checked once more when the grant is written in the
+turn journal, in one step with the write: two grants applied together on different PRs
+(parallel actions) never pass it, and the one that finds the last grant of the day taken hands
+its PR to the operator as `round_limit`. Granted, the PR's limit becomes `max_review_rounds` plus the rounds
 granted to it (plus the rounds that do not count, as before), and the PR goes back to
 `agent:review` or `agent:changes`, where it was. The grant leaves a `grant` event in the turn
 journal, a `supervision` record with outcome `granted` and a ledger `event`
@@ -1902,8 +1905,9 @@ keys take effect without a restart:
   tick, with a line `config: <key> <old> -> <new> from this tick` in the log. The actions already
   running go on and are not interrupted: a higher `max_open_prs` lets the next tick start an
   issue alongside them.
-- `[delegations]` (#405): a delegation turned off is revoked from the next tick
-  ([Granting a review round](#granting-a-review-round)).
+- `[delegations]` (#405, #406): a delegation turned off, `rounds` or `retry_own_prs`, is revoked
+  from the next tick ([Granting a review round](#granting-a-review-round),
+  [Escalations to the supervisor](#escalations-to-the-supervisor)).
 
 **Every other key needs a restart**, including the merge modes (`[merge]`), `[pin]`, the roles,
 `trusted_users`, the agents, the identities (`[apps]`), `state_dir`, `max_parallel_actions` and

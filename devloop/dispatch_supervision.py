@@ -589,7 +589,10 @@ class SupervisionMixin:
         condition that no longer holds hand the PR to the operator as ``round_limit``.
 
         Granted, the grant is written in the journal of the turns first, for the daily cap
-        (``journal.TurnJournal.grant``); then the ``supervision`` record, which raises the
+        (``journal.TurnJournal.grant``), which checks the cap again and records the grant in one
+        step under its lock: two grants applied together on different PRs never pass the cap,
+        and the one that finds it reached hands its PR to the operator as ``round_limit``. Then
+        the ``supervision`` record, which raises the
         limit of the PR and spends the command; then the ledger ``event`` with the delegation,
         the caps, the value granted and what remains; last the labels: the PR goes back to the
         label it was in (``agent:review`` or ``agent:changes``) and the next tick goes on."""
@@ -601,25 +604,33 @@ class SupervisionMixin:
                          'quindi la concessione si riferisce a un input superato. Il comando è '
                          'speso; l\'escalation resta al supervisore.\n\n'
                          + self._supervisor_resume(escalation, True, superseded=True))
-        pr = self._fresh_pr(target, labels, fresh, comments)
-        route, why = self._round_grant(pr, pr.reviews)
-        if route is None:
-            why = why or ('la delega dei round è spenta (`[delegations] rounds`), o la modalità '
-                          'di merge non è più `auto` con un supervisore')
+        def refuse(why):
             trace('refused', f'rifiutato: {why}.')
             return self._to_operator(number, 'Il supervisore non può concedere un altro round a '
                                      f'questa PR: {why}. `/devloop {GRANT_ROUND}` di `{by}` è '
                                      'stato rifiutato.\n\nL\'operatore può concedere altri round '
                                      'alzando `max_review_rounds` prima di riprendere la PR.',
                                      'round_limit')
+
+        pr = self._fresh_pr(target, labels, fresh, comments)
+        route, why = self._round_grant(pr, pr.reviews)
+        if route is None:
+            return refuse(why or ('la delega dei round è spenta (`[delegations] rounds`), o la '
+                                  'modalità di merge non è più `auto` con un supervisore'))
         rules = self.cfg.delegations
+        # The daily cap is checked again and the grant recorded in one step (#405): another
+        # grant applied in the meantime, on another PR, may have taken the last one.
+        daily = self.ledger.journal.grant('rounds', number, command['comment'], by,
+                                          rules.max_grants_per_day)
+        if daily is None:
+            return refuse('la delega dei round non si applica: nel frattempo le concessioni di '
+                          'oggi hanno raggiunto il massimo giornaliero (`[delegations] '
+                          f'max_grants_per_day` = {rules.max_grants_per_day})')
         granted = pr.granted_rounds + 1
-        daily = self._grants_today() + 1
         figures = {'head': head, 'granted': granted, 'cap': rules.max_rounds_per_pr,
                    'left': rules.max_rounds_per_pr - granted, 'daily': daily,
                    'daily_cap': rules.max_grants_per_day,
                    'daily_left': rules.max_grants_per_day - daily}
-        self.ledger.journal.grant('rounds', number, command['comment'], by)
         limit = self.cfg.max_review_rounds + granted
         resume = escalation.get('resume')
         resume = resume if resume in (lb.review, lb.changes) else lb.review

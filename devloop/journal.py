@@ -846,24 +846,40 @@ class TurnJournal:
         (``YYYY-MM-DD``, today by default), one per command comment, oldest first."""
         with self._lock:
             self._load()
-            day = day or self._now()[:10]
-            found = {}
-            for e in self._events:
-                if e['event'] == GRANT and str(e['data'].get('at', ''))[:10] == day:
-                    found.setdefault(e['data'].get('comment'), e['data'])
-            return list(found.values())
+            return list(self._grants(day or self._now()[:10]).values())
 
-    def grant(self, delegation, number, comment, by):
+    def _grants(self, day):
+        """The grants of the UTC ``day`` by command comment, the first of each (under the
+        lock)."""
+        found = {}
+        for e in self._events:
+            if e['event'] == GRANT and str(e['data'].get('at', ''))[:10] == day:
+                found.setdefault(e['data'].get('comment'), e['data'])
+        return found
+
+    def grant(self, delegation, number, comment, by, cap):
         """Record a grant of the delegation ``delegation`` (``rounds``) on issue or PR
-        ``number``, by the command of comment ``comment`` of ``by``, before it applies: it counts
-        against the daily cap from now on. Raises ``JournalError`` if it cannot be written, and
-        then the grant does not apply."""
+        ``number``, by the command of comment ``comment`` of ``by``, before it applies, within
+        the daily cap ``cap``: it counts against the cap from now on.
+
+        The cap is checked and the grant recorded in one step under the journal's lock, so that
+        two commands applied together never pass it (#405). Returns the grants of the UTC day
+        with this one, or None when the others of the day already reached ``cap``: nothing is
+        recorded, and the grant does not apply. A grant of the same comment already recorded
+        today is neither recorded nor counted twice. Raises ``JournalError`` if it cannot be
+        written, and then the grant does not apply."""
         if self.read_only:
             raise JournalError(f'{self.path}: read-only journal: no grant is recorded in it')
         with self._lock:
             self._load()
-            return self._append(GRANT, {'delegation': delegation, 'number': number,
-                                        'comment': comment, 'by': by})
+            today = self._grants(self._now()[:10])
+            others = sum(1 for c in today if c != comment)
+            if others >= cap:
+                return None
+            if comment not in today:
+                self._append(GRANT, {'delegation': delegation, 'number': number,
+                                     'comment': comment, 'by': by})
+            return others + 1
 
     # Attempts (#384) -------------------------------------------------------
     def _attempts(self):
