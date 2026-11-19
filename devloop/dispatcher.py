@@ -208,7 +208,7 @@ from .markdown import (RESUME, carries_record, dispatcher_header, publishable, r
                        render_cycle, render_escalation, render_operator_merge)
 from .activity import iso, restart_line
 from .outbox import SENT as PUBLISHED, describe as outbox_describe
-from .pin import PREFIX, PinError, Repinned, SmokeError
+from .pin import PREFIX, PinError, PinHeld, Repinned, SmokeError, held_prs
 from .planning import (BASE_CHANGED, MERGE_LANE, MERGING, RESYNC_AFTER_APPROVAL, PullRequest,
                        Snapshot,
                        admit, changes_before_ci, ci_unknown, counted_rounds, issue_priority,
@@ -1172,6 +1172,15 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             if self.cfg.preflight and not issue['blocked_by']:
                 issue['preflight'] = self._preflight_view(issue['number'], issue['labels'],
                                                           base_head)
+        if self.cfg.preflight:
+            # An issue that waits for the supervisor runs no check, but a request of a person
+            # for one is answered all the same (#468): its view says whether one is pending.
+            waiting = (set(self.cfg.blocked_labels) | {lb.working}) - {lb.needs_supervisor}
+            for issue in ready:
+                if (lb.needs_supervisor in issue['labels'] and issue['admitted']
+                        and not issue['labels'] & waiting and issue['number'] not in pr_issues):
+                    issue['preflight'] = self._preflight_view(issue['number'], issue['labels'],
+                                                              base_head)
         working = [raw['number'] for raw in self.gh.issues_with_label(lb.working)]
         return Snapshot(prs=prs, ready_issues=ready, working_issues=working,
                         supervised=self._supervised_items(prs),
@@ -1567,7 +1576,13 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         A merge devloop did not make (#430), such as one of the operator, requests the pin
         too: before reading the request, a tick that is not a dry run asks the pinner whether
         ``origin/<base_branch>`` advanced with changes to ``[pin] paths`` (``observe``). A
-        failure there is logged, and the next tick tries again."""
+        failure there is logged, and the next tick tries again.
+
+        While a merged PR's step on the host holds the auto-pin (#462, ``AutoPin.held``) a
+        request is only logged: it stays until the operator pins by hand, after the step. The
+        hold is read again once the pin resolved the commit (``PinHeld``): a merge that ran
+        meanwhile wrote its hold before merging. A hold whose merge had an unknown outcome is
+        settled first (``_settle_host_steps``)."""
         if self.pinner is None or not self.cfg.pin.auto:
             return
         ref = f'origin/{self.cfg.base_branch}'
@@ -1576,8 +1591,13 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 self.pinner.observe(self.cfg.base_branch, self.cfg.pin.touches)
             except (PinError, OSError) as exc:
                 self.log(f'auto-pin: the advance of {ref} not checked, next tick: {exc}')
+            self._settle_host_steps()
         request = self.pinner.pending()
         if not request:
+            return
+        steps = self.pinner.held()
+        if steps:
+            self._log_held_pin(ref, steps, dry_run)
             return
         if request.get('pr'):
             why = f'the merge of #{request["pr"]}'
@@ -1591,6 +1611,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         self.log(f'auto-pin of {ref} after {why}')
         try:
             copy = self.pinner.pin(ref)
+        except PinHeld as exc:
+            # A merge with a step on the host ran while the pin resolved the commit (#462).
+            self._log_held_pin(ref, exc.steps, dry_run)
+            return
         except SmokeError as exc:
             self.pinner.cancel()
             self.log(f'auto-pin of {ref} refused, the pinned copy is unchanged and the request '
@@ -1611,6 +1635,13 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             if self._restart is not None:
                 self._set_restart(None)  # this restart is the one that waited
             raise Repinned(copy)
+
+    def _log_held_pin(self, ref, steps, dry_run):
+        """A merged PR declared a step on the host (#462): only a pin by hand, after it,
+        releases the auto-pin. The request stays, and that pin clears it."""
+        self.log(f'{"[dry-run] " if dry_run else ""}auto-pin of {ref} held: the step on the '
+                 'host of ' + held_prs(steps) + ' waits for the operator, who pins by hand '
+                 'after it (devloop pin)')
 
     def _alert_refused_pin(self, ref, exc):
         """The alert of a copy refused by the smoke test of an auto-pin (#260), on

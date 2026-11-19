@@ -563,8 +563,26 @@ Checks recorded before #270 carry neither the commit nor `repository_dependent`:
 holding for their text alone, devloop does not infer the dependency from their descriptions, and
 `agent:ready` added again repeats them too. The next check records both.
 
-Rechecks run only for blocks the check owns: when the check owns `agent:needs-operator` is
-described in [Readiness check records](protocol.md#readiness-check-records).
+A check nobody asked for (the text changed, `main` advanced) runs only for a block the check
+owns: when the check owns `agent:needs-operator` is described in
+[Readiness check records](protocol.md#readiness-check-records). A note of the supervisor, such as
+its "Decisione per l'operatore" listing the options, does not take the block away from the
+check: only a comment of the supervisor with an escalation or a readiness check record does
+(#468).
+
+A request of a person, `/devloop recheck` from a trusted user or `agent:ready` added again by
+someone who may admit the issue, needs less (#468): the block need only be still the issue's
+**latest**. The latest check set it (class `operator_decision` or `preflight_default`), no
+escalation of another class came after it, and the label was not added again by anyone else.
+Any other comment after the check, with the header or not, does not stop the request. When the
+check runs, the block is the check's again: a pass removes it, a failure keeps it. A request
+that runs no check, because the latest block is another one (an escalation of another class, for
+example), leaves the block in place: devloop logs why and answers once on the issue with a
+"Controllo di prontezza non ripetuto" comment that gives the reason. The answer spends a
+`/devloop recheck`; an `agent:ready` added again is answered once for each time it is added.
+An issue in `agent:needs-supervisor` (a recheck that failed and went to the supervisor as
+`tool_failure`, for example) runs no check either: a request there gets the same answer, naming
+the escalation the issue waits on, and every block stays.
 
 Each check is an agent action: it takes a slot of `max_actions_per_tick`, and a check of an
 issue that may start also takes one of the free PR slots of the tick. It runs under
@@ -2525,6 +2543,48 @@ issue once per refused commit (its commit and failed step; the error stays in th
 recorded in `.ssdlc/devloop/pin-alerted.json`; a comment that cannot be published is only
 logged. The next merge that requests a pin, or the next advance of `origin/main` that touches
 the installation, tries again, on the new `origin/main`.
+
+#### Step on the host
+
+A PR whose code needs a step on the host before it is pinned (#462), such as a new table of the
+project file or of the overlay, declares it: implementer and fixer return `host_step` in their
+structured output (a short text with a reference to the document of the step, such as a section
+of `ops/host/migrate.md`; empty when there is none), the PR description shows it under
+"Passo sull'host", and the reviewer checks that it is there when the PR changes the schema of
+the project file or of the overlay, or `ops/host/`, and empty otherwise. The latest declaration
+holds: the PR's, or that of its latest fix.
+
+devloop merges such a PR as any other: the queue does not stop. With `[pin] auto = true`,
+though, the merge does not request the pin. Before merging, devloop records a hold of the
+auto-pin in `.ssdlc/devloop/pin-held.json` (a hold that cannot be recorded stops the merge), and
+after the merge it comments on `[run].alert_issue` with the step and adds `agent:needs-operator`
+to the issue the PR closes; with `[pin] auto = false` only the alert and the label. A merge that
+fails may still have happened (a timeout of `gh pr merge` loses GitHub's answer): its hold stays,
+marked uncertain, and at the next tick devloop reads the PR. Merged, the hold stays and the alert
+and the label follow then (`auto-pin: #<N> was merged despite the error: …`); not merged, the hold
+goes (`auto-pin: #<N> was not merged: its hold of the auto-pin goes`). Each hold names its merge
+attempt, and the tick settles only the hold of the attempt it read the PR for: when the merge
+worker of `run` merges the same PR again meanwhile, the hold of that new attempt stays, even if
+it too is uncertain, until a later tick reads the PR for it. The auto-pin reads the
+hold again once it has resolved `origin/main`: a merge that the merge worker of `run` makes
+while a pin is fetching writes its hold first, so a commit that contains it is never pinned.
+While the hold stays, no auto-pin runs, of that commit nor of later ones:
+a pending request (of a later merge, or of an advance of `origin/main`) waits, and the log says
+`auto-pin of origin/main held: the step on the host of #<N> waits for the operator, who pins by
+hand after it (devloop pin)`; `devloop status` shows `auto-pin held: …`. The operator does the
+step with the loop stopped, then pins by hand (`devloop pin`, also through the
+[launcher](#launcher)): that pin releases the hold (`auto-pin resumed: the hold after the step on
+the host of #<N> is released`) and drops the pending request, and the auto-pin resumes with the
+next merge.
+
+At the start of `tick` and `run`, and at each reload of `run`, devloop checks the tables of the
+project file that change its behaviour (`[prompts]`, `[tests]`): when the running copy reads one
+of them and neither the project file nor the overlay sets it, the log says `config: this copy
+reads [prompts], [tests] from the project file, and the configuration has none: devloop runs
+without them, degraded; add them to the project file`, and the dispatcher comments once on
+`[run].alert_issue` for each set of missing tables (recorded in
+`.ssdlc/devloop/project-tables-alerted.json`, forgotten once none is missing). The copy still
+starts.
 
 devloop may import only the Python standard library, itself and the `core` package, and a test
 enforces this (`tests/test_devloop_boundary.py`). [ADR 0001](../adr/0001-prodotto-unico-fasi-su-tracker.md) keeps

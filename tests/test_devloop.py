@@ -1144,14 +1144,14 @@ class FakeRunner:
 
 def implemented(status='completed', acceptance_map=()):
     return {'status': status, 'summary': 's', 'pr_title': 'fix: x', 'commit_message': 'fix: x',
-            'pr_body': 'Why and how.', 'acceptance_map': list(acceptance_map),
+            'pr_body': 'Why and how.', 'acceptance_map': list(acceptance_map), 'host_step': '',
             'blocked_reason': 'unclear' if status == 'blocked' else ''}
 
 
 def fixed(status='completed', acceptance_map=()):
     return {'status': status, 'summary': 'fixed', 'commit_message': 'fix: review',
             'responses': [{'finding_id': 'R1-1', 'action': 'fixed', 'note': 'done'}],
-            'acceptance_map': list(acceptance_map), 'blocked_reason': ''}
+            'acceptance_map': list(acceptance_map), 'host_step': '', 'blocked_reason': ''}
 
 
 class DispatcherTests(unittest.TestCase):

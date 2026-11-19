@@ -266,8 +266,13 @@ class PreflightTests(unittest.TestCase):
                 change(self.gh)
                 self.gh.say('/devloop recheck')
                 self.gh.say('Ho deciso: A.')
-                # Neither a changed text nor a request starts a check of a block not its own.
+                # Neither a changed text nor a request starts a check of a block not its own:
+                # the request is answered, once (#468).
+                self.assertEqual(self.planned(d), [('recheck_refused', 7)])
+                self.assertEqual([a.kind for a in d.tick()], ['recheck_refused'])
+                self.assertIn('Controllo di prontezza non ripetuto', self.gh.thread[-1]['body'])
                 self.assertEqual(self.planned(d), [])
+                self.assertEqual(len(self.runner.calls), 1)
                 self.runner.outputs.append(checked(True))
                 d._do_preflight(7)
                 self.assertEqual(self.gh.labels[7], {READY, NEEDS_OPERATOR})
@@ -295,7 +300,7 @@ class PreflightTests(unittest.TestCase):
         self.assertFalse(record['blocked'])
         self.assertEqual(self.gh.needs_operator_labelers, ['brushtyler'])
         self.gh.say('/devloop recheck')
-        self.assertEqual(self.planned(d), [])
+        self.assertEqual(self.planned(d), [('recheck_refused', 7)])
         d._do_preflight(7)
         self.assertEqual(self.gh.labels[7], {READY, NEEDS_OPERATOR})
 

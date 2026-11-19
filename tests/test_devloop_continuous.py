@@ -371,6 +371,9 @@ class SimPinner:
     def observe(self, branch, touches):
         return None  # only the merges of the simulation advance the base (#430)
 
+    def held(self):
+        return None  # no PR of the simulation declares a step on the host (#462)
+
     def cancel(self):
         self.cancelled += 1
         self.requests.clear()
@@ -864,6 +867,7 @@ class ContinuousTickTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp)
         pinner = mock.Mock()
         pinner.pending.return_value = None
+        pinner.held.return_value = None  # no step on the host holds the auto-pin (#462)
         d = self.make(pinner=pinner)
 
         def review(target):
@@ -918,6 +922,7 @@ class ContinuousTickTests(unittest.TestCase):
         # but passes while the snapshot reads GitHub: #10 does not start.
         pinner = mock.Mock()
         pinner.pending.return_value = None
+        pinner.held.return_value = None  # no step on the host holds the auto-pin (#462)
         d = self.make(pinner=pinner)
         now = [0]
         d.clock = lambda: now[0]
@@ -944,6 +949,7 @@ class ContinuousTickTests(unittest.TestCase):
         # The operator pinned the running copy again by hand while the restart waited.
         pinner = mock.Mock()
         pinner.pending.return_value = None
+        pinner.held.return_value = None  # no step on the host holds the auto-pin (#462)
         pinner.current.return_value = INSTALL_ROOT
         d = self.make(pinner=pinner)
         d.cfg = dataclasses.replace(PCFG, pin=dataclasses.replace(PCFG.pin, auto=True))
@@ -959,6 +965,7 @@ class ContinuousTickTests(unittest.TestCase):
         requests = []
         pinner = mock.Mock()
         pinner.pending.side_effect = lambda: requests[-1] if requests else None
+        pinner.held.return_value = None  # no step on the host holds the auto-pin (#462)
         pinner.pin.return_value = Path('/state/pinned-0123456789ab')
         d = self.make(pinner=pinner)
         d.cfg = dataclasses.replace(PCFG, pin=dataclasses.replace(PCFG.pin, auto=True))

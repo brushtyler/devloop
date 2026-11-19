@@ -79,7 +79,8 @@ implementer stops devloop at startup.
 `[pin]` (`auto`, default `false`; `restart_max_wait_minutes`, default 30) sets the
 [pin after a merge](guide.md#pin-after-a-merge), by devloop or by anyone else (#430), and how long, in the continuous mode, the restart
 from the new copy may wait for the running actions while new ones, except implementations, still
-start; an `auto` that is
+start; the merge of a PR that declares a [step on the host](guide.md#step-on-the-host) (#462)
+holds the auto-pin until a pin by hand; an `auto` that is
 not a boolean, a `restart_max_wait_minutes` that is not a whole number of at least 0, or an
 unknown key, stops devloop at startup. `source` (unset by default, a key of the host's overlay)
 names the clone of the [installation's source](guide.md#installation-source) (ADR 0006, R1),
@@ -257,6 +258,11 @@ other files ([Changes while the loop runs](guide.md#changes-while-the-loop-runs)
 it applies at the next start, a file that does not load leaves the previous configuration in
 use. A file created while the loop runs is read at the next start.
 
+A copy that reads `[prompts]` or `[tests]` from the project file still starts when neither the
+project file nor the overlay sets them, with its prompts or its test selection degraded: at the
+start of `tick` and `run`, and at each reload, devloop says so in the log and, once for each set
+of missing tables, on `[run].alert_issue` (#462, [Step on the host](guide.md#step-on-the-host)).
+
 **Facts of the repository.** The managed repository holds no file of devloop's configuration.
 Its facts are the files the agents already read in their worktree (`AGENTS.md`, the README,
 `pyproject.toml`, `package.json`, …), untrusted input: the dispatcher never reads them to decide
@@ -306,7 +312,9 @@ A span whose value the dispatcher did not give is an error, never a sentence dro
 **ssdlc's values** are in its project file ([`ops/host/ssdlc/project.toml`](../../ops/host/ssdlc/project.toml)):
 with them the prompts are the same, byte for byte, as before R4, which
 `tests/test_devloop_prompt_data.py` proves against the templates of before R4
-(`tests/fixtures/ssdlc-pre-r4/prompts/`). The text of the trust policy in the review and advisory
+(`tests/fixtures/ssdlc-pre-r4/prompts/`), with the changes of the templates made since then
+listed one by one, each with its issue (`SINCE_R4` in `tests/helpers/ssdlc_project.py`, such as
+`host_step`, #462). The text of the trust policy in the review and advisory
 review prompts is the installation's and does not change; the readiness check gets the same text,
 read from the review prompt of the installation (#472). On a host, the project file gains the
 `[prompts]` table before the pin of R4
