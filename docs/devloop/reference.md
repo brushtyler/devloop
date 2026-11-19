@@ -592,8 +592,8 @@ every turn cap (`turns`, each of `role_turns` and of `phase_turns`) and to `wall
 `BUDGET_TOLERANCE_PERCENT` (25, a constant of the code, D3) of the value frozen at the first
 booking, rounded down, and never touches `metered_usd`, `cli_estimate_usd` or tokens. It is a
 `grant` event of the delegation `budget` in the journal, with the `story` and the `extension`
-(`percent`, `turns`, `role_turns`, `phase_turns`, `wall_seconds`): once per story, ever, and
-the authority on it. The bookings keep recording the frozen limits; the envelope of a booking,
+(`percent`, `turns`, `role_turns`, `phase_turns`, `wall_seconds`) and the text of the command
+(`reason`), for completing its trace after a stop: once per story, ever, and the authority on it. The bookings keep recording the frozen limits; the envelope of a booking,
 of `devloop status` and of the receipt is the frozen one with that extension. An extension that
 would add nothing to the exhausted limit (3 turns × 25% = 0), or that a dollar cap, an uncertain
 outcome or a role outside the envelope would make useless, is not offered and is not spent.

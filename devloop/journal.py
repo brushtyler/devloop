@@ -39,8 +39,8 @@ before it (``previous``) and its own (``sha256``), like the journal of the local
   the grant applies, and the grants of a UTC day count against the daily cap of the delegations.
   The extension of a budget envelope (``/devloop grant-budget``, #411, ADR 0005, P5-7) is a
   ``grant`` of the delegation ``budget`` that also records the ``story`` and the ``extension``
-  (the turns and seconds it adds): one per story, ever, and the authority on the envelope of
-  that story (``devloop.budget``).
+  (the turns and seconds it adds), with the ``reason`` of the command: one per story, ever, and
+  the authority on the envelope of that story (``devloop.budget``).
 - ``config``: the configuration the dispatcher read (ADR 0006, R2, trace T1 of K1), at its start
   (``when: start``) and at each reload of ``devloop run`` that found the files changed
   (``when: reload``): the SHA-256 of the local overlay and of the project file (null without the
@@ -910,11 +910,13 @@ class TurnJournal:
             self._load()
             return self._extension(story)
 
-    def extend(self, story, extension, number, comment, by, cap):
+    def extend(self, story, extension, number, comment, by, cap, reason=None):
         """Record the extension ``extension`` of the budget envelope of story ``story`` (#411,
         ADR 0005, P5-7), granted on issue or PR ``number`` by the command of comment ``comment``
         of ``by``, before it applies: a ``grant`` of the delegation ``budget``, within the daily
-        cap ``cap`` of the delegations, as ``grant``.
+        cap ``cap`` of the delegations, as ``grant``. ``reason``, the text of the command (the
+        analysis of the causes), is recorded with it: a run stopped before the records of the
+        grant completes them with the original command, whatever the thread holds by then.
 
         Once per story, ever: the story's extension, the cap and the record are one step under
         the journal's lock, so that two commands applied together never extend a story twice
@@ -936,8 +938,11 @@ class TurnJournal:
             if found is None and others >= cap:
                 return None, 'daily'
             if found is None:
-                self._append(GRANT, {'delegation': BUDGET, 'number': number, 'comment': comment,
-                                     'by': by, 'story': story, 'extension': extension})
+                data = {'delegation': BUDGET, 'number': number, 'comment': comment, 'by': by,
+                        'story': story, 'extension': extension}
+                if isinstance(reason, str):
+                    data['reason'] = reason
+                self._append(GRANT, data)
             return others + 1, None
 
     # Configuration (ADR 0006, R2, T1) ---------------------------------------

@@ -1190,7 +1190,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         """The issues and PRs in ``agent:needs-supervisor``, not in ``agent:needs-operator``,
         with a supervisor command to apply (#182), and those in ``agent:needs-operator`` with a
         command of a trusted user (#321); either may be a command only to answer
-        (``_supervisor_view``)."""
+        (``_supervisor_view``). An extension of the budget envelope recorded in the journal and
+        not yet traced (``_pending_extension``, #411) is the command of its item."""
         lb = self.cfg.labels
         items = [(pr.number, True, self.gh.pr_comments, operator_blocked(pr.labels, lb))
                  for pr in prs if lb.needs_supervisor in pr.labels
@@ -1204,7 +1205,13 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                                   operator_blocked(label_names(raw['labels']), lb)))
         found = []
         for number, is_pr, read, operator in items:
-            view = self._supervisor_view(number, read(number), operator)
+            comments = read(number)
+            # An extension of the budget envelope whose records a stopped run did not write
+            # (#411) is the command to complete, whatever command is the latest now.
+            pending = None if operator else self._pending_extension(number, comments, is_pr)
+            view = (dict(pending['command'], step=pending['escalation'].get('step'),
+                         anchor={'kind': 'notice', 'record': pending['escalation']})
+                    if pending else self._supervisor_view(number, comments, operator))
             if view is not None:
                 found.append(dict(view, number=number, pr=is_pr))
         # A retry of an issue's step, or an extension of the budget envelope that runs it

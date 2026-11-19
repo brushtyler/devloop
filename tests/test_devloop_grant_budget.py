@@ -207,7 +207,8 @@ class GrantTests(BudgetCase):
         journal = d.ledger.journal
         (grant,) = journal.grants()
         self.assertEqual((grant['delegation'], grant['number'], grant['story'],
-                          grant['extension']), ('budget', 100, self.story, EXTENSION))
+                          grant['extension'], grant['reason']),
+                         ('budget', 100, self.story, EXTENSION, REASON))
         self.assertEqual(journal.extension(self.story)['extension'], EXTENSION)
         # The envelope of the story is the frozen one with the extension; the configuration and
         # the frozen limits of the bookings do not change.
@@ -410,6 +411,41 @@ class RecoveryTests(BudgetCase):
         d.cfg = OFF
         self.assert_completed(d)
 
+    def test_a_later_command_does_not_hide_the_stopped_grant(self):
+        # The run stopped after the journal; another command came before the next run. The
+        # stopped grant is completed first, as its own command, whatever the latest one is.
+        later = {'grant-budget': '/devloop grant-budget Un altro motivo.',
+                 'escalate': '/devloop escalate serve l\'operatore',
+                 'retry': '/devloop retry'}
+        for name, body in later.items():
+            with self.subTest(command=name):
+                d = self.make(ON, raw_review())
+                first = self.command(d)
+                with mock.patch.object(d.ledger, 'event', side_effect=RuntimeError('stopped')):
+                    with self.assertRaises(RuntimeError):
+                        self.tick(d)
+                self.gh.command(100, body)
+                self.assert_completed(d)
+                (decision,) = self.decisions(100)
+                self.assertEqual((decision['command'], decision['comment'], decision['by'],
+                                  decision['reason']),
+                                 ('grant-budget', first, SUPERVISOR_LOGIN, REASON))
+                self.assertTrue(any('senza applicarla di nuovo' in c['body']
+                                    for c in self.gh.threads[100]))
+                self.assertEqual(self.escalations(100)[-1]['class'], 'budget_grantable')
+
+    def test_the_journal_keeps_the_text_of_the_command(self):
+        # The text is read from the journal, even when the comment is gone from the thread.
+        d = self.make(ON, raw_review())
+        first = self.command(d)
+        with mock.patch.object(d.ledger, 'event', side_effect=RuntimeError('stopped')):
+            with self.assertRaises(RuntimeError):
+                self.tick(d)
+        self.assertEqual(d.ledger.journal.extension(self.story)['reason'], REASON)
+        self.gh.threads[100] = [c for c in self.gh.threads[100] if c['id'] != first]
+        self.assert_completed(d)
+        self.assertEqual(self.decisions(100)[0]['reason'], REASON)
+
     def test_another_command_on_an_extended_story_is_refused(self):
         d = self.make()
         comment = self.command(d)
@@ -463,6 +499,49 @@ class IssueTests(BudgetCase):
         escalation = self.escalations(7)[-1]
         self.assertEqual(escalation['class'], 'merged_issue')
         self.assert_nothing_spent(d)
+
+    def test_a_stopped_grant_on_an_issue_resolved_since_is_completed(self):
+        # The run stopped after the journal; a devloop PR resolving the issue was merged before
+        # the next run. The grant gets its records, and the issue is not implemented again.
+        d = self.escalate()
+        self.gh.command(7, '/devloop grant-budget ' + REASON)
+        first = self.gh.threads[7][-1]['id']
+        with mock.patch.object(d.ledger, 'event', side_effect=RuntimeError('stopped')):
+            with self.assertRaises(RuntimeError):
+                self.tick(d)
+        self.assertEqual(d.ledger.journal.extension(self.story)['comment'], first)
+        self.assertEqual(self.decisions(7), [])
+        self.gh.merged_raw = (merged_pr(),)
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        (decision,) = self.decisions(7)
+        self.assertEqual((decision['outcome'], decision['comment'], decision['story'],
+                          decision['extension'], decision['reason']),
+                         ('granted', first, self.story, EXTENSION, REASON))
+        self.assertIn('#99', self.gh.threads[7][-2]['body'] + self.gh.threads[7][-1]['body'])
+        events = [r for r in self.gh.records(7, 'ledger')
+                  if r.get('event') == 'delegation_grant']
+        self.assertEqual([(e['delegation'], e['comment']) for e in events], [('budget', first)])
+        self.assertEqual(self.escalations(7)[-1]['class'], 'merged_issue')
+        self.assertEqual(self.runner.calls, [])
+        self.assertEqual(self.gh.created, [])
+        self.assertEqual(len(d.ledger.journal.grants()), 1)
+
+    def test_a_stopped_grant_on_a_blocked_issue_waits(self):
+        d = self.escalate()
+        self.gh.command(7, '/devloop grant-budget ' + REASON)
+        with mock.patch.object(d.ledger, 'event', side_effect=RuntimeError('stopped')):
+            with self.assertRaises(RuntimeError):
+                self.tick(d)
+        pair = block(1)
+        self.gh.issue_dependencies = lambda n: (
+            {'author': 'brushtyler', 'blocked_by': [dict(pair[0])], 'added': [dict(pair[1])]}
+            if n == 7 else {'author': 'brushtyler', 'blocked_by': [], 'added': []})
+        self.gh.command(7, '/devloop escalate serve l\'operatore')
+        d._do_supervise(7)
+        self.assertEqual(self.decisions(7), [])
+        self.assertIn(SUPER, self.gh.labels[7])
+        self.assertIn('  the extension waits, blocked by #1', self.logs)
+        self.assertEqual(self.runner.calls, [])
 
     def test_a_blocked_issue_waits_and_takes_no_slot(self):
         d = self.escalate()

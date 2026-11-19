@@ -1043,7 +1043,8 @@ unspent, taking no slot. The grant leaves a `grant` event in the turn
 journal with the story and the extension, a ledger `event` `delegation_grant` and a
 `supervision` record with outcome `granted`, in this order (see
 [Supervision trace](protocol.md#supervision-trace)): a dispatcher stopped before the record
-completes the same command at its next tick, without extending the story again;
+completes the same command at its next tick, before any later command and even on an issue
+resolved meanwhile, without extending the story again;
 `devloop status` and the refusals show the extension in the state of the budget. A later turn
 the extended envelope refuses goes to the operator as `budget`: a second extension, the dollars
 and the values of the envelope stay the operator's (ADR 0004, D2).

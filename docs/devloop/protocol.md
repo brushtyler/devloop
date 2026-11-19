@@ -461,12 +461,17 @@ never passes the cap. An extension of the budget envelope granted with `/devloop
 (#411) carries the analysis of the causes in `reason`, the `story`, the `extension` (`percent`,
 and the `turns`, `role_turns`, `phase_turns` and `wall_seconds` it adds) and the same daily
 figures; its ledger `event` `delegation_grant` has the `delegation` `budget`, and its `grant`
-event in the turn journal, written first, also records the story and the extension, which from
-then on are part of the envelope of the story. Here the ledger event comes before the
-`supervision` record, which spends the command: a dispatcher stopped after the journal and
-before the record finds the command still to apply and the `grant` of its comment in the
-journal, so it completes what is missing (the ledger event only if absent, the record, the
-labels) without checking nor extending the story again. The record is
+event in the turn journal, written first, also records the story, the extension and the text of
+the command (`reason`), which from then on are part of the envelope of the story. Here the
+ledger event comes before the `supervision` record, which spends the command: a dispatcher
+stopped after the journal and before the record finds, on an item still in
+`agent:needs-supervisor` whose latest escalation is the `budget_grantable` one of that story,
+the `grant` of the item in the journal that no `supervision` record of the thread carries. It
+completes that grant before any other command, the latest one included, rebuilding the command
+from the journal (comment, author, text): the ledger event only if absent, the record `granted`
+and the labels, without checking nor extending the story again. An issue that a merged devloop
+PR resolved meanwhile gets the records and then a `merged_issue` escalation, without running its
+step; an issue blocked by an open issue waits, with nothing written. The record is
 written before the labels change, so a
 lost label change never runs a retry twice. A command that does not apply (#321) gets the same
 record, `refused`, with the reason and how to resume in the comment: it spends the command, which
