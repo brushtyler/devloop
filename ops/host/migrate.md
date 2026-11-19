@@ -40,12 +40,13 @@ Dallo `state_dir` di devloop (`/home/devloop/ssdlc/.ssdlc/devloop`), come utente
 | `model-unavailability.json` | la memoria dei modelli trovati non disponibili |
 | `activity.json` | le azioni del tick in corso, per `status`: dopo un arresto pulito restano quelle interrotte, se ce ne sono |
 | `config.local.toml` | l'overlay dell'operatore |
+| `project.toml` | il file di progetto di ssdlc (ADR 0006, R3): senza, devloop non parte |
 
 Per esempio, dalla macchina nuova:
 
 ```bash
 sudo -u devloop -H rsync -a --chmod=F600 \
-    vecchia:/home/devloop/ssdlc/.ssdlc/devloop/{turn-journal.jsonl,turn-journal-state.json,ledger-open-turns.json,model-unavailability.json,activity.json,config.local.toml} \
+    vecchia:/home/devloop/ssdlc/.ssdlc/devloop/{turn-journal.jsonl,turn-journal-state.json,ledger-open-turns.json,model-unavailability.json,activity.json,config.local.toml,project.toml} \
     /home/devloop/ssdlc/.ssdlc/devloop/
 ```
 
@@ -102,3 +103,69 @@ del supervisore solo la chiave `supervisor` e, finché P5-4 non è attivo, `clau
 - La macchina vecchia: servizio disabilitato, chiavi e token revocati o cancellati, login delle
   CLI chiusi.
 - Se cambia l'host, cambia anche il nome suggerito del token del supervisore: rinominarlo.
+
+## Configurazione di ssdlc nel suo file di progetto
+
+Con l'ADR 0006, R3, `devloop/config.toml` non contiene più i fatti di ssdlc né le restrizioni che
+aggiunge (`test_cmd`, `local_tests`, `language`, `priority_labels`, `[docs.map]`,
+`protected_paths`, `blocked_labels`, `sensitive_paths`, `sensitive_path_lists`,
+`operator_only_paths`): stanno nel file di progetto sull'host, `<state_dir>/project.toml`, di cui
+[`ops/host/ssdlc/project.toml`](ssdlc/project.toml) è l'esempio. I comandi di agy derivati dai
+test di ssdlc passano all'overlay ([`ops/host/ssdlc/overlay.toml`](ssdlc/overlay.toml)). `repo`,
+`trusted_users` e `[apps]` restano in `config.toml` fino a R6 (#425). Senza file di progetto la
+copia di R3 non parte e il suo pin fallisce, quindi i passi qui sotto vanno fatti **prima** del
+pin della copia di R3. Sono passi dell'operatore, dopo il merge della PR di R3.
+
+I percorsi sono quelli dell'installazione attuale (`state_dir` = `.ssdlc/devloop` del clone);
+i comandi vanno eseguiti come utente `devloop`, dal clone.
+
+1. **Quando.** L'hash del file di progetto entra nella versione della policy: le approvazioni
+   delle PR aperte decadono e serve una nuova review. Meglio con la coda vuota.
+2. **Copia dell'overlay di prima**, per il confronto:
+
+   ```bash
+   cd ~/ssdlc && git fetch origin
+   cp -p .ssdlc/devloop/config.local.toml .ssdlc/devloop/config.local.toml.prima-r3
+   ```
+
+   Senza overlay, non si crea nulla e il confronto si fa senza `--before-local`.
+3. **Il file di progetto**, dal commit di R3 su `origin/main`, con i permessi dell'overlay:
+
+   ```bash
+   git show origin/main:ops/host/ssdlc/project.toml > .ssdlc/devloop/project.toml
+   chmod 600 .ssdlc/devloop/project.toml
+   ```
+
+   Deve essere un file regolare a sé: né un link né un hard link al file del repository.
+4. **L'overlay** riceve le chiavi di `ops/host/ssdlc/overlay.toml` (`write_commands` e
+   `review_commands` di `[agents.agy]`), accanto a quelle che ha già. Se l'overlay ha già
+   `[agents.agy]`, le due chiavi vanno in quella tabella.
+5. **Verifica dell'equivalenza**, con la copia fissata di prima e un checkout del commit di R3:
+
+   ```bash
+   git worktree add --detach /tmp/ssdlc-r3 origin/main
+   python3 /tmp/ssdlc-r3/ops/host/ssdlc/check-equivalence.py \
+       --before .ssdlc/devloop/current --before-local .ssdlc/devloop/config.local.toml.prima-r3 \
+       --after /tmp/ssdlc-r3 --after-local .ssdlc/devloop/config.local.toml \
+       --after-project .ssdlc/devloop/project.toml
+   ```
+
+   Confronta la configurazione effettiva chiave per chiave, i prompt resi e i moduli di test
+   selezionati. Lascia fuori, dichiarandolo, l'hash del file di progetto
+   (`review_policy.project`), che R2 mette nella versione della policy: la versione si confronta
+   senza. Esce con 0 ed `equivalent: …` se non c'è differenza; altrimenti elenca ogni
+   differenza ed esce con 1, e il pin non va fatto finché non si è capito perché (di solito una
+   chiave dell'overlay che sostituisce un valore del file di progetto, o le chiavi del passo 4
+   mancanti). Poi `git worktree remove /tmp/ssdlc-r3`.
+6. **Pin e riavvio**: `scripts/devloop-pinned pin origin/main` (lo smoke test usa il file di
+   progetto), poi `sudo systemctl restart devloop`. Un loop in corso legge un file di progetto
+   nuovo solo al riavvio.
+
+**Rollback.** Il pin della copia di prima (`scripts/devloop-pinned pin <sha12>`) basta: con la
+copia di prima il file di progetto e le chiavi dell'overlay danno gli stessi valori. Si possono
+anche togliere, e la versione della policy torna quella di prima.
+
+**Dopo.** I fatti di ssdlc si cambiano sull'host: una PR aggiorna l'esempio
+`ops/host/ssdlc/project.toml` (per esempio una voce nuova di `[docs.map]`) e, dopo il merge,
+l'operatore copia il file sull'host come al passo 3. Una PR su `devloop/config.toml` cambia solo i
+default dell'installazione.

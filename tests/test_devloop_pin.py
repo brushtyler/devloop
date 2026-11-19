@@ -12,7 +12,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-import tomllib
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +23,7 @@ from devloop.config import ConfigError, MergePolicy, PinPolicy
 from devloop.dispatcher import Dispatcher
 from devloop.planning import Snapshot
 from devloop.workspace import Workspace, WorkspaceError
+from helpers import ssdlc_project
 from test_devloop import (CFG, REV_NAME, SHA1, FakeRunner, FakeWS, norm, raw_review, receipt)
 from test_devloop_merge import Identities, MergeGH, header, records
 from test_devloop_zero import changes
@@ -31,7 +31,7 @@ from test_devloop_zero import changes
 REPO = Path(__file__).resolve().parent.parent
 LAUNCHER = REPO / 'scripts' / 'devloop-pinned'
 LIST = 'schemas/recovery-grader-baseline.json'
-DATA = tomllib.loads(config.DEFAULT_CONFIG.read_text())
+DATA = ssdlc_project.data()
 # The documents of [docs] map (#203): the commits of these tests hold the map, not the documents.
 DOCUMENTS = list(dict.fromkeys(d for _, docs in config.docs_entries(DATA) for d in docs))
 
@@ -46,10 +46,13 @@ def load_launcher():
 
 def copy_package(dest):
     """The devloop and core packages and the list file of this checkout into ``dest``: its
-    configuration has a ``[docs] map``, but none of the documents it maps (#210)."""
+    configuration has a ``[docs] map``, but none of the documents it maps (#210). The
+    configuration is ssdlc's as one file (``ssdlc_project.text``, ADR 0006, R3), so that the
+    copy loads without a project file."""
     for package in ('devloop', 'core'):  # devloop imports core since #365
         shutil.copytree(REPO / package, dest / package,
                         ignore=shutil.ignore_patterns('__pycache__'))
+    (dest / 'devloop' / 'config.toml').write_text(ssdlc_project.text(), encoding='utf-8')
     (dest / LIST).parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(REPO / LIST, dest / LIST)
 
@@ -326,13 +329,16 @@ class PinTests(GitCase):
         self.assertEqual(auto.current(), copy.resolve())
 
     def test_the_command_line(self):
+        # ssdlc's configuration as one file: the installation's has no test_cmd (ADR 0006, R3).
+        flat = self.tmp / 'config.toml'
+        flat.write_text(ssdlc_project.text(), encoding='utf-8')
         with mock.patch.object(cli, 'main_checkout', return_value=self.root), \
                 mock.patch.object(cli, 'log', self.logs.append), \
                 mock.patch.object(pin, 'Smoke') as smoke:
-            cli.main(['pin', 'main'])
+            cli.main(['--config', str(flat), 'pin', 'main'])
             self.assertEqual(self.pointed().name, f'pinned-{self.first[:12]}')
             with self.assertRaises(SystemExit) as raised:
-                cli.main(['pin', 'nothing-here'])
+                cli.main(['--config', str(flat), 'pin', 'nothing-here'])
         self.assertIn('pin failed, the pinned copy is unchanged', str(raised.exception.code))
         # The smoke test of #260 ran from the main checkout on the new copy, before the pointer.
         self.assertEqual(smoke.call_args.args, (self.root,))
@@ -913,7 +919,7 @@ class MergeRequestTests(unittest.TestCase):
         # Not a sensitive path here, so that one level-1 approval suffices for the merge.
         rp = dataclasses.replace(CFG.review_policy, sensitive_paths=())
         cfg = dataclasses.replace(CFG, merge=MergePolicy(mode='strict'), review_policy=rp,
-                                  pin=PinPolicy(auto=auto))
+                                  pin=PinPolicy(auto=auto, paths=CFG.pin.paths))
         record = norm(raw_review(), bound=False)
         record['receipt'] = receipt(files=(path,), cfg=cfg)
         gh = MergeGH()
@@ -951,13 +957,16 @@ class MergeRequestTests(unittest.TestCase):
 
 class PinConfigTests(unittest.TestCase):
     def test_the_distributed_config_is_off(self):
-        cfg = config.load_config()
+        cfg = ssdlc_project.load()
         # ``core/`` too: devloop imports it since #365.
         self.assertEqual(cfg.pin, PinPolicy(auto=False, paths=('devloop/', 'core/', LIST)))
         self.assertEqual(DATA['pin'], {'auto': False, 'restart_max_wait_minutes': 30})
         self.assertEqual(cfg.pin.restart_max_wait_minutes, 30)
+        # The lists of the project file are watched too (ADR 0006, R3): the installation's
+        # own paths are its directories alone.
+        self.assertEqual(PinPolicy().paths, ('devloop/', 'core/'))
         self.assertEqual(config.parse_config({k: v for k, v in DATA.items() if k != 'pin'}).pin,
-                         PinPolicy())
+                         PinPolicy(paths=('devloop/', 'core/', LIST)))
 
     def test_the_restart_wait_limit(self):
         # #301: whole minutes, 0 included (the drain at once).
@@ -980,7 +989,7 @@ class PinConfigTests(unittest.TestCase):
         self.assertTrue(policy.touches([LIST]))
         self.assertFalse(policy.touches(['devloopx/a.py', 'schemas/other.json', 'README.md']))
         # #365: devloop imports core, and the distributed policy watches it.
-        self.assertTrue(config.load_config().pin.touches(['core/budget.py']))
+        self.assertTrue(ssdlc_project.load().pin.touches(['core/budget.py']))
 
 
 class OverlayTests(unittest.TestCase):
@@ -991,13 +1000,13 @@ class OverlayTests(unittest.TestCase):
 
     def load(self, text):
         self.local.write_text(text)
-        return config.load_config(None, self.local)
+        return ssdlc_project.load(self.local)
 
     def test_only_the_keys_set_change(self):
         cfg = self.load('preflight = "codex"\nmax_open_prs = 5\n'
                         '[merge]\nmode = "strict"\n[merge.levels]\n"2" = "off"\n'
                         '[agents.codex]\neffort = "xhigh"\n[pin]\nauto = true\n')
-        base = config.load_config()
+        base = ssdlc_project.load()
         self.assertEqual((cfg.preflight, cfg.max_open_prs), ('codex', 5))
         self.assertEqual(cfg.merge, MergePolicy(mode='strict', levels=((2, 'off'),),
                                                 operator_only_paths=base.merge.operator_only_paths))
@@ -1339,7 +1348,7 @@ class RestartTests(unittest.TestCase):
 
     def test_agents_do_not_inherit_the_pinned_copy(self):
         with mock.patch.dict(os.environ, {'PYTHONPATH': '/pinned'}):
-            env = cli.agent_environment(config.load_config(), self.tmp)
+            env = cli.agent_environment(ssdlc_project.load(), self.tmp)
         self.assertNotIn('PYTHONPATH', env)
 
 

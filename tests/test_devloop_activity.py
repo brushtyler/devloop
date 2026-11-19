@@ -14,6 +14,7 @@ from unittest import mock
 from devloop import activity, agents, follow
 from devloop.dispatcher import Dispatcher
 from devloop.planning import Action, Snapshot
+from helpers import ssdlc_project
 from helpers.devloop_fakes import FakeGH
 from test_devloop import CFG, IMPL, FakeRunner, FakeWS, implemented, pr, raw_review, ready
 
@@ -222,6 +223,7 @@ class FollowFormatTests(unittest.TestCase):
 
 class FollowTranscriptTests(unittest.TestCase):
     def setUp(self):
+        ssdlc_project.as_default(self)  # the installation's file has no test_cmd (R3)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name) / 'home'
@@ -413,6 +415,9 @@ with open(argv[argv.index('-o') + 1], 'w') as fh:
 
 
 class FollowCommandTests(unittest.TestCase):
+    def setUp(self):
+        ssdlc_project.as_default(self)  # the installation's file has no test_cmd (R3)
+
     def test_follow_reads_the_worktree_without_github(self):
         import devloop.__main__ as cli
         with mock.patch.object(cli, 'main_checkout', return_value=Path('/repo')), \

@@ -17,6 +17,7 @@ from devloop.config import ConfigError, DelegationPolicy, parse_delegations
 from devloop.journal import TurnJournal
 from devloop.ledger import Ledger
 from devloop.planning import Snapshot, findings_decreasing, last_counted_ci, plan
+from helpers import ssdlc_project
 from test_devloop import CFG, SHA1, SHA2, finding, norm, pr, raw_review
 from test_devloop_supervision import (AUTO, HUMAN, REVIEW, SUPER, SUPERVISOR_LOGIN, Case, crash)
 
@@ -67,7 +68,7 @@ class GrantCase(Case):
 
 class RoutingTests(GrantCase):
     def test_off_by_default_the_round_limit_stays_with_the_operator(self):
-        self.assertFalse(config.load_config().delegations.rounds)
+        self.assertFalse(ssdlc_project.load().delegations.rounds)
         self.assertFalse(AUTO.delegations.rounds)
         d = self.make(OFF)
         record = self.at_limit(d, ci_round())
@@ -258,7 +259,7 @@ class CapTests(GrantCase):
                 with self.assertRaises(ConfigError):
                     parse_delegations(table)
         # The local overlay may set the keys, and is held to the same caps.
-        data = config.load_data()
+        data = ssdlc_project.data()
         on = config.apply_overlay(data, {'delegations': {'rounds': True}})
         self.assertTrue(config.parse_config(on).delegations.rounds)
         with self.assertRaises(ConfigError):

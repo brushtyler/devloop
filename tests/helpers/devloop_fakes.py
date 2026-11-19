@@ -13,7 +13,9 @@ from devloop import config, markdown
 from devloop.github import GitHubNotFound, GitHubUncertain, merge_state
 from devloop.ports import PORTS, port_methods
 
-_CFG = config.load_config()
+from . import ssdlc_project
+
+_CFG = ssdlc_project.load()
 SHA1 = 'a' * 40  # the head FakeGH reports by default
 # The marker of PR #100 for issue 7, with whatever roles config.toml assigns.
 META = {'issue': 7, 'implementer': _CFG.implementer, 'reviewer': _CFG.reviewer}

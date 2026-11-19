@@ -9,6 +9,7 @@ from pathlib import Path
 from devloop import config
 from devloop.config import ConfigError, DelegationPolicy
 from devloop.supervision import MAX_RETRIES
+from helpers import ssdlc_project
 from test_devloop import CFG, pr, raw_review
 from test_devloop_supervision import AUTO, HUMAN, REVIEW, SUPER, Case, crash
 
@@ -20,14 +21,14 @@ TRUSTED = 'brushtyler'  # the supervisor of OWN has no app in the tests: a trust
 
 class ConfigTests(unittest.TestCase):
     def test_the_delegation_is_off_by_default(self):
-        self.assertFalse(config.load_config().delegations.retry_own_prs)
+        self.assertFalse(ssdlc_project.load().delegations.retry_own_prs)
         self.assertFalse(CFG.delegations.retry_own_prs)
 
     def test_the_overlay_turns_it_on(self):
         with tempfile.TemporaryDirectory() as tmp:
             local = Path(tmp) / 'config.local.toml'
             local.write_text('[delegations]\nretry_own_prs = true\n')
-            self.assertTrue(config.load_config(None, local).delegations.retry_own_prs)
+            self.assertTrue(ssdlc_project.load(local).delegations.retry_own_prs)
 
     def test_invalid_values_stop_devloop(self):
         for table, error in (({'retry_own_prs': 1}, 'delegations.retry_own_prs: expected true'),

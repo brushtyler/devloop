@@ -9,10 +9,11 @@ from pathlib import Path
 
 import devloop
 from devloop import ledger, markdown
-from devloop.config import ConfigError, load_config, load_data, parse_config
+from devloop.config import ConfigError, parse_config
 from devloop.dispatcher import Dispatcher
 from devloop.journal import JOURNAL, SNAPSHOT, JournalError, TurnJournal
 from devloop.ledger import Ledger
+from helpers import ssdlc_project
 from test_devloop import CFG, implemented
 from test_devloop_ledger import LedgerGH, ReportingRunner, TreeWS
 
@@ -185,7 +186,7 @@ class StoryDispatcherTests(unittest.TestCase):
 
     def test_existing_issues_without_marker_work_as_today(self):
         # Off by default: the takeover writes the request record as before, no story.
-        self.assertFalse(load_config().story_identity)
+        self.assertFalse(ssdlc_project.load().story_identity)
         d = self.make(CFG)
         d._do_implement(7)
         (comment,) = [c for c in self.gh.thread[7]
@@ -341,7 +342,7 @@ class StoryRecordTests(unittest.TestCase):
                                                        'story'))
 
     def test_the_configuration_key(self):
-        data = load_data()
+        data = ssdlc_project.data()
         data.pop('story_identity', None)
         self.assertFalse(parse_config(data).story_identity)
         self.assertTrue(parse_config(dict(data, story_identity=True)).story_identity)

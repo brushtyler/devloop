@@ -10,7 +10,9 @@ composition of ``Dispatcher`` and the documentation map of the new module.
 
 import unittest
 
-from devloop import config, dispatch_supervision, dispatcher
+from devloop import dispatch_supervision, dispatcher
+
+from helpers import ssdlc_project
 
 # Every module-level name the move took out of devloop/dispatcher.py.
 MOVED = ('HOLD_COMMAND', 'RELEASE_COMMAND', 'RESUME_STEP', 'merge_command', 'fix_command',
@@ -40,7 +42,7 @@ class DispatchSupervisionModuleTests(unittest.TestCase):
                               getattr(dispatch_supervision.SupervisionMixin, name))
 
     def test_the_documentation_map_covers_the_module(self):
-        docs = config.load_config().docs
+        docs = ssdlc_project.load().docs
         self.assertEqual(dict(docs.entries)['devloop/dispatch_supervision.py'],
                          dict(docs.entries)['devloop/dispatcher.py'])
         self.assertEqual(sorted(docs.documents(['devloop/dispatch_supervision.py'])),

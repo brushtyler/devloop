@@ -22,19 +22,22 @@ from devloop import config, pin
 from devloop.config import DEFAULT_CONFIG, ConfigError, Reloader
 from devloop.journal import CONFIG, JournalError, TurnJournal
 from devloop.ledger import Ledger
+from helpers import ssdlc_project
 from test_devloop_pin import LIST, GitCase, git, load_launcher
 
 REPO = Path(__file__).resolve().parent.parent
 
 
 class FilesCase(unittest.TestCase):
-    """The installation's config.toml, an overlay and a project file in a temporary state_dir."""
+    """An installation's config.toml, an overlay and a project file in a temporary state_dir.
+    The installation's file is ssdlc's configuration as one file (``ssdlc_project.text``), as
+    before ADR 0006, R3: these tests compose a project file over a complete configuration."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp)
         self.base = self.tmp / 'config.toml'
-        self.base.write_text(DEFAULT_CONFIG.read_text(encoding='utf-8'), encoding='utf-8')
+        self.base.write_text(ssdlc_project.text(), encoding='utf-8')
         self.local = self.tmp / 'config.local.toml'
         self.local.write_text('max_open_prs = 4\n', encoding='utf-8')
         self.project = self.tmp / 'project.toml'
@@ -62,7 +65,7 @@ class EquivalenceTests(FilesCase):
         self.assertEqual(config.load_data(self.base, self.local),
                          config.apply_overlay(config.read_toml(self.base),
                                               config.read_toml(self.local)))
-        self.assertEqual(config.load_config(), config.parse_config(config.read_toml(DEFAULT_CONFIG)))
+        self.assertEqual(config.load_data(), config.read_toml(DEFAULT_CONFIG))
 
     def test_an_empty_project_file_changes_only_the_policy_version(self):
         plain = self.load()
@@ -488,7 +491,7 @@ class CommandTests(FilesCase):
         dispatcher = SimpleNamespace(ledger=ledger, config_print=print_,
                                      ws=SimpleNamespace(repo_root=self.root))
         with mock.patch.object(cli, 'build', return_value=(
-                config.load_config(), self.state, dispatcher)), \
+                ssdlc_project.load(), self.state, dispatcher)), \
                 mock.patch.object(cli, 'log'), mock.patch.object(cli, 'run_loop', loop):
             cli.main(argv)
         reloader, records = seen[0]
@@ -507,7 +510,7 @@ class CommandTests(FilesCase):
         with mock.patch.object(ledger.journal, 'configuration',
                                side_effect=JournalError('full')), \
                 mock.patch.object(cli, 'build', return_value=(
-                    config.load_config(), self.state,
+                    ssdlc_project.load(), self.state,
                     SimpleNamespace(ledger=ledger, tick=mock.Mock(),
                                     config_print=config.fingerprint(
                                         config.read_sources(self.base))))) as build, \
@@ -590,8 +593,10 @@ class PinTests(GitCase):
     def test_run_pin_takes_the_project_file_of_the_state_dir(self):
         self.state.mkdir(parents=True, exist_ok=True)
         (self.state / 'project.toml').write_text('language = "Italiano"\n')
-        args = SimpleNamespace(config=None, local_config=None, project_config=None, ref='main',
-                               no_smoke=True)
+        flat = self.tmp / 'config.toml'  # an installation with a test_cmd (ADR 0006, R3)
+        flat.write_text(ssdlc_project.text(), encoding='utf-8')
+        args = SimpleNamespace(config=str(flat), local_config=None, project_config=None,
+                               ref='main', no_smoke=True)
         with mock.patch.object(cli, 'main_checkout', return_value=self.root), \
                 mock.patch.object(cli.pin, 'pin') as pinned:
             cli.run_pin(args)

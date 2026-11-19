@@ -22,6 +22,7 @@ from unittest import mock
 import devloop.__main__ as cli
 from devloop import apps, config, pin
 from devloop.config import ConfigError
+from helpers import ssdlc_project
 from test_devloop import CFG
 from test_devloop_pin import LAUNCHER, copy_package, git, load_launcher
 
@@ -113,6 +114,10 @@ class SourceRootTests(TwoRepositoriesCase):
 
 
 class SourcePinTests(TwoRepositoriesCase):
+    def setUp(self):
+        super().setUp()
+        ssdlc_project.as_default(self)  # the installation's file has no test_cmd (R3)
+
     def run_pin(self, ref):
         with mock.patch.object(cli, 'main_checkout', return_value=self.managed), \
                 mock.patch.object(cli, 'log', self.logs.append), \
@@ -213,10 +218,10 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             overlay = Path(tmp) / 'config.local.toml'
             overlay.write_text(text)
-            return config.load_config(None, overlay)
+            return ssdlc_project.load(overlay)
 
     def test_source_is_a_key_of_the_overlay(self):
-        self.assertEqual(config.load_config().source, '')
+        self.assertEqual(ssdlc_project.load().source, '')
         self.assertEqual(self.load('source = "/srv/ssdlc"\n').source, '/srv/ssdlc')
 
     def test_an_empty_or_wrong_source_is_refused(self):

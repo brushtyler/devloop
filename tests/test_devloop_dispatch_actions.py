@@ -9,7 +9,9 @@ composition of ``Dispatcher`` and the documentation map of the new module.
 
 import unittest
 
-from devloop import config, dispatch_actions, dispatcher
+from devloop import dispatch_actions, dispatcher
+
+from helpers import ssdlc_project
 
 # Every module-level name the move took out of devloop/dispatcher.py.
 MOVED = ('rerun_of', 'synced_from', 'skipped_models', 'Models', 'ready_approval')
@@ -38,7 +40,7 @@ class DispatchActionsModuleTests(unittest.TestCase):
                               getattr(dispatch_actions.ActionsMixin, name))
 
     def test_the_documentation_map_covers_the_module(self):
-        docs = config.load_config().docs
+        docs = ssdlc_project.load().docs
         self.assertEqual(dict(docs.entries)['devloop/dispatch_actions.py'],
                          dict(docs.entries)['devloop/dispatcher.py'])
         self.assertEqual(sorted(docs.documents(['devloop/dispatch_actions.py'])),

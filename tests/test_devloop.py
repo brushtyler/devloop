@@ -25,11 +25,12 @@ _TESTS_DIR = str(Path(__file__).resolve().parent)
 if _TESTS_DIR not in sys.path:
     sys.path.insert(0, _TESTS_DIR)
 
+from helpers import ssdlc_project
 from helpers.devloop_fakes import META, SHA1, FakeGH, FakeIdentities, SnapshotGH
 
 # The tests describe one action at a time (the default); parallel actions (#176) have their own
-# tests in test_devloop_parallel.py.
-CFG = dataclasses.replace(config.load_config(), max_parallel_actions=1)
+# tests in test_devloop_parallel.py. The configuration is ssdlc's (ADR 0006, R3).
+CFG = dataclasses.replace(ssdlc_project.load(), max_parallel_actions=1)
 SHA2 = 'b' * 40
 # Dispatcher tests follow whatever roles config.toml assigns.
 IMPL, REV = CFG.implementer, CFG.reviewer
@@ -161,8 +162,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(set(CFG.agents), {'claude', 'codex', 'agy'})
 
     def test_rejects_same_agent_for_both_roles_and_unknown_agents(self):
-        import tomllib
-        data = tomllib.loads(config.DEFAULT_CONFIG.read_text())
+        data = ssdlc_project.data()
         for roles in ({'implementer': 'codex', 'reviewer': 'codex'},
                       {'implementer': 'codex', 'reviewer': 'nobody'}):
             with self.subTest(roles=roles), self.assertRaises(config.ConfigError):
@@ -205,8 +205,7 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(any(fnmatch.fnmatchcase('PYTHONPATH=tests ' + form, p) for p in patterns))
 
     def test_apps_belong_to_known_actors_and_bots_are_never_trusted(self):
-        import tomllib
-        data = tomllib.loads(config.DEFAULT_CONFIG.read_text())
+        data = ssdlc_project.data()
         self.assertEqual(set(CFG.apps),
                          {'dispatcher', 'claude', 'codex', 'agy', 'merger', 'supervisor'})
         self.assertEqual(CFG.apps['dispatcher'].slug, 'brushtyler-devloop-dispatcher')
@@ -1902,8 +1901,7 @@ class CredentialIsolationTests(unittest.TestCase):
                              ('7', '42'))
 
     def test_agent_command_timeout_is_configurable_and_within_the_test_timeout(self):
-        import tomllib
-        data = tomllib.loads(config.DEFAULT_CONFIG.read_text())
+        data = ssdlc_project.data()
         self.assertEqual(CFG.agent_command_timeout_seconds, 600)
         self.assertEqual(config.parse_config(dict(data, agent_command_timeout_seconds=300))
                          .agent_command_timeout_seconds, 300)
@@ -1939,8 +1937,7 @@ class CredentialIsolationTests(unittest.TestCase):
         # AGENTS.md tells interactive agents to publish with scripts/agent-token.py; agents that
         # devloop launches must not, since the dispatcher does every GitHub write. The keys sit
         # where the config says, readable by the same system user.
-        import tomllib
-        data = tomllib.loads(config.DEFAULT_CONFIG.read_text())
+        data = ssdlc_project.data()
         with tempfile.TemporaryDirectory() as tmp:
             key = Path(tmp) / 'x-agent.2026-11-14.private-key.pem'
             key.write_text('key')

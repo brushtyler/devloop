@@ -1214,7 +1214,10 @@ For the same reason they never use the [publication outbox](protocol.md#publicat
 Not even its git commands write to the repository: it does not fetch, so it plans from the remote branches as last fetched (a
 branch never fetched leaves its merge mode not computable), and the objects that `git
 merge-tree` writes go to a temporary directory. In daily use run it from the pinned copy, through
-`scripts/devloop-pinned` ([Run from a pinned installation](#run-from-a-pinned-installation)).
+`scripts/devloop-pinned` ([Run from a pinned installation](#run-from-a-pinned-installation)),
+which also passes the [project file](reference.md#project-file) of the `state_dir`: since
+ADR 0006, R3 `devloop/config.toml` has no `test_cmd`, so run directly devloop needs
+`--project-config <state_dir>/project.toml`, before the command.
 `--local-config <file>`, before the command, applies a local overlay to the configuration
 ([Local config as an overlay](#local-config-as-an-overlay)). `state_dir` does not grow without
 limits: see [Cleanup of the state directory](#cleanup-of-the-state-directory).
@@ -1929,8 +1932,10 @@ unless `source` names another:
    of `origin`. A commit only local, or reachable only from a local tag or from a branch deleted
    on `origin`, is refused. The commit of a copy already pinned (also abbreviated) is used
    without a fetch: that is the rollback;
-2. reads `devloop/config.toml` of that commit with the local overlay applied, and takes the files
-   of `review_policy.sensitive_path_lists`: each must be a relative path inside the root and a
+2. reads `devloop/config.toml` of that commit with the [project file](reference.md#project-file)
+   of the `state_dir` and the local overlay applied, and takes the files
+   of `review_policy.sensitive_path_lists` (ssdlc's come from its project file since ADR 0006,
+   R3): each must be a relative path inside the root and a
    regular file of the commit. The documents of the [documentation map](reference.md#documentation-map) are
    not taken: they belong to the repository, not to the installation;
 3. extracts `devloop/`, `core/` when the commit has it (devloop imports it for the
@@ -2127,6 +2132,14 @@ stops devloop, naming the key; the trust keys stay in the overlay, and its `test
 enters the default commands of agy: the overlay alone admits it. It must be a regular file of
 its own: a symbolic link, or a file with other hard links, stops devloop. Its hash is part of
 the policy version, and each start and reload records the configuration in the journal.
+
+Since ADR 0006, R3 the installation's `config.toml` holds none of these keys: ssdlc's facts and
+restrictions are in its project file, whose example is
+[`ops/host/ssdlc/project.toml`](../../ops/host/ssdlc/project.toml), and the agy commands derived
+from its tests in its overlay ([`ops/host/ssdlc/overlay.toml`](../../ops/host/ssdlc/overlay.toml)).
+Without a project file, or a `test_cmd` in the overlay, devloop stops at startup (`missing
+'test_cmd'`), and so does the pin of a copy, whose check loads the configuration. The migration
+of a host is in [ops/host/migrate.md](../../ops/host/migrate.md#configurazione-di-ssdlc-nel-suo-file-di-progetto).
 
 #### Changes while the loop runs
 

@@ -20,6 +20,7 @@ from pathlib import Path
 
 from devloop import agentuser, apps
 from devloop.config import load_config
+from helpers import ssdlc_project
 
 ROOT = Path(__file__).resolve().parents[1]
 OPS = ROOT / 'ops'
@@ -243,7 +244,7 @@ class ManifestTests(unittest.TestCase):
     def test_the_configured_apps_have_a_manifest_and_the_prefix_of_params(self):
         params = (OPS / 'params.env.example').read_text()
         self.assertIn(f'APP_PREFIX={PREFIX}\n', params)
-        cfg = load_config(ROOT / 'devloop/config.toml')
+        cfg = load_config(ROOT / 'devloop/config.toml', None, ssdlc_project.PROJECT)
         for actor, app in cfg.apps.items():
             self.assertTrue(app.slug.startswith(PREFIX), actor)
             role = app.slug[len(PREFIX):]
@@ -372,7 +373,8 @@ class DeclarativeFileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             overlay = Path(tmp) / 'config.local.toml'
             overlay.write_text(active + '\n')
-            cfg = load_config(ROOT / 'devloop/config.toml', overlay)
+            # With ssdlc's project file, as on its host (ADR 0006, R3).
+            cfg = load_config(ROOT / 'devloop/config.toml', overlay, ssdlc_project.PROJECT)
         self.assertEqual(cfg.repo, 'brushtyler/ssdlc')
 
 

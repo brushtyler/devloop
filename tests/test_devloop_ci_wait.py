@@ -15,6 +15,7 @@ from devloop.planning import Action, ci_joins_round, counted_rounds, plan, round
 from devloop.review import open_findings
 from devloop.unavailability import iso
 
+from helpers import ssdlc_project
 from helpers.devloop_fakes import SHA1, SnapshotGH
 from test_devloop import CFG, SHA2, FakeRunner, FakeWS, finding, fixed, norm, pr, raw_review
 
@@ -608,12 +609,11 @@ class PlanTests(unittest.TestCase):
 
 class ConfigTests(unittest.TestCase):
     def data(self):
-        with open(config.DEFAULT_CONFIG, 'rb') as fh:
-            return tomllib.load(fh)
+        return ssdlc_project.data()
 
     def test_defaults_and_values(self):
         self.assertEqual(config.CIPolicy(), config.CIPolicy(5, 30))
-        self.assertEqual(config.load_config().ci, config.CIPolicy(5, 30))
+        self.assertEqual(ssdlc_project.load().ci, config.CIPolicy(5, 30))
         data = self.data()
         data.pop('ci')
         self.assertEqual(config.parse_config(data).ci, config.CIPolicy(5, 30))

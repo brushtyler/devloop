@@ -19,6 +19,7 @@ from devloop.dispatcher import Dispatcher
 from devloop.github import GitHub, GitHubError
 from devloop.housekeeping import Housekeeping
 from devloop.ledger import LedgerError
+from helpers import ssdlc_project
 from test_devloop import CFG, FakeRunner, FakeWS
 from devloop.workspace import Workspace
 from test_devloop_pin import GitCase, git
@@ -33,7 +34,7 @@ def gc_cfg(**kw):
 
 class ConfigTests(unittest.TestCase):
     def test_defaults_clean_pins_and_worktrees_not_logs(self):
-        gc = config.load_config().gc
+        gc = ssdlc_project.load().gc
         self.assertEqual((gc.pins, gc.keep_pins, gc.worktrees, gc.logs, gc.log_days,
                           gc.interval_minutes), (True, 5, True, False, 14, 60))
 
@@ -41,7 +42,7 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             local = Path(tmp) / 'config.local.toml'
             local.write_text('[gc]\nlogs = true\nlog_days = 30\nkeep_pins = 2\n')
-            gc = config.load_config(None, local).gc
+            gc = ssdlc_project.load(local).gc
         self.assertEqual((gc.logs, gc.log_days, gc.keep_pins, gc.pins), (True, 30, 2, True))
 
     def test_invalid_values_stop_devloop(self):

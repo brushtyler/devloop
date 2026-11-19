@@ -14,7 +14,8 @@ from unittest import mock
 
 from devloop import __main__ as cli
 from devloop import config, pin
-from devloop.config import ConfigError, load_config, repo_lock_name
+from devloop.config import ConfigError, repo_lock_name
+from helpers.ssdlc_project import load as load_config
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -27,7 +28,7 @@ class ConfigTests(unittest.TestCase):
     def load(self, text):
         overlay = self.tmp / 'config.local.toml'
         overlay.write_text(text)
-        return load_config(ROOT / 'devloop/config.toml', overlay)
+        return load_config(overlay)
 
     def test_unset_by_default(self):
         self.assertEqual(load_config().repo_lock_dir, '')

@@ -9,7 +9,9 @@ documentation map of the new module. No module-level name moved.
 
 import unittest
 
-from devloop import config, dispatch_merge, dispatcher
+from devloop import dispatch_merge, dispatcher
+
+from helpers import ssdlc_project
 
 # Every method of Dispatcher the move took into the mixin.
 METHODS = ('_approval_current', '_receipt', '_receipt_and_paths', '_base_check', '_base_checks',
@@ -29,7 +31,7 @@ class DispatchMergeModuleTests(unittest.TestCase):
                               getattr(dispatch_merge.MergeMixin, name))
 
     def test_the_documentation_map_covers_the_module(self):
-        docs = config.load_config().docs
+        docs = ssdlc_project.load().docs
         self.assertEqual(dict(docs.entries)['devloop/dispatch_merge.py'],
                          dict(docs.entries)['devloop/dispatcher.py'])
         self.assertEqual(sorted(docs.documents(['devloop/dispatch_merge.py'])),

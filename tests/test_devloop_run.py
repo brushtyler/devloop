@@ -16,7 +16,9 @@ from devloop.config import ConfigError, RunPolicy
 from devloop.github import GitHubError
 from devloop.watch import NOTHING_NEW
 
-REPO = Path(__file__).resolve().parent.parent
+from helpers import ssdlc_project
+
+REPO =Path(__file__).resolve().parent.parent
 
 
 class Clock:
@@ -338,7 +340,7 @@ class CommandTests(unittest.TestCase):
         gh = mock.Mock(time_left=None)
         failing = mock.Mock(side_effect=GitHubError('HTTP 502'))
         dispatcher = SimpleNamespace(tick=failing, gh=gh, identities=None)
-        cfg = dataclasses.replace(config.load_config(), run=RunPolicy(alert_issue=7))
+        cfg = dataclasses.replace(ssdlc_project.load(), run=RunPolicy(alert_issue=7))
         with mock.patch.object(runloop, 'BACKOFF_SECONDS', (0, 0, 0)), \
                 mock.patch.object(cli, 'log'):
             code = cli.run_loop(cfg, self.tmp, dispatcher, 900)
@@ -362,7 +364,7 @@ class CommandTests(unittest.TestCase):
                 (seen[0][1].parent / 'STOP').touch()  # the loop stops after this wait
                 return NOTHING_NEW
         with mock.patch.object(cli.watch, 'Watcher', Watcher), mock.patch.object(cli, 'log'):
-            code = cli.run_loop(config.load_config(), self.tmp, dispatcher, 30)
+            code = cli.run_loop(ssdlc_project.load(), self.tmp, dispatcher, 30)
         self.assertEqual(code, 0)
         self.assertEqual(seen[0], (gh, self.tmp / 'run-watch-state.json', 30, 30))
         self.assertTrue(callable(seen[1]))
@@ -374,7 +376,7 @@ class CommandTests(unittest.TestCase):
             raise pin.Repinned(self.tmp / 'pinned-new')
         dispatcher = SimpleNamespace(tick=mock.Mock(side_effect=tick), identities=None,
                                      gh=mock.Mock(time_left=None))
-        with mock.patch.object(cli, 'build', return_value=(config.load_config(), self.tmp,
+        with mock.patch.object(cli, 'build', return_value=(ssdlc_project.load(), self.tmp,
                                                            dispatcher)), \
                 mock.patch.object(cli, 'log'), mock.patch.object(pin, 'reexec') as reexec:
             cli.main(['run'])
@@ -401,7 +403,7 @@ class CommandTests(unittest.TestCase):
         gh = Client()
         dispatcher = SimpleNamespace(tick=mock.Mock(return_value=[]), gh=gh, identities=None)
         with mock.patch.object(cli, 'log'):
-            code = cli.run_loop(config.load_config(), self.tmp, dispatcher, 900)
+            code = cli.run_loop(ssdlc_project.load(), self.tmp, dispatcher, 900)
         self.assertEqual(code, 0)
         self.assertEqual(dispatcher.tick.call_count, 1)
         self.assertIsNone(gh.time_left)  # restored after the stop too
@@ -420,12 +422,12 @@ class CommandTests(unittest.TestCase):
 
 class ConfigTests(unittest.TestCase):
     def data(self, **run):
-        data = config.read_toml(config.DEFAULT_CONFIG)
+        data = ssdlc_project.data()
         data['run'] = run
         return data
 
     def test_alert_issue_is_optional_and_not_set_in_the_shipped_config(self):
-        self.assertEqual(config.load_config().run.alert_issue, 0)
+        self.assertEqual(ssdlc_project.load().run.alert_issue, 0)
         self.assertEqual(config.parse_config(self.data(alert_issue=12)).run.alert_issue, 12)
 
     def test_invalid_values_and_keys_are_refused(self):
@@ -435,8 +437,7 @@ class ConfigTests(unittest.TestCase):
                 config.parse_config(self.data(**run))
 
     def test_the_overlay_may_set_alert_issue(self):
-        data = config.apply_overlay(config.read_toml(config.DEFAULT_CONFIG),
-                                    {'run': {'alert_issue': 5}})
+        data = config.apply_overlay(ssdlc_project.data(), {'run': {'alert_issue': 5}})
         self.assertEqual(config.parse_config(data).run.alert_issue, 5)
 
 

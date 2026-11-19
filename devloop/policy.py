@@ -72,7 +72,9 @@ class ReviewPolicy:
     default_level: int = 1
     label: str = 'reviews:2'
     # Directory prefixes (``devloop/``) or file names (``AGENTS.md``), relative to the root.
-    sensitive_paths: tuple = ('devloop/', 'AGENTS.md', 'CLAUDE.md', '.github/', 'schemas/')
+    # None by default: they are restrictions of the managed repository, which its project file
+    # adds (ADR 0006, R3; ssdlc's in ops/host/ssdlc/project.toml).
+    sensitive_paths: tuple = ()
     # Files listed by ``sensitive_path_lists``, read when the configuration is loaded.
     sensitive_files: tuple = ()
     # The configured reviewer pool, in order: ``(key, app slug or None, kind, model, effort,

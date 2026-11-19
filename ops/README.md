@@ -37,7 +37,12 @@ ops/
     config.local.toml.example  overlay di devloop, tutto commentato
     check-host.sh            verifica utenti, permessi (700/600), chiavi, ACL, sudoers, utente
                              degli agent, servizio, CLI e `devloop apps`
-    migrate.md               cosa copiare dalla macchina vecchia e cosa ricreare
+    migrate.md               cosa copiare dalla macchina vecchia e cosa ricreare, e la
+                             configurazione di ssdlc nel suo file di progetto (ADR 0006, R3)
+    ssdlc/project.toml       il file di progetto di ssdlc, d'esempio: l'operatore lo copia in
+                             <state_dir>/project.toml
+    ssdlc/overlay.toml       le chiavi che l'overlay di ssdlc riceve con R3 (comandi di agy)
+    ssdlc/check-equivalence.py  confronta la configurazione prima e dopo R3 su un host
   github/
     apps/<ruolo>.json        manifest delle GitHub App (flusso "manifest" di GitHub)
     create-apps.sh           genera una pagina HTML locale che crea ciascuna app dal suo manifest
@@ -224,6 +229,12 @@ Prepara anche il **lock per repository** (ADR 0006, R8): il gruppo `REPO_LOCK_GR
 `TMPFILES_FILE` (`/etc/tmpfiles.d/devloop-repos.conf`). Non usa una directory che esiste già, non
 è vuota e non è di `root:<gruppo>`. L'overlay deve avere `repo_lock_dir` con lo stesso valore: lo
 script lo ricorda finché manca ([Più progetti sullo stesso host](#più-progetti-sullo-stesso-host)).
+
+Per ssdlc servono anche il **file di progetto** e le chiavi che l'overlay riceve con l'ADR 0006,
+R3: lo script non li crea. L'operatore copia [`ssdlc/project.toml`](host/ssdlc/project.toml) in
+`<state_dir>/project.toml` (mode 600, utente `devloop`) e aggiunge all'overlay le chiavi di
+[`ssdlc/overlay.toml`](host/ssdlc/overlay.toml); senza file di progetto devloop non parte e il
+primo pin fallisce ([migrate.md](host/migrate.md#configurazione-di-ssdlc-nel-suo-file-di-progetto)).
 
 Poi le **chiavi**: in `key_dir` di `devloop` (`/home/devloop/.ghapps`) quelle delle app che usa il
 dispatcher (`DEVLOOP_KEYS`: `dispatcher`, `merger`, `claude-agent`, `codex-agent`, `agy-agent`):
