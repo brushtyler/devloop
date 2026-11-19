@@ -18,6 +18,21 @@ class SchemaError(ValueError):
     pass
 
 
+# Fields that the schema keeps required, so that the CLIs always write them, but that an output
+# may lack because it was written before they existed: devloop fills them in before validating.
+# A review without ``operator_reason`` (#434) is read as before, a ``decision``.
+DEFAULTS = {'review': {'operator_reason': ''}}
+
+
+def with_defaults(name, value):
+    """``value`` with the missing fields of ``DEFAULTS[name]`` filled in; anything that is not
+    an object is returned as it is, for the validator to reject."""
+    defaults = DEFAULTS.get(name)
+    if not defaults or not isinstance(value, dict):
+        return value
+    return {**defaults, **value}
+
+
 def schema_path(name):
     if name not in SCHEMA_NAMES:
         raise KeyError(name)

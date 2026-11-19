@@ -27,7 +27,7 @@ reviewer's assessment never closes a finding.
 import re
 
 from .acceptance import acceptance_findings
-from .schema import load_schema, validate
+from .schema import load_schema, validate, with_defaults
 
 VERDICTS = ('approve', 'request_changes', 'needs_operator')
 # Why a reviewer asks for the operator (#434): the PR touches the trust policy, or anything else
@@ -191,7 +191,7 @@ def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, 
     the operator's whatever the verdict.
     """
     # An output without ``operator_reason`` (#434) is read as before: a ``decision``.
-    raw = dict(raw, operator_reason=raw.get('operator_reason', ''))
+    raw = with_defaults('review', raw)
     validate(raw, load_schema('review'))
     notes = []
     derived = acceptance_findings(criteria, acceptance_map)

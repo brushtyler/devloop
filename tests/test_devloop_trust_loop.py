@@ -7,12 +7,17 @@ once, in ``agent:ready-to-merge`` + ``agent:needs-operator``, for the review and
 ``decision``, or a ``needs_operator`` without the field, is still an immediate escalation."""
 
 import dataclasses
+import json
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 
-from devloop import markdown, review
+from devloop import agents, markdown, review
 from devloop.config import MergePolicy
 from devloop.dispatcher import Dispatcher
 from devloop.planning import Action, Snapshot, ci_joins_round, plan, waiting_reviewers
+from devloop.schema import SchemaError, with_defaults
 from test_devloop import (CFG, REV, REV_NAME, SHA1, FakeGH, FakeRunner, FakeWS, finding, norm,
                           pr, raw_review)
 from test_devloop_merge import READY, STRICT, Case, MergeGH, header, records
@@ -33,6 +38,20 @@ def without_reason(raw):
 def escalations(gh):
     found = (markdown.read_marker(b, 'notice') for _, b in gh.comments)
     return [r for r in found if r and r.get('event') == 'escalation']
+
+
+def cli(answer):
+    """The ``run`` of a real ``AgentRunner``: ``answer`` as the final message of the turn, in the
+    envelope of each kind of CLI."""
+    def run(argv, **kw):
+        if argv[-1] == '--version':
+            return SimpleNamespace(returncode=0, stdout='2.1.322 (Claude Code)', stderr='')
+        for arg in argv:  # codex writes its final message in a file
+            if str(arg).endswith('.last.json'):
+                Path(arg).write_text(json.dumps(answer), encoding='utf-8')
+        return SimpleNamespace(returncode=0, stderr='', stdout=json.dumps(
+            {'is_error': False, 'status': 'SUCCESS', 'structured_output': answer}))
+    return run
 
 
 class NormalizeTests(unittest.TestCase):
@@ -144,6 +163,39 @@ class ReviewRoundTests(unittest.TestCase):
         d._apply_round(p, records, announce=True, reviews=records)
         self.assertEqual(self.gh.labels[100], {OPERATOR})
         self.assertEqual(escalations(self.gh)[0]['class'], 'reviewer_decision')
+
+    def test_a_cli_answer_without_the_field_escalates_through_the_real_runner(self):
+        # The real ``AgentRunner`` checks the output against the strict schema before
+        # ``normalize_review``: a review without ``operator_reason`` is still a decision, an
+        # escalation ``reviewer_decision``, not a failure of the tool.
+        raw = without_reason(raw_review('needs_operator', [finding()], human='scelta'))
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self.make(agents.AgentRunner(Path(tmp) / 'logs', 10, run=cli(raw)))
+            p = pr()
+            self.gh.labels[100] = set(p.labels)
+            d._do_review(p)
+        self.assertEqual(self.gh.labels[100], {OPERATOR})
+        (escalation,) = escalations(self.gh)
+        self.assertEqual(escalation['class'], 'reviewer_decision')
+        record = markdown.read_marker(self.gh.comments[0][1], 'review')
+        self.assertEqual((record['verdict'], record['operator_reason']),
+                         ('needs_operator', 'decision'))
+
+    def test_the_runner_fills_in_the_field_and_keeps_the_schema_strict(self):
+        def turn(raw, kind):
+            with tempfile.TemporaryDirectory() as tmp:
+                return agents.AgentRunner(Path(tmp) / 'logs', 10, run=cli(raw)).run(
+                    CFG.agent(kind), 'review', 'p', 'review', tmp, 'pr-100')
+        for kind in ('claude', 'codex', 'agy'):
+            with self.subTest(kind=kind):
+                self.assertEqual(turn(without_reason(raw_review()), kind)['operator_reason'], '')
+                self.assertEqual(turn(trust(), kind)['operator_reason'], 'trust_policy')
+                with self.assertRaises(agents.AgentError) as ctx:
+                    turn(raw_review(reason='other'), kind)
+                self.assertIsInstance(ctx.exception.__cause__, SchemaError)
+        # The default belongs to the review: the other schemas are unchanged.
+        self.assertEqual(with_defaults('fix', {}), {})
+        self.assertIn('operator_reason', agents.load_schema('review')['required'])
 
     def test_the_round_limit_holds_as_before(self):
         rounds = [dict(norm(raw_review('request_changes', [finding()])), round=i) for i in (1, 2)]

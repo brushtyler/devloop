@@ -520,7 +520,9 @@ security finding with *(sicurezza)*. devloop then enforces consistency:
 - `operator_reason` (#434) says why a reviewer asks for the operator: `trust_policy` or
   `decision`, empty with the other verdicts. The record keeps it only with `needs_operator`, as
   `decision` when the reviewer gave none; a record without the field, written before #434, is a
-  `decision`. A `trust_policy` with another verdict becomes `needs_operator`.
+  `decision`. A `trust_policy` with another verdict becomes `needs_operator`. The schema keeps
+  the field required for the CLIs, but the runner fills it in (empty) before checking an output
+  that lacks it: such a review is a `decision`, not a failure of the tool.
 
 **What devloop does with the verdict** (#434). Only a `needs_operator` for a `decision` stops the
 loop: escalation `reviewer_decision`, the round suspended with a conclave. A `needs_operator`
