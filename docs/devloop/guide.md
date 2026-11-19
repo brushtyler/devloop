@@ -2023,8 +2023,10 @@ One host can run devloop for several projects, each with its own system user (an
 clone, `state_dir`, `key_dir` with the keys of its own set of apps, and service (ADR 0006, R8,
 decision D6). The [ops guide](../../ops/README.md) does it with one parameters file per project
 and `PROJECT`: the template unit `devloop@.service`, an instance `devloop@<project>` per project
-with its parameters in a drop-in, a sudoers of the supervisor per unit, and `check-host.sh` run
-once per project.
+with its parameters in a drop-in, a sudoers of the supervisor per unit, a clone and a `key_dir`
+of the supervisor per project, and `check-host.sh` run once per project. The scripts refuse a
+user that another installation of devloop on the host already has, in any role: only the
+supervisor is the same for every project.
 
 **One repository, one host.** A repository is served by exactly one dispatcher, on one host.
 The lock of `state_dir` (`state_dir/dispatcher.lock`) excludes only the dispatchers of the same
@@ -2038,14 +2040,19 @@ lock** too (decision of the operator, L1 of ADR 0006, section 3.8):
   holds it, whatever its `state_dir` or its user, devloop stops with `another dispatcher is running
   on <repo> (repository lock <path> held)`; dispatchers of different repositories run together;
 - the kernel releases it when the process ends; a [restart from a new copy](#pin-after-a-merge)
-  passes it on open, like the lock of `state_dir`. `tick --dry-run`, `status`, `cleanup` and `gc`
-  do not take it;
+  passes it on open, like the lock of `state_dir`. With the outbox of the publications, the `gh`
+  of each GitHub write holds it too while it runs, as it holds the lock of `state_dir`: a
+  dispatcher with another `state_dir` does not take over the repository while a publication of
+  one that stopped may still be running. `tick --dry-run`, `status`, `cleanup` and `gc` do not
+  take it;
 - the directory is the host's, the same for every project: `/run/devloop/repos` with the ops
   scripts, created at every boot by `systemd-tmpfiles`, owned by root, mode `3770`, of a group
   (`devloop-repos`) that holds the devloop users of the host and nobody else. The group gives no
   access to the `state_dir`s; the agent users and the supervisor do not enter it. devloop does
   not create it: a `repo_lock_dir` that does not exist stops `tick` and `run`. It opens a lock
-  read-only and never through a symlink;
+  read-only and never through a symlink. A lock that exists is opened as it is, without
+  creating or replacing it and with its owner and mode left alone; only a missing one is
+  created, readable by the other devloop users;
 - a container of devloop (ADR 0006, R7) has to mount that directory of the host, so that the
   lock spans the containers and the services of the host;
 - it holds **on one host only**: the same repository from two hosts is not excluded. Serving a

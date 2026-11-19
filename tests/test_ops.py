@@ -797,6 +797,113 @@ class DryRunTests(OpsTestCase):
         self.assertIn("SERVICE_NAME non valido: 'devloop@widget'", done.stderr)
         self.assertEqual(self.mutating_calls(), [])
 
+    def test_the_names_of_a_project_never_take_those_of_another_role(self):
+        # R1-1: devloop-<p>-agent is the agent user of project p, devloop-agent that of the
+        # installation without PROJECT: no project takes those names for its devloop user.
+        for project in ('agent', 'widget-agent'):
+            with self.subTest(project=project):
+                done = self.run_script('host/check-host.sh', '--dry-run', '--params',
+                                       str(self.project_params(PROJECT=project)))
+                self.assertNotEqual(done.returncode, 0)
+                self.assertIn("PROJECT non può essere 'agent' né finire con '-agent'",
+                              done.stderr)
+        done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params',
+                               str(self.params(AGENT_USER='supervisor')))
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn('AGENT_USER deve essere diverso da SUPERVISOR_USER', done.stderr)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def other_project(self, unit_user='devloop-gadget', agent_line=None, supervisor_line=None):
+        """Another project of the host, gadget, as its unit and its sudoers describe it."""
+        dropin = self.tmp / 'systemd/devloop@gadget.service.d/project.conf'
+        dropin.parent.mkdir(parents=True, exist_ok=True)
+        dropin.write_text('[Unit]\nDescription=devloop continuous loop (acme/gadget)\n\n'
+                          f'[Service]\nUser={unit_user}\nGroup={unit_user}\n')
+        sudoers = self.tmp / 'sudoers.d'
+        sudoers.mkdir(exist_ok=True)
+        (sudoers / 'devloop-agent-gadget').write_text(
+            'Defaults>devloop-gadget-agent !use_pty\n\n'
+            + (agent_line or 'devloop-gadget ALL=(devloop-gadget-agent) NOPASSWD:SETENV: \\')
+            + '\n    /usr/bin/bash\n')
+        (sudoers / 'devloop-supervisor-gadget').write_text(
+            'Defaults>devloop-gadget always_set_home\n\n'
+            + (supervisor_line or 'supervisor ALL=(devloop-gadget) NOPASSWD: \\')
+            + '\n    /usr/bin/true\n\nsupervisor ALL=(root) NOPASSWD: \\\n'
+              '    /usr/bin/systemctl start devloop@gadget\n')
+
+    def widget_params(self):
+        return self.project_params(
+            SUDOERS_FILE=str(self.tmp / 'sudoers.d/devloop-supervisor-widget'),
+            AGENT_SUDOERS_FILE=str(self.tmp / 'sudoers.d/devloop-agent-widget'))
+
+    def test_the_users_of_a_project_are_of_no_other_installation_of_the_host(self):
+        # R1-1: the scripts refuse a user that another installation of the host already has,
+        # in the same role or in another; the supervisor alone is the same in every project.
+        self.other_project()
+        for script in ('host/setup-devloop.sh', 'host/setup-supervisor.sh',
+                       'host/setup-agent-user.sh'):
+            with self.subTest(script=script):
+                done = self.run_script(script, '--dry-run', '--params',
+                                       str(self.widget_params()))
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        sudoers = self.tmp / 'sudoers.d'
+        for kwargs, message in (
+                ({'unit_user': 'devloop-widget'},
+                 "DEVLOOP_USER 'devloop-widget' è già l'utente devloop di un'altra installazione "
+                 f"di devloop dell'host ({self.tmp}/systemd/devloop@gadget.service.d/"
+                 "project.conf)"),
+                ({'agent_line': 'devloop-gadget ALL=(devloop-widget) NOPASSWD:SETENV: \\'},
+                 "DEVLOOP_USER 'devloop-widget' è già l'utente agent di un'altra installazione "
+                 f"di devloop dell'host ({sudoers}/devloop-agent-gadget)"),
+                ({'agent_line': 'devloop-widget-agent ALL=(devloop-gadget-agent) '
+                                'NOPASSWD:SETENV: \\'},
+                 "AGENT_USER 'devloop-widget-agent' è già l'utente devloop"),
+                ({'supervisor_line': 'devloop-widget-agent ALL=(devloop-gadget) NOPASSWD: \\'},
+                 "AGENT_USER 'devloop-widget-agent' è già l'utente supervisor"),
+                ({'supervisor_line': 'supervisor ALL=(supervisor) NOPASSWD: \\'},
+                 "SUPERVISOR_USER 'supervisor' è già l'utente devloop")):
+            with self.subTest(**kwargs):
+                self.other_project(**kwargs)
+                for script in ('host/setup-devloop.sh', 'host/check-host.sh'):
+                    done = self.run_script(script, '--dry-run', '--params',
+                                           str(self.widget_params()))
+                    self.assertNotEqual(done.returncode, 0)
+                    self.assertIn(message, done.stderr)
+        self.assertEqual(self.mutating_calls(), [])
+
+    def test_the_supervisor_has_a_clone_per_project(self):
+        # R1-4: like its key_dir, the supervisor's clone is the project's.
+        clone = self.home / 'supervisor/devloop-widget'
+        done = self.run_script('host/setup-supervisor.sh', '--dry-run', '--params',
+                               str(self.project_params()))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn(f'git clone https://github.com/acme/widget.git {clone}\n', done.stdout)
+        self.assertIn(f'{self.home}/supervisor/.ghapps-widget', done.stdout)
+        # Without PROJECT, the clone of before.
+        done = self.run_script('host/setup-supervisor.sh', '--dry-run', '--params',
+                               str(self.params()))
+        self.assertIn(f'git clone https://github.com/brushtyler/ssdlc.git '
+                      f'{self.home}/supervisor/ssdlc\n', done.stdout)
+        # A clone already there of another repository is another project's: never shared.
+        (clone / '.git').mkdir(parents=True)
+        config = clone / '.git/config'
+        for url, refused in (('https://github.com/acme/gadget.git', True),
+                             ('git@github.com:Acme/Widget.git', False),
+                             ('https://github.com/acme/widget', False)):
+            with self.subTest(url=url):
+                config.write_text('[core]\n\tbare = false\n[remote "origin"]\n'
+                                  f'\turl = {url}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n')
+                done = self.run_script('host/setup-supervisor.sh', '--dry-run', '--params',
+                                       str(self.project_params()))
+                if refused:
+                    self.assertNotEqual(done.returncode, 0)
+                    self.assertIn(f"{clone} è un clone di '{url}', non di acme/widget",
+                                  done.stderr)
+                else:
+                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                    self.assertIn(f'ok: {clone} è già un clone di acme/widget', done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+
     def test_a_missing_params_file_is_explained(self):
         done = self.run_script('host/check-host.sh', '--dry-run', '--params',
                                str(self.tmp / 'missing.env'))
@@ -1091,6 +1198,9 @@ class CheckHostTests(OpsTestCase):
         (state / 'config.local.toml').write_text(f'repo_lock_dir = "{self.locks}"\n'
                                                  '[agent_user]\nname = "root"\n')
         (systemd / 'devloop@.service').write_text(render('host/devloop@.service', {}))
+        # ssdlc, another installation of the host, has a user of its own (R1-1).
+        unit = systemd / 'devloop.service'
+        unit.write_text(unit.read_text().replace(f'User={ME}\n', 'User=opsdry-ssdlc\n'))
         dropin = systemd / 'devloop@widget.service.d/project.conf'
         dropin.parent.mkdir()
         dropin.write_text(render('host/devloop-project.conf', {
@@ -1115,7 +1225,8 @@ class CheckHostTests(OpsTestCase):
         other.write_text(dropin.read_text().replace('Description=devloop continuous loop '
                                                     '(acme/widget)',
                                                     'Description=devloop continuous loop '
-                                                    '(Acme/Widget)'))
+                                                    '(Acme/Widget)')
+                         .replace(f'User={ME}\n', 'User=opsdry-widget2\n'))
         done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
         self.assertEqual(done.returncode, 1)
         self.assertIn(f'ERRORE: {other} gestisce anche acme/widget: un repository, un servizio',

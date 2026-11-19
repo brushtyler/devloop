@@ -219,14 +219,39 @@ def repo_lock_path(cfg):
     return Path(directory).expanduser() / repo_lock_name(cfg.repo)
 
 
+def _open_repo_lock(path):
+    """The descriptor of the repository lock ``path``, read-only and never through a symlink
+    (ADR 0006, R8). A lock that exists is opened as it is, without ``O_CREAT``: devloop neither
+    creates nor replaces it, and leaves its owner and its mode alone. Only a missing one is
+    created, with ``O_EXCL``, and made readable by the other devloop users of the host whatever
+    the umask: they open it too. ``OSError`` when it cannot be opened."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        return os.open(path, flags)
+    except FileNotFoundError:
+        pass
+    try:
+        fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        # Another dispatcher created it in between: it is theirs, opened as it is.
+        return os.open(path, flags)
+    try:
+        os.fchmod(fd, 0o644)
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
+
+
 @contextmanager
 def repo_lock(cfg):
     """Hold the repository lock of ``cfg`` (ADR 0006, R8) while the block runs, taken without
     waiting: while another dispatcher on the same ``repo`` holds it, whatever its state_dir and
     its user, devloop stops with a message that names the repository. The directory is the
     host's, prepared by the operator for every devloop user (ops): devloop does not create it.
-    The file is opened read-only, which is enough for ``flock``, and never through a symlink.
-    Yields the open file, or None without ``repo_lock_dir``."""
+    The file is opened read-only, which is enough for ``flock``, and never through a symlink;
+    one that exists is opened without ``O_CREAT`` (``_open_repo_lock``). Yields the open file,
+    or None without ``repo_lock_dir``."""
     path = repo_lock_path(cfg)
     if path is None:
         yield None
@@ -237,13 +262,10 @@ def repo_lock(cfg):
             sys.exit(f'devloop: repo_lock_dir {path.parent} is not a directory: the host has to '
                      'prepare it for every devloop user (ops/host/setup-devloop.sh)')
         try:
-            fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
+            fd = _open_repo_lock(path)
         except OSError as exc:
             sys.exit(f'devloop: the repository lock {path} cannot be opened: {exc.strerror}')
         held = open(fd, 'r')
-        # Readable by the other devloop users of the host whatever the umask: they open it too.
-        if os.fstat(fd).st_uid == os.geteuid():
-            os.fchmod(fd, 0o644)
     with held as fh:
         try:
             fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -379,16 +401,21 @@ def check_agent_user(cfg, state, local_config, agent_user, log=log, me=None, git
     check_isolation(agent_user, key_dir, state, local_config, me=me, git_dir=git_dir)
 
 
-def hold_lock(dispatcher, lock_fd):
+def hold_lock(dispatcher, lock_fd, repo_lock_fd=None):
     """With the outbox of the publications (#385), the `gh` of each write holds the dispatcher
     lock ``lock_fd`` too, under a timeout of its own (``GitHub.KILL_AFTER``): no next dispatcher
     starts while one of them may still publish, even after this process stopped. Without it
     (#397, ADR 0004, D8) no `gh` gets the lock: a dispatcher killed while a `gh` of its runs
-    leaves the lock free at once, as before #385. Returns whether the lock was passed on."""
+    leaves the lock free at once, as before #385. The repository lock (ADR 0006, R8), when held
+    on ``repo_lock_fd``, passes on with it: no dispatcher with another state_dir takes over the
+    repository in the middle of a publication either. Returns whether the locks were passed on."""
     identities = getattr(dispatcher, 'identities', None)
     if getattr(identities, 'outbox', None) is None:
         return False
-    identities.hold(lock_fd)
+    if repo_lock_fd is None:
+        identities.hold(lock_fd)
+    else:
+        identities.hold(lock_fd, repo_lock_fd)
     return True
 
 
@@ -768,7 +795,7 @@ def main(argv=None):
     acting = args.command in ('tick', 'run')
     with single_instance(state / 'dispatcher.lock') as lock, \
             (repo_lock(cfg) if acting else nullcontext()) as repo:
-        hold_lock(dispatcher, lock.fileno())
+        hold_lock(dispatcher, lock.fileno(), repo.fileno() if repo is not None else None)
         recorder = None
         if args.command in ('tick', 'run'):
             # The trace T1 of the configuration (ADR 0006, K1), under the lock: no record, no

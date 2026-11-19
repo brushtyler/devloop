@@ -248,6 +248,110 @@ class RepoLockTests(unittest.TestCase):
         with cli.repo_lock(self.cfg()) as fh:
             self.assertFalse(os.get_inheritable(fh.fileno()))
 
+    def opens(self):
+        """``os.open`` as devloop calls it, with the flags of each call recorded."""
+        calls = []
+        real = os.open
+
+        def record(path, flags, *args, **kwargs):
+            calls.append((Path(path), flags))
+            return real(path, flags, *args, **kwargs)
+        return calls, mock.patch.object(cli.os, 'open', record)
+
+    def test_an_existing_lock_is_opened_as_it_is(self):
+        # R1-2: without O_CREAT, so it is never created or replaced, with its owner and its
+        # mode left alone.
+        path = self.locks / 'brushtyler--ssdlc.lock'
+        path.write_text('the host made it\n')
+        path.chmod(0o640)
+        inode = path.stat().st_ino
+        calls, patch = self.opens()
+        with patch, cli.repo_lock(self.cfg()) as fh:
+            self.assertTrue(os.path.samestat(os.fstat(fh.fileno()), path.stat()))
+        self.assertEqual([p for p, _ in calls], [path])
+        self.assertFalse(calls[0][1] & os.O_CREAT)
+        self.assertTrue(calls[0][1] & os.O_NOFOLLOW)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+        self.assertEqual((path.stat().st_ino, path.read_text()), (inode, 'the host made it\n'))
+
+    def test_only_a_missing_lock_is_created(self):
+        path = self.locks / 'brushtyler--ssdlc.lock'
+        calls, patch = self.opens()
+        with patch, cli.repo_lock(self.cfg()):
+            pass
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(calls[0][1] & os.O_CREAT)
+        self.assertEqual(calls[1][1] & (os.O_CREAT | os.O_EXCL), os.O_CREAT | os.O_EXCL)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+
+    def test_a_lock_created_in_between_is_opened_as_it_is(self):
+        # Another dispatcher creates it between the two opens: it is not taken over.
+        path = self.locks / 'brushtyler--ssdlc.lock'
+        real = os.open
+        flags_seen = []
+
+        def racing(target, flags, *args, **kwargs):
+            flags_seen.append(flags)
+            if len(flags_seen) == 1:
+                path.write_text('')
+                path.chmod(0o600)
+                raise FileNotFoundError(2, 'No such file or directory')
+            return real(target, flags, *args, **kwargs)
+        with mock.patch.object(cli.os, 'open', racing), cli.repo_lock(self.cfg()) as fh:
+            self.assertTrue(os.path.samestat(os.fstat(fh.fileno()), path.stat()))
+        self.assertEqual(len(flags_seen), 3)
+        self.assertTrue(flags_seen[1] & os.O_EXCL)
+        self.assertFalse(flags_seen[2] & os.O_CREAT)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_the_publications_hold_the_repository_lock_too(self):
+        # R1-3: with the outbox, the gh of each write keeps the repository lock open as well as
+        # the dispatcher lock, so that no dispatcher with another state_dir takes over in the
+        # middle of a publication.
+        from devloop.apps import Identities
+        path = self.locks / 'brushtyler--ssdlc.lock'
+        posts = []
+
+        def run(cmd, **kwargs):
+            posts.append(kwargs.get('pass_fds'))
+            return SimpleNamespace(returncode=0, stdout='{"id": 1}', stderr='')
+        identities = Identities('brushtyler/ssdlc', {}, run=run)
+        identities.outbox = object()
+        seen = {}
+
+        def tick(dry_run=False):
+            client = identities.direct('dispatcher')
+            seen['state'] = os.path.samestat(os.fstat(client.lock_fd),
+                                             os.stat(self.tmp / 'state-a/dispatcher.lock'))
+            seen['repo'] = os.path.samestat(os.fstat(client.repo_lock_fd), os.stat(path))
+            client.comment(7, 'x')
+            self.assertEqual(posts, [(client.lock_fd, client.repo_lock_fd)])
+        dispatcher = self.dispatcher(tick)
+        dispatcher.identities = identities
+        self.main(['tick'], self.cfg(), 'state-a', dispatcher)
+        self.assertEqual(seen, {'state': True, 'repo': True})
+
+    def test_without_the_directory_the_publications_hold_only_the_dispatcher_lock(self):
+        from devloop.apps import Identities
+        posts = []
+
+        def run(cmd, **kwargs):
+            posts.append(kwargs.get('pass_fds'))
+            return SimpleNamespace(returncode=0, stdout='{"id": 1}', stderr='')
+        identities = Identities('brushtyler/ssdlc', {}, run=run)
+        identities.outbox = object()
+
+        def tick(dry_run=False):
+            client = identities.direct('dispatcher')
+            self.assertIsNone(client.repo_lock_fd)
+            client.comment(7, 'x')
+            self.assertEqual(posts, [(client.lock_fd,)])
+        dispatcher = self.dispatcher(tick)
+        dispatcher.identities = identities
+        self.main(['tick'], SimpleNamespace(repo='brushtyler/ssdlc', repo_lock_dir=''),
+                  'state-a', dispatcher)
+        dispatcher.tick.assert_called_once()
+
     def test_the_other_devloop_users_can_open_it_whatever_the_umask(self):
         before = os.umask(0o077)
         try:

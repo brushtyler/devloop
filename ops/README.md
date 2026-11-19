@@ -474,8 +474,9 @@ altro, con un altro `state_dir` o un altro utente, lo tiene già
 non c'è esclusione: lo stesso repository non va configurato su due host.
 
 **Parametri.** Un file per progetto (per esempio `ops/params-widget.env`), passato a ogni script
-con `--params`, con `PROJECT` (minuscole, cifre e `-` interni, al più 16 caratteri). Con `PROJECT`
-i default diventano del progetto:
+con `--params`, con `PROJECT` (minuscole, cifre e `-` interni, al più 16 caratteri; non `agent` e
+non `…-agent`, il suffisso dell'utente degli agent). Con `PROJECT` i default diventano del
+progetto:
 
 | Parametro | Default con `PROJECT=widget` |
 |---|---|
@@ -484,10 +485,19 @@ i default diventano del progetto:
 | `SERVICE_NAME` | `devloop@widget`, l'unica forma ammessa |
 | `SUDOERS_FILE`, `AGENT_SUDOERS_FILE` | `/etc/sudoers.d/devloop-supervisor-widget`, `/etc/sudoers.d/devloop-agent-widget` |
 | `SUPERVISOR_KEY_DIR` | `/home/supervisor/.ghapps-widget`: le chiavi dell'insieme di app del progetto |
+| `SUPERVISOR_CLONE` | `/home/supervisor/devloop-widget`: il clone del supervisore per il progetto |
 
 `SUPERVISOR_USER`, `REPO_LOCK_DIR`, `REPO_LOCK_GROUP` e `TMPFILES_FILE` sono gli stessi per tutti i
 progetti dell'host. Un `params.env` senza `PROJECT`, come quello di ssdlc, continua a installare
 `devloop.service` come prima.
+
+**Utenti distinti.** I nomi derivati da `PROJECT` non coincidono mai con l'utente di un altro
+ruolo o di un altro progetto. Ogni script lo verifica anche sull'host: legge gli utenti delle altre
+installazioni di devloop dalle loro unità (`User=`) e dai loro sudoers (`devloop-*`), e si ferma
+se `DEVLOOP_USER` o `AGENT_USER` vi hanno già un ruolo, o se `SUPERVISOR_USER` vi è l'utente
+devloop o degli agent. Solo il supervisore è lo stesso in ogni progetto. I sudoers sono di root:
+senza root (`--dry-run`) la verifica legge solo le unità. `setup-supervisor.sh` si ferma anche se
+`SUPERVISOR_CLONE` è già un clone di un altro repository.
 
 **Unità.** Con `PROJECT`, `setup-devloop.sh` installa l'unità template `devloop@.service`, comune
 ai progetti, e i parametri del progetto (utente, clone, avviatore, log) nella drop-in
