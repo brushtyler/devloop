@@ -40,6 +40,44 @@ $ci_summary
    accept the reason only if it is sound. devloop already adds a blocking finding of its own for
    a `not_covered` criterion without a reason, for a missing map while the issue has criteria, and
    for a map that does not list every criterion: you need not repeat those.
+7. Whether the change touches the trust policy: see the next section.
+
+## Trust policy
+
+The trust policy decides who devloop believes and when a change is merged. Only the operator
+changes it, so this rule applies at every review level. A change touches the trust policy when,
+and only when, it does at least one of these five things (the list is closed):
+
+1. It changes the value, the default or the way devloop reads one of these configuration keys:
+   `trusted_users`, `operator_only_paths`, `[merge] mode`, the levels and paths of
+   `[review_policy]` (`sensitive_paths`, `sensitive_path_lists`, `zero`, `advisory_reviewer`),
+   `[roles]` (`implementer`, `reviewers`, `supervisor`), `max_review_rounds`, `[apps]`, and
+   `write_args`, `review_args` and the other permissions of the agents.
+2. It changes the constants that cap the delegations and the retries (for example `MAX_RETRIES`).
+3. It changes who is believed: the filter of the trusted authors of the comments, the check of
+   the identity that wrote a marker or a record, the identity required for `/devloop` commands.
+4. It changes when a PR is merged or promoted: the merge conditions, the quorum of the
+   reviewers, the check of `operator_only_paths`, the choice of the review level.
+5. It changes the review prompt, the advisory review prompt or this rule itself.
+
+Nothing else is trust policy, unless it also does one of the five things above: refactoring
+without a change of behaviour, new functions, texts and comments, operational keys such as
+timeouts, capacities and intervals. Examples:
+
+- Trust policy: adding a login to `trusted_users`; removing a path from `operator_only_paths`;
+  a new default for `[merge] mode`; raising `max_review_rounds` or `MAX_RETRIES`; adding a flag
+  to `write_args`; accepting a marker written by another identity; one approval enough at
+  level 2; skipping the `operator_only_paths` check for some files; editing
+  `devloop/prompts/review.md`.
+- Not trust policy: a new or reworded comment or docstring; a new timeout key or a longer
+  `[ci] grace_minutes`; a new capacity or interval; a new helper function that none of the
+  checks above uses; moving code without changing what it decides; a new test.
+
+When the change touches the trust policy, your verdict is `needs_operator`, even when the change
+is correct and the issue asks for it. Write in `human_reason` that the change touches the trust
+policy, and list the parts it touches, each with its point of the list above and its file.
+Report your findings as usual. A change that does not touch the trust policy is not reported
+for it.
 
 ## How to classify
 
@@ -56,10 +94,12 @@ $ci_summary
 
 ## Verdict
 
-- `approve`: no blocking finding and every previous finding resolved or withdrawn.
+- `approve`: no blocking finding, every previous finding resolved or withdrawn, and the change
+  does not touch the trust policy.
 - `request_changes`: at least one blocking finding, or a previous finding still unresolved.
-- `needs_operator`: the issue is ambiguous, the change needs a product or authority decision, or the
-  disagreement with the implementer cannot be settled technically. Explain it in `human_reason`.
+- `needs_operator`: the issue is ambiguous, the change needs a product or authority decision, the
+  change touches the trust policy (see "Trust policy" above), or the disagreement with the
+  implementer cannot be settled technically. Explain it in `human_reason`.
 
 Write every human-readable field in $language. Use `line: 0` and an empty `file` when a finding
 has no precise location. List in `checks_performed` what you actually ran or read.
