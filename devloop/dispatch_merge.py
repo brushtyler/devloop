@@ -668,9 +668,9 @@ class MergeMixin:
         policy records and commands rebuilt from the comments read now: the PR still open,
         ``agent:ready-to-merge`` without ``agent:needs-operator`` nor ``agent:merge-hold``, no hold
         or release command waiting, the head unchanged, ``MERGEABLE`` and ``CLEAN``, CI
-        ``pass``, no open finding, the merge mode of the recomputed receipt, no reviewer who said
-        the PR touches the trust policy (#434, ``trust_policy_parts``), no work of the PR
-        restarted after a conclave (#142, ``_human_merge``), and the conditions
+        ``pass``, no open finding, the merge mode of the recomputed receipt, no reviewer whose
+        ``trust_policy`` still holds the merge (#434, #461, ``trust_policy_parts``), no work of
+        the PR restarted after a conclave (#142, ``_human_merge``), and the conditions
         of the promotion: the approvals of every required reviewer with a matching receipt, or
         at level 0 the checks of a level-0 promotion. When one is missing devloop does not
         merge: what the per-tick checks of a ready PR revoke is left to the next tick, a stale
@@ -724,7 +724,8 @@ class MergeMixin:
         if mode not in MERGING:
             return skip(f'the merge mode of this PR is {mode}')
         if trust_policy_parts(pr.reviews):
-            # A reviewer said the PR touches the trust policy (#434): the merge is human.
+            # A reviewer said the PR touches the trust policy (#434), and no later approval of
+            # the same reviewer cleared it (#461): the merge is human.
             return skip('a reviewer said it touches the trust policy: the merge is human')
         unblocked = self._human_merge(pr)
         if unblocked is not None:
