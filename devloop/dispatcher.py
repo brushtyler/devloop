@@ -1166,6 +1166,15 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             if self.cfg.preflight and not issue['blocked_by']:
                 issue['preflight'] = self._preflight_view(issue['number'], issue['labels'],
                                                           base_head)
+        if self.cfg.preflight:
+            # An issue that waits for the supervisor runs no check, but a request of a person
+            # for one is answered all the same (#468): its view says whether one is pending.
+            waiting = (set(self.cfg.blocked_labels) | {lb.working}) - {lb.needs_supervisor}
+            for issue in ready:
+                if (lb.needs_supervisor in issue['labels'] and issue['admitted']
+                        and not issue['labels'] & waiting and issue['number'] not in pr_issues):
+                    issue['preflight'] = self._preflight_view(issue['number'], issue['labels'],
+                                                              base_head)
         working = [raw['number'] for raw in self.gh.issues_with_label(lb.working)]
         return Snapshot(prs=prs, ready_issues=ready, working_issues=working,
                         supervised=self._supervised_items(prs),

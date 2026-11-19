@@ -520,6 +520,9 @@ that runs no check, because the latest block is another one (an escalation of an
 example), leaves the block in place: devloop logs why and answers once on the issue with a
 "Controllo di prontezza non ripetuto" comment that gives the reason. The answer spends a
 `/devloop recheck`; an `agent:ready` added again is answered once for each time it is added.
+An issue in `agent:needs-supervisor` (a recheck that failed and went to the supervisor as
+`tool_failure`, for example) runs no check either: a request there gets the same answer, naming
+the escalation the issue waits on, and every block stays.
 
 Each check is an agent action: it takes a slot of `max_actions_per_tick`, and a check of an
 issue that may start also takes one of the free PR slots of the tick. It runs under

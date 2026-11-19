@@ -177,6 +177,27 @@ class PreflightMixin:
                     'prontezza, e non dal controllo')
         return None
 
+    def _supervisor_block(self, comments, records):
+        """``(log, text)`` of why an issue in ``agent:needs-supervisor`` runs no check on a
+        request of a person (#468), as ``_preflight_block``: it waits for the supervisor, for
+        the latest escalation (a ``notice`` from an identity allowed to write devloop records)
+        after the latest readiness check, if any."""
+        start = records[-1][0] if records else -1
+        cls = None
+        for comment in comments[start + 1:]:
+            notice = read_marker(comment.get('body', ''), 'notice')
+            if notice is not None and self._writes_records(
+                    (comment.get('author') or {}).get('login')):
+                cls = notice.get('class')
+        label = self.cfg.labels.needs_supervisor
+        if not isinstance(cls, str):
+            return (f'the issue waits for the supervisor ({label})',
+                    f'l\'issue è in `{label}` e attende il supervisore')
+        return (f'the issue waits for the supervisor ({label}) on an escalation of class {cls}',
+                f'l\'issue è in `{label}` e attende il supervisore, per un\'escalation di classe '
+                f'`{cls}` ({describe(cls)}): l\'ultimo blocco dell\'issue è quello, non il '
+                'controllo di prontezza')
+
     def _answered(self, comments, records, request):
         """Whether the dispatcher already answered ``request``: a ``/devloop recheck`` is spent
         by any devloop record after it (``_recheck_request``), ``agent:ready`` added again by a
@@ -230,7 +251,8 @@ class PreflightMixin:
         ``owned``: whether a new check may lift ``agent:needs-operator``, the check's own block
         (``_owns_block``) or, on a request of a person, its latest one (``_preflight_block``,
         #468). ``refused``: a request of a person (``_request``) that runs no check, with why,
-        until it is answered (``_do_recheck_refused``); None otherwise."""
+        until it is answered (``_do_recheck_refused``); None otherwise. On an issue in
+        ``agent:needs-supervisor`` every request runs none (``_supervisor_block``)."""
         history = self.gh.issue_history(number)
         comments = self.gh.issue_comments(number)
         records = self._preflight_records(comments)
@@ -244,14 +266,18 @@ class PreflightMixin:
                          f'check holds: {exc}')
         owned = self._owned_block(labels) and self._owns_block(number, comments, records)
         request = self._request(number, history, comments, records)
-        refused = None
+        refused = why = None
         if request and not owned and operator_blocked(labels, self.cfg.labels):
             # A request of a person repeats the check of a block that is still the issue's
             # latest, even if no longer the check's own (#468); otherwise it is answered once.
             why = self._preflight_block(number, labels, comments, records)
             owned = why is None
-            if why and not self._answered(comments, records, request):
-                refused = dict(request, log=why[0], reason=why[1])
+        if request and self.cfg.labels.needs_supervisor in labels:
+            # An issue that waits for the supervisor runs no check (#468): its block stays,
+            # and the request is answered all the same, with the escalation that holds it.
+            why = why or self._supervisor_block(comments, records)
+        if why and not self._answered(comments, records, request):
+            refused = dict(request, log=why[0], reason=why[1])
         return {'hash': self._request_hash(history, comments),
                 'record': record,
                 'recheck': request is not None and request['request'] == 'recheck',
@@ -283,14 +309,17 @@ class PreflightMixin:
         return None
 
     def _publish_preflight(self, number, outcome, digest, agent_key, note='', base=None,
-                           used=None):
+                           used=None, request=None):
         """Record a check's outcome on the issue and apply it to ``agent:needs-operator``: add
         the label when the check fails and the label is absent, remove it when the check passes
         and the label belongs to the readiness check, under whichever name it has (#248). A
         label someone else set stays. ``base``: the commit the check ran on, recorded with the
         outcome (#270); None for an outcome reused (the latest base then), which keeps the
         commit of its own record, if any. ``used``: the configuration the check ran with, a
-        fallback model's included (#148), for the header; the configured agent by default."""
+        fallback model's included (#148), for the header; the configured agent by default.
+        ``request``: the request of a person (``_request``) pending when the check started, if
+        any: the turn's ledger record spends a ``/devloop recheck`` before the outcome is
+        recorded (#468). Escalations and label events are read again here all the same."""
         lb = self.cfg.labels
         agent = used or self.cfg.agent(agent_key)
         labels = label_names(self.gh.issue(number).get('labels') or [])
@@ -298,8 +327,8 @@ class PreflightMixin:
         records = self._preflight_records(comments)
         present = operator_blocked(labels, lb)
         owned = self._owned_block(labels) and self._owns_block(number, comments, records)
-        if present and not owned and self._request(number, self.gh.issue_history(number),
-                                                   comments, records, log=False):
+        if present and not owned and (request or self._request(
+                number, self.gh.issue_history(number), comments, records, log=False)):
             # Asked by a person (#468): the block is the check's while it is the issue's latest.
             owned = self._preflight_block(number, labels, comments, records) is None
         shown =', '.join(f'`{name}`' for name in sorted(labels & lb.operator()))
@@ -362,6 +391,10 @@ class PreflightMixin:
             raise UntrustedChange(f'issue #{number}: {reason}')
         comments = self.gh.issue_comments(number)
         digest = self._request_hash(history, comments)
+        # The request of a person that started the check, if any (#468), kept for its outcome:
+        # with the ledger on, the turn's record spends a ``/devloop recheck`` before it.
+        request = self._request(number, history, comments, self._preflight_records(comments),
+                                log=False)
         prompt = _template('preflight', **prompt_values(cfg), repo=cfg.repo, base_branch=cfg.base_branch,
                            issue_number=number, issue_title=history['title'],
                            issue_body=history['body'],
@@ -389,7 +422,7 @@ class PreflightMixin:
         finally:
             self.ws.remove(name)
         self._publish_preflight(number, normalize_preflight(raw), digest, agent.key, base=base,
-                                used=used)
+                                used=used, request=request)
 
     def _do_recheck_refused(self, number):
         """Answer, once, a request of a person for a new check that runs none (#468): the

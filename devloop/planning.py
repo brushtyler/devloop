@@ -173,8 +173,9 @@ class Snapshot:
     # dicts: number, title, labels (set), labeler and ready_at (login and time of the latest
     # ``labeled`` event of agent:ready), admitted (whether that labeler may admit the issue,
     # ``label_admitters``), priority (``issue_priority``), and with ``preflight``
-    # configured, for the issues that may start or are blocked by the check, ``preflight``
-    # (``_preflight_view``). For those same issues, ``merged``: the numbers of the merged
+    # configured, for the issues that may start or are blocked by the check, and for those
+    # that wait for the supervisor only to answer a request of a person (#468), ``preflight``
+    # (``_preflight_view``). For the issues that may start or are blocked by the check, ``merged``: the numbers of the merged
     # devloop PRs that resolved them (#228), which ``plan`` never starts again. For those not
     # resolved, their native dependencies (#277, ``Dispatcher._dependency_view``): ``blocked_by``
     # (the open issues that block them, as ``issue_ref``), ``blocks`` (the numbers of those ready
@@ -757,7 +758,8 @@ def _plan_preflight(snapshot, cfg, pr_issues, free, urgent='', implement=True):
     such a request the block need only be the issue's latest (#468); a request that runs no
     check is answered once (``recheck_refused``). Any
     other ``agent:needs-operator`` (or its name before #248) is left alone. An issue in
-    ``agent:needs-supervisor`` waits for the supervisor (#182). Without ``implement`` (#342) an
+    ``agent:needs-supervisor`` waits for the supervisor (#182): a request of a person for a
+    new check is answered once there too, and runs none (#468). Without ``implement`` (#342) an
     issue whose check passed waits, and takes no slot from the checks of the others."""
     lb = cfg.labels
     excluded = set(cfg.blocked_labels) | {lb.working, lb.needs_supervisor}
@@ -766,6 +768,14 @@ def _plan_preflight(snapshot, cfg, pr_issues, free, urgent='', implement=True):
               and i['admitted']]
     issues.sort(key=start_order)
     actions, taken = [], 0
+    for issue in snapshot.ready_issues:
+        refused = (issue.get('preflight') or {}).get('refused')
+        if lb.needs_supervisor in issue['labels'] and refused:
+            # Waiting for the supervisor, the issue runs no check: a request of a person for
+            # one is answered once, and its block stays (#468).
+            actions.append(Action('recheck_refused', issue['number'],
+                                  f'{refused["request"]} by {refused["by"]} runs no '
+                                  f'readiness check: {refused["log"]}'))
     for issue in issues:
         view = issue.get('preflight')
         if view is None:

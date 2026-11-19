@@ -305,7 +305,11 @@ block is still the issue's latest: the label has one name only, the latest recor
 with `class` `operator_decision` or `preflight_default`, no `notice` of another class (or
 without one) from an identity allowed to write devloop records came after it, and the label
 events are those the record counted plus the dispatcher's one. Other text after the check does
-not count here. A request that fails these conditions runs no check: the `recheck_refused`
+not count here. The request is read when the check starts and kept for its outcome: the ledger
+record of the check's turn spends a `/devloop recheck` before the outcome is recorded, while
+the conditions above are read again when it is. A request on an issue in
+`agent:needs-supervisor` never runs a check: it is refused, with the latest escalation after the
+check as the reason, and every label stays. A request that fails these conditions runs no check: the `recheck_refused`
 action logs the reason and answers on the issue with a dispatcher comment ending with a
 `recheck` marker: `request` (`recheck` or `relabeled`), `by`, `reason` and, when an
 `agent:ready` added again is pending, `labeled`, the time of its `labeled` event. The answer is a
