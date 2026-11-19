@@ -60,8 +60,13 @@ stops devloop at startup in any case, until a story at its limit can be extended
 ([prerequisites of activation](#prerequisites-of-activation), #396).
 `[merge]` (`mode`, `levels`, `operator_only_paths`) and `roles.supervisor` set the
 [merge modes](guide.md#merge-modes); an unknown mode, level or key stops devloop at startup.
+`[delegations]` holds the revocation keys of the delegations to the supervisor (ADR 0005), all
+off by default: `retry_own_prs` (a boolean, default `false`, #406) lets a `tool_failure` on a PR
+implemented by the supervisor's agent go to the supervisor, who may retry it
+([Escalations to the supervisor](guide.md#escalations-to-the-supervisor)); a value that is not a
+boolean, or an unknown key, stops devloop at startup. It applies at the next start.
 `[pin]` (`auto`, default `false`; `restart_max_wait_minutes`, default 30) sets the
-[pin after a merge](guide.md#pin-after-a-merge) and how long, in the continuous mode, the restart
+[pin after a merge](guide.md#pin-after-a-merge), by devloop or by anyone else (#430), and how long, in the continuous mode, the restart
 from the new copy may wait for the running actions while new ones, except implementations, still
 start; an `auto` that is
 not a boolean, a `restart_max_wait_minutes` that is not a whole number of at least 0, or an

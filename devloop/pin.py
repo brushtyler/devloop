@@ -15,6 +15,11 @@ With ``[pin] auto = true`` a merge by devloop that touches ``devloop/``, ``core/
 request (``pin-pending.json``), and the next tick pins ``origin/<base_branch>`` before planning
 (``AutoPin``): ``run`` and ``tick`` then start again from the new copy (``Repinned``). In the
 continuous mode of ``run`` the pin runs at once, and the restart waits until no action runs (#301).
+A merge by anyone else (the operator's, #430) records the same request: at each tick, before
+the pin, ``AutoPin.observe`` fetches ``origin/<base_branch>`` and, when it advanced since the
+head last seen (``pin-base.json``; the first time, since the commit of ``current``) with changes
+to those paths, requests the pin of the new head. ``devloop status`` says when the copy it runs
+from is behind ``origin/<base_branch>`` on those paths (``AutoPin.behind``).
 
 Each successful pin, of a new copy or a reused one, records its time in ``pin-times.json``. With
 ``keep`` (``[gc] keep_pins``, #380) the pin then keeps ``current`` and the ``keep`` other copies
@@ -50,6 +55,8 @@ LOCAL_CONFIG = 'config.local.toml'
 # section 3.4), which devloop imports for the budget envelope (#365).
 CODE_PACKAGES = ('core',)
 PENDING = 'pin-pending.json'
+# The head of origin/<base_branch> the last tick saw (#430): an advance from it requests a pin.
+BASE_SEEN = 'pin-base.json'
 LOCK = 'pin.lock'
 # A copy refused by the smoke test (#260), kept for the analysis; never a pinned copy.
 REJECTED = 'rejected-'
@@ -674,6 +681,44 @@ def clear_pending(state):
         pass
 
 
+def copy_commit(copy):
+    """The commit of the pinned copy ``copy``, read in its stamp, or None when ``copy`` is not
+    one (devloop running from a checkout)."""
+    if copy is None:
+        return None
+    try:
+        sha = json.loads((Path(copy) / STAMP).read_text(encoding='utf-8'))['commit']
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return sha if isinstance(sha, str) and SHA.fullmatch(sha) else None
+
+
+def install_changes(root, old, new, touches):
+    """The files that differ between commits ``old`` and ``new`` and that ``touches`` (``[pin]
+    paths``) counts as the installation's, in git's order. Raises ``PinError`` when git cannot
+    compare them."""
+    names = _git(root, 'diff', '--name-only', '--no-renames', '-z', old, new, '--')
+    return [name for name in names.split('\0') if name and touches([name])]
+
+
+def base_head(root, branch, fetch_lock=None):
+    """The head of ``origin/<branch>`` after a fetch of that branch alone (held under
+    ``fetch_lock``), into the ref ``resolve`` uses."""
+    with fetch_lock or nullcontext():
+        _git(root, 'fetch', '--quiet', '--no-tags', 'origin',
+             f'+refs/heads/{branch}:{REMOTE_BRANCHES}{branch}')
+    return last_fetched(root, branch)
+
+
+def last_fetched(root, branch):
+    """The head of ``origin/<branch>`` as last fetched, without a fetch."""
+    sha = _git(root, 'rev-parse', '--verify', '--quiet', '--end-of-options',
+               f'{REMOTE_BRANCHES}{branch}^{{commit}}').strip()
+    if not SHA.fullmatch(sha):
+        raise PinError(f'origin/{branch}: not a commit')
+    return sha
+
+
 class AutoPin:
     """The pin after a merge (#174), as the dispatcher uses it. ``fetch_lock`` is the lock of
     the workspace's shared git commands, held during the fetch of a pin that runs while actions
@@ -694,6 +739,81 @@ class AutoPin:
     def cancel(self):
         """Drop the request: a copy refused by the smoke test is not tried again (#260)."""
         clear_pending(self.state)
+
+    def _seen(self):
+        try:
+            sha = json.loads((self.state / BASE_SEEN).read_text(encoding='utf-8'))['head']
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        return sha if isinstance(sha, str) and SHA.fullmatch(sha) else None
+
+    def _record_seen(self, sha):
+        path = self.state / BASE_SEEN
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f'.{BASE_SEEN}-{os.getpid()}')
+        tmp.write_text(json.dumps({'head': sha, 'at': int(time.time())}) + '\n',
+                       encoding='utf-8')
+        os.replace(tmp, path)
+
+    def observe(self, branch, touches):
+        """The pin after a merge nobody announced (#430), such as one of the operator: fetch
+        ``origin/<branch>`` and, when its head advanced since the head the last call saw (the
+        first time: since the commit of ``current``) with changes to the files ``touches``
+        counts, request the pin of the new head, as a merge by devloop does. Nothing is
+        requested when a request is already pending, nor when ``current`` already holds the
+        new head; when git cannot compare the two commits (a head no longer known) the pin is
+        requested all the same. The head is then recorded as seen, so that a copy refused by the
+        smoke test is not tried again until the branch advances. Returns the head requested,
+        or None. Raises ``PinError`` or ``OSError`` when the branch cannot be read: the next
+        tick tries again."""
+        head = base_head(self.root, branch, self.fetch_lock)
+        seen = self._seen()
+        if head == seen:
+            return None
+        pinned = copy_commit(current(self.state))
+        since = seen or pinned
+        requested = None
+        if since and head != pinned and not self.pending():
+            try:
+                changed = install_changes(self.root, since, head, touches)
+            except PinError as exc:
+                self.log(f'auto-pin: the changes of origin/{branch} since {since[:12]} cannot '
+                         f'be read ({exc}): pin requested all the same')
+                changed = None
+            if changed is None or changed:
+                self.request(None, head)
+                requested = head
+                if changed:
+                    self.log(f'auto-pin: origin/{branch} advanced to {head[:12]} with '
+                             f'{len(changed)} changed files of the installation ('
+                             + ', '.join(changed[:5]) + (', …' if len(changed) > 5 else '')
+                             + '): pin requested')
+        self._record_seen(head)
+        return requested
+
+    def behind(self, branch, touches, copy=None):
+        """The line of ``devloop status`` when the pinned ``copy`` (default: the one this
+        process runs from) differs from ``origin/<branch>``, as last fetched, in the files
+        ``touches`` counts (#430); None when it does not, or when ``copy`` is not a pinned
+        copy. Raises ``PinError`` when git cannot read the branch or compare the commits."""
+        copy = INSTALL_ROOT if copy is None else copy
+        running = copy_commit(copy)
+        if running is None:
+            return None
+        head = last_fetched(self.root, branch)
+        if head == running:
+            return None
+        changed = install_changes(self.root, running, head, touches)
+        if not changed:
+            return None
+        try:
+            _git(self.root, 'merge-base', '--is-ancestor', running, head)
+            how = 'behind'
+        except PinError:
+            how = 'not an ancestor of'
+        return (f'pinned copy: {Path(copy).name} ({running[:12]}) is {how} origin/{branch} '
+                f'({head[:12]}, as last fetched) in {len(changed)} files of the installation: '
+                + ', '.join(changed[:5]) + (', …' if len(changed) > 5 else ''))
 
     def pin(self, ref):
         return pin(self.root, self.state, ref, self.local, log=self.log, smoke=self.smoke,
