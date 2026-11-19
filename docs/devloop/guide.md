@@ -87,12 +87,38 @@ Nothing else is policy, unless it also does one of the five things: refactoring 
 of behaviour, new functions, texts and comments, operational keys such as timeouts, capacities
 and intervals. The prompts give examples of both. A change that is not policy is not reported.
 
-- **Review of the quorum.** A reviewer who finds the policy touched gives the verdict
+**When the operator decides** (#447). The operator decides the policy, not every change that
+carries it out ([ADR 0002](../adr/0002-ruoli-e-responsabilita.md): the operator takes the
+reserved decisions, devloop and the agents carry them out). A change that touches the policy
+needs the operator when, and only when, at least one of these three things holds:
+
+1. it goes beyond or against a decision of the operator, or no decision covers it: a decision
+   recorded in the section "Decise dall'operatore" of an ADR approved with the
+   [cycle of the ADRs](../adr/README.md#ciclo-di-un-adr) and present on `main`, or written by the
+   operator in the body of the issue; the points an ADR leaves open are not decisions;
+2. it weakens a check and no decision of the operator authorizes that weakening;
+3. it changes the rule itself: the "Trust policy" section of the review or the advisory review
+   prompt, or the classes of escalation (`NON_CRITICAL` in `devloop/supervision.py`), even when
+   an ADR asks for it.
+
+A **faithful implementation** does not need the operator: the issue cites the section of an ADR
+on `main`, and the change carries out its decision with no deviation. The reviewer checks the
+conformity of the whole change to the decision, read on `main` and never in the diff of the PR,
+and cites it in the review (file of the ADR, section and point); its verdict is then the technical
+one, `approve` or `request_changes`, and devloop merges the PR like any other of its level.
+Without the citation the PR needs the operator as before; every deviation found needs the
+operator, with its reason and the decision it departs from. The prompts give an example of each
+case: a conforming implementation of an ADR, a deviation, a weakening without a decision, a
+change of the rule. Unchanged: `operator_only_paths` (`docs/adr/`, `AGENTS.md`, `CLAUDE.md`)
+keeps the merge with the operator whatever the reviewers say, the activations of ADR 0005 (D10)
+are not PRs and stay with the operator, and a `needs_operator` for a `decision` works as below.
+
+- **Review of the quorum.** A reviewer for whom the change needs the operator gives the verdict
   `needs_operator`, even when the change is correct and the issue asks for it, and writes in
-  `human_reason` the parts touched, each with its point of the list and its file. The review
-  prompt asks to assess the rule again at every round, on the whole diff of the PR against its
-  base and not only on what the latest fix changed: a PR already flagged stays `needs_operator`
-  after a fix, as long as its diff still touches the policy.
+  `human_reason` the parts touched, each with its point of the list and its file, and which of
+  the three points holds. The review prompt asks to assess the rule again at every round, on the
+  whole diff of the PR against its base and not only on what the latest fix changed: a PR already
+  flagged stays `needs_operator` after a fix, as long as its diff still needs the operator.
 - **One hand-off to the operator** (#434). The reviewer says why it asks for the operator in
   `operator_reason`: `trust_policy` for this rule, `decision` for anything else (an ambiguous
   issue, a product or authority decision, a disagreement that cannot be settled technically), and
@@ -112,15 +138,18 @@ and intervals. The prompts give examples of both. A change that is not policy is
   a round or opens a [conclave](#conclave-on-a-block). With a conclave configured, trust rules are
   in its reserved perimeter.
 - **Advisory review.** It has no verdict and does not count for the quorum
-  ([Advisory review for the operator](#advisory-review-for-the-operator)): its opinion is `dubbi`,
-  or `contrario` when the change weakens a check, and the first of its residual risks begins with
-  "Policy di fiducia toccata:" and lists the parts touched. Its schema does not change.
+  ([Advisory review for the operator](#advisory-review-for-the-operator)): when the change needs
+  the operator, its opinion is `dubbi`, or `contrario` when the change weakens a check, and the
+  first of its residual risks begins with "Policy di fiducia toccata:" and lists the parts
+  touched; a faithful implementation gets an opinion on its merits, with the decision cited in
+  the summary. Its schema does not change.
 
 **Residual risks**, accepted by the operator (ADR 0005, section 4):
 
 - the rule depends on the attention of the reviewers, at every round: at level 2 they are two,
   of different vendors, but they may both miss a change, and a reviewer of a later round who
-  looks only at the latest fix may approve a PR an earlier round flagged. devloop checks nothing
+  looks only at the latest fix may approve a PR an earlier round flagged. Since #447 they also
+  judge whether a change conforms to the decision it cites. devloop checks nothing
   of it in code: no file is reserved to the operator for the policy, and `devloop/config.toml` is
   not in `operator_only_paths`;
 - a change deliberately disguised as something else is not covered;
@@ -1089,8 +1118,8 @@ does not have the implementer's context, and having the same model it could neve
 quorum anyway. Like the review prompt, the advisory one is blind to the author (#389): it names
 neither the implementer nor its model, tells the agent it is not the author, and passes on the
 issue and the PR description without attribution headers and markers (see
-[What the reviewers read](protocol.md#attribution)). A change to the trust policy gets the
-opinion `dubbi` or `contrario` and a first residual risk that says so (see
+[What the reviewers read](protocol.md#attribution)). A change to the trust policy that needs
+the operator gets the opinion `dubbi` or `contrario` and a first residual risk that says so (see
 [Changes to the trust policy](#changes-to-the-trust-policy)).
 
 - **One per head.** An `advisory` action, which takes a slot of `max_actions_per_tick`, runs one

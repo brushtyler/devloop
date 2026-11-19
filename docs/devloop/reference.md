@@ -816,7 +816,9 @@ configuration: the lists are read at startup from the root of the running instal
 pinned checkout, see [Run from a pinned installation](guide.md#run-from-a-pinned-installation)), never
 from a PR branch, so a PR that changes `devloop/config.toml`, the prompts or the lists cannot
 apply weaker rules to itself. A list that cannot be read stops devloop at startup. Whatever the
-level, a reviewer gives `needs_operator` to a change that touches the trust policy (#399, see
+level, a reviewer gives `needs_operator` to a change that touches the trust policy and needs the
+operator for it: since #447 a faithful implementation of a decision of the operator recorded in
+an ADR on `main` gets the technical verdict, unless it changes the rule itself (#399, see
 [Changes to the trust policy](guide.md#changes-to-the-trust-policy)), with `operator_reason`
 `trust_policy`: the fix goes on as for `request_changes`, and the merge is the operator's (#434).
 
