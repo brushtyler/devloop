@@ -22,8 +22,10 @@ from devloop.dispatcher import Dispatcher
 from devloop.policy import ReviewPolicy, agent_profile
 from helpers import ssdlc_project
 from helpers.devloop_fakes import FakeGH, FakeIdentities
-from test_devloop import SHA1, FakeRunner, FakeWS, finding, implemented, pr, raw_review
+from test_devloop import (SHA1, SHA2, FakeRunner, FakeWS, finding, implemented, pr,
+                          raw_review)
 from test_devloop_implementer_app import IMPL_APP, RoleIdentities, role_meta
+from test_devloop_parallel import CopyWS
 from test_devloop_quorum import Quorum
 
 DATA = ssdlc_project.data()
@@ -383,16 +385,22 @@ class FallbackTests(unittest.TestCase):
 SONNET_KEY = 'sonnet'
 
 
-def legacy_quorum(codex=None):
+def legacy_quorum(codex=None, agy=None):
     """config.toml with the keys of before, every provider declared, the rules of P5-5 on and
     a fourth key of claude with Sonnet, last in the pool: the third reviewer of these tests."""
     agents_ = {kind: declared(kind) for kind in PROVIDERS}
     agents_[SONNET_KEY] = declared('claude', model=SONNET, model_label='Claude Sonnet 5.5')
     if codex:
         agents_['codex'] = dict(agents_['codex'], **codex)
+    if agy:
+        agents_['agy'] = dict(agents_['agy'], **agy)
     return parse(dict(DATA, agents=agents_,
                       roles=dict(DATA['roles'], reviewers=['codex', 'agy', SONNET_KEY]),
                       review_policy=dict(DATA['review_policy'], provider_quorum=True)))
+
+
+HAIKU_FALLBACK = [{'model': 'claude-haiku-5-5', 'model_label': 'Claude Haiku 5.5',
+                   'provider': 'anthropic'}]
 
 
 class ThirdReviewerTests(Quorum):
@@ -431,9 +439,7 @@ class ThirdReviewerTests(Quorum):
     def test_the_quorum_holds_on_every_model_a_turn_runs(self):
         # codex falls back on a Claude model: with sonnet beside it, no reviewer of the round
         # would be of another provider than the implementer.
-        cfg = legacy_quorum({'fallback_models': [
-            {'model': 'claude-haiku-5-5', 'model_label': 'Claude Haiku 5.5',
-             'provider': 'anthropic'}]})
+        cfg = legacy_quorum({'fallback_models': HAIKU_FALLBACK})
         for agent in cfg.agent('agy').chain():
             self.memory.record('agy', agent.model, 'quota', NOW + 3600)
         self.make(unavailable_model('codex'), cfg=cfg)
@@ -442,6 +448,54 @@ class ThirdReviewerTests(Quorum):
         self.assertEqual(self.reviewed(), ['codex'])
         self.assertIn('- `claude-haiku-5-5`: not independent', self.gh.comments[-1][1])
         self.assertEqual(self.records('review'), [])
+
+    def test_a_fallback_is_never_of_the_authors_provider(self):
+        # Claude implements, codex approves: the quorum already holds, yet agy may not fall
+        # back on a Claude model (D8, "Fallback dello stesso fornitore").
+        cfg = legacy_quorum(agy={'fallback_models': HAIKU_FALLBACK})
+        self.make(raw_review(), unavailable_model('agy'), raw_review(), cfg=cfg)
+        self.d.tick()
+        self.d.tick()
+        self.assertEqual(self.reviewed(), ['codex', 'agy'])
+        self.assertIn('- `claude-haiku-5-5`: not independent', self.gh.comments[-1][1])
+        self.assertEqual([r['reviewer'] for r in self.records('review')], ['codex'])
+        self.assertNotIn('agent:ready-to-merge', self.gh.labels[100])
+        self.assertEqual(self.records('policy'), [])
+        # The primary model of a reviewer of the authors' provider stays subject to the quorum
+        # alone: sonnet reviews claude's code beside codex.
+        self.assertEqual(self.d._select(self.d.snapshot().prs[0], 2, fresh=True)[0],
+                         ['codex', 'agy'])
+        self.d.cfg = with_pool(cfg, SONNET_KEY, 'codex')
+        self.assertEqual(self.d._select(self.d.snapshot().prs[0], 2, fresh=True)[0],
+                         [SONNET_KEY, 'codex'])
+
+    def test_a_parallel_round_is_promoted_with_its_own_reviewers(self):
+        # Round 1, agy unavailable: codex and sonnet approve, in one action.
+        cfg = dataclasses.replace(legacy_quorum(), max_parallel_actions=2)
+        for agent in cfg.agent('agy').chain():
+            self.memory.record('agy', agent.model, 'quota', NOW + 3600)
+        self.make(*[raw_review()] * 4, cfg=cfg)
+        # Parallel reviewers work in review copies of their own.
+        ws = CopyWS()
+        ws.diff = self.ws.diff
+        self.ws = self.d.ws = ws
+        self.d.memory = self.memory
+        self.d.tick()
+        self.assertEqual(sorted(self.reviewed()), ['codex', SONNET_KEY])
+        self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
+        # agy is back, and a new head opens round 2: codex and agy approve it, in one action,
+        # and the promotion reads round 2's reviewers, not those of the snapshot's round 1.
+        self.forget_agy(cfg)
+        self.gh.head = self.ws._head = SHA2
+        self.gh.labels[100] = {'agent:review'}
+        self.d.tick()
+        self.assertEqual(sorted(self.reviewed()[2:]), ['agy', 'codex'])
+        round2 = [r for r in self.records('review') if r['round'] == 2]
+        self.assertEqual(sorted(r['reviewer'] for r in round2), ['agy', 'codex'])
+        for record in round2:
+            self.assertEqual(record['receipt']['reviewers'], ['codex', 'agy'])
+        self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
+        self.assertEqual([r['event'] for r in self.records('policy')], ['promoted', 'promoted'])
 
 
 if __name__ == '__main__':

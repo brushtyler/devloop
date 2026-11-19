@@ -72,8 +72,10 @@ class MergeMixin:
         event of the level label on the PR, and the highest level already recorded on it."""
         return self._receipt_and_paths(pr)[0]
 
-    def _receipt_and_paths(self, pr):
-        """``_receipt`` and every path of the diff it was computed on."""
+    def _receipt_and_paths(self, pr, reviews=None):
+        """``_receipt`` and every path of the diff it was computed on. ``reviews``: every review
+        of the PR up to the round being promoted, which the snapshot may not have yet
+        (``_promote``): the reviewers that round chose are read from them (#409)."""
         policy = self.cfg.review_policy
         base, head, changes = self.ws.review_diff(pr.head_ref)
         records = pr.reviews + pr.policy
@@ -84,7 +86,7 @@ class MergeMixin:
                            labelers=self.gh.labelers(pr.number, policy.label),
                            trusted_users=self.cfg.trusted_users,
                            previous_level=recorded_level(records),
-                           select=lambda level: self._select(pr, level)[0],
+                           select=lambda level: self._select(pr, level, reviews=reviews)[0],
                            profile=lambda key: self._profile(key, 'review'),
                            zero_events=zero, refused=zero_refused(records))
         return receipt, sorted({c['path'] for c in changes})
@@ -154,7 +156,7 @@ class MergeMixin:
             authors += cfg.agent(implementer).chain()
         return authors
 
-    def _select(self, pr, level, fresh=False):
+    def _select(self, pr, level, fresh=False, reviews=None):
         """``(reviewers, problem)``: the reviewers ``level`` requires on the PR, in order, or
         none and why.
 
@@ -174,9 +176,9 @@ class MergeMixin:
         included, in the same way (``ActionsMixin._do_review``).
 
         With ``review_policy.provider_quorum`` (ADR 0005, P5-5, #409) the reviewers are chosen
-        by ``_select_by_provider`` instead; ``fresh`` matters only there."""
+        by ``_select_by_provider`` instead; ``fresh`` and ``reviews`` matter only there."""
         if self.cfg.review_policy.provider_quorum:
-            return self._select_by_provider(pr, level, fresh)
+            return self._select_by_provider(pr, level, fresh, reviews)
         cfg, implementer = self.cfg, pr.meta['implementer']
 
         def eligible(key, authors):
@@ -210,7 +212,7 @@ class MergeMixin:
                     '(kind, model, effort, review_args), e nessuno può avere l\'identità o il '
                     'modello (kind, model, effort) dell\'implementer o di chi ha corretto la PR')
 
-    def _select_by_provider(self, pr, level, fresh):
+    def _select_by_provider(self, pr, level, fresh, reviews=None):
         """``(reviewers, problem)`` with the reviewer rules of ADR 0005, P5-5 (#409), at both
         levels:
 
@@ -226,7 +228,11 @@ class MergeMixin:
 
         Without ``fresh``, the reviewers of the latest round's receipt are kept while they still
         meet these rules: a reviewer is never replaced in the middle of a round, and the receipt
-        a promotion or a merge recomputes is the one the round was approved with. ``fresh`` (a
+        a promotion or a merge recomputes is the one the round was approved with. The latest
+        round is read from ``reviews`` when given, else from the snapshot's: a promotion passes
+        the records of the round it applies, which the snapshot does not have when the round
+        ended in the same action (parallel reviewers), so that a round that chose other
+        reviewers than the previous one is promoted with its own. ``fresh`` (a
         new round, ``_fresh_receipt``) chooses again: first the groups that leave out fewest
         owners of open findings, who alone may close them; among those, a group without a
         reviewer whose whole chain is remembered unavailable (``_unavailable_reviewer``), so
@@ -252,7 +258,8 @@ class MergeMixin:
             return (len(set(group)) == level and None not in profiles
                     and all(distinct(a, b) for a, b in itertools.combinations(profiles, 2))
                     and provider_quorum(profiles, authors))
-        kept = None if fresh else self._round_reviewers(pr, level)
+        kept = None if fresh else self._round_reviewers(
+            pr.reviews if reviews is None else reviews, level)
         if kept is not None and valid(kept):
             return kept, ''
         groups = [list(g) for g in itertools.combinations(candidates, level) if valid(g)]
@@ -274,10 +281,10 @@ class MergeMixin:
                      'unavailable')
         return chosen, ''
 
-    def _round_reviewers(self, pr, level):
-        """The reviewers the receipt of the latest agent round requires, when it was given at
-        ``level``; else None."""
-        records = [r for r in current_round(pr.reviews) if r.get('source') == 'agent']
+    def _round_reviewers(self, reviews, level):
+        """The reviewers the receipt of the latest agent round of ``reviews`` requires, when it
+        was given at ``level``; else None."""
+        records = [r for r in current_round(reviews) if r.get('source') == 'agent']
         receipt = receipt_of(records[0]) if records else None
         if receipt is None or receipt['level'] != level or len(receipt['reviewers']) != level:
             return None
@@ -363,7 +370,7 @@ class MergeMixin:
         and leave the PR in review for a new review of the same head. ``reviews``: every review
         of the PR up to the round included, for its receipt (#135); the snapshot's by default."""
         lb = self.cfg.labels
-        current, paths = self._receipt_and_paths(pr)
+        current, paths = self._receipt_and_paths(pr, reviews)
         if current['level'] == ZERO_LEVEL:
             return self._promote_zero(pr, current)
         if len(current['reviewers']) < current['level']:

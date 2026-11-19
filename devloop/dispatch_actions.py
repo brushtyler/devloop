@@ -555,9 +555,13 @@ class ActionsMixin:
             # With the reviewer rules of P5-5 (#409) a model keeps what the selection checked:
             # independent by tuple of every author, distinct from the round's other reviewers,
             # and the quorum rule (ii) of D8 on the round with this model in it, the reviewers
-            # not yet run counted with the model they would run now.
+            # not yet run counted with the model they would run now. A fallback model is also
+            # never of an author's provider, whatever the quorum (D8, "Fallback dello stesso
+            # fornitore"): only the reviewer's primary model is subject to the quorum alone.
             def allowed(candidate):
                 p = self._profile(key, 'review', candidate)
+                if candidate.fallback_for and not foreign(p, authors):
+                    return False
                 with reserving:
                     others = [q for k, q in reserved.items() if k != key]
                     waiting = [self._profile(k, 'review') for k in receipt['reviewers']

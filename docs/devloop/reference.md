@@ -1523,8 +1523,13 @@ claude becomes the third reviewer of the pool, as a reserve. **Off by default** 
     of the authors, distinct from the round's other reviewers, and the quorum rule on the round
     with that model in it (the reviewers not yet run counted with their configured model). A
     model that breaks them is skipped without running; when none of the chain is left the turn
-    fails without a review (`tool_failure`). The ban of every fallback on the authors' provider,
-    whatever the quorum, is P5-6's.
+    fails without a review (`tool_failure`). A fallback model is also never of an author's
+    provider, whatever the quorum (D8, "Fallback dello stesso fornitore"): on a PR implemented
+    by claude, agy does not fall back on a Claude model even when codex already gives the round
+    another provider. Only a reviewer's primary model is subject to the quorum rule alone. The
+    authors are those of the selection, with every model of the implementer's chain; recording
+    the fallbacks the implementer and the fixers actually used, and the check at startup, are
+    P5-6's.
   - **The reviewer the marker records** is the first of the pool of another provider and
     another tuple than the implementer's models.
 - **Unavailable reviewer.** When a **new round** chooses its reviewers, a reviewer whose whole
@@ -1536,7 +1541,9 @@ claude becomes the third reviewer of the pool, as a reserve. **Off by default** 
   `tool_failure`, as before. A reviewer is never replaced in the middle of a round: until the
   round ends, the receipt keeps the reviewers it recorded while they still meet the rules, so a
   promotion or a merge recomputes the receipt the round was approved with, whatever the memory
-  says by then. The log names the skipped reviewer.
+  says by then. The promotion reads the round from the records it applies, not only from the
+  snapshot: with parallel reviewers a round that chose another pair than the previous one ends
+  in the same action, and is promoted with its own pair. The log names the skipped reviewer.
 - **The third reviewer** (D8). `claude-reviewer`, kind `claude`, with a model other than the
   implementer's (Sonnet 5.5 against Opus 5.5), last in the pool, signing with `claude-agent`
   (`app = "claude"`). It needs the keys by role and the supervisor's role app first: before the
