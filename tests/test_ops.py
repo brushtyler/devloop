@@ -287,8 +287,9 @@ class R3MigrationGuideTests(unittest.TestCase):
                     self.assertIn(path[len(self.STATE):], names)
                 elif path.startswith(self.UPDATED) or path.startswith(self.CLONE):
                     continue  # checkouts of this repository: the test above
-                else:  # the updated checkout, the operator's and its home
-                    self.assertIn(path, {self.UPDATED.rstrip('/'), self.OPERATOR, '/root'})
+                else:  # the checkouts themselves (devloop's clone too) and the operator's home
+                    self.assertIn(path, {self.UPDATED.rstrip('/'), self.CLONE.rstrip('/'),
+                                         self.OPERATOR, '/root'})
         saved = self.STATE + self.SAVED
         install = [line for block in self.blocks() for line in block.splitlines()
                    if line.startswith('test -e') or line.startswith('install ')]
@@ -311,6 +312,70 @@ class R3MigrationGuideTests(unittest.TestCase):
         required = set(re.findall(r"add_argument\('(--[\w-]+)', required=True", source))
         self.assertLessEqual(set(flags), declared)
         self.assertLessEqual(required, set(flags))
+
+    def commands(self):
+        return [line for block in self.blocks() for line in block.splitlines()]
+
+    def test_the_clone_is_updated_as_devloop_before_the_pin_and_the_restart(self):
+        # #455: the launcher comes from devloop's clone, not from the pinned copy; an old clone
+        # does not pass --project-config. A fast-forward, as devloop, before pin and restart.
+        commands = self.commands()
+        clone = self.CLONE.rstrip('/')
+        fetch = f'sudo -u devloop -H git -C {clone} fetch origin'
+        merge = f'sudo -u devloop -H git -C {clone} merge --ff-only origin/main'
+        self.assertIn(fetch, commands)
+        self.assertIn(merge, commands)
+        pins = [i for i, line in enumerate(commands) if line.endswith(' pin origin/main')]
+        self.assertEqual(len(pins), 2, commands)
+        self.assertLess(commands.index(fetch), commands.index(merge))
+        self.assertLess(commands.index(merge), min(pins))
+        section = ' '.join(self.section().split())
+        step = section[section.index('6. **Clone di devloop, pin e riavvio.**'):]
+        self.assertLess(step.index(merge), step.index('`sudo systemctl restart devloop`'))
+        self.assertLess(step.index(merge), step.index('sudo systemctl start devloop'))
+        self.assertIn("l'aggiornamento del clone di devloop del passo 6, poi `sudo systemctl "
+                      'restart devloop`', section)
+        # The launcher is the clone's: it passes --project-config, from the state_dir.
+        launcher = (ROOT / 'scripts/devloop-pinned').read_text(encoding='utf-8')
+        self.assertIn("ROOT = Path(__file__).resolve().parent.parent", launcher)
+        self.assertIn("extra += ['--project-config', str(project)]", launcher)
+
+    def test_the_pin_with_the_new_code_is_complete_and_says_when(self):
+        # #455: when the copy in use precedes R3, the pin runs the updated clone's code with the
+        # project file and the overlay; devloop-pinned would run the copy in use.
+        lines = [line for line in self.commands() if ' -m devloop ' in line]
+        self.assertEqual(len(lines), 1, lines)
+        cd, command = lines[0].split(' && ')
+        self.assertEqual(cd, 'cd ' + self.CLONE.rstrip('/'))
+        argv = shlex.split(command)
+        self.assertEqual(argv[:6], ['sudo', '-u', 'devloop', '-H', 'python3', '-m'])
+        self.assertEqual(argv[6], 'devloop')
+        self.assertEqual(argv[-2:], ['pin', 'origin/main'])
+        options = argv[7:-2]
+        flags = dict(zip(options[::2], options[1::2]))
+        self.assertEqual(len(options), 2 * len(flags))
+        self.assertEqual(flags, {'--project-config': self.STATE + 'project.toml',
+                                 '--local-config': self.STATE + 'config.local.toml'})
+        # The options and the subcommand are devloop's.
+        source = (ROOT / 'devloop/__main__.py').read_text(encoding='utf-8')
+        declared = set(re.findall(r"parser\.add_argument\('(--[\w-]+)'", source))
+        self.assertLessEqual(set(flags), declared)
+        self.assertIn("sub.add_parser('pin'", source)
+        self.assertIn("pin_cmd.add_argument('ref'", source)
+        section = ' '.join(self.section().split())
+        for phrase in ('**Quando la copia in uso è precedente a R3**',
+                       '`devloop-pinned pin` non basta perché il pin lo fa la copia in uso',
+                       'Una copia precedente a R2 non passa il file di progetto',
+                       "`config: missing 'test_cmd'`", 'I pin successivi tornano al launcher.',
+                       'cambia il launcher (`scripts/devloop-pinned`) o ciò che il pin deve '
+                       'passare alla copia nuova',
+                       'di fare il pin con il codice nuovo, dal clone aggiornato'):
+            self.assertIn(phrase, section)
+        # R2 taught the pin to pass the project file to the check of the new copy.
+        from devloop import pin
+        import inspect
+        self.assertIn('project', inspect.signature(pin.pin).parameters)
+        self.assertIn('project', inspect.signature(pin.verify).parameters)
 
     def test_it_says_the_order_the_user_and_the_exit_codes(self):
         section = ' '.join(self.section().split())
