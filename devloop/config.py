@@ -11,6 +11,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .localtests import CI_LOG_FORMATS, SELECTIONS, Tests
 from .localtests import MODES as LOCAL_TESTS_MODES
 from .policy import MAX_LEVEL, MIN_LEVEL, ZERO_LEVEL, ReviewPolicy
 from .supervision import MAX_CAPACITY, MAX_CAPACITY_HOURS, MAX_DAILY_GRANTS, MAX_GRANTED_ROUNDS
@@ -497,11 +498,16 @@ class Config:
     # one at a time, in plan order.
     max_parallel_actions: int = 1
     implement_test_retries: int = 1
-    # Which tests run locally after a writing turn (#169): see ``localtests``.
+    # Which tests run locally after a writing turn (#169): see ``localtests``. ``changed`` without
+    # a selection in ``tests`` is ``full`` (ADR 0006, R5).
     local_tests: str = 'full'
     # Re-run once, without a round, a CI failure whose test modules are not pertinent to the PR
-    # (#200, ``Dispatcher._rerun_unrelated``).
+    # (#200, ``Dispatcher._rerun_unrelated``). Off without a CI log format and a selection in
+    # ``tests`` (ADR 0006, R5): nothing would tell the failed modules or their pertinence.
     ci_rerun_unrelated: bool = True
+    # The selection of the test modules and the format of the CI logs (``[tests]``, ADR 0006,
+    # R5), facts of the project: none by default.
+    tests: Tests = Tests()
     # The block on uncertain turns (#362): a turn of the journal left without outcome refuses
     # every new turn of its work until a trusted user reconciles it. Off by default (ADR 0004,
     # D8): the journal records the turns all the same.
@@ -908,6 +914,53 @@ def parse_ci(table):
                 raise ConfigError(f'ci.{key}: expected a whole number of minutes, at least {low}')
             values[key] = value
     return CIPolicy(**values)
+
+
+TESTS_KEYS = ('selection', 'source_prefixes', 'dir_modules', 'ci_log_format')
+_NAME_PART = re.compile(r'\w+', re.ASCII)
+_MODULE_PREFIX = re.compile(r'test_\w*', re.ASCII)
+
+
+def parse_tests(table):
+    """``[tests]`` (ADR 0006, R5), facts of the project, each optional: ``selection``, one of
+    ``localtests.SELECTIONS``, with its parameters ``source_prefixes`` (name prefixes such as
+    ``"ssdlc_"``) and ``dir_modules`` (``"<directory>/" = "test_<prefix>"``), which need it;
+    ``ci_log_format``, one of ``localtests.CI_LOG_FORMATS``. Anything else stops devloop."""
+    if not isinstance(table, dict):
+        raise ConfigError('tests: expected a table')
+    unknown = set(table) - set(TESTS_KEYS)
+    if unknown:
+        raise ConfigError(f'tests: unknown keys {sorted(unknown)}')
+    values = {}
+    for key, names in (('selection', SELECTIONS), ('ci_log_format', CI_LOG_FORMATS)):
+        if key in table:
+            value = table[key]
+            if not isinstance(value, str) or value not in names:
+                raise ConfigError(f'tests.{key}: must be one of {names}')
+            values[key] = value
+    prefixes = _str_list(table, 'source_prefixes', 'tests')
+    for prefix in prefixes:
+        if not _NAME_PART.fullmatch(prefix):
+            raise ConfigError(f'tests.source_prefixes: {prefix!r} is not a name prefix '
+                              '(letters, digits and "_")')
+    dirs = table.get('dir_modules', {})
+    if not isinstance(dirs, dict):
+        raise ConfigError('tests.dir_modules: expected a table of "<directory>/" = '
+                          '"test_<prefix>"')
+    pairs = []
+    for directory, prefix in dirs.items():
+        at = f'tests.dir_modules.{directory!r}'
+        parts = directory.split('/')
+        if (not directory.endswith('/') or directory.startswith('/') or '\\' in directory
+                or any(part in ('', '.', '..') for part in parts[:-1])):
+            raise ConfigError(f'{at}: expected a relative directory ending in "/"')
+        if not isinstance(prefix, str) or not _MODULE_PREFIX.fullmatch(prefix):
+            raise ConfigError(f'{at}: expected the prefix of test modules, "test_<name>"')
+        pairs.append((directory, prefix))
+    if (prefixes or pairs) and 'selection' not in values:
+        raise ConfigError('tests: source_prefixes and dir_modules are parameters of a '
+                          'selection: they need tests.selection')
+    return Tests(source_prefixes=prefixes, dir_modules=tuple(pairs), **values)
 
 
 def parse_delegations(table):
@@ -1458,6 +1511,13 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
         raise ConfigError(f'local_tests: must be one of {LOCAL_TESTS_MODES}')
     ci_rerun = (_require(data, 'ci_rerun_unrelated', bool, 'config')
                 if 'ci_rerun_unrelated' in data else Config.ci_rerun_unrelated)
+    tests = parse_tests(data.get('tests', {}))
+    # ADR 0006, R5: without a selection ``changed`` is ``full``, a project without a strategy
+    # loses no test; without a format of the CI logs and a selection nothing tells the failed
+    # modules or their pertinence, so a CI failure is never re-run without a round.
+    if local_tests == 'changed' and not tests.selection:
+        local_tests = 'full'
+    ci_rerun = ci_rerun and bool(tests.ci_log_format) and bool(tests.selection)
     block_uncertain = (_require(data, 'block_uncertain_turns', bool, 'config')
                        if 'block_uncertain_turns' in data else Config.block_uncertain_turns)
     story_identity = (_require(data, 'story_identity', bool, 'config')
@@ -1505,7 +1565,7 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
         priority_labels=_str_list(data, 'priority_labels', 'config', ('prerequisito',)),
         protected_paths=_str_list(data, 'protected_paths', 'config', DEFAULT_PROTECTED),
         apps=apps, app_key_dir=key_dir, agent_stall_action=stall_action,
-        local_tests=local_tests, ci_rerun_unrelated=ci_rerun,
+        local_tests=local_tests, ci_rerun_unrelated=ci_rerun, tests=tests,
         block_uncertain_turns=block_uncertain, story_identity=story_identity,
         publication_outbox=outbox, attempt_identity=attempt_identity, budget=budget,
         merge=parse_merge(data.get('merge', {}), supervisor), supervisor=supervisor,
@@ -1610,6 +1670,8 @@ OVERLAY_KEYS = {
                          'interval_minutes')),
     'agent_user': dict.fromkeys(('name', 'check')),
     'docs': {'map': {'*': None}},
+    'tests': {'selection': None, 'source_prefixes': None, 'dir_modules': {'*': None},
+              'ci_log_format': None},
     'delegations': dict.fromkeys(('retry_own_prs', 'rounds', 'max_rounds_per_pr',
                                   'max_grants_per_day', 'capacity', 'capacity_max_open_prs',
                                   'capacity_max_parked_prs', 'capacity_max_hours')),
@@ -1661,6 +1723,10 @@ PROJECT_CONFIG = 'project.toml'
 PROJECT_FACTS = {
     'test_cmd': None, 'local_tests': None, 'language': None, 'priority_labels': None,
     'docs': {'map': {'*': None}},
+    # The selection of the test modules and the format of the CI logs (ADR 0006, R5). Never a
+    # permission of the agents: those are the installation's and the overlay's (D2).
+    'tests': {'selection': None, 'source_prefixes': None, 'dir_modules': {'*': None},
+              'ci_log_format': None},
 }
 # Each restriction with its value when neither the installation nor the overlay sets it.
 PROJECT_RESTRICTIONS = {

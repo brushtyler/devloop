@@ -253,3 +253,75 @@ anche togliere, e la versione della policy torna quella di prima.
 Una PR che richiede un passo sull'host (un file nello `state_dir`, una chiave dell'overlay, un
 comando di root) dice nella descrizione e nella guida di `ops/` **che cosa fare prima del merge**,
 con i comandi completi, l'utente che li esegue e cosa fare se devloop ha già preso la copia nuova.
+
+## Test di ssdlc nel file di progetto
+
+Con l'ADR 0006, R5, le regole con cui devloop sceglie i moduli di test di `local_tests =
+"changed"` (`ssdlc_<nome>.py` → `test_<nome>*.py`, `devloop/` → `test_devloop*.py`) e il formato
+dei log della CI (le righe di `scripts/run-tests.py`) non stanno più nel codice: sono la tabella
+`[tests]` del file di progetto
+([docs/devloop/reference.md](../../docs/devloop/reference.md#local-tests)). Le due copie non
+accettano lo stesso file:
+
+- la copia di R5 **senza** `[tests]` parte, ma `local_tests = "changed"` vale `"full"` (ogni
+  turno di scrittura esegue l'intera suite) e `ci_rerun_unrelated` è spento;
+- la copia di prima **con** `[tests]` non parte: la chiave è sconosciuta.
+
+Il file di progetto sull'host e la copia fissata cambiano quindi insieme, a loop fermo. Se l'host
+non ha ancora fatto la migrazione di R3, basta quella di [Migrazione di R3 su un host
+attivo](#migrazione-di-r3-su-un-host-attivo) con l'esempio di R5, nel caso "Dopo il merge" (loop
+fermo): la copia di prima non accetterebbe il file nuovo a un riavvio. Altrimenti, dopo il merge
+della PR di R5, **come root** con il checkout dell'operatore, come per R3:
+
+1. **Fermare il loop**: `sudo systemctl stop devloop`. Una copia di prima in corso rifiuterebbe
+   il file nuovo a ogni rilettura, e un pin automatico di R5 con il file vecchio passerebbe a
+   `"full"`.
+2. **Il checkout aggiornato** e la **copia del file di progetto di prima**, per il confronto e il
+   rollback:
+
+   ```bash
+   cd /root/repos/ssdlc && git fetch origin
+   git worktree add --detach /tmp/ssdlc-r5 origin/main
+   install -o devloop -m 600 /home/devloop/ssdlc/.ssdlc/devloop/project.toml \
+       /home/devloop/ssdlc/.ssdlc/devloop/project.toml.prima-r5
+   ```
+
+3. **La tabella `[tests]`** (con `[tests.dir_modules]`) di
+   `/tmp/ssdlc-r5/ops/host/ssdlc/project.toml` va aggiunta al file di progetto sull'host, come
+   `devloop`: `sudo -u devloop -H "${EDITOR:-vi}" /home/devloop/ssdlc/.ssdlc/devloop/project.toml`.
+   Se il file sull'host è ancora l'esempio di R3 senza modifiche, si può copiare l'esempio intero
+   come al passo 3 della migrazione di R3.
+4. **Verifica dell'equivalenza**: prima la copia fissata in uso con il file di progetto di prima,
+   dopo il checkout aggiornato con quello nuovo, lo stesso overlay sui due lati:
+
+   ```bash
+   python3 /tmp/ssdlc-r5/ops/host/ssdlc/check-equivalence.py \
+       --before /home/devloop/ssdlc/.ssdlc/devloop/current \
+       --before-local /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml \
+       --before-project /home/devloop/ssdlc/.ssdlc/devloop/project.toml.prima-r5 \
+       --after /tmp/ssdlc-r5 \
+       --after-local /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml \
+       --after-project /home/devloop/ssdlc/.ssdlc/devloop/project.toml
+   ```
+
+   Per la copia di prima, che aveva le regole nel codice, i valori di `tests` sono quelli che il
+   suo codice applicava, e i moduli li sceglie il suo codice: per ogni file del checkout
+   aggiornato devono essere gli stessi. I codici di uscita sono quelli della migrazione di R3. Con
+   `[tests]` mancante o diversa le righe dicono `local_tests: before changed, after full` o
+   `config tests.…`.
+5. **Pin e avvio**:
+
+   ```bash
+   sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned pin origin/main
+   sudo systemctl start devloop
+   ```
+
+6. **Pulizia**: `git -C /root/repos/ssdlc worktree remove /tmp/ssdlc-r5`. La copia
+   `project.toml.prima-r5` si cancella quando la copia di R5 gira.
+
+L'hash del file di progetto cambia ed entra nella versione della policy: le approvazioni delle PR
+aperte decadono. Meglio con la coda vuota.
+
+**Rollback.** Il pin della copia di prima (`scripts/devloop-pinned pin <sha12>`) **insieme** al
+file di progetto di prima (`project.toml.prima-r5`, rimesso al suo posto con `cp -p`): la copia
+di prima non legge `[tests]`.

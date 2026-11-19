@@ -190,7 +190,11 @@ class SchemaTests(FilesCase):
     def test_the_schema_holds_only_the_project_keys(self):
         self.assertEqual(set(config.PROJECT_KEYS), {
             'test_cmd', 'local_tests', 'language', 'priority_labels', 'docs', 'protected_paths',
-            'blocked_labels', 'review_policy', 'merge'})
+            'blocked_labels', 'review_policy', 'merge', 'tests'})
+        # ADR 0006, R5: the selection of the test modules and the format of the CI logs.
+        self.assertEqual(config.PROJECT_KEYS['tests'],
+                         {'selection': None, 'source_prefixes': None, 'dir_modules': {'*': None},
+                          'ci_log_format': None})
         self.assertEqual(config.PROJECT_KEYS['review_policy'],
                          {'sensitive_paths': None, 'sensitive_path_lists': None,
                           'zero': {'checks': None}})

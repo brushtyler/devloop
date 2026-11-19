@@ -31,6 +31,25 @@ priority_labels = ["prerequisito"]
 # a branch of this repository would run in CI before anyone reviewed it.
 protected_paths = [".github/"]
 
+# How the dispatcher reads ssdlc's tests (ADR 0006, R5): the selection of local_tests = "changed"
+# and the format of the CI logs, as they were in devloop/localtests.py before R5. Without
+# `selection`, "changed" would be "full"; without `ci_log_format`, ci_rerun_unrelated would be
+# off and the CI summary in the prompts would have no suite lines. Never a permission of the
+# agents: those are the overlay's.
+[tests]
+# The installation's strategy for the modules tests/test_*.py, each run with
+# `python3 -m unittest discover -s tests -p '<module>'` (issue #169).
+selection = "python-unittest-modules"
+# A changed ssdlc_<name>.py also selects tests/test_<name>*.py.
+source_prefixes = ["ssdlc_"]
+# The lines scripts/run-tests.py prints: FAILED MODULE, and "Ran N tests in S (… modules, …
+# jobs)" (issues #200 and #300).
+ci_log_format = "run-tests"
+
+[tests.dir_modules]
+# Any file under devloop/ selects tests/test_devloop*.py.
+"devloop/" = "test_devloop"
+
 [review_policy]
 # Directory prefixes (ending in "/") or files, relative to the repository root. The code that
 # decides permissions, fencing and authorizations goes to level 2 (issue #171); a listed file

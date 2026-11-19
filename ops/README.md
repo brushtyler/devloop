@@ -455,8 +455,9 @@ sudo -u devloop -H sh -c 'cd ~/widget && PYTHONPATH=~/devloop-source python3 -P 
 ```
 
 Il pin dopo un merge resta spento: un nuovo tag si fissa a mano, con `devloop-pinned
---state-dir … pin <tag>`. Prompt, test locali e lettura della CI sono ancora quelli di ssdlc
-(issue R2-R5 dell'ADR 0006): vale quanto sotto per `local_tests` e `ci_rerun_unrelated`.
+--state-dir … pin <tag>`. I prompt sono ancora quelli di ssdlc (issue R4 dell'ADR 0006); i test
+locali e la lettura della CI seguono `[tests]` del file di progetto (R5): vale quanto sotto per
+`local_tests` e `ci_rerun_unrelated`.
 
 **devloop nel repository gestito**, come ssdlc:
 
@@ -473,10 +474,12 @@ Il pin dopo un merge resta spento: un nuovo tag si fissa a mano, con `devloop-pi
 2. **Configurare `devloop/config.toml`** ([docs/devloop/reference.md](../docs/devloop/reference.md)
    descrive ogni chiave):
    - `repo`, `base_branch`, `branch_prefix`, `language`, `trusted_users`;
-   - `test_cmd` con la suite del progetto. `local_tests = "changed"` e `ci_rerun_unrelated`
-     presuppongono la struttura di questo repository (`tests/test_*.py`, le righe `FAILED MODULE`
-     di `scripts/run-tests.py`): altrove usare `local_tests = "full"` o `"none"` e
-     `ci_rerun_unrelated = false`;
+   - `test_cmd` con la suite del progetto. `local_tests = "changed"` vuole una selezione in
+     `[tests]` (oggi `selection = "python-unittest-modules"`, che presuppone i moduli
+     `tests/test_*.py` di `unittest`, con le regole di nome del progetto come parametri); senza,
+     vale `"full"`. `ci_rerun_unrelated` vuole anche `[tests] ci_log_format = "run-tests"` (le
+     righe `FAILED MODULE` di `scripts/run-tests.py`); senza, è spento
+     ([docs/devloop/reference.md](../docs/devloop/reference.md#local-tests));
    - `[apps]`: `app_id` e `slug` delle app create al passo 2, con un `APP_PREFIX` nuovo;
    - `[roles]` e `[agents.*]`: implementer, reviewer, supervisore e modelli;
    - `protected_paths`, `review_policy.sensitive_paths` e `sensitive_path_lists`,
