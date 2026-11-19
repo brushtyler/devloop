@@ -49,9 +49,10 @@ the agent user writes, is root's and sticky. A link among them, or inside a seal
 followed, and what it leads to must be protected the same way; the sealed files must stay
 readable by the agent user. The probe runs only the system's tools, never those of the agent
 user's PATH. In every claude turn, the auto memory, which ``~/.claude/projects`` keeps and
-shares among the worktrees of a repository, is off, and only the MCP servers of the command
-line count, never those of ``~/.claude.json``, which the agent user writes
-(``agents.CLAUDE_TURN_ENV``, ``agents.build_command``).
+shares among the worktrees of a repository, is off, also over the settings of the project that a
+turn writes in the worktree (``agents.CLAUDE_TURN_SETTINGS``, given with ``--settings``), and only
+the MCP servers of the command line count, never those of ``~/.claude.json``, which the agent
+user writes (``agents.CLAUDE_TURN_ENV``, ``agents.build_command``).
 """
 
 import contextlib

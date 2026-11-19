@@ -2093,10 +2093,16 @@ dispatcher's user, as before ([reference](reference.md#agent-user)).
 - What the CLIs keep writable must not carry instructions into the next turn either. Every
   claude turn runs with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, whatever the operator's
   environment says: the auto memory of `~/.claude/projects/<project>/memory`, shared by the
-  worktrees of a repository, is neither loaded nor written. It runs with `--strict-mcp-config`:
+  worktrees of a repository, is neither loaded nor written. The environment alone would not
+  bind: the `env` of the settings overrides it, and a turn writes `.claude/settings.json` and
+  `.claude/settings.local.json` in its worktree, which the next turns of the pull request read.
+  So the same value, with `autoMemoryEnabled: false`, also comes with `--settings`, whose
+  settings come before those of the project and the local ones (after the managed ones only,
+  which are root's); a `--settings` in the `write_args` or `review_args` of a claude agent, which
+  would replace it, stops devloop at startup. It runs with `--strict-mcp-config`:
   the MCP servers of `~/.claude.json`, which `devloop-agent` writes, are ignored, and only those
   of a `--mcp-config` in `write_args` or `review_args` count (`agents.CLAUDE_TURN_ENV`,
-  `agents.build_command`).
+  `agents.CLAUDE_TURN_SETTINGS`, `agents.build_command`).
 
 `ops/host/setup-agent-user.sh` creates the user, its directories, the ACLs and the sudoers rule,
 and makes the files of the CLIs root's; `ops/host/check-host.sh` verifies them

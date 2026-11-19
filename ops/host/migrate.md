@@ -317,7 +317,10 @@ parte anche dopo il passo:
 
 1. fermare il loop: `sudo systemctl stop devloop`;
 2. aggiornare il clone di devloop, per avere gli script nuovi: `sudo -u devloop -H git -C
-   /home/devloop/ssdlc pull --ff-only`;
+   /home/devloop/ssdlc pull --ff-only`. Verificare che l'overlay non abbia `--settings` nei
+   `write_args` o nei `review_args` di un agent claude: devloop passa a ogni turno di Claude
+   Code il proprio `--settings`, con la memoria automatica spenta, e rifiuta di partire con un
+   altro;
 3. rendere di root la home di `devloop-agent` e i file delle sue CLI:
    `sudo bash ops/host/setup-agent-user.sh --dry-run`, poi senza `--dry-run`, dal clone;
 4. verificare con `sudo bash ops/host/check-host.sh --no-apps`: nessun errore nel passo

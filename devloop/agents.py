@@ -29,8 +29,15 @@ CLAUDE_DENIED_TOOLS = ('Agent', 'Task', 'Workflow')
 # it. The auto memory of ``~/.claude/projects/<project>/memory``, shared by the worktrees of a
 # repository, is neither loaded nor written; the MCP servers of ``~/.claude.json``, which the
 # agent user writes, are ignored (``--strict-mcp-config``: only those of ``--mcp-config`` in the
-# operator's arguments count).
+# operator's arguments count). The environment alone does not bind: the ``env`` of the settings
+# overrides it, and a turn writes the project's ``.claude/settings.json`` and
+# ``.claude/settings.local.json`` in the worktree, which a later turn of the same pull request
+# reads ({"env": {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0"}} turns the memory back on). The
+# settings of the command line (``--settings``) come before those of the project and the local
+# ones, after the managed ones only, which are root's: ``CLAUDE_TURN_SETTINGS`` carries the same
+# value, and ``config`` refuses another ``--settings`` in the arguments of a claude agent.
 CLAUDE_TURN_ENV = {'CLAUDE_CODE_DISABLE_AUTO_MEMORY': '1'}
+CLAUDE_TURN_SETTINGS = {'autoMemoryEnabled': False, 'env': dict(CLAUDE_TURN_ENV)}
 # A blocked turn whose reason says that background work was still running (issue #219): the
 # turn ended before its own work, a failure of the tool rather than of the change. Both
 # patterns must match the same sentence. "Before" counts only with a verb of completion
@@ -442,7 +449,8 @@ def build_command(agent, mode, prompt, *, schema_file, out_file):
         schema = Path(schema_file).read_text(encoding='utf-8')
         argv = ['claude', '-p', '--model', agent.model, '--effort', agent.effort,
                 '--output-format', 'json', '--json-schema', schema,
-                '--disallowedTools', *CLAUDE_DENIED_TOOLS, '--strict-mcp-config', *extra]
+                '--disallowedTools', *CLAUDE_DENIED_TOOLS, '--strict-mcp-config',
+                '--settings', json.dumps(CLAUDE_TURN_SETTINGS), *extra]
         return argv, prompt
     if agent.kind == 'codex':
         # A reviewer runs in a disposable copy of the PR worktree (Workspace.review_copy): it

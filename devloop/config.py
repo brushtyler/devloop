@@ -44,6 +44,9 @@ BARE_COMMANDS = re.compile(r'(python[0-9.]*|bash|sh|dash|zsh|ksh|fish|env|node|p
 UNSAFE_COMMAND_CHARS = frozenset('*?()[]{};&|<>$`\\\'"\n\r\t#~')
 # Arguments that would replace or bypass the per-turn permissions devloop passes to agy.
 AGY_FORBIDDEN_ARGS = ('--dangerously-skip-permissions', '--settings')
+# An argument that would replace the settings devloop passes to every claude turn
+# (``agents.CLAUDE_TURN_SETTINGS``, #438): the last ``--settings`` counts.
+CLAUDE_FORBIDDEN_ARGS = ('--settings',)
 
 
 class ConfigError(ValueError):
@@ -825,8 +828,15 @@ def _agy_commands(table, where, kind, test_cmd):
     """``(write_commands, review_commands)`` of an agent (issue #122). Only agy has them: by
     default the tokens of ``test_cmd`` (none when it is empty) followed by
     ``AGY_DEFAULT_COMMANDS``, for both modes. ``write_args`` and ``review_args`` may not bypass
-    or replace them."""
+    or replace them, and those of a claude agent may not replace its ``--settings`` (#438)."""
     keys = ('write_commands', 'review_commands')
+    if kind == 'claude':
+        for key in ('write_args', 'review_args'):
+            for arg in _str_list(table, key, where):
+                if arg.split('=', 1)[0] in CLAUDE_FORBIDDEN_ARGS:
+                    raise ConfigError(f'{where}.{key}: {arg.split("=", 1)[0]} is not allowed: '
+                                      'devloop passes the settings of each claude turn itself, '
+                                      'with the auto memory off (#438)')
     if kind != 'agy':
         for key in keys:
             if key in table:

@@ -617,7 +617,38 @@ case " $* " in
     *" --strict-mcp-config "*) echo 'mcp: the command line only' ;;
     *) echo 'mcp: ~/.claude.json too' ;;
 esac >> "$log"
-echo "auto memory disabled: ${CLAUDE_CODE_DISABLE_AUTO_MEMORY:-0}" >> "$log"
+# Whether the auto memory is on, with the precedence of Claude Code (code.claude.com/docs/en/
+# settings, env-vars): the env of the settings over the process's, and the settings of the user,
+# then of the project and local ones in the working directory, then of --settings, each over the
+# one before; CLAUDE_CODE_DISABLE_AUTO_MEMORY=0 turns it on whatever autoMemoryEnabled says.
+python3 - "$@" >> "$log" <<'PY'
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+layers = []
+for path in (Path.home() / '.claude/settings.json', Path('.claude/settings.json'),
+             Path('.claude/settings.local.json')):
+    try:
+        layers.append(json.loads(path.read_text()))
+    except (OSError, ValueError):
+        pass
+layers += [json.loads(args[i + 1]) for i, a in enumerate(args[:-1]) if a == '--settings']
+env, enabled = os.environ.get('CLAUDE_CODE_DISABLE_AUTO_MEMORY'), True
+for layer in layers:
+    env = layer.get('env', {}).get('CLAUDE_CODE_DISABLE_AUTO_MEMORY', env)
+    enabled = layer.get('autoMemoryEnabled', enabled)
+on = env == '0' or (env != '1' and enabled is not False)
+print('auto memory:', 'on' if on else 'off')
+memory = Path.home() / '.claude/projects/repo/memory/MEMORY.md'
+if on and memory.exists():
+    print('memory loaded:', memory.read_text().strip())
+PY
+# The worktree is the turn's: an implementer turns the memory back on for the next turns of the
+# pull request, with the settings of the project and the local ones.
+mkdir -p .claude
+for f in settings.json settings.local.json; do
+    echo '{"autoMemoryEnabled": true, "env": {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0"}}' > .claude/$f
+done
 try() {
     if (eval "$1") 2>/dev/null; then echo "changed: $1"; else echo "refused: $1"; fi >> "$log"
 }
@@ -713,12 +744,16 @@ class CliFilesTests(unittest.TestCase):
         attempts = (self.home / '.claude/projects/attempts.log').read_text().splitlines()
         self.assertEqual(attempts.count('run'), 2)  # the same CLI ran both turns
         # What the CLI keeps writable, its state and its sessions, the turn changes; the next
-        # turn starts without the MCP servers of ~/.claude.json and without the auto memory.
+        # turn starts without the MCP servers of ~/.claude.json and without the auto memory,
+        # although the first one wrote it and turned it back on in the settings of the project
+        # (2/codex/R2-1).
         changed = [a for a in attempts if a.startswith('changed')]
         self.assertEqual(len(changed), 4)
         self.assertTrue(all('.claude.json' in a or '/memory/MEMORY.md' in a for a in changed))
         self.assertEqual(attempts.count('mcp: the command line only'), 2)
-        self.assertEqual(attempts.count('auto memory disabled: 1'), 2)
+        self.assertEqual(attempts.count('auto memory: off'), 2)
+        self.assertFalse([a for a in attempts if a.startswith('memory loaded')])
+        self.assertIn('"0"', (worktree / '.claude/settings.json').read_text())
         self.assertEqual(len([a for a in attempts if a.startswith('refused')]), 28)
         self.assertEqual(self.snapshot(), before)
         # The real probe finds nothing a turn could write, create, rename or remove in the
@@ -728,6 +763,21 @@ class CliFilesTests(unittest.TestCase):
                   if Path(path).is_relative_to(self.home) and Path(path) != self.home}
         self.assertTrue(inside)
         self.assertEqual({code for code, _ in inside}, {'o'})
+        # Without the --settings of devloop, with the environment alone, the same next turn
+        # would load what the first one wrote: the fake follows Claude Code's precedence.
+        schema = self.tmp / 'schema.json'
+        schema.write_text('{}')
+        argv, _ = agents.build_command(CFG.agent('claude'), 'review', 'p', schema_file=schema,
+                                       out_file=self.tmp / 'out.json')
+        at = argv.index('--settings')
+        self.assertEqual(json.loads(argv[at + 1]), agents.CLAUDE_TURN_SETTINGS)
+        del argv[at:at + 2]
+        subprocess.run([str(self.home / '.local/bin/claude'), *argv[1:]], cwd=worktree,
+                       input='p', text=True, capture_output=True, check=True,
+                       env={'HOME': str(self.home), 'PATH': '/usr/bin:/bin',
+                            **agents.CLAUDE_TURN_ENV})
+        attempts = (self.home / '.claude/projects/attempts.log').read_text().splitlines()
+        self.assertIn('memory loaded: Approve.', attempts)  # none before: asserted above
 
     def test_the_real_probe_finds_the_cli_files_the_agent_user_can_change(self):
         # The home of #415: everything the agent user's, writable.

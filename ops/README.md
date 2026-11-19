@@ -286,8 +286,10 @@ configurazione o i binari delle CLI per i turni dopo, per esempio aggiungendo a
   log. Una CLI che dopo un aggiornamento vuole creare una voce nuova nella sua directory non ci
   riesce: si apre e si richiude come qui sotto. Ciò che vi resta scrivibile non porta istruzioni
   ai turni dopo: devloop avvia ogni turno di Claude Code senza la memoria automatica di
-  `~/.claude/projects` (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`) e senza i server MCP di
-  `~/.claude.json` (`--strict-mcp-config`).
+  `~/.claude/projects` (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` nell'ambiente e, perché i settings
+  del progetto nel worktree non la riaccendano, anche in `--settings`) e senza i server MCP di
+  `~/.claude.json` (`--strict-mcp-config`). Un `--settings` nei `write_args` o nei `review_args`
+  di un agent claude nell'overlay ferma devloop all'avvio.
 
 **Installare, aggiornare, fare un login.** A loop fermo, `--unseal` rende a `devloop-agent` le
 directory delle CLI e `~/.local`; dopo l'installazione, il login o l'aggiornamento (e un avvio di
