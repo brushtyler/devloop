@@ -154,7 +154,8 @@ class ConfigTests(unittest.TestCase):
     def test_apps_belong_to_known_actors_and_bots_are_never_trusted(self):
         import tomllib
         data = tomllib.loads(config.DEFAULT_CONFIG.read_text())
-        self.assertEqual(set(CFG.apps), {'dispatcher', 'claude', 'codex', 'agy', 'merger'})
+        self.assertEqual(set(CFG.apps),
+                         {'dispatcher', 'claude', 'codex', 'agy', 'merger', 'supervisor'})
         self.assertEqual(CFG.apps['dispatcher'].slug, 'brushtyler-devloop-dispatcher')
         self.assertEqual(CFG.protected_paths, ('.github/',))
         bad = [dict(data, trusted_users=['brushtyler', 'brushtyler-devloop-claude-agent[bot]']),

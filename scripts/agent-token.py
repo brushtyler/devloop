@@ -11,7 +11,9 @@ Examples:
 
 Actors: claude, codex, agy. The dispatcher's app is reserved to devloop: devloop trusts some of
 the markers it reads only when the dispatcher wrote them. So is the merger's app, the only one
-with contents=write, used only for devloop's merges.
+with contents=write, used only for devloop's merges. The supervisor's role app is not exposed
+either (ADR 0005, P5-4): no review or interactive session may write a command as the
+supervisor. The supervisor gets its token with scripts/supervisor-token.py.
 
 Without --perm the token gets issues=write and pull_requests=write: enough for comments,
 reviews and labels, not for pushing, merging or changing the repository. contents=write and
@@ -34,6 +36,7 @@ from devloop.config import load_config  # noqa: E402
 
 ACTORS = ('claude', 'codex', 'agy')
 RESERVED = ('dispatcher', 'merger')  # devloop's own apps, never exposed here
+SUPERVISOR = 'supervisor'  # the supervisor's role app: scripts/supervisor-token.py only
 DEFAULT = {'issues': 'write', 'pull_requests': 'write'}
 ALLOWED = {'issues': {'read', 'write'}, 'pull_requests': {'read', 'write'},
            'contents': {'read'}, 'metadata': {'read'}, 'checks': {'read'},
@@ -51,6 +54,9 @@ def parse(argv):
     actor, options = head[0].lower(), head[1:]
     if actor in RESERVED:
         raise SystemExit(f'agent-token: the {actor} app is reserved to devloop')
+    if actor == SUPERVISOR:
+        raise SystemExit('agent-token: the supervisor app is not exposed here; the supervisor '
+                         'uses scripts/supervisor-token.py')
     if actor not in ACTORS:
         raise SystemExit(f'agent-token: unknown actor {actor!r}; use one of {", ".join(ACTORS)}')
     permissions = {}

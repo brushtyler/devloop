@@ -160,6 +160,23 @@ class DelegationPolicy:
     retry_own_prs: bool = False
 
 
+@dataclass(frozen=True)
+class SupervisorActor:
+    """``[roles.supervisor]`` as a table (ADR 0005, P5-4, #408): the supervisor actor, such as
+    ``claude-supervisor``. devloop does not run it, so it is not in ``[agents]``; it signs with
+    the role app ``[apps.supervisor]``, which no agent declares. ``kind``, ``provider`` and
+    ``model`` say which agent runs it, for the check on the PRs implemented by the same agent
+    (``SupervisionMixin._supervisor_implemented``)."""
+    name: str
+    kind: str
+    provider: str
+    model: str
+
+
+# The keys of the ``[roles.supervisor]`` table.
+SUPERVISOR_KEYS = ('name', 'kind', 'provider', 'model')
+
+
 # The roles of a turn in the budget envelope (#365): the kinds of the turns charged to a story.
 # A readiness check (``preflight``) comes before the takeover and is outside the envelope.
 BUDGET_ROLES = ('implement', 'fix', 'review', 'sync', 'conclave', 'advisory')
@@ -277,9 +294,10 @@ class AgentConfig:
                          for f in self.fallback_models]
 
 
-# Actors that are an app of devloop's and never an agent: the dispatcher, and the merger, the app
-# that only merges (#201).
-APP_ONLY_ACTORS = ('dispatcher', 'merger')
+# Actors that are an app of devloop's and never an agent: the dispatcher, the merger, the app
+# that only merges (#201), and the supervisor's role app (ADR 0005, P5-4, #408), which counts
+# only with ``[roles.supervisor]`` as a table and whose key devloop never reads.
+APP_ONLY_ACTORS = ('dispatcher', 'merger', 'supervisor')
 
 
 @dataclass(frozen=True)
@@ -385,9 +403,13 @@ class Config:
     labels: Labels = field(default_factory=Labels)
     review_policy: ReviewPolicy = field(default_factory=ReviewPolicy)
     merge: MergePolicy = field(default_factory=MergePolicy)
-    # The agent whose identity, besides trusted_users, may hold and release a merge in ``auto``
-    # mode (#172), or '' when none is configured.
+    # The supervisor whose identity, besides trusted_users, may hold and release a merge in
+    # ``auto`` mode (#172), or '' when none is configured: the agent key ``roles.supervisor``
+    # names, whose app it signs with, or the name of ``supervisor_actor``.
     supervisor: str = ''
+    # ``[roles.supervisor]`` as a table (#408): the supervisor actor, which signs with the app of
+    # ``[apps.supervisor]``; None with the agent key of before.
+    supervisor_actor: SupervisorActor = None
     # The delegations to the supervisor (ADR 0005), each off by default (D10).
     delegations: DelegationPolicy = field(default_factory=DelegationPolicy)
     pin: PinPolicy = field(default_factory=PinPolicy)
@@ -1009,6 +1031,40 @@ def parse_conclave(data, agents):
     return keys
 
 
+def parse_supervisor(roles, agents):
+    """``(supervisor, actor)`` of ``roles.supervisor``: ``('', None)`` without it. As a string
+    it is the key of a configured agent, which signs with that agent's app (#172), and
+    ``actor`` is None. As a table (ADR 0005, P5-4, #408) it is the supervisor actor, with the
+    keys of ``SUPERVISOR_KEYS``: ``name`` names agent and role in full (``<kind>-supervisor``)
+    and is not a key of ``[agents]``, since devloop does not run it."""
+    if 'supervisor' not in roles:
+        return '', None
+    value = roles['supervisor']
+    if isinstance(value, str):
+        if value not in agents:
+            raise ConfigError(f'roles.supervisor: unknown agent {value!r}')
+        return value, None
+    if not isinstance(value, dict):
+        raise ConfigError('roles.supervisor: expected the key of an agent or a table')
+    where = 'roles.supervisor'
+    unknown = sorted(set(value) - set(SUPERVISOR_KEYS))
+    if unknown:
+        raise ConfigError(f'{where}: unknown key {unknown[0]!r}')
+    name, kind, provider, model = (_require(value, key, str, where) for key in SUPERVISOR_KEYS)
+    if kind not in AGENT_KINDS:
+        raise ConfigError(f'{where}.kind: must be one of {AGENT_KINDS}')
+    if name != f'{kind}-supervisor':
+        raise ConfigError(f'{where}.name: must be {kind + "-supervisor"!r}, the agent and the '
+                          'role in full')
+    if name in agents:
+        raise ConfigError(f'{where}.name: {name!r} is an agent of [agents]; the supervisor '
+                          'actor is not run by devloop')
+    for key, text in (('provider', provider), ('model', model)):
+        if not text.strip():
+            raise ConfigError(f'{where}.{key}: must not be empty')
+    return name, SupervisorActor(name=name, kind=kind, provider=provider, model=model)
+
+
 def parse_config(data, root=INSTALL_ROOT):
     """``root`` is where relative ``review_policy.sensitive_path_lists`` are read."""
     test_cmd = _require(data, 'test_cmd', str, 'config')
@@ -1044,11 +1100,7 @@ def parse_config(data, root=INSTALL_ROOT):
     if implementer not in agents:
         raise ConfigError(f'roles.implementer: unknown agent {implementer!r}')
     pool = _reviewer_pool(roles, agents, implementer)
-    supervisor = ''
-    if 'supervisor' in roles:
-        supervisor = _require(roles, 'supervisor', str, 'roles')
-        if supervisor not in agents:
-            raise ConfigError(f'roles.supervisor: unknown agent {supervisor!r}')
+    supervisor, supervisor_actor = parse_supervisor(roles, agents)
     preflight = ''
     if 'preflight' in data:
         preflight = _require(data, 'preflight', str, 'config')
@@ -1077,6 +1129,9 @@ def parse_config(data, root=INSTALL_ROOT):
                                 slug=_require(table, 'slug', str, where))
     if len({app.app_id for app in apps.values()}) != len(apps):
         raise ConfigError('apps: each actor needs its own app')
+    if supervisor_actor is not None and 'supervisor' not in apps:
+        # The actor exists to sign with its role app: without it nobody would be the supervisor.
+        raise ConfigError('roles.supervisor: the supervisor actor needs [apps.supervisor]')
     ints = {}
     for key in ('max_open_prs', 'max_parked_prs', 'max_review_rounds', 'max_actions_per_tick',
                 'max_parallel_actions', 'implement_test_retries', 'agent_timeout_seconds', 'test_timeout_seconds',
@@ -1136,6 +1191,7 @@ def parse_config(data, root=INSTALL_ROOT):
         block_uncertain_turns=block_uncertain, story_identity=story_identity,
         publication_outbox=outbox, attempt_identity=attempt_identity, budget=budget,
         merge=parse_merge(data.get('merge', {}), supervisor), supervisor=supervisor,
+        supervisor_actor=supervisor_actor,
         delegations=parse_delegations(data.get('delegations', {})),
         pin=parse_pin(data.get('pin', {}), sensitive_lists(data)),
         run=parse_run(data.get('run', {})),

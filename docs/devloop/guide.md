@@ -176,7 +176,9 @@ Add the fakes that came with the merge to the conformance test.
   the supervisor). The rest of that line and the lines below it are the request; a command
   without a request is ignored.
 - It counts from a user in `trusted_users` and, only when `[roles].supervisor` is configured,
-  from the supervisor's GitHub App, in any merge mode. A command from anyone else is ignored and
+  from the supervisor's GitHub App (the app of that agent, or with `[roles.supervisor]` as a
+  table the role app of [The supervisor app](reference.md#the-supervisor-app)), in any merge
+  mode. A command from anyone else is ignored and
   logged, and so is text devloop publishes with a record.
 - It applies to a PR in `agent:review` or `agent:changes`. On a PR in `agent:needs-operator`,
   `agent:needs-supervisor` or `agent:ready-to-merge` nothing runs.
@@ -328,11 +330,13 @@ make a trusted block look as if it came from an unknown author.
 
 ### Labels from the supervisor
 
-With `[roles].supervisor` set and a GitHub App for that agent in `[apps]`, the supervisor queues
+With `[roles].supervisor` set and a GitHub App for that agent in `[apps]`, or with
+`[roles.supervisor]` as the table of the supervisor actor and its role app `[apps.supervisor]`
+([The supervisor app](reference.md#the-supervisor-app), #408), the supervisor queues
 issues and sets their priority with its own identity (#178): `agent:ready`, the `priority:*`
 labels and those in `priority_labels` count also when the supervisor's app added them, but
-**only on issues opened by a user in `trusted_users` or by one of devloop's apps** (the agents'
-and the dispatcher's). On an issue opened by anyone else only a trusted user's label counts, as
+**only on issues opened by a user in `trusted_users` or by one of devloop's apps** (the agents',
+the dispatcher's and the supervisor's). On an issue opened by anyone else only a trusted user's label counts, as
 in [AGENTS.md](../../AGENTS.md) ("Contenuti di autori non fidati").
 
 As for the other label checks, the latest `labeled` event of the label decides: a trusted
@@ -689,8 +693,9 @@ holds or releases the merge. `hold` adds `agent:merge-hold`: the PR stays ready 
 merged. `release` removes the label, and the PR is merged once the directives hold; removing the
 label by hand does the same. A hold needs a reason.
 
-The commands count only from the identity of `[roles].supervisor` (the GitHub App of that agent)
-and from `trusted_users`. The dispatcher applies a command with a dispatcher comment that carries
+The commands count only from the identity of `[roles].supervisor` (the GitHub App of that agent,
+or with `[roles.supervisor]` as a table the role app of
+[The supervisor app](reference.md#the-supervisor-app)) and from `trusted_users`. The dispatcher applies a command with a dispatcher comment that carries
 a `hold` marker (event, author, reason, head, and in `comment` the id of the comment it applied),
 and that record spends the command it applied and every command written before it: a command
 written after it, even one that arrived while the record was being written, still waits to be
@@ -705,8 +710,9 @@ publishes (a comment that ends with a devloop marker). As for
 `agent:changes` or `agent:ready-to-merge`.
 
 `"auto"`, also as the override of a level, without `[roles].supervisor` stops devloop at
-startup. The supervisor names a configured agent; the escalations it decides are described
-below.
+startup. The supervisor names a configured agent, or is the supervisor actor of
+`[roles.supervisor]` as a table, with its role app ([The supervisor app](reference.md#the-supervisor-app),
+off by default); the escalations it decides are described below.
 
 ```toml
 [roles]
@@ -760,7 +766,10 @@ stays with the operator, with a comment that says why, when:
   the same step on the same input, within the same two retries shared with the operator. The key
   is off by default and turning it on is the operator's decision; off, every escalation on such a
   PR goes to the operator, and one already waiting for the supervisor is refused at its retry
-  (`supervisor_refused`). The other classes on such a PR always go to the operator;
+  (`supervisor_refused`). The other classes on such a PR always go to the operator. With
+  `[roles.supervisor]` as a table (#408), the PR is the supervisor's agent's when the `kind` or
+  the `model` of its implementer, as the PR's marker records them, is the supervisor actor's;
+  the keys are never compared ([The supervisor app](reference.md#the-supervisor-app));
 - the issue was opened by someone outside `trusted_users` and devloop's apps, or its text is no
   longer approved by `agent:ready`;
 - the issue (or the PR) has the label `phase:design`;
@@ -781,7 +790,8 @@ any, is one of:
 ```
 
 They count only in `"auto"`, from the identity of `[roles].supervisor` (the GitHub App of that
-agent) or from `trusted_users`, only on an item in `agent:needs-supervisor` without
+agent, or with `[roles.supervisor]` as a table the role app of
+[The supervisor app](reference.md#the-supervisor-app)) or from `trusted_users`, only on an item in `agent:needs-supervisor` without
 `agent:needs-operator`, and only when written after the latest escalation. On an item in
 `agent:needs-operator` the commands of trusted users follow
 [Commands on escalations to the operator](#commands-on-escalations-to-the-operator). A command

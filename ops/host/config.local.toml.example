@@ -35,3 +35,11 @@
 # Il supervisore che decide le escalation non critiche (identità della sua app).
 # [roles]
 # supervisor = "claude"
+# Oppure, con l'app di ruolo del supervisore (ADR 0005, P5-4; decisione dell'operatore, con la
+# coda vuota): l'attore claude-supervisor, che firma con [apps.supervisor]. Al posto delle due
+# righe sopra, non insieme (docs/devloop/reference.md, "The supervisor app"):
+#     [roles.supervisor]
+#     name = "claude-supervisor"
+#     kind = "claude"
+#     provider = "anthropic"
+#     model = "claude-opus-5-5"

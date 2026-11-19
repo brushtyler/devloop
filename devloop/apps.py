@@ -4,6 +4,10 @@ Each actor (``dispatcher``, ``merger`` or an agent key) may have a GitHub App. I
 minted per action with only the permissions that action needs, so a reviewer never holds a
 token that can push. An actor without an app falls back to the ambient ``gh`` login, as before.
 
+The supervisor's role app (``supervisor``, ADR 0005, P5-4) is only a login for devloop: its key
+stays with the supervisor's system user, devloop never mints its tokens, and the supervisor gets
+them with ``scripts/supervisor-token.py``.
+
 Tokens stay in this process: they reach ``gh`` and ``git`` through the environment of a single
 command and are never given to the agent CLIs. Only the standard library and the ``openssl``
 binary are used (RS256 is not in the standard library).
@@ -28,6 +32,9 @@ API = 'https://api.github.com'
 DISPATCHER = 'dispatcher'
 # The app that only merges (#201): never used for comments, labels or pushes, and not an agent.
 MERGER = 'merger'
+# The supervisor's role app (#408): its commands and labels count as the supervisor's with
+# ``[roles.supervisor]`` as a table. devloop reads no key of it and never writes with it.
+SUPERVISOR = 'supervisor'
 
 # Permissions of the token minted for each kind of action (metadata: read is always implied).
 IMPLEMENT = {'contents': 'write', 'pull_requests': 'write'}
@@ -123,6 +130,11 @@ def find_key(key_dir, slug):
     return key
 
 
+def app_login(slug):
+    """The bot login of the app ``slug``."""
+    return f'{slug}[bot]'
+
+
 class AppAuth:
     """One GitHub App installed on the repository."""
 
@@ -143,7 +155,7 @@ class AppAuth:
 
     @property
     def login(self):
-        return f'{self.slug}[bot]'
+        return app_login(self.slug)
 
     def jwt(self, time_left=None):
         now = int(self._clock())
@@ -224,8 +236,10 @@ class Identities:
     @classmethod
     def from_config(cls, cfg, run=subprocess.run):
         key_dir = os.environ.get('DEVLOOP_APP_KEY_DIR') or cfg.app_key_dir
+        # Not the supervisor's app (#408): devloop never acts as the supervisor, and its key is
+        # with the supervisor's system user, not in devloop's key_dir.
         apps = {actor: AppAuth(app.app_id, app.slug, find_key(key_dir, app.slug), cfg.repo)
-                for actor, app in cfg.apps.items()}
+                for actor, app in cfg.apps.items() if actor != SUPERVISOR}
         return cls(cfg.repo, apps, run=run)
 
     # The outbox of the publications (#385, ``outbox.Outbox``), set by devloop when
@@ -281,7 +295,8 @@ class Identities:
         return app.login if app else None
 
     def agent_logins(self):
-        return {app.login for actor, app in self.apps.items() if actor not in (DISPATCHER, MERGER)}
+        return {app.login for actor, app in self.apps.items()
+                if actor not in (DISPATCHER, MERGER, SUPERVISOR)}
 
     def merger(self) -> Backend:
         """The client merges run with (#201): the ``merger`` app, with a token limited to

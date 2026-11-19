@@ -35,8 +35,9 @@ MUTATING = ('sudo', 'apt-get', 'useradd', 'setfacl', 'visudo', 'chown', 'chmod',
 LEVEL = {'read': 1, 'write': 2}
 
 
-def agent_token():
-    spec = importlib.util.spec_from_file_location('agent_token', ROOT / 'scripts/agent-token.py')
+def supervisor_token():
+    spec = importlib.util.spec_from_file_location('supervisor_token',
+                                                  ROOT / 'scripts/supervisor-token.py')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -55,8 +56,11 @@ REQUIRED = {
     'codex-agent': AGENT,
     'agy-agent': AGENT,
     'implementer': (apps.IMPLEMENT, apps.PR_COMMENT, apps.ISSUE_COMMENT),
-    # The supervisor writes through scripts/agent-token.py, with its default permissions.
-    'supervisor': (agent_token().DEFAULT,),
+    # The supervisor writes through scripts/supervisor-token.py (#408): its default permissions
+    # and the highest level of each permission it may ask for.
+    'supervisor': (supervisor_token().DEFAULT,
+                   {name: max(levels, key=LEVEL.get)
+                    for name, levels in supervisor_token().ALLOWED.items()}),
 }
 
 
@@ -223,7 +227,8 @@ class ManifestTests(unittest.TestCase):
             role = app.slug[len(PREFIX):]
             self.assertIn(role, REQUIRED, actor)
             needs = {apps.DISPATCHER: REQUIRED['dispatcher'],
-                     apps.MERGER: REQUIRED['merger']}.get(actor, AGENT)
+                     apps.MERGER: REQUIRED['merger'],
+                     apps.SUPERVISOR: REQUIRED['supervisor']}.get(actor, AGENT)
             granted = manifest(role)['default_permissions']
             for need in needs:
                 for name, level in need.items():
