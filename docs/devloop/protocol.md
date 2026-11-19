@@ -688,6 +688,15 @@ full map again in its `fix` marker and comment. The latest map holds: that of th
 that carries one, otherwise that of the PR. A sync carries no map, so the previous one still
 holds after it.
 
+Implementer and fixer also return `host_step` (#462): empty, or the short text of a step the
+operator makes on the host before the code is pinned, with a reference to its document. A
+non-empty one is recorded in the PR marker (`host_step`) and shown in the PR description under
+"Passo sull'host"; each fix records its declaration again in its `fix` marker (`host_step`, empty
+when there is none), and the latest holds, as for the map. The reviewer receives it and checks
+that it is there when the PR needs it and empty otherwise. When devloop merges a PR whose latest
+declaration is not empty, it holds the auto-pin instead of requesting it, and alerts the operator
+([Step on the host](guide.md#step-on-the-host)).
+
 The reviewer receives the criteria and the latest map, and must verify them: a criterion without
 real coverage, or with tests that do not actually verify it, is a blocking finding. A
 `not_covered` criterion with a reason is left to the reviewer's judgement. Independently of the

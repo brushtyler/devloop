@@ -94,3 +94,84 @@ def as_default(case):
     patcher.start()
     case.addCleanup(patcher.stop)
     return flat
+
+
+# The prompt templates of before R4 (ADR 0006), frozen as they were: the reference of the
+# rendered prompts (``tests/test_devloop_prompt_data.py``).
+PRE_R4_PROMPTS = ROOT / 'tests' / 'fixtures' / 'ssdlc-pre-r4' / 'prompts'
+
+_HOST_STEP_IMPLEMENT = """\
+- `host_step`: empty, unless the code of your change cannot run as intended, once devloop pins
+  it, without a step the operator makes on the host first, with the loop stopped: for example
+  a new table or key of the project file or of the local overlay that the code reads, a change
+  to the schema of either, or to the procedures of the host (such as `ops/host/`). Then a short
+  text, in $language, of what the operator must do, with a reference to the document that
+  describes it (for example the section of the migration guide of the host). devloop merges a
+  pull request that declares it as any other, but holds the automatic pin of that commit and
+  of the later ones until the operator pins by hand, after the step. The reviewer checks that
+  the declaration is there when it is needed and empty otherwise.
+"""
+_HOST_STEP_FIX = """\
+- `host_step`: the declaration of a step on the host after your changes, which replaces the
+  current one below: empty, unless the code of the pull request cannot run as intended, once
+  devloop pins it, without a step the operator makes on the host first, with the loop stopped
+  (for example a new table or key of the project file or of the local overlay that the code
+  reads, a change to the schema of either, or to the procedures of the host such as
+  `ops/host/`). Then a short text, in $language, of what the operator must do, with a reference
+  to the document that describes it. Return the current declaration again when it still
+  holds. devloop holds the automatic pin after the merge of a pull request that declares one,
+  until the operator pins by hand after the step.
+"""
+_HOST_STEP_REVIEW = """\
+8. The declaration of a step on the host (`host_step`, under "Step on the host" below). A PR
+   needs one when its code cannot run as intended, once devloop pins it, without a step the
+   operator makes on the host first, with the loop stopped: it changes the schema of the
+   project file or of the local overlay (a new table or key the code reads), or the procedures
+   of the host (such as `ops/host/`). Then the declaration must be there, with a short text of
+   the step and a reference to the document that describes it; in every other case it must be
+   empty. A declaration missing where it is needed, or present where it is not, is a blocking
+   finding: devloop merges a PR that declares one, but holds the automatic pin until the
+   operator pins by hand after the step, and pins a PR that declares none without waiting.
+"""
+# The changes of the templates since R4, each as ``(anchor, text)``: ``text`` follows the only
+# occurrence of ``anchor`` in the reference. The frozen files stay as they were; the prompts of
+# now are the reference with these changes, and nothing else.
+SINCE_R4 = {
+    # #462: the step on the host, declared by implementer and fixer and checked by the reviewer.
+    'implement': (
+        ('  list (`[]`) when the issue has no recognisable acceptance criteria.\n',
+         _HOST_STEP_IMPLEMENT),
+    ),
+    'fix': (
+        ('  the issue has no recognisable acceptance criteria.\n', _HOST_STEP_FIX),
+        ('Current acceptance map of the pull request:\n\n$acceptance_map\n\n',
+         '## Step on the host\n\nCurrent declaration of the pull request (`host_step`):\n\n'
+         '$host_step\n\n'),
+    ),
+    'review': (
+        ('   the next section.\n', _HOST_STEP_REVIEW),
+        ('Latest coverage map of the pull request, from the implementer or its latest fix:\n\n'
+         '$acceptance_map\n\n',
+         '## Step on the host\n\nLatest declaration of the pull request (`host_step`), from the '
+         'implementer or its latest fix:\n\n$host_step\n\n'),
+    ),
+}
+
+
+def pre_r4_prompt(name):
+    """The template ``name`` of before R4 with the changes made since (``SINCE_R4``)."""
+    text = (PRE_R4_PROMPTS / f'{name}.md').read_text(encoding='utf-8')
+    for anchor, added in SINCE_R4.get(name, ()):
+        if text.count(anchor) != 1:
+            raise AssertionError(f'{name}: the anchor {anchor!r} is not once in the reference')
+        text = text.replace(anchor, anchor + added)
+    return text
+
+
+def pre_r4_prompts(dest):
+    """The templates of ``pre_r4_prompt`` written in the directory ``dest``, created."""
+    dest = Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    for path in sorted(PRE_R4_PROMPTS.glob('*.md')):
+        (dest / path.name).write_text(pre_r4_prompt(path.stem), encoding='utf-8')
+    return dest
