@@ -57,7 +57,9 @@ the reviewers, from the PR's marker.
 
 A blocking finding carries its evidence (#481): the scenario that shows it, or the code and the
 rule it violates with the quotation. One without evidence is recorded as non-blocking and does
-not send the PR to the fix, unless it is a security finding, which stays blocking. The fix
+not send the PR to the fix, unless it is a security finding, which stays blocking. A reviewer
+left with only such findings gives the neutral verdict `unproven`, which is no approval: the PR
+is not promoted without the explicit approvals of the quorum, and gets a new review. The fix
 prompt asks the implementer to verify the evidence before fixing, and to dispute a finding whose
 evidence does not hold; the reviewer who opened it then withdraws it or answers with new
 evidence (see [Evidence of a blocking finding](reference.md#evidence-of-a-blocking-finding)).

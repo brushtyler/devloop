@@ -579,7 +579,10 @@ document) with the quotation. The prompts use it this way:
 
 A blocking finding with an empty `evidence` is recorded as non-blocking, with
 `without_evidence: true`, and does not send the PR to the fix; one with `security: true` stays
-blocking (see [Structured review](protocol.md#structured-review)). The field is in the output
+blocking (see [Structured review](protocol.md#structured-review)). A request for changes left
+with nothing else to fix becomes the neutral verdict `unproven`: it is no approval, neither for
+the quorum nor for clearing a `trust_policy` (#461), so the PR is not promoted and gets a new
+review of the same head, within the round limit. The field is in the output
 schema the CLIs enforce: a review whose blocking finding lacks it fails validation like any
 other incomplete answer.
 

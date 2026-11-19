@@ -219,8 +219,8 @@ from .planning import (BASE_CHANGED, MERGE_LANE, MERGING, RESYNC_AFTER_APPROVAL,
 from .policy import (BINDING, MAX_LISTED_PATHS, agent_profile, differences, profile_of,
                      receipt_of)
 from .ports import Backend, Tracker, summarize_checks
-from .review import (CI, OPERATOR, current_round, finding_commands, finding_key, flow_verdict,
-                     open_findings, owner_of, round_verdict, trust_policy_parts)
+from .review import (CI, OPERATOR, UNPROVEN, current_round, finding_commands, finding_key,
+                     flow_verdict, open_findings, owner_of, round_verdict, trust_policy_parts)
 from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, DECIDE, RETRY,
                           ROUND_GRANTABLE, TOOL_FAILURE, UNCERTAIN_TURN, supervisor_command)
 from .workspace import WorkspaceError
@@ -3150,6 +3150,14 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                     'Un reviewer chiede una decisione dell\'operatore: il motivo è nella sua '
                     'review.', cls='reviewer_decision'))
             self.gh.edit_labels(pr.number, add=[lb.needs_operator], remove=transient)
+        elif verdict == UNPROVEN:
+            # #481: a reviewer's request for changes had no evidence. Nothing to fix, and no
+            # explicit approval for the quorum: the PR stays in review, and the next tick plans
+            # a new review of the head, or the round limit.
+            self.log(f'  not promoted: round {records[0]["round"]} has no explicit approval of '
+                     'every reviewer (unproven)')
+            self.gh.edit_labels(pr.number, add=[lb.review],
+                                remove=[lb.changes, lb.ready_to_merge, *self._released(pr)])
         elif counted_rounds(reviews) >= self.cfg.max_review_rounds + pr.granted_rounds:
             limit = self.cfg.max_review_rounds + pr.granted_rounds
             # The next round may be the supervisor's to grant (#405); else the operator's.

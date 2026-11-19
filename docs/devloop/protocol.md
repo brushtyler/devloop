@@ -592,8 +592,15 @@ map, stay blocking as before. devloop then enforces consistency:
   unresolved, becomes `request_changes` (another owner's open finding does not change it: the
   dispatcher checks it before promoting);
 - `request_changes` whose only blocking findings were demoted for lack of evidence (#481), with
-  none of the reviewer's own earlier findings left unresolved, becomes `approve` (another
-  owner's open finding does not keep it: the dispatcher checks it before promoting);
+  none of the reviewer's own earlier findings left unresolved, becomes `unproven` (another
+  owner's open finding does not keep the request for changes: the dispatcher checks it before
+  promoting). `unproven` is a neutral verdict that devloop writes, never the reviewer: it does
+  not send the PR to the fix, and it is no approval. The quorum counts only explicit
+  approvals, so a round with an `unproven`, and no `needs_operator` or `request_changes`, is
+  not approved: the PR stays in `agent:review` and the next tick plans a new review of the same
+  head, a new round within the round limit (at the limit, the usual `round_limit`). Nor does it
+  clear a `trust_policy` of its reviewer (#461), which needs an `approve`. Its native review is
+  a `COMMENT`;
 - `request_changes` with nothing else to fix becomes `needs_operator`;
 - an earlier finding the reviewer does not assess stays open;
 - `operator_reason` (#434) says why a reviewer asks for the operator: `trust_policy` or
@@ -670,7 +677,9 @@ Since #325 each review is **one element** of the PR's timeline:
   same reviewer's earlier `REQUEST_CHANGES`, which would block the merge after the operator's
   decision. The body states the verdict and the event, and devloop still keeps the PR in
   `agent:needs-operator` for a decision, or goes on with the fix or the operator merge for the
-  trust policy (#434): it reads the verdict from the record, never from the event. No review
+  trust policy (#434): it reads the verdict from the record, never from the event. The
+  neutral `unproven` (#481) is a `COMMENT`: it neither approves nor asks for changes, and an
+  earlier `REQUEST_CHANGES` of the same reviewer stays until it approves. No review
   is dismissed, neither the reviewer's own nor another reviewer's. That native review is the record devloop reads, and no review comment is
   written. Its submission is required: a failure is tried again, up to three attempts in all,
   after a pause of 5 seconds and then 10. Before each new attempt the dispatcher reads the PR's

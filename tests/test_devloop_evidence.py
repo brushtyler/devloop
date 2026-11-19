@@ -27,6 +27,7 @@ from test_devloop import (CFG, IMPL, REV, SHA1, FakeGH, FakeRunner, FakeWS, find
 from test_devloop_advisory import Base as AdvisoryBase
 from test_devloop_advisory import answer
 from test_devloop_findings import OTHER, Flow, reviewed_by
+from test_devloop_trust_loop import PARTS, resolving, trust
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIGS = (ssdlc_project.load(), SimpleNamespace(prompts=PromptFacts()))
@@ -65,10 +66,15 @@ class NormalizeTests(unittest.TestCase):
                 # The record says so, and the request for changes has nothing left to fix.
                 self.assertIn('senza evidenza', record['note'])
                 self.assertIn('R1-1', record['note'])
-                self.assertEqual(record['verdict'], 'approve')
+                # Neutral, never an approval (#481): it does not send the PR to the fix.
+                self.assertEqual(record['verdict'], review.UNPROVEN)
+                self.assertIn('non è un\'approvazione', record['note'])
                 self.assertEqual(review.open_findings([record]), [])
-                self.assertEqual(review.flow_verdict(record), 'approve')
+                self.assertEqual(review.flow_verdict(record), review.UNPROVEN)
+                self.assertEqual(markdown.native_event(record), 'COMMENT')
                 body = markdown.render_review(record, 'h')
+                self.assertIn('**Verdetto:** Nessun finding bloccante con evidenza: non '
+                              'approvata', body)
                 self.assertIn('### Non bloccanti', body)
                 self.assertIn('registrato come non bloccante', body)
                 self.assertNotIn('### Bloccanti', body)
@@ -130,12 +136,52 @@ class NormalizeTests(unittest.TestCase):
                                  for f in previous]),
             previous_open=previous, round_no=2, max_rounds=3, head_sha=SHA1, ci='pass',
             reviewer=REV)
-        self.assertEqual(second['verdict'], 'approve')
+        self.assertEqual(second['verdict'], review.UNPROVEN)
         self.assertEqual(second['blocking_findings'], [])
         self.assertTrue(second['non_blocking_findings'][0]['without_evidence'])
         # The other owners' findings stay open: the dispatcher checks them before promoting.
         self.assertEqual({f['owner'] for f in review.open_findings([first, ci, second])},
                          {OTHER, 'ci'})
+
+
+class NeutralVerdictTests(unittest.TestCase):
+    """The supervisor's request on #482: a reviewer whose blocking findings were all demoted
+    for lack of evidence gives no approval, neither for the quorum nor for clearing its
+    ``trust_policy`` (#461)."""
+
+    def demoted(self, earlier=(), round_no=1, reviewer=REV):
+        left = review.open_findings(list(earlier))
+        raw = raw_review('request_changes', [finding('unproven', evidence='')], previous=[
+            {'id': f['key'], 'status': 'resolved', 'note': 'ok'} for f in left])
+        return reviewed_by(reviewer, raw, left, round_no=round_no)
+
+    def test_the_round_is_not_approved_without_the_explicit_approvals(self):
+        approval = reviewed_by(OTHER, raw_review('approve'))
+        neutral = self.demoted()
+        self.assertEqual(neutral['verdict'], review.UNPROVEN)
+        # The quorum counts the reviewers whose flow verdict is an approval: not this one.
+        self.assertNotEqual(review.flow_verdict(neutral), 'approve')
+        self.assertEqual(review.round_verdict([approval, neutral]), review.UNPROVEN)
+        self.assertEqual(review.round_verdict([neutral]), review.UNPROVEN)
+        # A request for changes or the operator's decision still prevails.
+        fixing = reviewed_by(OTHER, raw_review('request_changes', [finding()]))
+        self.assertEqual(review.round_verdict([fixing, neutral]), 'request_changes')
+        deciding = reviewed_by(OTHER, raw_review('needs_operator', human='scelta'))
+        self.assertEqual(review.round_verdict([deciding, neutral]), 'needs_operator')
+        # The record of the neutral verdict is valid, and shown in the receipt.
+        self.assertEqual(markdown.read_marker(markdown.render_review(neutral, 'h'), 'review'),
+                         neutral)
+
+    def test_the_trust_policy_does_not_fall_without_an_explicit_approval(self):
+        first = reviewed_by(REV, trust([finding()]))
+        # Its own finding closed, and a new one without evidence: no approval, the trust
+        # policy still holds the merge.
+        second = self.demoted([first], round_no=2)
+        self.assertEqual(second['verdict'], review.UNPROVEN)
+        self.assertEqual([p['status'] for p in second['previous_findings']], ['resolved'])
+        self.assertEqual(review.trust_policy_parts([first, second]), [(REV, 1, PARTS)])
+        # An explicit approval of the same round clears it, as #461 decided.
+        self.assertEqual(review.trust_policy_parts([first, resolving([first])]), [])
 
 
 class DisputeTests(unittest.TestCase):
@@ -187,10 +233,33 @@ class FlowTests(Flow, unittest.TestCase):
                                                    [finding(evidence='')])))
         self.d.tick()
         (recorded,) = self.published('review')
-        self.assertEqual(recorded['verdict'], 'approve')
+        self.assertEqual(recorded['verdict'], review.UNPROVEN)
         self.assertEqual(recorded['blocking_findings'], [])
         self.assertNotIn('agent:changes', self.gh.labels[100])
         self.assertNotIn('fix', [a.kind for a in self.planned()])
+
+    def test_a_reviewer_with_only_demoted_findings_does_not_approve_the_pr(self):
+        # The supervisor's request on #482: the neutral verdict is no approval for the quorum.
+        # The PR is neither promoted nor fixed: it stays in review, and the next tick plans a
+        # new review of the same head.
+        self.make([], runner=FakeRunner(raw_review('request_changes',
+                                                   [finding(evidence='')])))
+        self.d.tick()
+        self.assertEqual(self.gh.labels[100], {'agent:review'})
+        self.assertEqual(self.published('policy'), [])  # no promotion
+        (action,) = self.planned()
+        self.assertEqual((action.kind, action.reason),
+                         ('review', 'a reviewer asked for changes without evidence and did not '
+                                    'approve'))
+        # The recorded round is never replayed as an approval.
+        self.assertNotIn('apply_review', [a.kind for a in self.planned()])
+
+    def test_at_the_round_limit_the_neutral_round_goes_to_the_operator(self):
+        self.make([], runner=FakeRunner(raw_review('request_changes', [finding(evidence='')])),
+                  cfg=dataclasses.replace(CFG, max_review_rounds=1))
+        self.d.tick()
+        self.assertEqual(self.gh.labels[100], {'agent:review'})
+        self.assertEqual([a.kind for a in self.planned()], ['round_limit'])
 
     def test_a_security_finding_without_evidence_sends_the_pr_to_the_fix(self):
         self.make([], runner=FakeRunner(raw_review('request_changes',
