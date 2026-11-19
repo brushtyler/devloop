@@ -5,8 +5,8 @@ changes. ``pin`` resolves ``<ref>`` to a commit reachable from the refs of ``ori
 copy already verified, reused without a fetch: the rollback), extracts ``devloop/``, ``core/``
 when the commit has it (#365), and the files of ``review_policy.sensitive_path_lists`` of that
 commit into ``<state_dir>/pinned-<sha12>``
-(not the documents of ``[docs] map``: they belong to the repository, #210), makes it read-only, checks that it imports and that its configuration, with the local overlay,
-loads, runs the smoke test of a new copy (``Smoke``, #260: ``tick --dry-run`` and one round of
+(not the documents of ``[docs] map``: they belong to the repository, #210), makes it read-only, checks that it imports and that its configuration, with the local overlay
+and the project file of ``state_dir`` (ADR 0006, R2: never a file of the commit), loads, runs the smoke test of a new copy (``Smoke``, #260: ``tick --dry-run`` and one round of
 ``watch`` from the copy), and only then points ``<state_dir>/current`` at it with an atomic
 rename. A failure leaves ``current`` as it was. Earlier copies stay for the rollback; a copy that
 fails the smoke test stays as ``rejected-<sha12>``, for the analysis.
@@ -48,8 +48,7 @@ import tomllib
 from contextlib import contextmanager, nullcontext
 from pathlib import Path, PurePosixPath
 
-from .config import (DEFAULT_SENSITIVE_LISTS, INSTALL_ROOT, ConfigError, apply_overlay,
-                     read_toml)
+from .config import DEFAULT_SENSITIVE_LISTS, INSTALL_ROOT, ConfigError, compose, read_toml
 
 POINTER = 'current'
 # The time of the last successful pin of each copy (#380): the order of ``prune``.
@@ -87,7 +86,13 @@ for module in (devloop.__main__, config):
         sys.exit(f'{module.__name__} imported from {module.__file__}, not from the copy')
 if config.INSTALL_ROOT.resolve() != root:
     sys.exit(f'the copy reads its lists from {config.INSTALL_ROOT}')
-cfg = config.load_config(None, sys.argv[2] or None)
+if len(sys.argv) > 3 and sys.argv[3]:
+    import inspect
+    if 'project' not in inspect.signature(config.load_config).parameters:
+        sys.exit('the copy cannot read the project file ' + sys.argv[3])
+    cfg = config.load_config(None, sys.argv[2] or None, sys.argv[3])
+else:
+    cfg = config.load_config(None, sys.argv[2] or None)
 print(len(cfg.review_policy.sensitive_files))
 '''
 # The smoke test (#260) runs ``python3 -m devloop <args>`` of the copy through this wrapper: an
@@ -224,17 +229,21 @@ def resolve(root, state, ref, fetch=True, fetch_lock=None):
     return sha
 
 
-def required_files(root, sha, local):
+def required_files(root, sha, local, project=None):
     """The files of ``review_policy.sensitive_path_lists`` that the copy of ``sha`` needs: read
-    from config.toml of that commit with the overlay ``local`` applied. Each must be a relative
-    path inside the root, and a regular file in the commit."""
+    from config.toml of that commit with the overlay ``local`` and the project file ``project``
+    (ADR 0006, R2, never a file of the commit) composed, when they exist. Each must be a
+    relative path inside the root, and a regular file in the commit."""
     try:
         data = tomllib.loads(_git(root, 'show', f'{sha}:devloop/config.toml'))
     except ValueError as exc:
         raise PinError(f'devloop/config.toml of {sha[:12]}: {exc}') from exc
     try:
-        if local and Path(local).exists():
-            data = apply_overlay(data, read_toml(Path(local), 'local config'))
+        overlay = (read_toml(Path(local), 'local config')
+                   if local and Path(local).exists() else None)
+        table = (read_toml(Path(project), 'project file')
+                 if project and Path(project).exists() else None)
+        data = compose(data, table, overlay)
     except ConfigError as exc:
         raise PinError(str(exc)) from exc
     table = data.get('review_policy', {})
@@ -280,17 +289,19 @@ def _remove(copy):
         shutil.rmtree(copy)
 
 
-def verify(copy, files, local, timeout=120):
+def verify(copy, files, local, timeout=120, project=None):
     """Check the copy: every required file is there, and in a Python with only the copy on its
-    module path the package imports and the configuration, with the overlay, loads its lists
-    from the copy."""
+    module path the package imports and the configuration, with the overlay and the project
+    file ``project`` (ADR 0006, R2) when it exists, loads its lists from the copy. A copy whose
+    code cannot read the project file is refused while there is one: it would run without it."""
     copy = Path(copy)
     for name in ['devloop/__init__.py', 'devloop/__main__.py', 'devloop/config.toml', *files]:
         if not (copy / name).is_file() or (copy / name).is_symlink():
             raise PinError(f'{copy.name}: {name} is missing')
     try:
         proc = subprocess.run([sys.executable, '-P', '-B', '-c', VERIFY, str(copy),
-                               _overlay(local)], cwd=copy, env=_copy_env(copy),
+                               _overlay(local), _overlay(project)], cwd=copy,
+                              env=_copy_env(copy),
                               capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         raise PinError(f'{copy.name}: the check did not end in {timeout} s') from None
@@ -307,7 +318,8 @@ def _copy_env(copy):
 
 
 def _overlay(local):
-    """The absolute path of the overlay ``local``, or '' when it does not exist."""
+    """The absolute path of the overlay ``local`` (or of the project file), or '' when it does
+    not exist."""
     return str(Path(local).resolve()) if local and Path(local).exists() else ''
 
 
@@ -338,10 +350,13 @@ class Smoke:
         self.root, self.log, self._run = Path(root), log, run
         self.watch_seconds, self.tick_seconds = watch_seconds, tick_seconds
 
-    def __call__(self, copy, local):
+    def __call__(self, copy, local, project=None):
         copy = Path(copy).resolve()
         overlay = _overlay(local)
         prefix = ['--local-config', overlay] if overlay else []
+        # The project file (ADR 0006, R2), as the launcher passes it.
+        if _overlay(project):
+            prefix += ['--project-config', _overlay(project)]
         seconds = str(self.watch_seconds)
         with tempfile.TemporaryDirectory(prefix='devloop-smoke-') as tmp:
             state = Path(tmp) / 'watch-state.json'
@@ -472,9 +487,10 @@ def _reject(state, sha, tmp):
 
 
 def pin(root, state, ref, local=None, log=print, fetch=True, smoke=True, fetch_lock=None,
-        keep=None, in_use=None, managed=None):
+        keep=None, in_use=None, managed=None, project=None):
     """Pin ``ref``: the verified copy of its commit, which ``state/current`` now points at.
-    ``local`` is the overlay (used when the file exists). On any failure ``current`` is left as
+    ``local`` is the overlay and ``project`` the project file (ADR 0006, R2), each used when
+    the file exists: the copy is checked with them. On any failure ``current`` is left as
     it was. ``root`` is the main checkout of the installation's source, whose ``origin`` the
     commit comes from; ``managed`` (default: ``root``) that of the managed repository, where the
     smoke test runs (ADR 0006, R1).
@@ -497,21 +513,23 @@ def pin(root, state, ref, local=None, log=print, fetch=True, smoke=True, fetch_l
         if reused:
             if _verified_copies(state).get(sha) != dest or dest.is_symlink():
                 raise PinError(f'{dest.name} exists but is not the copy of {sha[:12]}')
-            files = required_files(root, sha, local)
-            verify(dest, files, local)
+            files = required_files(root, sha, local, project)
+            verify(dest, files, local, project=project)
         else:
-            files = required_files(root, sha, local)
+            files = required_files(root, sha, local, project)
             tmp = _extract(root, sha, files, dest)
             failed = None
             try:
                 _set_mode(tmp, writable=False)
-                verify(tmp, files, local)
+                verify(tmp, files, local, project=project)
                 if smoke is False:
                     log(f'smoke test of {sha[:12]} skipped (--no-smoke)')
                 else:
                     try:
+                        # A smoke test of the caller's gets the project file only when there
+                        # is one: one written before ADR 0006, R2 takes two arguments.
                         (Smoke(managed or root, log=log) if smoke is True else smoke)(
-                            tmp, local)
+                            tmp, local, *((project,) if _overlay(project) else ()))
                     except StepFailed as exc:
                         failed = exc
                 if failed is None:
@@ -754,9 +772,10 @@ class AutoPin:
     besides ``current`` a successful pin keeps (#380)."""
 
     def __init__(self, root, state, local=None, log=print, smoke=True, fetch_lock=None,
-                 keep=None):
+                 keep=None, project=None):
         self.root, self.state, self.local, self.log = Path(root), Path(state), local, log
         self.smoke, self.fetch_lock, self.keep = smoke, fetch_lock, keep
+        self.project = project  # the project file (ADR 0006, R2), or None
 
     def request(self, pr, head):
         request(self.state, pr, head)
@@ -845,7 +864,7 @@ class AutoPin:
 
     def pin(self, ref):
         return pin(self.root, self.state, ref, self.local, log=self.log, smoke=self.smoke,
-                   fetch_lock=self.fetch_lock, keep=self.keep)
+                   fetch_lock=self.fetch_lock, keep=self.keep, project=self.project)
 
     def current(self):
         """The copy ``current`` points at now, or None: the operator may pin another one by

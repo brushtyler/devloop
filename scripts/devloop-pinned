@@ -6,7 +6,9 @@
 From the clone this script belongs to, it runs ``python3 -P -m devloop`` with ``PYTHONPATH`` on
 the copy that ``.ssdlc/devloop/current`` points at (made by ``python3 -m devloop pin <ref>``)
 and, when ``.ssdlc/devloop/config.local.toml`` exists, ``--local-config`` on it: the keys it sets
-replace those of the copy's ``devloop/config.toml``. It works run directly by the dedicated user
+replace those of the copy's ``devloop/config.toml``. When ``project.toml`` exists beside the
+overlay, it passes ``--project-config`` on it: the project file of the host (ADR 0006, R2), with
+the facts and the added restrictions of the managed repository. It works run directly by the dedicated user
 or through ``sudo -u devloop -H``, and refuses to run as root without ``--allow-root``.
 
 With ``--state-dir DIR`` (ADR 0006, R1) the pinned copy and the overlay are those of ``DIR``, an
@@ -52,6 +54,10 @@ def command(root, argv, python=sys.executable, state=None):
                  '`python3 -m devloop pin origin/main` from the main checkout first')
     local = state / 'config.local.toml'
     extra = ['--local-config', str(local)] if local.is_file() else []
+    # The project file on the host (ADR 0006, R2), beside the overlay.
+    project = state / 'project.toml'
+    if project.is_file():
+        extra += ['--project-config', str(project)]
     env = {k: v for k, v in os.environ.items()
            if k not in ('PYTHONPATH', 'PYTHONHOME', STATE_ENV)}
     env['PYTHONPATH'] = str(copy)

@@ -49,6 +49,8 @@ class ConfigError(ValueError):
 # hold a merge).
 MERGE_MODES = ('off', 'strict', 'auto')
 DEFAULT_OPERATOR_ONLY = ('docs/adr/', 'AGENTS.md', 'CLAUDE.md')
+DEFAULT_PROTECTED = ('.github/',)
+DEFAULT_BLOCKED = ('bloccata',)
 
 
 @dataclass(frozen=True)
@@ -1128,8 +1130,10 @@ def parse_supervisor(roles, agents):
     return name, SupervisorActor(name=name, kind=kind, provider=provider, model=model)
 
 
-def parse_config(data, root=INSTALL_ROOT):
-    """``root`` is where relative ``review_policy.sensitive_path_lists`` are read."""
+def parse_config(data, root=INSTALL_ROOT, project=''):
+    """``root`` is where relative ``review_policy.sensitive_path_lists`` are read. ``project``
+    is the SHA-256 of the project file (ADR 0006, R2) composed into ``data``, '' without one:
+    it enters the version of the review policy, and so every receipt."""
     test_cmd = _require(data, 'test_cmd', str, 'config')
     agents = {}
     for key, table in (data.get('agents') or {}).items():
@@ -1232,6 +1236,8 @@ def parse_config(data, root=INSTALL_ROOT):
           agents[k].effort, agents[k].review_args,
           tuple((f.model, f.effort) for f in agents[k].fallback_models),
           agents[k].review_commands) for k in pool], agents)
+    if project:
+        review_policy = dataclasses.replace(review_policy, project=project)
     # The roles whose turns can run (#365): conclave and advisory only when configured.
     budget_roles = (BUDGET_BASE_ROLES + (('conclave',) if conclave else ())
                     + (('advisory',) if review_policy.advisory_reviewer else ()))
@@ -1247,9 +1253,9 @@ def parse_config(data, root=INSTALL_ROOT):
         implementer=implementer, reviewer=pool[0], reviewers=pool, agents=agents,
         preflight=preflight, conclave=conclave,
         trusted_users=trusted,
-        blocked_labels=_str_list(data, 'blocked_labels', 'config', ('bloccata',)),
+        blocked_labels=_str_list(data, 'blocked_labels', 'config', DEFAULT_BLOCKED),
         priority_labels=_str_list(data, 'priority_labels', 'config', ('prerequisito',)),
-        protected_paths=_str_list(data, 'protected_paths', 'config', ('.github/',)),
+        protected_paths=_str_list(data, 'protected_paths', 'config', DEFAULT_PROTECTED),
         apps=apps, app_key_dir=key_dir, agent_stall_action=stall_action,
         local_tests=local_tests, ci_rerun_unrelated=ci_rerun,
         block_uncertain_turns=block_uncertain, story_identity=story_identity,
@@ -1343,20 +1349,155 @@ def _check_overlay(table, schema, where):
             _check_overlay(value, expected, at)
 
 
+def _merge(base, top):
+    """``base`` with the keys of ``top`` set over it: tables merge key by key, any other value
+    (a list too) replaces the one below. Neither is changed."""
+    out = dict(base)
+    for key, value in top.items():
+        below = out.get(key)
+        out[key] = (_merge(below, value) if isinstance(value, dict) and isinstance(below, dict)
+                    else value)
+    return out
+
+
 def apply_overlay(data, overlay):
     """``data`` with the keys of ``overlay`` (the local config, #174) set over it: tables merge
     key by key, any other value (a list too) replaces the one below. A key that config.toml
     cannot have is refused."""
     _check_overlay(overlay, OVERLAY_KEYS, '')
+    return _merge(data, overlay)
 
-    def merge(base, top):
-        out = dict(base)
-        for key, value in top.items():
-            below = out.get(key)
-            out[key] = (merge(below, value) if isinstance(value, dict) and isinstance(below, dict)
-                        else value)
+
+# The project file (ADR 0006, R2): on the host, in ``state_dir`` beside the overlay, written by
+# the operator; never in the managed repository, a PR branch or the pinned copy. Its schema is
+# closed: the facts of the project, which replace the installation's and which the overlay
+# replaces in turn, and the restrictions, which only add to those of the installation and the
+# overlay. Every other key (trust, identities, limits, activations) is the overlay's alone.
+PROJECT_CONFIG = 'project.toml'
+PROJECT_FACTS = {
+    'test_cmd': None, 'local_tests': None, 'language': None, 'priority_labels': None,
+    'docs': {'map': {'*': None}},
+}
+# Each restriction with its value when neither the installation nor the overlay sets it.
+PROJECT_RESTRICTIONS = {
+    ('protected_paths',): DEFAULT_PROTECTED,
+    ('blocked_labels',): DEFAULT_BLOCKED,
+    ('review_policy', 'sensitive_paths'): ReviewPolicy.sensitive_paths,
+    ('review_policy', 'sensitive_path_lists'): DEFAULT_SENSITIVE_LISTS,
+    ('review_policy', 'zero', 'checks'): (),
+    ('merge', 'operator_only_paths'): DEFAULT_OPERATOR_ONLY,
+}
+
+
+def _project_schema():
+    schema = dict(PROJECT_FACTS)
+    for path in PROJECT_RESTRICTIONS:
+        node = schema
+        for key in path[:-1]:
+            node = node.setdefault(key, {})
+        node[path[-1]] = None
+    return schema
+
+
+PROJECT_KEYS = _project_schema()
+_MISSING = object()
+
+
+def _check_project(table, schema, overlay, where=''):
+    """Refuse a key the project file cannot have, naming it: a key of the overlay (``overlay``
+    is the overlay's schema at this level, or None) is told apart from an unknown one."""
+    for key, value in table.items():
+        at = f'{where}.{key}' if where else key
+        if key in schema or '*' in schema:
+            expected = schema[key] if key in schema else schema['*']
+        elif isinstance(overlay, dict) and (key in overlay or '*' in overlay):
+            raise ConfigError(f'project file: {at!r} is not a key of the project file: set it '
+                              'in the local overlay (config.local.toml)')
+        else:
+            raise ConfigError(f'project file: unknown key {at!r}')
+        if isinstance(expected, dict):
+            if not isinstance(value, dict):
+                raise ConfigError(f'project file: {at} must be a table')
+            below = overlay.get(key, overlay.get('*')) if isinstance(overlay, dict) else None
+            _check_project(value, expected, below, at)
+
+
+def _get(table, path):
+    for key in path:
+        if not isinstance(table, dict) or key not in table:
+            return _MISSING
+        table = table[key]
+    return table
+
+
+def _nested(path, value):
+    for key in reversed(path):
+        value = {key: value}
+    return value
+
+
+def _facts(project):
+    """``project`` without its restrictions, and without the tables they leave empty."""
+    def strip(table, prefix):
+        out = {}
+        for key, value in table.items():
+            path = prefix + (key,)
+            if path in PROJECT_RESTRICTIONS:
+                continue
+            if isinstance(value, dict) and any(r[:len(path)] == path
+                                               for r in PROJECT_RESTRICTIONS):
+                value = strip(value, path)
+                if not value:
+                    continue
+            out[key] = value
         return out
-    return merge(data, overlay)
+    return strip(project, ())
+
+
+def _restrict(data, path, extra, default):
+    """``data`` with the restriction ``extra`` of the project file added to the one at
+    ``path``: the entries already there stay, in their order, and those of ``extra`` that are
+    not there follow. What is below and not a list, or not in a table, is left to
+    ``parse_config``, which refuses it."""
+    where = '.'.join(path)
+    if not isinstance(extra, list):
+        raise ConfigError(f'project file: {where}: expected a list')
+    for n in range(1, len(path)):
+        above = _get(data, path[:n])
+        if above is not _MISSING and not isinstance(above, dict):
+            return data
+    floor = _get(data, path)
+    if floor is _MISSING:
+        floor = list(default)
+    if not isinstance(floor, list):
+        return data
+    if path == ('review_policy', 'zero', 'checks') and extra and not floor:
+        raise ConfigError('project file: review_policy.zero.checks: level 0 has no checks in '
+                          'the installation and the local overlay; the project file only adds '
+                          'checks to them, it never turns level 0 on')
+    union = list(floor)
+    for item in extra:
+        if item not in union:
+            union.append(item)
+    return _merge(data, _nested(path, union))
+
+
+def compose(data, project=None, overlay=None):
+    """The raw configuration (ADR 0006, R2): the installation's ``data``, the facts of the
+    ``project`` file over it, the ``overlay`` over both, and the restrictions of the project
+    file added on top. ``project`` and ``overlay`` are parsed tables, or None without the file.
+    A key the project file cannot have is refused, naming it."""
+    if project is not None:
+        _check_project(project, PROJECT_KEYS, OVERLAY_KEYS)
+        data = _merge(data, _facts(project))
+    if overlay is not None:
+        data = apply_overlay(data, overlay)
+    if project is not None:
+        for path, default in PROJECT_RESTRICTIONS.items():
+            extra = _get(project, path)
+            if extra is not _MISSING:
+                data = _restrict(data, path, extra, default)
+    return data
 
 
 def read_toml(path, what='config'):
@@ -1367,19 +1508,118 @@ def read_toml(path, what='config'):
         raise ConfigError(f'{what} {path}: {exc}') from exc
 
 
-def load_data(path=None, local=None):
-    """The raw configuration: ``path`` (default: config.toml of this installation) with the
-    local overlay ``local`` (#174) applied, when given."""
-    data = read_toml(Path(path) if path else DEFAULT_CONFIG)
+# What each file of the configuration is called in an error.
+SOURCES = {'config': 'config', 'local': 'local config', 'project': 'project file'}
+
+
+def read_sources(path=None, local=None, project=None):
+    """The files of the configuration as ``{name: (path, bytes)}``: ``config`` (``path``,
+    default: config.toml of this installation), ``local`` (the overlay, #174) and ``project``
+    (the project file, ADR 0006, R2) when given. Each is read once: what is hashed is what is
+    parsed."""
+    paths = {'config': Path(path) if path else DEFAULT_CONFIG}
     if local:
-        data = apply_overlay(data, read_toml(Path(local), 'local config'))
-    return data
+        paths['local'] = Path(local)
+    if project:
+        paths['project'] = Path(project)
+    sources = {}
+    for name, where in paths.items():
+        try:
+            sources[name] = (where, where.read_bytes())
+        except OSError as exc:
+            raise ConfigError(f'{SOURCES[name]} {where}: {exc}') from exc
+    return sources
 
 
-def load_config(path=None, local=None):
-    """The configuration of ``path`` (default: config.toml of this installation) with the local
-    overlay ``local`` (#174) applied, when given."""
-    return parse_config(load_data(path, local))
+def compose_sources(sources):
+    """The raw configuration of ``sources`` (``read_sources``), as ``compose``."""
+    tables = {}
+    for name, (where, raw) in sources.items():
+        try:
+            tables[name] = tomllib.loads(raw.decode())
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            raise ConfigError(f'{SOURCES[name]} {where}: {exc}') from exc
+    return compose(tables['config'], tables.get('project'), tables.get('local'))
+
+
+def _sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def project_hash(sources):
+    """The SHA-256 of the project file of ``sources``, '' without one."""
+    return _sha(sources['project'][1]) if 'project' in sources else ''
+
+
+def parse_sources(sources, root=INSTALL_ROOT):
+    """The configuration of ``sources`` (``read_sources``), the project file's hash in the
+    review policy."""
+    return parse_config(compose_sources(sources), root, project_hash(sources))
+
+
+def load_data(path=None, local=None, project=None):
+    """The raw configuration: ``path`` (default: config.toml of this installation) with the
+    project file ``project`` (ADR 0006, R2) and the local overlay ``local`` (#174) composed,
+    when given (``compose``)."""
+    return compose_sources(read_sources(path, local, project))
+
+
+def load_config(path=None, local=None, project=None):
+    """The configuration of ``path`` (default: config.toml of this installation) with the
+    project file ``project`` (ADR 0006, R2) and the local overlay ``local`` (#174), when
+    given."""
+    return parse_sources(read_sources(path, local, project))
+
+
+# The trust keys (ADR 0006, K1 and T1): a change of a value under them is recorded, with the
+# value before and after, in the journal of the dispatcher at its start and at each reload.
+TRUST_KEYS = ('repo', 'base_branch', 'state_dir', 'source', 'test_cmd', 'trusted_users',
+              'preflight', 'conclave', 'roles', 'agents', 'apps', 'merge', 'review_policy',
+              'protected_paths', 'blocked_labels', 'budget', 'delegations', 'agent_user', 'pin')
+
+
+def _plain(value):
+    """``value`` as JSON has it (a TOML date as its text)."""
+    return json.loads(json.dumps(value, default=str))
+
+
+def trust_values(data):
+    """The values under ``TRUST_KEYS`` of the raw configuration ``data``, by dotted key: a
+    table is walked down to its values, a list is one value."""
+    out = {}
+
+    def walk(at, value):
+        if isinstance(value, dict) and value:
+            for key, sub in value.items():
+                walk(f'{at}.{key}', sub)
+        else:
+            out[at] = _plain(value)
+    for key in TRUST_KEYS:
+        if key in data:
+            walk(key, data[key])
+    return out
+
+
+def file_hashes(sources):
+    """``{'overlay', 'project'}``: the SHA-256 of each of those files of ``sources`` (as
+    ``read_sources`` gives them; None as the bytes of a file that cannot be read), None
+    without the file."""
+    def sha(name):
+        raw = sources[name][1] if name in sources else None
+        return _sha(raw) if raw is not None else None
+    return {'overlay': sha('local'), 'project': sha('project')}
+
+
+def fingerprint(sources, data=None):
+    """What the journal records of a configuration (ADR 0006, T1): the hashes of the overlay
+    and of the project file (``file_hashes``), that of the effective raw configuration
+    (``effective``, of its canonical JSON) and its trust values (``trust_values``). ``data`` is
+    the composition of ``sources``, composed here when not given."""
+    data = compose_sources(sources) if data is None else data
+    text = json.dumps(data, sort_keys=True, separators=(',', ':'), ensure_ascii=False,
+                      default=str)
+    return {**file_hashes(sources), 'effective': _sha(text.encode('utf-8')),
+            'trust': trust_values(data)}
 
 
 # The keys ``devloop run`` reads again before each tick (#278): the operating limits. Any other
@@ -1396,50 +1636,69 @@ class Reloader:
     key is logged and waits for a restart; a configuration that does not load is logged and the
     previous one stays. Either way the files are loaded again only after their next change.
     The first ``refresh()`` loads them in any case: they may have changed between the load of
-    ``cfg`` and the creation of the reloader, and a fingerprint taken here would hide that."""
+    ``cfg`` and the creation of the reloader, and a fingerprint taken here would hide that.
 
-    def __init__(self, cfg, path=None, local=None, *, log):
+    The project file ``project`` (ADR 0006, R2), when given, is read again with them. Each
+    time the files are loaded, ``record`` (when given) gets the ``fingerprint`` of what was
+    read, or, for a configuration that does not load, the hashes of its files with
+    ``effective`` and ``trust`` None and the ``error``: the trace of T1 (ADR 0006, K1). An
+    exception of ``record`` is logged, and the configuration of the tick is the same."""
+
+    def __init__(self, cfg, path=None, local=None, project=None, *, log, record=None):
         self.cfg = cfg
         self.log = log
-        self.paths = (Path(path) if path else DEFAULT_CONFIG,) + ((Path(local),) if local else ())
+        self.record = record
+        self.paths = {'config': Path(path) if path else DEFAULT_CONFIG}
+        if local:
+            self.paths['local'] = Path(local)
+        if project:
+            self.paths['project'] = Path(project)
         self._seen = None  # no content compared with ``cfg`` yet
 
     @staticmethod
     def _read(path):
-        """``(sha256, content)`` of ``path``, or None when it cannot be read."""
+        """The content of ``path``, or None when it cannot be read."""
         try:
-            raw = path.read_bytes()
+            return path.read_bytes()
         except OSError:
             return None
-        return hashlib.sha256(raw).hexdigest(), raw
 
-    def _load(self, now):
-        """The configuration of the contents just read (the ones hashed), as ``load_config``."""
-        data = None
-        for path in self.paths:
-            what = 'config' if data is None else 'local config'
-            if now[path] is None:
-                raise ConfigError(f'{what} {path}: cannot be read')
-            try:
-                table = tomllib.loads(now[path][1].decode())
-            except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
-                raise ConfigError(f'{what} {path}: {exc}') from exc
-            data = table if data is None else apply_overlay(data, table)
-        return parse_config(data)
+    def _load(self, sources):
+        """The configuration of the contents just read (the ones hashed), as ``load_config``,
+        and their ``fingerprint``."""
+        for name, (path, raw) in sources.items():
+            if raw is None:
+                raise ConfigError(f'{SOURCES[name]} {path}: cannot be read')
+        data = compose_sources(sources)
+        return parse_config(data, project=project_hash(sources)), fingerprint(sources, data)
+
+    def _record(self, print_):
+        if self.record is None:
+            return
+        try:
+            self.record(print_)
+        except Exception as exc:  # the trace failed: said, and the tick goes on
+            self.log(f'config: the record of the configuration was not written: '
+                     f'{type(exc).__name__}: {exc}')
 
     def refresh(self):
         """The configuration of the next tick."""
-        now = {p: self._read(p) for p in self.paths}
+        sources = {name: (path, self._read(path)) for name, path in self.paths.items()}
+        now = {name: _sha(raw) if raw is not None else None
+               for name, (_, raw) in sources.items()}
         changed = now != self._seen
         self._seen = now
         if not changed:
             return self.cfg
         try:
-            new = self._load(now)
+            new, print_ = self._load(sources)
         except Exception as exc:  # the loop goes on with the configuration it has
             self.log(f'config: changed but not valid, the previous configuration stays in use: '
                      f'{type(exc).__name__}: {exc}')
+            self._record({**file_hashes(sources), 'effective': None, 'trust': None,
+                          'error': f'{type(exc).__name__}: {exc}'})
             return self.cfg
+        self._record(print_)
         restart = [f.name for f in dataclasses.fields(Config) if f.name not in LIVE_KEYS
                    and getattr(new, f.name) != getattr(self.cfg, f.name)]
         if restart:

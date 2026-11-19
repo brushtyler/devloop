@@ -16,14 +16,15 @@ from .agents import AgentRunner, isolated_env
 from .agentuser import GH_CONFIG, SHARED_DIR, WORKTREES_DIR, AgentUser, AgentUserError, SharedDir
 from .agentuser import check as check_isolation
 from .apps import DISPATCHER, MERGER, Identities
-from .config import ConfigError, Reloader, load_config
+from .config import (PROJECT_CONFIG, ConfigError, Reloader, fingerprint, load_config,
+                     read_sources)
 from .context import both_labels_warning, label_transition
 from .dispatch_advisory import AdvisoryFailures, AdvisoryResults
 from .dispatcher import (Dispatcher, TickLog, Workers, ensure_labels, pr_counts_line,
                          pr_status_line)
 from .github import GitHub, GitHubError
 from .housekeeping import Housekeeping
-from .journal import MIB
+from .journal import MIB, TurnJournal
 from .ledger import Ledger
 from .outbox import for_identities
 from .planning import plan, queue_lines
@@ -55,6 +56,84 @@ def state_path(cfg, root):
         raise ConfigError(f'state_dir: {state} is not the directory given to the launcher, '
                           f'{given}: set state_dir = "{given}" in its {pin.LOCAL_CONFIG}')
     return state
+
+
+def project_of(args):
+    """The project file given with ``--project-config`` (ADR 0006, R2), or None."""
+    return getattr(args, 'project_config', None) or None
+
+
+def tracked(root, path):
+    """Whether git tracks ``path`` in the checkout ``root``."""
+    try:
+        return subprocess.run(['git', '-C', str(root), 'ls-files', '--error-unmatch', '--',
+                               str(path)], capture_output=True).returncode == 0
+    except OSError:
+        return False
+
+
+def check_project(project, state, root):
+    """``ConfigError`` unless the project file ``project`` (ADR 0006, R2), if any, is
+    ``<state_dir>/project.toml`` on the host, and not a file the managed repository (its main
+    checkout ``root``) tracks: the project file never comes from the repository, a PR branch
+    or the worktree of a turn."""
+    if project is None:
+        return
+    expected = Path(state) / PROJECT_CONFIG
+    if Path(project).resolve() != expected.resolve():
+        raise ConfigError(f'project file: {project} is not {expected}: the project file is '
+                          f'{PROJECT_CONFIG} in the state_dir, on the host')
+    if tracked(root, expected):
+        raise ConfigError(f'project file: {expected} is a file of the managed repository: the '
+                          'project file belongs to the host, never to the repository')
+
+
+def load(args, root=None):
+    """The configuration of ``args``: the installation's, the project file (ADR 0006, R2) and
+    the overlay. A project file given is checked (``check_project``) on the main checkout
+    ``root`` (default: ``main_checkout()``)."""
+    cfg = load_config(args.config, args.local_config, project_of(args))
+    if project_of(args) is not None:
+        root = root or main_checkout()
+        check_project(project_of(args), state_path(cfg, root), root)
+    return cfg
+
+
+def config_recorder(journal, when, log):
+    """The trace T1 (ADR 0006, K1): ``record(fingerprint, only_if_changed=False)`` writes the
+    configuration in the journal (``TurnJournal.configuration``) and says in the log what it
+    recorded: the hashes and each trust key changed, before and after."""
+    def short(sha):
+        return sha[:12] if sha else 'none'
+
+    def record(print_, only_if_changed=False):
+        first = not journal.configurations()
+        changes = journal.configuration(when, print_, only_if_changed=only_if_changed)
+        if changes is None:
+            return
+        log(f'config ({when}): overlay {short(print_.get("overlay"))}, project file '
+            f'{short(print_.get("project"))}, effective {short(print_.get("effective"))}'
+            + (f': not valid, {print_["error"]}' if print_.get('error') else ''))
+        if first:
+            log(f'config: first record of the trust keys ({len(changes)})')
+            return
+        for change in changes:
+            log(f'config: trust key {change["key"]} {change["old"]!r} -> {change["new"]!r}')
+    return record
+
+
+def record_start(args, dispatcher, log):
+    """Record the configuration the dispatcher starts with in its journal (ADR 0006, T1);
+    nothing for a dispatcher without a journal of its own. Returns the recorder of the reloads,
+    or None."""
+    journal = getattr(getattr(dispatcher, 'ledger', None), 'journal', None)
+    if not isinstance(journal, TurnJournal):
+        return None
+    record = config_recorder(journal, 'start', log)
+    record(fingerprint(read_sources(args.config, args.local_config, project_of(args))))
+    reload = config_recorder(journal, 'reload', log)
+    # The first reload reads the files in any case: recorded only when they changed since.
+    return lambda print_: reload(print_, only_if_changed=True)
 
 
 def installation_source(cfg, root):
@@ -135,8 +214,8 @@ def agent_environment(cfg, gh_config, agent_user=None):
 
 
 def build(args):
-    cfg = load_config(args.config, args.local_config)
     root = main_checkout()
+    cfg = load(args, root)
     state = state_path(cfg, root)
     try:
         identities = Identities.from_config(cfg)
@@ -189,6 +268,7 @@ def build(args):
                             activity=current, ledger=ledger,
                             merger=identities.merger(),
                             pinner=auto_pinner(cfg, root, state, args.local_config, tick_log,
+                                               project=project_of(args),
                                                fetch_lock=ws.shared_lock,
                                                keep=keep_pins(cfg)),
                             memory=unavailability.Memory(state),
@@ -253,8 +333,9 @@ def run_fallback(args):
     """``devloop fallback reset <agent>`` (#151): forget the models ``agent`` remembers
     unavailable, so that its next turn starts from the configured model. Local files only."""
     try:
-        cfg = load_config(args.config, args.local_config)
-        state = state_path(cfg, main_checkout())
+        root = main_checkout()
+        cfg = load(args, root)
+        state = state_path(cfg, root)
     except ConfigError as exc:
         sys.exit(f'devloop: invalid config: {exc}')
     memory = unavailability.Memory(state)
@@ -274,15 +355,18 @@ def run_pin(args):
     new copy (#260), and the log says so. The commit comes from the installation's source
     (``source``, ADR 0006, R1), the smoke test runs in the managed repository."""
     try:
-        cfg = load_config(args.config, args.local_config)
         root = main_checkout()
+        cfg = load(args, root)
         state = state_path(cfg, root)
+        local = args.local_config or state / pin.LOCAL_CONFIG
+        # The project file of the state_dir (ADR 0006, R2), as the launcher would pass it.
+        project = project_of(args) or state / PROJECT_CONFIG
+        check_project(project if Path(project).exists() else None, state, root)
     except ConfigError as exc:
         sys.exit(f'devloop: invalid config: {exc}')
-    local = args.local_config or state / pin.LOCAL_CONFIG
     try:
         pin.pin(installation_source(cfg, root), state, args.ref, local, log=log,
-                smoke=not args.no_smoke, keep=keep_pins(cfg), managed=root)
+                smoke=not args.no_smoke, keep=keep_pins(cfg), managed=root, project=project)
     except (pin.PinError, ConfigError, OSError) as exc:
         sys.exit(f'devloop: pin failed, the pinned copy is unchanged: {exc}')
 
@@ -303,7 +387,7 @@ def run_watch(parser, args):
         except ValueError as exc:
             parser.error(f'watch: {exc}')
     try:
-        cfg = load_config(args.config, args.local_config)
+        cfg = load(args)
         state = (Path(args.state) if args.state
                  else state_path(cfg, main_checkout()) / watch.STATE_FILE)
     except ConfigError as exc:
@@ -346,7 +430,7 @@ def run_report(parser, args):
         except ValueError:
             parser.error(f'report: --day must be a day in the form YYYY-MM-DD, not {args.day!r}')
     try:
-        cfg = load_config(args.config, args.local_config)
+        cfg = load(args)
     except ConfigError as exc:
         sys.exit(f'devloop: invalid config: {exc}')
     if args.publish and not cfg.report.issue:
@@ -430,6 +514,10 @@ def main(argv=None):
     parser.add_argument('--local-config', metavar='PATH',
                         help='local overlay: only the keys it sets replace those of the config '
                              '(scripts/devloop-pinned passes <state_dir>/config.local.toml)')
+    parser.add_argument('--project-config', metavar='PATH',
+                        help='project file on the host, <state_dir>/project.toml: the facts and '
+                             'the added restrictions of the managed repository (scripts/'
+                             'devloop-pinned passes it when it exists)')
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('setup', help='create or update the agent:* labels')
     sub.add_parser('status', help='show the running action, devloop PRs, ready issues and the '
@@ -506,7 +594,7 @@ def main(argv=None):
         if not follow.NAME.fullmatch(args.target):
             sys.exit(f'devloop: follow needs issue-<N> or pr-<N>, not {args.target!r}')
         try:
-            cfg = load_config(args.config, args.local_config)
+            cfg = load(args)
             root = state_path(cfg, main_checkout()) / 'worktrees'
         except ConfigError as exc:
             sys.exit(f'devloop: invalid config: {exc}')
@@ -607,6 +695,14 @@ def main(argv=None):
             sys.exit(f'devloop: {exc}')
     with single_instance(state / 'dispatcher.lock') as lock:
         hold_lock(dispatcher, lock.fileno())
+        recorder = None
+        if args.command in ('tick', 'run'):
+            # The trace T1 of the configuration (ADR 0006, K1), under the lock: no record, no
+            # tick.
+            try:
+                recorder = record_start(args, dispatcher, log)
+            except (ConfigError, GitHubError) as exc:
+                sys.exit(f'devloop: the configuration was not recorded in the journal: {exc}')
         if args.command == 'cleanup':
             for name in dispatcher.ws.names():
                 dispatcher.ws.remove(name)
@@ -624,7 +720,8 @@ def main(argv=None):
                 dispatcher.tick(dry_run=args.dry_run)
             elif args.command == 'run':
                 code = run_loop(cfg, state, dispatcher, timeout,
-                                Reloader(cfg, args.config, args.local_config, log=log))
+                                Reloader(cfg, args.config, args.local_config, project_of(args),
+                                         log=log, record=recorder))
                 if code:
                     sys.exit(code)
         except pin.PinError as exc:
