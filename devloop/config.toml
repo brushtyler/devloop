@@ -127,6 +127,14 @@ advisory_reviewer = ""
 # remembered unavailable, unless it owns an open finding; a round keeps its reviewers until it
 # ends.
 # provider_quorum = false
+# The ban of ADR 0005, P5-6 (issue #410), off by default (D10), independent of provider_quorum:
+# at both levels a reviewer's fallback model never runs when its provider is that of an author of
+# the PR (the implementer, every fixer and sync, with the fallbacks they actually ran); with no
+# model of the chain left the review turn fails (`tool_failure`). On, every agent and fallback
+# model declares its `provider`, and a reviewer of the pool with a fallback of a provider other
+# than its own model's and the same as an agent's that may implement (agy falling back on Claude
+# while claude implements) stops devloop at startup. It enters the policy version.
+# fallback_provider_ban = false
 
 # Level 0 (issue #107): no review. It applies only when a trusted user added `label` to the PR
 # (the latest event of that label added it), the level computed above is 1, and the PR's full
@@ -408,7 +416,8 @@ effort = "high"
 # budget exhausted, model not available, rate limit), the same turn runs again on the next
 # fallback model, each at most once per action (issue #121). A fallback inherits `effort` when
 # it sets none, and never reasons below high. Its `provider` (issue #409) is its own, never the
-# agent's: required, as the agent's, only with review_policy.provider_quorum. What counts as unavailable: `unavailable_patterns`
+# agent's: required, as the agent's, only with review_policy.provider_quorum or
+# review_policy.fallback_provider_ban (#410). What counts as unavailable: `unavailable_patterns`
 # (default "RESOURCE_EXHAUSTED", "quota", "429", "model .* not available") in the output of a
 # failed turn, each as a delimited word or code (#443), or an exit code in
 # `unavailable_exit_codes` (default none). An output with only `(code 400)` never counts, not
