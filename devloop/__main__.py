@@ -507,6 +507,14 @@ def main(argv=None):
         restart = activity.describe_restart(state)
         if restart:
             log(restart)
+        # #430: the copy this runs from, behind the base branch in the installation's files.
+        try:
+            behind = dispatcher.pinner and dispatcher.pinner.behind(cfg.base_branch,
+                                                                    cfg.pin.touches)
+        except (pin.PinError, OSError) as exc:
+            behind = f'pinned copy: not compared with origin/{cfg.base_branch}: {exc}'
+        if behind:
+            log(behind)
         for line in unavailability.describe(state):
             log(line)
         if label_transition(dispatcher.gh, cfg.labels) == 'both':

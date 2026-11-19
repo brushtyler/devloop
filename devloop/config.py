@@ -161,6 +161,15 @@ class AgentUserPolicy:
     check: bool = True
 
 
+@dataclass(frozen=True)
+class DelegationPolicy:
+    """``[delegations]`` (ADR 0005): the revocation keys of the delegations to the supervisor,
+    all off by default (D10). ``retry_own_prs`` (P5-2, #406): a ``tool_failure`` escalation on a
+    PR implemented by the supervisor's agent goes to the supervisor, who may retry it within
+    ``MAX_RETRIES``; every other class on such a PR still goes to the operator."""
+    retry_own_prs: bool = False
+
+
 # The roles of a turn in the budget envelope (#365): the kinds of the turns charged to a story.
 # A readiness check (``preflight``) comes before the takeover and is outside the envelope.
 BUDGET_ROLES = ('implement', 'fix', 'review', 'sync', 'conclave', 'advisory')
@@ -389,6 +398,8 @@ class Config:
     # The agent whose identity, besides trusted_users, may hold and release a merge in ``auto``
     # mode (#172), or '' when none is configured.
     supervisor: str = ''
+    # The delegations to the supervisor (ADR 0005), each off by default (D10).
+    delegations: DelegationPolicy = field(default_factory=DelegationPolicy)
     pin: PinPolicy = field(default_factory=PinPolicy)
     run: RunPolicy = field(default_factory=RunPolicy)
     # The daily summary (#256).
@@ -674,6 +685,20 @@ def parse_pin(table, lists):
                           'at least 0')
     return PinPolicy(auto=auto, paths=('devloop/', 'core/', *lists),
                      restart_max_wait_minutes=wait)
+
+
+def parse_delegations(table):
+    """``[delegations]`` (ADR 0005): ``retry_own_prs``, a boolean, default false (D10)."""
+    if not isinstance(table, dict):
+        raise ConfigError('delegations: expected a table')
+    names = {f.name for f in dataclasses.fields(DelegationPolicy)}
+    unknown = set(table) - names
+    if unknown:
+        raise ConfigError(f'delegations: unknown keys {sorted(unknown)}')
+    for key, value in table.items():
+        if not isinstance(value, bool):
+            raise ConfigError(f'delegations.{key}: expected true or false')
+    return DelegationPolicy(**table)
 
 
 def parse_run(table):
@@ -1147,6 +1172,7 @@ def parse_config(data, root=INSTALL_ROOT):
         block_uncertain_turns=block_uncertain, story_identity=story_identity,
         publication_outbox=outbox, attempt_identity=attempt_identity, budget=budget,
         merge=parse_merge(data.get('merge', {}), supervisor), supervisor=supervisor,
+        delegations=parse_delegations(data.get('delegations', {})),
         pin=parse_pin(data.get('pin', {}), sensitive_lists(data)),
         run=parse_run(data.get('run', {})),
         report=parse_report(data.get('report', {})),
@@ -1190,6 +1216,7 @@ OVERLAY_KEYS = {
                       'zero': dict.fromkeys(('label', 'allowlist', 'checks'))},
     'merge': {'mode': None, 'operator_only_paths': None, 'levels': {'*': None}},
     'roles': dict.fromkeys(('implementer', 'reviewer', 'reviewers', 'supervisor')),
+    'delegations': {'retry_own_prs': None},
     'agents': {'*': _AGENT_KEYS},
     'apps': {'key_dir': None, '*': dict.fromkeys(('app_id', 'slug'))},
     'pin': {'auto': None},

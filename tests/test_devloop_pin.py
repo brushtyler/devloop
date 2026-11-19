@@ -107,6 +107,21 @@ class GitCase(unittest.TestCase):
         git(self.root, 'push', '--quiet', 'origin', 'main')
         return sha
 
+    def push_elsewhere(self, message, path, text):
+        """A merge made outside devloop (#430): committed in another clone and pushed to
+        ``origin``; this clone learns of it only with a fetch."""
+        other = self.tmp / 'operator'
+        if not other.exists():
+            git(self.tmp, 'clone', '--quiet', str(self.tmp / 'origin.git'), str(other))
+        git(other, 'pull', '--quiet', 'origin', 'main')
+        target = other / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+        git(other, 'add', '-A')
+        git(other, 'commit', '--quiet', '-m', message)
+        git(other, 'push', '--quiet', 'origin', 'HEAD:main')
+        return git(other, 'rev-parse', 'HEAD')
+
     def pin(self, ref, local=None, **kw):
         kw.setdefault('smoke', self.passing_smoke)
         return pin.pin(self.root, self.state, ref, local, log=self.logs.append, **kw)
@@ -382,6 +397,150 @@ class AutoPinTests(GitCase):
                 self.assertRaises(KeyboardInterrupt):
             loop.run()
         self.assertIn('tick failed (1 in a row): PinError: auto-pin failed', self.logs)
+
+
+class ExternalMergeTests(GitCase):
+    """#430: a merge devloop did not make, such as one of the operator, advances
+    ``origin/main``; the next tick sees it with its fetch and pins when it touches the
+    installation. The dispatcher is the one of ``AutoPinTests``, with the fakes of GitHub,
+    workspace and agents, on a real repository."""
+
+    dispatcher = AutoPinTests.dispatcher
+
+    def refusing_smoke(self, copy, local):
+        self.smoked.append(Path(copy))
+        raise pin.StepFailed('ImportError: broken on purpose', step='tick --dry-run')
+
+    def test_a_merge_by_the_operator_touching_devloop_pins_at_the_next_tick(self):
+        self.pin('main')
+        d, snapshots = self.dispatcher(auto=True)
+        with self.assertRaisesRegex(AssertionError, 'plan'):
+            d.tick()  # nothing new: the tick plans, and the head is recorded as seen
+        self.assertIsNone(pin.pending(self.state))
+        new_sha = self.push_elsewhere('merged by hand', 'devloop/extra.txt', 'new\n')
+        with self.assertRaises(pin.Repinned) as raised:
+            d.tick()
+        self.assertEqual(raised.exception.copy, self.state / f'pinned-{new_sha[:12]}')
+        self.assertEqual(self.pointed().name, f'pinned-{new_sha[:12]}')
+        self.assertIsNone(pin.pending(self.state))
+        self.assertEqual(snapshots, [1])  # the second tick pinned before planning
+        self.assertIn(f'auto-pin: origin/main advanced to {new_sha[:12]} with 1 changed files '
+                      'of the installation (devloop/extra.txt): pin requested', self.logs)
+        self.assertIn(f'auto-pin of origin/main after the advance of origin/main to '
+                      f'{new_sha[:12]}', self.logs)
+
+    def test_the_first_tick_compares_the_branch_with_the_pinned_copy(self):
+        # No head seen yet: the commit of current is the baseline.
+        self.pin('main')
+        new_sha = self.push_elsewhere('merged by hand', 'core/extra.py', 'x = 1\n')
+        d, snapshots = self.dispatcher(auto=True)
+        with self.assertRaises(pin.Repinned):
+            d.tick()
+        self.assertEqual((self.pointed().name, snapshots), (f'pinned-{new_sha[:12]}', []))
+
+    def test_a_merge_outside_the_installation_does_not_pin(self):
+        old = self.pin('main')
+        self.smoked.clear()
+        d, snapshots = self.dispatcher(auto=True)
+        new_sha = self.push_elsewhere('docs by hand', 'docs/devloop/guide.md', 'text\n')
+        with self.assertRaisesRegex(AssertionError, 'plan'):
+            d.tick()
+        self.assertEqual(snapshots, [1])
+        self.assertIsNone(pin.pending(self.state))
+        self.assertEqual(self.pointed(), old.resolve())
+        self.assertEqual(self.smoked, [])
+        self.assertEqual(json.loads((self.state / pin.BASE_SEEN).read_text())['head'], new_sha)
+        # A later change to the installation counts only what changed since that head.
+        self.push_elsewhere('notes by hand', 'NOTES.md', 'still not pinned\n')
+        with self.assertRaisesRegex(AssertionError, 'plan'):
+            d.tick()
+        self.assertEqual((snapshots, pin.pending(self.state)), ([1, 1], None))
+
+    def test_off_ignores_merges_outside_devloop(self):
+        old = self.pin('main')
+        self.push_elsewhere('merged by hand', 'devloop/extra.txt', 'new\n')
+        d, snapshots = self.dispatcher(auto=False)
+        with self.assertRaisesRegex(AssertionError, 'plan'):
+            d.tick()
+        self.assertEqual((snapshots, self.pointed()), ([1], old.resolve()))
+        self.assertIsNone(pin.pending(self.state))
+        self.assertFalse((self.state / pin.BASE_SEEN).exists())  # not even fetched
+
+    def test_a_request_of_a_merge_by_devloop_is_kept(self):
+        self.pin('main')
+        new_sha = self.push_elsewhere('merged by devloop', 'devloop/extra.txt', 'new\n')
+        pin.request(self.state, 100, new_sha)
+        d, _ = self.dispatcher(auto=True)
+        with self.assertRaises(pin.Repinned):
+            d.tick()
+        self.assertIn('auto-pin of origin/main after the merge of #100', self.logs)
+
+    def test_a_refused_copy_is_not_tried_again_until_the_branch_advances(self):
+        old = self.pin('main')
+        self.smoked.clear()
+        d, snapshots = self.dispatcher(auto=True)
+        d.pinner.smoke = self.refusing_smoke
+        self.push_elsewhere('merged by hand', 'devloop/extra.txt', 'new\n')
+        for _ in range(2):
+            with self.assertRaisesRegex(AssertionError, 'plan'):
+                d.tick()
+        self.assertEqual((len(self.smoked), snapshots), (1, [1, 1]))
+        self.assertEqual(self.pointed(), old.resolve())
+
+    def test_a_fetch_that_fails_is_logged_and_the_tick_goes_on(self):
+        self.pin('main')
+        d, snapshots = self.dispatcher(auto=True)
+        git(self.root, 'remote', 'set-url', 'origin', str(self.tmp / 'gone.git'))
+        with self.assertRaisesRegex(AssertionError, 'plan'):
+            d.tick()
+        self.assertEqual(snapshots, [1])
+        self.assertTrue(any(line.startswith('auto-pin: the advance of origin/main not checked, '
+                                            'next tick: git fetch') for line in self.logs),
+                        self.logs)
+
+
+class BehindTests(GitCase):
+    """#430: ``devloop status`` says when the pinned copy it runs from is behind
+    ``origin/<base_branch>`` in the files of the installation."""
+
+    def behind(self, copy):
+        pinner = pin.AutoPin(self.root, self.state, log=self.logs.append)
+        return pinner.behind('main', PinPolicy().touches, copy=copy)
+
+    def fetch(self):
+        pin.base_head(self.root, 'main')
+
+    def test_a_copy_behind_in_the_installation_is_reported(self):
+        copy = self.pin('main')
+        self.assertIsNone(self.behind(copy))
+        self.push_elsewhere('docs by hand', 'docs/x.md', 'text\n')
+        self.fetch()
+        self.assertIsNone(self.behind(copy))  # nothing of the installation changed
+        head = self.push_elsewhere('merged by hand', 'devloop/extra.txt', 'new\n')
+        self.assertIsNone(self.behind(copy))  # not fetched yet: as last fetched
+        self.fetch()
+        self.assertEqual(self.behind(copy),
+                         f'pinned copy: {copy.name} ({self.first[:12]}) is behind origin/main '
+                         f'({head[:12]}, as last fetched) in 1 files of the installation: '
+                         'devloop/extra.txt')
+        # Not a pinned copy (devloop running from a checkout): nothing to compare.
+        self.assertIsNone(self.behind(REPO))
+
+    def test_status_shows_the_line(self):
+        copy = self.pin('main')
+        self.push_elsewhere('merged by hand', 'devloop/extra.txt', 'new\n')
+        self.fetch()
+        d = Dispatcher(CFG, None, FakeWS(), FakeRunner(), log=self.logs.append,
+                       pinner=pin.AutoPin(self.root, self.state, log=self.logs.append))
+        d.snapshot = lambda: Snapshot([], [], [])
+        lines = []
+        with mock.patch.object(cli, 'build', return_value=(CFG, self.state, d)), \
+                mock.patch.object(cli, 'log', lines.append), \
+                mock.patch.object(cli, 'label_transition', return_value=None), \
+                mock.patch.object(pin, 'INSTALL_ROOT', copy):
+            cli.main(['status'])
+        self.assertTrue(any(line.startswith(f'pinned copy: {copy.name} ({self.first[:12]}) '
+                                            'is behind origin/main') for line in lines), lines)
 
 
 # A fake copy (#260): its `python3 -m devloop` does, for each step and attempt, what plan.json
@@ -737,6 +896,9 @@ class FakePinner:
 
     def pending(self):
         return {'pr': self.requests[-1][0]} if self.requests else None
+
+    def observe(self, branch, touches):
+        return None  # no merge outside devloop here (#430)
 
     def pin(self, ref):
         self.pins.append(ref)
