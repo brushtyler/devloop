@@ -18,7 +18,8 @@ from devloop.config import MergePolicy
 from devloop.context import (format_operator_decisions, issue_decisions, text_changed_at,
                              trust_policy_rule)
 from devloop.dispatch_preflight import TRUST_QUESTION, normalize_preflight
-from devloop.dispatcher import Dispatcher
+from devloop.dispatcher import Dispatcher, preflight_hash
+from devloop.planning import plan
 from devloop.supervision import NON_CRITICAL, preflight_class
 from helpers.devloop_fakes import FakeGH
 from test_devloop import (CFG, REV, REV_NAME, SHA1, FakeRunner, FakeWS, norm, pr, raw_review,
@@ -53,8 +54,11 @@ def history(edited=EDITED, renamed=(), taken=TAKEN):
             'labeled': labeled, 'renamed': list(renamed)}
 
 
-def comment(at=APPROVED, body=APPROVAL_TEXT, login=OPERATOR):
-    return {'author': {'login': login}, 'body': body, 'created_at': at}
+def comment(at=APPROVED, body=APPROVAL_TEXT, login=OPERATOR, updated=None):
+    """A comment as ``issue_comments`` reads it, written at ``at`` and last changed at
+    ``updated`` (``at`` by default: never edited)."""
+    return {'author': {'login': login}, 'body': body, 'created_at': at,
+            'updated_at': updated or at}
 
 
 def decided(comments, hist=None, trusted=(OPERATOR,), apps=(SUPERVISOR_LOGIN,), taken=False):
@@ -107,6 +111,29 @@ class IssueDecisionsTests(unittest.TestCase):
         # Before the takeover, after the change: only that one counts, in order.
         early, late = comment(at='2026-11-19T10:30:00Z'), comment(at=LATER)
         self.assertEqual(decided([early, comment(at='2026-11-19T09:30:00Z'), late]), [early])
+
+    def test_a_comment_rewritten_after_the_takeover_does_not_count(self):
+        # Written before the takeover, turned into an approval after it: its text is read as it
+        # is now, so it is not a decision taken before the takeover (#472).
+        for updated in (TAKEN, LATER):
+            rewritten = comment(updated=updated)
+            for taken in (False, True):
+                with self.subTest(updated=updated, review=taken):
+                    self.assertEqual(decided([rewritten], taken=taken), [])
+        # Edited before the takeover, it still counts.
+        edited = comment(updated='2026-11-19T11:30:00Z')
+        self.assertEqual(decided([edited], taken=True), [edited])
+        # Before the takeover, when the readiness check reads it, there is no bound yet.
+        self.assertEqual(decided([comment(updated=LATER)], history(taken=None)),
+                         [comment(updated=LATER)])
+        # A comment whose latest change is not known does not count.
+        for updated in (None, ''):
+            unknown = dict(comment(), updated_at=updated)
+            with self.subTest(updated=updated):
+                self.assertEqual(decided([unknown]), [])
+        missing = comment()
+        del missing['updated_at']
+        self.assertEqual(decided([missing]), [])
 
     def test_a_review_needs_the_takeover(self):
         approval = comment()
@@ -213,9 +240,12 @@ class PreflightTrustTests(unittest.TestCase):
     def tick(self, output, thread=(), hist=None, cfg=PCFG):
         self.gh = PreflightGH(thread, hist)
         self.runner = FakeRunner(output)
-        d = Dispatcher(cfg, self.gh, FakeWS(), self.runner, log=lambda m: None)
-        self.assertEqual([a.kind for a in d.tick()], ['preflight'])
+        self.d = Dispatcher(cfg, self.gh, FakeWS(), self.runner, log=lambda m: None)
+        self.assertEqual([a.kind for a in self.d.tick()], ['preflight'])
         return self.runner.calls[0][3]
+
+    def planned(self):
+        return [(a.kind, a.number) for a in plan(self.d.snapshot(), PCFG)]
 
     def record(self):
         return [r for c in self.gh.thread if (r := markdown.read_marker(c['body'], 'preflight'))][-1]
@@ -273,6 +303,39 @@ class PreflightTrustTests(unittest.TestCase):
                          ('covered', reason))
         self.assertIn('**Policy di fiducia:** toccata, coperta da una decisione '
                       f'dell\'operatore. {reason}', self.gh.thread[-1]['body'])
+
+    def test_a_check_that_relied_on_a_decision_no_longer_valid_runs_again(self):
+        # Covered by the approval, then the text is changed and restored: title, body and
+        # comments are the same, but the approval no longer counts. The check is not reused.
+        reason = f'Punto 4: coperta dal commento di {OPERATOR} del {APPROVED}.'
+        self.tick(checked(True, trust='covered', reason=reason), [comment()])
+        self.assertEqual(self.planned(), [('implement', 7)])
+        before = self.d._preflight_view(7, ())['hash']
+        self.gh.hist = history(edited='2026-11-19T11:30:00Z', taken=None)
+        self.assertEqual(self.d._issue_decisions(self.gh.thread, self.gh.hist), [])
+        self.assertNotEqual(self.d._preflight_view(7, ())['hash'], before)
+        self.assertEqual(self.planned(), [('preflight', 7)])
+        # The new check reads no decision, and blocks the issue.
+        self.runner.outputs.append(checked(True, trust='uncovered'))
+        self.assertEqual([a.kind for a in self.d.tick()], ['preflight'])
+        self.assertIn(f'{DECISIONS}\n\n{NONE}', self.runner.calls[-1][3])
+        self.assertEqual(self.gh.labels[7], {READY, NEEDS_OPERATOR})
+        # A new approval of the operator, after the change, makes it ready again.
+        self.gh.thread.append(comment(at='2026-11-19T11:45:00Z'))
+        self.gh.say('/devloop recheck')
+        self.assertEqual(self.planned(), [('preflight', 7)])
+
+    def test_without_decisions_the_hash_is_the_one_of_before(self):
+        # Only the comments that may record a decision enter the hash: an issue without them
+        # keeps the hash of its checks written before #472.
+        d = Dispatcher(PCFG, PreflightGH(), FakeWS(), FakeRunner(), log=lambda m: None)
+        hist, plain = history(taken=None), comment(at='2026-11-19T09:30:00Z')
+        self.assertEqual(d._request_hash(hist, [plain]),
+                         preflight_hash(hist['title'], hist['body'], [plain],
+                                        PCFG.trusted_users, d._automatic, d._accepted))
+        self.assertNotEqual(d._request_hash(hist, [comment()]),
+                            preflight_hash(hist['title'], hist['body'], [comment()],
+                                           PCFG.trusted_users, d._automatic, d._accepted))
 
     def test_an_approval_before_an_edit_or_from_the_supervisor_is_not_listed(self):
         for thread, hist in (([comment()], history(edited='2026-11-19T11:30:00Z', taken=None)),

@@ -314,7 +314,7 @@ with them the prompts are the same, byte for byte, as before R4, which
 `tests/test_devloop_prompt_data.py` proves against the templates of before R4
 (`tests/fixtures/ssdlc-pre-r4/prompts/`), with the changes of the templates made since then
 listed one by one, each with its issue (`SINCE_R4` in `tests/helpers/ssdlc_project.py`, such as
-`host_step`, #462). The text of the trust policy in the review and advisory
+`host_step`, #462, or the trust policy, #472). The text of the trust policy in the review and advisory
 review prompts is the installation's and does not change; the readiness check gets the same text,
 read from the review prompt of the installation (#472). On a host, the project file gains the
 `[prompts]` table before the pin of R4
@@ -1048,7 +1048,8 @@ when a change needs the operator: a change to `NON_CRITICAL`, to a `/devloop` co
 condition of the merge that a decision names explicitly is a faithful implementation, merged
 like any other of its level. A comment in which the operator approves the change on the issue
 counts as a decision when a trusted user wrote it in person, not the supervisor's identity nor
-an app of devloop, after the latest change of the issue's text and before the takeover: devloop
+an app of devloop, after the latest change of the issue's text and before the takeover (its
+latest edit too): devloop
 lists those comments under "Decisions of the operator on the issue" in the prompts of the
 readiness check, of the reviewers and of the advisory review. The readiness check declares
 `trust_policy` and blocks, with the question to the operator, an issue whose change no decision

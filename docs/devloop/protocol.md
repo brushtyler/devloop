@@ -628,8 +628,12 @@ first point, and a comment in which the operator approves the change on the issu
 decision. devloop lists the comments that may: written in person by a trusted user (no
 attribution header), not by the supervisor's identity nor by an app of devloop, after the latest
 change of the issue's title or body (`lastEditedAt` and the `renamed` events) and before the
-first `labeled` event of `agent:working` after it, each by its `created_at`, a bound in the same
-second excluded; a reviewer gets none when no such takeover follows the latest change. All of
+first `labeled` event of `agent:working` after it, each written (`created_at`) after the change
+and last changed (`updated_at`) before the takeover, a bound in the same second excluded, a
+comment without both times excluded too; a reviewer gets none when no such takeover follows the
+latest change. Those comments, by author and `created_at`, enter the hash of the request, so a
+readiness check that relied on one is not reused once a change of the text, even undone,
+drops it. All of
 it is described in [Changes to the trust policy](guide.md#changes-to-the-trust-policy). The rule
 lives only in the prompts: the schema `advisory.json` does not change, `review.json` only gains
 `operator_reason` (#434) for it, `preflight.json` gains `trust_policy` and

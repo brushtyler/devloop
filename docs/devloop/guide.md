@@ -144,8 +144,10 @@ of every PR:
   of `agent:working` after that change). devloop lists those comments, with author and time,
   under "Decisions of the operator on the issue" in the prompts of the readiness check, of the
   reviewers and of the advisory review; only those count, and whether one approves the change is
-  the agents' to judge. A change of the text after the comment drops it; the reviewers of a PR
-  whose issue was not taken on after the latest change get none.
+  the agents' to judge. A change of the text after the comment drops it; so does a change of the
+  comment itself after the takeover (its `updated_at`), since the agents read it as it is now: a
+  comment rewritten into an approval after the takeover is not a decision taken before it. The
+  reviewers of a PR whose issue was not taken on after the latest change get none.
 - **Readiness check.** With `preflight` configured, the check applies the same rule to the issue
   and declares in `trust_policy` whether the change the issue asks for touches the policy:
   `none`, `covered` (a decision of the operator covers it, cited in `trust_policy_reason`) or
@@ -155,7 +157,9 @@ of every PR:
   `operator_decision`, to the operator also in `auto` mode
   ([Readiness check before implementation](#readiness-check-before-implementation)). The
   operator answers with a comment on the issue: the hash of the request changes and the check
-  runs again.
+  runs again. The hash also carries the comments that may record a decision, by author and
+  time: a change of the text undone later leaves title and body as they were but drops those
+  comments, so a check that relied on them is not reused and runs again.
 - **The merge.** With that decision, a faithful PR with no open finding and green CI is merged by
   devloop like any other of its level, except for the paths of `operator_only_paths`. What no
   decision covers, what goes beyond or against one, an unauthorised weakening and a change of the

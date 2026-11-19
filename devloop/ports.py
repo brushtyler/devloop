@@ -86,7 +86,8 @@ class Tracker(Protocol):
 
     def issue_comments(self, number):
         """The comments of an issue, oldest first, as ``{id, author: {login}, body,
-        created_at}`` (``created_at`` in ISO 8601, UTC, as GitHub writes it)."""
+        created_at, updated_at}`` (``created_at`` and ``updated_at``, the latest change, #472,
+        in ISO 8601, UTC, as GitHub writes them)."""
 
     def pr_comments(self, number):
         """The conversation comments of a pull request, as :meth:`issue_comments`."""

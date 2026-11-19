@@ -66,9 +66,11 @@ def issue_decisions(comments, history, trusted_users, devloop_logins, working, t
     the latest change of the issue's text (``text_changed_at``) and before devloop took it on,
     the first ``labeled`` event of ``working`` after that change. A change of the text after a
     comment drops it. With ``taken`` (a review) the issue must have been taken on after that
-    change: without such an event no comment counts. A comment without its time
-    (``created_at``), or written in the same second as a bound, does not count. Whether a
-    comment approves the change is the agents' to judge."""
+    change: without such an event no comment counts. The comment is read as it is now, so its
+    latest change (``updated_at``), not only its creation (``created_at``), must come before
+    the takeover: a comment rewritten after it, into an approval or not, does not count. A
+    comment without both times, or written in the same second as a bound, does not count.
+    Whether a comment approves the change is the agents' to judge."""
     changed = text_changed_at(history)
     takeovers = sorted(at for label, _, at in history.get('labeled') or ()
                        if label == working and isinstance(at, str)
@@ -78,9 +80,11 @@ def issue_decisions(comments, history, trusted_users, devloop_logins, working, t
         return []
     found = []
     for c in operator_comments(comments, trusted_users):
-        at = c.get('created_at')
-        if (c['author']['login'] in devloop_logins or not isinstance(at, str)
-                or (changed is not None and at <= changed) or (bound is not None and at >= bound)):
+        at, edited = c.get('created_at'), c.get('updated_at')
+        if (c['author']['login'] in devloop_logins
+                or not (isinstance(at, str) and at) or not (isinstance(edited, str) and edited)
+                or (changed is not None and at <= changed)
+                or (bound is not None and max(at, edited) >= bound)):
             continue
         found.append(c)
     return found

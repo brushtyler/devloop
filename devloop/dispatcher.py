@@ -549,18 +549,28 @@ def control_command(body):
     return bool(lines) and lines[0].split()[:1] == ['/devloop']
 
 
-def preflight_hash(title, body, comments, trusted_users, automatic, accepted=None):
+def preflight_hash(title, body, comments, trusted_users, automatic, accepted=None,
+                   decisions=()):
     """The hash that binds a readiness check to the issue text: title, body and the comments of
     trusted users, without devloop's own records (``automatic(comment)``) and without
     ``/devloop`` commands (a supervisor command after the attribution header too, #182). Any
     other trusted comment counts, header or not, and so does a dispatcher record of defaults
-    the supervisor accepted (``accepted(comment)``, #182), as a trusted comment would."""
+    the supervisor accepted (``accepted(comment)``, #182), as a trusted comment would.
+
+    ``decisions``: the comments that may record a decision of the operator (``issue_decisions``,
+    #472), each by its author and its time. Their validity depends on the history of the text,
+    not only on the text: a change of the title or body, undone later, leaves the text as it was
+    but drops them, and with them the hash, so the check that relied on them runs again. Without
+    such comments the hash is the one of before #472."""
     accepted = accepted or (lambda comment: False)
     kept = [[(c.get('author') or {}).get('login'), c.get('body') or ''] for c in comments
             if accepted(c) or ((c.get('author') or {}).get('login') in trusted_users
                                and not automatic(c) and not control_command(c.get('body'))
                                and supervisor_command(c.get('body')) is None)]
-    data = json.dumps([title or '', body or '', kept], ensure_ascii=False, separators=(',', ':'))
+    request = [title or '', body or '', kept]
+    if decisions:
+        request.append([[c['author']['login'], c['created_at']] for c in decisions])
+    data = json.dumps(request, ensure_ascii=False, separators=(',', ':'))
     return hashlib.sha256(data.encode('utf-8')).hexdigest()
 
 
@@ -863,9 +873,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
     def _request_hash(self, history, comments):
         """The hash of an issue's request (``preflight_hash``): what binds a readiness check,
-        and the key of an issue step's retries."""
+        and the key of an issue step's retries. With the comments that may record a decision of
+        the operator as the readiness check reads them (#472): a check whose decision no longer
+        holds is not reused."""
         return preflight_hash(history['title'], history['body'], comments,
-                              self.cfg.trusted_users, self._automatic, self._accepted)
+                              self.cfg.trusted_users, self._automatic, self._accepted,
+                              decisions=self._issue_decisions(comments, history))
 
     def _devloop_author(self, login):
         """Whether an issue opened by ``login`` may have its escalations decided by the
