@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -206,6 +207,138 @@ class LayoutTests(unittest.TestCase):
 
     def test_the_devloop_guide_links_the_ops_guide(self):
         self.assertIn('(../../ops/README.md)', (ROOT / 'docs/devloop/guide.md').read_text())
+
+
+class R3MigrationGuideTests(unittest.TestCase):
+    """ops/host/migrate.md, "Migrazione di R3 su un host attivo" (#452): the order, the user, the
+    complete commands of check-equivalence.py and its exit codes. Every path it cites exists: a
+    path of the repository in the repository, a path of the host among those the code uses."""
+
+    HEADING = '## Migrazione di R3 su un host attivo'
+    ANCHOR = 'host/migrate.md#migrazione-di-r3-su-un-host-attivo'
+    STATE = '/home/devloop/ssdlc/.ssdlc/devloop/'   # devloop's state_dir
+    CLONE = '/home/devloop/ssdlc/'                  # devloop's clone: a checkout of this repo
+    UPDATED = '/tmp/ssdlc-r3/'                      # the updated checkout
+    OPERATOR = '/root/repos/ssdlc'                  # the operator's checkout
+    SAVED = 'config.local.toml.prima-r3'            # the overlay of before, made by step 2
+    SCRIPT = ROOT / 'ops/host/ssdlc/check-equivalence.py'
+    HOST_PATH = re.compile(r'(?<![\w.-])/(?:home|root|tmp|etc|usr|var|run)(?:/[\w.-]+)*')
+    REPO_PATH = re.compile(r'`((?:ops|scripts|docs|devloop|tests)/[\w./-]*[\w])`')
+
+    def section(self):
+        text = (OPS / 'host/migrate.md').read_text(encoding='utf-8')
+        start = text.index(self.HEADING)
+        end = text.find('\n## ', start + 1)
+        return text[start:] if end < 0 else text[start:end]
+
+    def blocks(self):
+        """The shell blocks of the section, each with its continuation lines joined."""
+        found = re.findall(r'```bash\n(.*?)```', self.section(), re.S)
+        return ['\n'.join(line.strip() for line in re.sub(r'\\\n\s*', '', block).splitlines())
+                for block in found]
+
+    def check_command(self):
+        commands = [line for block in self.blocks() for line in block.splitlines()
+                    if 'check-equivalence.py' in line]
+        self.assertEqual(len(commands), 1, commands)
+        return shlex.split(commands[0])
+
+    def test_the_ops_guide_links_the_section(self):
+        self.assertIn(self.HEADING, (OPS / 'host/migrate.md').read_text(encoding='utf-8'))
+        self.assertIn(f'({self.ANCHOR})', (OPS / 'README.md').read_text(encoding='utf-8'))
+
+    def test_the_repository_paths_it_cites_exist(self):
+        section = self.section()
+        cited = set(self.REPO_PATH.findall(section))
+        for link in re.findall(r'\]\(([^)#\s]+)(?:#[^)]*)?\)', section):
+            if '://' not in link:
+                cited.add(os.path.relpath((OPS / 'host' / link).resolve(), ROOT))
+        for path in self.HOST_PATH.findall(section):
+            if (path + '/').startswith(self.STATE):
+                continue  # the state_dir: the test below
+            for checkout in (self.UPDATED, self.CLONE):
+                if path.startswith(checkout):
+                    cited.add(path[len(checkout):])
+        self.assertIn('ops/host/ssdlc/check-equivalence.py', cited)
+        self.assertIn('ops/host/ssdlc/project.toml', cited)
+        self.assertIn('ops/host/ssdlc/overlay.toml', cited)
+        self.assertIn('scripts/devloop-pinned', cited)
+        for path in sorted(cited):
+            with self.subTest(path=path):
+                self.assertTrue((ROOT / path).exists(), path)
+
+    def test_the_host_paths_it_cites_are_those_the_code_uses(self):
+        # The state_dir of the installation, as at the top of migrate.md; in it, only the names
+        # the launcher and pin read, and the copy of the overlay that step 2 makes.
+        self.assertIn('`.ssdlc/devloop`', (OPS / 'host/migrate.md').read_text(encoding='utf-8'))
+        launcher = (ROOT / 'scripts/devloop-pinned').read_text(encoding='utf-8')
+        names = {'current', 'config.local.toml', 'project.toml'}
+        for name in names:
+            self.assertIn(f"state / '{name}'", launcher)
+        from devloop import pin
+        self.assertEqual(pin.POINTER, 'current')
+        self.assertEqual(pin.LOCAL_CONFIG, 'config.local.toml')
+        names.add(self.SAVED)
+        for path in set(self.HOST_PATH.findall(self.section())):
+            with self.subTest(path=path):
+                if path + '/' == self.STATE:
+                    continue
+                if path.startswith(self.STATE):
+                    self.assertIn(path[len(self.STATE):], names)
+                elif path.startswith(self.UPDATED) or path.startswith(self.CLONE):
+                    continue  # checkouts of this repository: the test above
+                else:  # the updated checkout, the operator's and its home
+                    self.assertIn(path, {self.UPDATED.rstrip('/'), self.OPERATOR, '/root'})
+        saved = self.STATE + self.SAVED
+        install = [line for block in self.blocks() for line in block.splitlines()
+                   if line.startswith('test -e') or line.startswith('install ')]
+        self.assertTrue(any(line.rstrip().endswith(saved) for line in install), install)
+
+    def test_the_check_command_is_complete(self):
+        argv = self.check_command()
+        self.assertEqual(argv[:2], ['python3', self.UPDATED + 'ops/host/ssdlc/check-equivalence.py'])
+        flags = dict(zip(argv[2::2], argv[3::2]))
+        self.assertEqual(len(argv[2:]), 2 * len(flags))
+        self.assertEqual(flags, {
+            '--before': self.STATE + 'current',
+            '--before-local': self.STATE + self.SAVED,
+            '--after': self.UPDATED.rstrip('/'),
+            '--after-local': self.STATE + 'config.local.toml',
+            '--after-project': self.STATE + 'project.toml',
+        })
+        source = self.SCRIPT.read_text(encoding='utf-8')
+        declared = set(re.findall(r"add_argument\('(--[\w-]+)'", source))
+        required = set(re.findall(r"add_argument\('(--[\w-]+)', required=True", source))
+        self.assertLessEqual(set(flags), declared)
+        self.assertLessEqual(required, set(flags))
+
+    def test_it_says_the_order_the_user_and_the_exit_codes(self):
+        section = ' '.join(self.section().split())
+        for phrase in ('### Ordine', '**prima** che devloop prenda la copia di R3',
+                       '**Prima del merge della PR di R3**', '**Se il loop si è già fermato**',
+                       'RestartPreventExitStatus=4', 'Tutti **come root**', 'Permission denied',
+                       'legge e non scrive', 'sudo systemctl start devloop',
+                       '**che cosa fare prima del merge**'):
+            self.assertIn(phrase, section)
+        for code in ('0', '1', '2'):
+            self.assertIn(f'| {code} |', section)
+        # The messages it quotes are those of the script and of devloop.
+        script = self.SCRIPT.read_text(encoding='utf-8')
+        self.assertIn('0 when there is none, 1 when there is\none, 2 when a side does not load',
+                      script)
+        for message in ('equivalent: ', 'difference(s): the migration is not equivalent',
+                        'not an installation of devloop', 'the configuration does not load',
+                        'not a file'):
+            self.assertIn(message, section)
+            self.assertIn(message, script)
+        devloop = ''.join(path.read_text(encoding='utf-8')
+                          for path in sorted((ROOT / 'devloop').glob('*.py')))
+        for quoted, source in (('auto-pin of origin/main failed, the pinned copy is unchanged',
+                                'failed, the pinned copy is unchanged: '),
+                               ("config: missing 'test_cmd'", "config: missing 'test_cmd'"),
+                               ('ALERT: 3 consecutive ticks failed', 'consecutive ticks failed')):
+            self.assertIn(quoted, section)
+            self.assertIn(source, devloop)
 
 
 class ManifestTests(unittest.TestCase):

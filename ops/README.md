@@ -235,6 +235,8 @@ R3: lo script non li crea. L'operatore copia [`ssdlc/project.toml`](host/ssdlc/p
 `<state_dir>/project.toml` (mode 600, utente `devloop`) e aggiunge all'overlay le chiavi di
 [`ssdlc/overlay.toml`](host/ssdlc/overlay.toml); senza file di progetto devloop non parte e il
 primo pin fallisce ([migrate.md](host/migrate.md#configurazione-di-ssdlc-nel-suo-file-di-progetto)).
+Su un host già in servizio l'ordine conta: vedi [Migrazione di R3 su un host
+attivo](host/migrate.md#migrazione-di-r3-su-un-host-attivo).
 
 Poi le **chiavi**: in `key_dir` di `devloop` (`/home/devloop/.ghapps`) quelle delle app che usa il
 dispatcher (`DEVLOOP_KEYS`: `dispatcher`, `merger`, `claude-agent`, `codex-agent`, `agy-agent`):
@@ -416,6 +418,17 @@ resta fermo, come descritto in *Continuous loop* della guida di devloop).
 Vedi [host/migrate.md](host/migrate.md): cosa copiare dallo `state_dir` e dal supervisore, cosa
 ricreare (copie fissate, login delle CLI, servizio), come trattare le chiavi delle app e in che
 ordine, senza mai due dispatcher attivi sullo stesso repository.
+
+### Migrazione di R3 su un host attivo
+
+Il passaggio di un host in servizio alla copia di R3 (ADR 0006) è in [host/migrate.md](host/migrate.md#migrazione-di-r3-su-un-host-attivo):
+file di progetto e chiavi dell'overlay **prima** che devloop prenda la copia nuova (prima del
+merge della PR, o a loop fermo), `check-equivalence.py` eseguito **come root** dal checkout
+dell'operatore, il significato dei codici di uscita (0 equivalente, 1 differenze, 2 un lato non si
+carica) e come ripartire se il loop si è fermato.
+
+Ogni PR che richiede un passo sull'host dice, nella descrizione e nella guida, **che cosa fare
+prima del merge** ([host/migrate.md](host/migrate.md#ogni-cambio-con-un-passo-sullhost)).
 
 ## Un altro progetto
 
