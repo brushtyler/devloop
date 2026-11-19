@@ -11,13 +11,14 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["file", "line", "title", "detail", "suggested_fix"],
+        "required": ["file", "line", "title", "detail", "suggested_fix", "security"],
         "properties": {
           "file": {"type": "string"},
           "line": {"type": "integer"},
           "title": {"type": "string"},
           "detail": {"type": "string"},
-          "suggested_fix": {"type": "string"}
+          "suggested_fix": {"type": "string"},
+          "security": {"type": "boolean"}
         }
       }
     },
@@ -26,13 +27,14 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["file", "line", "title", "detail", "suggested_fix"],
+        "required": ["file", "line", "title", "detail", "suggested_fix", "security"],
         "properties": {
           "file": {"type": "string"},
           "line": {"type": "integer"},
           "title": {"type": "string"},
           "detail": {"type": "string"},
-          "suggested_fix": {"type": "string"}
+          "suggested_fix": {"type": "string"},
+          "security": {"type": "boolean"}
         }
       }
     },

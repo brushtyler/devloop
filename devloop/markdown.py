@@ -568,7 +568,9 @@ def _location(finding):
 def _findings(findings):
     lines = []
     for f in findings:
-        lines.append(f'- **{f.get("key") or f["id"]}**{_location(f)}: {f["title"]}')
+        # A finding the reviewer marked as one of security (#405, ADR 0005, D5).
+        tag = ' *(sicurezza)*' if f.get('security') is True else ''
+        lines.append(f'- **{f.get("key") or f["id"]}**{_location(f)}: {f["title"]}{tag}')
         if f['detail']:
             lines.append(f'  {f["detail"]}'.replace('\n', '\n  '))
         if f['suggested_fix']:
@@ -795,6 +797,9 @@ SUPERVISOR_RESUME = (
     'l\'issue in coda;\n'
     '- `/devloop decide <decisioni>`: decide le lacune del controllo di prontezza anche '
     'diversamente dai default (il testo è il resto del commento) e rimette l\'issue in coda;\n'
+    '- `/devloop grant-round <motivo>`: concede un round di review in più a una PR al limite dei '
+    'round (`round_grantable`), entro i tetti della delega; il motivo, che può continuare nelle '
+    'righe successive, riporta o cita l\'analisi delle cause;\n'
     '- `/devloop escalate <motivo>`: passa l\'escalation all\'operatore (`agent:needs-operator`).')
 
 

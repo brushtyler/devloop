@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 """Run devloop from its pinned copy (#174), with the local config as an overlay.
 
-    scripts/devloop-pinned [--allow-root] <devloop arguments>
+    scripts/devloop-pinned [--allow-root] [--state-dir DIR] <devloop arguments>
 
 From the clone this script belongs to, it runs ``python3 -P -m devloop`` with ``PYTHONPATH`` on
 the copy that ``.ssdlc/devloop/current`` points at (made by ``python3 -m devloop pin <ref>``)
 and, when ``.ssdlc/devloop/config.local.toml`` exists, ``--local-config`` on it: the keys it sets
 replace those of the copy's ``devloop/config.toml``. It works run directly by the dedicated user
 or through ``sudo -u devloop -H``, and refuses to run as root without ``--allow-root``.
+
+With ``--state-dir DIR`` (ADR 0006, R1) the pinned copy and the overlay are those of ``DIR``, an
+absolute path, and the script may live anywhere, as the copy the host installs outside the
+pinned copy and the managed repository: devloop then runs in the current directory, which must be
+in the checkout of the managed repository (the ``WorkingDirectory`` of the service), and gets
+``DIR`` in ``DEVLOOP_STATE_DIR``, so that it stops when the ``state_dir`` of its configuration is
+another directory.
 
 It exports ``DISABLE_AUTOUPDATER=1`` unless the environment already sets it (#218): Claude Code
 then does not update itself while devloop runs it, so no turn starts while its binary is being
@@ -17,42 +24,85 @@ It imports nothing from the clone: the copy is the only devloop code that runs.
 """
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 STATE = Path('.ssdlc') / 'devloop'
 ALLOW_ROOT = '--allow-root'
+STATE_DIR = '--state-dir'
+# The state_dir given with --state-dir, for devloop's check (devloop/__main__.py, STATE_ENV).
+STATE_ENV = 'DEVLOOP_STATE_DIR'
 
 
-def command(root, argv, python=sys.executable):
-    """``(argv, env)`` of devloop run from the pinned copy of ``root``, or SystemExit."""
-    state = root / STATE
+def command(root, argv, python=sys.executable, state=None):
+    """``(argv, env)`` of devloop run from the pinned copy of ``state`` (default: the state_dir
+    of the clone ``root``), or SystemExit."""
+    given = state is not None
+    state = Path(state) if given else root / STATE
     pointer = state / 'current'
     copy = pointer.resolve() if pointer.is_symlink() else None
     if copy is None or not (copy / 'devloop' / '__main__.py').is_file():
+        if given:
+            sys.exit(f'devloop-pinned: no pinned copy at {pointer}: pin a tag of the '
+                     "installation's source first (docs/devloop/guide.md, \"Installation "
+                     'source\")')
         sys.exit(f'devloop-pinned: no pinned copy at {pointer}: run '
                  '`python3 -m devloop pin origin/main` from the main checkout first')
     local = state / 'config.local.toml'
     extra = ['--local-config', str(local)] if local.is_file() else []
-    env = {k: v for k, v in os.environ.items() if k not in ('PYTHONPATH', 'PYTHONHOME')}
+    env = {k: v for k, v in os.environ.items()
+           if k not in ('PYTHONPATH', 'PYTHONHOME', STATE_ENV)}
     env['PYTHONPATH'] = str(copy)
+    if given:
+        env[STATE_ENV] = str(state)
     # The agents' CLIs do not update themselves under devloop (#218); an operator's value stays.
     env.setdefault('DISABLE_AUTOUPDATER', '1')
     return [python, '-P', '-m', 'devloop', *extra, *argv], env
 
 
+def options(argv):
+    """``(allow_root, state, argv)``: the launcher's own options, before devloop's arguments."""
+    allow_root, state = False, None
+    while argv:
+        if argv[0] == ALLOW_ROOT and not allow_root:
+            allow_root, argv = True, argv[1:]
+        elif argv[0] == STATE_DIR and state is None:
+            if len(argv) < 2:
+                sys.exit(f'devloop-pinned: {STATE_DIR} needs a directory')
+            state, argv = argv[1], argv[2:]
+        elif argv[0].startswith(STATE_DIR + '=') and state is None:
+            state, argv = argv[0][len(STATE_DIR) + 1:], argv[1:]
+        else:
+            break
+    if state is not None and not Path(state).is_absolute():
+        sys.exit(f'devloop-pinned: {STATE_DIR} needs an absolute path, not {state!r}')
+    return allow_root, state, argv
+
+
+def in_checkout(cwd=None):
+    """Whether the current directory is in a git checkout."""
+    try:
+        return subprocess.run(['git', 'rev-parse', '--show-toplevel'], cwd=cwd,
+                              capture_output=True).returncode == 0
+    except OSError:
+        return False
+
+
 def main(argv=None, euid=None, execve=os.execve, root=ROOT):
     argv = sys.argv[1:] if argv is None else list(argv)
-    allow_root = bool(argv) and argv[0] == ALLOW_ROOT
-    if allow_root:
-        argv = argv[1:]
+    allow_root, state, argv = options(argv)
     if (os.geteuid() if euid is None else euid) == 0 and not allow_root:
         sys.exit('devloop-pinned: refusing to run as root; run it as the devloop user '
                  f'(sudo -u devloop -H {sys.argv[0]} ...) or pass {ALLOW_ROOT} first')
-    args, env = command(root, argv)
-    # From the clone, so that devloop finds its main checkout whatever the caller's directory.
-    os.chdir(root)
+    args, env = command(root, argv, state=state)
+    if state is None:
+        # From the clone, so that devloop finds its main checkout whatever the caller's directory.
+        os.chdir(root)
+    elif not in_checkout():
+        sys.exit(f'devloop-pinned: with {STATE_DIR}, run it from the checkout of the managed '
+                 f'repository, not from {os.getcwd()}')
     execve(args[0], args, env)
 
 
