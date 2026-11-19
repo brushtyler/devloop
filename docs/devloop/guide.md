@@ -2399,10 +2399,16 @@ holds: the PR's, or that of its latest fix.
 
 devloop merges such a PR as any other: the queue does not stop. With `[pin] auto = true`,
 though, the merge does not request the pin. Before merging, devloop records a hold of the
-auto-pin in `.ssdlc/devloop/pin-held.json` (a hold that cannot be recorded stops the merge; a
-merge that fails drops it), and after the merge it comments on `[run].alert_issue` with the step
-and adds `agent:needs-operator` to the issue the PR closes; with `[pin] auto = false` only the
-alert and the label. While the hold stays, no auto-pin runs, of that commit nor of later ones:
+auto-pin in `.ssdlc/devloop/pin-held.json` (a hold that cannot be recorded stops the merge), and
+after the merge it comments on `[run].alert_issue` with the step and adds `agent:needs-operator`
+to the issue the PR closes; with `[pin] auto = false` only the alert and the label. A merge that
+fails may still have happened (a timeout of `gh pr merge` loses GitHub's answer): its hold stays,
+marked uncertain, and at the next tick devloop reads the PR. Merged, the hold stays and the alert
+and the label follow then (`auto-pin: #<N> was merged despite the error: …`); not merged, the hold
+goes (`auto-pin: #<N> was not merged: its hold of the auto-pin goes`). The auto-pin reads the
+hold again once it has resolved `origin/main`: a merge that the merge worker of `run` makes
+while a pin is fetching writes its hold first, so a commit that contains it is never pinned.
+While the hold stays, no auto-pin runs, of that commit nor of later ones:
 a pending request (of a later merge, or of an advance of `origin/main`) waits, and the log says
 `auto-pin of origin/main held: the step on the host of #<N> waits for the operator, who pins by
 hand after it (devloop pin)`; `devloop status` shows `auto-pin held: …`. The operator does the

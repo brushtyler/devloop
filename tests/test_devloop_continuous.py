@@ -922,6 +922,7 @@ class ContinuousTickTests(unittest.TestCase):
         # but passes while the snapshot reads GitHub: #10 does not start.
         pinner = mock.Mock()
         pinner.pending.return_value = None
+        pinner.held.return_value = None  # no step on the host holds the auto-pin (#462)
         d = self.make(pinner=pinner)
         now = [0]
         d.clock = lambda: now[0]
@@ -948,6 +949,7 @@ class ContinuousTickTests(unittest.TestCase):
         # The operator pinned the running copy again by hand while the restart waited.
         pinner = mock.Mock()
         pinner.pending.return_value = None
+        pinner.held.return_value = None  # no step on the host holds the auto-pin (#462)
         pinner.current.return_value = INSTALL_ROOT
         d = self.make(pinner=pinner)
         d.cfg = dataclasses.replace(PCFG, pin=dataclasses.replace(PCFG.pin, auto=True))

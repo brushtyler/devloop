@@ -16,6 +16,7 @@ promotion, its receipt and the merge that follows it. ``Dispatcher`` inherits th
 
 import itertools
 from dataclasses import replace
+from types import SimpleNamespace
 
 from .acceptance import acceptance_criteria, acceptance_findings, latest_map
 from .apps import MERGER
@@ -23,6 +24,7 @@ from .context import _describe_bases, _open_findings_reason
 from .dispatch_supervision import RELEASE_COMMAND
 from . import receipt as pr_receipt
 from .github import GitHubError
+from .hoststep import UNREADABLE as UNREADABLE_STEP
 from .hoststep import latest as latest_host_step
 from .ledger import collect as ledger_collect
 from .ledger import timestamp as ledger_timestamp
@@ -771,11 +773,16 @@ class MergeMixin:
             self.merger.merge_pr(pr.number, head)
         except BaseException:
             if holding:
+                # The outcome is unknown: GitHub may have merged and its answer be lost (a
+                # timeout). The hold stays, marked uncertain, until a later tick reads the PR
+                # (``_settle_host_steps``): it goes if the PR was not merged, else it alerts.
                 try:
-                    self.pinner.unhold(pr.number)
+                    self.pinner.doubt(pr.number, pr.meta.get('issue'))
+                    self.log(f'  the merge failed: the hold of the auto-pin stays until a '
+                             f'later tick reads whether #{pr.number} was merged')
                 except OSError as exc:
-                    self.log(f'  the hold of the auto-pin stays, release it with a pin by '
-                             f'hand: {exc}')
+                    self.log(f'  the merge failed and its hold of the auto-pin stays, release '
+                             f'it with a pin by hand: {exc}')
             raise
         self.log(f'  merged {head[:12]} at level {current["level"]} in mode {mode}')
         if holding:
@@ -816,6 +823,43 @@ class MergeMixin:
         if step:
             self._alert_host_step(pr, head, step, holding)
         return None
+
+    def _settle_host_steps(self):
+        """The holds of the auto-pin whose merge failed with an unknown outcome (#462,
+        ``pin.doubt``): the PR, read on GitHub, says how it went. Merged (the answer was lost),
+        the hold stays and the alarm of its step goes out now; not merged, the hold goes, and a
+        new merge of that PR holds again. A PR that cannot be read is tried at the next tick."""
+        for held in self.pinner.held() or []:
+            number = held.get('pr')
+            if not held.get('uncertain') or not isinstance(number, int):
+                continue
+            try:
+                state = (self.gh.pr_state(number) or {}).get('state')
+            except GitHubError as exc:
+                self.log(f'auto-pin: whether #{number} was merged is not known, next tick: '
+                         f'{exc}')
+                continue
+            if state not in ('MERGED', 'OPEN', 'CLOSED'):
+                self.log(f'auto-pin: #{number} is {state or "in an unknown state"}: its hold '
+                         'stays')
+                continue
+            merged = state == 'MERGED'
+            try:
+                if not self.pinner.settle(number, merged):
+                    continue  # held again by a new merge meanwhile
+            except OSError as exc:
+                self.log(f'auto-pin: the hold of #{number} not settled, next tick: {exc}')
+                continue
+            if not merged:
+                self.log(f'auto-pin: #{number} was not merged: its hold of the auto-pin goes')
+                continue
+            self.log(f'auto-pin: #{number} was merged despite the error: its step on the host '
+                     'holds the auto-pin')
+            head = held.get('head') if isinstance(held.get('head'), str) else ''
+            step = held.get('step') if isinstance(held.get('step'), str) and held['step'] \
+                else UNREADABLE_STEP
+            pr = SimpleNamespace(number=number, meta={'issue': held.get('issue')})
+            self._alert_host_step(pr, head, step, True)
 
     def _alert_host_step(self, pr, head, step, holding):
         """The alarm of a merged PR that declares a step on the host (#462): a comment on

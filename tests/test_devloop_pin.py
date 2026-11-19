@@ -907,8 +907,26 @@ class FakePinner:
     def unhold(self, pr):
         self.holds = [h for h in self.holds if h[0] != pr]
 
+    def doubt(self, pr, issue=None):
+        """A merge with an unknown outcome (#462): its hold stays, uncertain."""
+        self.doubts = dict(getattr(self, 'doubts', {}), **{str(pr): issue})
+        return any(h[0] == pr for h in self.holds)
+
+    def settle(self, pr, merged):
+        doubts = getattr(self, 'doubts', {})
+        if str(pr) not in doubts:
+            return False
+        del doubts[str(pr)]
+        if not merged:
+            self.unhold(pr)
+        return True
+
     def held(self):
-        return [{'pr': pr, 'head': head, 'step': step} for pr, head, step in self.holds] or None
+        doubts = getattr(self, 'doubts', {})
+        return [dict({'pr': pr, 'head': head, 'step': step},
+                     **({'uncertain': True, 'issue': doubts[str(pr)]} if str(pr) in doubts
+                        else {}))
+                for pr, head, step in self.holds] or None
 
     def pending(self):
         return {'pr': self.requests[-1][0]} if self.requests else None

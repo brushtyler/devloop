@@ -38,9 +38,9 @@ class HostStepGH(MergeGH):
     """``MergeGH`` whose PR #100 declares ``step`` in its marker (#462); a ``merge_error``
     makes the merge fail."""
 
-    def __init__(self, step=STEP, merge_error=None):
+    def __init__(self, step=STEP, merge_error=None, lost=False):
         super().__init__()
-        self.step, self.merge_error = step, merge_error
+        self.step, self.merge_error, self.lost = step, merge_error, lost
 
     def open_prs(self):
         meta = dict(META, host_step=self.step) if self.step else META
@@ -49,6 +49,8 @@ class HostStepGH(MergeGH):
 
     def merge_pr(self, number, head):
         if self.merge_error is not None:
+            if self.lost:  # GitHub merges, and its answer is lost (a timeout)
+                super().merge_pr(number, head)
             raise self.merge_error
         super().merge_pr(number, head)
 
@@ -120,12 +122,56 @@ class HostStepMergeTests(unittest.TestCase):
         # A declaration that is not text holds the pin all the same.
         self.assertEqual(hoststep.latest(dict(META, host_step=3), []), hoststep.UNREADABLE)
 
-    def test_a_failed_merge_drops_its_hold(self):
+    def test_a_failed_merge_keeps_its_hold_until_a_tick_reads_the_pr(self):
         gh = HostStepGH(merge_error=GitHubError('merge refused'))
-        self.merge(gh)
+        d = self.merge(gh)
         self.assertEqual(gh.merged, [])
+        # The outcome of a failed merge is not known: the hold stays, uncertain.
+        self.assertEqual(self.pinner.holds, [(100, SHA1, STEP)])
+        self.assertEqual(self.pinner.held()[0]['uncertain'], True)
+        self.assertIn('  the merge failed: the hold of the auto-pin stays until a later tick '
+                      'reads whether #100 was merged', self.logs)
+        # The next tick reads the PR, still open: the hold goes, with no alarm.
+        d._auto_pin(False)
         self.assertEqual(self.pinner.holds, [])
+        self.assertIn('auto-pin: #100 was not merged: its hold of the auto-pin goes', self.logs)
         self.assertFalse([b for n, b in gh.comments if n == ALERT_ISSUE])
+
+    def test_a_merge_whose_answer_is_lost_keeps_the_hold_and_alerts_later(self):
+        # GitHub merges, but the answer is lost: the merge raises as the adapter does on a
+        # timeout of `gh pr merge`.
+        gh = HostStepGH(merge_error=GitHubError('gh pr merge 100: timed out after 60s'),
+                        lost=True)
+        d = self.merge(gh)
+        self.assertEqual(gh.merged, [(100, SHA1)])
+        self.assertEqual(self.pinner.holds, [(100, SHA1, STEP)])
+        self.assertFalse([b for n, b in gh.comments if n == ALERT_ISSUE])
+        # The next tick reads the PR merged: the hold stays and the alarm goes out.
+        self.pinner.request(None, 'b' * 40)
+        d._auto_pin(False)
+        self.assertEqual(self.pinner.holds, [(100, SHA1, STEP)])
+        self.assertNotIn('uncertain', self.pinner.held()[0])
+        self.assertEqual(self.pinner.pins, [])
+        self.assertIn('auto-pin: #100 was merged despite the error: its step on the host holds '
+                      'the auto-pin', self.logs)
+        alert, = [b for n, b in gh.comments if n == ALERT_ISSUE]
+        self.assertIn('> ' + STEP, alert)
+        self.assertIn('#100', alert)
+        self.assertIn(CFG.labels.needs_operator, gh.labels[META['issue']])
+        # Settled once: a later tick alerts no more, and still does not pin.
+        d._auto_pin(False)
+        self.assertEqual(len([b for n, b in gh.comments if n == ALERT_ISSUE]), 1)
+        self.assertEqual(self.pinner.pins, [])
+
+    def test_an_unreadable_outcome_keeps_the_hold(self):
+        gh = HostStepGH(merge_error=GitHubError('gh pr merge 100: timed out after 60s'))
+        d = self.merge(gh)
+        gh.pr_state = mock.Mock(side_effect=GitHubError('unreachable'))
+        d._auto_pin(False)
+        self.assertEqual(self.pinner.holds, [(100, SHA1, STEP)])
+        self.assertTrue(self.pinner.held()[0]['uncertain'])
+        self.assertIn('auto-pin: whether #100 was merged is not known, next tick: unreachable',
+                      self.logs)
 
     def test_a_hold_that_cannot_be_recorded_stops_the_merge(self):
         pinner = FakePinner()
@@ -202,6 +248,52 @@ class HeldPinTests(GitCase):
             d.tick()
         self.assertEqual(raised.exception.copy, self.state / f'pinned-{newer[:12]}')
         self.assertEqual(snapshots, [1, 1])
+
+    def test_a_merge_while_the_pin_resolves_the_commit_holds_it(self):
+        # Continuous mode: the merge worker writes its hold and merges while the tick's auto-pin
+        # fetches origin/main. The commit resolved holds that merge, so the pin stops.
+        old = self.pin('main')
+        before = self.push('merged without a step', 'devloop/extra.txt', 'new\n')
+        pin.request(self.state, 101, before)
+        d, snapshots = self.dispatcher(auto=True)
+        resolve = pin.resolve
+        merged = []
+
+        def worker_merges_then_resolve(*args, **kwargs):
+            if not merged:
+                pin.hold(self.state, 102, SHA1, STEP)
+                merged.append(self.push_elsewhere('merged with a step', 'devloop/step.txt',
+                                                  'step\n'))
+            return resolve(*args, **kwargs)
+        with mock.patch.object(pin, 'resolve', side_effect=worker_merges_then_resolve), \
+                self.assertRaisesRegex(AssertionError, 'plan'):
+            d.tick()
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(self.pointed(), old.resolve())
+        self.assertEqual(pin.pending(self.state)['pr'], 101)  # the request waits
+        self.assertEqual(pin.held(self.state)[0]['pr'], 102)
+        self.assertIn('auto-pin of origin/main held: the step on the host of #102 waits for the '
+                      'operator, who pins by hand after it (devloop pin)', self.logs)
+        self.assertEqual(snapshots, [1])
+
+    def test_an_uncertain_hold_is_settled_once(self):
+        pin.hold(self.state, 100, SHA1, 'first')
+        self.assertTrue(pin.doubt(self.state, 100, 7))
+        self.assertFalse(pin.doubt(self.state, 101))
+        self.assertEqual(pin.held(self.state)[0]['issue'], 7)
+        # Merged: the hold stays, no longer uncertain, and only once.
+        self.assertTrue(pin.settle(self.state, 100, merged=True))
+        self.assertNotIn('uncertain', pin.held(self.state)[0])
+        self.assertFalse(pin.settle(self.state, 100, merged=False))
+        self.assertEqual(pin.held(self.state)[0]['step'], 'first')
+        # Not merged: it goes; but not a hold written again by a new merge of the PR.
+        pin.doubt(self.state, 100)
+        pin.hold(self.state, 100, SHA1, 'again')
+        self.assertFalse(pin.settle(self.state, 100, merged=False))
+        self.assertEqual(pin.held(self.state)[0]['step'], 'again')
+        pin.doubt(self.state, 100)
+        self.assertTrue(pin.settle(self.state, 100, merged=False))
+        self.assertIsNone(pin.held(self.state))
 
     def test_holds_add_up_and_a_failed_merge_drops_only_its_own(self):
         pin.hold(self.state, 100, SHA1, 'first')
