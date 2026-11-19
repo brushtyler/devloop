@@ -44,7 +44,8 @@ is enabled, has no review to start early: it still waits for its CI.
 
 The review and fix prompts carry a summary of the CI of the head, read by the dispatcher: each
 job with its outcome and duration and, for a job that runs `scripts/run-tests.py`, its final
-`Ran N tests in S (…)` and `Slowest` lines (#300). The agents, without network, can use those
+`Ran N tests in S (…)` and `Slowest` lines (#300), when the project declares that format of its
+CI logs (`[tests] ci_log_format = "run-tests"`, ADR 0006, R5). The agents, without network, can use those
 measures instead of asking the supervisor for them; a job log that cannot be read only leaves
 its summary out (see [Summary of the CI in the prompts](reference.md#summary-of-the-ci-in-the-prompts)).
 
@@ -416,6 +417,15 @@ implementer that is the same agent as the readiness check, send the issue to the
 `configuration`. Every implementer signs with the implementer app once the keys are renamed by
 role ([the keys by role](reference.md#the-implementer-app-and-the-keys-by-role)); off by default.
 
+Once the keys are renamed, claude can join the reviewer pool as its third reviewer,
+`claude-reviewer`, last and with another model than the implementer's (#409, ADR 0005, P5-5).
+With `[review_policy] provider_quorum = true`, off by default, every agent declares its
+`provider`; a reviewer must differ by tuple from everyone who wrote the PR, at least one
+reviewer of the round is of another provider, a reviewer never falls back on a model of an
+author's provider, and a new round skips a reviewer whose models are all remembered unavailable.
+See
+[Reviewers by provider and the third reviewer](reference.md#reviewers-by-provider-and-the-third-reviewer).
+
 ### Readiness check before implementation
 
 With `preflight = "<agent>"` in the configuration, an issue is checked before the implementer
@@ -445,7 +455,11 @@ as an operator decision for the issues that cite it (#367): `docs/adr/` is in
 `operator_only_paths`, so it reaches `main` only through the operator's merge. A point the ADR
 leaves open, or an ADR that is only proposed, settles nothing and stays an `operator_decision`
 gap. The lifecycle of an ADR, from proposal to the recorded decisions, is in
-[`docs/adr/README.md`](../adr/README.md).
+[`docs/adr/README.md`](../adr/README.md). This rule is ssdlc's datum in the prompt, in
+`[prompts.adr]` of its project file (ADR 0006, R4): the directory, which must be in
+`operator_only_paths`, and the words of the ADRs. A project without it gets no such rule, and
+a decision in its ADRs settles no gap
+([Project data in the prompts](reference.md#project-data-in-the-prompts)).
 
 The outcome is a comment on the issue, with a marker that records it and a hash of the request
 (see [Readiness check records](protocol.md#readiness-check-records)). The outcome is reused
@@ -2300,7 +2314,7 @@ replace it.
 
 Beside it, `.ssdlc/devloop/project.toml` is the [project file](reference.md#project-file)
 (ADR 0006, R2), with the same permissions: the facts of the managed repository (`test_cmd`,
-`local_tests`, `language`, `priority_labels`, `[docs.map]`) and the restrictions it adds
+`local_tests`, `[tests]`, `language`, `priority_labels`, `[docs.map]`) and the restrictions it adds
 (`protected_paths`, `blocked_labels`, sensitive paths and lists, level-0 checks,
 `operator_only_paths`). The order is installation < project file < overlay, but a restriction
 of the project file only adds to those of the installation and the overlay. Any other key in it

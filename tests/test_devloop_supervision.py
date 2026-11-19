@@ -5,7 +5,7 @@ import unittest
 
 from devloop import agents, markdown, supervision
 from devloop.config import MergePolicy
-from devloop.context import PROMPT_DIR
+from devloop.context import PROMPT_DIR, _template, prompt_values
 from devloop.dispatcher import Dispatcher
 from devloop.github import GitHubError
 from devloop.planning import Action, plan
@@ -936,8 +936,9 @@ class AcceptDefaultsTests(Case):
 
     def test_the_prompt_counts_decisions_recorded_in_an_adr_on_the_base_branch(self):
         # #367: a decision recorded in an ADR on the base branch is the operator's; a point the
-        # ADR leaves open is still a gap.
-        text = (PROMPT_DIR / 'preflight.md').read_text(encoding='utf-8')
+        # ADR leaves open is still a gap. Since ADR 0006, R4, the ADRs' directory and words are
+        # ssdlc's data in the prompts, from its project file.
+        text = _template('preflight', **prompt_values(CFG))
         self.assertIn('"Decise dall\'operatore"', text)
         self.assertIn('`docs/adr/` reaches `$base_branch` only through the operator\'s merge', text)
         self.assertIn('stays\n`operator_decision`', text)

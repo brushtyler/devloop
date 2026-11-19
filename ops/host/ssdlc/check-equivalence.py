@@ -3,24 +3,34 @@
 file (ADR 0006, R3).
 
     python3 ops/host/ssdlc/check-equivalence.py --before DIR [--before-local FILE]
-        --after DIR [--after-local FILE] --after-project FILE [--root CHECKOUT]
+        [--before-project FILE] --after DIR [--after-local FILE] --after-project FILE
+        [--root CHECKOUT]
 
 ``DIR`` is an installation of devloop: a pinned copy (``<state_dir>/current``) or the top of a
 checkout, holding ``devloop/`` with its ``config.toml``. "Before" is the installation of before
 R3 with the overlay of before; "after" the installation of R3 with the project file and the
 overlay that gains the keys of ``ops/host/ssdlc/overlay.toml``. Each side runs in a Python of
-its own, with only its installation on the module path, as ``devloop pin`` checks a copy. The
-script compares, side by side:
+its own, with only its installation on the module path, as ``devloop pin`` checks a copy. For
+R4 (the project's data in the prompts) on a host already migrated to R3, "before" is the
+installation of R3 with its project file (``--before-project``), and "after" the installation
+of R4 with the project file that gains ``[prompts]``. For R5 (the project's tests, ADR 0006),
+"before" is the installation in use with its project file (``--before-project``), and "after"
+the installation of R5 with the project file that gains ``[tests]``. The script compares, side
+by side:
 
 - the values of the effective configuration, key by key. The SHA-256 of the project file
   (``review_policy.project``) is left out on purpose: R2 puts it in the policy version by
   construction, so the version differs. In its place the version of the policy after, computed
-  without the hash, must be the version of before;
+  without the hash, must be the version of before. The project's data in the prompts
+  (``prompts.*``, R4) is left out too: before R4 its text was in the templates;
 - the prompts of ``devloop/prompts/``, each rendered with the values of the configuration
-  (``repo``, ``base_branch``, ``test_cmd``, ``language`` and the documentation map); the other
-  placeholders stay as they are, the same on both sides;
+  (``repo``, ``base_branch``, ``test_cmd``, ``language``, the documentation map and, from R4,
+  the project's data in the prompts); the other placeholders stay as they are, the same on both
+  sides;
 - the test modules ``local_tests`` selects: the mode, and with ``changed`` the modules picked for
-  each file the checkout ``--root`` tracks (default: the checkout of this script).
+  each file the checkout ``--root`` tracks (default: the checkout of this script). An
+  installation of before R5 has its selection and its format of the CI logs built in: its
+  ``tests`` are those built-in values, and its own code selects the modules.
 
 Relative paths are taken from the current directory, as usual, even though each side runs in
 its installation. It prints every difference and ends with 0 when there is none, 1 when there is
@@ -39,6 +49,13 @@ ROOT = Path(__file__).resolve().parents[3]
 # Left out of the comparison of the values (ADR 0006, R3): the hash of the project file, which
 # the policy version includes by construction since R2.
 DECLARED = ('review_policy.project',)
+# Left out too, every key under it (ADR 0006, R4): the project's data in the prompts, whose
+# text was in the templates before R4. The rendered prompts are compared in its place.
+DECLARED_TABLES = ('prompts',)
+
+
+def declared(key):
+    return key in DECLARED or key.split('.')[0] in DECLARED_TABLES
 
 # Run by each side with only its installation on the module path.
 DUMP = r'''
@@ -57,15 +74,25 @@ policy = cfg.review_policy
 bare = (dataclasses.replace(policy, project='') if hasattr(policy, 'project') else policy)
 values = dict(repo=cfg.repo, base_branch=cfg.base_branch, test_cmd=cfg.test_cmd,
               language=cfg.language, docs=context.docs_map_section(cfg.docs.entries))
-prompts = {path.stem: context._template(path.stem, **values)
+if hasattr(context, 'prompt_values'):  # R4: the project's data in the prompts
+    values.update(context.prompt_values(cfg))
+prompts ={path.stem: context._template(path.stem, **values)
            for path in sorted(context.PROMPT_DIR.glob('*.md'))}
+effective = dataclasses.asdict(cfg)
+tests = getattr(cfg, 'tests', None)
+if tests is None:
+    # Before R5 (ADR 0006): the selection and the format of the CI logs were in the code.
+    effective['tests'] = {'selection': 'python-unittest-modules', 'source_prefixes': ['ssdlc_'],
+                       'dir_modules': [[localtests.DEVLOOP_DIR, localtests.DEVLOOP_TESTS]],
+                       'ci_log_format': 'run-tests'}
 selected = {}
 if cfg.local_tests == 'changed':
     modules = sorted(p.name for p in (root / 'tests').glob('test_*.py'))
     files = subprocess.run(['git', 'ls-files', '-z'], cwd=root, check=True,
                            capture_output=True, text=True).stdout.split('\0')
-    selected = {f: localtests.select_modules([f], modules) for f in files if f}
-print(json.dumps({'config': dataclasses.asdict(cfg), 'version': bare.version(),
+    extra = () if tests is None else (tests,)
+    selected = {f: localtests.select_modules([f], modules, *extra) for f in files if f}
+print(json.dumps({'config': effective, 'version': bare.version(),
                   'prompts': prompts,
                   'tests': {'local_tests': cfg.local_tests, 'selected': selected}},
                  default=str))
@@ -109,7 +136,7 @@ def differences(before, after):
     lines = []
     old, new = flatten(before['config']), flatten(after['config'])
     for key in sorted(set(old) | set(new)):
-        if key in DECLARED or old.get(key, '<missing>') == new.get(key, '<missing>'):
+        if declared(key) or old.get(key, '<missing>') == new.get(key, '<missing>'):
             continue
         lines.append(f'config {key}: before {json.dumps(old.get(key, "<missing>"))}, '
                      f'after {json.dumps(new.get(key, "<missing>"))}')
@@ -134,6 +161,10 @@ def main(argv=None):
     parser.add_argument('--before', required=True, metavar='DIR',
                         help='the installation of before R3')
     parser.add_argument('--before-local', metavar='FILE', help='the overlay of before R3')
+    parser.add_argument('--before-project', metavar='FILE',
+                        help='the project file of before, when the installation of before is '
+                             'R3 or later (R4: the file without [prompts]; R5: the file '
+                             'without [tests])')
     parser.add_argument('--after', required=True, metavar='DIR',
                         help='the installation of R3')
     parser.add_argument('--after-local', metavar='FILE', help='the overlay of after R3')
@@ -145,13 +176,14 @@ def main(argv=None):
     # Each side runs in its installation: a relative path is the caller's, so it is made
     # absolute here, before any process changes directory. Not resolved: a link stays a link,
     # and the project file's read still refuses it.
-    for name in ('before', 'after', 'before_local', 'after_local', 'after_project', 'root'):
+    for name in ('before', 'after', 'before_local', 'before_project', 'after_local',
+                 'after_project', 'root'):
         if getattr(args, name):
             setattr(args, name, os.path.abspath(getattr(args, name)))
-    for path in (args.before_local, args.after_local, args.after_project):
+    for path in (args.before_local, args.before_project, args.after_local, args.after_project):
         if path and not Path(path).is_file():
             parser.error(f'{path}: not a file')
-    before = dump(args.before, args.before_local, None, args.root)
+    before = dump(args.before, args.before_local, args.before_project, args.root)
     after = dump(args.after, args.after_local, args.after_project, args.root)
     lines = differences(before, after)
     for line in lines:
@@ -159,10 +191,13 @@ def main(argv=None):
     if lines:
         print(f'{len(lines)} difference(s): the migration is not equivalent')
         return 1
-    print(f'equivalent: {len(flatten(after["config"])) - len(DECLARED)} values of the '
+    values = [key for key in flatten(after['config']) if not declared(key)]
+    print(f'equivalent: {len(values)} values of the '
           f'configuration, {len(after["prompts"])} prompts, the test selection of '
           f'{len(after["tests"]["selected"])} files; left out by design: '
-          f'{", ".join(DECLARED)} (the project file\'s hash, in the policy version since R2)')
+          f'{", ".join(DECLARED)} (the project file\'s hash, in the policy version since R2), '
+          f'{", ".join(t + ".*" for t in DECLARED_TABLES)} (the project\'s data in the prompts '
+          'since R4, compared through the rendered prompts)')
     return 0
 
 

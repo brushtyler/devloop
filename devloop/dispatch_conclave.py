@@ -29,7 +29,7 @@ from .conclave import (DONE, MAX_DIFF, MAX_OPTION, MAX_OPTIONS, MAX_RESOLUTION, 
                        consistent, describe_block, make_stale, missing, new_record, next_call,
                        outcome, render, resolution_section, settle_started, text_hash,
                        veto_command)
-from .context import _template
+from .context import _template, prompt_values
 from .dispatch_actions import Models
 from .dispatch_supervision import UntrustedChange
 from .github import GitHubError
@@ -369,7 +369,7 @@ class ConclaveMixin:
         cfg = self.cfg
         proposal = which == 'proposal'
         member = record['proposal'] if proposal else record['votes'][which]
-        values = dict(repo=cfg.repo, issue_number=record['issue'],
+        values = dict(prompt_values(cfg), repo=cfg.repo, issue_number=record['issue'],
                       issue_title=context['issue']['title'],
                       issue_body=context['issue'].get('body') or '',
                       issue_comments=context['comments'], agent=member['agent'],

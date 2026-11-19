@@ -22,13 +22,14 @@ from .budget import BudgetRefused
 from .context import (_failure_text, _format_conflicts, _format_findings, _review_failure,
                       _start_failure, _template, _trusted_comments, docs_diff_section,
                       docs_map_section, docs_review_section, format_ci_summary,
-                      format_fix_requests, format_operator_comments, format_previous_rounds)
+                      format_fix_requests, format_operator_comments, format_previous_rounds,
+                      prompt_values)
 from .github import GitHubError, GitHubUncertain, job_id
 from .ledger import attempt_branch, attempt_marker, fix_register
-from .localtests import failed_modules, select_modules, suite_summary
+from .localtests import RUN_TESTS_LOG, failed_modules, select_modules, suite_summary
 from .markdown import (dispatcher_header, publishable, render_fix, render_native_review,
                        render_review, without_attribution)
-from .config import same_agent
+from .config import foreign, provider_quorum, same_agent
 from .planning import (BASE_CHANGED, FIX_COMMAND, RESYNC_AFTER_APPROVAL, ci_joins_round,
                        counted_rounds, implementer_choice, pending_reviewers, preflight_state,
                        voided_approval, waived_rounds, waiting_reviewers)
@@ -170,7 +171,7 @@ class ActionsMixin:
             # documents mapped to the diff it left.
             docs = (docs_map_section(self._mapped_entries(path)) if attempt == 0
                     else docs_diff_section(self._mapped_docs(path)))
-            return _template('implement', repo=cfg.repo, base_branch=cfg.base_branch,
+            return _template('implement', **prompt_values(cfg), repo=cfg.repo, base_branch=cfg.base_branch,
                              issue_number=number, issue_title=issue['title'],
                              issue_body=issue.get('body') or '', issue_comments=comments,
                              acceptance_criteria=format_criteria(criteria),
@@ -207,11 +208,20 @@ class ActionsMixin:
         self.ws.push(path, branch, replace=True, auth=auth)
         self._pushed(path)
         # The marker keeps the map the reviewer checks until a fix replaces it (#134). Its
-        # reviewer is the first of the pool that is not the implementer's agent (#407).
-        reviewer = next((k for k in cfg.pool() if not cfg.signs_for_role(k)
-                         and not same_agent(cfg.agent(k), agent)), cfg.reviewer)
+        # reviewer is the first of the pool that is not the implementer's agent (#407); with the
+        # reviewer rules of P5-5 (#409), the first of another provider and another tuple.
+        profile = self._profile(agent.key, 'write', used)
+        if cfg.review_policy.provider_quorum:
+            authors = [profile] + [self._profile(agent.key, 'write', m) for m in agent.chain()]
+            reviewer = next((k for k in cfg.pool() if not cfg.signs_for_role(k)
+                             and foreign(self._profile(k, 'review'), authors)
+                             and all(independent(self._profile(k, 'review'), a)
+                                     for a in authors)), cfg.reviewer)
+        else:
+            reviewer = next((k for k in cfg.pool() if not cfg.signs_for_role(k)
+                             and not same_agent(cfg.agent(k), agent)), cfg.reviewer)
         meta = {'issue': number, 'implementer': agent.key, 'reviewer': reviewer,
-                'profile': self._profile(agent.key, 'write', used),
+                'profile': profile,
                 'acceptance_map': result['acceptance_map'],
                 # Informative only (#169): no receipt nor approval depends on it.
                 'local_tests': local, **skipped_models(used)}
@@ -315,8 +325,12 @@ class ActionsMixin:
         ``paths``,
         the PR's diff, as ``local_tests = "changed"`` would select them (``select_modules``).
         A re-run that GitHub refuses, such as a 403 without ``actions: write``, is logged and
-        the failure is a round, as before."""
-        if not self.cfg.ci_rerun_unrelated or rerun_of(pr.reruns, pr.head_sha) is not None:
+        the failure is a round, as before. It needs the format of the CI logs and the selection
+        of the project (``[tests]``, ADR 0006, R5), without which the configuration turns
+        ``ci_rerun_unrelated`` off."""
+        tests = self.cfg.tests
+        if (not self.cfg.ci_rerun_unrelated or tests.ci_log_format != RUN_TESTS_LOG
+                or not tests.selection or rerun_of(pr.reruns, pr.head_sha) is not None):
             return False
         details = self.gh.check_details(pr.head_sha)
         failed = [c for c in details if c.get('bucket') == 'fail']
@@ -339,7 +353,7 @@ class ActionsMixin:
                 return False
             modules.update(found)
         modules = sorted(modules)
-        pertinent = select_modules(paths, modules)
+        pertinent = select_modules(paths, modules, self.cfg.tests)
         if pertinent:
             self.log(f'  CI rerun: failed modules pertinent to the PR: {", ".join(pertinent)}; '
                      'CI round')
@@ -371,14 +385,17 @@ class ActionsMixin:
         (#300): ``{name, outcome, bucket, duration_s}``, and for a completed GitHub Actions job
         ``tests``, the final lines of ``scripts/run-tests.py`` its log holds
         (``suite_summary``, None when it holds none), or ``log: unavailable`` when the log
-        could not be read: that only leaves the summary out, it never stops the action."""
+        could not be read: that only leaves the summary out, it never stops the action. Without
+        the format of the CI logs (``[tests] ci_log_format``, ADR 0006, R5) no log is read: each
+        job has its outcome and duration only."""
         jobs = []
+        readable = self.cfg.tests.ci_log_format == RUN_TESTS_LOG
         for check in details:
             job = {'name': check.get('name'), 'outcome': check.get('conclusion')
                    or check.get('bucket'), 'bucket': check.get('bucket'),
                    'duration_s': check.get('duration_s')}
             number = job_id(check.get('link')) if check.get('run_id') is not None else None
-            if number is not None and check.get('bucket') != 'pending':
+            if readable and number is not None and check.get('bucket') != 'pending':
                 try:
                     log = self.gh.job_log(number)
                 except GitHubError as exc:
@@ -466,6 +483,9 @@ class ActionsMixin:
         else:
             round_no, done, comments = last_round(pr.reviews) + 1, [], pr.operator_comments
             counted = counted_rounds(pr.reviews) + 1
+            # A new round chooses its reviewers again (#409): one whose chain is remembered
+            # unavailable gives its place to the next valid one of the pool.
+            receipt = self._fresh_receipt(pr, receipt)
             if bases:
                 # Abandoned only because the base advanced: the round does not count.
                 restarts = {'round': latest[0]['round'], 'bases': bases}
@@ -514,7 +534,7 @@ class ActionsMixin:
         decision, _, resolution = self._resolution_for(pr.issue, issue, pr, pr.head_sha)
         # Blind to the author (#389): no implementer key, no attribution header, no marker. The
         # key stays in the PR's marker and in the ledger, for the selection of the reviewers.
-        prompt = _template('review', repo=cfg.repo, base_branch=cfg.base_branch,
+        prompt = _template('review', **prompt_values(cfg), repo=cfg.repo, base_branch=cfg.base_branch,
                            pr_number=pr.number, round=round_no, max_rounds=max_rounds,
                            ci=ci, ci_summary=ci_summary, test_cmd=cfg.test_cmd,
                            issue_number=pr.issue, issue_title=issue['title'],
@@ -528,7 +548,8 @@ class ActionsMixin:
                            operator_comments=format_operator_comments(comments),
                            language=cfg.language, conclave=resolution)
         level2 = receipt['level'] > 1
-        authors = (self._authors(pr) or []) if level2 else []
+        by_provider = cfg.review_policy.provider_quorum
+        authors = (self._authors(pr) or []) if level2 or by_provider else []
         peers = [p for p in map(profile_of, done) if p]
         # The profile each reviewer of this action runs with, reserved before any turn starts
         # and replaced atomically when a fallback model takes over (#176); a reviewer that
@@ -541,7 +562,32 @@ class ActionsMixin:
         # selection reads the implementer (``_implementer_agents``), at level 2 every author.
         same = authors if level2 else self._implementer_agents(pr)
 
+        def allowed_by_provider(key):
+            # With the reviewer rules of P5-5 (#409) a model keeps what the selection checked:
+            # independent by tuple of every author, distinct from the round's other reviewers,
+            # and the quorum rule (ii) of D8 on the round with this model in it, the reviewers
+            # not yet run counted with the model they would run now. A fallback model is also
+            # never of an author's provider, whatever the quorum (D8, "Fallback dello stesso
+            # fornitore"): only the reviewer's primary model is subject to the quorum alone.
+            def allowed(candidate):
+                p = self._profile(key, 'review', candidate)
+                if candidate.fallback_for and not foreign(p, authors):
+                    return False
+                with reserving:
+                    others = [q for k, q in reserved.items() if k != key]
+                    waiting = [self._profile(k, 'review') for k in receipt['reviewers']
+                               if k not in reviewed and k not in reserved and k != key]
+                    if not (all(independent(p, a) for a in authors)
+                            and all(distinct(p, q) for q in peers + others)
+                            and provider_quorum(peers + others + waiting + [p], authors)):
+                        return False
+                    reserved[key] = p
+                    return True
+            return allowed
+
         def allowed_for(key):
+            if by_provider:
+                return allowed_by_provider(key)
             if not level2:
                 return lambda candidate: not any(same_agent(candidate, a) for a in same)
 
@@ -783,7 +829,8 @@ class ActionsMixin:
 
         def prompt(attempt):
             # The documents mapped to the diff each attempt starts from (#203).
-            return _template('fix', repo=cfg.repo, pr_number=pr.number, issue_number=pr.issue,
+            return _template('fix', **prompt_values(cfg), repo=cfg.repo, pr_number=pr.number,
+                             issue_number=pr.issue,
                              issue_title=issue['title'], issue_body=issue.get('body') or '',
                              findings=_format_findings(findings), test_cmd=cfg.test_cmd,
                              ci_summary=ci_summary,
@@ -924,7 +971,8 @@ class ActionsMixin:
         ci_summary = self._ci_summary(pr)[0]
 
         def prompt(attempt):
-            return _template('fix', repo=cfg.repo, pr_number=pr.number, issue_number=pr.issue,
+            return _template('fix', **prompt_values(cfg), repo=cfg.repo, pr_number=pr.number,
+                             issue_number=pr.issue,
                              issue_title=issue['title'], issue_body=issue.get('body') or '',
                              findings=_format_findings(findings), test_cmd=cfg.test_cmd,
                              ci_summary=ci_summary,
@@ -1028,7 +1076,8 @@ class ActionsMixin:
                                           f'riuscita. {reason}\n\nFile in conflitto:\n\n{listed}',
                                detail, remove=remove, cls=cls, supervised=supervised, why=why,
                                retry=None if supervised else self._retry_payload('sync', pr))
-            prompt = _template('sync', repo=cfg.repo, pr_number=pr.number, issue_number=pr.issue,
+            prompt = _template('sync', **prompt_values(cfg), repo=cfg.repo, pr_number=pr.number,
+                               issue_number=pr.issue,
                                issue_title=issue['title'], issue_body=issue.get('body') or '',
                                base_branch=cfg.base_branch, conflicts=listed,
                                test_cmd=cfg.test_cmd, language=cfg.language)

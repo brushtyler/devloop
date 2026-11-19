@@ -2352,7 +2352,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             return self.cfg.test_cmd, {'mode': mode}
         if mode == 'none':
             return None, {'mode': mode, 'modules': []}
-        modules = select_modules(self.ws.worktree_changes(path), self.ws.test_modules(path))
+        modules = select_modules(self.ws.worktree_changes(path), self.ws.test_modules(path),
+                                 self.cfg.tests)
         return (module_command(modules) if modules else None), {'mode': mode, 'modules': modules}
 
     def _run_tests(self, where, path, attempt, command):

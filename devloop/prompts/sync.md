@@ -4,7 +4,7 @@ You work alone and headless.
 
 The working directory is a git worktree on the PR branch, in the middle of a merge of
 `origin/$base_branch`: the dispatcher started the merge, and the files listed below contain git
-conflict markers. Read `AGENTS.md` before changing anything.
+conflict markers.{{?fix_instructions: Read $fix_instructions before changing anything.}}
 
 ## Rules
 
@@ -14,9 +14,9 @@ conflict markers. Read `AGENTS.md` before changing anything.
 - Make no other change: no refactoring, no new features, no fixes the conflicts do not need.
 - Do not run `git merge`, `git add`, `git commit`, `git reset`, `git checkout` or
   `git merge --abort`: the dispatcher concludes the merge with a merge commit after you finish.
-- Before finishing, run the tests that cover the conflicting files, one module at a time with
-  `python3 -m unittest discover -s tests -p 'test_name.py'`: this form works for every module,
-  including those that import helpers from `tests/`. Do not run the full suite (`$test_cmd`): it can outlast
+- Before finishing, run the tests that cover the conflicting files{{?module_test_cmd:, one module at a time with
+  `$module_test_cmd`}}{{?module_test_helpers:: this form works for every module,
+  including those that import helpers from `$module_test_helpers`}}. Do not run the full suite (`$test_cmd`): it can outlast
   your tool's time limit, and the dispatcher runs it after you finish and sends you any failures.
 - Run tests in the foreground and use their exit code. Do not start them in the background and then
   wait with a loop that searches their output for some text: if that text never appears, the loop

@@ -308,6 +308,17 @@ capacity = false
 # max_rounds_per_pr = 2
 # max_grants_per_day = 3
 
+# Added after the freeze: the selection of the test modules and the format of the CI logs that the
+# code of the frozen commit had built in (devloop/localtests.py), declared since ADR 0006, R5
+# (issue #424), not R3's. The same values as ops/host/ssdlc/project.toml.
+[tests]
+selection = "python-unittest-modules"
+source_prefixes = ["ssdlc_"]
+ci_log_format = "run-tests"
+
+[tests.dir_modules]
+"devloop/" = "test_devloop"
+
 # Documentation map (issue #203): code paths and the documents that describe them. A key is a
 # directory prefix ending in "/" or a file, relative to the root, with no pattern characters;
 # each value lists one or more documents of the repository (a pin does not extract them, #210).

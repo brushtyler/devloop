@@ -11,6 +11,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .localtests import CI_LOG_FORMATS, SELECTIONS, Tests
 from .localtests import MODES as LOCAL_TESTS_MODES
 from .policy import MAX_LEVEL, MIN_LEVEL, ZERO_LEVEL, ReviewPolicy
 from .supervision import MAX_CAPACITY, MAX_CAPACITY_HOURS, MAX_DAILY_GRANTS, MAX_GRANTED_ROUNDS
@@ -295,11 +296,41 @@ class DocsMap:
 
 
 @dataclass(frozen=True)
+class PromptFacts:
+    """``[prompts]`` (ADR 0006, R4): the project's data the prompt templates of the
+    installation are filled with. Each is empty without its key, and the template then drops
+    the sentence that names it (``context._template``). The text around them stays the
+    installation's: the project gives data, never rules."""
+    # What the agents read before starting a turn on an issue or a PR, each a Markdown fragment
+    # (``\\`AGENTS.md\\```, ``the README section "Developing SSDLC"``), joined as an English list.
+    instructions: tuple = ()
+    # What the implementer reads before a fix or a sync of its pull request.
+    fix_instructions: tuple = ()
+    # The command that runs one test module, ``test_name.py`` standing for the module, and the
+    # directory of the helpers the modules import, which that form still lets them import.
+    module_test_cmd: str = ''
+    module_test_helpers: str = ''
+    # ``[prompts.adr]``: the directory of the ADRs, reserved to the operator, the heading of the
+    # operator's decisions in an ADR, and the words that mark a value and a choice it leaves
+    # open. All four or none.
+    adr_dir: str = ''
+    adr_decided: str = ''
+    adr_open_value: str = ''
+    adr_open_choice: str = ''
+
+
+PROMPT_ADR_KEYS = ('dir', 'decided', 'open_value', 'open_choice')
+
+
+@dataclass(frozen=True)
 class FallbackModel:
     """A model an agent falls back to when the ones before it are unavailable (issue #121)."""
     model: str
     model_label: str
     effort: str
+    # Who makes the model (ADR 0005, D8, P5-5, #409), lowercase, '' when not declared: then
+    # ``provider_of`` reads it from the prefix of the model's name.
+    provider: str = ''
 
 
 @dataclass(frozen=True)
@@ -340,13 +371,18 @@ class AgentConfig:
     # declare the role app ``implementer``. Without a table of that name the agent uses the
     # ambient ``gh`` login.
     app: str = ''
+    # Who makes ``model`` (ADR 0005, D8, P5-5, #409), lowercase, '' when not declared: then
+    # ``provider_of`` reads it from the prefix of the model's name. Required, for the agent and
+    # each fallback model, with ``review_policy.provider_quorum``.
+    provider: str = ''
 
     def chain(self):
         """The agent with its configured model, then with each fallback model in order: same
-        key, CLI and arguments, with the fallback's model, label and effort."""
+        key, CLI and arguments, with the fallback's model, label, effort and provider (its own,
+        never the agent's: agy may fall back on a model of another provider)."""
         return [self] + [dataclasses.replace(self, model=f.model, model_label=f.model_label,
-                                             effort=f.effort, fallback_models=(),
-                                             fallback_for=self.model)
+                                             effort=f.effort, provider=f.provider,
+                                             fallback_models=(), fallback_for=self.model)
                          for f in self.fallback_models]
 
 
@@ -391,10 +427,20 @@ def legacy_key(key, role, agents):
 
 
 # The providers of the models devloop knows, by the prefix of the model's name (ADR 0005, P5-3,
-# #407): ``kind`` is the CLI, not who makes the model, and agy also offers Claude models. Used
-# only where an agent declares no provider (``provider_of``), so it only adds conflicts; the
-# provider declared for every agent and fallback, with this table as a check, is P5-5's.
+# #407): ``kind`` is the CLI, not who makes the model, and agy also offers Claude models. Where
+# an agent or a fallback declares no provider (``provider``), ``provider_of`` reads it here; where
+# one declares it, the table is a check (D8, option (c), P5-5, #409): a model with one of these
+# prefixes declared with another provider stops devloop at startup (``_provider``).
 MODEL_PROVIDERS = (('claude-', 'anthropic'), ('gpt-', 'openai'), ('gemini-', 'google'))
+
+
+def prefix_provider(model):
+    """The provider the prefix of ``model`` names (``MODEL_PROVIDERS``), or ''."""
+    if isinstance(model, str):
+        for prefix, provider in MODEL_PROVIDERS:
+            if model.lower().startswith(prefix):
+                return provider
+    return ''
 
 
 def _field(x, name):
@@ -408,12 +454,7 @@ def provider_of(x):
     declared = _field(x, 'provider')
     if isinstance(declared, str) and declared.strip():
         return declared.strip().lower()
-    model = _field(x, 'model')
-    if isinstance(model, str):
-        for prefix, provider in MODEL_PROVIDERS:
-            if model.lower().startswith(prefix):
-                return provider
-    return ''
+    return prefix_provider(_field(x, 'model'))
 
 
 def same_agent(a, b):
@@ -422,11 +463,27 @@ def same_agent(a, b):
     #407): the same kind of CLI, the same model, or the same provider (``provider_of``) when
     both are known. The conflict checks compare this, never the keys, which differ by role for
     one same agent (``claude-implementer``, ``claude-reviewer``): agy run with a Claude model
-    is the same provider as claude. At level 2 this is stricter than the quorum rule (ii) of D8,
-    which admits one reviewer of the authors' provider: that rule comes with P5-5."""
+    is the same provider as claude. The reviewers are chosen with it until the operator turns on
+    ``review_policy.provider_quorum`` (P5-5, #409): then with ``foreign`` and the tuple."""
     provider = provider_of(a)
     return (_field(a, 'kind') == _field(b, 'kind') or _field(a, 'model') == _field(b, 'model')
             or bool(provider and provider == provider_of(b)))
+
+
+def foreign(reviewer, authors):
+    """Whether ``reviewer`` (a profile, an ``AgentConfig``) is of a provider other than every
+    one of ``authors`` (ADR 0005, D8, P5-5, #409). Fails closed: a provider that is not known,
+    the reviewer's or an author's, is never another one."""
+    provider = provider_of(reviewer)
+    return bool(provider) and all(provider_of(a) and provider_of(a) != provider
+                                  for a in authors)
+
+
+def provider_quorum(reviewers, authors):
+    """The quorum rule (ii) of D8 (ADR 0005, P5-5, #409): at least one of ``reviewers`` is of a
+    provider other than every one of ``authors`` (``foreign``). At level 1 the only reviewer
+    must be; at level 2 one of the two may share the authors' provider."""
+    return any(foreign(r, authors) for r in reviewers)
 
 
 @dataclass(frozen=True)
@@ -505,11 +562,16 @@ class Config:
     # one at a time, in plan order.
     max_parallel_actions: int = 1
     implement_test_retries: int = 1
-    # Which tests run locally after a writing turn (#169): see ``localtests``.
+    # Which tests run locally after a writing turn (#169): see ``localtests``. ``changed`` without
+    # a selection in ``tests`` is ``full`` (ADR 0006, R5).
     local_tests: str = 'full'
     # Re-run once, without a round, a CI failure whose test modules are not pertinent to the PR
-    # (#200, ``Dispatcher._rerun_unrelated``).
+    # (#200, ``Dispatcher._rerun_unrelated``). Off without a CI log format and a selection in
+    # ``tests`` (ADR 0006, R5): nothing would tell the failed modules or their pertinence.
     ci_rerun_unrelated: bool = True
+    # The selection of the test modules and the format of the CI logs (``[tests]``, ADR 0006,
+    # R5), facts of the project: none by default.
+    tests: Tests = Tests()
     # The block on uncertain turns (#362): a turn of the journal left without outcome refuses
     # every new turn of its work until a trusted user reconciles it. Off by default (ADR 0004,
     # D8): the journal records the turns all the same.
@@ -566,6 +628,8 @@ class Config:
     agent_user: AgentUserPolicy = field(default_factory=AgentUserPolicy)
     # Code paths and their documents, listed in the implement, fix and review prompts (#203).
     docs: DocsMap = field(default_factory=DocsMap)
+    # The project's data in the prompts (ADR 0006, R4).
+    prompts: PromptFacts = field(default_factory=PromptFacts)
 
     def agent(self, key):
         return self.agents[key]
@@ -626,7 +690,7 @@ def _fallback_models(table, where, kind, model, effort):
         at = f'{where}[{position}]'
         if not isinstance(item, dict):
             raise ConfigError(f'{at}: expected a table with model, model_label and effort')
-        unknown = set(item) - {'model', 'model_label', 'effort'}
+        unknown = set(item) - {'model', 'model_label', 'effort', 'provider'}
         if unknown:
             raise ConfigError(f'{at}: unknown keys {sorted(unknown)}')
         name = _require(item, 'model', str, at)
@@ -642,8 +706,47 @@ def _fallback_models(table, where, kind, model, effort):
         if name in seen:
             raise ConfigError(f'{at}.model: {name!r} is already the agent\'s model or a fallback')
         seen.add(name)
-        models.append(FallbackModel(model=name, model_label=label, effort=level))
+        models.append(FallbackModel(model=name, model_label=label, effort=level,
+                                    provider=_provider(item, at, name)))
     return tuple(models)
+
+
+def _provider(table, where, model):
+    """``provider`` of an agent or of a fallback model (ADR 0005, D8, P5-5, #409): who makes
+    ``model``, lowercase, or '' when not declared. A model whose prefix names a provider
+    (``MODEL_PROVIDERS``) declared with another one stops devloop: the table is the check of
+    option (c), for agy, which also offers Claude models."""
+    if 'provider' not in table:
+        return ''
+    provider = _require(table, 'provider', str, where).strip().lower()
+    if not provider:
+        raise ConfigError(f'{where}.provider: must not be empty')
+    known = prefix_provider(model)
+    if known and known != provider:
+        raise ConfigError(f'{where}.provider: {model!r} is a model of {known!r}, not of '
+                          f'{provider!r}')
+    return provider
+
+
+def _providers(agent):
+    """``(providers,)``: the declared providers of ``agent``'s model and of each fallback, ''
+    each when not declared, as ``ReviewPolicy.reviewers`` records them; ``()`` when none is
+    declared."""
+    providers = (agent.provider, *(f.provider for f in agent.fallback_models))
+    return (providers,) if any(providers) else ()
+
+
+def _check_providers(agents):
+    """With ``review_policy.provider_quorum`` (P5-5, #409) every agent and every fallback model
+    declares its provider (D8, option (c)): the quorum rule never reads it from a prefix."""
+    for key, agent in agents.items():
+        if not agent.provider:
+            raise ConfigError(f'agents.{key}.provider: required with '
+                              'review_policy.provider_quorum')
+        for position, fallback in enumerate(agent.fallback_models):
+            if not fallback.provider:
+                raise ConfigError(f'agents.{key}.fallback_models[{position}].provider: required '
+                                  'with review_policy.provider_quorum')
 
 
 def _memory_seconds(table, where):
@@ -772,10 +875,13 @@ def parse_review_policy(table, root, reviewers=(), agents=None):
         raise ConfigError(f'{where}.advisory_reviewer: unknown agent {advisory!r}')
     if advisory:
         _check_role(advisory, 'reviewer', f'{where}.advisory_reviewer')
+    quorum = default.provider_quorum
+    if 'provider_quorum' in table:
+        quorum = _require(table, 'provider_quorum', bool, where)
     return ReviewPolicy(default_level=level, label=label, sensitive_paths=paths,
                         sensitive_files=tuple(files), reviewers=tuple(reviewers),
                         zero_label=zero_label, zero_allowlist=allowlist, zero_checks=checks,
-                        advisory_reviewer=advisory)
+                        advisory_reviewer=advisory, provider_quorum=quorum)
 
 
 def _zero_policy(table, level_label, default):
@@ -916,6 +1022,53 @@ def parse_ci(table):
                 raise ConfigError(f'ci.{key}: expected a whole number of minutes, at least {low}')
             values[key] = value
     return CIPolicy(**values)
+
+
+TESTS_KEYS = ('selection', 'source_prefixes', 'dir_modules', 'ci_log_format')
+_NAME_PART = re.compile(r'\w+', re.ASCII)
+_MODULE_PREFIX = re.compile(r'test_\w*', re.ASCII)
+
+
+def parse_tests(table):
+    """``[tests]`` (ADR 0006, R5), facts of the project, each optional: ``selection``, one of
+    ``localtests.SELECTIONS``, with its parameters ``source_prefixes`` (name prefixes such as
+    ``"ssdlc_"``) and ``dir_modules`` (``"<directory>/" = "test_<prefix>"``), which need it;
+    ``ci_log_format``, one of ``localtests.CI_LOG_FORMATS``. Anything else stops devloop."""
+    if not isinstance(table, dict):
+        raise ConfigError('tests: expected a table')
+    unknown = set(table) - set(TESTS_KEYS)
+    if unknown:
+        raise ConfigError(f'tests: unknown keys {sorted(unknown)}')
+    values = {}
+    for key, names in (('selection', SELECTIONS), ('ci_log_format', CI_LOG_FORMATS)):
+        if key in table:
+            value = table[key]
+            if not isinstance(value, str) or value not in names:
+                raise ConfigError(f'tests.{key}: must be one of {names}')
+            values[key] = value
+    prefixes = _str_list(table, 'source_prefixes', 'tests')
+    for prefix in prefixes:
+        if not _NAME_PART.fullmatch(prefix):
+            raise ConfigError(f'tests.source_prefixes: {prefix!r} is not a name prefix '
+                              '(letters, digits and "_")')
+    dirs = table.get('dir_modules', {})
+    if not isinstance(dirs, dict):
+        raise ConfigError('tests.dir_modules: expected a table of "<directory>/" = '
+                          '"test_<prefix>"')
+    pairs = []
+    for directory, prefix in dirs.items():
+        at = f'tests.dir_modules.{directory!r}'
+        parts = directory.split('/')
+        if (not directory.endswith('/') or directory.startswith('/') or '\\' in directory
+                or any(part in ('', '.', '..') for part in parts[:-1])):
+            raise ConfigError(f'{at}: expected a relative directory ending in "/"')
+        if not isinstance(prefix, str) or not _MODULE_PREFIX.fullmatch(prefix):
+            raise ConfigError(f'{at}: expected the prefix of test modules, "test_<name>"')
+        pairs.append((directory, prefix))
+    if (prefixes or pairs) and 'selection' not in values:
+        raise ConfigError('tests: source_prefixes and dir_modules are parameters of a '
+                          'selection: they need tests.selection')
+    return Tests(source_prefixes=prefixes, dir_modules=tuple(pairs), **values)
 
 
 def parse_delegations(table):
@@ -1203,6 +1356,60 @@ def parse_docs(data):
     return DocsMap(entries=docs_entries(data))
 
 
+def _prompt_text(value, where):
+    """A value of ``[prompts]``: a string on one line, not empty, put in a prompt as it is."""
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f'{where}: expected a non-empty string')
+    if value != value.strip() or any(c in value for c in '\r\n'):
+        raise ConfigError(f'{where}: expected one line without leading or trailing spaces')
+    return value
+
+
+def parse_prompts(table, merge):
+    """``[prompts]`` (ADR 0006, R4): the project's data in the prompts (``PromptFacts``). The
+    ADR directory must be reserved to the operator (``merge``'s ``operator_only_paths``): the
+    preflight takes its decisions as settled because only the operator merges them there."""
+    if not isinstance(table, dict):
+        raise ConfigError('prompts: expected a table')
+    keys = {'instructions', 'fix_instructions', 'module_test_cmd', 'module_test_helpers', 'adr'}
+    unknown = set(table) - keys
+    if unknown:
+        raise ConfigError(f'prompts: unknown keys {sorted(unknown)}')
+    values = {}
+    for key in ('instructions', 'fix_instructions'):
+        items = table.get(key, [])
+        if not isinstance(items, list):
+            raise ConfigError(f'prompts.{key}: expected a list of strings')
+        values[key] = tuple(_prompt_text(item, f'prompts.{key}') for item in items)
+    for key in ('module_test_cmd', 'module_test_helpers'):
+        if key in table:
+            values[key] = _prompt_text(table[key], f'prompts.{key}')
+    if values.get('module_test_helpers') and not values.get('module_test_cmd'):
+        raise ConfigError('prompts.module_test_helpers: needs prompts.module_test_cmd, the '
+                          'command the helpers are imported with')
+    if 'adr' in table:
+        adr = table['adr']
+        if not isinstance(adr, dict):
+            raise ConfigError('prompts.adr: expected a table')
+        unknown = set(adr) - set(PROMPT_ADR_KEYS)
+        if unknown:
+            raise ConfigError(f'prompts.adr: unknown keys {sorted(unknown)}')
+        missing = [key for key in PROMPT_ADR_KEYS if key not in adr]
+        if missing:
+            raise ConfigError(f'prompts.adr: missing {missing}: the four keys go together')
+        for key in PROMPT_ADR_KEYS:
+            values[f'adr_{key}'] = _prompt_text(adr[key], f'prompts.adr.{key}')
+        directory = values['adr_dir']
+        _docs_path(directory, 'prompts.adr.dir', document=False)
+        if not directory.endswith('/'):
+            raise ConfigError(f'prompts.adr.dir: {directory!r} is not a directory (ending in "/")')
+        if not merge.operator_only(directory):
+            raise ConfigError(f'prompts.adr.dir: {directory!r} is not in [merge] '
+                              'operator_only_paths: the preflight takes the decisions of its '
+                              'ADRs as the operator\'s only when the operator alone merges them')
+    return PromptFacts(**values)
+
+
 def _check_role(key, role, where):
     """Refuse the key ``key`` given the role ``role`` when it names another one (ADR 0005,
     P5-3, #407): ``claude-reviewer`` as ``roles.implementer`` stops devloop at startup. A key
@@ -1402,7 +1609,8 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
             unavailable_patterns=patterns, unavailable_exit_codes=codes,
             fallback_memory_seconds=_memory_seconds(table, where),
             denied_cooldown_hours=_denied_cooldown(table, where),
-            write_commands=write_commands, review_commands=review_commands, app=app)
+            write_commands=write_commands, review_commands=review_commands, app=app,
+            provider=_provider(table, where, model))
     roles = data.get('roles') or {}
     implementer = _require(roles, 'implementer', str, 'roles')
     if implementer not in agents:
@@ -1467,6 +1675,13 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
         raise ConfigError(f'local_tests: must be one of {LOCAL_TESTS_MODES}')
     ci_rerun = (_require(data, 'ci_rerun_unrelated', bool, 'config')
                 if 'ci_rerun_unrelated' in data else Config.ci_rerun_unrelated)
+    tests = parse_tests(data.get('tests', {}))
+    # ADR 0006, R5: without a selection ``changed`` is ``full``, a project without a strategy
+    # loses no test; without a format of the CI logs and a selection nothing tells the failed
+    # modules or their pertinence, so a CI failure is never re-run without a round.
+    if local_tests == 'changed' and not tests.selection:
+        local_tests = 'full'
+    ci_rerun = ci_rerun and bool(tests.ci_log_format) and bool(tests.selection)
     block_uncertain = (_require(data, 'block_uncertain_turns', bool, 'config')
                        if 'block_uncertain_turns' in data else Config.block_uncertain_turns)
     story_identity = (_require(data, 'story_identity', bool, 'config')
@@ -1484,7 +1699,12 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
           agents[k].kind, agents[k].model,
           agents[k].effort, agents[k].review_args,
           tuple((f.model, f.effort) for f in agents[k].fallback_models),
-          agents[k].review_commands) for k in pool], agents)
+          agents[k].review_commands)
+         # The declared providers (#409) only when there are some: without them the pool is
+         # recorded as before.
+         + _providers(agents[k]) for k in pool], agents)
+    if review_policy.provider_quorum:
+        _check_providers(agents)
     if project:
         review_policy = dataclasses.replace(review_policy, project=project)
     # The roles whose turns can run (#365): conclave and advisory only when configured.
@@ -1497,6 +1717,7 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
         # The command of a temporary capacity limit lives on the issue of the summary (#412).
         raise ConfigError('delegations.capacity: needs [report] issue, where the supervisor '
                           'writes `/devloop capacity`')
+    merge = parse_merge(data.get('merge', {}), supervisor)
     return Config(
         repo=_require(data, 'repo', str, 'config'),
         base_branch=data.get('base_branch', 'main'),
@@ -1514,10 +1735,10 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
         priority_labels=_str_list(data, 'priority_labels', 'config', ('prerequisito',)),
         protected_paths=_str_list(data, 'protected_paths', 'config', DEFAULT_PROTECTED),
         apps=apps, app_key_dir=key_dir, agent_stall_action=stall_action,
-        local_tests=local_tests, ci_rerun_unrelated=ci_rerun,
+        local_tests=local_tests, ci_rerun_unrelated=ci_rerun, tests=tests,
         block_uncertain_turns=block_uncertain, story_identity=story_identity,
         publication_outbox=outbox, attempt_identity=attempt_identity, budget=budget,
-        merge=parse_merge(data.get('merge', {}), supervisor), supervisor=supervisor,
+        merge=merge, supervisor=supervisor,
         supervisor_actor=supervisor_actor,
         pin=parse_pin(data.get('pin', {}), sensitive_lists(data)),
         run=parse_run(data.get('run', {})),
@@ -1527,6 +1748,7 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
         agent_user=parse_agent_user(data.get('agent_user', {})),
         delegations=delegations,
         docs=parse_docs(data),
+        prompts=parse_prompts(data.get('prompts', {}), merge),
         review_policy=review_policy,
         **ints)
 
@@ -1589,7 +1811,10 @@ _AGENT_KEYS = dict.fromkeys(('kind', 'display_name', 'model', 'model_label', 'ef
                              'version_cmd', 'write_args', 'review_args', 'commit_trailer',
                              'fallback_models', 'unavailable_patterns', 'unavailable_exit_codes',
                              'fallback_memory_seconds', 'denied_cooldown_hours',
-                             'write_commands', 'review_commands', 'app'))
+                             'write_commands', 'review_commands', 'app', 'provider'))
+_PROMPTS_KEYS = {**dict.fromkeys(('instructions', 'fix_instructions', 'module_test_cmd',
+                                  'module_test_helpers')),
+                 'adr': dict.fromkeys(PROMPT_ADR_KEYS)}
 OVERLAY_KEYS = {
     **dict.fromkeys(('repo', 'base_branch', 'branch_prefix', 'state_dir', 'source',
                      'repo_lock_dir',
@@ -1604,7 +1829,8 @@ OVERLAY_KEYS = {
                      'agent_stall_action', 'blocked_labels', 'priority_labels',
                      'protected_paths')),
     'review_policy': {**dict.fromkeys(('default_level', 'label', 'sensitive_paths',
-                                       'sensitive_path_lists', 'advisory_reviewer')),
+                                       'sensitive_path_lists', 'advisory_reviewer',
+                                       'provider_quorum')),
                       'zero': dict.fromkeys(('label', 'allowlist', 'checks'))},
     'merge': {'mode': None, 'operator_only_paths': None, 'levels': {'*': None}},
     'roles': {**dict.fromkeys(('implementer', 'reviewer', 'reviewers', 'supervisor')),
@@ -1619,6 +1845,9 @@ OVERLAY_KEYS = {
                          'interval_minutes')),
     'agent_user': dict.fromkeys(('name', 'check')),
     'docs': {'map': {'*': None}},
+    'tests': {'selection': None, 'source_prefixes': None, 'dir_modules': {'*': None},
+              'ci_log_format': None},
+    'prompts': _PROMPTS_KEYS,
     'delegations': dict.fromkeys(('retry_own_prs', 'rounds', 'budget', 'max_rounds_per_pr',
                                   'max_grants_per_day', 'capacity', 'capacity_max_open_prs',
                                   'capacity_max_parked_prs', 'capacity_max_hours')),
@@ -1669,7 +1898,11 @@ def apply_overlay(data, overlay):
 PROJECT_CONFIG = 'project.toml'
 PROJECT_FACTS = {
     'test_cmd': None, 'local_tests': None, 'language': None, 'priority_labels': None,
-    'docs': {'map': {'*': None}},
+    'docs': {'map': {'*': None}}, 'prompts': _PROMPTS_KEYS,
+    # The selection of the test modules and the format of the CI logs (ADR 0006, R5). Never a
+    # permission of the agents: those are the installation's and the overlay's (D2).
+    'tests': {'selection': None, 'source_prefixes': None, 'dir_modules': {'*': None},
+              'ci_log_format': None},
 }
 # Each restriction with its value when neither the installation nor the overlay sets it.
 PROJECT_RESTRICTIONS = {

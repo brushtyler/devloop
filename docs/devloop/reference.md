@@ -31,7 +31,8 @@ and `agent_stall_action` (`"warn"`, the default, or `"abort"`) control the
 open PRs in progress and those waiting for a person ([Open PR limits](guide.md#open-pr-limits)).
 `ci_rerun_unrelated` (a boolean, default `true`) re-runs once a CI failure in test modules not
 pertinent to the PR ([CI failures not pertinent to the PR](#ci-failures-not-pertinent-to-the-pr));
-another value stops devloop at startup. `block_uncertain_turns` (a boolean, default `false`)
+another value stops devloop at startup. It needs the selection and the format of the CI logs of
+the project's [`[tests]`](#local-tests): without either it is off, whatever its value. `block_uncertain_turns` (a boolean, default `false`)
 turns on the block on uncertain turns of the [turn journal](protocol.md#turn-journal) (#362): a
 turn left without outcome refuses every new turn of its work, with an escalation, until a trusted
 user reconciles it with `/devloop reconcile`. Off, the journal records the turns all the same;
@@ -215,10 +216,15 @@ the commands agy had by default from the `test_cmd` of `config.toml`, which the 
 admits now. `repo`, `trusted_users` and `[apps]` stay in `config.toml` until R6, for
 `scripts/agent-token.py` and `scripts/supervisor-token.py`, which read only them, with no
 project file. Without a project file, or a `test_cmd` in the overlay, devloop stops at startup:
-`test_cmd` is required. `ops/host/ssdlc/check-equivalence.py` compares two installations on a
+`test_cmd` is required. Since R5 the rules of ssdlc's test selection and the format of its CI
+logs are its project file's `[tests]` too ([Local tests](#local-tests)).
+`ops/host/ssdlc/check-equivalence.py` compares two installations on a
 host (the one of before R3 with its overlay, the one of R3 with the project file and the
-overlay): the values of the configuration key by key, the rendered prompts and the test modules
-`local_tests` selects. The hash of the project file is left out, since it is in the policy
+overlay; with `--before-project`, an installation of R3 or later with its project file, as for
+R5): the values of the configuration key by key, the rendered prompts and the test modules
+`local_tests` selects. An installation of before R5 had its selection and its format in the
+code: its `tests` are those built-in values, and its own code selects the modules
+([ops/host/migrate.md](../../ops/host/migrate.md#test-di-ssdlc-nel-file-di-progetto)). The hash of the project file is left out, since it is in the policy
 version by construction: the version is compared without it. It exits with 0 when the two are
 equivalent, 1 when they differ, 2 when a side does not load; it writes nothing, not even byte
 code, so the operator runs it as root
@@ -230,13 +236,13 @@ names it (a key of the overlay is told so: `set it in the local overlay`):
 
 | Kind | Keys | How it composes |
 |---|---|---|
-| Facts | `test_cmd`, `local_tests`, `language`, `priority_labels`, `[docs.map]` | replace the installation's value (`[docs.map]` merges key by key); the overlay replaces them in turn |
+| Facts | `test_cmd`, `local_tests`, [`[tests]`](#local-tests), `language`, `priority_labels`, `[docs.map]`, `[prompts]` ([data in the prompts](#project-data-in-the-prompts)) | replace the installation's value (`[docs.map]`, `[tests]` and `[prompts]` merge key by key); the overlay replaces them in turn |
 | Restrictions | `protected_paths`, `blocked_labels`, `[review_policy] sensitive_paths` and `sensitive_path_lists`, `[review_policy.zero] checks`, `[merge] operator_only_paths` | only add: the entries of the installation and of the overlay (or the code's default) stay, those of the project file that are not there follow. An empty list removes nothing. `[review_policy.zero] checks` only add to the checks of the installation and the overlay: the project file never turns level 0 on, and a check with none below stops devloop |
 
 Every other key, the trust keys (`repo`, `trusted_users`, `[apps]`, `[merge] mode`, roles, review
 levels, the level-0 allowlist, the agents and their permissions, `[budget]`, `preflight`,
 `conclave`, `[delegations]`), the limits and `state_dir`, is the overlay's alone. The
-`test_cmd` of the project file is the dispatcher's test command, never a permission of the
+`test_cmd` and the `[tests]` of the project file are the dispatcher's, never a permission of the
 agents: the default commands of agy (`write_commands` and `review_commands`, see
 [agy permissions](#agy-permissions)) still derive from the `test_cmd` of the overlay, or of the
 installation without one there; the overlay alone admits the project's test command. The lists of
@@ -269,6 +275,41 @@ before and after. The trust keys are `repo`, `base_branch`, `state_dir`, `source
 `[delegations]`, `[agent_user]` and `[pin]`. The start records the files the dispatcher was
 built from, as they were read, never a second read of them. Its log says the same. A start whose
 record cannot be written stops devloop.
+
+### Project data in the prompts
+
+The prompts of `devloop/prompts/` are templates of the installation (ADR 0006, R4). The text that
+belongs to one project is data of its [project file](#project-file) (or of the overlay), in the
+`[prompts]` table; the rules around it (permissions, verdicts, what an agent does not do, the
+decisions reserved to the operator) stay in the templates. Each key is optional:
+
+| Key | What the prompts do with it |
+|---|---|
+| `instructions` | What the agents read before an implement, preflight, review, advisory review or conclave turn: a list of Markdown fragments, joined as an English list (`` ['`AGENTS.md`', 'the README section "Developing SSDLC"'] `` gives ``Read `AGENTS.md` and the README section "Developing SSDLC" ``) |
+| `fix_instructions` | The same, before a fix or a sync |
+| `module_test_cmd` | The command that runs one test module, written with a placeholder name for the module (ssdlc's: `python3 -m unittest discover -s tests -p 'test_name.py'`): implement, fix and sync ask to run the pertinent modules one at a time with it, and never the full suite (`test_cmd`) |
+| `module_test_helpers` | The directory of the helpers the test modules import, which that command still lets them import (needs `module_test_cmd`) |
+| `[prompts.adr]` `dir`, `decided`, `open_value`, `open_choice` | The preflight's rule on the ADRs: a decision recorded under the heading `decided` of an ADR in `dir` on the base branch is the operator's and not a gap, while a point the ADR leaves open (`open_value`, `open_choice`: the words that mark a value and a choice still open) settles nothing. The four keys go together, and `dir` must be in `[merge] operator_only_paths`: the rule holds only because the operator alone merges that directory |
+
+A key that is missing drops, whole, the sentence that names it: no instruction to read, no
+command for one module (the agent is still told not to run the full suite), no rule on the ADRs
+(the preflight is then stricter: a decision in an ADR does not settle a gap). Every value is one
+line of text, not empty and without spaces around it; a value that is not, an unknown key, an
+incomplete `[prompts.adr]` or a `dir` outside `operator_only_paths` stops devloop at startup. A
+value is put in the prompt as it is, never read as a template. The installation's
+`devloop/config.toml` has no `[prompts]`.
+
+In a template a sentence of the project is an optional span, `{{?name:text}}`: `text` when the
+value `name` is not empty, nothing when it is; a span alone on its line takes the line with it.
+A span whose value the dispatcher did not give is an error, never a sentence dropped in silence.
+
+**ssdlc's values** are in its project file ([`ops/host/ssdlc/project.toml`](../../ops/host/ssdlc/project.toml)):
+with them the prompts are the same, byte for byte, as before R4, which
+`tests/test_devloop_prompt_data.py` proves against the templates of before R4
+(`tests/fixtures/ssdlc-pre-r4/prompts/`). The text of the trust policy in the review and advisory
+review prompts is the installation's and does not change. On a host, the project file gains the
+`[prompts]` table before the pin of R4
+([ops/host/migrate.md](../../ops/host/migrate.md#dati-di-ssdlc-nei-prompt)).
 
 ### No background work in a turn
 
@@ -336,19 +377,37 @@ worktree before committing (#169). `local_tests` says which:
 | `local_tests` | Local tests |
 |---|---|
 | `"full"` (default) | `test_cmd`, the whole suite, as before #169 |
-| `"changed"` (this repository) | Only the test modules pertinent to the diff, each with `python3 -m unittest discover -s tests -p '<module>'`, one after the other, stopping at the first that fails |
+| `"changed"` (ssdlc) | Only the test modules pertinent to the diff, chosen by the project's selection (`[tests] selection`), each with `python3 -m unittest discover -s tests -p '<module>'`, one after the other, stopping at the first that fails. Without a selection, `"full"` |
 | `"none"` | None |
 
 Any other value stops devloop at startup. With `"changed"` the diff is the whole one from the
 merge base with `origin/main` to the current content of the worktree: the branch's commits, the
 index, unstaged changes and new files git does not ignore, computed again after every attempt.
-The pertinent modules, among the `tests/test_*.py` files of the worktree, are:
+
+**`[tests]`** (ADR 0006, R5) declares how the dispatcher reads the project's tests. It is a fact
+of the project: it belongs in the [project file](#project-file), the overlay may replace its
+keys, and the installation sets none. Every key is optional:
+
+| Key | Value | Without it |
+|---|---|---|
+| `selection` | The installation's strategy, by name. The only one is `"python-unittest-modules"` | `local_tests = "changed"` is `"full"`: the project loses no test, only time. `ci_rerun_unrelated` is off |
+| `source_prefixes` | Parameter of the selection: name prefixes, letters, digits and `_` (ssdlc: `["ssdlc_"]`) | No such rule |
+| `[tests.dir_modules]` | Parameter of the selection: `"<directory>/" = "test_<prefix>"`, a relative directory and the prefix of test module names (ssdlc: `"devloop/" = "test_devloop"`) | No such rule |
+| `ci_log_format` | The format of the CI logs, by name. The only one is `"run-tests"`, what `scripts/run-tests.py` prints | `ci_rerun_unrelated` is off, and the [summary of the CI](#summary-of-the-ci-in-the-prompts) has no suite lines: no job log is read |
+
+An unknown key or name, a parameter without `selection`, a prefix or a directory of another
+form stop devloop at startup. `[tests]` never becomes a permission of the agents: the commands
+they may run are the installation's and the overlay's (ADR 0006, D2). With
+`"python-unittest-modules"` the pertinent modules, among the `tests/test_*.py` files of the
+worktree, are:
 
 - every changed or added `tests/test_*.py`;
 - for every other changed `<module>.py` (or `<package>/<module>.py`), the modules
-  `test_<module>*.py`; for `ssdlc_<name>.py` also `test_<name>*.py` (`ssdlc_impact.py` selects
-  `test_ssdlc_impact*.py` and `test_impact*.py`);
-- for any file under `devloop/`, the modules `tests/test_devloop*.py`.
+  `test_<module>*.py`; for `<prefix><name>.py`, with `<prefix>` one of `source_prefixes`, also
+  `test_<name>*.py` (with ssdlc's, `ssdlc_impact.py` selects `test_ssdlc_impact*.py` and
+  `test_impact*.py`);
+- for any file under a directory of `[tests.dir_modules]`, the modules whose name starts with its
+  prefix (with ssdlc's, any file under `devloop/` selects `tests/test_devloop*.py`).
 
 When no module is pertinent, for example when only documentation changed, and with `"none"`,
 no test runs locally and the PR goes on to the CI. `implement_test_retries` applies to the tests
@@ -446,7 +505,10 @@ The rerun needs **`actions: write`** on the dispatcher's app. Its token is minte
 permission. Without it (GitHub answers 403, or refuses to mint the token; also when the
 dispatcher has no app and uses a `gh` login without the permission), or on any other GitHub error,
 the dispatcher writes one line to the tick log (`CI rerun refused, …`) and the failure is a round,
-as before. `ci_rerun_unrelated = false` turns the re-run off; the default is `true`. A marker of
+as before. `ci_rerun_unrelated = false` turns the re-run off; the default is `true`. The re-run
+also needs the project's `[tests]` with a `selection` and `ci_log_format = "run-tests"`
+([Local tests](#local-tests)): without either nothing tells the failed modules or their
+pertinence, and every CI failure is a round. A marker of
 the `rerun` kind counts only when the dispatcher's identity wrote it.
 
 Only a `ci_failed` is re-run this way: a CI failure on a PR that has no round left goes to
@@ -466,7 +528,9 @@ a **CI of the head** section that the dispatcher reads with its own identity (#3
   (`gh run view --job <id> --log`; the job is the one in the check's link) and, when the job
   runs `scripts/run-tests.py`, shows its final lines `Ran N tests in S (… modules, … split by
   class, … jobs)` and `Slowest: …`. A job without the first of these lines (unittest's own
-  `Ran N tests in S` has no parentheses) shows only its outcome and duration.
+  `Ran N tests in S` has no parentheses) shows only its outcome and duration. The dispatcher
+  reads the logs only when the project declares `[tests] ci_log_format = "run-tests"`
+  ([Local tests](#local-tests)); without it every job shows only its outcome and duration.
 - **Log not readable.** A log `gh` cannot read (expired, deleted, an error from GitHub) shows
   `the job log could not be read: its test summary is not available`, and the action goes on;
   checks that cannot be read at all leave the section saying the summary is not available. The
@@ -827,7 +891,8 @@ fallback_models = [
 ```
 
 - **Schema.** Each entry has `model`, `model_label` and optionally `effort`, which otherwise is
-  the agent's. A fallback reasons at `high`, `xhigh` or `max`: any other level, or for agy a
+  the agent's, and `provider`, never the agent's
+  ([Reviewers by provider](#reviewers-by-provider-and-the-third-reviewer), #409). A fallback reasons at `high`, `xhigh` or `max`: any other level, or for agy a
   model whose name ends with `-minimal`, `-low` or `-medium`, stops devloop at startup, as does a
   model listed twice or equal to the agent's own. The list is optional: an agent without it
   behaves as before.
@@ -993,7 +1058,9 @@ code on the PR: the implementer recorded in the PR marker, the author of every f
 earlier rounds, the agent that resolved the conflicts of every sync, and the agent configured
 now under the implementer's key, which runs fixes and syncs. Nor may either be the same agent in
 effect as one of them, the same `kind` or the same `model` (#407, at level 1 too, against the
-implementer: [the keys by role](#the-implementer-app-and-the-keys-by-role)). The dispatcher scans the pool in configuration order and takes the first such pair. The
+implementer: [the keys by role](#the-implementer-app-and-the-keys-by-role)); with
+`review_policy.provider_quorum` the quorum rule on the provider replaces this last condition
+([Reviewers by provider](#reviewers-by-provider-and-the-third-reviewer), #409). The dispatcher scans the pool in configuration order and takes the first such pair. The
 choice is deterministic, so it stays the same for the whole round, and it is recorded in the
 receipt (`reviewers`).
 
@@ -1443,7 +1510,7 @@ app = "agy"
 # ...
 
 [review_policy]
-advisory_reviewer = "claude-reviewer"   # once claude-reviewer exists (P5-5); "" until then
+advisory_reviewer = "claude-reviewer"   # once claude-reviewer exists (P5-5, #409); "" until then
 ```
 
 - **One key, one role.** A key may name agent and role in full, `<kind>-implementer` or
@@ -1471,12 +1538,15 @@ advisory_reviewer = "claude-reviewer"   # once claude-reviewer exists (P5-5); ""
 - **Conflicts by agent, never by key.** A reviewer is skipped, at level 1 and at level 2, when
   it is the same agent in effect as the PR's implementer (at level 2 as any author of the PR):
   the same `kind`, the same `model` or the same provider, as the profile of the marker records
-  them, and the models of the agent configured under the implementer's key. The agents do not
-  declare a provider yet (P5-5): devloop reads it from the prefix of the model's name (`claude-`
-  Anthropic, `gpt-` OpenAI, `gemini-` Google), and a model with another prefix is compared only
-  by `kind` and `model`. So neither `claude-reviewer` nor agy run with a Claude model reviews the
-  code of `claude-implementer`. At level 2 this is stricter than the quorum rule (ii) of D8,
-  which admits one reviewer of the authors' provider: that rule comes with P5-5. A PR whose
+  them, and the models of the agent configured under the implementer's key. The provider is the
+  one the agent or the fallback declares (`provider`), else the one the prefix of the model's
+  name gives (`claude-` Anthropic, `gpt-` OpenAI, `gemini-` Google), and a model with another
+  prefix and no declared provider is compared only by `kind` and `model`. So neither
+  `claude-reviewer` nor agy run with a Claude model reviews the code of `claude-implementer`.
+  At level 2 this is stricter than the quorum rule (ii) of D8, which admits one reviewer of the
+  authors' provider: that rule replaces this check with `review_policy.provider_quorum`
+  ([Reviewers by provider and the third reviewer](#reviewers-by-provider-and-the-third-reviewer)),
+  off by default. A PR whose
   implementer has no profile and no configured key has no reviewer at level 1, and goes to the
   operator. The pool is no longer refused in the configuration because of the implementer's key.
   The check on the PRs of the supervisor's agent compares the agent in the same way, with
@@ -1504,3 +1574,101 @@ advisory_reviewer = "claude-reviewer"   # once claude-reviewer exists (P5-5); ""
   an open devloop PR (of this repository, by a trusted user or one of devloop's apps, on a devloop
   branch) has a marker whose implementer or reviewer is not a configured key, or a key of the
   other role, and when the open PRs cannot be read. Nobody else's PR can stop devloop.
+
+### Reviewers by provider and the third reviewer
+
+ADR 0005, P5-5 (#409): the reviewers are excluded by the agent in effect and its provider, and
+claude becomes the third reviewer of the pool, as a reserve. **Off by default** (D10):
+`[review_policy] provider_quorum = false`, and the reviewers are chosen as in
+[the keys by role](#the-implementer-app-and-the-keys-by-role).
+
+- **Declared provider** (D8, option (c)). Every agent and every fallback model may declare who
+  makes its model: `provider = "anthropic"` in `[agents.<key>]`, and `provider` in each entry of
+  `fallback_models`, which never inherits the agent's (agy may fall back on a Claude model). It is
+  read lowercase. A table of the known prefixes of the model names (`claude-` Anthropic, `gpt-`
+  OpenAI, `gemini-` Google) is the check: a model with one of them declared with another
+  provider, or an empty provider, stops devloop at startup, with the rules on or off. Without a
+  declared provider devloop reads it from that prefix, as before. A declared provider is in the
+  profile of the markers and the receipts (`provider`) and in the policy version: declaring one
+  voids the approvals of the open PRs, as any change of the pool does. Without any declared
+  provider the version is the one before.
+- **Turning it on.** `provider_quorum = true` requires the provider of every agent and of every
+  fallback model (`agents.<key>.provider: required with review_policy.provider_quorum` stops
+  devloop otherwise), and enters the policy version. Both keys may be set in the local overlay.
+  The rules then apply at both levels, to every PR, and replace the exclusion of the same agent:
+  - **Independent by tuple** of every author of the PR, at level 1 too: the implementer, every
+    fixer, every sync with conflicts and the models of the agent configured under the
+    implementer's key, as at level 2. Another GitHub identity and another `(kind, model,
+    effort)`. The kind alone no longer excludes: `claude-reviewer` with Sonnet may review the
+    code of Opus.
+  - **Quorum rule (ii)** of D8: at level 1 the only reviewer is of a provider other than every
+    author's; at level 2 at least one of the two is, and the two are distinct as before. A
+    provider that is not known, the reviewer's or an author's, is never another one. Level 1
+    takes the PR's recorded reviewer, then the pool; level 2 the first valid pair of the pool, in
+    configuration order. Without one, the PR goes to `agent:needs-operator` as before.
+  - **Every model a turn runs**, fallbacks included, keeps the same rules: independent by tuple
+    of the authors, distinct from the round's other reviewers, and the quorum rule on the round
+    with that model in it (the reviewers not yet run counted with their configured model). A
+    model that breaks them is skipped without running; when none of the chain is left the turn
+    fails without a review (`tool_failure`). A fallback model is also never of an author's
+    provider, whatever the quorum (D8, "Fallback dello stesso fornitore"): on a PR implemented
+    by claude, agy does not fall back on a Claude model even when codex already gives the round
+    another provider. Only a reviewer's primary model is subject to the quorum rule alone. The
+    authors are those of the selection, with every model of the implementer's chain; recording
+    the fallbacks the implementer and the fixers actually used, and the check at startup, are
+    P5-6's.
+  - **The reviewer the marker records** is the first of the pool of another provider and
+    another tuple than the implementer's models.
+- **Unavailable reviewer.** When a **new round** chooses its reviewers, a reviewer whose whole
+  chain is remembered unavailable ([Memory of unavailable models](#memory-of-unavailable-models):
+  only an agent with fallback models) is skipped, and the next valid one of the pool takes its
+  place. It is never skipped when it owns an open finding of the PR, which only it may close in
+  a later review: the groups that keep the owners of the open findings come first. When every
+  valid group has an unavailable reviewer, the first is kept and its turn fails as
+  `tool_failure`, as before. A reviewer is never replaced in the middle of a round: until the
+  round ends, the receipt keeps the reviewers it recorded while they still meet the rules, so a
+  promotion or a merge recomputes the receipt the round was approved with, whatever the memory
+  says by then. The promotion reads the round from the records it applies, not only from the
+  snapshot: with parallel reviewers a round that chose another pair than the previous one ends
+  in the same action, and is promoted with its own pair. The log names the skipped reviewer.
+- **The third reviewer** (D8). `claude-reviewer`, kind `claude`, with a model other than the
+  implementer's (Sonnet 5.5 against Opus 5.5), last in the pool, signing with `claude-agent`
+  (`app = "claude"`). It needs the keys by role and the supervisor's role app first: before the
+  migration `claude-agent` also signs the implementer's work, and two keys that sign with the
+  same app stop devloop at startup (`apps.claude: each app belongs to one actor`). It reviews
+  only when one of the first two is missing, unavailable or not independent, and at level 2 a
+  PR of claude only beside a reviewer of another provider:
+
+```toml
+[review_policy]
+provider_quorum = true
+
+[roles]
+implementer = "claude-implementer"
+reviewers = ["codex-reviewer", "agy-reviewer", "claude-reviewer"]
+
+[agents.claude-implementer]   # the table of [agents.claude]
+app = "implementer"
+provider = "anthropic"
+# ...
+[agents.codex-reviewer]       # the table of [agents.codex]
+app = "codex"
+provider = "openai"
+# ...
+[agents.agy-reviewer]         # the table of [agents.agy]
+app = "agy"
+provider = "google"
+fallback_models = [
+    { model = "gemini-4-hydrogen-high", model_label = "Gemini 4 Hydrogen", provider = "google" },
+]
+# ...
+[agents.claude-reviewer]      # the table of [agents.claude], with Sonnet
+app = "claude"
+provider = "anthropic"
+model = "claude-sonnet-5-5"
+model_label = "Claude Sonnet 5.5"
+# ...
+```
+
+Changing the pool, the providers or the rule changes the policy version and voids the approvals
+of the open PRs: turn it on when no PR is close to its merge.
