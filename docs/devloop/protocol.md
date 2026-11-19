@@ -293,9 +293,30 @@ was removed and applied again, if a comment starting with the attribution header
 identity allowed to write devloop records, came after the check (another escalation, or
 anything that may be one, marker or not; the dispatcher's [ledger records](#evidence-and-telemetry),
 such as the turn of a recheck, and its [supervision traces](#supervision-trace), such as the
-answer to a command that does not apply, do not count), or if the attribution is uncertain. A comment from
+answer to a command that does not apply, and its `recheck` answers do not count, nor, since #468,
+a comment of the supervisor's identity that carries neither a `notice` nor a `preflight`
+marker), or if the attribution is uncertain. A comment from
 anyone else, header or not, never touches the attribution. A label already present when the
 check failed is never the check's.
+
+On a request of a person (#468), `/devloop recheck` from a trusted user or `agent:ready` added
+again by one of the issue's admitters, the check runs, and owns the block it then records, if the
+block is still the issue's latest: the label has one name only, the latest record is `blocked`
+with `class` `operator_decision` or `preflight_default`, no `notice` of another class (or
+without one) from an identity allowed to write devloop records came after it, and the label
+events are those the record counted plus the dispatcher's one. Other text after the check does
+not count here. The request is read when the check starts and kept for its outcome: the ledger
+record of the check's turn spends a `/devloop recheck` before the outcome is recorded, while
+the conditions above are read again when it is. A request on an issue in
+`agent:needs-supervisor` never runs a check: it is refused, with the latest escalation after the
+check as the reason, and every label stays. A request that fails these conditions runs no check: the `recheck_refused`
+action logs the reason and answers on the issue with a dispatcher comment ending with a
+`recheck` marker: `request` (`recheck` or `relabeled`), `by`, `reason` and, when an
+`agent:ready` added again is pending, `labeled`, the time of its `labeled` event. The answer is a
+devloop record, so it spends the `/devloop recheck` written before it; an `agent:ready` added
+again counts as answered by a `recheck` record after the latest check with the time of its
+label. The record leaves the readiness hash and the block's attribution as they are, and only
+the dispatcher's identity writes it.
 
 ## Conclave records
 

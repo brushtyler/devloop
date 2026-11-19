@@ -5,15 +5,17 @@ import dataclasses
 import unittest
 from datetime import datetime, timedelta
 
+import doc_contracts as docs
 from devloop import markdown
 from devloop.dispatch_preflight import normalize_preflight
 from devloop.dispatcher import Dispatcher
+from devloop.ledger import Ledger
 from devloop.planning import BASE_ADVANCED, Snapshot, plan, preflight_state, repository_bound
 from devloop.workspace import WorkspaceError
 from test_devloop import SHA2
 from test_devloop_preflight import checked, gap
 from test_devloop_supervision import (PREFLIGHT_AUTO, SUPERVISOR_LOGIN, Identities, StepRunner,
-                                      SupGH, SupWS)
+                                      SupGH, SupWS, crash)
 
 HUMAN, READY = 'agent:needs-operator', 'agent:ready'
 CFG = PREFLIGHT_AUTO  # with a supervisor that has an app, whose labels may count
@@ -276,6 +278,206 @@ class RelabelTests(Case):
         self.gh.relabel(SUPERVISOR_LOGIN)
         self.assertIsNone(d._preflight_view(7, ())['relabeled'])
         self.assertEqual(self.planned(d), [('implement', 7)])
+
+
+def supervisor_note():
+    """The supervisor's answer to a failed check: the options for the operator, with the
+    attribution header and no devloop marker."""
+    return ('## Decisione per l\'operatore\n\nIl controllo chiede quale formato usare. '
+            'Opzioni: JSON oppure CSV.')
+
+
+class RequestTests(Case):
+    """A request of a person repeats the check of the issue's latest block (#468)."""
+
+    def test_a_recheck_after_a_note_of_the_supervisor_repeats_the_check(self):
+        d = self.make()
+        self.blocked(d, gap())
+        self.gh.command(7, supervisor_note())
+        # The note is neither an escalation nor a check: the block stays the check's.
+        self.assertTrue(d._preflight_view(7, {READY, HUMAN})['owned'])
+        self.gh.say(7, 'brushtyler', '/devloop recheck')
+        self.assertEqual(self.planned(d), [('preflight', 7)])
+        self.runner.outputs.append(checked(True))
+        self.assertEqual([a.kind for a in d.tick()], ['preflight'])
+        self.assertEqual(self.gh.labels[7], {READY})
+        self.assertIn('Il blocco messo dal controllo di prontezza è stato rimosso',
+                      self.gh.threads[7][-1]['body'])
+        self.assertEqual(self.planned(d), [('implement', 7)])
+
+    def test_agent_ready_from_the_supervisor_after_its_note_repeats_the_check(self):
+        d = self.make()
+        self.blocked(d, gap())
+        self.gh.command(7, supervisor_note())
+        self.gh.relabel(SUPERVISOR_LOGIN)
+        self.assertEqual(self.planned(d), [('preflight', 7)])
+        self.runner.outputs.append(checked(True))
+        self.assertEqual([a.kind for a in d.tick()], ['preflight'])
+        self.assertEqual(self.gh.labels[7], {READY})
+        self.assertEqual(self.planned(d), [('implement', 7)])
+
+    def test_a_note_with_an_escalation_marker_still_voids_the_attribution(self):
+        d = self.make()
+        self.blocked(d, gap())
+        self.gh.command(7, markdown.render_escalation('Altro motivo.'))
+        self.assertFalse(d._preflight_view(7, {READY, HUMAN})['owned'])
+
+    def test_a_request_repeats_the_latest_block_even_if_no_longer_the_checks_own(self):
+        for name, request in (('recheck', lambda: self.gh.say(7, 'brushtyler',
+                                                               '/devloop recheck')),
+                              ('relabel', lambda: self.gh.relabel(SUPERVISOR_LOGIN))):
+            with self.subTest(name):
+                d = self.make()
+                self.blocked(d, gap())
+                # Text with the header from an identity that writes devloop records, without a
+                # marker: the block is no longer provably the check's own...
+                self.gh.say(7, 'brushtyler', markdown.dispatcher_header() + '\nUna nota.')
+                self.assertFalse(d._preflight_view(7, {READY, HUMAN})['owned'])
+                # ...but it is still the issue's latest: a request of a person repeats it.
+                request()
+                self.assertEqual(self.planned(d), [('preflight', 7)])
+                self.runner.outputs.append(checked(False, [gap()]))
+                d.tick()
+                record = self.records()[-1]
+                self.assertEqual((record['blocked'], record['labeled']), (True, 0))
+                self.assertEqual(self.gh.labels[7], {READY, HUMAN})
+                self.assertEqual(self.planned(d), [])
+                self.gh.say(7, 'brushtyler', '/devloop recheck')
+                self.runner.outputs.append(checked(True))
+                d.tick()
+                self.assertEqual(self.gh.labels[7], {READY})
+
+    def test_an_escalation_of_another_class_keeps_its_block_and_the_recheck_is_answered(self):
+        d = self.make()
+        self.blocked(d, gap())
+        self.gh.comment(7, markdown.render_escalation('I test falliscono.', cls='tests_failed'))
+        self.gh.say(7, 'brushtyler', '/devloop recheck')
+        self.assertEqual(self.planned(d), [('recheck_refused', 7)])
+        self.assertEqual([a.kind for a in d.tick()], ['recheck_refused'])
+        # No check runs, the block stays, and the answer says why.
+        self.assertEqual(len(self.runner.calls), 1)
+        self.assertEqual(self.gh.labels[7], {READY, HUMAN})
+        body = self.gh.threads[7][-1]['body']
+        for text in ('Controllo di prontezza non ripetuto', '`/devloop recheck`', '`brushtyler`',
+                     'escalation di classe `tests_failed`'):
+            self.assertIn(text, body)
+        answer = self.gh.records(7, 'recheck')[-1]
+        self.assertEqual((answer['request'], answer['by']), ('recheck', 'brushtyler'))
+        self.assertTrue(any('recheck by brushtyler runs no readiness check: an escalation of '
+                            'class tests_failed' in m for m in self.logs))
+        # Answered once: the request is spent.
+        self.assertEqual(self.planned(d), [])
+        self.assertEqual(d.tick(), [])
+        # A check run anyway leaves that block in place.
+        self.runner.outputs.append(checked(True))
+        d._do_preflight(7)
+        self.assertEqual(self.gh.labels[7], {READY, HUMAN})
+
+    def test_agent_ready_added_again_on_another_block_is_answered_once_per_label(self):
+        d = self.make()
+        self.blocked(d, gap())
+        self.gh.comment(7, markdown.render_escalation('I test falliscono.', cls='tests_failed'))
+        self.gh.relabel(SUPERVISOR_LOGIN)
+        self.assertEqual([a.kind for a in d.tick()], ['recheck_refused'])
+        self.assertIn('`agent:ready` rimesso di `agy-agent[bot]`', self.gh.threads[7][-1]['body'])
+        self.assertEqual(self.planned(d), [])
+        # The label added again later is a new request: answered too.
+        self.gh.relabel('brushtyler')
+        self.assertEqual(self.planned(d), [('recheck_refused', 7)])
+        self.assertEqual(len(self.runner.calls), 1)
+
+    def test_an_escalation_of_the_same_class_keeps_the_block_the_checks(self):
+        d = self.make()
+        self.blocked(d, gap())
+        self.gh.comment(7, markdown.render_escalation('Decide l\'operatore.',
+                                                      cls='operator_decision'))
+        self.gh.say(7, 'brushtyler', '/devloop recheck')
+        self.assertEqual(self.planned(d), [('preflight', 7)])
+
+    def test_the_request_holds_through_the_turn_recorded_in_the_ledger(self):
+        for name, request in (('recheck', lambda: self.gh.say(7, 'brushtyler',
+                                                               '/devloop recheck')),
+                              ('relabel', lambda: self.gh.relabel(SUPERVISOR_LOGIN))):
+            with self.subTest(name):
+                d = self.make()
+                d.ledger = Ledger(self.gh)
+                self.blocked(d, gap())
+                self.gh.say(7, 'brushtyler', markdown.dispatcher_header() + '\nUna nota.')
+                request()
+                self.assertEqual(self.planned(d), [('preflight', 7)])
+                self.runner.outputs.append(checked(True))
+                d.tick()
+                # The turn's ledger record came before the outcome: the request that started
+                # the check still lifts the block.
+                self.assertTrue(self.gh.records(7, 'ledger'))
+                self.assertEqual(self.gh.labels[7], {READY})
+                self.assertIn('Il blocco messo dal controllo di prontezza è stato rimosso',
+                              self.gh.threads[7][-1]['body'])
+                self.assertEqual(self.planned(d), [('implement', 7)])
+
+    def test_a_request_on_an_issue_waiting_for_the_supervisor_is_answered(self):
+        for name, request, who in (
+                ('recheck', lambda: self.gh.say(7, 'brushtyler', '/devloop recheck'),
+                 'brushtyler'),
+                ('relabel', lambda: self.gh.relabel(SUPERVISOR_LOGIN), SUPERVISOR_LOGIN)):
+            with self.subTest(name):
+                d = self.make()
+                self.blocked(d, gap())
+                # The recheck fails: a tool_failure escalation to the supervisor.
+                self.gh.say(7, 'brushtyler', '/devloop recheck')
+                self.runner.outputs.append(crash())
+                self.assertEqual([a.kind for a in d.tick()], ['preflight'])
+                self.assertEqual(self.gh.labels[7], {READY, HUMAN, 'agent:needs-supervisor'})
+                self.assertEqual(self.planned(d), [])
+                request()
+                self.assertEqual(self.planned(d), [('recheck_refused', 7)])
+                self.assertEqual([a.kind for a in d.tick()], ['recheck_refused'])
+                # No check runs, both blocks stay, and the answer says why.
+                self.assertEqual(len(self.runner.calls), 2)
+                self.assertEqual(self.gh.labels[7], {READY, HUMAN, 'agent:needs-supervisor'})
+                body = self.gh.threads[7][-1]['body']
+                for text in ('Controllo di prontezza non ripetuto', f'`{who}`',
+                             'escalation di classe `tool_failure`'):
+                    self.assertIn(text, body)
+                self.assertTrue(any(f'by {who} runs no readiness check: an escalation of '
+                                    'class tool_failure' in m for m in self.logs))
+                # Answered once.
+                self.assertEqual(self.planned(d), [])
+
+    def test_an_issue_waiting_for_the_supervisor_alone_answers_too(self):
+        d = self.make()
+        self.blocked(d, gap())
+        self.gh.labels[7] = {READY, 'agent:needs-supervisor'}
+        self.gh.comment(7, markdown.render_escalation('Il passo è fallito.', cls='tool_failure'))
+        self.gh.say(7, 'brushtyler', '/devloop recheck')
+        self.assertEqual(self.planned(d), [('recheck_refused', 7)])
+        d.tick()
+        self.assertIn('attende il supervisore', self.gh.threads[7][-1]['body'])
+        self.assertEqual(self.gh.labels[7], {READY, 'agent:needs-supervisor'})
+        self.assertEqual(len(self.runner.calls), 1)
+        self.assertEqual(self.planned(d), [])
+
+    def test_a_block_added_again_by_someone_else_is_not_the_checks(self):
+        d = self.make()
+        self.blocked(d, gap())
+        self.gh.label_log[(7, HUMAN)].append('brushtyler')
+        self.gh.say(7, 'brushtyler', '/devloop recheck')
+        self.assertEqual(self.planned(d), [('recheck_refused', 7)])
+        d.tick()
+        self.assertIn('aggiunto di nuovo', self.gh.threads[7][-1]['body'])
+        self.assertEqual(self.gh.labels[7], {READY, HUMAN})
+
+    def test_the_requests_are_documented(self):
+        guide = docs.plan_section('docs/devloop/guide.md',
+                                  'Readiness check before implementation', root=docs.ROOT)
+        docs.assert_documented(self, guide, [
+            'latest', 'Decisione per l\'operatore', 'escalation of another class',
+            'Controllo di prontezza non ripetuto', 'answers once'], issues=(468,))
+        protocol = docs.plan_section('docs/devloop/protocol.md', 'Readiness check records',
+                                     root=docs.ROOT)
+        docs.assert_documented(self, protocol, [
+            'recheck_refused', '`recheck` marker', 'supervisor\'s identity', 'preflight_default'],
+            issues=(468,))
 
 
 if __name__ == '__main__':

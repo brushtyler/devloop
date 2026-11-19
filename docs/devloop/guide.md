@@ -513,8 +513,26 @@ Checks recorded before #270 carry neither the commit nor `repository_dependent`:
 holding for their text alone, devloop does not infer the dependency from their descriptions, and
 `agent:ready` added again repeats them too. The next check records both.
 
-Rechecks run only for blocks the check owns: when the check owns `agent:needs-operator` is
-described in [Readiness check records](protocol.md#readiness-check-records).
+A check nobody asked for (the text changed, `main` advanced) runs only for a block the check
+owns: when the check owns `agent:needs-operator` is described in
+[Readiness check records](protocol.md#readiness-check-records). A note of the supervisor, such as
+its "Decisione per l'operatore" listing the options, does not take the block away from the
+check: only a comment of the supervisor with an escalation or a readiness check record does
+(#468).
+
+A request of a person, `/devloop recheck` from a trusted user or `agent:ready` added again by
+someone who may admit the issue, needs less (#468): the block need only be still the issue's
+**latest**. The latest check set it (class `operator_decision` or `preflight_default`), no
+escalation of another class came after it, and the label was not added again by anyone else.
+Any other comment after the check, with the header or not, does not stop the request. When the
+check runs, the block is the check's again: a pass removes it, a failure keeps it. A request
+that runs no check, because the latest block is another one (an escalation of another class, for
+example), leaves the block in place: devloop logs why and answers once on the issue with a
+"Controllo di prontezza non ripetuto" comment that gives the reason. The answer spends a
+`/devloop recheck`; an `agent:ready` added again is answered once for each time it is added.
+An issue in `agent:needs-supervisor` (a recheck that failed and went to the supervisor as
+`tool_failure`, for example) runs no check either: a request there gets the same answer, naming
+the escalation the issue waits on, and every block stays.
 
 Each check is an agent action: it takes a slot of `max_actions_per_tick`, and a check of an
 issue that may start also takes one of the free PR slots of the tick. It runs under

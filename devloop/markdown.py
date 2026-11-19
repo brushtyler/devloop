@@ -447,6 +447,18 @@ def _valid_cycle(c):
             and all(isinstance(item, str) and item for item in cycle))
 
 
+RECHECK_REQUESTS = ('recheck', 'relabeled')
+
+
+def _valid_recheck(r):
+    """The dispatcher's answer to a request of a person for a new readiness check that does not
+    start one (#468): the request (``/devloop recheck`` or ``agent:ready`` added again), its
+    author, why no check runs and, in ``labeled``, the time of the ``agent:ready`` it answers
+    too, if any."""
+    return (r.get('request') in RECHECK_REQUESTS and isinstance(r.get('by'), str)
+            and isinstance(r.get('reason'), str) and isinstance(r.get('labeled', ''), str))
+
+
 RECEIPT_STATES = ('current', 'superseded')
 
 
@@ -515,7 +527,8 @@ _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy':
           'finding': _valid_finding, 'sync': _valid_sync, 'preflight': _valid_preflight,
           'notice': _valid_notice, 'ledger': _valid_ledger, 'merged': _valid_merged,
           'hold': _valid_hold, 'supervision': _valid_supervision, 'rerun': _valid_rerun,
-          'closed': _valid_closed, 'cycle': _valid_cycle, 'report': _valid_report,
+          'closed': _valid_closed, 'cycle': _valid_cycle, 'recheck': _valid_recheck,
+          'report': _valid_report,
           'receipt': _valid_pr_receipt, 'conclave': _valid_conclave,
           'advisory': _valid_advisory, 'story': _valid_story}
 
@@ -862,6 +875,21 @@ def render_cycle(record):
         'finché il ciclo resta. Il supervisore o l\'operatore rimuove una delle dipendenze; '
         'devloop ricalcola da solo quali issue possono partire, senza altri interventi.\n',
         'cycle', record)
+
+
+def render_recheck(record):
+    """The dispatcher's answer to a request for a new readiness check that starts none (#468),
+    with a ``recheck`` marker: each request is answered once."""
+    what = ('Il comando `/devloop recheck`' if record['request'] == 'recheck'
+            else '`agent:ready` rimesso')
+    return publishable(
+        dispatcher_header() + '\n## Controllo di prontezza non ripetuto\n\n'
+        f'{what} di `{record["by"]}` non ripete il controllo di prontezza: '
+        f'{record["reason"]}.\n\n'
+        'Il blocco resta, e si risolve come dice il suo commento. Quando l\'ultimo blocco '
+        'dell\'issue torna a essere quello del controllo di prontezza, un nuovo '
+        '`/devloop recheck` lo ripete.\n',
+        'recheck', record)
 
 
 def render_operator_merge(head, labeled, promotion, reasons, label):
