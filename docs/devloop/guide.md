@@ -1858,6 +1858,10 @@ and writes nothing without `--publish`. The summary lists:
   rounds still grantable to the PR, the story's one budget extension (booked until the turn
   starts) or the capacity limit in force with its expiry, and the grants of the day still
   available across every delegation;
+- the auto-pins that did not move `current` (#453): from the `pin` record of the alert on
+  `[run].alert_issue`, one per commit, the UTC time, the commit of `origin/main` the running copy
+  stays behind and the reason (the step of the smoke test, or the first line of the failed check;
+  see [Pin after a merge](#pin-after-a-merge));
 - the totals: PRs opened and merged that day, review rounds opened that day (each round once,
   on the day of its first review comment or of its [round register](protocol.md#round-register),
   counted once a review turn of the round succeeded or its CI was recorded: the native reviews
@@ -2526,7 +2530,20 @@ the running copy, and `run` counts no failed tick. The alert on `[run].alert_iss
 commit (`pin-alerted.json`), gives the commit and the first line of the reason, with each
 absolute path reduced to its last name. The commit is not tried again at each tick: only a new
 commit of `origin/main` that touches the installation, or a pin by hand (`devloop pin`), after
-fixing the cause, tries again.
+fixing the cause, tries again. When `origin/main` advanced while the tick ran, between the check
+of its advance and the fetch of the pin, the next tick requests the commit that failed: the
+auto-pin finds it in `pin-failed.json` and drops the request without checking it again (the log
+says `the auto-pin of <sha12> already failed (<reason>): not tried again …`), with no second alert.
+
+Both alerts, of the smoke test and of the checks, carry a `pin` record: the commit, the branch,
+the time and the reason the alert shows. The [daily summary](#daily-summary) lists them under
+`Pin automatico non riuscito`, so the summary says on which day the running copy stayed behind
+and why. Without `[run].alert_issue` there is no alert, and the summary does not show it.
+
+A failure after `current` moved to the new copy (the removal of the request, the record of the
+pin's time, the cleanup of old copies) is only logged: the pin stands and the process starts
+again from the new copy. A request that could not be removed makes the next tick pin the same
+commit again, reusing its copy.
 
 The last auto-pin refused by the checks or by the smoke test is recorded in
 `.ssdlc/devloop/pin-failed.json`, and `devloop status` shows it next to the line of the copy

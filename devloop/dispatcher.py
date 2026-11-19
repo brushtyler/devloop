@@ -1568,8 +1568,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         A copy refused by the smoke test (``SmokeError``, #260), or one that fails the checks
         before it (``CheckFailed``, #453: a missing file, the import, the configuration), is not
         a failed tick: the request is dropped, ``current`` stays, planning goes on from the
-        running copy, and an alert goes to ``[run].alert_issue`` once per refused commit. The
-        commit is tried again only when ``origin/<base_branch>`` advances, or by a pin by hand.
+        running copy, and an alert goes to ``[run].alert_issue`` once per refused commit, with
+        the ``pin`` record the daily summary reads. The commit is tried again only when
+        ``origin/<base_branch>`` advances to another commit, or by a pin by hand: a request that
+        resolves the commit that failed last is dropped without trying it (``again``), and its
+        alert is not published twice.
 
         A merge devloop did not make (#430), such as one of the operator, requests the pin
         too: before reading the request, a tick that is not a dry run asks the pinner whether
@@ -1652,7 +1655,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         or by the checks before it (#453, ``CheckFailed``), on ``[run].alert_issue``, once per
         commit. For the smoke test: its commit and failed step, never the error's text (it stays
         in the local log). For the checks: its commit and the reason (``public_reason``: first
-        line, absolute paths reduced to their last name). One attempt; a failure is logged."""
+        line, absolute paths reduced to their last name). Both carry a ``pin`` record (#453):
+        the commit, ``ref``, the time and that reason, which the daily summary lists. One
+        attempt; a failure is logged."""
         issue = self.cfg.run.alert_issue
         if not issue:
             self.log('  no [run].alert_issue is configured: no alert for the refused pin')
@@ -1662,7 +1667,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             return
         if isinstance(exc, CheckFailed):
             reason = public_reason(exc.reason).replace('`', "'")
-            body = publishable(
+            text = (
                 dispatcher_header()
                 + '\n## Pin automatico non riuscito\n\n'
                 + f'La copia di `{ref}` al commit `{exc.sha[:12]}` non ha superato il controllo '
@@ -1673,7 +1678,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                   'oppure a mano (`devloop pin`) dopo aver corretto la causa. `devloop status` '
                   'mostra il motivo finché un pin non riesce.')
         else:
-            body = publishable(
+            reason = f'smoke test: {exc.step}'
+            text = (
                 dispatcher_header()
                 + '\n## Pin automatico rifiutato dallo smoke test\n\n'
                 + f'La copia di `{ref}` al commit `{exc.sha[:12]}` non ha superato lo smoke '
@@ -1681,6 +1687,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                   'richiesta di pin è annullata e il ciclo continua.\n\n'
                 + 'Il dettaglio è nel log locale; la copia rifiutata resta in '
                   f'`rejected-{exc.sha[:12]}` nella directory di stato, per l\'analisi.')
+        # The record of the daily summary (#453): the commit not pinned, when and why, as above.
+        body = publishable(text, 'pin', {'sha': exc.sha, 'ref': ref, 'reason': reason,
+                                         'at': iso(self.clock())})
         try:
             self.gh.comment(issue, body)
         except Exception as exc_:  # one attempt only: its class, never its output

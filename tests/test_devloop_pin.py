@@ -409,6 +409,29 @@ class AutoPinTests(GitCase):
         self.pin('main')
         self.assertIsNone(pin.failed(self.state))
 
+    def test_a_failure_after_the_pointer_moved_keeps_the_pin_and_restarts(self):
+        # #453: once current points at the new copy, a failure (here, the removal of the
+        # request) is logged: the pin stands, nothing records it as failed, and the process
+        # starts again from the new copy.
+        self.pin('main')
+        new_sha = self.push('merged', 'devloop/extra.txt', 'new\n')
+        pin.request(self.state, 100, new_sha)
+        d, snapshots = self.dispatcher(auto=True)
+        with mock.patch.object(pin, 'clear_pending', side_effect=OSError('disk hiccup')), \
+                self.assertRaises(pin.Repinned) as raised:
+            d.tick()
+        self.assertEqual(raised.exception.copy, self.state / f'pinned-{new_sha[:12]}')
+        self.assertEqual(self.pointed().name, f'pinned-{new_sha[:12]}')
+        self.assertEqual(snapshots, [])
+        self.assertIsNone(pin.failed(self.state))
+        self.assertIn(f'the request of the auto-pin not removed, the next tick pins '
+                      f'{new_sha[:12]} again: disk hiccup', self.logs)
+        self.assertFalse([line for line in self.logs if 'failed the checks' in line], self.logs)
+        # The request stayed: the next pin reuses the copy and removes it.
+        self.assertEqual(pin.pending(self.state)['pr'], 100)
+        self.pin('origin/main', fetch=False)
+        self.assertIsNone(pin.pending(self.state))
+
     def test_a_pin_failing_before_the_commit_is_resolved_still_fails_the_tick(self):
         old = self.pin('main')
         pin.request(self.state, 100, SHA1)
@@ -544,6 +567,44 @@ class ExternalMergeTests(GitCase):
         self.assertEqual(len(tries), 2)
         self.assertEqual(self.pointed().name, f'pinned-{newer[:12]}')
         self.assertIsNone(pin.failed(self.state))
+
+    def test_a_commit_failing_the_checks_after_an_advance_during_the_tick_is_not_tried_again(self):
+        # #453: origin/main advances from A to B between observe() and the fetch of the pin.
+        # The pin resolves B, which fails; observe() saw A, so the next tick requests B: the
+        # auto-pin does not check it again. A pin by hand does.
+        old = self.pin('main')
+        d, snapshots = self.dispatcher(auto=True)
+        tries = []
+        real_verify, real_observe = pin.verify, d.pinner.observe
+        broken = []
+
+        def verify(copy, *args, **kw):
+            tries.append(Path(copy).name)
+            return real_verify(copy, *args, **kw)
+
+        def observe(branch, touches):
+            requested = real_observe(branch, touches)
+            if not broken:  # the advance during the first tick only
+                broken.append(self.push_elsewhere('broken by hand', 'devloop/__init__.py',
+                                                  "raise ImportError('broken on purpose')\n"))
+            return requested
+        d.pinner.observe = observe
+        self.push_elsewhere('merged by hand', 'devloop/extra.txt', 'new\n')
+        with mock.patch.object(pin, 'verify', verify):
+            for _ in range(3):
+                with self.assertRaisesRegex(AssertionError, 'plan'):
+                    d.tick()
+            self.assertEqual((len(tries), snapshots), (1, [1, 1, 1]))
+            self.assertEqual(pin.failed(self.state)['sha'], broken[0])
+            self.assertEqual(self.pointed(), old.resolve())
+            self.assertIsNone(pin.pending(self.state))
+            self.assertTrue(any(f'the auto-pin of {broken[0][:12]} already failed' in line
+                                for line in self.logs), self.logs)
+            # By hand the same commit is checked again.
+            with self.assertRaisesRegex(pin.PinError, 'broken on purpose'):
+                self.pin('main')
+        self.assertEqual(len(tries), 2)
+        self.assertEqual(self.pointed(), old.resolve())
 
     def test_a_fetch_that_fails_is_logged_and_the_tick_goes_on(self):
         self.pin('main')
@@ -1006,6 +1067,12 @@ class AutoPinSmokeTests(GitCase):
         self.assertIn("missing 'test_cmd'", body)  # the reason
         self.assertNotIn(str(self.tmp), body)  # never a path of the host
         self.assertIn(f'  the refusal of {broken[:12]} was already reported on #7', self.logs)
+        # The record the daily summary reads (#453): the commit, the branch, when and why.
+        record = markdown.read_marker(body, 'pin')
+        self.assertEqual((record['sha'], record['ref']), (broken, 'origin/main'))
+        self.assertIn("missing 'test_cmd'", record['reason'])
+        self.assertNotIn(str(self.tmp), record['reason'])
+        self.assertRegex(record['at'], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
 
     def test_the_public_reason_keeps_no_absolute_path(self):
         self.assertEqual(pin.public_reason("pinned-abc: the check failed: config: missing "
