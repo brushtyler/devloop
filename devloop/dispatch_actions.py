@@ -27,7 +27,7 @@ from .ledger import attempt_branch, attempt_marker, fix_register
 from .localtests import failed_modules, select_modules, suite_summary
 from .markdown import (dispatcher_header, publishable, render_fix, render_native_review,
                        render_review, without_attribution)
-from .config import same_agent
+from .config import foreign, provider_quorum, same_agent
 from .planning import (BASE_CHANGED, FIX_COMMAND, RESYNC_AFTER_APPROVAL, ci_joins_round,
                        counted_rounds, implementer_choice, pending_reviewers, preflight_state,
                        voided_approval, waived_rounds, waiting_reviewers)
@@ -204,11 +204,20 @@ class ActionsMixin:
         self.ws.push(path, branch, replace=True, auth=auth)
         self._pushed(path)
         # The marker keeps the map the reviewer checks until a fix replaces it (#134). Its
-        # reviewer is the first of the pool that is not the implementer's agent (#407).
-        reviewer = next((k for k in cfg.pool() if not cfg.signs_for_role(k)
-                         and not same_agent(cfg.agent(k), agent)), cfg.reviewer)
+        # reviewer is the first of the pool that is not the implementer's agent (#407); with the
+        # reviewer rules of P5-5 (#409), the first of another provider and another tuple.
+        profile = self._profile(agent.key, 'write', used)
+        if cfg.review_policy.provider_quorum:
+            authors = [profile] + [self._profile(agent.key, 'write', m) for m in agent.chain()]
+            reviewer = next((k for k in cfg.pool() if not cfg.signs_for_role(k)
+                             and foreign(self._profile(k, 'review'), authors)
+                             and all(independent(self._profile(k, 'review'), a)
+                                     for a in authors)), cfg.reviewer)
+        else:
+            reviewer = next((k for k in cfg.pool() if not cfg.signs_for_role(k)
+                             and not same_agent(cfg.agent(k), agent)), cfg.reviewer)
         meta = {'issue': number, 'implementer': agent.key, 'reviewer': reviewer,
-                'profile': self._profile(agent.key, 'write', used),
+                'profile': profile,
                 'acceptance_map': result['acceptance_map'],
                 # Informative only (#169): no receipt nor approval depends on it.
                 'local_tests': local, **skipped_models(used)}
@@ -463,6 +472,9 @@ class ActionsMixin:
         else:
             round_no, done, comments = last_round(pr.reviews) + 1, [], pr.operator_comments
             counted = counted_rounds(pr.reviews) + 1
+            # A new round chooses its reviewers again (#409): one whose chain is remembered
+            # unavailable gives its place to the next valid one of the pool.
+            receipt = self._fresh_receipt(pr, receipt)
             if bases:
                 # Abandoned only because the base advanced: the round does not count.
                 restarts = {'round': latest[0]['round'], 'bases': bases}
@@ -525,7 +537,8 @@ class ActionsMixin:
                            operator_comments=format_operator_comments(comments),
                            language=cfg.language, conclave=resolution)
         level2 = receipt['level'] > 1
-        authors = (self._authors(pr) or []) if level2 else []
+        by_provider = cfg.review_policy.provider_quorum
+        authors = (self._authors(pr) or []) if level2 or by_provider else []
         peers = [p for p in map(profile_of, done) if p]
         # The profile each reviewer of this action runs with, reserved before any turn starts
         # and replaced atomically when a fallback model takes over (#176); a reviewer that
@@ -538,7 +551,28 @@ class ActionsMixin:
         # selection reads the implementer (``_implementer_agents``), at level 2 every author.
         same = authors if level2 else self._implementer_agents(pr)
 
+        def allowed_by_provider(key):
+            # With the reviewer rules of P5-5 (#409) a model keeps what the selection checked:
+            # independent by tuple of every author, distinct from the round's other reviewers,
+            # and the quorum rule (ii) of D8 on the round with this model in it, the reviewers
+            # not yet run counted with the model they would run now.
+            def allowed(candidate):
+                p = self._profile(key, 'review', candidate)
+                with reserving:
+                    others = [q for k, q in reserved.items() if k != key]
+                    waiting = [self._profile(k, 'review') for k in receipt['reviewers']
+                               if k not in reviewed and k not in reserved and k != key]
+                    if not (all(independent(p, a) for a in authors)
+                            and all(distinct(p, q) for q in peers + others)
+                            and provider_quorum(peers + others + waiting + [p], authors)):
+                        return False
+                    reserved[key] = p
+                    return True
+            return allowed
+
         def allowed_for(key):
+            if by_provider:
+                return allowed_by_provider(key)
             if not level2:
                 return lambda candidate: not any(same_agent(candidate, a) for a in same)
 

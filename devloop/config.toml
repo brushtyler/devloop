@@ -114,6 +114,17 @@ label = "reviews:2"
 # local overlay turns it on, e.g. advisory_reviewer = "claude". It is not part of the policy
 # version.
 advisory_reviewer = ""
+# The reviewer rules of ADR 0005, P5-5 (issue #409), off by default (D10): turning them on is the
+# operator's decision, best with no PR close to its merge (the policy version changes). On, every
+# agent and every fallback model declares its `provider` (checked against the prefix of the
+# model's name: a claude-* model declared with another provider stops devloop), and at both
+# levels a reviewer differs by GitHub identity and (kind, model, effort) from everyone who wrote
+# the PR, with at least one reviewer of a provider other than every author's (the only one at
+# level 1, quorum rule (ii) of D8): claude-reviewer with Sonnet may then review the code of
+# claude-implementer beside codex or agy. A new round skips a reviewer whose models are all
+# remembered unavailable, unless it owns an open finding; a round keeps its reviewers until it
+# ends.
+# provider_quorum = false
 
 # Level 0 (issue #107): no review. It applies only when a trusted user added `label` to the PR
 # (the latest event of that label added it), the level computed above is 1, and the PR's full
@@ -347,7 +358,13 @@ implementer = "claude"
 # Level 2 takes the first pair that differs both in GitHub identity (app) and in (kind, model,
 # effort, review_args), and neither of which shares the identity or (kind, model, effort) of the
 # implementer or of a fixer of the PR; without such a pair the PR goes to agent:needs-operator.
-# `reviewer = "codex"` is a pool of one.
+# `reviewer = "codex"` is a pool of one. With review_policy.provider_quorum (issue #409) the
+# quorum rule on the provider replaces the check of the same agent, and once the keys are renamed
+# claude joins the pool as the third reviewer, last, with another model than the implementer's
+# and the app of claude (D8):
+#   reviewers = ["codex-reviewer", "agy-reviewer", "claude-reviewer"]
+#   [agents.claude-reviewer]      (the table of [agents.claude], with app = "claude",
+#                                  provider = "anthropic", model = "claude-sonnet-5-5")
 reviewers = ["codex", "agy"]
 
 [agents.claude]
@@ -388,7 +405,8 @@ effort = "high"
 # Argon has a budget of its own: when a turn fails because the model is unavailable (quota or
 # budget exhausted, model not available, rate limit), the same turn runs again on the next
 # fallback model, each at most once per action (issue #121). A fallback inherits `effort` when
-# it sets none, and never reasons below high. What counts as unavailable: `unavailable_patterns`
+# it sets none, and never reasons below high. Its `provider` (issue #409) is its own, never the
+# agent's: required, as the agent's, only with review_policy.provider_quorum. What counts as unavailable: `unavailable_patterns`
 # (default "RESOURCE_EXHAUSTED", "quota", "429", "model .* not available") in the output of a
 # failed turn, each as a delimited word or code (#443), or an exit code in
 # `unavailable_exit_codes` (default none). An output with only `(code 400)` never counts, not

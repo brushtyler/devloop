@@ -556,3 +556,13 @@ slug = "brushtyler-devloop-merger"
 [apps.supervisor]
 app_id = 5824243
 slug = "brushtyler-devloop-supervisor"
+
+# The implementer's role app (ADR 0005, P5-3, issue #407), with contents: write,
+# pull_requests: write and issues: write, without workflows. It signs commits, pushes, PRs and
+# the records of fixes and syncs of every agent that declares app = "implementer", and only a
+# <kind>-implementer key may declare it. Until one does (the migration of the keys, off by
+# default), devloop does not read its key and nothing is signed with it. scripts/agent-token.py
+# does not expose it.
+[apps.implementer]
+app_id = 5824194
+slug = "brushtyler-devloop-implementer"

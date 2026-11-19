@@ -31,7 +31,9 @@ A level asks for as many independent reviewers (#111): one at level 1, two at le
 reviewers are distinct only if both their GitHub identity and their tuple ``(kind, model, effort,
 review_args)`` differ; keys and descriptions do not count. At level 2 a reviewer is independent
 of who wrote the code (the implementer, every fixer) only if both its identity and its ``(kind,
-model, effort)`` differ from theirs.
+model, effort)`` differ from theirs. With ``provider_quorum`` (ADR 0005, P5-5, #409) that holds
+at level 1 too, and at least one reviewer is of a provider other than every author's
+(``config.provider_quorum``).
 """
 
 import hashlib
@@ -78,9 +80,11 @@ class ReviewPolicy:
     # Files listed by ``sensitive_path_lists``, read when the configuration is loaded.
     sensitive_files: tuple = ()
     # The configured reviewer pool, in order: ``(key, app slug or None, kind, model, effort,
-    # review_args[, fallback models[, review commands]])`` each, the fallback models as
-    # ``(model, effort)`` pairs (#121), the review commands the command prefixes an agy reviewer
-    # may run (#122). A change to any of them changes the version, and so every receipt.
+    # review_args[, fallback models[, review commands[, providers]]])`` each, the fallback
+    # models as ``(model, effort)`` pairs (#121), the review commands the command prefixes an
+    # agy reviewer may run (#122), the providers those of the model and of each fallback as
+    # declared, '' each when not (ADR 0005, P5-5, #409). A change to any of them changes the
+    # version, and so every receipt.
     reviewers: tuple = ()
     # Level 0 (#107): the label a trusted user adds, the allowlist (directory prefixes or files,
     # as ``sensitive_paths``) and the expected check runs, ``(name, app_id)`` each. Without an
@@ -96,6 +100,12 @@ class ReviewPolicy:
     # the file changes the version, and so voids every approval, as a change of the
     # configuration does.
     project: str = ''
+    # The reviewer rules of ADR 0005, P5-5 (#409), off by default (D10): every agent declares
+    # its provider; a reviewer is independent by tuple of every author at both levels, and the
+    # quorum rule (ii) of D8 replaces the exclusion of the same agent; a reviewer whose chain is
+    # all remembered unavailable is skipped when a new round chooses its reviewers. Off, the
+    # reviewers are chosen as before (``config.same_agent``).
+    provider_quorum: bool = False
 
     def zero_enabled(self):
         return bool(self.zero_allowlist) and bool(self.zero_checks)
@@ -113,10 +123,18 @@ class ReviewPolicy:
                 # some: without them the version is the one before #121.
                 # Its review commands (agy, #122) likewise count only when it has some, tagged
                 # so that they never read as fallback models.
+                # Its declared providers (#409) likewise count only when it declares some,
+                # tagged in the same way.
                 'reviewers': [[*r[:5], list(r[5]), *([[list(f) for f in r[6]]]
                                                      if len(r) > 6 and r[6] else []),
-                               *([{'commands': list(r[7])}] if len(r) > 7 and r[7] else [])]
+                               *([{'commands': list(r[7])}] if len(r) > 7 and r[7] else []),
+                               *([{'providers': list(r[8])}] if len(r) > 8 and any(r[8])
+                                 else [])]
                               for r in self.reviewers]}
+        # The reviewer rules of P5-5 (#409) only when on, so that off the version is the one
+        # before.
+        if self.provider_quorum:
+            data['provider_quorum'] = True
         if self.zero_enabled():
             data['zero'] = {'label': self.zero_label,
                             'allowlist': sorted({_norm(p) for p in self.zero_allowlist}),
@@ -281,10 +299,14 @@ def agent_profile(agent, identity, mode):
     """The profile ``agent`` acts with in ``mode`` (``write`` or ``review``) under GitHub
     ``identity``, as markers and receipts record it. An agy profile also records the command
     prefixes its turns may run in ``mode`` (#122), passed with ``--settings``: a change to them
-    voids the approvals given with the old ones, even for a reviewer outside the pool."""
+    voids the approvals given with the old ones, even for a reviewer outside the pool. The
+    provider of the model, when the agent declares it (ADR 0005, P5-5, #409): the quorum rule
+    of D8 reads it from the profiles of the authors and of the reviewers."""
     profile = {'identity': identity, 'kind': agent.kind, 'model': agent.model,
                'effort': agent.effort,
                'args': list(agent.review_args if mode == 'review' else agent.write_args)}
+    if getattr(agent, 'provider', ''):
+        profile['provider'] = agent.provider
     if agent.kind == 'agy':
         profile['commands'] = list(agent.review_commands if mode == 'review'
                                    else agent.write_commands)

@@ -292,6 +292,9 @@ class FallbackModel:
     model: str
     model_label: str
     effort: str
+    # Who makes the model (ADR 0005, D8, P5-5, #409), lowercase, '' when not declared: then
+    # ``provider_of`` reads it from the prefix of the model's name.
+    provider: str = ''
 
 
 @dataclass(frozen=True)
@@ -332,13 +335,18 @@ class AgentConfig:
     # declare the role app ``implementer``. Without a table of that name the agent uses the
     # ambient ``gh`` login.
     app: str = ''
+    # Who makes ``model`` (ADR 0005, D8, P5-5, #409), lowercase, '' when not declared: then
+    # ``provider_of`` reads it from the prefix of the model's name. Required, for the agent and
+    # each fallback model, with ``review_policy.provider_quorum``.
+    provider: str = ''
 
     def chain(self):
         """The agent with its configured model, then with each fallback model in order: same
-        key, CLI and arguments, with the fallback's model, label and effort."""
+        key, CLI and arguments, with the fallback's model, label, effort and provider (its own,
+        never the agent's: agy may fall back on a model of another provider)."""
         return [self] + [dataclasses.replace(self, model=f.model, model_label=f.model_label,
-                                             effort=f.effort, fallback_models=(),
-                                             fallback_for=self.model)
+                                             effort=f.effort, provider=f.provider,
+                                             fallback_models=(), fallback_for=self.model)
                          for f in self.fallback_models]
 
 
@@ -383,10 +391,20 @@ def legacy_key(key, role, agents):
 
 
 # The providers of the models devloop knows, by the prefix of the model's name (ADR 0005, P5-3,
-# #407): ``kind`` is the CLI, not who makes the model, and agy also offers Claude models. Used
-# only where an agent declares no provider (``provider_of``), so it only adds conflicts; the
-# provider declared for every agent and fallback, with this table as a check, is P5-5's.
+# #407): ``kind`` is the CLI, not who makes the model, and agy also offers Claude models. Where
+# an agent or a fallback declares no provider (``provider``), ``provider_of`` reads it here; where
+# one declares it, the table is a check (D8, option (c), P5-5, #409): a model with one of these
+# prefixes declared with another provider stops devloop at startup (``_provider``).
 MODEL_PROVIDERS = (('claude-', 'anthropic'), ('gpt-', 'openai'), ('gemini-', 'google'))
+
+
+def prefix_provider(model):
+    """The provider the prefix of ``model`` names (``MODEL_PROVIDERS``), or ''."""
+    if isinstance(model, str):
+        for prefix, provider in MODEL_PROVIDERS:
+            if model.lower().startswith(prefix):
+                return provider
+    return ''
 
 
 def _field(x, name):
@@ -400,12 +418,7 @@ def provider_of(x):
     declared = _field(x, 'provider')
     if isinstance(declared, str) and declared.strip():
         return declared.strip().lower()
-    model = _field(x, 'model')
-    if isinstance(model, str):
-        for prefix, provider in MODEL_PROVIDERS:
-            if model.lower().startswith(prefix):
-                return provider
-    return ''
+    return prefix_provider(_field(x, 'model'))
 
 
 def same_agent(a, b):
@@ -414,11 +427,27 @@ def same_agent(a, b):
     #407): the same kind of CLI, the same model, or the same provider (``provider_of``) when
     both are known. The conflict checks compare this, never the keys, which differ by role for
     one same agent (``claude-implementer``, ``claude-reviewer``): agy run with a Claude model
-    is the same provider as claude. At level 2 this is stricter than the quorum rule (ii) of D8,
-    which admits one reviewer of the authors' provider: that rule comes with P5-5."""
+    is the same provider as claude. The reviewers are chosen with it until the operator turns on
+    ``review_policy.provider_quorum`` (P5-5, #409): then with ``foreign`` and the tuple."""
     provider = provider_of(a)
     return (_field(a, 'kind') == _field(b, 'kind') or _field(a, 'model') == _field(b, 'model')
             or bool(provider and provider == provider_of(b)))
+
+
+def foreign(reviewer, authors):
+    """Whether ``reviewer`` (a profile, an ``AgentConfig``) is of a provider other than every
+    one of ``authors`` (ADR 0005, D8, P5-5, #409). Fails closed: a provider that is not known,
+    the reviewer's or an author's, is never another one."""
+    provider = provider_of(reviewer)
+    return bool(provider) and all(provider_of(a) and provider_of(a) != provider
+                                  for a in authors)
+
+
+def provider_quorum(reviewers, authors):
+    """The quorum rule (ii) of D8 (ADR 0005, P5-5, #409): at least one of ``reviewers`` is of a
+    provider other than every one of ``authors`` (``foreign``). At level 1 the only reviewer
+    must be; at level 2 one of the two may share the authors' provider."""
+    return any(foreign(r, authors) for r in reviewers)
 
 
 @dataclass(frozen=True)
@@ -618,7 +647,7 @@ def _fallback_models(table, where, kind, model, effort):
         at = f'{where}[{position}]'
         if not isinstance(item, dict):
             raise ConfigError(f'{at}: expected a table with model, model_label and effort')
-        unknown = set(item) - {'model', 'model_label', 'effort'}
+        unknown = set(item) - {'model', 'model_label', 'effort', 'provider'}
         if unknown:
             raise ConfigError(f'{at}: unknown keys {sorted(unknown)}')
         name = _require(item, 'model', str, at)
@@ -634,8 +663,47 @@ def _fallback_models(table, where, kind, model, effort):
         if name in seen:
             raise ConfigError(f'{at}.model: {name!r} is already the agent\'s model or a fallback')
         seen.add(name)
-        models.append(FallbackModel(model=name, model_label=label, effort=level))
+        models.append(FallbackModel(model=name, model_label=label, effort=level,
+                                    provider=_provider(item, at, name)))
     return tuple(models)
+
+
+def _provider(table, where, model):
+    """``provider`` of an agent or of a fallback model (ADR 0005, D8, P5-5, #409): who makes
+    ``model``, lowercase, or '' when not declared. A model whose prefix names a provider
+    (``MODEL_PROVIDERS``) declared with another one stops devloop: the table is the check of
+    option (c), for agy, which also offers Claude models."""
+    if 'provider' not in table:
+        return ''
+    provider = _require(table, 'provider', str, where).strip().lower()
+    if not provider:
+        raise ConfigError(f'{where}.provider: must not be empty')
+    known = prefix_provider(model)
+    if known and known != provider:
+        raise ConfigError(f'{where}.provider: {model!r} is a model of {known!r}, not of '
+                          f'{provider!r}')
+    return provider
+
+
+def _providers(agent):
+    """``(providers,)``: the declared providers of ``agent``'s model and of each fallback, ''
+    each when not declared, as ``ReviewPolicy.reviewers`` records them; ``()`` when none is
+    declared."""
+    providers = (agent.provider, *(f.provider for f in agent.fallback_models))
+    return (providers,) if any(providers) else ()
+
+
+def _check_providers(agents):
+    """With ``review_policy.provider_quorum`` (P5-5, #409) every agent and every fallback model
+    declares its provider (D8, option (c)): the quorum rule never reads it from a prefix."""
+    for key, agent in agents.items():
+        if not agent.provider:
+            raise ConfigError(f'agents.{key}.provider: required with '
+                              'review_policy.provider_quorum')
+        for position, fallback in enumerate(agent.fallback_models):
+            if not fallback.provider:
+                raise ConfigError(f'agents.{key}.fallback_models[{position}].provider: required '
+                                  'with review_policy.provider_quorum')
 
 
 def _memory_seconds(table, where):
@@ -764,10 +832,13 @@ def parse_review_policy(table, root, reviewers=(), agents=None):
         raise ConfigError(f'{where}.advisory_reviewer: unknown agent {advisory!r}')
     if advisory:
         _check_role(advisory, 'reviewer', f'{where}.advisory_reviewer')
+    quorum = default.provider_quorum
+    if 'provider_quorum' in table:
+        quorum = _require(table, 'provider_quorum', bool, where)
     return ReviewPolicy(default_level=level, label=label, sensitive_paths=paths,
                         sensitive_files=tuple(files), reviewers=tuple(reviewers),
                         zero_label=zero_label, zero_allowlist=allowlist, zero_checks=checks,
-                        advisory_reviewer=advisory)
+                        advisory_reviewer=advisory, provider_quorum=quorum)
 
 
 def _zero_policy(table, level_label, default):
@@ -1393,7 +1464,8 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
             unavailable_patterns=patterns, unavailable_exit_codes=codes,
             fallback_memory_seconds=_memory_seconds(table, where),
             denied_cooldown_hours=_denied_cooldown(table, where),
-            write_commands=write_commands, review_commands=review_commands, app=app)
+            write_commands=write_commands, review_commands=review_commands, app=app,
+            provider=_provider(table, where, model))
     roles = data.get('roles') or {}
     implementer = _require(roles, 'implementer', str, 'roles')
     if implementer not in agents:
@@ -1475,7 +1547,12 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
           agents[k].kind, agents[k].model,
           agents[k].effort, agents[k].review_args,
           tuple((f.model, f.effort) for f in agents[k].fallback_models),
-          agents[k].review_commands) for k in pool], agents)
+          agents[k].review_commands)
+         # The declared providers (#409) only when there are some: without them the pool is
+         # recorded as before.
+         + _providers(agents[k]) for k in pool], agents)
+    if review_policy.provider_quorum:
+        _check_providers(agents)
     if project:
         review_policy = dataclasses.replace(review_policy, project=project)
     # The roles whose turns can run (#365): conclave and advisory only when configured.
@@ -1580,7 +1657,7 @@ _AGENT_KEYS = dict.fromkeys(('kind', 'display_name', 'model', 'model_label', 'ef
                              'version_cmd', 'write_args', 'review_args', 'commit_trailer',
                              'fallback_models', 'unavailable_patterns', 'unavailable_exit_codes',
                              'fallback_memory_seconds', 'denied_cooldown_hours',
-                             'write_commands', 'review_commands', 'app'))
+                             'write_commands', 'review_commands', 'app', 'provider'))
 OVERLAY_KEYS = {
     **dict.fromkeys(('repo', 'base_branch', 'branch_prefix', 'state_dir', 'source',
                      'repo_lock_dir',
@@ -1595,7 +1672,8 @@ OVERLAY_KEYS = {
                      'agent_stall_action', 'blocked_labels', 'priority_labels',
                      'protected_paths')),
     'review_policy': {**dict.fromkeys(('default_level', 'label', 'sensitive_paths',
-                                       'sensitive_path_lists', 'advisory_reviewer')),
+                                       'sensitive_path_lists', 'advisory_reviewer',
+                                       'provider_quorum')),
                       'zero': dict.fromkeys(('label', 'allowlist', 'checks'))},
     'merge': {'mode': None, 'operator_only_paths': None, 'levels': {'*': None}},
     'roles': {**dict.fromkeys(('implementer', 'reviewer', 'reviewers', 'supervisor')),
