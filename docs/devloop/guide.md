@@ -2246,7 +2246,8 @@ restrictions are in its project file, whose example is
 from its tests in its overlay ([`ops/host/ssdlc/overlay.toml`](../../ops/host/ssdlc/overlay.toml)).
 Without a project file, or a `test_cmd` in the overlay, devloop stops at startup (`missing
 'test_cmd'`), and so does the pin of a copy, whose check loads the configuration. The migration
-of a host is in [ops/host/migrate.md](../../ops/host/migrate.md#configurazione-di-ssdlc-nel-suo-file-di-progetto).
+of a running host, and the order to follow so that the pin after the merge finds the project
+file, are in [ops/host/migrate.md](../../ops/host/migrate.md#migrazione-di-r3-su-un-host-attivo).
 
 #### Changes while the loop runs
 

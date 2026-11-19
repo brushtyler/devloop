@@ -2,7 +2,7 @@
  "source": {
   "commit": "28eaf9455bad6ff52dcbdbc29ecc07d7dde83e2a",
   "how": "dataclasses.asdict(devloop.config.load_config()) and review_policy.version(), computed by the code and the devloop/config.toml of that commit (origin/main before ADR 0006, R3), without overlay nor project file; tuples written as lists",
-  "updated": "later defaults of the installation, written with config.toml: [apps.implementer], app of the agents and implementers (ADR 0005, P5-3, #407), the capacity keys of [delegations] (P5-8, #412), provider of the agents and of the fallbacks and review_policy.provider_quorum (P5-5, #409), all off by default; the policy version is unchanged"
+  "updated": "later changes of the installation, not R3's, added to config.toml and here with only the values they add (the policy version does not change): [apps.implementer], implementers and agents.*.app (issue #407, PR #442); delegations.capacity and capacity_max_* (issue #412, PR #450); agents.*.provider, provider of the fallbacks and review_policy.provider_quorum (issue #409)"
  },
  "policy_version": "619dd4fda8b8e7870f12564883f49a790c9db939796fe17c90fba43b64e326d3",
  "config": {
