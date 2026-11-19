@@ -156,7 +156,8 @@ class ConfigTests(unittest.TestCase):
         import tomllib
         data = tomllib.loads(config.DEFAULT_CONFIG.read_text())
         self.assertEqual(set(CFG.apps),
-                         {'dispatcher', 'claude', 'codex', 'agy', 'merger', 'supervisor'})
+                         {'dispatcher', 'claude', 'codex', 'agy', 'merger', 'supervisor',
+                          'implementer'})
         self.assertEqual(CFG.apps['dispatcher'].slug, 'brushtyler-devloop-dispatcher')
         self.assertEqual(CFG.protected_paths, ('.github/',))
         bad = [dict(data, trusted_users=['brushtyler', 'brushtyler-devloop-claude-agent[bot]']),

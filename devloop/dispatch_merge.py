@@ -30,8 +30,9 @@ from .markdown import (MAX_BODY, dispatcher_header, publishable, read_marker, sp
 from .planning import MERGING, label_names, pending_reviewers, touched_by_base
 from .policy import describe as describe_receipt
 from .policy import (MAX_LISTED_PATHS, ZERO_LEVEL, changes_requested, check_outcome,
-                     check_states, differences, distinct, evaluate, independent, receipt_of,
-                     recorded_level, zero_refused)
+                     check_states, differences, distinct, evaluate, independent, profile_of,
+                     receipt_of, recorded_level, zero_refused)
+from .config import same_agent
 from .receipt import CONFLICT as RECEIPT_CONFLICT
 from .review import (FINDING_COMMAND, current_round, open_findings, round_verdict,
                      trust_policy_parts)
@@ -153,21 +154,38 @@ class MergeMixin:
         the PR: the implementer, every fixer and every agent that resolved conflicts in a sync,
         as their markers record them, and the agent configured now under the implementer's
         key, which runs fixes and syncs, with each of its models (#121). When a marker does not record who wrote the code,
-        independence cannot be verified."""
+        independence cannot be verified.
+
+        At both levels a reviewer that is the same agent in effect as the implementer
+        (``same_agent``: the same kind or the same model; at level 2 as any author) is
+        excluded, never by comparing keys (ADR 0005, P5-3, #407): ``claude-implementer`` and
+        ``claude-reviewer`` are different keys of the same agent. Nor does an agent that signs
+        with a role app review."""
         cfg, implementer = self.cfg, pr.meta['implementer']
+
+        def eligible(key, authors):
+            return (key in cfg.agents and not cfg.signs_for_role(key)
+                    and not any(same_agent(cfg.agent(key), a) for a in authors))
         if level == 1:
+            authors = [p for p in [profile_of(pr.meta)] if p is not None]
+            if implementer in cfg.agents:
+                authors += cfg.agent(implementer).chain()
+            if not authors:
+                return [], (f'non è verificabile che il reviewer sia un agent diverso '
+                            f'dall\'implementer della PR (`{implementer}`): il marker non ne '
+                            'registra il profilo e la sua chiave non è configurata')
             for key in (pr.meta['reviewer'], *cfg.pool()):
-                if key in cfg.agents and key != implementer:
+                if eligible(key, authors):
                     return [key], ''
-            return [], (f'nessun reviewer configurato è diverso dall\'implementer della PR '
-                        f'(`{implementer}`)')
+            return [], (f'nessun reviewer configurato è un agent diverso dall\'implementer della '
+                        f'PR (`{implementer}`)')
         authors = self._authors(pr)
         if authors is None:
             return [], ('non è verificabile che i reviewer siano indipendenti da chi ha scritto '
                         'il codice: la PR, una sua correzione o una risoluzione di conflitti '
                         'non registra identità e tupla dell\'agent (marker precedenti a #111)')
         candidates = [(key, self._profile(key, 'review')) for key in cfg.pool()
-                      if key in cfg.agents and key != implementer]
+                      if eligible(key, authors)]
         candidates = [(key, p) for key, p in candidates if all(independent(p, a) for a in authors)]
         for group in itertools.combinations(candidates, level):
             if all(distinct(a[1], b[1]) for a, b in itertools.combinations(group, 2)):

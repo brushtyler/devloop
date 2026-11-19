@@ -111,7 +111,9 @@ class Summary:
 class Records:
     """The records of the days from ``first`` to ``last`` (``datetime.date``), read once with
     ``gh`` (``github.GitHub``). ``trust`` is a ``watch.Trust``: who may write each record;
-    ``agents`` the keys of the configured agents, the only reviewers whose reviews count."""
+    ``agents`` the keys of the only reviewers whose reviews count (``Config.review_keys``: the
+    configured agents that do not sign with a role app, and the keys before the migration of
+    #407 that one of them stands for)."""
 
     def __init__(self, gh, trust, first, last, agents=()):
         self.gh = gh
@@ -519,6 +521,6 @@ def build(cfg, gh, trust, state_dir, *, log):
     """The ``Publisher`` of ``[report] issue``, or None when no issue is configured."""
     if not cfg.report.issue:
         return None
-    return Publisher(gh, trust, cfg.repo, cfg.report.issue, agents=cfg.agents, log=log,
+    return Publisher(gh, trust, cfg.repo, cfg.report.issue, agents=cfg.review_keys(), log=log,
                      lock=Path(state_dir) / LOCK_FILE)
 

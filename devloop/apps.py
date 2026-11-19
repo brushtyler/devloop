@@ -8,6 +8,11 @@ The supervisor's role app (``supervisor``, ADR 0005, P5-4) is only a login for d
 stays with the supervisor's system user, devloop never mints its tokens, and the supervisor gets
 them with ``scripts/supervisor-token.py``.
 
+The implementer's role app (``implementer``, ADR 0005, P5-3) is devloop's: every agent key that
+declares it (``app = "implementer"``, only ``<kind>-implementer`` keys) commits, pushes, opens
+PRs and writes the records of fixes and syncs with it. The dispatcher maps each agent key to
+the app it declares (``Config.app_of``) before asking for a client here.
+
 Tokens stay in this process: they reach ``gh`` and ``git`` through the environment of a single
 command and are never given to the agent CLIs. Only the standard library and the ``openssl``
 binary are used (RS256 is not in the standard library).
@@ -35,6 +40,9 @@ MERGER = 'merger'
 # The supervisor's role app (#408): its commands and labels count as the supervisor's with
 # ``[roles.supervisor]`` as a table. devloop reads no key of it and never writes with it.
 SUPERVISOR = 'supervisor'
+# The implementer's role app (#407): commits, pushes, PRs and the records of fixes and syncs of
+# every agent that declares it (``app = "implementer"``), whichever does the work.
+IMPLEMENTER = 'implementer'
 
 # Permissions of the token minted for each kind of action (metadata: read is always implied).
 IMPLEMENT = {'contents': 'write', 'pull_requests': 'write'}
@@ -128,6 +136,14 @@ def find_key(key_dir, slug):
     if key.stat().st_mode & 0o077:
         raise PermissionError(f'{key} is readable by group or others (chmod 600)')
     return key
+
+
+def used(cfg, actor):
+    """Whether devloop acts with the app of ``[apps.<actor>]`` of ``cfg``: never the
+    supervisor's (#408); the implementer's (#407) only when an agent declares it."""
+    if actor == SUPERVISOR:
+        return False
+    return actor != IMPLEMENTER or any(cfg.app_of(key) == IMPLEMENTER for key in cfg.agents)
 
 
 def app_login(slug):
@@ -237,9 +253,11 @@ class Identities:
     def from_config(cls, cfg, run=subprocess.run):
         key_dir = os.environ.get('DEVLOOP_APP_KEY_DIR') or cfg.app_key_dir
         # Not the supervisor's app (#408): devloop never acts as the supervisor, and its key is
-        # with the supervisor's system user, not in devloop's key_dir.
+        # with the supervisor's system user, not in devloop's key_dir. Nor the implementer's
+        # (#407) while no agent declares it: until the migration of the keys nothing signs with
+        # it.
         apps = {actor: AppAuth(app.app_id, app.slug, find_key(key_dir, app.slug), cfg.repo)
-                for actor, app in cfg.apps.items() if actor != SUPERVISOR}
+                for actor, app in cfg.apps.items() if used(cfg, actor)}
         return cls(cfg.repo, apps, run=run)
 
     # The outbox of the publications (#385, ``outbox.Outbox``), set by devloop when

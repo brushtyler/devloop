@@ -49,7 +49,7 @@ class PreflightMixin:
         for position, comment in enumerate(comments):
             record = read_marker(comment.get('body', ''), 'preflight')
             login = (comment.get('author') or {}).get('login')
-            if record and record['agent'] in self.cfg.agents and self._wrote(login, record['agent']):
+            if record and self._wrote_as_agent(login, record['agent']):
                 found.append((position, record))
         return found
 

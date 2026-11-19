@@ -10,6 +10,7 @@ these names: import them from here.
 
 from dataclasses import dataclass, field, replace
 
+from .config import IMPLEMENTER_LABEL
 from .policy import receipt_of
 from .review import CI, current_round, flow_verdict, open_findings, owner_of, round_verdict
 from .supervision import ISSUE_STEPS, RETRY
@@ -304,6 +305,46 @@ def issue_priority(labels, events, trusted_users, priority_labels=()):
     valid = [names[name] for name in labels
              if name in names and added_by.get(name) in trusted_users]
     return min(valid, key=PRIORITY_RANK.__getitem__, default='normal')
+
+
+def implementer_choice(cfg, labels, labeled, admitters):
+    """``(key, why, problem)``: the implementer of an issue at its takeover (ADR 0005, D7,
+    #407), how it was chosen, and ``problem`` ('' when there is none, else why the choice is
+    the operator's, as a ``configuration`` escalation, and ``key`` None).
+
+    A label counts only while the issue has it and its latest ``labeled`` event (``labeled``:
+    ``(label, login, at)``, oldest first) comes from one of ``admitters`` (``label_admitters``:
+    the trusted users, and the supervisor on the issues of trusted users and of devloop's apps,
+    as for the priority labels of #178). An ``impl:<kind>`` label chooses ``<kind>-implementer``
+    and prevails; then the area labels of ``[roles.implementers]``; then ``roles.implementer``.
+    Two different ``impl:`` labels, an ``impl:`` label of an implementer not configured, or
+    areas that lead to different implementers are the operator's."""
+    latest = {}
+    for name, who, _ in labeled:
+        latest[name] = who
+    counted = {name for name in label_names(labels) if latest.get(name) in admitters}
+    chosen = sorted(name for name in counted if name.startswith(IMPLEMENTER_LABEL))
+    if len(chosen) > 1:
+        return None, '', ('l\'issue ha più label che scelgono l\'implementer: '
+                          + ', '.join(f'`{name}`' for name in chosen))
+    if chosen:
+        key = f'{chosen[0][len(IMPLEMENTER_LABEL):]}-implementer'
+        if key not in cfg.agents:
+            return None, '', (f'la label `{chosen[0]}` sceglie l\'implementer `{key}`, che non è '
+                              'configurato')
+        return key, f'label `{chosen[0]}`', ''
+    mapped = {}
+    for label, key in cfg.implementers:
+        if label in counted:
+            mapped.setdefault(key, []).append(label)
+    if len(mapped) > 1:
+        return None, '', ('le label di area dell\'issue portano a implementer diversi: '
+                          + '; '.join(f'{", ".join(f"`{n}`" for n in names)} → `{key}`'
+                                      for key, names in sorted(mapped.items())))
+    if mapped:
+        (key, names), = mapped.items()
+        return key, 'label di area ' + ', '.join(f'`{n}`' for n in names), ''
+    return cfg.implementer, 'default', ''
 
 
 def start_order(issue):

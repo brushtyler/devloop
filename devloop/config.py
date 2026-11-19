@@ -304,6 +304,11 @@ class AgentConfig:
     # each turn as ``permissions.allow`` rules with ``--settings``.
     write_commands: tuple = ()
     review_commands: tuple = ()
+    # The actor of ``[apps.*]`` the agent signs with (ADR 0005, P5-3, #407), as the agent
+    # declares it with ``app``; '' for its key, as before (``Config.app_of``). The implementers
+    # declare the role app ``implementer``. Without a table of that name the agent uses the
+    # ambient ``gh`` login.
+    app: str = ''
 
     def chain(self):
         """The agent with its configured model, then with each fallback model in order: same
@@ -315,9 +320,54 @@ class AgentConfig:
 
 
 # Actors that are an app of devloop's and never an agent: the dispatcher, the merger, the app
-# that only merges (#201), and the supervisor's role app (ADR 0005, P5-4, #408), which counts
-# only with ``[roles.supervisor]`` as a table and whose key devloop never reads.
-APP_ONLY_ACTORS = ('dispatcher', 'merger', 'supervisor')
+# that only merges (#201), the supervisor's role app (ADR 0005, P5-4, #408), which counts only
+# with ``[roles.supervisor]`` as a table and whose key devloop never reads, and the
+# implementer's role app (ADR 0005, P5-3, #407), which the implementers declare.
+APP_ONLY_ACTORS = ('dispatcher', 'merger', 'supervisor', 'implementer')
+# The role app of the implementers (#407): commits, pushes, PRs and the records of fixes and
+# syncs, whichever agent does the work. Only a ``<kind>-implementer`` key may declare it.
+IMPLEMENTER_APP = 'implementer'
+# The apps that sign for a role and not for an agent: a reviewer's record signed with one of
+# them would be the implementer's or the supervisor's (#407).
+ROLE_APPS = (IMPLEMENTER_APP, 'supervisor')
+# The roles an agent key may name in full (ADR 0005, P5-3, #407): ``<kind>-<role>``, such as
+# ``claude-implementer`` or ``codex-reviewer``. A key that names a role serves only that role;
+# a key that names none (``claude``, ``codex``, ``agy``, the keys before the migration) serves
+# the roles it is given, as before.
+KEY_ROLES = ('implementer', 'reviewer')
+# The label that chooses the implementer of an issue (#407, D7): ``impl:<kind>`` chooses
+# ``<kind>-implementer``.
+IMPLEMENTER_LABEL = 'impl:'
+
+
+def key_role(key):
+    """The role ``key`` names in full (``KEY_ROLES``), or None for a key without one."""
+    for role in KEY_ROLES:
+        if isinstance(key, str) and key.endswith(f'-{role}'):
+            return role
+    return None
+
+
+def legacy_key(key, role, agents):
+    """The configured key that the key ``key`` of a historical record (a marker, a turn, a
+    review) stands for in ``role`` (#407): ``key`` itself when it is configured; for one of the
+    keys before the migration (``claude``, ``codex``, ``agy``) no longer configured, its
+    ``<kind>-<role>`` when that one is; else ``key``, unknown. The record is never rewritten."""
+    if key in agents or key not in AGENT_KINDS:
+        return key
+    renamed = f'{key}-{role}'
+    return renamed if renamed in agents else key
+
+
+def same_agent(a, b):
+    """Whether ``a`` and ``b`` (an ``AgentConfig``, a marker profile, a supervisor actor:
+    anything with ``kind`` and ``model``) are the same agent in effect (ADR 0005, D6, #407): the
+    same kind of CLI, or the same model. The conflict checks compare this, never the keys, which
+    differ by role for one same agent (``claude-implementer``, ``claude-reviewer``).
+    ``provider`` is not compared yet: the agents do not declare one (P5-5)."""
+    def get(x, name):
+        return x.get(name) if isinstance(x, dict) else getattr(x, name, None)
+    return get(a, 'kind') == get(b, 'kind') or get(a, 'model') == get(b, 'model')
 
 
 @dataclass(frozen=True)
@@ -372,6 +422,10 @@ class Config:
     source: str = ''
     # The reviewer pool, in order (``roles.reviewers``; ``roles.reviewer`` is a pool of one).
     reviewers: tuple = ()
+    # The implementers of the area labels (``[roles.implementers]``, ADR 0005, D7, #407):
+    # ``(label, key)`` pairs in configuration order. Empty by default: every issue goes to
+    # ``implementer`` unless an ``impl:<kind>`` label chooses another.
+    implementers: tuple = ()
     # The agent of the readiness check before implement (#114), or '' when it is disabled.
     preflight: str = ''
     # The three agents of the conclave on a block (#141), the agent that stopped among them, or
@@ -451,6 +505,28 @@ class Config:
 
     def agent(self, key):
         return self.agents[key]
+
+    def app_of(self, actor):
+        """The actor of ``[apps.*]`` that ``actor`` signs with (#407): a configured agent's
+        declared app; any other actor (``dispatcher``, ``merger``, the key of a historical
+        record no longer configured) itself."""
+        agent = self.agents.get(actor)
+        return (agent.app or actor) if agent is not None else actor
+
+    def signs_for_role(self, key):
+        """Whether the configured agent ``key`` signs with a role app (``ROLE_APPS``, #407):
+        its records count only as the implementer's, never as a review, a readiness check or a
+        conclave's."""
+        return key in self.agents and self.app_of(key) in ROLE_APPS
+
+    def review_keys(self):
+        """The keys whose review records count where history is read (the daily summary,
+        #407): the configured agents that do not sign with a role app, and each key before the
+        migration (``claude``, ``codex``, ``agy``) no longer configured whose ``<kind>-reviewer``
+        is one of them (``legacy_key``): its records are read as they are, never rewritten."""
+        keys = {key for key in self.agents if not self.signs_for_role(key)}
+        return frozenset(keys | {kind for kind in AGENT_KINDS
+                                 if legacy_key(kind, 'reviewer', self.agents) in keys - {kind}})
 
     def pool(self):
         """The reviewer pool, in configuration order."""
@@ -628,6 +704,8 @@ def parse_review_policy(table, root, reviewers=(), agents=None):
         raise ConfigError(f'{where}.advisory_reviewer: expected a string')
     if advisory and agents is not None and advisory not in agents:
         raise ConfigError(f'{where}.advisory_reviewer: unknown agent {advisory!r}')
+    if advisory:
+        _check_role(advisory, 'reviewer', f'{where}.advisory_reviewer')
     return ReviewPolicy(default_level=level, label=label, sensitive_paths=paths,
                         sensitive_files=tuple(files), reviewers=tuple(reviewers),
                         zero_label=zero_label, zero_allowlist=allowlist, zero_checks=checks,
@@ -1052,9 +1130,80 @@ def parse_docs(data):
     return DocsMap(entries=docs_entries(data))
 
 
-def _reviewer_pool(roles, agents, implementer):
-    """``roles.reviewers``, or ``roles.reviewer`` as a pool of one: known agents, no repeats,
-    never the implementer."""
+def _check_role(key, role, where):
+    """Refuse the key ``key`` given the role ``role`` when it names another one (ADR 0005,
+    P5-3, #407): ``claude-reviewer`` as ``roles.implementer`` stops devloop at startup. A key
+    that names no role (``key_role``) serves the roles it is given, as before the migration;
+    the roles without keys of their own (preflight, conclave, the supervisor as an agent key)
+    take only such keys until the operator gives them one."""
+    named = key_role(key)
+    if named is not None and named != role:
+        raise ConfigError(f'{where}: {key!r} is a {named} key and serves only that role, not '
+                          f'the {role}')
+
+
+def parse_implementers(roles, agents):
+    """``[roles.implementers]`` (ADR 0005, D7, #407): the implementer of each area label, as
+    ``(label, key)`` pairs; ``()`` without the table. Every key is a configured agent that may
+    implement; an ``impl:`` label chooses by itself and is not an area."""
+    table = roles.get('implementers', {})
+    where = 'roles.implementers'
+    if not isinstance(table, dict):
+        raise ConfigError(f'{where}: expected a table of "<label>" = "<implementer key>"')
+    pairs = []
+    for label, key in table.items():
+        at = f'{where}.{label!r}'
+        if not label.strip() or label.startswith(IMPLEMENTER_LABEL):
+            raise ConfigError(f'{at}: expected an area label, not empty nor an '
+                              f'{IMPLEMENTER_LABEL}<kind> label')
+        if not isinstance(key, str):
+            raise ConfigError(f'{at}: expected the key of an implementer')
+        if key not in agents:
+            raise ConfigError(f'{at}: unknown agent {key!r}')
+        _check_role(key, 'implementer', at)
+        pairs.append((label, key))
+    return tuple(pairs)
+
+
+def _check_apps(agents, declared, apps):
+    """The apps the agents sign with (ADR 0005, P5-3, #407). ``declared``: the keys of the
+    agents with an ``app`` of their own. Each ``[apps.*]`` table is one actor's, devloop's own
+    or one agent's, except ``implementer``, which every ``<kind>-implementer`` may declare and
+    nobody else; no agent declares devloop's own apps; an implementer key signs with the
+    implementer app or with the ambient login, never with an agent's app."""
+    owners = {}
+    for key, agent in agents.items():
+        app, where = agent.app or key, f'agents.{key}.app'
+        if app in APP_ONLY_ACTORS and app != IMPLEMENTER_APP:
+            raise ConfigError(f'{where}: {app!r} is reserved to devloop\'s own app')
+        if app == IMPLEMENTER_APP and key_role(key) != 'implementer':
+            raise ConfigError(f'{where}: only a <kind>-implementer key may declare the '
+                              'implementer app: a review or a check signed with it would be the '
+                              'implementer\'s')
+        if key_role(key) == 'implementer' and app != IMPLEMENTER_APP and app in apps:
+            raise ConfigError(f'{where}: an implementer signs with the implementer app '
+                              f'(app = "{IMPLEMENTER_APP}"), not with {app!r}')
+        if key in declared and app not in apps:
+            raise ConfigError(f'{where}: no [apps.{app}] table')
+        if app != IMPLEMENTER_APP:
+            owners.setdefault(app, []).append(key)
+    for app, keys in owners.items():
+        if app in apps and len(keys) > 1:
+            raise ConfigError(f'apps.{app}: each app belongs to one actor, declared by '
+                              + ', '.join(sorted(keys)))
+    for actor in apps:
+        # The app of an agent's key before the migration (``claude``, ``codex``, ``agy``) stays
+        # even when no key declares it: the records it signed are read with it.
+        if actor not in APP_ONLY_ACTORS and actor not in owners and actor not in AGENT_KINDS:
+            raise ConfigError(f'apps.{actor}: not the dispatcher, the merger, a role app nor the '
+                              'app of a configured agent')
+
+
+def _reviewer_pool(roles, agents, implementers):
+    """``roles.reviewers``, or ``roles.reviewer`` as a pool of one: known agents with a
+    reviewer's key, no repeats, none of the keys that may implement (``implementers``): a key
+    serves one role (#407). Whether a reviewer is the same agent as the implementer of a PR is
+    checked for each PR, never here (ADR 0005, D6)."""
     if 'reviewers' in roles:
         if 'reviewer' in roles:
             raise ConfigError('roles: set either reviewer or reviewers, not both')
@@ -1068,7 +1217,8 @@ def _reviewer_pool(roles, agents, implementer):
     for key in pool:
         if key not in agents:
             raise ConfigError(f'roles.reviewers: unknown agent {key!r}')
-        if key == implementer:
+        _check_role(key, 'reviewer', 'roles.reviewers')
+        if key in implementers:
             raise ConfigError('roles: the reviewer must be a different agent from the implementer')
     return pool
 
@@ -1088,6 +1238,8 @@ def parse_conclave(data, agents):
     unknown = [key for key in keys if key not in agents]
     if unknown:
         raise ConfigError(f'conclave: unknown agent {unknown[0]!r}')
+    for key in keys:
+        _check_role(key, 'conclave', 'conclave')
     tuples = {(agents[k].kind, agents[k].model, agents[k].effort) for k in keys}
     if len(tuples) != CONCLAVE_SIZE:
         raise ConfigError('conclave: the agents must differ in (kind, model, effort)')
@@ -1106,6 +1258,7 @@ def parse_supervisor(roles, agents):
     if isinstance(value, str):
         if value not in agents:
             raise ConfigError(f'roles.supervisor: unknown agent {value!r}')
+        _check_role(value, 'supervisor', 'roles.supervisor')
         return value, None
     if not isinstance(value, dict):
         raise ConfigError('roles.supervisor: expected the key of an agent or a table')
@@ -1131,7 +1284,7 @@ def parse_supervisor(roles, agents):
 def parse_config(data, root=INSTALL_ROOT):
     """``root`` is where relative ``review_policy.sensitive_path_lists`` are read."""
     test_cmd = _require(data, 'test_cmd', str, 'config')
-    agents = {}
+    agents, declared = {}, set()
     for key, table in (data.get('agents') or {}).items():
         where = f'agents.{key}'
         if key in APP_ONLY_ACTORS:
@@ -1139,6 +1292,16 @@ def parse_config(data, root=INSTALL_ROOT):
         kind = _require(table, 'kind', str, where)
         if kind not in AGENT_KINDS:
             raise ConfigError(f'{where}.kind: must be one of {AGENT_KINDS}')
+        role = key_role(key)
+        if role is not None and key != f'{kind}-{role}':
+            raise ConfigError(f'{where}: a key with a role names the agent and the role in full: '
+                              f'{kind + "-" + role!r}')
+        app = ''  # the key's own app, as before (``Config.app_of``)
+        if 'app' in table:
+            app = _require(table, 'app', str, where)
+            if not app.strip():
+                raise ConfigError(f'{where}.app: must not be empty')
+            declared.add(key)
         model = _require(table, 'model', str, where)
         effort = _require(table, 'effort', str, where)
         patterns, codes = _unavailable(table, where)
@@ -1157,19 +1320,27 @@ def parse_config(data, root=INSTALL_ROOT):
             unavailable_patterns=patterns, unavailable_exit_codes=codes,
             fallback_memory_seconds=_memory_seconds(table, where),
             denied_cooldown_hours=_denied_cooldown(table, where),
-            write_commands=write_commands, review_commands=review_commands)
+            write_commands=write_commands, review_commands=review_commands, app=app)
     roles = data.get('roles') or {}
     implementer = _require(roles, 'implementer', str, 'roles')
     if implementer not in agents:
         raise ConfigError(f'roles.implementer: unknown agent {implementer!r}')
-    pool = _reviewer_pool(roles, agents, implementer)
+    _check_role(implementer, 'implementer', 'roles.implementer')
+    implementers = parse_implementers(roles, agents)
+    # The keys that may implement an issue: the default, those of the area map and every
+    # <kind>-implementer, which an impl:<kind> label chooses (#407).
+    selectable = ({implementer} | {key for _, key in implementers}
+                  | {key for key in agents if key_role(key) == 'implementer'})
+    pool = _reviewer_pool(roles, agents, selectable)
     supervisor, supervisor_actor = parse_supervisor(roles, agents)
     preflight = ''
     if 'preflight' in data:
         preflight = _require(data, 'preflight', str, 'config')
         if preflight not in agents:
             raise ConfigError(f'preflight: unknown agent {preflight!r}')
-        if preflight == implementer:
+        _check_role(preflight, 'preflight', 'preflight')
+        # The implementer chosen for an issue is checked against it at the takeover (#407).
+        if preflight in selectable:
             raise ConfigError('preflight: must be a different agent from the implementer')
     conclave = parse_conclave(data, agents)
     trusted =_str_list(data, 'trusted_users', 'config')
@@ -1184,12 +1355,11 @@ def parse_config(data, root=INSTALL_ROOT):
     apps = {}
     for actor, table in apps_table.items():
         where = f'apps.{actor}'
-        if actor not in APP_ONLY_ACTORS and actor not in agents:
-            raise ConfigError(f'{where}: not the dispatcher, the merger nor a configured agent')
         if not isinstance(table, dict):
             raise ConfigError(f'{where}: expected a table')
         apps[actor] = AppConfig(app_id=_require(table, 'app_id', int, where),
                                 slug=_require(table, 'slug', str, where))
+    _check_apps(agents, declared, apps)
     if len({app.app_id for app in apps.values()}) != len(apps):
         raise ConfigError('apps: each actor needs its own app')
     if supervisor_actor is not None and 'supervisor' not in apps:
@@ -1228,7 +1398,8 @@ def parse_config(data, root=INSTALL_ROOT):
         raise ConfigError('attempt_identity: needs story_identity = true')
     review_policy = parse_review_policy(
         data.get('review_policy', {}), root,
-        [(k, apps[k].slug if k in apps else None, agents[k].kind, agents[k].model,
+        [(k, apps[agents[k].app or k].slug if (agents[k].app or k) in apps else None,
+          agents[k].kind, agents[k].model,
           agents[k].effort, agents[k].review_args,
           tuple((f.model, f.effort) for f in agents[k].fallback_models),
           agents[k].review_commands) for k in pool], agents)
@@ -1244,7 +1415,8 @@ def parse_config(data, root=INSTALL_ROOT):
         source=_source(data),
         test_cmd=test_cmd,
         language=data.get('language', 'English'),
-        implementer=implementer, reviewer=pool[0], reviewers=pool, agents=agents,
+        implementer=implementer, implementers=implementers, reviewer=pool[0], reviewers=pool,
+        agents=agents,
         preflight=preflight, conclave=conclave,
         trusted_users=trusted,
         blocked_labels=_str_list(data, 'blocked_labels', 'config', ('bloccata',)),
@@ -1293,7 +1465,7 @@ _AGENT_KEYS = dict.fromkeys(('kind', 'display_name', 'model', 'model_label', 'ef
                              'version_cmd', 'write_args', 'review_args', 'commit_trailer',
                              'fallback_models', 'unavailable_patterns', 'unavailable_exit_codes',
                              'fallback_memory_seconds', 'denied_cooldown_hours',
-                             'write_commands', 'review_commands'))
+                             'write_commands', 'review_commands', 'app'))
 OVERLAY_KEYS = {
     **dict.fromkeys(('repo', 'base_branch', 'branch_prefix', 'state_dir', 'source',
                      'test_cmd', 'local_tests', 'ci_rerun_unrelated', 'block_uncertain_turns', 'story_identity',
@@ -1310,7 +1482,8 @@ OVERLAY_KEYS = {
                                        'sensitive_path_lists', 'advisory_reviewer')),
                       'zero': dict.fromkeys(('label', 'allowlist', 'checks'))},
     'merge': {'mode': None, 'operator_only_paths': None, 'levels': {'*': None}},
-    'roles': dict.fromkeys(('implementer', 'reviewer', 'reviewers', 'supervisor')),
+    'roles': {**dict.fromkeys(('implementer', 'reviewer', 'reviewers', 'supervisor')),
+              'implementers': {'*': None}},
     'agents': {'*': _AGENT_KEYS},
     'apps': {'key_dir': None, '*': dict.fromkeys(('app_id', 'slug'))},
     'pin': {'auto': None},

@@ -446,12 +446,40 @@ retry_own_prs = false
 # kind = "claude"
 # provider = "anthropic"
 # model = "claude-opus-5-5"
+#
+# Agent keys by role and the implementer app (ADR 0005, P5-3, issue #407), off by default:
+# turning them on is the operator's decision (D10), with an empty queue, since at startup
+# devloop stops while an open PR's marker names a key not configured or of another role. A key
+# then names agent and role in full and serves that role only: "claude-implementer",
+# "codex-reviewer", "agy-reviewer" (a key such as "claude-reviewer" given as implementer stops
+# devloop at startup). The implementers declare app = "implementer" and sign with
+# [apps.implementer]; the reviewers declare the app of their agent (app = "codex", ...). The
+# keys claude, codex and agy disappear: the records that name them are read as they are, and the
+# models remembered unavailable move to the new keys. Then also
+# review_policy.advisory_reviewer = "claude-reviewer". For example:
+#   implementer = "claude-implementer"
+#   reviewers = ["codex-reviewer", "agy-reviewer"]
+#   [agents.claude-implementer]   (the table of [agents.claude], with app = "implementer")
+#   [agents.codex-reviewer]       (the table of [agents.codex], with app = "codex")
+#   [agents.agy-reviewer]         (the table of [agents.agy], with app = "agy")
+# The implementer of an issue is chosen at its takeover (D7) and recorded in its request record
+# and in its PR's marker: an impl:<kind> label chooses <kind>-implementer and prevails, then the
+# area labels of [roles.implementers], then `implementer`. A label counts only when its latest
+# labeled event comes from a trusted user, or from the supervisor on an issue of a trusted user
+# or of devloop's apps (the rules of the priority labels, issue #178). Two impl: labels, an
+# implementer not configured, or areas that lead to different implementers go to the operator
+# as `configuration`, and so does an implementer that is the same agent as `preflight`.
+# [roles.implementers]
+# "area:docs" = "claude-implementer"
 implementer = "claude"
-# The reviewer pool, in order; none may be the implementer. Level 1 uses the PR's recorded
-# reviewer (the first of the pool when the PR was opened). Level 2 takes the first pair that
-# differs both in GitHub identity (app) and in (kind, model, effort, review_args), and neither of
-# which shares the identity or (kind, model, effort) of the implementer or of a fixer of the PR;
-# without such a pair the PR goes to agent:needs-operator. `reviewer = "codex"` is a pool of one.
+# The reviewer pool, in order; none may be a key that implements. Level 1 uses the PR's
+# recorded reviewer (the first of the pool, when the PR was opened, that is not the
+# implementer's agent). At both levels a reviewer that is the same agent in effect (same kind or
+# same model) as the implementer, or at level 2 as a fixer of the PR, is skipped (issue #407).
+# Level 2 takes the first pair that differs both in GitHub identity (app) and in (kind, model,
+# effort, review_args), and neither of which shares the identity or (kind, model, effort) of the
+# implementer or of a fixer of the PR; without such a pair the PR goes to agent:needs-operator.
+# `reviewer = "codex"` is a pool of one.
 reviewers = ["codex", "agy"]
 
 [agents.claude]
@@ -516,8 +544,9 @@ fallback_models = [
 # review_commands = ["python3 scripts/run-tests.py", "python3 -m unittest", "git diff"]
 # write_commands = [...]
 
-# GitHub Apps (issue #65): one per agent, one for the dispatcher, one for merges (#201) and one
-# for the supervisor (#408). App
+# GitHub Apps (issue #65): one per agent, one for the dispatcher, one for merges (#201), one
+# for the supervisor (#408) and one for the implementers (#407). An agent signs with the table
+# of its key, or with the one it declares with `app`. App
 # ids and slugs are not secret. Private keys are read from key_dir (or $DEVLOOP_APP_KEY_DIR) as
 # <slug>.<date>.private-key.pem, mode 600. An actor without an app uses the ambient `gh` login.
 [apps]
@@ -554,3 +583,13 @@ slug = "brushtyler-devloop-merger"
 [apps.supervisor]
 app_id = 5824243
 slug = "brushtyler-devloop-supervisor"
+
+# The implementer's role app (ADR 0005, P5-3, issue #407), with contents: write,
+# pull_requests: write and issues: write, without workflows. It signs commits, pushes, PRs and
+# the records of fixes and syncs of every agent that declares app = "implementer", and only a
+# <kind>-implementer key may declare it. Until one does (the migration of the keys, off by
+# default), devloop does not read its key and nothing is signed with it. scripts/agent-token.py
+# does not expose it.
+[apps.implementer]
+app_id = 5824194
+slug = "brushtyler-devloop-implementer"

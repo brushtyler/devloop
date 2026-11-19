@@ -189,7 +189,7 @@ from .budget import BUDGET, OUTSIDE, BudgetRefused
 from .budget import of_issue as budget_of_issue
 from .budget import reserve as budget_reserve
 from .budget import status_lines as budget_status_lines
-from .config import INSTALL_ROOT, LEGACY_NEEDS_OPERATOR, ConfigError
+from .config import INSTALL_ROOT, LEGACY_NEEDS_OPERATOR, ConfigError, key_role
 from .context import (LABEL_STYLE, _describe_bases, _failure_text, _open_findings_reason,
                       _render_issue_comments, both_labels_warning, label_transition,
                       transition_labels)
@@ -679,15 +679,28 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         self._ledger = ledger
 
     # Identities ------------------------------------------------------------
+    # An agent key acts with the app it declares (``Config.app_of``, ADR 0005, P5-3, #407): an
+    # implementer with the role app ``implementer``, a reviewer with its agent's app. The key of
+    # a historical record no longer configured, such as ``claude``, is looked up as an app.
     def _as(self, actor, permissions) -> Backend:
         """The GitHub client ``actor`` acts with, holding only ``permissions``."""
-        return self.identities.github(actor, permissions) if self.identities else self.gh
+        return (self.identities.github(self.cfg.app_of(actor), permissions) if self.identities
+                else self.gh)
 
     def _git_auth(self, actor, permissions):
-        return self.identities.git_auth(actor, permissions) if self.identities else None
+        return (self.identities.git_auth(self.cfg.app_of(actor), permissions) if self.identities
+                else None)
 
     def _app_login(self, actor):
-        return self.identities.login(actor) if self.identities else None
+        return self.identities.login(self.cfg.app_of(actor)) if self.identities else None
+
+    def _wrote_as_agent(self, login, key):
+        """Whether ``login`` may write the record of the configured agent ``key`` as an agent
+        of its own (a review, a readiness check, a conclave's): never for a key that signs with
+        a role app (#407), whose app is shared by every implementer and signs only their
+        work."""
+        return (key in self.cfg.agents and not self.cfg.signs_for_role(key)
+                and self._wrote(login, key))
 
     def _wrote(self, login, actor):
         """Whether ``login`` may write records for ``actor``: the actor's app if it has one,
@@ -730,9 +743,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                     problems.append(f'la review del round {record["round"]} non registra il '
                                     'reviewer')
                 continue
-            elif record['reviewer'] in (implementer, CI) or record['reviewer'] not in self.cfg.agents:
+            elif (record['reviewer'] in (implementer, CI) or record['reviewer'] not in self.cfg.agents
+                  or self.cfg.signs_for_role(record['reviewer'])):
                 # Only a configured agent reviews: never the implementer, nor one of devloop's
-                # own apps, such as the merger, whose app only merges (#201).
+                # own apps, such as the merger, whose app only merges (#201), nor an agent that
+                # signs with the implementer's role app (#407).
                 continue
             else:
                 actor = record['reviewer']
@@ -967,6 +982,38 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 {a['n'] for a in self.ledger.journal.attempts().values()
                  if a['repo'] == self.cfg.repo and a['issue'] == number and a['n'] > 1})]
         return branches
+
+    def key_problems(self):
+        """Why devloop may not start with the agent keys it has (ADR 0005, P5-3, #407), one line
+        per problem, or none: an open devloop PR whose marker names as its implementer or its
+        reviewer a key that is not configured, or one that names another role
+        (``config.key_role``). Its fixes and syncs run with the agent its marker names, so the
+        keys renamed by role change only with an empty queue (D10). Only the PRs that may be
+        devloop's count (``_devloop_pr``: of this repository, by a trusted user or one of
+        devloop's apps, on a devloop branch): nobody else's PR can stop devloop."""
+        cfg, problems = self.cfg, []
+        agents = self.identities.agent_logins() if self.identities else set()
+        for raw in self.gh.open_prs():
+            author = (raw.get('author') or {}).get('login')
+            if raw.get('isCrossRepository') or (author not in cfg.trusted_users
+                                                and author not in agents):
+                continue
+            if parse_branch(cfg.branch_prefix, raw.get('headRefName') or '') is None:
+                continue
+            meta = read_marker(raw.get('body') or '', 'pr')
+            if meta is None:
+                continue
+            for field, role in (('implementer', 'implementer'), ('reviewer', 'reviewer')):
+                if field not in meta:
+                    continue
+                key = meta[field]
+                if not isinstance(key, str) or key not in cfg.agents:
+                    problems.append(f'PR #{raw["number"]}: its marker names the {field} {key!r}, '
+                                    'which is not configured')
+                elif key_role(key) not in (None, role):
+                    problems.append(f'PR #{raw["number"]}: its marker names the {field} {key!r}, '
+                                    f'a {key_role(key)} key')
+        return problems
 
     def _devloop_pr(self, raw):
         """A devloop PR is recognised by its branch, ``<branch_prefix><issue>``, so that it stays
