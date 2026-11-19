@@ -9,7 +9,9 @@ the module-level names are imported from here, not re-exported by ``devloop/disp
 """
 
 from dataclasses import replace
+from datetime import datetime
 
+from .activity import iso
 from .agents import AgentError
 from .apps import DISPATCHER
 from .context import operator_comments, requests_rereview
@@ -22,9 +24,10 @@ from .planning import (FIX_COMMAND, Action, PullRequest, findings_decreasing, la
                        last_counted_ci, operator_blocked)
 from .policy import ZERO_LEVEL, profile_of
 from .review import finding_state
-from .supervision import (ACCEPT_DEFAULTS, DECIDE, DESIGN_LABEL, ESCALATE, GRANT_ROUND,
-                          ISSUE_STEPS, MAX_RETRIES, MERGED_ISSUE, PREFLIGHT_DEFAULT, RETRY,
-                          RETRY_STEPS, ROUND_GRANTABLE, SYNC_FAILED, TOOL_FAILURE, critical,
+from .supervision import (ACCEPT_DEFAULTS, CAPACITY, CAPACITY_REFUSED, DECIDE, DESIGN_LABEL,
+                          ESCALATE, GRANT_ROUND, ISSUE_STEPS, MAX_CAPACITY, MAX_RETRIES,
+                          MERGED_ISSUE, PREFLIGHT_DEFAULT, RETRY, RETRY_STEPS, ROUND_GRANTABLE,
+                          SYNC_FAILED, TOOL_FAILURE, capacity_arguments, critical,
                           preflight_class, retries_done, supervisor_command)
 from .workspace import WorkspaceError
 
@@ -38,6 +41,24 @@ RESUME_STEP = {'review': 'review', 'fix': 'changes', 'sync': 'review'}
 # or to the operator (#321).
 SUPERVISOR_TITLE = 'Decisione del supervisore'
 OPERATOR_TITLE = 'Comando su un\'escalation all\'operatore'
+# The title of the dispatcher's trace of a ``/devloop capacity`` command (#412).
+CAPACITY_TITLE = 'Limite di capacità temporaneo'
+CAPACITY_USAGE = (f'Il comando si scrive come `/devloop {CAPACITY} <chiave> <valore> <durata> '
+                  '<motivo>`, come prima riga di un commento su questa issue: la chiave è '
+                  + ' o '.join(f'`{key}`' for key in MAX_CAPACITY) + ', la durata `<N>h` o '
+                  '`<N>m`, il motivo, che può continuare nelle righe successive, riporta o cita '
+                  'l\'analisi delle cause.')
+
+
+def _epoch(stamp):
+    """The seconds since the epoch of an ISO 8601 time in UTC as GitHub and devloop write it
+    (``2026-11-19T10:00:00Z``), or None."""
+    if not isinstance(stamp, str) or not stamp.endswith('Z'):
+        return None
+    try:
+        return datetime.fromisoformat(stamp[:-1] + '+00:00').timestamp()
+    except ValueError:
+        return None
 
 
 def merge_command(body):
@@ -434,6 +455,15 @@ class SupervisionMixin:
                    else f'Il comando è speso; {where} resta in `{lb.needs_supervisor}`.\n\n'
                    + self._supervisor_resume(escalation, is_pr))
             return trace('refused', f'non applicabile: {command["refusal"]}. {how}')
+        if name == CAPACITY:
+            # A temporary capacity limit is never a decision on an escalation (#412).
+            where = 'la PR' if is_pr else 'l\'issue'
+            label = lb.needs_operator if operator else lb.needs_supervisor
+            resume = (self._operator_resume(command['anchor'], is_pr) if operator
+                      else self._supervisor_resume(escalation, is_pr))
+            return trace('refused', f'non applicabile: `/devloop {CAPACITY}` vale solo sulla '
+                         'issue del riepilogo (`[report] issue`), non su un\'escalation. Il '
+                         f'comando è speso; {where} resta in `{label}`.\n\n{resume}')
         if operator:
             return self._operator_command(target, number, labels, comments, command, trace)
         if critical(cls) or escalation.get('to') != 'supervisor':
@@ -666,6 +696,188 @@ class SupervisionMixin:
         self.ledger.event(number, 'delegation_grant', delegation='rounds', by=by,
                           comment=command['comment'], **figures)
         self.gh.edit_labels(number, add=[resume], remove=[lb.needs_supervisor])
+
+    # Temporary capacity limits (#412, ADR 0005, P5-8) ------------------------
+    def _capacity(self, dry_run=False):
+        """The configuration this tick plans with: ``self.cfg`` with the temporary capacity
+        limits of the supervisor in force (#412, ADR 0005, P5-8). ``self.cfg`` itself never
+        changes: when a limit expires, or the delegation is turned off, the next tick plans with
+        the configured value again.
+
+        Only with ``[delegations] capacity`` on: the dispatcher reads the comments of
+        ``[report] issue``, applies the ``/devloop capacity`` commands still to answer
+        (``_capacity_commands``; not in a dry run) and takes the limits in force from its own
+        ``supervision`` records (``_capacity_limits``). With the delegation off the issue is not
+        read and its commands are not answered. When the issue cannot be read the configured
+        values apply (fail closed)."""
+        cfg = self.cfg
+        issue = cfg.report.issue
+        limits = {}
+        if cfg.delegations.capacity and issue:
+            try:
+                comments = self.gh.issue_comments(issue)
+                if not dry_run and self._capacity_commands(issue, comments):
+                    comments = self.gh.issue_comments(issue)
+                limits = self._capacity_limits(comments)
+            except GitHubError as exc:
+                self.log(f'capacity: #{issue} cannot be read or answered ({exc}): the configured '
+                         'limits apply')
+                limits = {}
+        seen = getattr(self, '_capacity_seen', {})
+        for key in sorted(seen.keys() | limits.keys()):
+            if key not in limits:
+                self.log(f'capacity: {key} back to the configured {getattr(cfg, key)}')
+            elif seen.get(key) != limits[key]:
+                self.log(f'capacity: {key} = {limits[key]["value"]} until {limits[key]["until"]}, '
+                         f'a temporary limit of the supervisor (configured: {getattr(cfg, key)})')
+        self._capacity_seen = limits
+        if not limits:
+            return cfg
+        return replace(cfg, **{key: limit['value'] for key, limit in limits.items()})
+
+    def _capacity_limits(self, comments):
+        """The temporary capacity limits in force, from the ``comments`` of ``[report] issue``:
+        ``{key: {value, until, by}}``. Each comes from the dispatcher's ``supervision`` record
+        of a ``capacity`` command it ``granted``; for each key the latest grant replaces the
+        earlier ones, and is in force until its ``until``. A grant whose value is above the cap
+        the configuration sets now (lowered after the grant) is not applied."""
+        rules, now = self.cfg.delegations, self.clock()
+        latest = {}
+        for _, record in self._dispatcher_records(comments, 'supervision'):
+            if record.get('command') != CAPACITY or record.get('outcome') != 'granted':
+                continue
+            key, value, until = record.get('setting'), record.get('value'), record.get('until')
+            if (rules.capacity_cap(key) is not None and isinstance(value, int)
+                    and not isinstance(value, bool) and _epoch(until) is not None):
+                latest[key] = {'value': value, 'until': until, 'by': record.get('by')}
+        limits = {}
+        for key, limit in latest.items():
+            if _epoch(limit['until']) <= now:
+                continue
+            if not 1 <= limit['value'] <= rules.capacity_cap(key):
+                self.log(f'capacity: {key} = {limit["value"]} is above the cap of the '
+                         f'configuration ({rules.capacity_cap(key)}): not applied')
+                continue
+            limits[key] = limit
+        return limits
+
+    def _capacity_commands(self, issue, comments):
+        """Answer the ``/devloop`` commands written on ``[report] issue`` after the latest one
+        answered (#412), oldest first, each with a ``supervision`` record (``_capacity_command``)
+        that spends it and every command before it. Only commands from the supervisor's
+        identity or a trusted user count (``_may_hold``); any other is ignored and only logged.
+        Returns how many were answered."""
+        spent, start = None, -1
+        for position, record in self._dispatcher_records(comments, 'supervision'):
+            applied = record.get('comment')
+            if isinstance(applied, int) and not isinstance(applied, bool):
+                spent = applied if spent is None else max(spent, applied)
+            else:
+                start = max(start, position)  # a record without the id spends what precedes it
+        answered = 0
+        for comment in comments[start + 1:]:
+            body = comment.get('body') or ''
+            parsed = None if carries_record(body) else supervisor_command(body)
+            if parsed is None:
+                continue
+            ident = comment.get('id')
+            if spent is not None and (not isinstance(ident, int) or ident <= spent):
+                continue
+            login = (comment.get('author') or {}).get('login')
+            if not self._may_hold(login):
+                self.log(f'capacity: #{issue}: ignored `/devloop {parsed[0]}` by {login}: the '
+                         'author is neither the supervisor nor a trusted user')
+                continue
+            self._capacity_command(issue, comment, *parsed, login)
+            answered += 1
+        return answered
+
+    def _capacity_command(self, issue, comment, name, text, by):
+        """Answer the command ``name`` with its ``text`` of ``by`` in ``comment`` of ``[report]
+        issue`` (#412, ADR 0005, P5-8). Only ``/devloop capacity <key> <value> <duration>
+        <reason>`` applies, and only when every condition holds, each verified now: merge mode
+        ``auto``; a well-formed command with the analysis of the causes in its reason; a key the
+        delegation covers (``max_parallel_actions`` is refused: it needs a restart); a value
+        from 1 to the cap of the key and a duration up to ``capacity_max_hours``, caps of the
+        code the configuration may only lower; a duration not over yet, counted from when the
+        command was written; the daily cap of the grants not reached.
+
+        A refusal is answered with a ``supervision`` record, and changes nothing. A grant is
+        written in the journal of the turns first, which checks the daily cap again and
+        records it in one step (as ``_grant_round``); then the ``supervision`` record, which
+        makes it apply from this tick until its ``until``; last the ledger ``event``."""
+        cfg = self.cfg
+        rules = cfg.delegations
+        ident = comment.get('id')
+        args = capacity_arguments(text) if name == CAPACITY else None
+
+        def trace(outcome, what, **extra):
+            record = dict(command=name, by=by, comment=ident, outcome=outcome,
+                          reason=args[3] if args else text or '', **extra)
+            self.gh.comment(issue, render_supervision(record, f'`/devloop {name}` di `{by}`: '
+                                                      f'{what.strip()}', CAPACITY_TITLE))
+            self.log(f'capacity: {name} by {by}: {outcome}')
+
+        def refuse(why):
+            return trace('refused', f'non applicabile: {why}. Il comando è speso; i limiti di '
+                         f'capacità restano quelli di prima.\n\n{CAPACITY_USAGE}')
+
+        if name != CAPACITY:
+            return refuse(f'sulla issue del riepilogo vale solo `/devloop {CAPACITY}`')
+        if cfg.merge.mode != 'auto':
+            return refuse(f'la modalità di merge è `{cfg.merge.mode}`, non `auto`, quindi i '
+                          'comandi del supervisore non valgono')
+        if args is None:
+            return refuse('il comando non è completo o non è ben formato: servono chiave, valore '
+                          'intero, durata e motivo')
+        key, value, minutes, _ = args
+        if key in CAPACITY_REFUSED:
+            return refuse(f'`{key}` non è delegata: devloop la applica solo al riavvio di '
+                          '`devloop run`, quindi la cambia solo l\'operatore')
+        cap = rules.capacity_cap(key)
+        if cap is None:
+            return refuse(f'`{key}` non è fra le chiavi della delega')
+        if not 1 <= value <= cap:
+            return refuse(f'il valore {value} è fuori dai limiti della delega: `{key}` va da 1 a '
+                          f'{cap} (`[delegations] capacity_{key}`)')
+        if minutes > rules.capacity_max_hours * 60:
+            return refuse(f'la durata supera il massimo di {rules.capacity_max_hours} ore '
+                          '(`[delegations] capacity_max_hours`)')
+        written = _epoch(comment.get('created_at'))
+        if written is None:
+            return refuse('l\'ora del comando non è leggibile, quindi la scadenza non è '
+                          'verificabile')
+        until = written + minutes * 60
+        if until <= self.clock():
+            return refuse(f'la durata, contata da quando il comando è stato scritto '
+                          f'({iso(written)}), è già trascorsa')
+        journal = getattr(self.ledger, 'journal', None)
+        try:
+            daily = (None if journal is None else
+                     journal.grant('capacity', issue, ident, by, rules.max_grants_per_day))
+        except JournalError as exc:
+            self.log(f'capacity: the grant cannot be recorded: {exc}')
+            journal = None
+        if journal is None:
+            return refuse('le concessioni di oggi non sono verificabili: il journal dei turni non '
+                          'è disponibile o non è leggibile')
+        if daily is None:
+            return refuse('oggi le concessioni hanno già raggiunto il massimo giornaliero '
+                          f'(`[delegations] max_grants_per_day` = {rules.max_grants_per_day})')
+        configured = getattr(cfg, key)
+        figures = {'setting': key, 'value': value, 'configured': configured, 'cap': cap,
+                   'minutes': minutes, 'until': iso(until), 'daily': daily,
+                   'daily_cap': rules.max_grants_per_day,
+                   'daily_left': rules.max_grants_per_day - daily}
+        trace('granted', f'`{key}` vale {value} fino a {iso(until)} (valore configurato: '
+              f'{configured}; tetto della delega: {cap}). Alla scadenza torna il valore '
+              f'configurato; un altro `/devloop {CAPACITY}` sulla stessa chiave sostituisce '
+              f'questo. Concessioni di oggi: {daily} di {rules.max_grants_per_day}.\n\n'
+              '**Motivo e analisi delle cause:**\n\n'
+              + '\n'.join(f'> {line}'.rstrip() for line in args[3].splitlines()), **figures)
+        if self.ledger is not None:
+            self.ledger.event(issue, 'delegation_grant', delegation='capacity', by=by,
+                              comment=ident, **figures)
 
     def _apply_retry(self, number, is_pr, comments, escalation, remove, trace, limit):
         """Run again the step of ``escalation`` on issue or PR ``number`` (#182), its input

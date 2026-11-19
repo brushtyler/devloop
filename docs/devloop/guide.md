@@ -912,6 +912,9 @@ one wins; without one, the latest that does not apply is answered.
 - `/devloop grant-round <reason>` grants one more review round to a PR in a `round_grantable`
   escalation, as described in [Granting a review round](#granting-a-review-round). It needs a
   reason, which may go on in the lines below the command.
+- `/devloop capacity` is not a command of an escalation: on one it is answered as not applicable
+  and the escalation stays where it is. It applies only on `[report] issue`, as described in
+  [Temporary capacity limits](#temporary-capacity-limits).
 
 An escalation whose class is critical or unknown, or that was not routed to the supervisor,
 accepts no command: the command is refused and the item goes to `agent:needs-operator`. A command
@@ -983,6 +986,58 @@ apply: the operator grants more rounds by raising `max_review_rounds`, as before
 
 **Trace.** Every command applied leaves a dispatcher record, described in
 [Supervision trace](protocol.md#supervision-trace).
+
+#### Temporary capacity limits
+
+A delegation of the operator to the supervisor (#412, [ADR 0005](../adr/0005-deleghe-e-ruoli-degli-agent.md#capacità),
+P5-8), **off by default**: `[delegations] capacity = false`. It lets the supervisor raise or lower
+`max_open_prs` or `max_parked_prs` for a while, without touching the configuration or the
+overlay, which stay the operator's. It needs `[report] issue`: the command is written there, on
+the issue of the [daily summary](#daily-summary), never on an escalation. With `capacity = true`
+and no `[report] issue` devloop does not start.
+
+With `capacity = true`, in merge mode `"auto"`, the supervisor (or a trusted user) writes, as the
+first line of a comment on that issue:
+
+```text
+/devloop capacity <key> <value> <duration> <reason>
+```
+
+- `<key>` is `max_open_prs` or `max_parked_prs`. `max_parallel_actions` is refused: it sizes the
+  workers when `devloop run` starts, so only a restart applies it, and only the operator changes
+  it. Any other key is refused.
+- `<value>` is a whole number from 1 to the cap of the key: **6** for `max_open_prs` and **6** for
+  `max_parked_prs`. A value lower than the configured one applies too.
+- `<duration>` is `<N>h` or `<N>m`, at most **24 hours**, counted from when the command was
+  written: a command the dispatcher reads late applies only for what is left, and one whose
+  duration is already over is refused.
+- `<reason>` is required, may go on in the lines below, and carries the analysis of the causes,
+  or cites it in the diary issue, as for [granting a round](#granting-a-review-round).
+
+The caps are constants of the code (`MAX_CAPACITY` and `MAX_CAPACITY_HOURS` in
+`devloop/supervision.py`); `capacity_max_open_prs`, `capacity_max_parked_prs` and
+`capacity_max_hours` in `[delegations]` may only lower them, and a higher value is refused at
+startup. Every grant counts against the daily cap of the delegations (`max_grants_per_day`, 3,
+with the rounds granted), checked and written in the [turn journal](protocol.md#turn-journal) in
+one step: without a journal that can be read no grant applies.
+
+At every tick, with the delegation on, the dispatcher reads the comments of the issue, answers the
+commands written after the latest one it answered, and plans with the limits in force: for each
+key the latest grant, until its end. The configuration itself does not change: when the limit
+expires the next tick plans with the configured value again, and the log says
+`capacity: <key> back to the configured <value>`. A later command on the same key replaces the
+earlier one, even when it ends sooner. A grant whose value is above a cap the operator lowered
+afterwards stops applying. When the issue cannot be read, the configured values apply. A command
+from anyone but the supervisor's identity or a trusted user is ignored and only logged; any other
+`/devloop` command on the issue is answered as not applicable.
+
+Each answer is a `supervision` record on the issue (see
+[Supervision trace](protocol.md#supervision-trace)): `refused`, with why, changes nothing; a grant
+(`granted`) records the key, the value, the configured value, the cap and the end, and the
+same figures go in a ledger `event` `delegation_grant` and in a `grant` event of the turn journal.
+
+**Revocation.** `capacity = false` revokes the delegation from the next tick: the limits in force
+stop applying, and the issue is no longer read, so its commands are no longer answered.
 
 ### Commands on escalations to the operator
 
@@ -2142,9 +2197,12 @@ keys take effect without a restart:
   tick, with a line `config: <key> <old> -> <new> from this tick` in the log. The actions already
   running go on and are not interrupted: a higher `max_open_prs` lets the next tick start an
   issue alongside them.
-- `[delegations]` (#405, #406): a delegation turned off, `rounds` or `retry_own_prs`, is revoked
-  from the next tick ([Granting a review round](#granting-a-review-round),
-  [Escalations to the supervisor](#escalations-to-the-supervisor)).
+- `[delegations]` (#405, #406, #412): a delegation turned off, `rounds`, `retry_own_prs` or
+  `capacity`, is revoked from the next tick ([Granting a review round](#granting-a-review-round),
+  [Escalations to the supervisor](#escalations-to-the-supervisor),
+  [Temporary capacity limits](#temporary-capacity-limits)). A temporary capacity limit of the
+  supervisor is not a change of the configuration: it applies over the configured value of
+  `max_open_prs` or `max_parked_prs` until it expires.
 
 **Every other key needs a restart**, including the merge modes (`[merge]`), `[pin]`, the roles,
 `trusted_users`, the agents, the identities (`[apps]`), `state_dir`, `max_parallel_actions` and
