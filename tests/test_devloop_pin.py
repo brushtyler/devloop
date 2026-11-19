@@ -967,8 +967,9 @@ class LauncherTests(unittest.TestCase):
         section = ' '.join(text[start:text.index('#### Pin\n', start)].split())
         self.assertIn('disable their automatic updates: for Claude Code, '
                       '`DISABLE_AUTOUPDATER=1` in the launcher\'s environment', section)
-        # #243: every agent CLI belongs to the devloop user, Claude Code included.
-        self.assertIn('install them in the home of the `devloop` user, Claude Code included',
+        # #243: every agent CLI belongs to one user, Claude Code included; since #415 the agent
+        # user, not devloop.
+        self.assertIn('install them in the home of the agent user, Claude Code included',
                       section)
 
     def installation(self):
@@ -986,7 +987,7 @@ class LauncherTests(unittest.TestCase):
     def test_the_installation_path_goes_from_the_user_to_the_rollback(self):
         # #243 (ADR 0003, I5): one path, in order: user, keys, CLIs, overlay, pin, start, rollback.
         section = self.subsection('Installation as a dedicated user')
-        steps = ('**User and clone.**', '**Keys.**', '**Agent CLIs.**', '**Overlay.**',
+        steps = ('**User and clone.**', '**Keys.**', '**Agent user and CLIs.**', '**Overlay.**',
                  '**Pin.**', '**Checks.**', '**Start.**', '**Rollback.**')
         positions = [section.index(step) for step in steps]
         self.assertEqual(positions, sorted(positions))
@@ -1013,10 +1014,11 @@ class LauncherTests(unittest.TestCase):
                       section)
         self.assertNotIn('--allow-root', self.installation())
 
-    def test_the_agent_clis_belong_to_the_devloop_user(self):
+    def test_the_agent_clis_belong_to_the_agent_user(self):
         section = self.subsection('Agent CLIs')
-        for needle in ('`~/.local/bin`',
-                       'npm install -g --prefix /home/devloop/.local @anthropic-ai/claude-code',
+        for needle in ('`~/.local/bin`', 'sudo -iu devloop-agent',
+                       'npm install -g --prefix /home/devloop-agent/.local '
+                       '@anthropic-ai/claude-code',
                        '"autoUpdates": false', '"DISABLE_AUTOUPDATER": "1"',
                        '`~/.claude/settings.json`', '**codex** and **agy**',
                        '**Updating them by hand, with the loop stopped**', '`STOP` file',

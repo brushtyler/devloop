@@ -17,13 +17,13 @@ import tomllib
 import unittest
 from pathlib import Path
 
-from devloop import apps
+from devloop import agentuser, apps
 from devloop.config import load_config
 
 ROOT = Path(__file__).resolve().parents[1]
 OPS = ROOT / 'ops'
-SCRIPTS = ('host/setup-devloop.sh', 'host/setup-supervisor.sh', 'host/check-host.sh',
-           'github/create-apps.sh')
+SCRIPTS = ('host/setup-devloop.sh', 'host/setup-supervisor.sh', 'host/setup-agent-user.sh',
+           'host/check-host.sh', 'github/create-apps.sh')
 BASH = shutil.which('bash')
 ME = getpass.getuser()
 PREFIX = 'brushtyler-devloop-'
@@ -93,6 +93,8 @@ class OpsTestCase(unittest.TestCase):
             'SUPERVISOR_HOME': str(self.home / 'supervisor'),
             'SYSTEMD_DIR': str(self.tmp / 'systemd'),
             'SUDOERS_FILE': str(self.tmp / 'sudoers.d' / 'devloop-supervisor'),
+            'AGENT_HOME': str(self.home / 'agent'),
+            'AGENT_SUDOERS_FILE': str(self.tmp / 'sudoers.d' / 'devloop-agent'),
         }
         values.update(overrides)
         path = self.tmp / 'params.env'
@@ -120,6 +122,7 @@ class LayoutTests(unittest.TestCase):
         for name in ('README.md', 'params.env.example', 'lib.sh',
                      'host/setup-devloop.sh', 'host/setup-supervisor.sh', 'host/devloop.service',
                      'host/sudoers-supervisor', 'host/config.local.toml.example',
+                     'host/setup-agent-user.sh', 'host/sudoers-agent',
                      'host/check-host.sh', 'host/migrate.md',
                      'github/create-apps.sh', 'github/ruleset-main.json', 'github/tokens.md',
                      *(f'github/apps/{role}.json' for role in REQUIRED)):
@@ -283,6 +286,21 @@ class DeclarativeFileTests(unittest.TestCase):
         self.assertEqual(len(body), 3)
         self.assertNotIn('config.local.toml', ' '.join(body))
 
+    def test_the_agent_sudoers_allows_only_the_clis_bash_and_kill(self):
+        # #415: devloop starts as the agent user only the CLIs, the test command and the kill of
+        # a stopped group, with the environment it builds (SETENV) and in its own process group.
+        text = (OPS / 'host/sudoers-agent').read_text()
+        body = [line for line in text.replace('\\\n', ' ').splitlines()
+                if line.strip() and not line.startswith('#')]
+        self.assertEqual(body[0], 'Defaults>@AGENT_USER@ !use_pty, secure_path="@AGENT_PATH@"')
+        self.assertTrue(body[1].startswith('@DEVLOOP_USER@ ALL=(@AGENT_USER@) NOPASSWD:SETENV:'))
+        allowed = [c.strip() for c in body[1].split('SETENV:', 1)[1].split(',')]
+        self.assertEqual(allowed, ['@AGENT_HOME@/.local/bin/claude',
+                                   '@AGENT_HOME@/.local/bin/codex',
+                                   '@AGENT_HOME@/.local/bin/agy', agentuser.BASH,
+                                   agentuser.KILL])
+        self.assertEqual(len(body), 2)
+
     def test_the_example_overlay_is_valid_for_devloop(self):
         example = (OPS / 'host/config.local.toml.example').read_text()
         # Every commented key and table, uncommented, is accepted by devloop's config.
@@ -315,7 +333,10 @@ class DryRunTests(OpsTestCase):
         self.assertIn(f'    | StandardOutput=append:{self.home}/devloop/ssdlc/.ssdlc/devloop/run.log',
                       out)
         self.assertIn('    |   "autoUpdates": false,', out)
-        self.assertIn('da fare a mano: installare claude', out)
+        # The CLIs are the agent user's (#415).
+        self.assertIn("le CLI e i loro login sono dell'utente devloop-agent (#415): "
+                      'setup-agent-user.sh', out)
+        self.assertNotIn('installare claude', out)
         self.assertNotRegex(out, r'@[A-Z_]+@')
         self.assertEqual(self.mutating_calls(), [])
         self.assertEqual(self.tree(), before)
@@ -380,6 +401,53 @@ class DryRunTests(OpsTestCase):
         self.assertEqual(self.mutating_calls(), [])
         self.assertEqual(self.tree(), before)
 
+    def test_setup_agent_user_dry_run_prints_the_user_the_acls_and_the_sudoers(self):
+        # #415: the agent user traverses the home of devloop and state_dir, writes the worktrees
+        # and the shared directory, and has no access to any other entry of state_dir.
+        devloop = self.home / 'devloop'
+        state = devloop / 'ssdlc/.ssdlc/devloop'
+        (state / 'logs').mkdir(parents=True)
+        (state / 'turn-journal.jsonl').write_text('')
+        (state / 'config.local.toml').write_text('[merge]\nmode = "off"\n')
+        (devloop / 'ssdlc/.git/worktrees').mkdir(parents=True)
+        params = self.params(DEVLOOP_USER=ME, AGENT_USER='opsdry-noagent')
+        before = self.tree()
+        done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        out = done.stdout
+        agent = self.home / 'agent'
+        self.assertIn(f'[dry-run] useradd --create-home --home-dir {agent} --shell /bin/bash '
+                      'opsdry-noagent', out)
+        self.assertIn(f'[dry-run] install -d -m 700 -o opsdry-noagent -g opsdry-noagent '
+                      f'{agent}/.claude', out)
+        self.assertIn(f'[dry-run] setfacl -m u:opsdry-noagent:--x {devloop}\n', out)
+        # `run` prints each argument as printf %q does: a comma is escaped.
+        self.assertIn(f'[dry-run] setfacl -m u:{ME}:r-x\\,d:u:{ME}:r-x\\,d:u:opsdry-noagent:rwx '
+                      f'{agent}/.claude/projects', out)
+        self.assertIn(f'[dry-run] setfacl -m u:opsdry-noagent:--x\\,d:u:opsdry-noagent:--- '
+                      f'{state}\n', out)
+        shared = f'u:opsdry-noagent:rwx\\,d:u:opsdry-noagent:rwx\\,d:u:{ME}:rwx'
+        for path in (state / 'worktrees', state / 'agent-shared', devloop / 'ssdlc/.git/worktrees'):
+            self.assertIn(f'[dry-run] setfacl -m {shared} {path}\n', out)
+        for name in ('logs', 'turn-journal.jsonl', 'config.local.toml'):
+            self.assertIn(f'[dry-run] setfacl -m u:opsdry-noagent:--- {state / name}\n', out)
+        self.assertNotIn(f'u:opsdry-noagent:--- {state / "worktrees"}', out)
+        self.assertIn(f'scriverebbe {self.tmp}/sudoers.d/devloop-agent (mode 440', out)
+        self.assertIn(f'    | {ME} ALL=(opsdry-noagent) NOPASSWD:SETENV: \\', out)
+        self.assertIn(f'    |     {agent}/.local/bin/claude, \\', out)
+        self.assertIn('da fare a mano: installare claude come opsdry-noagent', out)
+        self.assertIn('da fare a mano: impostare [agent_user] name = "opsdry-noagent"', out)
+        self.assertNotRegex(out, r'@[A-Z_]+@')
+        self.assertEqual(self.mutating_calls(), [])
+        self.assertEqual(self.tree(), before)
+
+    def test_the_agent_user_must_differ_from_devloop(self):
+        done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params',
+                               str(self.params(DEVLOOP_USER=ME, AGENT_USER=ME)))
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn('AGENT_USER deve essere diverso da DEVLOOP_USER', done.stderr)
+        self.assertEqual(self.mutating_calls(), [])
+
     def test_create_apps_dry_run_lists_the_apps_and_writes_nothing(self):
         page = self.tmp / 'page.html'
         done = self.run_script('github/create-apps.sh', '--dry-run', '--params', str(self.params()),
@@ -438,7 +506,8 @@ class DryRunTests(OpsTestCase):
     def test_another_state_dir_is_refused(self):
         # scripts/devloop-pinned looks for the pinned copy and the overlay in .ssdlc/devloop only:
         # setup and check refuse another state_dir instead of preparing one the launcher ignores.
-        for script in ('host/setup-devloop.sh', 'host/setup-supervisor.sh', 'host/check-host.sh'):
+        for script in ('host/setup-devloop.sh', 'host/setup-supervisor.sh',
+                       'host/setup-agent-user.sh', 'host/check-host.sh'):
             done = self.run_script(script, '--dry-run', '--params',
                                    str(self.params(STATE_DIR='custom-state')))
             self.assertNotEqual(done.returncode, 0, script)
@@ -528,12 +597,16 @@ class CheckHostTests(OpsTestCase):
         for home, roles in ((self.devloop, DEVLOOP_KEYS), (self.supervisor, SUPERVISOR_KEYS)):
             for role in roles:
                 self.key(home, role)
+        self.agent = self.home / 'agent'
+        (self.agent / '.local/bin').mkdir(parents=True)
         for cli in ('claude', 'codex', 'agy'):
-            self.exe(self.devloop / '.local/bin' / cli)
+            self.exe(self.agent / '.local/bin' / cli)
         self.exe(self.supervisor / '.local/bin/claude')
-        state = self.devloop / 'ssdlc/.ssdlc/devloop'
+        self.state = state = self.devloop / 'ssdlc/.ssdlc/devloop'
         (state / 'current').mkdir(parents=True)
         (state / 'run.log').touch()
+        # The agent user of the checks (#415): an existing user other than devloop's.
+        (state / 'config.local.toml').write_text('[agent_user]\nname = "root"\n')
         (self.tmp / 'systemd').mkdir()
         (self.tmp / 'systemd/devloop.service').write_text(render('host/devloop.service', {
             'REPO': 'brushtyler/ssdlc', 'DEVLOOP_USER': ME,
@@ -565,7 +638,7 @@ class CheckHostTests(OpsTestCase):
                                f' show) echo mixed ;; esac')
 
     def check(self, *args):
-        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=ME)
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=ME, AGENT_USER='root')
         done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params), *args)
         errors = [line for line in done.stdout.splitlines()
                   if 'ERRORE' in line and 'sudoers' not in line]
@@ -583,9 +656,33 @@ class CheckHostTests(OpsTestCase):
         # The checks through sudo or the network are only printed.
         self.assertIn(f'[dry-run] sudo -u {ME} -H -- test -r {self.devloop}/ssdlc/.ssdlc/devloop/'
                       'run.log', out)
-        self.assertIn(f'{self.devloop}/.local/bin/claude --version', out)
+        self.assertIn(f'[dry-run] sudo -u root -H -- {self.agent}/.local/bin/claude --version',
+                      out)
         self.assertRegex(out, r'\[dry-run\] sudo .*/scripts/devloop-pinned apps')
+        # The agent user reads neither the keys nor state_dir, and writes the worktrees (#415).
+        for path in (self.devloop / '.ghapps', self.state, self.state / 'config.local.toml'):
+            self.assertIn(f'[dry-run] sudo -u root -H -- /usr/bin/bash -c ' + r"\!\ \[\ -r\ "
+                          + r'\"\$1\"\ \]' + f' _ {path}\n', out)
+        self.assertIn(f'-r\\ \\"\\$1\\"\\ \\] _ {self.state}/turn-journal.jsonl', out)
+        self.assertRegex(out, r'\[dry-run\] sudo -u root -H -- /usr/bin/bash -c .*-w.* _ '
+                              + re.escape(f'{self.state}/worktrees'))
+        self.assertIn(f'ok: {self.state}/config.local.toml imposta [agent_user] name = "root"',
+                      out)
         self.assertEqual(self.mutating_calls(), [])
+
+    def test_an_overlay_without_the_agent_user_is_an_error(self):
+        (self.state / 'config.local.toml').write_text('[merge]\nmode = "off"\n')
+        done, errors = self.check()
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(errors, [f'  ERRORE: {self.state}/config.local.toml non imposta '
+                                  f'[agent_user] name = "root": gli agent girerebbero come {ME}'])
+
+    def test_a_missing_agent_cli_is_an_error(self):
+        (self.agent / '.local/bin/codex').unlink()
+        done, errors = self.check()
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(errors, [f'  ERRORE: {self.agent}/.local/bin/codex non trovato '
+                                  '(setup-agent-user.sh)'])
 
     def test_a_key_readable_by_others_is_an_error(self):
         key = self.key(self.devloop, 'merger', 0o644)

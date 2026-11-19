@@ -24,13 +24,16 @@ ops/
   host/
     setup-devloop.sh         pacchetti, utente devloop, clone, state_dir e log, overlay d'esempio,
                              key_dir e ~/.claude, ~/.codex 700, impostazioni di Claude Code, unità
+    setup-agent-user.sh      utente degli agent (devloop-agent): directory delle CLI, ACL su
+                             state_dir, worktree e sessioni, sudoers dell'avvio degli agent
     setup-supervisor.sh      utente supervisor, ACL di attraversamento su /home/<devloop>,
                              sudoers, clone, key_dir 700, impostazioni di Claude Code
     devloop.service          unità systemd (con segnaposto @NOME@)
+    sudoers-agent            sudoers con cui devloop avvia CLI e test come utente degli agent
     sudoers-supervisor       sudoers minimale del supervisore (con segnaposto @NOME@)
     config.local.toml.example  overlay di devloop, tutto commentato
-    check-host.sh            verifica utenti, permessi (700/600), chiavi, ACL, sudoers, servizio,
-                             CLI e `devloop apps`
+    check-host.sh            verifica utenti, permessi (700/600), chiavi, ACL, sudoers, utente
+                             degli agent, servizio, CLI e `devloop apps`
     migrate.md               cosa copiare dalla macchina vecchia e cosa ricreare
   github/
     apps/<ruolo>.json        manifest delle GitHub App (flusso "manifest" di GitHub)
@@ -204,7 +207,7 @@ Installa i pacchetti che mancano (`python3`, `git`, `gh`, `openssl`, `acl`, `nod
 crea l'utente `devloop` e il suo clone, `state_dir` con `run.log`, l'overlay d'esempio (solo se non
 esiste), `~/.ghapps`, `~/.claude` e `~/.codex` con mode 700, `~/.claude/settings.json` con gli
 aggiornamenti automatici spenti (solo se non esiste), e l'unità `devloop.service`. Non avvia il
-servizio.
+servizio. Le CLI degli agent non sono di `devloop`: le prepara il passo 5.
 
 Poi le **chiavi**: in `key_dir` di `devloop` (`/home/devloop/.ghapps`) quelle delle app che usa il
 dispatcher (`DEVLOOP_KEYS`: `dispatcher`, `merger`, `claude-agent`, `codex-agent`, `agy-agent`):
@@ -213,11 +216,44 @@ dispatcher (`DEVLOOP_KEYS`: `dispatcher`, `merger`, `claude-agent`, `codex-agent
 sudo install -o devloop -g devloop -m 600 <slug>.<data>.private-key.pem /home/devloop/.ghapps/
 ```
 
-### 5. CLI degli agent (passi manuali)
+### 5. Utente degli agent e CLI
 
-Le CLI e i loro login non sono automatizzati: il login è interattivo e ogni fornitore ha il suo
-installatore. Tutto come utente `devloop` (`sudo -iu devloop`), con gli eseguibili in
-`~/.local/bin`, che è il primo elemento del `PATH` del servizio:
+Gli agent e i test non girano come `devloop`, che può leggere le chiavi delle app e lo
+`state_dir`, ma come un utente proprio, `devloop-agent` (`AGENT_USER`, #415): il dispatcher li
+avvia con `sudo -n -E -u devloop-agent`
+([docs/devloop/guide.md](../docs/devloop/guide.md#agent-user)).
+
+```bash
+sudo bash ops/host/setup-agent-user.sh --dry-run
+sudo bash ops/host/setup-agent-user.sh
+```
+
+Crea l'utente `devloop-agent`, i suoi `~/.claude` e `~/.codex` (700) con
+`~/.claude/settings.json` senza aggiornamenti automatici, e `~/.local/bin`; poi le ACL:
+
+- `devloop-agent` attraversa soltanto la home di `devloop` (`--x`) e lo `state_dir` (`--x`), e
+  non ha accesso a nessuna voce dello `state_dir` (journal, log, overlay, copie fissate), né a
+  quelle che vi si creeranno (ACL di default `d:u:devloop-agent:---`);
+- `state_dir/worktrees`, `state_dir/agent-shared` e `.git/worktrees` del clone sono scrivibili
+  da entrambi gli utenti, anche ciò che vi si creerà (ACL di default);
+- `devloop` legge le sessioni di `devloop-agent` (`~/.claude/projects`, `~/.codex/sessions`), per
+  il controllo di stallo e `devloop follow`.
+
+Installa infine il **sudoers** `ops/host/sudoers-agent` in `/etc/sudoers.d/devloop-agent`, dopo
+averlo validato con `visudo -c`: come `devloop-agent`, l'utente `devloop` può avviare solo le tre
+CLI di `~devloop-agent/.local/bin`, `/usr/bin/bash` (il comando dei test) e `/usr/bin/kill` (il
+gruppo di processi a un timeout), con l'ambiente che devloop prepara (`SETENV`) e senza terminale
+(`!use_pty`). Rieseguire lo script dopo aver copiato file nello `state_dir`
+([host/migrate.md](host/migrate.md)): le ACL delle voci già presenti sono sue.
+
+Poi l'**overlay** deve avere `[agent_user] name = "devloop-agent"` (lo script lo segnala se
+manca; `check-host.sh` lo considera un errore). All'avvio di `tick` e `run` devloop verifica come
+`devloop-agent` che non legga `key_dir`, `state_dir` né l'overlay e che scriva nei worktree, e
+altrimenti non parte.
+
+Le **CLI** e i loro login non sono automatizzati: il login è interattivo e ogni fornitore ha il
+suo installatore. Tutto come utente `devloop-agent` (`sudo -iu devloop-agent`), con gli
+eseguibili in `~/.local/bin`, che è il primo elemento del `secure_path` del sudoers:
 
 | CLI | Installazione | Eseguibile |
 |---|---|---|
@@ -230,7 +266,7 @@ verifica con `~/.local/bin/<cli> --version`.
 
 Gli aggiornamenti automatici restano spenti: devloop non deve avviare un turno mentre una CLI
 sostituisce il proprio eseguibile. Per Claude Code, `~/.claude/settings.json` con
-`"autoUpdates": false` e `"env": {"DISABLE_AUTOUPDATER": "1"}` (lo scrive `setup-devloop.sh`), e il
+`"autoUpdates": false` e `"env": {"DISABLE_AUTOUPDATER": "1"}` (lo scrive `setup-agent-user.sh`), e il
 launcher esporta `DISABLE_AUTOUPDATER=1`. Le CLI si aggiornano a mano con il loop fermo
 ([docs/devloop/guide.md](../docs/devloop/guide.md#agent-clis)).
 
@@ -292,8 +328,11 @@ Verifica gli utenti; `key_dir`, `~/.claude` e `~/.codex` con mode 700 e il propr
 ogni chiave `*.pem` con mode 600 e del suo utente, una chiave per app attesa e, nella `key_dir`
 del supervisore, nessuna chiave in più; l'ACL `user:supervisor:--x` sulla home di devloop e
 nessuna ACL per il supervisore sulle sue directory private; che il supervisore legga `run.log`;
-il sudoers (440, root, accettato da `visudo`, uguale a quello generato); l'unità (uguale a quella
-generata, `KillMode=mixed`) e lo stato del servizio; `--version` di ogni CLI; e `devloop apps`
+i due sudoers (440, root, accettati da `visudo`, uguali a quelli generati); che `devloop-agent` non
+legga `key_dir`, lo `state_dir`, l'overlay e il journal, che scriva in `worktrees` e
+`agent-shared`, e che l'overlay abbia `[agent_user] name = "devloop-agent"`; l'unità (uguale a
+quella generata, `KillMode=mixed`) e lo stato del servizio; `--version` di ogni CLI come
+`devloop-agent`; e `devloop apps`
 (ogni app, la sua installazione e i suoi permessi). Con `--dry-run` stampa, senza eseguirle, le
 verifiche che passano da `sudo` o dalla rete.
 

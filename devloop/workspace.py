@@ -13,6 +13,8 @@ import time
 from contextlib import nullcontext
 from pathlib import Path
 
+from .agentuser import SHARED_DIR
+
 # The opening and closing lines git writes around a conflict (`=======` alone also underlines
 # Markdown and reST headings, so it is not a reliable sign).
 _CONFLICT_MARKER = re.compile(rb'^(?:<{7}|>{7})(?: |\r?$)', re.MULTILINE)
@@ -29,11 +31,15 @@ def partial_text(data):
     return data or ''
 
 
-def _kill_group(proc):
-    """Kill the process group of ``proc`` and return what it wrote."""
+def _kill_group(proc, kill=None):
+    """Kill the process group of ``proc`` and return what it wrote. ``kill(pgid)``, if given,
+    kills it first as another user (``agentuser.AgentUser.kill_group``, #415): the processes of
+    a command started as the agent user are not this user's to signal."""
+    if kill is not None:
+        kill(proc.pid)
     try:
         os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         pass
     try:
         return proc.communicate(timeout=5)
@@ -47,10 +53,12 @@ def _kill_group(proc):
         return partial_text(exc.output), partial_text(exc.stderr)
 
 
-def run_in_group(argv, *, timeout=None, input=None, watch=None, watch_interval=30.0, **kwargs):
+def run_in_group(argv, *, timeout=None, input=None, watch=None, watch_interval=30.0, kill=None,
+                 **kwargs):
     """Like ``subprocess.run(..., capture_output=True, text=True)``, but the command gets its own
     process group, and a timeout kills the whole group: the test runner's workers, or the
-    background commands an agent CLI started, do not outlive it.
+    background commands an agent CLI started, do not outlive it. ``kill(pgid)``, if given,
+    kills the group too, as another user: the agent user's processes (#415).
 
     ``watch(pid)``, if given, is called every ``watch_interval`` seconds while the command runs;
     an exception it raises kills the whole group and propagates, with what the command wrote
@@ -73,12 +81,12 @@ def run_in_group(argv, *, timeout=None, input=None, watch=None, watch_interval=3
             break
         except subprocess.TimeoutExpired:
             if watch is None or (deadline is not None and time.monotonic() >= deadline):
-                out, err = _kill_group(proc)
+                out, err = _kill_group(proc, kill)
                 raise subprocess.TimeoutExpired(argv, timeout, output=out, stderr=err) from None
         try:
             watch(proc.pid)
         except BaseException as exc:
-            partial = _kill_group(proc)
+            partial = _kill_group(proc, kill)
             try:
                 exc.partial_output = partial
             except AttributeError:
@@ -159,16 +167,21 @@ _READ_GIT = ('rev-parse', 'rev-list', 'diff', 'diff-tree', 'cat-file', 'merge-ba
 class Workspace:
     """``private_tmp``: each run of the test command gets a temporary directory of its own
     (``TMPDIR``), removed afterwards, so that test runs of parallel actions (#176) do not share
-    one."""
+    one.
+
+    ``agent_user`` (``agentuser.AgentUser``, #415), if given, runs the test command as that user,
+    and kills it as that user on a timeout; its private temporary directories are then in
+    ``<state_dir>/agent-shared/tmp``, which that user can write."""
 
     def __init__(self, repo_root, state_dir, base_branch, run=subprocess.run, test_env=None,
-                 private_tmp=False):
+                 private_tmp=False, agent_user=None):
         self.repo_root = Path(repo_root)
         self.root = self.repo_root / state_dir / 'worktrees'
         self.base_branch = base_branch
         self._run = run
         self._test_env = test_env
         self.private_tmp = private_tmp
+        self.agent_user = agent_user
         self._shared = threading.RLock()
         self._read_only = None
 
@@ -230,11 +243,34 @@ class Workspace:
     def path(self, name):
         return self.root / name
 
+    def _rmtree(self, path, ignore_errors=False):
+        """Remove ``path``. With an agent user (#415), what it created with a restrictive mode
+        is opened to the group class first (``AgentUser.release``) when the removal fails."""
+        try:
+            shutil.rmtree(path)
+            return
+        except OSError:
+            if self.agent_user is None and not ignore_errors:
+                raise
+        if self.agent_user is not None:
+            self.agent_user.release(path)
+        shutil.rmtree(path, ignore_errors=ignore_errors)
+
+    def _agent_tmp(self):
+        """A new private temporary directory the agent user can write (#415), in
+        ``<state_dir>/agent-shared/tmp``: mode ``0770``, so that the named entries of its
+        default ACL apply."""
+        parent = self.root.parent / SHARED_DIR / 'tmp'
+        parent.mkdir(parents=True, exist_ok=True)
+        tmp = tempfile.mkdtemp(prefix='devloop-tests-', dir=parent)
+        os.chmod(tmp, 0o770)
+        return tmp
+
     def _fresh(self, path):
         if path.exists():
             self._git('worktree', 'remove', '--force', str(path), check=False)
             if path.exists():
-                shutil.rmtree(path)
+                self._rmtree(path)
         self._git('worktree', 'prune')
         path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -659,18 +695,30 @@ class Workspace:
                                      'credentials other than the app token')
 
     def run_tests(self, path, command, timeout):
-        """``(passed, output_tail)`` for the project test command in ``path``."""
+        """``(passed, output_tail)`` for the project test command in ``path``. With an agent
+        user (#415) the command runs as that user."""
         kwargs = {'env': self._test_env} if self._test_env is not None else {}
         run = run_in_group if self._run is subprocess.run else self._run
-        with (tempfile.TemporaryDirectory(prefix='devloop-tests-') if self.private_tmp
-              else nullcontext()) as tmp:
-            if tmp is not None:
-                base = os.environ if self._test_env is None else self._test_env
-                kwargs['env'] = dict(base, TMPDIR=tmp)
+        argv = ['bash', '-c', command]
+        user = self.agent_user
+        if user is not None:
+            argv = user.shell(command)
+            if run is run_in_group:
+                kwargs['kill'] = user.kill_group
+        tmp = None
+        if self.private_tmp:
+            tmp = (self._agent_tmp() if user is not None
+                   else tempfile.mkdtemp(prefix='devloop-tests-'))
+            base = os.environ if self._test_env is None else self._test_env
+            kwargs['env'] = dict(base, TMPDIR=tmp)
+        try:
             try:
-                done = run(['bash', '-c', command], cwd=path, capture_output=True, text=True,
-                           timeout=timeout, **kwargs)
+                done = run(argv, cwd=path, capture_output=True, text=True, timeout=timeout,
+                           **kwargs)
             except subprocess.TimeoutExpired:
                 return False, f'Test command timed out after {timeout}s'
+        finally:
+            if tmp is not None:
+                self._rmtree(tmp, ignore_errors=True)
         tail = '\n'.join((done.stdout + '\n' + done.stderr).strip().splitlines()[-60:])
         return done.returncode == 0, tail

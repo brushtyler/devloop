@@ -2,8 +2,8 @@
 # Prepara l'host per devloop: pacchetti, utente dedicato, clone, state_dir, overlay d'esempio,
 # key_dir 700, impostazioni di Claude Code senza aggiornamenti automatici, unità systemd.
 # Idempotente: si può rieseguire, fa solo ciò che manca. Non scrive segreti e non avvia il
-# servizio. Le CLI degli agent, i loro login, le chiavi delle app e il pin restano passi manuali
-# (ops/README.md).
+# servizio. L'utente degli agent e le sue CLI li prepara setup-agent-user.sh (#415); i login
+# delle CLI, le chiavi delle app e il pin restano passi manuali (ops/README.md).
 
 OPS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=../lib.sh
@@ -106,14 +106,8 @@ else
 }' || true
 fi
 
-step 'CLI degli agent (passi manuali, ops/README.md)'
-for cli in claude codex agy; do
-    if [ -x "$DEVLOOP_HOME/.local/bin/$cli" ]; then
-        ok "$DEVLOOP_HOME/.local/bin/$cli presente"
-    else
-        todo "installare $cli come $DEVLOOP_USER, con l'eseguibile in $DEVLOOP_HOME/.local/bin/$cli, e fare il login"
-    fi
-done
+step 'CLI degli agent'
+say "  le CLI e i loro login sono dell'utente $AGENT_USER (#415): setup-agent-user.sh"
 
 step "Servizio $SERVICE_NAME"
 UNIT="$SYSTEMD_DIR/$SERVICE_NAME.service"
@@ -132,4 +126,4 @@ for role in $DEVLOOP_KEYS; do
 done
 
 step 'Fatto'
-say "Poi: chiavi e login delle CLI, primo pin, ops/host/check-host.sh, avvio del servizio (ops/README.md)."
+say "Poi: chiavi, setup-agent-user.sh e login delle CLI, primo pin, ops/host/check-host.sh, avvio del servizio (ops/README.md)."

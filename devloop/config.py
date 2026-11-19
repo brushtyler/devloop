@@ -151,6 +151,16 @@ class GCPolicy:
         return self.pins or self.worktrees or self.logs
 
 
+@dataclass(frozen=True)
+class AgentUserPolicy:
+    """``[agent_user]`` (#415): ``name``, the system user the agent CLIs and the test command
+    run as, through sudo (``agentuser``), or '' to run them as the dispatcher's user, as before;
+    ``check``, the startup check that the user cannot read ``key_dir`` nor ``state_dir`` (on by
+    default; off only in development)."""
+    name: str = ''
+    check: bool = True
+
+
 # The roles of a turn in the budget envelope (#365): the kinds of the turns charged to a story.
 # A readiness check (``preflight``) comes before the takeover and is outside the envelope.
 BUDGET_ROLES = ('implement', 'fix', 'review', 'sync', 'conclave', 'advisory')
@@ -387,6 +397,8 @@ class Config:
     ci: CIPolicy = field(default_factory=CIPolicy)
     # The cleanup of state_dir (#380).
     gc: GCPolicy = field(default_factory=GCPolicy)
+    # The system user of the agents and of the tests (#415).
+    agent_user: AgentUserPolicy = field(default_factory=AgentUserPolicy)
     # Code paths and their documents, listed in the implement, fix and review prompts (#203).
     docs: DocsMap = field(default_factory=DocsMap)
 
@@ -738,6 +750,30 @@ def parse_gc(table):
                 raise ConfigError(f'gc.{key}: expected a whole number of {what}, at least {low}')
             values[key] = value
     return GCPolicy(**values)
+
+
+_USER_NAME = re.compile(r'[a-z_][a-z0-9_-]{0,31}')
+
+
+def parse_agent_user(table):
+    """``[agent_user]`` (#415): ``name``, a system user name or '' (default: off); ``check``, a
+    boolean (default true)."""
+    if not isinstance(table, dict):
+        raise ConfigError('agent_user: expected a table')
+    unknown = set(table) - {f.name for f in dataclasses.fields(AgentUserPolicy)}
+    if unknown:
+        raise ConfigError(f'agent_user: unknown keys {sorted(unknown)}')
+    values = {}
+    if 'name' in table:
+        name = table['name']
+        if not isinstance(name, str) or name and not _USER_NAME.fullmatch(name):
+            raise ConfigError('agent_user.name: expected a system user name, or "" for none')
+        values['name'] = name
+    if 'check' in table:
+        if not isinstance(table['check'], bool):
+            raise ConfigError('agent_user.check: expected true or false')
+        values['check'] = table['check']
+    return AgentUserPolicy(**values)
 
 
 def _no_tokens(table, where):
@@ -1116,6 +1152,7 @@ def parse_config(data, root=INSTALL_ROOT):
         report=parse_report(data.get('report', {})),
         ci=parse_ci(data.get('ci', {})),
         gc=parse_gc(data.get('gc', {})),
+        agent_user=parse_agent_user(data.get('agent_user', {})),
         docs=parse_docs(data),
         review_policy=review_policy,
         **ints)
@@ -1161,6 +1198,7 @@ OVERLAY_KEYS = {
     'ci': dict.fromkeys(('grace_minutes', 'required_timeout_minutes')),
     'gc': dict.fromkeys(('pins', 'keep_pins', 'worktrees', 'logs', 'log_days',
                          'interval_minutes')),
+    'agent_user': dict.fromkeys(('name', 'check')),
     'docs': {'map': {'*': None}},
     # Every key of [budget] (#365) is checked by ``parse_budget``, a token cap with its message.
     'budget': {'*': None},

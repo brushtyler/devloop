@@ -1,0 +1,18 @@
+# sudoers dell'utente degli agent (ops/host/sudoers-agent), issue #415.
+# setup-agent-user.sh lo installa in AGENT_SUDOERS_FILE (mode 440) dopo averlo validato con
+# visudo -c, sostituendo i segnaposto con i valori di params.env.
+#
+# L'utente devloop avvia come utente degli agent solo le tre CLI, bash (il comando dei test e il
+# controllo all'avvio) e kill (il gruppo di processi di un turno o dei test, a un timeout).
+# SETENV: devloop passa con `sudo -E` l'ambiente isolato che prepara (agents.isolated_env).
+# !use_pty: il comando resta nel gruppo di processi che devloop ha avviato, così un timeout lo
+# ferma tutto. secure_path: le CLI si trovano in ~/.local/bin dell'utente degli agent.
+
+Defaults>@AGENT_USER@ !use_pty, secure_path="@AGENT_PATH@"
+
+@DEVLOOP_USER@ ALL=(@AGENT_USER@) NOPASSWD:SETENV: \
+    @AGENT_HOME@/.local/bin/claude, \
+    @AGENT_HOME@/.local/bin/codex, \
+    @AGENT_HOME@/.local/bin/agy, \
+    /usr/bin/bash, \
+    /usr/bin/kill

@@ -4,6 +4,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -48,9 +49,10 @@ CREDENTIAL_VARS = ('GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_EN
                    'SSH_AUTH_SOCK', 'GIT_CONFIG_PARAMETERS')
 
 
-def isolated_env(gh_config_dir, base=None):
+def isolated_env(gh_config_dir, base=None, git_config=()):
     """Environment for agent CLIs and the test command: no GitHub credentials in reach of `gh`
-    or `git`.
+    or `git`. ``git_config``: further ``(key, value)`` pairs applied to every git command, after
+    those below.
 
     - ``gh`` gets an empty config directory and no token variables;
     - git may only use local repositories (``GIT_ALLOW_PROTOCOL=file``), so neither SSH keys nor
@@ -62,12 +64,13 @@ def isolated_env(gh_config_dir, base=None):
       does every GitHub write.
 
     This prevents accidental use of the operator's credentials, not deliberate access: code
-    running as the same system user can still read files. Real isolation needs a dedicated
-    system user or a container.
+    running as the same system user can still read files. The isolation comes from the agent
+    user (``[agent_user]``, ``agentuser``, #415), which cannot read the keys at all.
     """
     env = {k: v for k, v in (os.environ if base is None else base).items()
            if k not in CREDENTIAL_VARS and not k.startswith('GIT_CONFIG_')}
-    env.update(git_config_env([('credential.helper', ''), ('http.extraHeader', '')]))
+    env.update(git_config_env([('credential.helper', ''), ('http.extraHeader', ''),
+                               *git_config]))
     env.update({'GH_CONFIG_DIR': str(gh_config_dir), 'GIT_ALLOW_PROTOCOL': 'file',
                 'GIT_TERMINAL_PROMPT': '0', 'GIT_ASKPASS': 'false', 'SSH_ASKPASS': 'false',
                 'GIT_SSH_COMMAND': 'false',
@@ -670,10 +673,20 @@ class AgentRunner:
     (#176) each read the report of their own turn. ``last_command``, in the same way, is the
     last command the latest turn's output exposes (``public_command``), whether the turn ended
     or was stopped, or None. ``clock`` dates the failures that announce when the model is back
-    (#151)."""
+    (#151).
+
+    ``agent_user`` (``agentuser.AgentUser``, #415), if given, runs every CLI, its version
+    included, as that user, and kills a stopped turn as that user. The files the CLI reads or
+    writes besides its worktree, the schema of the turn and the final message of codex, are
+    then in ``shared_dir``, which that user can write; the final message is copied to the
+    turn's log afterwards, as without an agent user."""
 
     def __init__(self, log_dir, timeout, run=subprocess.run, env=None, on_turn=None, stall=None,
-                 clock=time.time, sleep=time.sleep):
+                 clock=time.time, sleep=time.sleep, agent_user=None, shared_dir=None):
+        if agent_user is not None and shared_dir is None:
+            raise ValueError('an agent user needs a shared directory')
+        self.agent_user = agent_user
+        self.shared_dir = None if shared_dir is None else Path(shared_dir)
         self.log_dir = Path(log_dir)
         self._clock = clock
         self._sleep = sleep
@@ -710,8 +723,13 @@ class AgentRunner:
         """The CLI version, cached once known; a failed lookup is retried on the next call."""
         if agent.key in self._versions:
             return self._versions[agent.key]
+        argv, kwargs = list(agent.version_cmd), {}
+        if self.agent_user is not None:  # the CLI the turns run (#415)
+            argv = self.agent_user.command(argv)
+            if self._env is not None:
+                kwargs['env'] = self._env
         try:
-            done = self._run(list(agent.version_cmd), capture_output=True, text=True, timeout=60)
+            done = self._run(argv, capture_output=True, text=True, timeout=60, **kwargs)
         except (OSError, subprocess.SubprocessError):
             return None
         version = parse_version(done.stdout + done.stderr)
@@ -732,10 +750,39 @@ class AgentRunner:
         self.last_command = None
         self.log_dir.mkdir(parents=True, exist_ok=True)
         stem = self.log_dir / f'{time.strftime("%Y%m%dT%H%M%S")}-{label}-{agent.key}'
-        out_file = stem.with_suffix('.last.json')
+        logged = stem.with_suffix('.last.json')
+        if self.agent_user is None:
+            return self._turn(agent, mode, prompt, schema_name, workdir, stem, logged,
+                              schema_path(schema_name))
+        # The agent user cannot read state_dir nor the pinned copy (#415): the schema and the
+        # final message of codex pass through the shared directory.
+        turns = self.shared_dir / 'turns'
+        turns.mkdir(parents=True, exist_ok=True)
+        out_file = turns / logged.name
+        schema_file = turns / f'{stem.name}.schema.json'
+        shutil.copyfile(schema_path(schema_name), schema_file)
+        try:
+            return self._turn(agent, mode, prompt, schema_name, workdir, stem, out_file,
+                              schema_file)
+        finally:
+            try:
+                if out_file.exists():
+                    shutil.copyfile(out_file, logged)
+            except OSError:
+                pass
+            for path in (out_file, schema_file):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def _turn(self, agent, mode, prompt, schema_name, workdir, stem, out_file, schema_file):
         prompt = turn_prompt(agent, mode, prompt)
-        argv, stdin = build_command(agent, mode, prompt, schema_file=schema_path(schema_name),
+        argv, stdin = build_command(agent, mode, prompt, schema_file=schema_file,
                                     out_file=out_file)
+        cli = argv[0]
+        if self.agent_user is not None:
+            argv = self.agent_user.command(argv)
         prompt_file = stem.with_suffix('.prompt.md')
         prompt_file.write_text(prompt, encoding='utf-8')
         if self._on_turn:
@@ -753,11 +800,13 @@ class AgentRunner:
             if watched:  # each start its own watch: a pause before it is no inactivity
                 extra.update(watch=self._stall.turn(agent.key, workdir),
                              watch_interval=self._stall.interval)
+            if run is run_in_group and self.agent_user is not None:
+                extra['kill'] = self.agent_user.kill_group  # its processes, not ours (#415)
             return run(argv, input=stdin, cwd=workdir, capture_output=True, text=True,
                        timeout=self.timeout, **extra)
 
         def write_log(status, stdout, stderr):
-            log.write_text(f'$ {argv[0]} ({mode})\n{status}\n--- stdout\n{stdout}'
+            log.write_text(f'$ {cli} ({mode})\n{status}\n--- stdout\n{stdout}'
                            f'\n--- stderr\n{stderr}', encoding='utf-8')
 
         def stopped_log(status, stdout='', stderr=''):
