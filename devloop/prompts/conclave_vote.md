@@ -7,7 +7,7 @@ the resolution below, identified by its hash `$proposal_hash`. Vote on exactly t
 are no revisions, and you cannot propose another one.
 
 The working directory is a disposable checkout of commit `$commit`, removed afterwards. Read
-`AGENTS.md`, the README section "Developing SSDLC" and the code and docs the issue touches.
+{{?instructions:$instructions_items and }}the code and docs the issue touches.
 
 ## Your task
 

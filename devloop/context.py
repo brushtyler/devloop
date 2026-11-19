@@ -8,6 +8,7 @@ styles it uses. Since #297 (step S7) ``devloop/dispatcher.py`` no longer re-expo
 import them from here.
 """
 
+import re
 import string
 from pathlib import Path
 
@@ -69,8 +70,43 @@ def format_operator_comments(comments):
               'that round left to a human.\n\n' + rendered)
 
 
+# An optional span of a template (ADR 0006, R4): ``{{?name:text}}`` is ``text`` when the value
+# ``name`` is not empty, and nothing when it is; a span alone on its lines takes them with it.
+_OPTIONAL = re.compile(r'(^)?\{\{\?(\w+):(.*?)\}\}(\n)?', re.S | re.M)
+
+
+def _english_list(items):
+    """``a``, ``a and b``, ``a, b and c``."""
+    items = list(items)
+    return ' and '.join(filter(None, (', '.join(items[:-1]), *items[-1:])))
+
+
+def prompt_values(cfg):
+    """The values of the project's data in the prompts (``cfg.prompts``, ADR 0006, R4), each
+    '' when the project does not give it: ``instructions`` and ``fix_instructions`` as an
+    English list, ``instructions_items`` joined by commas, for a list the template goes on."""
+    facts = cfg.prompts
+    return {'instructions': _english_list(facts.instructions),
+            'instructions_items': ', '.join(facts.instructions),
+            'fix_instructions': _english_list(facts.fix_instructions),
+            'module_test_cmd': facts.module_test_cmd,
+            'module_test_helpers': facts.module_test_helpers,
+            'adr_dir': facts.adr_dir, 'adr_decided': facts.adr_decided,
+            'adr_open_value': facts.adr_open_value, 'adr_open_choice': facts.adr_open_choice}
+
+
 def _template(name, **values):
+    """The prompt ``name`` with ``values``. An optional span (``_OPTIONAL``) whose value is not
+    among ``values`` is an error (``KeyError``): the caller forgot ``prompt_values``."""
     text = (PROMPT_DIR / f'{name}.md').read_text(encoding='utf-8')
+
+    def span(match):
+        start, key, body, newline = match.groups()
+        if str(values[key]):
+            return body + (newline or '')
+        return '' if start is not None and newline else (newline or '')
+
+    text = _OPTIONAL.sub(span, text)
     return string.Template(text).safe_substitute({k: str(v) for k, v in values.items()})
 
 

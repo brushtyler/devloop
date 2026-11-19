@@ -445,7 +445,11 @@ as an operator decision for the issues that cite it (#367): `docs/adr/` is in
 `operator_only_paths`, so it reaches `main` only through the operator's merge. A point the ADR
 leaves open, or an ADR that is only proposed, settles nothing and stays an `operator_decision`
 gap. The lifecycle of an ADR, from proposal to the recorded decisions, is in
-[`docs/adr/README.md`](../adr/README.md).
+[`docs/adr/README.md`](../adr/README.md). This rule is ssdlc's datum in the prompt, in
+`[prompts.adr]` of its project file (ADR 0006, R4): the directory, which must be in
+`operator_only_paths`, and the words of the ADRs. A project without it gets no such rule, and
+a decision in its ADRs settles no gap
+([Project data in the prompts](reference.md#project-data-in-the-prompts)).
 
 The outcome is a comment on the issue, with a marker that records it and a hash of the request
 (see [Readiness check records](protocol.md#readiness-check-records)). The outcome is reused

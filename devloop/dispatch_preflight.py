@@ -11,7 +11,7 @@ from here, not re-exported by ``devloop/dispatcher.py``.
 
 from .agents import AgentError
 from .apps import DISPATCHER, ISSUE_COMMENT
-from .context import _render_issue_comments, _template
+from .context import _render_issue_comments, _template, prompt_values
 from .dispatch_actions import Models, ready_approval
 from .dispatch_supervision import UntrustedChange
 from .markdown import carries_record, read_marker, render_escalation, render_preflight
@@ -243,7 +243,7 @@ class PreflightMixin:
             raise UntrustedChange(f'issue #{number}: {reason}')
         comments = self.gh.issue_comments(number)
         digest = self._request_hash(history, comments)
-        prompt = _template('preflight', repo=cfg.repo, base_branch=cfg.base_branch,
+        prompt = _template('preflight', **prompt_values(cfg), repo=cfg.repo, base_branch=cfg.base_branch,
                            issue_number=number, issue_title=history['title'],
                            issue_body=history['body'],
                            issue_comments=_render_issue_comments(

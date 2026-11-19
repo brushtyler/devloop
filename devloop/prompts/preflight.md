@@ -3,7 +3,7 @@ agent starts on it. You work alone and headless: nobody will answer questions du
 Do not edit any file: you only read and judge.
 
 The working directory is a disposable checkout of `$base_branch`, removed after the check.
-Read `AGENTS.md`, the README section "Developing SSDLC" and the code and docs the issue touches.
+Read {{?instructions:$instructions_items and }}the code and docs the issue touches.
 
 ## The question
 
@@ -29,14 +29,14 @@ permissions, trust rules, the replay gate baseline, the merge mode, the continuo
 automatic pinning, and the approval of ADRs. The same holds for a gap whose resolution needs a
 change to a path reserved to the operator (`operator_only_paths` in `[merge]`: by default
 `docs/adr/`, `AGENTS.md` and `CLAUDE.md`). In merge mode `auto` a supervisor may accept
-`default_available` gaps on the operator's behalf, so classify conservatively.
+`default_available` gaps on the operator's behalf, so classify conservatively.{{?adr_dir:
 
-A decision recorded as decided by the operator ("Decise dall'operatore") in an ADR under
-`docs/adr/` on `$base_branch` is an operator decision for the issues that cite it, and is not a
-gap: `docs/adr/` reaches `$base_branch` only through the operator's merge. Read the ADR section
-the issue cites. A point the ADR still leaves open (for example a value "da fissare" or a choice
-"da decidere"), or an ADR that is only proposed, settles nothing: such a gap stays
-`operator_decision`.
+A decision recorded as decided by the operator ("$adr_decided") in an ADR under
+`$adr_dir` on `$base_branch` is an operator decision for the issues that cite it, and is not a
+gap: `$adr_dir` reaches `$base_branch` only through the operator's merge. Read the ADR section
+the issue cites. A point the ADR still leaves open (for example a value "$adr_open_value" or a choice
+"$adr_open_choice"), or an ADR that is only proposed, settles nothing: such a gap stays
+`operator_decision`.}}
 
 A choice the repository or the issue already prescribes is not a gap, and neither is a proposed
 default that a comment below has accepted, nor a gap that a decision of the supervisor recorded

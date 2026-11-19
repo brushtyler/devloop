@@ -22,7 +22,7 @@ goes back to the implementer, with the failure.
 The implementer cannot run the full suite nor read the CI: the jobs, their durations and the
 summary of the suite are in "CI of the head" below. When the issue asks for a measure of the
 suite (its duration, the number of tests), take it from there instead of asking the implementer.
-Read `AGENTS.md` and the README section "Developing SSDLC".
+{{?instructions:Read $instructions.}}
 
 $ci_summary
 

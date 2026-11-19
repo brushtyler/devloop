@@ -39,7 +39,7 @@ from pathlib import Path
 from .agents import AgentError
 from .apps import REVIEW
 from .budget import BUDGET, BudgetRefused
-from .context import _template, format_previous_rounds
+from .context import _template, format_previous_rounds, prompt_values
 from .dispatch_actions import Models
 from .journal import JournalError, TurnBlocked
 from .ledger import timestamp as ledger_timestamp
@@ -512,7 +512,7 @@ class AdvisoryMixin:
         path = self.ws.commit_copy(name, head, branch=pr.head_ref)
         advisory, error, header = None, '', ''
         try:
-            prompt = _template('advisory', repo=cfg.repo, pr_number=pr.number, head=head,
+            prompt = _template('advisory', **prompt_values(cfg), repo=cfg.repo, pr_number=pr.number, head=head,
                                base_branch=cfg.base_branch, why=why,
                                issue_number=pr.issue, issue_title=issue['title'],
                                # Blind to the author, as the review (#389).

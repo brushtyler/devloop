@@ -52,6 +52,26 @@ sensitive_paths = ["devloop/", "AGENTS.md", "CLAUDE.md", ".github/", "schemas/",
 # `devloop pin` extracts them into); a missing file stops devloop.
 sensitive_path_lists = ["schemas/recovery-grader-baseline.json"]
 
+# The project's data in the prompts of the installation (ADR 0006, R4): the prompts read as they
+# did before R4. A key left out drops the sentence that names it.
+[prompts]
+# What the agents read before an implement, a preflight, a review, an advisory review or a
+# conclave turn; fix_instructions before a fix or a sync. Markdown fragments, joined as a list.
+instructions = ['`AGENTS.md`', 'the README section "Developing SSDLC"']
+fix_instructions = ['`AGENTS.md`']
+# The command of one test module (test_name.py stands for the module), and the directory of the
+# helpers the modules import, which this form still lets them import.
+module_test_cmd = "python3 -m unittest discover -s tests -p 'test_name.py'"
+module_test_helpers = "tests/"
+
+# The ADRs the preflight takes as the operator's decisions: their directory, which must be in
+# [merge] operator_only_paths, the heading of the decisions, and the words of an open point.
+[prompts.adr]
+dir = "docs/adr/"
+decided = "Decise dall'operatore"
+open_value = "da fissare"
+open_choice = "da decidere"
+
 [merge]
 # A PR touching one of these paths (directories ending in "/" or files from the root) is merged
 # by a person, whatever the mode. A ready PR that devloop does not merge, for these paths, the

@@ -173,3 +173,52 @@ anche togliere, e la versione della policy torna quella di prima.
 `ops/host/ssdlc/project.toml` (per esempio una voce nuova di `[docs.map]`) e, dopo il merge,
 l'operatore copia il file sull'host come al passo 3. Una PR su `devloop/config.toml` cambia solo i
 default dell'installazione.
+
+## Dati di ssdlc nei prompt
+
+Con l'ADR 0006, R4, i prompt di `devloop/prompts/` non contengono più il testo di ssdlc: le
+istruzioni da leggere (`AGENTS.md`, la sezione "Developing SSDLC" del README), il comando di un
+solo modulo di test e le regole sugli ADR del preflight stanno nella tabella `[prompts]` del file
+di progetto ([docs/devloop/reference.md](../../docs/devloop/reference.md#project-data-in-the-prompts)).
+Senza la tabella la copia di R4 parte, ma i prompt perdono quelle frasi; con la tabella la copia
+di R3 non parte (chiave sconosciuta). Il file di progetto sull'host e la copia fissata cambiano
+quindi insieme, a loop fermo. Sono passi dell'operatore, dopo il merge della PR di R4.
+
+Se l'host non ha ancora fatto la migrazione di R3, basta quella della sezione precedente con
+l'esempio di R4: il passo 3 copia anche `[prompts]`, e il passo 5 confronta anche i prompt resi.
+Altrimenti, come utente `devloop`, dal clone:
+
+1. **Quando.** L'hash del file di progetto cambia: le approvazioni delle PR aperte decadono.
+   Meglio con la coda vuota. Fermare il loop (`sudo systemctl stop devloop`): una copia di R3 in
+   corso rifiuterebbe il file nuovo a ogni rilettura.
+2. **Copia del file di progetto di prima**, per il confronto e il rollback:
+
+   ```bash
+   cd ~/ssdlc && git fetch origin
+   cp -p .ssdlc/devloop/project.toml .ssdlc/devloop/project.toml.prima-r4
+   ```
+
+3. **La tabella `[prompts]`** (con `[prompts.adr]`) dell'esempio di R4 su `origin/main`
+   (`git show origin/main:ops/host/ssdlc/project.toml`) va aggiunta al file di progetto
+   sull'host. Se il file sull'host è ancora l'esempio di R3 senza modifiche, si può copiare
+   l'esempio intero come al passo 3 della sezione precedente.
+4. **Verifica dell'equivalenza**, con la copia fissata di R3 e un checkout del commit di R4:
+
+   ```bash
+   git worktree add --detach /tmp/ssdlc-r4 origin/main
+   python3 /tmp/ssdlc-r4/ops/host/ssdlc/check-equivalence.py \
+       --before .ssdlc/devloop/current --before-local .ssdlc/devloop/config.local.toml \
+       --before-project .ssdlc/devloop/project.toml.prima-r4 \
+       --after /tmp/ssdlc-r4 --after-local .ssdlc/devloop/config.local.toml \
+       --after-project .ssdlc/devloop/project.toml
+   ```
+
+   Lascia fuori, dichiarandoli, l'hash del file di progetto e i valori di `[prompts]`, che prima
+   di R4 erano testo dei modelli: al loro posto confronta i prompt resi, che devono essere
+   identici. Esce con 0 ed `equivalent: …`; altrimenti il pin non va fatto. Poi
+   `git worktree remove /tmp/ssdlc-r4`.
+5. **Pin e avvio**: `scripts/devloop-pinned pin origin/main`, poi `sudo systemctl start devloop`.
+
+**Rollback.** Il pin della copia di R3 (`scripts/devloop-pinned pin <sha12>`) **insieme** al file
+di progetto di prima (`project.toml.prima-r4`, rimesso al suo posto con `cp -p`): la copia di R3
+non legge `[prompts]`.
