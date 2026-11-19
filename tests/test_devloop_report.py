@@ -524,6 +524,17 @@ class CommandTest(unittest.TestCase):
         self.assertIn('| 09:12 | #5 | implement | claude | success | 12m 30s |', out)
         self.assertEqual(self.gh.count('edit_issue_body') + self.gh.count('comment'), 0)
 
+    def test_report_day_counts_the_reviews_of_the_keys_before_the_migration(self):
+        # With the keys by role (#407) the printed summary reads the reviews as --publish does
+        # (Config.review_keys): those recorded with the keys of before (codex) count, the
+        # implementer's key does not.
+        from test_devloop_implementer_app import ROLE
+        with mock.patch.object(report, 'Records', wraps=report.Records) as records:
+            out, _ = self.run_cli(['--day', '2026-11-16'], ROLE)
+        self.assertEqual(records.call_args.args[4], ROLE.review_keys())
+        self.assertNotIn('claude-implementer', records.call_args.args[4])
+        self.assertIn('- Round di review aperti: 2', out)
+
     def test_a_malformed_day_is_refused(self):
         for day in ('16-11-2026', '2026-13-01', 'today'):
             with self.subTest(day=day), mock.patch('sys.stderr'), \

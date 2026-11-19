@@ -575,7 +575,7 @@ def run_report(parser, args):
             report.build(cfg, gh, trust, state, log=log).publish(day)
             return
         day = day or report.utc_today()
-        summary = report.Records(gh, trust, day, day, cfg.agents).summary(day)
+        summary = report.Records(gh, trust, day, day, cfg.review_keys()).summary(day)
         print(report.render_text(summary), end='', flush=True)
     except (GitHubError, report.ReportError) as exc:
         sys.exit(f'devloop: report: {exc}')
