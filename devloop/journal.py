@@ -37,6 +37,10 @@ before it (``previous``) and its own (``sha256``), like the journal of the local
   such as a review round granted with ``/devloop grant-round``: the ``delegation``, the issue or
   PR ``number``, the ``comment`` of the command and its author (``by``). It is written before
   the grant applies, and the grants of a UTC day count against the daily cap of the delegations.
+  The extension of a budget envelope (``/devloop grant-budget``, #411, ADR 0005, P5-7) is a
+  ``grant`` of the delegation ``budget`` that also records the ``story`` and the ``extension``
+  (the turns and seconds it adds): one per story, ever, and the authority on the envelope of
+  that story (``devloop.budget``).
 - ``config``: the configuration the dispatcher read (ADR 0006, R2, trace T1 of K1), at its start
   (``when: start``) and at each reload of ``devloop run`` that found the files changed
   (``when: reload``): the SHA-256 of the local overlay and of the project file (null without the
@@ -126,6 +130,7 @@ MAX_BYTES = 64 * MIB
 WARN_RATIO = 0.8
 SIZE_WARNING = 'size_warning'  # the event of that warning
 GRANT = 'grant'  # a grant of a delegation to the supervisor (#405), for the daily cap
+BUDGET = 'budget'  # the delegation of the extension of a budget envelope (#411)
 CONFIG = 'config'  # the configuration read at a start or a reload (ADR 0006, T1)
 CONFIG_HASHES = ('overlay', 'project', 'effective')
 # A turn's id: its sequence (or, for a legacy one, its number) and 8 hex digits that differ
@@ -888,6 +893,52 @@ class TurnJournal:
                 self._append(GRANT, {'delegation': delegation, 'number': number,
                                      'comment': comment, 'by': by})
             return others + 1
+
+    def _extension(self, story):
+        """The extension of the budget envelope of ``story`` (under the lock): the first
+        ``grant`` of the delegation ``budget`` for it, of any day, or None."""
+        for e in self._events:
+            d = e['data']
+            if e['event'] == GRANT and d.get('delegation') == BUDGET and d.get('story') == story:
+                return d
+        return None
+
+    def extension(self, story):
+        """The extension of the budget envelope of story ``story`` (#411): the ``grant`` that
+        recorded it, with its ``extension`` and ``at``, or None when the story has none."""
+        with self._lock:
+            self._load()
+            return self._extension(story)
+
+    def extend(self, story, extension, number, comment, by, cap):
+        """Record the extension ``extension`` of the budget envelope of story ``story`` (#411,
+        ADR 0005, P5-7), granted on issue or PR ``number`` by the command of comment ``comment``
+        of ``by``, before it applies: a ``grant`` of the delegation ``budget``, within the daily
+        cap ``cap`` of the delegations, as ``grant``.
+
+        Once per story, ever: the story's extension, the cap and the record are one step under
+        the journal's lock, so that two commands applied together never extend a story twice
+        nor pass the cap. Returns ``(grants of the UTC day with this one, None)``, or ``(None,
+        why)`` when nothing is recorded and the extension does not apply: ``'spent'`` when the
+        story already has an extension of another command, ``'daily'`` when the grants of the
+        day already reached ``cap``. The same command recorded already is not recorded again.
+        Raises ``JournalError`` if it cannot be written, and then the extension does not
+        apply."""
+        if self.read_only:
+            raise JournalError(f'{self.path}: read-only journal: no grant is recorded in it')
+        with self._lock:
+            self._load()
+            found = self._extension(story)
+            if found is not None and found.get('comment') != comment:
+                return None, 'spent'
+            today = self._grants(self._now()[:10])
+            others = sum(1 for c in today if c != comment)
+            if found is None and others >= cap:
+                return None, 'daily'
+            if found is None:
+                self._append(GRANT, {'delegation': BUDGET, 'number': number, 'comment': comment,
+                                     'by': by, 'story': story, 'extension': extension})
+            return others + 1, None
 
     # Configuration (ADR 0006, R2, T1) ---------------------------------------
     def _configurations(self):

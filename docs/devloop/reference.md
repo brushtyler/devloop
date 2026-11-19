@@ -120,9 +120,12 @@ supervisor [grant a review round](guide.md#granting-a-review-round) to a PR at t
 the code, `MAX_GRANTED_ROUNDS` and `MAX_DAILY_GRANTS` in `devloop/supervision.py`;
 `retry_own_prs` (true or false, default false, #406) lets a `tool_failure` on a PR implemented by
 the supervisor's agent go to the supervisor, who may retry it
-([Escalations to the supervisor](guide.md#escalations-to-the-supervisor)). A value that is not a
-whole number from 0 to its cap, a `rounds` or `retry_own_prs` that is not a boolean, or an
-unknown key, stops devloop at startup.
+([Escalations to the supervisor](guide.md#escalations-to-the-supervisor)); `budget` (true or
+false, default false, #411) lets the supervisor
+[extend the budget envelope](guide.md#extending-the-budget-envelope) of a story once, in turns
+and time, by `BUDGET_TOLERANCE_PERCENT` (25) of its values, within `max_grants_per_day`. A value
+that is not a whole number from 0 to its cap, a `rounds`, `retry_own_prs` or `budget` that is not
+a boolean, or an unknown key, stops devloop at startup.
 `[review_policy]` sets the
 [review level](#review-level-and-policy-receipt): `default_level` (1 or 2, default 1), the level
 `label` (default `reviews:2`), `sensitive_paths` and `sensitive_path_lists`; changing any of them,
@@ -579,6 +582,22 @@ same category and the same head, is not planned again, and escalates no more, un
 covers the turn again. Its escalation says that the review of that head is held; a new head is
 tried again and, if refused, escalated again, never held in silence.
 
+**The one extension** (#411, ADR 0005, P5-7). With `[delegations] budget = true` and merge mode
+`"auto"`, a turn of `implement`, `review`, `fix` or `sync` refused at a limit (`LIMIT_REACHED`)
+goes instead to the supervisor as `budget_grantable` when the story was never extended and the
+extension would cover the turn now; the supervisor extends the envelope with
+`/devloop grant-budget <reason>`
+([Extending the budget envelope](guide.md#extending-the-budget-envelope)). The extension adds to
+every turn cap (`turns`, each of `role_turns` and of `phase_turns`) and to `wall_seconds`
+`BUDGET_TOLERANCE_PERCENT` (25, a constant of the code, D3) of the value frozen at the first
+booking, rounded down, and never touches `metered_usd`, `cli_estimate_usd` or tokens. It is a
+`grant` event of the delegation `budget` in the journal, with the `story` and the `extension`
+(`percent`, `turns`, `role_turns`, `phase_turns`, `wall_seconds`): once per story, ever, and
+the authority on it. The bookings keep recording the frozen limits; the envelope of a booking,
+of `devloop status` and of the receipt is the frozen one with that extension. An extension that
+would add nothing to the exhausted limit (3 turns × 25% = 0), or that a dollar cap, an uncertain
+outcome or a role outside the envelope would make useless, is not offered and is not spent.
+
 **Consumption** is cumulative: every turn booked for a story counts, whatever its issue, attempt,
 model, outcome or process, and nothing refunds a booking. A failed turn, one not dispatched and
 an uncertain one stay counted; a reconciled turn counts with its reconciled outcome. The outcome
@@ -630,8 +649,11 @@ budget (D2 stays with the operator) and can be revised before the activation:
    startup. Nothing is invented: the operator declares `unmetered_quota` or a reserve.
 2. **No activation without an extension.** The envelope of a story is frozen, and a story at its
    limit has no way out but `enabled = false` for every story: a new takeover keeps the same story
-   and deadline. Until the extension exists (`grant-budget`, ADR 0005), `enabled = true` stops
-   devloop at startup with a message that says so. This is the gate of every activation.
+   and deadline. The extension exists since #411 (`grant-budget`, ADR 0005, P5-7), once per
+   story and as a delegation off by default ([The one extension](#budget-envelope)); the gate
+   (`BUDGET_EXTENSION` in `devloop/config.py`) stays closed until the operator lifts it, and
+   until then `enabled = true` stops devloop at startup with a message that says so. This is the
+   gate of every activation.
 3. **The time starts at the first booking**, recorded in the envelope (`started_at`), not at the
    takeover. Issues taken over before `story_identity` are excluded with no migration
    (`SCOPE_REQUIRED`), and `devloop status` says so.

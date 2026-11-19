@@ -185,7 +185,7 @@ from pathlib import Path
 from .agents import (TAIL_LINES, AgentError, ModelsUnavailable, ModelUnavailable, NoOutput,
                      PermissionDenied, background_unfinished, denied_retry_note)
 from .apps import DISPATCHER, ISSUE_COMMENT, PR_COMMENT, SUPERVISOR, app_login
-from .budget import BUDGET, OUTSIDE, BudgetRefused
+from .budget import BUDGET, OUTSIDE, BudgetRefused, extension_text
 from .budget import of_issue as budget_of_issue
 from .budget import reserve as budget_reserve
 from .budget import status_lines as budget_status_lines
@@ -220,8 +220,8 @@ from .policy import (BINDING, MAX_LISTED_PATHS, agent_profile, differences, prof
 from .ports import Backend, Tracker, summarize_checks
 from .review import (CI, OPERATOR, current_round, finding_commands, finding_key, flow_verdict,
                      open_findings, owner_of, round_verdict, trust_policy_parts)
-from .supervision import (ACCEPT_DEFAULTS, DECIDE, ISSUE_STEPS, RETRY, ROUND_GRANTABLE,
-                          TOOL_FAILURE, UNCERTAIN_TURN, supervisor_command)
+from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, DECIDE, ISSUE_STEPS, RETRY,
+                          ROUND_GRANTABLE, TOOL_FAILURE, UNCERTAIN_TURN, supervisor_command)
 from .workspace import WorkspaceError
 
 LEVEL_LABEL_STYLE = ('5319e7', 'devloop: la PR richiede una review di livello 2')
@@ -1695,7 +1695,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         The escalation of a ``TurnBlocked`` records the ids of the turns it names (``turns``).
         A turn the budget envelope does not cover (``BudgetRefused``, #365, a ``TurnBlocked``
         with no turns) escalates the same way, with class ``budget``, its ``category`` and, on
-        a PR, its ``head`` (#396)."""
+        a PR, its ``head`` (#396); or, when the supervisor may extend the envelope of its story
+        (``_budget_grant``, #411), to the supervisor as ``budget_grantable``, with the story
+        and the extension in its record."""
         if action.kind == 'conclave' and not isinstance(exc, TurnBlocked):
             self.log('  conclave: no escalation, it resumes from its record')
             return
@@ -1721,6 +1723,16 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         try:
             reviewer, key = getattr(exc, 'reviewer', None), getattr(exc, 'key', None)
             supervised, why = self._supervised(number, cls, action.kind, pr, reviewer, key=key)
+            if isinstance(exc, BudgetRefused):
+                # The one extension of the envelope, when the supervisor may grant it (#411).
+                supervised, why = self._budget_grant(number, action.kind, pr, reviewer, key,
+                                                     exc)
+                if supervised:
+                    cls = BUDGET_GRANTABLE
+                    reason += ('\n\nIl supervisore può estendere una volta l\'envelope di questa '
+                               'storia, solo in turni e tempo, con `/devloop grant-budget '
+                               '<motivo>`, dove il motivo riporta o cita l\'analisi delle '
+                               'cause: ' + extension_text(supervised['extension']) + '.')
             # To the operator the step stays recorded too, for a trusted user's retry (#321).
             retry = None if supervised else self._retry_payload(action.kind, pr, reviewer, key)
             if retry and retry['step'] == 'preflight':

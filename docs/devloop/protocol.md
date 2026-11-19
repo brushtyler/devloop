@@ -191,7 +191,10 @@ resolved, a new review of the same head or of a new one; a round the CI failure 
 joined adds `con la CI fallita dello stesso head`, and `che ne ha fatto decadere l'approvazione`
 when the round had approved), then the rounds that do not count with theirs, and recalls that the operator can grant more rounds by raising `max_review_rounds` (#289).
 A `round_grantable` escalation (#405) has the same lists and says instead that the supervisor
-may grant one more round with `/devloop grant-round <reason>`.
+may grant one more round with `/devloop grant-round <reason>`. A `budget_grantable` escalation
+(#411) of a turn the budget refused records, besides the step and its key, the `story`, the
+`extension` the supervisor may grant with `/devloop grant-budget <reason>`, and the `kind` and
+`agent` of the refused turn.
 `devloop status` shows the counted rounds of each PR on the limit, as `rounds=<counted>/<max>`,
 with the rounds granted in `<max>` and `(+<n> granted)` after it when the supervisor granted some,
 followed by `(+<n> not counted)` when some rounds did not count. It reads them from the thread
@@ -454,7 +457,12 @@ these records are what raises the round limit of the PR. The same figures go in 
 command's comment, and, before both, a `grant` event in the
 [turn journal](#turn-journal), which counts the grants of the day across every PR: the daily cap
 is checked again and the event written in one step, so `daily` is the count with this grant and
-never passes the cap. The record is
+never passes the cap. An extension of the budget envelope granted with `/devloop grant-budget`
+(#411) carries the analysis of the causes in `reason`, the `story`, the `extension` (`percent`,
+and the `turns`, `role_turns`, `phase_turns` and `wall_seconds` it adds) and the same daily
+figures; its ledger `event` `delegation_grant` has the `delegation` `budget`, and its `grant`
+event in the turn journal, written first, also records the story and the extension, which from
+then on are part of the envelope of the story. The record is
 written before the labels change, so a
 lost label change never runs a retry twice. A command that does not apply (#321) gets the same
 record, `refused`, with the reason and how to resume in the comment: it spends the command, which
@@ -1013,7 +1021,11 @@ their format does not change. The journal is append-only, one JSON event per lin
   the PR, the id of the command's comment and its author; written before the grant applies, the
   grants of a UTC day count against the daily cap, which is checked again under the journal's
   lock in the same step as the write: past the cap nothing is written and the grant does not
-  apply ([Granting a review round](guide.md#granting-a-review-round)). The events of the
+  apply ([Granting a review round](guide.md#granting-a-review-round)). The extension of a budget
+  envelope (#411, `/devloop grant-budget`) is a `grant` of the delegation `budget` that also
+  records the `story` and the `extension` it adds; one per story, ever, checked under the lock in
+  the same step as the daily cap and the write, and from then on part of the envelope of that
+  story ([Extending the budget envelope](guide.md#extending-the-budget-envelope)). The events of the
   [publication outbox](#publication-outbox) start with `publication`.
 - `config` (ADR 0006, R2, trace T1 of K1): the configuration the dispatcher read, at each start
   of `tick` and `run` (`when: start`, before any tick: a start whose record cannot be written
