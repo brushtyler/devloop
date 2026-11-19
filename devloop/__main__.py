@@ -1,5 +1,5 @@
 """devloop command line: python3 -m devloop
-{setup,status,apps,tick,run,cleanup,gc,follow,watch,pin,report,fallback}."""
+{setup,status,apps,tick,run,cleanup,gc,follow,watch,pin,report,fallback,token}."""
 
 import argparse
 import fcntl
@@ -11,7 +11,7 @@ import time
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
-from . import activity, follow, pin, report, runloop, unavailability, watch
+from . import activity, follow, pin, report, runloop, token, unavailability, watch
 from .agents import AgentRunner, isolated_env
 from .agentuser import GH_CONFIG, SHARED_DIR, WORKTREES_DIR, AgentUser, AgentUserError, SharedDir
 from .agentuser import check as check_isolation
@@ -495,6 +495,37 @@ def run_pin(args):
         sys.exit(f'devloop: pin failed, the pinned copy is unchanged: {exc}')
 
 
+def run_token(args, command):
+    """``devloop token <actor> [--perm NAME=LEVEL ...] -- <command>`` (ADR 0006, R6): run
+    ``command`` with a token of the actor's app, on the ``repo`` and with the ``[apps]`` of the
+    configuration of the project (``token.run``): the installation's, the project file and the
+    overlay of its state_dir, as the launcher passes them. The actor and the permissions are
+    checked before any file is read. Exits with the command's exit code."""
+    try:
+        actor = token.actor_of(args.actor)
+        permissions = token.permissions_of(args.perm or ())
+    except token.TokenError as exc:
+        sys.exit(f'devloop: token: {exc}')
+    if not command:
+        sys.exit('devloop: token: the command goes after --: devloop token <actor> '
+                 '[--perm NAME=LEVEL ...] -- <command> [args...]')
+    try:
+        root = main_checkout()
+    except (OSError, subprocess.CalledProcessError):
+        sys.exit('devloop: token: run it from the checkout of the managed repository, or one of '
+                 'its worktrees')
+    try:
+        cfg = load(args, root)
+        state_path(cfg, root)
+    except ConfigError as exc:
+        sys.exit(f'devloop: invalid config: {exc}')
+    try:
+        code = token.run(cfg, actor, permissions, command)
+    except (token.TokenError, OSError, GitHubError) as exc:
+        sys.exit(f'devloop: token: {exc}')
+    sys.exit(code)
+
+
 def run_watch(parser, args):
     """``devloop watch`` (#173). It reads GitHub with the identity of the ticks' reads (#197):
     the dispatcher's app when ``[apps]`` has one, else the ambient ``gh`` login."""
@@ -698,7 +729,18 @@ def main(argv=None):
                                                       'unavailable: its next turn starts from '
                                                       'its configured model')
     reset_cmd.add_argument('agent', help='the agent key, as in [agents.<key>]')
+    token_cmd = sub.add_parser('token', help='run a command after -- as an agent\'s GitHub App '
+                                             'of the project, with a token limited to --perm '
+                                             '(default issues=write, pull_requests=write)')
+    token_cmd.add_argument('actor', help=f'one of {", ".join(token.ACTORS)}')
+    token_cmd.add_argument('--perm', action='append', metavar='NAME=LEVEL',
+                           help='a permission of the token; repeat it for more')
     argv = sys.argv[1:] if argv is None else list(argv)
+    # The command of `token` (ADR 0006, R6) is everything after its --, options included.
+    command = None
+    if '--' in argv and 'token' in argv[:argv.index('--')]:
+        split = argv.index('--')
+        argv, command = argv[:split], argv[split + 1:]
     args = parser.parse_args(argv)
 
     if args.command == 'run':
@@ -707,6 +749,8 @@ def main(argv=None):
             log('run: --interval is deprecated, use --idle-timeout')
     if args.command == 'pin':
         return run_pin(args)
+    if args.command == 'token':
+        return run_token(args, command)
     if args.command == 'fallback':
         return run_fallback(args)
     if args.command == 'report':
@@ -748,6 +792,12 @@ def main(argv=None):
         return
     if args.command == 'apps':
         failed = False
+        # The project's set of apps (ADR 0006, D3): those of its repo, with its key_dir.
+        log(f'apps of {cfg.repo}, keys in '
+            f'{os.environ.get("DEVLOOP_APP_KEY_DIR") or cfg.app_key_dir}')
+        if MERGER in cfg.apps and not cfg.merge.enabled():
+            log(f'{MERGER}: [merge] mode is off: the merger app is only for a repository where '
+                'devloop merges (ADR 0006, D3)')
         # Each app once, by the actor of its table: the agents' declared apps, the implementer's
         # role app among them (#407).
         for actor in dict.fromkeys([DISPATCHER, MERGER, *map(cfg.app_of, cfg.agents)]):

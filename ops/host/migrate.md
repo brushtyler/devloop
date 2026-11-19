@@ -337,3 +337,50 @@ sudo systemctl start devloop
 ```
 
 `<sha12>` è la copia di R3 (`pinned-<sha12>` nello `state_dir`).
+
+## Identità di ssdlc nell'overlay
+
+Con l'ADR 0006, R6, `devloop/config.toml` non ha più `repo`, `trusted_users` né `[apps]`: il
+repository gestito, gli utenti fidati e l'insieme di app del progetto sono dell'operatore,
+nell'overlay del suo `state_dir`
+([docs/devloop/reference.md](../../docs/devloop/reference.md#identities-of-a-project)). Gli
+stessi valori che `config.toml` aveva stanno in [`ssdlc/overlay.toml`](ssdlc/overlay.toml). Senza
+`repo` e `trusted_users` nell'overlay la copia di R6 non parte, e il suo pin fallisce lasciando la
+copia di prima (`pin failed, the pinned copy is unchanged`).
+
+La copia di prima accetta già queste chiavi nell'overlay, e con gli stessi valori la
+configurazione effettiva e la versione della policy non cambiano: l'overlay si aggiorna **prima**
+del pin della copia di R6, anche a loop avviato (la rilettura trova gli stessi valori). Come
+utente `devloop`, dal clone:
+
+1. **Le chiavi nell'overlay.** `repo`, `trusted_users` e le tabelle `[apps]` (con `key_dir`) di
+   `ssdlc/overlay.toml` della testa della PR di R6, o di `origin/main` dopo il merge
+   (`git show origin/main:ops/host/ssdlc/overlay.toml`), vanno aggiunte a
+   `.ssdlc/devloop/config.local.toml`. Una chiave che l'overlay ha già resta com'è.
+2. **Verifica dell'equivalenza**, con la copia fissata e un checkout del commit di R6:
+
+   ```bash
+   cd ~/ssdlc && git fetch origin
+   git worktree add --detach /tmp/ssdlc-r6 origin/main
+   python3 -B /tmp/ssdlc-r6/ops/host/ssdlc/check-equivalence.py \
+       --before .ssdlc/devloop/current --before-local .ssdlc/devloop/config.local.toml \
+       --before-project .ssdlc/devloop/project.toml \
+       --after /tmp/ssdlc-r6 --after-local .ssdlc/devloop/config.local.toml \
+       --after-project .ssdlc/devloop/project.toml
+   git worktree remove /tmp/ssdlc-r6
+   ```
+
+   Esce con 0 ed `equivalent: …`; con 2 (`trusted_users` o `repo` nel messaggio) all'overlay
+   manca una chiave del passo 1, e il pin non va fatto.
+3. **Pin della copia di R6**, come ogni pin: dopo un merge con `[pin] auto`, oppure a mano
+   (`python3 scripts/devloop-pinned pin origin/main`, poi stop e avvio del loop). Il pin la
+   verifica con l'overlay del passo 1. `python3 scripts/devloop-pinned apps` nomina per prima
+   cosa il repository e la `key_dir` del progetto (`apps of brushtyler/ssdlc, keys in …`).
+4. **Token.** Dal pin della copia di R6, `python3 scripts/agent-token.py` passa da `devloop token`
+   della copia fissata, con `repo` e `[apps]` dell'overlay; prima, la copia fissata non ha il
+   sottocomando `token`. Il supervisore, dal suo clone aggiornato, aggiunge
+   `--state-dir /home/devloop/ssdlc/.ssdlc/devloop` ai comandi di `scripts/supervisor-token.py`:
+   ne legge l'overlay come legge `run.log`, senza segreti.
+
+**Rollback.** Il pin della copia di prima (`python3 scripts/devloop-pinned pin <sha12>`) basta:
+accetta le stesse chiavi nell'overlay, che possono restare.

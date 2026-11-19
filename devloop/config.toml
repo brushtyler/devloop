@@ -9,8 +9,14 @@
 # host, <state_dir>/project.toml (ADR 0006, R3; docs/devloop/reference.md, "Project file"). ssdlc's
 # is ops/host/ssdlc/project.toml. Without a project file, or a test_cmd in the overlay, devloop
 # stops at startup: test_cmd is required.
+#
+# The project's identities and trust (repo, trusted_users, [apps] with its key_dir) are not
+# here either: they are the operator's, in the local overlay of the project's state_dir,
+# <state_dir>/config.local.toml (ADR 0006, R6; docs/devloop/reference.md, "GitHub identities").
+# Each repository has its own set of apps, never shared with another, and its own key_dir
+# (D3). ssdlc's keys are in ops/host/ssdlc/overlay.toml. Without repo and trusted_users in the
+# overlay, devloop stops at startup.
 
-repo = "brushtyler/ssdlc"
 base_branch = "main"
 branch_prefix = "agent/issue-"
 # Worktrees, logs and the lock live here, relative to the main checkout (ignored by git).
@@ -50,9 +56,6 @@ attempt_identity = false
 # written, so no turn starts, and nothing is ever removed from it. From 80% of the limit devloop
 # warns the operator, once, on [run].alert_issue, or at each start in the log without one.
 journal_max_mib = 64
-
-# Only these logins may start work (`agent:ready`) or write markers that devloop reads.
-trusted_users = ["brushtyler"]
 
 # Readiness check before implement (issue #114): a read-only agent, other than the implementer,
 # checks on a checkout of main that the issue can be implemented in one run, and an issue that
@@ -420,47 +423,27 @@ fallback_models = [
 # of its key, or with the one it declares with `app`. App
 # ids and slugs are not secret. Private keys are read from key_dir (or $DEVLOOP_APP_KEY_DIR) as
 # <slug>.<date>.private-key.pem, mode 600. An actor without an app uses the ambient `gh` login.
-[apps]
-key_dir = "~/.ghapps"
-
-[apps.dispatcher]
-app_id = 5747835
-slug = "brushtyler-devloop-dispatcher"
-
-[apps.claude]
-app_id = 5735240
-slug = "brushtyler-devloop-claude-agent"
-
-[apps.codex]
-app_id = 5735296
-slug = "brushtyler-devloop-codex-agent"
-
-[apps.agy]
-app_id = 5735349
-slug = "brushtyler-devloop-agy-agent"
-
-# The app that merges in "strict" and "auto" mode (issue #201), installed on this repository only
-# with contents: write and pull_requests: write. It does nothing else, and scripts/agent-token.py
-# does not expose it. Without it, merges use the local `gh` login.
-[apps.merger]
-app_id = 5792929
-slug = "brushtyler-devloop-merger"
-
-# The supervisor's role app (ADR 0005, P5-4, issue #408), with issues: write and pull_requests:
-# write and no contents. It counts as the supervisor only with [roles.supervisor] as a table.
-# devloop never reads its key, which is in the key_dir of the supervisor's system user, not in
-# devloop's; the supervisor mints its tokens with scripts/supervisor-token.py, and
-# scripts/agent-token.py does not expose it.
-[apps.supervisor]
-app_id = 5824243
-slug = "brushtyler-devloop-supervisor"
-
-# The implementer's role app (ADR 0005, P5-3, issue #407), with contents: write,
-# pull_requests: write and issues: write, without workflows. It signs commits, pushes, PRs and
-# the records of fixes and syncs of every agent that declares app = "implementer", and only a
-# <kind>-implementer key may declare it. Until one does (the migration of the keys, off by
-# default), devloop does not read its key and nothing is signed with it. scripts/agent-token.py
-# does not expose it.
-[apps.implementer]
-app_id = 5824194
-slug = "brushtyler-devloop-implementer"
+# The tables are the project's, in the local overlay of its state_dir (ADR 0006, R6): one set of
+# apps per repository, installed on that repository only, with a key_dir of its own (D3); the
+# merger only where devloop merges. Default key_dir: "~/.ghapps". ssdlc's are in
+# ops/host/ssdlc/overlay.toml.
+# [apps]
+# key_dir = "~/.ghapps"
+# [apps.dispatcher]
+# app_id = ...
+# slug = "<prefix>dispatcher"
+# [apps.claude], [apps.codex], [apps.agy]: the agents' apps, which `devloop token`
+#   (scripts/agent-token.py) exposes.
+# [apps.merger]: the app that merges in "strict" and "auto" mode (issue #201), with contents:
+#   write and pull_requests: write. It does nothing else, and `devloop token` does not expose it.
+#   Without it, merges use the local `gh` login.
+# [apps.supervisor]: the supervisor's role app (ADR 0005, P5-4, issue #408), with issues: write
+#   and pull_requests: write and no contents. It counts as the supervisor only with
+#   [roles.supervisor] as a table. devloop never reads its key, which is in the key_dir of the
+#   supervisor's system user; the supervisor mints its tokens with scripts/supervisor-token.py,
+#   and `devloop token` does not expose it.
+# [apps.implementer]: the implementer's role app (ADR 0005, P5-3, issue #407), with contents:
+#   write, pull_requests: write and issues: write, without workflows. It signs commits, pushes,
+#   PRs and the records of fixes and syncs of every agent that declares app = "implementer", and
+#   only a <kind>-implementer key may declare it. Until one does, devloop does not read its key.
+#   `devloop token` does not expose it.

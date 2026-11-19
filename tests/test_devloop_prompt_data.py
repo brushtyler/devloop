@@ -276,7 +276,8 @@ class ConfigTests(unittest.TestCase):
     def test_the_overlay_replaces_the_project_file(self):
         data = config.compose(config.read_toml(config.DEFAULT_CONFIG),
                               ssdlc_project.project(),
-                              {'prompts': {'fix_instructions': ['`CONTRIBUTING.md`']}})
+                              {**ssdlc_project.identity(),
+                               'prompts': {'fix_instructions': ['`CONTRIBUTING.md`']}})
         cfg = config.parse_config(data)
         self.assertEqual(cfg.prompts.fix_instructions, ('`CONTRIBUTING.md`',))
         self.assertEqual(cfg.prompts.instructions,

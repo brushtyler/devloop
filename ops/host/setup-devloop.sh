@@ -139,8 +139,9 @@ else
 fi
 # Con l'avviatore che riceve lo state_dir (LAUNCHER_ARGS), devloop si ferma se l'overlay ne
 # nomina un altro; con la sorgente a parte, l'overlay dice dove è il suo clone. Sempre, l'overlay
-# nomina la directory dei lock per repository (ADR 0006, R8).
-overlay_lines=("repo_lock_dir = \"$REPO_LOCK_DIR\"")
+# nomina la directory dei lock per repository (ADR 0006, R8) e il repository gestito, che
+# devloop/config.toml non ha più (ADR 0006, R6).
+overlay_lines=("repo = \"$REPO\"" "repo_lock_dir = \"$REPO_LOCK_DIR\"")
 if [ -n "$LAUNCHER_ARGS" ]; then
     overlay_lines+=("state_dir = \"$STATE_PATH\"" ${SOURCE_REPO:+"source = \"$SOURCE_CLONE\""})
 fi

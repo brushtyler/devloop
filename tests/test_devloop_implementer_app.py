@@ -13,7 +13,6 @@ memory of the unavailable models moves to the new keys.
 """
 
 import dataclasses
-import importlib.util
 import os
 import tempfile
 import unittest
@@ -80,14 +79,6 @@ def role_meta(cfg=ROLE, key='claude-implementer'):
 
 class RoleIdentities(FakeIdentities):
     LOGINS = dict(FakeIdentities.LOGINS, implementer=IMPL_APP)
-
-
-def script(name):
-    spec = importlib.util.spec_from_file_location(name.replace('-', '_'),
-                                                  ROOT / 'scripts' / f'{name}.py')
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 class ConfigTests(unittest.TestCase):
@@ -656,13 +647,13 @@ class MemoryTests(unittest.TestCase):
 
 class TokenAndDocsTests(unittest.TestCase):
     def test_agent_token_does_not_expose_the_implementer_app(self):
-        token = script('agent-token')
+        # devloop token (ADR 0006, R6), which scripts/agent-token.py calls.
         for actor in ('implementer', 'IMPLEMENTER'):
             with self.subTest(actor=actor), \
-                    mock.patch.object(token, 'load_config') as load, \
-                    mock.patch.object(token.subprocess, 'run') as run:
+                    mock.patch.object(cli, 'load') as load, \
+                    mock.patch.object(cli.token.subprocess, 'run') as run:
                 with self.assertRaisesRegex(SystemExit, 'reserved to devloop'):
-                    token.main([actor, '--', 'gh', 'pr', 'create'])
+                    cli.main(['token', actor, '--', 'gh', 'pr', 'create'])
                 load.assert_not_called()
                 run.assert_not_called()
 

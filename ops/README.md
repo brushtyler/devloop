@@ -231,9 +231,11 @@ Prepara anche il **lock per repository** (ADR 0006, R8): il gruppo `REPO_LOCK_GR
 script lo ricorda finché manca ([Più progetti sullo stesso host](#più-progetti-sullo-stesso-host)).
 
 Per ssdlc servono anche il **file di progetto** e le chiavi che l'overlay riceve con l'ADR 0006,
-R3: lo script non li crea. L'operatore copia [`ssdlc/project.toml`](host/ssdlc/project.toml) in
+R3 e R6: lo script non li crea. L'operatore copia [`ssdlc/project.toml`](host/ssdlc/project.toml) in
 `<state_dir>/project.toml` (mode 600, utente `devloop`) e aggiunge all'overlay le chiavi di
-[`ssdlc/overlay.toml`](host/ssdlc/overlay.toml); senza file di progetto devloop non parte e il
+[`ssdlc/overlay.toml`](host/ssdlc/overlay.toml): i comandi di agy e, da R6, `repo`,
+`trusted_users` e l'insieme di app di ssdlc (`[apps]`), che `devloop/config.toml` non ha più.
+Senza `repo` e `trusted_users` nell'overlay devloop non parte; senza file di progetto devloop non parte e il
 primo pin fallisce ([migrate.md](host/migrate.md#configurazione-di-ssdlc-nel-suo-file-di-progetto)).
 Su un host già in servizio l'ordine conta: vedi [Migrazione di R3 su un host
 attivo](host/migrate.md#migrazione-di-r3-su-un-host-attivo).
@@ -356,7 +358,9 @@ Poi, a mano:
   finché P5-4 non è attivo, `claude-agent`. Con P5-4 attivo (`[roles.supervisor]` come tabella
   nell'overlay di devloop), le scritture del supervisore passano da
   `scripts/supervisor-token.py`, che conia un token dell'app `supervisor` con i soli permessi
-  dell'azione (solo `issues` e `pull_requests`); prima passano da `scripts/agent-token.py`, con
+  dell'azione (solo `issues` e `pull_requests`), con `--state-dir` sullo `state_dir` di devloop
+  (`/home/devloop/ssdlc/.ssdlc/devloop`), dal cui overlay legge `repo` e `[apps.supervisor]`
+  (ADR 0006, R6); prima passano da `scripts/agent-token.py`, con
   l'attore `claude`, che non espone l'app `supervisor`;
 - **token di sola lettura** per `gh` ([github/tokens.md](github/tokens.md));
 - **Claude Code** come utente `supervisor`, con lo stesso `npm install` del passo 5 e il login;
@@ -427,6 +431,15 @@ merge della PR, o a loop fermo), `check-equivalence.py` eseguito **come root** d
 dell'operatore, il significato dei codici di uscita (0 equivalente, 1 differenze, 2 un lato non si
 carica) e come ripartire se il loop si è fermato.
 
+### Identità nell'overlay (R6)
+
+Con l'ADR 0006, R6, `repo`, `trusted_users` e `[apps]` lasciano `devloop/config.toml` per
+l'overlay. L'overlay li riceve **prima** che devloop prenda la copia di R6: la copia di prima li
+accetta con gli stessi valori, quella di R6 senza di essi non parte. `scripts/agent-token.py`
+diventa un involucro di `devloop token` della copia fissata, e funziona dal pin della copia di
+R6; il supervisore passa a `scripts/supervisor-token.py` lo `state_dir` di devloop con
+`--state-dir`. I passi sono in [host/migrate.md](host/migrate.md#identità-di-ssdlc-nelloverlay).
+
 Ogni PR che richiede un passo sull'host dice, nella descrizione e nella guida, **che cosa fare
 prima del merge** ([host/migrate.md](host/migrate.md#ogni-cambio-con-un-passo-sullhost)).
 
@@ -443,8 +456,11 @@ solito uno `STATE_DIR` assoluto. `setup-devloop.sh` clona la sorgente in `SOURCE
 (`/home/devloop/devloop-source`) e installa l'avviatore dal tag `SOURCE_REF` in `LAUNCHER_DIR`
 (`/usr/local/lib/devloop/devloop-pinned`, di root), fuori dalla copia fissata e dal clone gestito;
 unità e sudoers lo chiamano con `--state-dir`. L'overlay nello `state_dir` ha `source`,
-`state_dir` e le chiavi del progetto (`repo`, `base_branch`, `[apps]`, …): lo script ricorda le
-prime due finché mancano. I fatti del progetto (`test_cmd`, `[docs.map]`, …) stanno nel file di
+`state_dir` e le chiavi del progetto (`repo`, `trusted_users`, `base_branch`, `[apps]` con la
+`key_dir` del progetto, …; ADR 0006, R6): lo script ricorda `source`, `state_dir` e `repo` finché
+mancano. `[apps]` è l'insieme di app di quel repository, creato con il suo `APP_PREFIX` e
+installato solo lì (D3); le sessioni scrivono con `scripts/agent-token.py --state-dir <state_dir>`
+del clone della sorgente, cioè con `devloop token` della copia fissata. I fatti del progetto (`test_cmd`, `[docs.map]`, …) stanno nel file di
 progetto `project.toml` dello stesso `state_dir` (ADR 0006, R3). Il primo pin si fa dal clone
 della sorgente, con il file di progetto e l'overlay prima del comando:
 
@@ -466,8 +482,9 @@ di ssdlc (issue R5 dell'ADR 0006): vale quanto sotto per `local_tests` e `ci_rer
 1. **Portare devloop nel repository** (con una PR, come ogni cambiamento):
    - `devloop/` (con i prompt, `devloop/prompts/`, e gli schemi, `devloop/schemas/`);
    - `core/`, che devloop importa per il budget;
-   - `scripts/devloop-pinned` (il launcher) e `scripts/agent-token.py` (le scritture del
-     supervisore con la sua app);
+   - `scripts/devloop-pinned` (il launcher), `scripts/agent-token.py` (le scritture delle
+     sessioni con le app del progetto, attraverso `devloop token`) e
+     `scripts/supervisor-token.py` (quelle del supervisore con la sua app);
    - `schemas/`, almeno i file che `review_policy.sensitive_path_lists` elenca: `pin` li estrae e
      rifiuta una copia in cui mancano;
    - `ops/`, per ricreare l'installazione;
@@ -476,12 +493,14 @@ di ssdlc (issue R5 dell'ADR 0006): vale quanto sotto per `local_tests` e `ci_rer
      senza modificare i prompt.
 2. **Configurare `devloop/config.toml`** ([docs/devloop/reference.md](../docs/devloop/reference.md)
    descrive ogni chiave):
-   - `repo`, `base_branch`, `branch_prefix`, `language`, `trusted_users`;
+   - `base_branch`, `branch_prefix`, `language`. `repo`, `trusted_users` e `[apps]` non stanno
+     in `devloop/config.toml` ma nell'overlay dello `state_dir` sull'host (ADR 0006, R6);
    - `test_cmd` con la suite del progetto. `local_tests = "changed"` e `ci_rerun_unrelated`
      presuppongono la struttura di questo repository (`tests/test_*.py`, le righe `FAILED MODULE`
      di `scripts/run-tests.py`): altrove usare `local_tests = "full"` o `"none"` e
      `ci_rerun_unrelated = false`;
-   - `[apps]`: `app_id` e `slug` delle app create al passo 2, con un `APP_PREFIX` nuovo;
+   - nell'overlay, `[apps]`: `app_id` e `slug` delle app create al passo 2, con un `APP_PREFIX`
+     nuovo, e la `key_dir` del progetto;
    - `[roles]` e `[agents.*]`: implementer, reviewer, supervisore e modelli;
    - `protected_paths`, `review_policy.sensitive_paths` e `sensitive_path_lists`,
      `merge.operator_only_paths` e `[docs.map]`, con i percorsi del progetto;

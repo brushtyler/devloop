@@ -379,7 +379,10 @@ class ManifestTests(unittest.TestCase):
     def test_the_configured_apps_have_a_manifest_and_the_prefix_of_params(self):
         params = (OPS / 'params.env.example').read_text()
         self.assertIn(f'APP_PREFIX={PREFIX}\n', params)
-        cfg = load_config(ROOT / 'devloop/config.toml', None, ssdlc_project.PROJECT)
+        # ssdlc's apps are in its overlay since ADR 0006, R6.
+        cfg = load_config(ROOT / 'devloop/config.toml', ssdlc_project.OVERLAY,
+                          ssdlc_project.PROJECT)
+        self.assertTrue(cfg.apps)
         for actor, app in cfg.apps.items():
             self.assertTrue(app.slug.startswith(PREFIX), actor)
             role = app.slug[len(PREFIX):]
@@ -555,7 +558,9 @@ class DryRunTests(OpsTestCase):
         state.mkdir(parents=True)
         (state / 'run.log').touch()
         locks = self.tmp / 'locks/repos'
-        (state / 'config.local.toml').write_text(f'repo_lock_dir = "{locks}"\n'
+        # The repository is the overlay's since ADR 0006, R6.
+        (state / 'config.local.toml').write_text('repo = "brushtyler/ssdlc"\n'
+                                                 f'repo_lock_dir = "{locks}"\n'
                                                  '[merge]\nmode = "off"\n')
         self.lock_dir(locks)
         for name, mode in (('.ghapps', 0o700), ('.claude', 0o700), ('.codex', 0o700),
@@ -836,6 +841,9 @@ class DryRunTests(OpsTestCase):
         self.assertIn(f'[dry-run] systemd-tmpfiles --create {tmpfiles}\n', out)
         self.assertIn(f'da fare a mano: scrivere repo_lock_dir = "{locks}" in {self.home}/devloop/'
                       'ssdlc/.ssdlc/devloop/config.local.toml', out)
+        # ADR 0006, R6: the repository is the overlay's, devloop/config.toml has none.
+        self.assertIn(f'da fare a mano: scrivere repo = "brushtyler/ssdlc" in {self.home}/'
+                      'devloop/ssdlc/.ssdlc/devloop/config.local.toml', out)
         self.assertEqual(self.mutating_calls(), [])
         self.assertEqual(self.tree(), before)
 

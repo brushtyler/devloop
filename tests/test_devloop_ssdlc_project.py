@@ -18,10 +18,11 @@ R3's: it updates the frozen ``config.toml`` and ``effective.json`` with it, sayi
 ``updated`` lists those made so far: the implementer app of #407 and the capacity delegation of
 #412, merged beside R3).
 
-``repo``, ``trusted_users`` and ``[apps]`` stay in ``devloop/config.toml`` until R6 (#425), which
-brings ``devloop token`` with the configuration of the project: ``scripts/agent-token.py`` and
-``scripts/supervisor-token.py`` read them there. The check that the installation holds no value
-of ssdlc leaves them out, and says so.
+``repo``, ``trusted_users`` and ``[apps]`` left ``devloop/config.toml`` with R6 (#425) for the
+overlay, beside the agy commands (``ops/host/ssdlc/overlay.toml``): ``devloop token``, which
+``scripts/agent-token.py`` calls, and ``scripts/supervisor-token.py`` read them from the
+configuration of the project. The check that the installation holds no value of ssdlc is
+complete: it leaves out no key.
 """
 
 import dataclasses
@@ -50,8 +51,6 @@ from helpers import ssdlc_project
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / 'ops' / 'host' / 'ssdlc' / 'check-equivalence.py'
 LIST = 'schemas/recovery-grader-baseline.json'
-# Left in the installation until R6 (#425): the token scripts read them from config.toml.
-UNTIL_R6 = ('repo', 'trusted_users', 'apps')
 # The reference of before R3, frozen at its last commit (see the module).
 FROZEN = REPO / 'tests' / 'fixtures' / 'ssdlc-pre-r3'
 FROZEN_COMMIT = '28eaf9455bad6ff52dcbdbc29ecc07d7dde83e2a'
@@ -225,7 +224,7 @@ class EquivalenceTests(unittest.TestCase):
     def test_without_the_overlay_keys_agy_loses_the_test_command(self):
         # The agents' commands derived from the project's tests are the overlay's alone (D2):
         # without its keys the configuration is not equivalent, and the check says so.
-        bare = composed(overlay=None)
+        bare = composed(overlay=ssdlc_project.identity_overlay(self))
         self.assertNotIn('python3 scripts/run-tests.py', bare.agents['agy'].review_commands)
         self.assertNotEqual(dataclasses.replace(bare.review_policy, project='').version(),
                             self.frozen['policy_version'])
@@ -234,10 +233,32 @@ class EquivalenceTests(unittest.TestCase):
         with self.assertRaisesRegex(config.ConfigError, "missing 'test_cmd'.*project file"):
             config.load_config()
 
+    def test_the_identities_come_from_the_overlay(self):
+        # R6: repo, trusted_users and the apps, as before, from the overlay alone.
+        reference = self.frozen['config']
+        self.assertEqual(self.after.repo, reference['repo'])
+        self.assertEqual(list(self.after.trusted_users), reference['trusted_users'])
+        self.assertEqual(as_json(self.after)['apps'], reference['apps'])
+        self.assertEqual(self.after.app_key_dir, reference['app_key_dir'])
+
+    def test_without_the_identities_in_the_overlay_devloop_does_not_start(self):
+        # The overlay with the agy commands only, as after R3: the copy of R6 does not start.
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        agy = tomllib.loads(ssdlc_project.OVERLAY.read_text(encoding='utf-8'))['agents']
+        overlay = tmp / 'config.local.toml'
+        overlay.write_text(ssdlc_project.toml_text({'agents': agy}) + '\n', encoding='utf-8')
+        with self.assertRaisesRegex(config.ConfigError, 'trusted_users.*local overlay'):
+            composed(overlay=overlay)
+        overlay.write_text(ssdlc_project.toml_text(
+            {'trusted_users': ['brushtyler'], 'agents': agy}) + '\n', encoding='utf-8')
+        with self.assertRaisesRegex(config.ConfigError, "missing 'repo'.*local overlay"):
+            composed(overlay=overlay)
+
 
 class InstallationTests(unittest.TestCase):
-    """The installation holds no value of ssdlc (ADR 0006, section 3.5), but for the keys left
-    to R6 and the code values left to other issues, each declared here."""
+    """The installation holds no value of ssdlc (ADR 0006, section 3.5), but for the code values
+    left to other issues, each declared here. Since R6 no key is left out."""
 
     def test_config_toml_sets_no_fact_nor_restriction_of_the_project(self):
         installation = config.read_toml(config.DEFAULT_CONFIG)
@@ -249,16 +270,29 @@ class InstallationTests(unittest.TestCase):
                 node = node.get(key, {}) if isinstance(node, dict) else {}
             self.assertIn(node, ({}, []), '.'.join(path))
 
-    def test_config_toml_holds_no_value_of_ssdlc_but_those_left_to_r6(self):
+    def test_config_toml_holds_no_value_of_ssdlc(self):
         installation = config.read_toml(config.DEFAULT_CONFIG)
-        ssdlc = strings(ssdlc_project.project())
-        rest = {k: v for k, v in installation.items() if k not in UNTIL_R6}
-        self.assertEqual(strings(rest) & ssdlc, set())
-        # Declared: still here until R6 (#425), for scripts/agent-token.py and
-        # scripts/supervisor-token.py.
-        self.assertEqual(installation['repo'], 'brushtyler/ssdlc')
-        self.assertEqual(installation['trusted_users'], ['brushtyler'])
-        self.assertIn('dispatcher', installation['apps'])
+        ssdlc = strings(ssdlc_project.project()) | strings(ssdlc_project.identity())
+        self.assertEqual(strings(installation) & ssdlc, set())
+        # R6: the identities and trust of the project are the overlay's (ADR 0006, D3 and D6).
+        for key in ssdlc_project.IDENTITY_KEYS:
+            self.assertNotIn(key, installation, key)
+
+    def test_the_installation_names_no_identity_of_ssdlc(self):
+        # Not in a value, a default of the code or a comment: no owner, repository or app slug
+        # of ssdlc in what the pin extracts (devloop/ and core/).
+        identity = ssdlc_project.identity()
+        owner = identity['repo'].split('/')[0]
+        app_ids = {str(app['app_id']) for app in identity['apps'].values()
+                   if isinstance(app, dict)}
+        for package in ('devloop', 'core'):
+            for path in sorted((REPO / package).rglob('*')):
+                if not path.is_file() or '__pycache__' in path.parts:
+                    continue
+                text = path.read_text(encoding='utf-8')
+                with self.subTest(path=str(path.relative_to(REPO))):
+                    self.assertNotIn(owner, text)
+                    self.assertEqual({i for i in app_ids if i in text}, set())
 
     def test_the_code_has_no_default_of_ssdlc_for_the_project_keys(self):
         self.assertEqual(policy.ReviewPolicy.sensitive_paths, ())
@@ -284,27 +318,37 @@ class ExampleFilesTests(unittest.TestCase):
         config.compose({}, table)  # the closed schema refuses any other key
         self.assertEqual(set(table) - set(config.PROJECT_KEYS), set())
 
-    def test_the_overlay_keys_are_the_agy_commands_only(self):
+    def test_the_overlay_keys_are_the_agy_commands_and_the_identities(self):
         table = config.read_toml(ssdlc_project.OVERLAY, 'local config')
-        self.assertEqual(table, {'agents': {'agy': {
+        self.assertEqual(table, {**ssdlc_project.identity(), 'agents': {'agy': {
             'write_commands': table['agents']['agy']['write_commands'],
             'review_commands': table['agents']['agy']['review_commands']}}})
+        # R6: the values config.toml had before, frozen with the reference of before R3.
+        frozen_raw = config.read_toml(FROZEN / 'config.toml')
+        self.assertEqual(ssdlc_project.identity(),
+                         {key: frozen_raw[key] for key in ssdlc_project.IDENTITY_KEYS})
         # The commands agy had by default from the test_cmd of config.toml.
         expected = ('python3 scripts/run-tests.py',) + config.AGY_DEFAULT_COMMANDS
         after = composed()
         self.assertEqual(after.agents['agy'].write_commands, expected)
         self.assertEqual(after.agents['agy'].review_commands, expected)
 
-    def test_the_token_scripts_read_repo_and_apps_without_a_project_file(self):
-        for name in ('agent-token', 'supervisor-token'):
-            spec = importlib.util.spec_from_file_location(
-                name.replace('-', '_'), REPO / 'scripts' / f'{name}.py')
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            cfg = module.load_config(config.DEFAULT_CONFIG)
-            with self.subTest(script=name):
-                self.assertEqual(cfg.repo, 'brushtyler/ssdlc')
-                self.assertEqual(cfg.apps, ssdlc_project.load().apps)
+    def test_the_supervisor_token_reads_repo_and_apps_from_the_overlay(self):
+        # R6: from the overlay of the project's state_dir, without a project file.
+        spec = importlib.util.spec_from_file_location(
+            'supervisor_token', REPO / 'scripts' / 'supervisor-token.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        state = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, state)
+        shutil.copy(ssdlc_project.OVERLAY, state / 'config.local.toml')
+        cfg = module.load_config(state)
+        self.assertEqual(cfg.repo, 'brushtyler/ssdlc')
+        self.assertEqual(cfg.apps, ssdlc_project.load().apps)
+        # The installation alone has neither: without the overlay it stops, naming it.
+        (state / 'config.local.toml').unlink()
+        with self.assertRaisesRegex(SystemExit, 'no local overlay.*--state-dir'):
+            module.load_config(state)
 
 
 class FirstPinTests(unittest.TestCase):
@@ -466,9 +510,15 @@ class CheckScriptTests(unittest.TestCase):
         self.assertIn('policy version without the project file', out)
 
     def test_without_the_overlay_keys_agy_differs(self):
-        code, out = self.check(overlay=None)
+        code, out = self.check(overlay=ssdlc_project.identity_overlay(self))
         self.assertEqual(code, 1, out)
         self.assertIn('config agents.agy.review_commands:', out)
+
+    def test_without_the_identities_in_the_overlay_the_after_side_does_not_load(self):
+        # R6: repo and trusted_users are the overlay's; without them the copy does not start.
+        code, out = self.check(overlay=None)
+        self.assertEqual(code, 2, out)
+        self.assertIn('trusted_users', out)
 
     def test_a_fact_changed_is_a_difference_in_the_prompts(self):
         text = ssdlc_project.PROJECT.read_text(encoding='utf-8').replace(

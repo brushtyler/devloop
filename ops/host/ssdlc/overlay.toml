@@ -1,14 +1,63 @@
-# The keys ssdlc's overlay gains with R3 (ADR 0006): add them to <state_dir>/config.local.toml of
-# ssdlc's host, beside the keys it already has (ops/host/migrate.md, "Migrazione di R3 su un host
-# attivo"). Not an overlay of its own: devloop never reads it from here.
+# The keys ssdlc's overlay gains with R3 and R6 (ADR 0006): add them to
+# <state_dir>/config.local.toml of ssdlc's host, beside the keys it already has
+# (ops/host/migrate.md, "Migrazione di R3 su un host attivo" and "Identità di ssdlc
+# nell'overlay"). Not an overlay of its own: devloop never reads it from here.
 #
 # The agents' permissions derived from the project's tests are the overlay's alone (ADR 0006,
 # D2): the test_cmd of the project file never becomes a command of agy. Before R3 agy's default
 # commands derived from the test_cmd of devloop/config.toml; the installation no longer has one,
 # so the overlay admits the same commands, in the same order (docs/devloop/reference.md, "agy
 # permissions"). The values are those agy had: the policy version keeps its reviewers' part.
+#
+# The project's identities and trust are the overlay's too (ADR 0006, R6): the managed
+# repository, the logins devloop trusts and ssdlc's set of GitHub Apps, installed on this
+# repository only, with its key_dir (D3). The values are those devloop/config.toml had before R6.
+repo = "brushtyler/ssdlc"
+# Only these logins may start work (`agent:ready`) or write markers that devloop reads.
+trusted_users = ["brushtyler"]
+
 [agents.agy]
 write_commands = ["python3 scripts/run-tests.py", "python3 -m unittest", "git status",
                   "git diff", "git log", "git show"]
 review_commands = ["python3 scripts/run-tests.py", "python3 -m unittest", "git status",
                    "git diff", "git log", "git show"]
+
+# ssdlc's set of apps (docs/devloop/reference.md, "GitHub identities"). Private keys are read
+# from key_dir (or $DEVLOOP_APP_KEY_DIR) as <slug>.<date>.private-key.pem, mode 600.
+[apps]
+key_dir = "~/.ghapps"
+
+[apps.dispatcher]
+app_id = 5747835
+slug = "brushtyler-devloop-dispatcher"
+
+[apps.claude]
+app_id = 5735240
+slug = "brushtyler-devloop-claude-agent"
+
+[apps.codex]
+app_id = 5735296
+slug = "brushtyler-devloop-codex-agent"
+
+[apps.agy]
+app_id = 5735349
+slug = "brushtyler-devloop-agy-agent"
+
+# The app that merges in "strict" and "auto" mode (issue #201), installed on this repository
+# only with contents: write and pull_requests: write. Only where devloop merges (ADR 0006, D3).
+[apps.merger]
+app_id = 5792929
+slug = "brushtyler-devloop-merger"
+
+# The supervisor's role app (ADR 0005, P5-4, issue #408). devloop never reads its key, which is
+# in the key_dir of the supervisor's system user; the supervisor mints its tokens with
+# scripts/supervisor-token.py.
+[apps.supervisor]
+app_id = 5824243
+slug = "brushtyler-devloop-supervisor"
+
+# The implementer's role app (ADR 0005, P5-3, issue #407). Until a <kind>-implementer key
+# declares it, devloop does not read its key and nothing is signed with it.
+[apps.implementer]
+app_id = 5824194
+slug = "brushtyler-devloop-implementer"
