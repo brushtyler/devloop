@@ -34,7 +34,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from devloop.apps import AppAuth, find_key  # noqa: E402
-from devloop.config import load_config  # noqa: E402
+from devloop.config import parse_config, read_toml  # noqa: E402
 
 ACTORS = ('claude', 'codex', 'agy')
 # devloop's own apps, never exposed here: the implementer's role app (#407) among them.
@@ -44,6 +44,14 @@ DEFAULT = {'issues': 'write', 'pull_requests': 'write'}
 ALLOWED = {'issues': {'read', 'write'}, 'pull_requests': {'read', 'write'},
            'contents': {'read'}, 'metadata': {'read'}, 'checks': {'read'},
            'statuses': {'read'}, 'actions': {'read'}}
+
+
+def load_config(path):
+    """The configuration of ``path`` for ``repo`` and ``[apps]``, the only keys the token needs.
+    Since ADR 0006, R3 the facts of the project (``test_cmd`` among them) are in the project
+    file on the host, not in ``path``: an empty ``test_cmd`` stands in for it when ``path`` has
+    none, and the token never uses it."""
+    return parse_config({'test_cmd': '', **read_toml(path)})
 
 
 def parse(argv):

@@ -6,7 +6,6 @@ import os
 import shlex
 import tempfile
 import time
-import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -14,6 +13,7 @@ from unittest import mock
 from devloop import activity, agents, config, follow, stall
 from devloop.dispatcher import Dispatcher
 from devloop.planning import Action, Snapshot
+from helpers import ssdlc_project
 from helpers.devloop_fakes import FakeGH
 from test_devloop import CFG, IMPL, FakeWS, implemented, ready
 
@@ -22,7 +22,7 @@ HAS_PROC = Path('/proc/self/stat').exists()
 
 class StallConfigTests(unittest.TestCase):
     def test_keys_are_validated_with_warn_by_default(self):
-        data = tomllib.loads(config.DEFAULT_CONFIG.read_text())
+        data = ssdlc_project.data()
         self.assertEqual((CFG.agent_stall_seconds, CFG.agent_stall_action), (900, 'warn'))
         omitted = {k: v for k, v in data.items()
                    if k not in ('agent_stall_seconds', 'agent_stall_action')}

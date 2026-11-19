@@ -8,10 +8,11 @@ import unittest
 from devloop import agents, config, markdown, policy, review
 from devloop.dispatcher import Dispatcher
 from devloop.planning import Action, plan
+from helpers import ssdlc_project
 from helpers.devloop_fakes import PORT_METHODS, FakeIdentities, SnapshotGH, at
 from test_devloop import (CFG, IMPL, SHA1, SHA2, FakeRunner, FakeWS, finding, fixed, raw_review)
 
-DATA = tomllib.loads(config.DEFAULT_CONFIG.read_text())
+DATA = ssdlc_project.data()
 # The pool of the default configuration: two reviewers with their own apps and models.
 FIRST, SECOND = CFG.reviewers[:2]
 CORE = [{'path': 'devloop/dispatcher.py', 'links': []}]  # a sensitive diff: level 2

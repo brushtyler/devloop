@@ -10,7 +10,9 @@ documentation map of the new module.
 import unittest
 from pathlib import Path
 
-from devloop import config, context, dispatcher
+from devloop import context, dispatcher
+
+from helpers import ssdlc_project
 
 # Every name the move took out of devloop/dispatcher.py.
 MOVED = ('PROMPT_DIR', 'REREVIEW_COMMAND', 'LABEL_STYLE', 'requested_fixes', 'operator_comments',
@@ -36,7 +38,7 @@ class ContextModuleTests(unittest.TestCase):
         self.assertTrue((context.PROMPT_DIR / 'implement.md').is_file())
 
     def test_the_documentation_map_covers_the_module(self):
-        docs = config.load_config().docs
+        docs = ssdlc_project.load().docs
         self.assertEqual(dict(docs.entries)['devloop/context.py'],
                          dict(docs.entries)['devloop/dispatcher.py'])
         self.assertEqual(sorted(docs.documents(['devloop/context.py'])),

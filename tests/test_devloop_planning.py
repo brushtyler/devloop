@@ -8,7 +8,9 @@ documentation map of the new module.
 
 import unittest
 
-from devloop import config, planning
+from devloop import planning
+
+from helpers import ssdlc_project
 
 # Every name the move took out of devloop/dispatcher.py.
 MOVED = ('RECHECK_COMMAND', 'FIX_COMMAND', 'MERGING', 'RESYNC_AFTER_APPROVAL', 'BASE_CHANGED',
@@ -29,7 +31,7 @@ class PlanningModuleTests(unittest.TestCase):
                     self.assertEqual(getattr(planning, name).__module__, 'devloop.planning')
 
     def test_the_documentation_map_covers_the_module(self):
-        docs = config.load_config().docs
+        docs = ssdlc_project.load().docs
         self.assertEqual(dict(docs.entries)['devloop/planning.py'],
                          dict(docs.entries)['devloop/dispatcher.py'])
         self.assertEqual(sorted(docs.documents(['devloop/planning.py'])),

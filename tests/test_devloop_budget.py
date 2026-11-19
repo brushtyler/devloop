@@ -12,16 +12,17 @@ from unittest import mock
 from core import budget as core
 from devloop import agents, budget, config, markdown, supervision
 from devloop.budget import ROLE_NOT_IN_ENVELOPE, BudgetRefused
-from devloop.config import BudgetPolicy, ConfigError, load_config, load_data, parse_config
+from devloop.config import BudgetPolicy, ConfigError, parse_config
 from devloop.dispatch_actions import Models
 from devloop.dispatcher import Dispatcher
 from devloop.journal import JOURNAL, TurnJournal
 from devloop.ledger import Ledger
 from devloop.planning import Action
+from helpers import ssdlc_project
 from test_devloop import CFG, implemented, pr, raw_review
 from test_devloop_ledger import LedgerGH, ReportingRunner, TreeWS
 
-DATA = load_data()
+DATA = ssdlc_project.data()
 REPO = CFG.repo
 RULE = {'model': 'unmetered_quota', 'reason': 'the CLI reports no cost: the turn caps bound it'}
 ENVELOPE = {
@@ -67,8 +68,8 @@ def events(state_dir):
 
 class BudgetConfigTests(unittest.TestCase):
     def test_off_by_default(self):
-        self.assertEqual(load_config().budget, BudgetPolicy())
-        self.assertFalse(load_config().budget.enabled)
+        self.assertEqual(ssdlc_project.load().budget, BudgetPolicy())
+        self.assertFalse(ssdlc_project.load().budget.enabled)
         self.assertEqual(DATA['budget'], {'enabled': False})
         self.assertEqual(parse_config({k: v for k, v in DATA.items() if k != 'budget'}).budget,
                          BudgetPolicy())
@@ -134,7 +135,7 @@ class BudgetConfigTests(unittest.TestCase):
             local = Path(tmp) / 'config.local.toml'
             local.write_text('[budget]\nenabled = false\ntokens = 5\n')
             with self.assertRaisesRegex(ConfigError, 'token caps are not supported yet'):
-                load_config(None, local)
+                ssdlc_project.load(local)
             local.write_text('story_identity = true\n[budget]\nenabled = true\nturns = 4\n'
                              'wall_seconds = 60\nmetered_usd = 1\ncli_estimate_usd = 1\n'
                              '[budget.role_turns]\nimplement = 1\nfix = 1\nreview = 1\n'
@@ -142,7 +143,7 @@ class BudgetConfigTests(unittest.TestCase):
                              '[budget.usage.codex]\nmodel = "unmetered_quota"\nreason = "r"\n'
                              '[budget.usage.agy]\nmodel = "unmetered_quota"\nreason = "r"\n'
                              '[budget.usage.claude]\nmodel = "unmetered_quota"\nreason = "r"\n')
-            self.assertEqual(load_config(None, local).budget.turns, 4)
+            self.assertEqual(ssdlc_project.load(local).budget.turns, 4)
 
     def test_invalid_values_are_refused(self):
         for name, table in (
@@ -212,10 +213,10 @@ class BudgetActivationTests(unittest.TestCase):
             local = Path(tmp) / 'config.local.toml'
             local.write_text('story_identity = true\n[budget]\nenabled = true\n')
             with self.assertRaisesRegex(ConfigError, 'cannot be turned on yet'):
-                load_config(None, local)
+                ssdlc_project.load(local)
         # Off, the configuration loads as before, values written or not.
         self.assertFalse(cfg_with(envelope(enabled=False)).budget.enabled)
-        self.assertFalse(load_config().budget.enabled)
+        self.assertFalse(ssdlc_project.load().budget.enabled)
 
     def test_the_constant_is_off_in_the_distributed_code(self):
         # Only the tests of the envelope turn it on (``setUpModule``).

@@ -1,0 +1,178 @@
+# The project file of ssdlc (ADR 0006, R3): the facts of the repository and the restrictions it
+# adds, as they were in devloop/config.toml before R3. This copy is an example and the source of
+# the migration: devloop never reads it from here. The operator copies it to the host, as
+# <state_dir>/project.toml, mode 600, owned by the dispatcher's user; from then on the copy on the host is the one that
+# counts, and changing it is the operator's act (ops/host/migrate.md, "Configurazione di ssdlc
+# nel suo file di progetto"). The keys and how they compose: docs/devloop/reference.md,
+# "Project file".
+
+# The same tests as `python3 -m unittest discover -s tests`, split across parallel worker
+# processes (each runs several modules in turn, like the serial discover does in one process).
+# The dispatcher's test command only: the agents' commands derived from it are admitted by the
+# overlay (ops/host/ssdlc/overlay.toml).
+test_cmd = "python3 scripts/run-tests.py"
+# Local tests after each writing turn: implement, fix, sync with conflicts (issue #169).
+# "full" runs test_cmd, "changed" only the test modules pertinent to the branch's diff against
+# the base (none when, say, only documentation changed), "none" nothing. The CI stays the gate:
+# without "full" a review needs the CI passed, and a head without CI gets test_cmd locally
+# before its review.
+local_tests = "changed"
+# Language of the text that agents write for GitHub.
+language = "Italian"
+
+blocked_labels = ["bloccata"]
+# Ready issues start by priority (priority:high, priority:normal, priority:low), then by the
+# latest agent:ready, then by number (issue #146). These labels count as priority:high. Every
+# priority label counts only if a user in trusted_users added it, or roles.supervisor's app on
+# an issue of a trusted user or of a devloop app (issue #178).
+priority_labels = ["prerequisito"]
+
+# Changes under these paths are never pushed by devloop: a workflow or a local action pushed to
+# a branch of this repository would run in CI before anyone reviewed it.
+protected_paths = [".github/"]
+
+[review_policy]
+# Directory prefixes (ending in "/") or files, relative to the repository root. The code that
+# decides permissions, fencing and authorizations goes to level 2 (issue #171); a listed file
+# that does not exist yet is just a path. The restrictions ssdlc wants guaranteed (devloop/ and
+# schemas/ sensitive, ADR 0006, section 3.2, requirement 5) are here, on the host.
+sensitive_paths = ["devloop/", "AGENTS.md", "CLAUDE.md", ".github/", "schemas/",
+                   # Writer fencing and locks.
+                   "ssdlc_writer_gate.py", "ssdlc_role_fencing.py",
+                   "ssdlc_container_holder.py", "ssdlc_locks.py", "ssdlc_fencing_proof.py",
+                   # Authorized transitions and gates.
+                   "ssdlc_transitions.py", "ssdlc_replay_gate.py", "ssdlc_grader.py",
+                   # Delegations and admissions.
+                   "ssdlc_feedback_delegation.py", "ssdlc_feedback_admission.py",
+                   "ssdlc_usage_admission.py",
+                   # App tokens.
+                   "scripts/agent-token.py", "scripts/supervisor-token.py"]
+# JSON files whose "files" object lists more sensitive paths: facts of the repository, read at
+# startup relative to the root of the running devloop installation (a pinned checkout, which
+# `devloop pin` extracts them into); a missing file stops devloop.
+sensitive_path_lists = ["schemas/recovery-grader-baseline.json"]
+
+[merge]
+# A PR touching one of these paths (directories ending in "/" or files from the root) is merged
+# by a person, whatever the mode. A ready PR that devloop does not merge, for these paths, the
+# mode or a level "off", gets agent:needs-operator and a dispatcher comment (issue #248).
+operator_only_paths = ["docs/adr/", "AGENTS.md", "CLAUDE.md"]
+
+# Documentation map (issue #203): code paths and the documents that describe them. A key is a
+# directory prefix ending in "/" or a file, relative to the root, with no pattern characters;
+# each value lists one or more documents of the repository (a pin does not extract them, #210).
+# The implement, fix and review prompts list the documents mapped to the files of the diff that
+# the worktree holds (a missing one is omitted, with a line in the log)
+# (the first implement prompt, with an empty diff, gets the whole map): an implementer updates
+# those whose described behaviour changes, and a reviewer reports a documented behaviour changed
+# without its document as a blocking finding. A file no key covers asks for nothing.
+[docs.map]
+"devloop/" = ["docs/devloop/guide.md"]
+"devloop/config.py" = ["docs/devloop/reference.md"]
+"devloop/config.toml" = ["docs/devloop/reference.md"]
+"devloop/budget.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
+"devloop/agents.py" = ["docs/devloop/reference.md"]
+"devloop/unavailability.py" = ["docs/devloop/reference.md"]
+"devloop/localtests.py" = ["docs/devloop/reference.md"]
+"devloop/workspace.py" = ["docs/devloop/reference.md"]
+"devloop/apps.py" = ["docs/devloop/reference.md"]
+"devloop/prompts/" = ["docs/devloop/reference.md"]
+"devloop/markdown.py" = ["docs/devloop/protocol.md"]
+"devloop/ledger.py" = ["docs/devloop/protocol.md"]
+"devloop/acceptance.py" = ["docs/devloop/protocol.md"]
+"devloop/review.py" = ["docs/devloop/protocol.md"]
+"devloop/policy.py" = ["docs/devloop/protocol.md", "docs/devloop/reference.md"]
+"devloop/schemas/" = ["docs/devloop/protocol.md"]
+"devloop/dispatcher.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
+"devloop/context.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
+"devloop/planning.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
+"devloop/dispatch_supervision.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
+"devloop/dispatch_preflight.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
+"devloop/dispatch_merge.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
+"devloop/dispatch_actions.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
+"devloop/dispatch_conclave.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
+"devloop/conclave.py" = ["docs/devloop/protocol.md"]
+"devloop/ports.py" = ["docs/architecture.md"]
+"devloop/github.py" = ["docs/architecture.md"]
+"scripts/devloop-pinned" = ["docs/devloop/guide.md"]
+"scripts/run-tests.py" = ["docs/development.md"]
+"orchestrator.py" = ["docs/getting-started.md", "docs/architecture.md"]
+"ssdlc_tasks.py" = ["docs/getting-started.md", "docs/architecture.md"]
+"ssdlc_controller.py" = ["docs/getting-started.md", "docs/architecture.md"]
+"setup-ssdlc.sh" = ["docs/getting-started.md", "docs/configuration.md"]
+"ssdlc_writer_gate.py" = ["docs/writer-fencing.md"]
+"ssdlc_role_fencing.py" = ["docs/writer-fencing.md"]
+"ssdlc_container_holder.py" = ["docs/writer-fencing.md"]
+"ssdlc_fencing_proof.py" = ["docs/writer-fencing.md", "docs/recovery.md"]
+"ssdlc_telemetry.py" = ["docs/cost-telemetry.md", "docs/bounded-recovery.md"]
+"ssdlc_quota.py" = ["docs/cost-telemetry.md"]
+"ssdlc_recovery.py" = ["docs/cost-telemetry.md", "docs/bounded-recovery.md"]
+"ssdlc_feedback.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_admission.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_analysis.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_bindings.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_delegation.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_delivery.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_return.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_roles.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_workflow.py" = ["docs/developer-feedback.md"]
+"ssdlc_scope_amendments.py" = ["docs/scope-amendments.md", "docs/recovery.md"]
+"ssdlc_continuations.py" = ["docs/continuations.md", "docs/historical-reconciliation.md", "docs/recovery.md"]
+"ssdlc_historical.py" = ["docs/continuations.md", "docs/historical-reconciliation.md", "docs/recovery.md"]
+"ssdlc_catalogues.py" = ["docs/configuration.md"]
+# ADR 0003, I10 (#247): the modules and schemas without a document, each checked against the
+# document that describes its behaviour.
+"scripts/agent-token.py" = ["AGENTS.md", "docs/devloop/reference.md"]
+"scripts/supervisor-token.py" = ["AGENTS.md", "docs/devloop/reference.md"]
+"ssdlc_reconciliation.py" = ["docs/historical-reconciliation.md", "docs/recovery.md"]
+"ssdlc_transitions.py" = ["docs/recovery.md"]
+"ssdlc_preparations.py" = ["docs/continuations.md", "docs/historical-reconciliation.md", "docs/scope-amendments.md"]
+"ssdlc_supervisor.py" = ["docs/supervision.md", "docs/writer-fencing.md"]
+"ssdlc_bounce.py" = ["docs/bounce-preview.md"]
+"ssdlc_corrective.py" = ["docs/bounce-preview.md", "docs/native-gate-convergence.md"]
+"ssdlc_corrective_owners.py" = ["docs/bounce-preview.md", "docs/developer-feedback.md"]
+"ssdlc_candidates.py" = ["docs/candidate-capture.md"]
+"ssdlc_bootstrap.py" = ["docs/task-mode.md", "docs/native-gate-convergence.md"]
+"ssdlc_design.py" = ["docs/task-mode.md", "docs/bounded-recovery.md"]
+"ssdlc_planning.py" = ["docs/task-mode.md"]
+"ssdlc_requirements.py" = ["docs/task-mode.md"]
+"ssdlc_gate_reports.py" = ["docs/native-gate-convergence.md", "docs/task-mode.md"]
+"ssdlc_findings.py" = ["docs/native-gate-convergence.md", "docs/task-mode.md"]
+"ssdlc_usage_admission.py" = ["docs/bounded-recovery.md", "docs/cost-telemetry.md", "docs/recovery.md"]
+"ssdlc_replay_gate.py" = ["docs/bounded-recovery.md", "docs/development.md"]
+"ssdlc_grader.py" = ["docs/bounded-recovery.md"]
+"ssdlc_owner_revalidation.py" = ["docs/developer-feedback.md", "docs/task-mode.md"]
+"ssdlc_impact.py" = ["docs/developer-feedback.md", "docs/task-mode.md"]
+"ssdlc_operator_recovery.py" = ["docs/developer-feedback.md"]
+"ssdlc_amendments.py" = ["docs/scope-amendments.md"]
+"ssdlc_verification_repair.py" = ["docs/scope-amendments.md", "docs/recovery.md"]
+"ssdlc_deadline_extensions.py" = ["docs/scope-amendments.md"]
+"ssdlc_limit_extensions.py" = ["docs/limit-extensions.md", "docs/recovery.md"]
+"ssdlc_locks.py" = ["docs/writer-fencing.md"]
+# One key per schema, towards the document that uses it: no "schemas/" prefix, since the entries
+# that cover a file add up.
+"schemas/advisory-event.schema.json" = ["docs/task-mode.md"]
+"schemas/advisory-proposals.schema.json" = ["docs/task-mode.md"]
+"schemas/bootstrap-profile.schema.json" = ["docs/task-mode.md"]
+"schemas/candidate-capture.schema.json" = ["docs/candidate-capture.md"]
+"schemas/candidate-evidence.schema.json" = ["docs/native-gate-convergence.md"]
+"schemas/context-disclosure.schema.json" = ["docs/native-gate-convergence.md"]
+"schemas/continuation-proposal.schema.json" = ["docs/continuations.md"]
+"schemas/continuation-snapshot.schema.json" = ["docs/continuations.md"]
+"schemas/convergence-decision.schema.json" = ["docs/native-gate-convergence.md"]
+"schemas/corrective-transaction.schema.json" = ["docs/bounce-preview.md", "docs/native-gate-convergence.md"]
+"schemas/design-review.schema.json" = ["docs/task-mode.md"]
+"schemas/diagnosis-record.schema.json" = ["docs/native-gate-convergence.md"]
+"schemas/gate-findings.schema.json" = ["docs/task-mode.md"]
+"schemas/history-snapshot.schema.json" = ["docs/native-gate-convergence.md"]
+"schemas/limit-extension-authorization.schema.json" = ["docs/limit-extensions.md"]
+"schemas/limit-extension-proposal.schema.json" = ["docs/limit-extensions.md"]
+"schemas/plan.schema.json" = ["docs/task-mode.md"]
+"schemas/quality-contract.schema.json" = ["docs/configuration.md"]
+"schemas/reconciliation-authorization.schema.json" = ["docs/historical-reconciliation.md"]
+"schemas/reconciliation-proposal.schema.json" = ["docs/historical-reconciliation.md"]
+"schemas/reconciliation-request.schema.json" = ["docs/historical-reconciliation.md"]
+"schemas/recovery-grader-baseline.json" = ["docs/bounded-recovery.md", "docs/devloop/reference.md"]
+"schemas/recovery-limits.schema.json" = ["docs/bounded-recovery.md", "docs/historical-reconciliation.md"]
+"schemas/task-manifest.schema.json" = ["docs/task-mode.md"]
+"schemas/task-plan-review.schema.json" = ["docs/task-mode.md"]

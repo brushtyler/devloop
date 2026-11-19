@@ -23,6 +23,7 @@ from devloop.github import GitHub, GitHubError
 from devloop.pin import Repinned, SmokeError
 from devloop.planning import Action, Snapshot, admit, plan
 from devloop.watch import NOTHING_NEW
+from helpers import ssdlc_project
 from helpers.devloop_fakes import FakeGH
 from test_devloop import CFG, FakeRunner, FakeWS, norm, pr, raw_review, ready
 from test_devloop_merge import READY, STRICT
@@ -992,7 +993,7 @@ class CommandTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp)
 
     def mode(self, parallel):
-        cfg = dataclasses.replace(config.load_config(), max_parallel_actions=parallel)
+        cfg = dataclasses.replace(ssdlc_project.load(), max_parallel_actions=parallel)
         dispatcher = SimpleNamespace(tick=mock.Mock(return_value=[]), gh=mock.Mock(),
                                      identities=None)
         seen = []

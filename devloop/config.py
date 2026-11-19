@@ -20,7 +20,9 @@ DEFAULT_CONFIG = Path(__file__).resolve().parent / 'config.toml'
 # The root of the running dispatcher's installation (a pinned checkout, see docs/devloop/guide.md):
 # relative ``sensitive_path_lists`` are read from here, never from a PR branch.
 INSTALL_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_SENSITIVE_LISTS = ('schemas/recovery-grader-baseline.json',)
+# The installation has no list of its own: the lists are facts of the managed repository, added
+# by the project file (ADR 0006, R3; ssdlc's in ops/host/ssdlc/project.toml).
+DEFAULT_SENSITIVE_LISTS = ()
 AGENT_KINDS = ('claude', 'codex', 'agy')
 STALL_ACTIONS = ('warn', 'abort')
 # A fallback model never reasons below ``high`` (issue #121).
@@ -123,6 +125,7 @@ class PinPolicy:
     new ones except implementations (#342) still start, for at most ``restart_max_wait_minutes``
     (#301): after that no action starts until the restart."""
     auto: bool = False
+    # The directories of the installation, which the pin extracts; ``parse_pin`` adds the lists.
     paths: tuple = ('devloop/', 'core/') + DEFAULT_SENSITIVE_LISTS
     restart_max_wait_minutes: int = 30
 
@@ -1348,6 +1351,10 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
     it enters the version of the review policy, and so every receipt. ``agent_test_cmd``, when
     given, is the test command the default commands of agy derive from instead of
     ``test_cmd``: the agents' permissions are the installation's and the overlay's (D2)."""
+    if 'test_cmd' not in data:
+        # The installation has none since ADR 0006, R3: it is a fact of the project.
+        raise ConfigError("config: missing 'test_cmd': set it in the project file on the host, "
+                          '<state_dir>/project.toml (--project-config; the launcher passes it)')
     test_cmd = _require(data, 'test_cmd', str, 'config')
     agent_cmd = test_cmd if agent_test_cmd is None else agent_test_cmd
     agents, declared = {}, set()

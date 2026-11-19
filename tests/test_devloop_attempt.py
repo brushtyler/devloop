@@ -11,11 +11,12 @@ from unittest import mock
 
 import devloop
 from devloop import markdown
-from devloop.config import ConfigError, load_config, load_data, parse_config
+from devloop.config import ConfigError, parse_config
 from devloop.dispatcher import Dispatcher
 from devloop.journal import JOURNAL, AttemptActive, JournalError, TurnJournal
 from devloop.ledger import Ledger, attempt_branch, attempt_marker, parse_branch
 from devloop.planning import Action, plan
+from helpers import ssdlc_project
 from helpers.devloop_fakes import META, SHA1
 from test_devloop import CFG, implemented
 from test_devloop_ledger import ReportingRunner, TreeWS
@@ -264,7 +265,7 @@ class AttemptDispatcherTests(unittest.TestCase):
 
     def test_existing_prs_without_marker_work_as_today(self):
         # Off by default: no attempt in the journal, in the PR marker or in the turn records.
-        self.assertFalse(load_config().attempt_identity)
+        self.assertFalse(ssdlc_project.load().attempt_identity)
         for cfg in (CFG, STORY):
             with self.subTest(story=cfg.story_identity):
                 d = self.make(cfg)
@@ -511,7 +512,7 @@ class AttemptRecordTests(unittest.TestCase):
             'x', 'ledger', dict(turn, attempt='story-3-0123abcd')), 'ledger'))
 
     def test_the_configuration_key(self):
-        data = load_data()
+        data = ssdlc_project.data()
         data.pop('attempt_identity', None)
         self.assertFalse(parse_config(data).attempt_identity)
         on = dict(data, story_identity=True, attempt_identity=True)

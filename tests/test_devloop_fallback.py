@@ -13,12 +13,13 @@ from devloop import activity, agents, config, markdown, policy
 from devloop.dispatch_actions import Models
 from devloop.dispatcher import Dispatcher
 from devloop.planning import Action, Snapshot
+from helpers import ssdlc_project
 from helpers.devloop_fakes import FakeGH, FakeIdentities
 from test_devloop import CFG, IMPL, SHA1, FakeRunner, FakeWS, implemented, pr, raw_review
 from test_devloop_quorum import FIRST, SECOND, Quorum
 
 # One action at a time, as in test_devloop.CFG: parallel actions (#176) are tested on their own.
-DATA = dict(tomllib.loads(config.DEFAULT_CONFIG.read_text()), max_parallel_actions=1)
+DATA = dict(ssdlc_project.data(), max_parallel_actions=1)
 ARGON, HYDROGEN = 'gemini-4-argon-high', 'gemini-4-hydrogen-high'
 QUOTA = 'Error: RESOURCE_EXHAUSTED: quota of gemini-4-argon-high exhausted for today'
 

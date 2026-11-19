@@ -12,7 +12,6 @@ import dataclasses
 import importlib.util
 import os
 import tempfile
-import tomllib
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,11 +21,12 @@ from devloop import apps, config
 from devloop.config import AppConfig, ConfigError, SupervisorActor
 from devloop.dispatcher import Dispatcher
 from devloop.watch import Trust
+from helpers import ssdlc_project
 from test_devloop import CFG, FakeGH, FakeIdentities, FakeRunner, FakeWS, pr, raw_review
 from test_devloop_supervision import AUTO, HUMAN, REVIEW, SUPER, Case, crash
 
 ROOT = Path(__file__).resolve().parents[1]
-DATA = tomllib.loads(config.DEFAULT_CONFIG.read_text())
+DATA = ssdlc_project.data()
 SUPERVISOR_APP = 'brushtyler-devloop-supervisor[bot]'
 AGENT_APP = 'agy-agent[bot]'  # the app of the agent the supervisor of AUTO names
 TABLE = {'name': 'agy-supervisor', 'kind': 'agy', 'provider': 'google',
@@ -53,7 +53,7 @@ def with_roles(**roles):
 
 class ConfigTests(unittest.TestCase):
     def test_off_by_default_with_the_app_declared(self):
-        cfg = config.load_config()
+        cfg = ssdlc_project.load()
         self.assertEqual((cfg.supervisor, cfg.supervisor_actor), ('', None))
         self.assertEqual(cfg.apps['supervisor'],
                          AppConfig(5824243, 'brushtyler-devloop-supervisor'))
@@ -71,7 +71,7 @@ class ConfigTests(unittest.TestCase):
             local = Path(tmp) / 'config.local.toml'
             local.write_text('[roles.supervisor]\nname = "claude-supervisor"\nkind = "claude"\n'
                              'provider = "anthropic"\nmodel = "claude-opus-5-5"\n')
-            cfg = config.load_config(None, local)
+            cfg = ssdlc_project.load(local)
         self.assertEqual(cfg.supervisor_actor,
                          SupervisorActor('claude-supervisor', 'claude', 'anthropic',
                                          'claude-opus-5-5'))
@@ -125,7 +125,7 @@ class ConfigTests(unittest.TestCase):
 
 class IdentityTests(unittest.TestCase):
     def test_devloop_never_reads_the_supervisors_key(self):
-        cfg = config.load_config()
+        cfg = ssdlc_project.load()
         with tempfile.TemporaryDirectory() as tmp:
             for actor, app in cfg.apps.items():
                 if actor != apps.SUPERVISOR:

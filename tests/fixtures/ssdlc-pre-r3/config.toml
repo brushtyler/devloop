@@ -1,0 +1,558 @@
+# devloop: dispatcher that moves issues labelled `agent:ready` through
+# implementation, independent structured review and fixes, up to a PR that a
+# human merges (or devloop, see [merge]). See docs/devloop/guide.md; every key is in
+# docs/devloop/reference.md.
+
+repo = "brushtyler/ssdlc"
+base_branch = "main"
+branch_prefix = "agent/issue-"
+# Worktrees, logs and the lock live here, relative to the main checkout (ignored by git).
+state_dir = ".ssdlc/devloop"
+# The same tests as `python3 -m unittest discover -s tests`, split across parallel worker
+# processes (each runs several modules in turn, like the serial discover does in one process).
+test_cmd = "python3 scripts/run-tests.py"
+# Local tests after each writing turn: implement, fix, sync with conflicts (issue #169).
+# "full" runs test_cmd, "changed" only the test modules pertinent to the branch's diff against
+# the base (none when, say, only documentation changed), "none" nothing. The CI stays the gate:
+# without "full" a review needs the CI passed, and a head without CI gets test_cmd locally
+# before its review.
+local_tests = "changed"
+# A first CI failure on a head whose failed test modules (the `FAILED MODULE` lines of
+# scripts/run-tests.py) are not pertinent to the PR's diff, with the same correspondence as
+# local_tests = "changed", is re-run once instead of becoming a round (issue #200). It needs
+# `actions: write` on the dispatcher's app; without it the failure is a round, as before.
+ci_rerun_unrelated = true
+# The journal of the turns in state_dir (issue #362) records each turn's intent before its CLI
+# starts, and its outcome. A turn left without outcome becomes `uncertain` and is never re-run
+# automatically. With this key on, it also refuses every new turn of the same work (the issue
+# and its PRs), with an escalation, until a trusted user reconciles it with
+# `/devloop reconcile`. Off here: turning it on is the operator's decision (ADR 0004, D8).
+block_uncertain_turns = false
+# The story identity (issue #363, ADR 0004, P2-3a): at the takeover of an issue the journal of
+# state_dir assigns it a story, or adds the new request hash to the story it already has, and the
+# comment of its `request` record carries the dispatcher's `story` marker. An issue inherits the
+# story of another only from that marker, never from text. Off here: turning it on is the
+# operator's decision (ADR 0004, D8).
+story_identity = false
+# The outbox of the publications (issue #385): every comment, comment edit, native review and
+# pull request devloop writes (ledger records, agent outputs, receipts, escalations) is saved in
+# the journal of the turns before it is sent. An uncertain outcome (timeout, 5xx) is reconciled
+# on the exact comment of the same author before any new POST, never sent again on absence
+# alone, and a restart resumes what was left half published.
+# Off here: turning it on is the operator's decision (ADR 0004, D8).
+publication_outbox = false
+# The attempt identity (issue #384, ADR 0004, P2-3b): an implementation runs in an attempt the
+# journal opens before its first turn, one active attempt per phase; the PR marker and the turn
+# records carry it, and a new attempt starts only once the previous one is concluded (its PR
+# merged or closed). It needs story_identity = true. Off here: turning it on is the operator's
+# decision (ADR 0004, D8).
+attempt_identity = false
+# The limit of the journal of the turns in state_dir, in MiB (issue #397). Its size is checked
+# before it is loaded and before each event: beyond the limit it is not loaded and no event is
+# written, so no turn starts, and nothing is ever removed from it. From 80% of the limit devloop
+# warns the operator, once, on [run].alert_issue, or at each start in the log without one.
+journal_max_mib = 64
+# Language of the text that agents write for GitHub.
+language = "Italian"
+
+# Only these logins may start work (`agent:ready`) or write markers that devloop reads.
+trusted_users = ["brushtyler"]
+
+# Readiness check before implement (issue #114): a read-only agent, other than the implementer,
+# checks on a checkout of main that the issue can be implemented in one run, and an issue that
+# is not ready goes to agent:needs-operator without starting the implementer. Each check takes a
+# slot of max_actions_per_tick. Disabled here: enabling it is the operator's decision.
+# preflight = "codex"
+
+# Conclave on a block (issue #141): when the implementer or a fixer stops as blocked, or a
+# reviewer asks for the operator, these three agents (distinct by GitHub identity and by
+# kind, model and effort, the one that stopped among them) vote on one written resolution. The
+# outcome (UNANIMOUS, BLOCKED or RESERVED) is recorded on the issue or PR, which stays in
+# agent:needs-operator. Each call takes a slot of max_actions_per_tick. Disabled here: enabling
+# it is the operator's decision.
+# conclave = ["claude", "codex", "agy"]
+
+max_open_prs = 2            # devloop PRs in progress at once; new issues wait
+# PRs waiting for a person (issue #199): agent:needs-operator, and agent:ready-to-merge when
+# devloop does not merge them ([merge] mode "off", a level override "off", operator_only_paths;
+# since issue #248 these get agent:needs-operator too). They do not take the slots of
+# max_open_prs; once this many are open, only priority:high issues start (issue #274).
+max_parked_prs = 3
+max_review_rounds = 3       # review rounds (including CI failures) before escalating
+max_actions_per_tick = 3
+# Actions of one tick on different issues and PRs run at once, up to this many (issue #176): two
+# actions on the same issue or PR (or on a PR and its issue) stay in plan order, and at level 2
+# one review action runs every reviewer the round waits for. Default 1: one action at a time.
+max_parallel_actions = 3
+implement_test_retries = 1  # extra implementer attempts when local tests fail
+agent_timeout_seconds = 3600
+test_timeout_seconds = 3600     # suite: ~8 min with test_cmd on 4 CPUs, ~25 min serially
+# Claude Code Bash commands that set no timeout stop after this; a command may ask for up to
+# test_timeout_seconds (issue #96).
+agent_command_timeout_seconds = 600
+# An agent turn with no new event in its session transcript and no child process using CPU for
+# this long is reported as stalled in the tick log and in `devloop status` (issue #100).
+# agent_stall_action: "warn" only reports it; "abort" also stops the turn and escalates it to
+# agent:needs-operator with a comment.
+agent_stall_seconds = 900
+agent_stall_action = "warn"
+
+blocked_labels = ["bloccata"]
+# Ready issues start by priority (priority:high, priority:normal, priority:low), then by the
+# latest agent:ready, then by number (issue #146). These labels count as priority:high. Every
+# priority label counts only if a user in trusted_users added it, or roles.supervisor's app on
+# an issue of a trusted user or of a devloop app (issue #178).
+priority_labels = ["prerequisito"]
+
+# Changes under these paths are never pushed by devloop: a workflow or a local action pushed to
+# a branch of this repository would run in CI before anyone reviewed it.
+protected_paths = [".github/"]
+
+# Review level of a devloop PR (issue #106): the highest of default_level, level 2 when a trusted
+# user ever added `label` to the PR, level 2 when the PR's full diff against the base touches a
+# sensitive path, and any level already recorded on the PR. Level 1 needs one reviewer, level 2
+# two independent ones from roles.reviewers (issue #111). The policy comes from the running
+# dispatcher, never from the PR branch; its hash, which covers the reviewers' apps, models,
+# efforts and review_args too, goes into every receipt.
+[review_policy]
+default_level = 1
+label = "reviews:2"
+# Directory prefixes (ending in "/") or files, relative to the repository root. The code that
+# decides permissions, fencing and authorizations goes to level 2 (issue #171); a listed file
+# that does not exist yet is just a path.
+sensitive_paths = ["devloop/", "AGENTS.md", "CLAUDE.md", ".github/", "schemas/",
+                   # Writer fencing and locks.
+                   "ssdlc_writer_gate.py", "ssdlc_role_fencing.py",
+                   "ssdlc_container_holder.py", "ssdlc_locks.py", "ssdlc_fencing_proof.py",
+                   # Authorized transitions and gates.
+                   "ssdlc_transitions.py", "ssdlc_replay_gate.py", "ssdlc_grader.py",
+                   # Delegations and admissions.
+                   "ssdlc_feedback_delegation.py", "ssdlc_feedback_admission.py",
+                   "ssdlc_usage_admission.py",
+                   # App tokens.
+                   "scripts/agent-token.py", "scripts/supervisor-token.py"]
+# JSON files whose "files" object lists more sensitive paths, read at startup relative to the
+# root of the running devloop installation (a pinned checkout); a missing file stops devloop.
+sensitive_path_lists = ["schemas/recovery-grader-baseline.json"]
+# Advisory review (issue #369): the agent that writes one more review, as a native `COMMENT`
+# review with its own identity, of each head of a PR in agent:needs-operator. It may be the
+# implementer: it never counts for the quorum nor for the round limit, opens no finding and
+# changes no label; devloop never reads it to decide. Empty (the default) turns it off; the
+# local overlay turns it on, e.g. advisory_reviewer = "claude". It is not part of the policy
+# version.
+advisory_reviewer = ""
+
+# Level 0 (issue #107): no review. It applies only when a trusted user added `label` to the PR
+# (the latest event of that label added it), the level computed above is 1, and the PR's full
+# diff is inside `allowlist`. The head then goes to agent:ready-to-merge (never merged) once
+# every check run in `checks` concluded `success` on it; a missing, pending, skipped, neutral
+# or cancelled check is not a success. An empty allowlist or an empty `checks` (the default)
+# turns level 0 off. Allowlist entries are directories ("docs/") or files; a Markdown file
+# counts only when listed by its exact path. AGENTS.md and CLAUDE.md at any depth,
+# devloop/prompts/, standards/, .github/, schemas/ and the sensitive paths are never allowed.
+[review_policy.zero]
+label = "reviews:0"
+allowlist = []
+# Check runs by exact name and GitHub App id, e.g. { name = "unittest", app_id = 15368 }.
+checks = []
+
+# Merge (issue #172). mode:
+# - "off" (default): a person merges every PR, as before;
+# - "strict": devloop merges a PR in agent:ready-to-merge, with a merge commit bound to the
+#   approved head (--match-head-commit), with the app of [apps.merger] (else the local `gh`
+#   login it runs with), only if, read
+#   again just before the merge: the conditions of the promotion still hold (every required
+#   approve, no open finding, head = approved commit, policy receipt recomputed and matching;
+#   at level 0 the checks of its promotion), CI is `pass`, GitHub reports MERGEABLE and CLEAN,
+#   and neither agent:needs-operator nor agent:merge-hold is set. The branch is kept;
+# - "auto": as "strict", and the supervisor (roles.supervisor) or a trusted user can hold a
+#   merge with `/devloop hold <reason>` and allow it again with `/devloop release`. Needs
+#   roles.supervisor.
+# Each merge takes a slot of max_actions_per_tick and runs alone. Enabling it is the operator's
+# decision.
+[merge]
+mode = "off"
+# A PR touching one of these paths (directories ending in "/" or files from the root) is merged
+# by a person, whatever the mode. A ready PR that devloop does not merge, for these paths, the
+# mode or a level "off", gets agent:needs-operator and a dispatcher comment (issue #248).
+operator_only_paths = ["docs/adr/", "AGENTS.md", "CLAUDE.md"]
+# A mode per review level: the most restrictive of this and `mode` applies (off, then strict,
+# then auto).
+# [merge.levels]
+# "2" = "off"
+
+# Pinned installation (issue #174, see docs/devloop/guide.md). With auto = true, after a merge by
+# devloop whose diff touches devloop/, core/ (issue #365) or a file of
+# review_policy.sensitive_path_lists, the next
+# tick runs `pin origin/<base_branch>` before planning, and `run` and `tick` start again from the
+# new copy; a failed pin stops the tick and leaves the pinned copy as it was. Enabling it is the
+# operator's decision. With parallel actions (`devloop run`, issue #301) the pin runs at once and
+# the loop keeps planning with the code it loaded; it restarts as soon as no action runs. After
+# restart_max_wait_minutes of a pending restart no new action starts until the restart.
+[pin]
+auto = false
+restart_max_wait_minutes = 30
+
+# The cleanup of state_dir (issue #380, see docs/devloop/guide.md). It runs at a tick with
+# nothing running, at most every interval_minutes (0: at every such tick), and with `devloop gc`;
+# each removal goes to the log. pins: after a successful pin, keep `current` and the keep_pins
+# copies pinned most recently, and remove the other pinned-* copies that no process uses.
+# worktrees: remove the worktrees of closed issues and of closed or merged PRs. logs (off by
+# default, turned on in the local overlay): remove the files of logs/ not modified for log_days
+# days, never the evidence of an open escalation nor the files of a turn still open in the ledger.
+[gc]
+pins = true
+keep_pins = 5
+worktrees = true
+logs = false
+log_days = 14
+interval_minutes = 60
+
+# The system user of the agents and of the tests (issue #415, see docs/devloop/reference.md):
+# with a name, the dispatcher starts the agent CLIs and the test command as that user through
+# `sudo -n -E -u <name>`, so that they cannot read the app keys (key_dir), state_dir nor the
+# local overlay. Empty: they run as the dispatcher's user, as before. The host prepared by
+# ops/host/setup-agent-user.sh sets name = "devloop-agent" in the local overlay. check: at the
+# start of `tick` and `run`, refuse to start when that user can read or enter key_dir or
+# state_dir, can write the repository's .git or the directories that hold the worktrees and its
+# turns, or cannot write the directories of its turns; false only in development.
+[agent_user]
+name = ""
+check = true
+
+# `devloop run` (issue #177): after three consecutive failed ticks the loop stops and the
+# dispatcher posts an alert on this issue; without it the alert goes only to the local log, and
+# the loop stops all the same. Which issue gets it is the operator's choice (local overlay).
+[run]
+# alert_issue = 123
+
+# `devloop report` (issue #256): the daily summary of devloop's records. With `--publish`, and in
+# `devloop run` at most every `interval` minutes, the dispatcher keeps today's summary in the
+# body of this issue, a dedicated one, and archives each closed day in a comment. Without it
+# `--publish` refuses and `run` publishes nothing. Which issue is the operator's choice (local
+# overlay).
+[report]
+# issue = 123
+interval = 15
+
+# The CI of a new head (issue #263). With local_tests other than "full", a PR in agent:review
+# whose head has no CI yet is not reviewed for grace_minutes after its push (the dispatcher's own
+# push, else the commit date): GitHub may not have registered the CI yet. After that the full
+# suite runs locally before the review, as before, unless the rulesets or the branch protection
+# of base_branch require checks: then the review waits for them, and after
+# required_timeout_minutes from the push the PR goes to agent:needs-operator (class ci_missing).
+[ci]
+grace_minutes = 5
+required_timeout_minutes = 30
+
+# The budget envelope of each story (issue #365, ADR 0004, P2-5a). With enabled = true each turn
+# of an agent is booked, before its CLI starts, in the envelope of its story (it needs
+# story_identity = true), and a turn the envelope does not cover is refused with an escalation
+# (class budget). Consumption is cumulative across child issues, attempts, fallback models,
+# retries and restarts, recorded in the journal of state_dir; nothing refunds a booking. The
+# readiness check (preflight) is outside the envelope. With enabled = true every value is
+# required, with no default: turns of the story, wall_seconds from its first booking, the dollar
+# caps metered_usd (measured spend) and cli_estimate_usd (estimates, today claude's), both above 0
+# (a cap is exhausted at equality: 0 would refuse every turn), role_turns for
+# implement, fix, review and sync (conclave and advisory too when configured), phase_turns for
+# implementation, and in [budget.usage.<agent>] a rule for every agent, claude included (#396):
+# model = "unmetered_quota" (no reserve in USD, only the turn caps, D2) and a reason, the only
+# rule of codex and agy; "reserve_per_invocation" (with metered_usd and cli_estimate_usd) only for
+# claude. The limits a story gets at its first booking stay its own: a later change applies to
+# new stories. Token caps are refused: not supported yet. Off here: the values and turning it on
+# are the operator's decisions (ADR 0004, D2 and D8). enabled = true is refused at startup until
+# a story at its limit can be extended (grant-budget, ADR 0005; docs/devloop/reference.md,
+# "Prerequisites of activation").
+# The shape, with no value: the values are not decided yet (D2).
+[budget]
+enabled = false
+# turns = <turns>
+# wall_seconds = <seconds>
+# metered_usd = <dollars>
+# cli_estimate_usd = <dollars>
+# [budget.role_turns]
+# implement = <turns>
+# fix = <turns>
+# review = <turns>
+# sync = <turns>
+# [budget.phase_turns]
+# implementation = <turns>
+# [budget.usage.codex]
+# model = "unmetered_quota"
+# reason = "codex reports no cost: the turn caps bound it"
+# [budget.usage.agy]
+# model = "unmetered_quota"
+# reason = "agy reports no cost: the turn caps bound it"
+# [budget.usage.claude]
+# model = "unmetered_quota"
+# reason = "claude reports its estimate only when a turn completes"
+
+# The delegations of the operator to the supervisor (ADR 0005), each with its revocation key, all
+# off here: turning one on is the operator's decision (D10); turned off, it is revoked from the
+# next tick. rounds (issue #405, P5-1): in merge mode "auto", a PR at the round limit whose
+# conditions hold (the latest counted round a CI failure or fewer open blocking findings than the
+# round before, no open security finding, the conditions of the supervisor's other escalations)
+# goes to the supervisor as round_grantable, and `/devloop grant-round <reason>` grants it one
+# more round, with the analysis of the causes in the reason; turned off, the round limit goes to
+# the operator, as before. max_rounds_per_pr and max_grants_per_day may only lower the caps of
+# the code (2 rounds per PR, 3 grants per UTC day, ADR 0005, D4): a higher value is refused at
+# startup. retry_own_prs (issue #406, P5-2): in "auto", a tool_failure escalation on a PR
+# implemented by the agent of roles.supervisor goes to the supervisor, who may retry it with
+# /devloop retry within the 2 retries it shares with the operator; every other class on such a PR
+# still goes to the operator.
+[delegations]
+rounds = false
+retry_own_prs = false
+# max_rounds_per_pr = 2
+# max_grants_per_day = 3
+
+# Documentation map (issue #203): code paths and the documents that describe them. A key is a
+# directory prefix ending in "/" or a file, relative to the root, with no pattern characters;
+# each value lists one or more documents of the repository (a pin does not extract them, #210).
+# The implement, fix and review prompts list the documents mapped to the files of the diff that
+# the worktree holds (a missing one is omitted, with a line in the log)
+# (the first implement prompt, with an empty diff, gets the whole map): an implementer updates
+# those whose described behaviour changes, and a reviewer reports a documented behaviour changed
+# without its document as a blocking finding. A file no key covers asks for nothing.
+[docs.map]
+"devloop/" = ["docs/devloop/guide.md"]
+"devloop/config.py" = ["docs/devloop/reference.md"]
+"devloop/config.toml" = ["docs/devloop/reference.md"]
+"devloop/budget.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
+"devloop/agents.py" = ["docs/devloop/reference.md"]
+"devloop/unavailability.py" = ["docs/devloop/reference.md"]
+"devloop/localtests.py" = ["docs/devloop/reference.md"]
+"devloop/workspace.py" = ["docs/devloop/reference.md"]
+"devloop/apps.py" = ["docs/devloop/reference.md"]
+"devloop/prompts/" = ["docs/devloop/reference.md"]
+"devloop/markdown.py" = ["docs/devloop/protocol.md"]
+"devloop/ledger.py" = ["docs/devloop/protocol.md"]
+"devloop/acceptance.py" = ["docs/devloop/protocol.md"]
+"devloop/review.py" = ["docs/devloop/protocol.md"]
+"devloop/policy.py" = ["docs/devloop/protocol.md", "docs/devloop/reference.md"]
+"devloop/schemas/" = ["docs/devloop/protocol.md"]
+"devloop/dispatcher.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
+"devloop/context.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
+"devloop/planning.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
+"devloop/dispatch_supervision.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
+"devloop/dispatch_preflight.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
+"devloop/dispatch_merge.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
+"devloop/dispatch_actions.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
+"devloop/dispatch_conclave.py" = ["docs/devloop/reference.md", "docs/devloop/protocol.md"]
+"devloop/conclave.py" = ["docs/devloop/protocol.md"]
+"devloop/ports.py" = ["docs/architecture.md"]
+"devloop/github.py" = ["docs/architecture.md"]
+"scripts/devloop-pinned" = ["docs/devloop/guide.md"]
+"scripts/run-tests.py" = ["docs/development.md"]
+"orchestrator.py" = ["docs/getting-started.md", "docs/architecture.md"]
+"ssdlc_tasks.py" = ["docs/getting-started.md", "docs/architecture.md"]
+"ssdlc_controller.py" = ["docs/getting-started.md", "docs/architecture.md"]
+"setup-ssdlc.sh" = ["docs/getting-started.md", "docs/configuration.md"]
+"ssdlc_writer_gate.py" = ["docs/writer-fencing.md"]
+"ssdlc_role_fencing.py" = ["docs/writer-fencing.md"]
+"ssdlc_container_holder.py" = ["docs/writer-fencing.md"]
+"ssdlc_fencing_proof.py" = ["docs/writer-fencing.md", "docs/recovery.md"]
+"ssdlc_telemetry.py" = ["docs/cost-telemetry.md", "docs/bounded-recovery.md"]
+"ssdlc_quota.py" = ["docs/cost-telemetry.md"]
+"ssdlc_recovery.py" = ["docs/cost-telemetry.md", "docs/bounded-recovery.md"]
+"ssdlc_feedback.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_admission.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_analysis.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_bindings.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_delegation.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_delivery.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_return.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_roles.py" = ["docs/developer-feedback.md"]
+"ssdlc_feedback_workflow.py" = ["docs/developer-feedback.md"]
+"ssdlc_scope_amendments.py" = ["docs/scope-amendments.md", "docs/recovery.md"]
+"ssdlc_continuations.py" = ["docs/continuations.md", "docs/historical-reconciliation.md", "docs/recovery.md"]
+"ssdlc_historical.py" = ["docs/continuations.md", "docs/historical-reconciliation.md", "docs/recovery.md"]
+"ssdlc_catalogues.py" = ["docs/configuration.md"]
+# ADR 0003, I10 (#247): the modules and schemas without a document, each checked against the
+# document that describes its behaviour.
+"scripts/agent-token.py" = ["AGENTS.md", "docs/devloop/reference.md"]
+"scripts/supervisor-token.py" = ["AGENTS.md", "docs/devloop/reference.md"]
+"ssdlc_reconciliation.py" = ["docs/historical-reconciliation.md", "docs/recovery.md"]
+"ssdlc_transitions.py" = ["docs/recovery.md"]
+"ssdlc_preparations.py" = ["docs/continuations.md", "docs/historical-reconciliation.md", "docs/scope-amendments.md"]
+"ssdlc_supervisor.py" = ["docs/supervision.md", "docs/writer-fencing.md"]
+"ssdlc_bounce.py" = ["docs/bounce-preview.md"]
+"ssdlc_corrective.py" = ["docs/bounce-preview.md", "docs/native-gate-convergence.md"]
+"ssdlc_corrective_owners.py" = ["docs/bounce-preview.md", "docs/developer-feedback.md"]
+"ssdlc_candidates.py" = ["docs/candidate-capture.md"]
+"ssdlc_bootstrap.py" = ["docs/task-mode.md", "docs/native-gate-convergence.md"]
+"ssdlc_design.py" = ["docs/task-mode.md", "docs/bounded-recovery.md"]
+"ssdlc_planning.py" = ["docs/task-mode.md"]
+"ssdlc_requirements.py" = ["docs/task-mode.md"]
+"ssdlc_gate_reports.py" = ["docs/native-gate-convergence.md", "docs/task-mode.md"]
+"ssdlc_findings.py" = ["docs/native-gate-convergence.md", "docs/task-mode.md"]
+"ssdlc_usage_admission.py" = ["docs/bounded-recovery.md", "docs/cost-telemetry.md", "docs/recovery.md"]
+"ssdlc_replay_gate.py" = ["docs/bounded-recovery.md", "docs/development.md"]
+"ssdlc_grader.py" = ["docs/bounded-recovery.md"]
+"ssdlc_owner_revalidation.py" = ["docs/developer-feedback.md", "docs/task-mode.md"]
+"ssdlc_impact.py" = ["docs/developer-feedback.md", "docs/task-mode.md"]
+"ssdlc_operator_recovery.py" = ["docs/developer-feedback.md"]
+"ssdlc_amendments.py" = ["docs/scope-amendments.md"]
+"ssdlc_verification_repair.py" = ["docs/scope-amendments.md", "docs/recovery.md"]
+"ssdlc_deadline_extensions.py" = ["docs/scope-amendments.md"]
+"ssdlc_limit_extensions.py" = ["docs/limit-extensions.md", "docs/recovery.md"]
+"ssdlc_locks.py" = ["docs/writer-fencing.md"]
+# One key per schema, towards the document that uses it: no "schemas/" prefix, since the entries
+# that cover a file add up.
+"schemas/advisory-event.schema.json" = ["docs/task-mode.md"]
+"schemas/advisory-proposals.schema.json" = ["docs/task-mode.md"]
+"schemas/bootstrap-profile.schema.json" = ["docs/task-mode.md"]
+"schemas/candidate-capture.schema.json" = ["docs/candidate-capture.md"]
+"schemas/candidate-evidence.schema.json" = ["docs/native-gate-convergence.md"]
+"schemas/context-disclosure.schema.json" = ["docs/native-gate-convergence.md"]
+"schemas/continuation-proposal.schema.json" = ["docs/continuations.md"]
+"schemas/continuation-snapshot.schema.json" = ["docs/continuations.md"]
+"schemas/convergence-decision.schema.json" = ["docs/native-gate-convergence.md"]
+"schemas/corrective-transaction.schema.json" = ["docs/bounce-preview.md", "docs/native-gate-convergence.md"]
+"schemas/design-review.schema.json" = ["docs/task-mode.md"]
+"schemas/diagnosis-record.schema.json" = ["docs/native-gate-convergence.md"]
+"schemas/gate-findings.schema.json" = ["docs/task-mode.md"]
+"schemas/history-snapshot.schema.json" = ["docs/native-gate-convergence.md"]
+"schemas/limit-extension-authorization.schema.json" = ["docs/limit-extensions.md"]
+"schemas/limit-extension-proposal.schema.json" = ["docs/limit-extensions.md"]
+"schemas/plan.schema.json" = ["docs/task-mode.md"]
+"schemas/quality-contract.schema.json" = ["docs/configuration.md"]
+"schemas/reconciliation-authorization.schema.json" = ["docs/historical-reconciliation.md"]
+"schemas/reconciliation-proposal.schema.json" = ["docs/historical-reconciliation.md"]
+"schemas/reconciliation-request.schema.json" = ["docs/historical-reconciliation.md"]
+"schemas/recovery-grader-baseline.json" = ["docs/bounded-recovery.md", "docs/devloop/reference.md"]
+"schemas/recovery-limits.schema.json" = ["docs/bounded-recovery.md", "docs/historical-reconciliation.md"]
+"schemas/task-manifest.schema.json" = ["docs/task-mode.md"]
+"schemas/task-plan-review.schema.json" = ["docs/task-mode.md"]
+
+[roles]
+# The agent whose GitHub identity may hold and release merges in "auto" mode (issue #172),
+# besides trusted_users. Its app's agent:ready and priority labels count too, but only on issues
+# opened by a trusted user or by a devloop app (issue #178). In "auto" it also decides the
+# non-critical escalations in agent:needs-supervisor with /devloop retry, accept-defaults,
+# decide (issue #258) and escalate (issue #182). In any merge mode it may ask for a fix of a PR in agent:review or
+# agent:changes with /devloop fix, as a trusted user may (issue #195).
+# supervisor = "claude"
+# The supervisor's role app (ADR 0005, P5-4, issue #408), off by default: turning it on is the
+# operator's decision (D10), best with an empty queue. As a table, roles.supervisor is the
+# supervisor actor, not a key of [agents] (devloop does not run it): its name is
+# "<kind>-supervisor", and kind, provider and model say which agent runs it. Its identity is then
+# the app of [apps.supervisor], and no longer the app of an agent: the commands, labels, issues
+# and fix or hold requests of the agent's app stop counting as the supervisor's. A PR counts as
+# implemented by the supervisor's agent when the kind or the model of its implementer, as its
+# marker records them, is the actor's.
+# [roles.supervisor]
+# name = "claude-supervisor"
+# kind = "claude"
+# provider = "anthropic"
+# model = "claude-opus-5-5"
+implementer = "claude"
+# The reviewer pool, in order; none may be the implementer. Level 1 uses the PR's recorded
+# reviewer (the first of the pool when the PR was opened). Level 2 takes the first pair that
+# differs both in GitHub identity (app) and in (kind, model, effort, review_args), and neither of
+# which shares the identity or (kind, model, effort) of the implementer or of a fixer of the PR;
+# without such a pair the PR goes to agent:needs-operator. `reviewer = "codex"` is a pool of one.
+reviewers = ["codex", "agy"]
+
+[agents.claude]
+kind = "claude"
+display_name = "Claude Code"
+model = "claude-opus-5-5"
+model_label = "Claude Opus 5.5"
+effort = "high"
+# No web tools: the repository is public, and its issues and comments are readable without
+# credentials; agents get the trusted content from the prompt only (issue #79).
+# `python3 -m unittest *` covers the targeted form that the implement and fix prompts suggest,
+# `python3 -m unittest discover -s tests -p 'test_name.py'` (issue #83).
+write_args = ["--permission-mode", "acceptEdits",
+              "--allowedTools", "Bash(python3 -m unittest *)", "Bash(git status *)",
+              "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)",
+              "--disallowedTools", "WebFetch", "WebSearch"]
+review_args = ["--allowedTools", "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)",
+               "Bash(python3 -m unittest tests.*)",
+               "Bash(PYTHONPATH=tests python3 -m unittest tests.*)",
+               "--disallowedTools", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]
+commit_trailer = "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+
+[agents.codex]
+kind = "codex"
+display_name = "Codex"
+model = "gpt-6.1-sol"
+model_label = "gpt-6.1-sol"
+# Reviews need the deeper pass: on PR #112 a medium review approved while a high one
+# reproduced five remaining defects (issue #123). The operator asked for high, never less.
+effort = "high"
+
+[agents.agy]
+kind = "agy"
+display_name = "Antigravity"
+model = "gemini-4-argon-high"
+model_label = "Gemini 4 Argon"
+effort = "high"
+# Argon has a budget of its own: when a turn fails because the model is unavailable (quota or
+# budget exhausted, model not available, rate limit), the same turn runs again on the next
+# fallback model, each at most once per action (issue #121). A fallback inherits `effort` when
+# it sets none, and never reasons below high. What counts as unavailable: `unavailable_patterns`
+# (default "RESOURCE_EXHAUSTED", "quota", "429", "model .* not available") in the output of a
+# failed turn, each as a delimited word or code (#443), or an exit code in
+# `unavailable_exit_codes` (default none). An output with only `(code 400)` never counts, not
+# even with a listed exit code.
+fallback_models = [
+    { model = "gemini-4-hydrogen-high", model_label = "Gemini 4 Hydrogen" },
+]
+# A model found unavailable is remembered in <state_dir>/model-unavailability.json, and the
+# next turns start from the first model of the chain not remembered (issue #151): until the
+# reset the error announces ("Resets in 152h4m35s"), else for fallback_memory_seconds (default
+# 3600). `devloop fallback reset agy` forgets it. Without fallback_models nothing is remembered.
+# fallback_memory_seconds = 3600
+# A model that a turn's denied permission stops twice (the retry included) is left for the next
+# model of the chain, and remembered the same way for denied_cooldown_hours (default 6, issue
+# #319). On the last model the turn escalates (tool_failure) naming the model and the command.
+# denied_cooldown_hours = 6
+# Headless agy cannot ask for a permission (issue #122): each turn gets, with --settings, only
+# `command(<prefix>)` rules for these command prefixes. Default for both lists: test_cmd,
+# "python3 -m unittest", "git status", "git diff", "git log", "git show". A bare interpreter,
+# shell or git (also by path, as /bin/sh), wildcards and shell syntax stop devloop at startup,
+# and so do --dangerously-skip-permissions and --settings in write_args or review_args.
+# Changing review_commands voids agy's earlier approvals, as a change of model would.
+# review_commands = ["python3 scripts/run-tests.py", "python3 -m unittest", "git diff"]
+# write_commands = [...]
+
+# GitHub Apps (issue #65): one per agent, one for the dispatcher, one for merges (#201) and one
+# for the supervisor (#408). App
+# ids and slugs are not secret. Private keys are read from key_dir (or $DEVLOOP_APP_KEY_DIR) as
+# <slug>.<date>.private-key.pem, mode 600. An actor without an app uses the ambient `gh` login.
+[apps]
+key_dir = "~/.ghapps"
+
+[apps.dispatcher]
+app_id = 5747835
+slug = "brushtyler-devloop-dispatcher"
+
+[apps.claude]
+app_id = 5735240
+slug = "brushtyler-devloop-claude-agent"
+
+[apps.codex]
+app_id = 5735296
+slug = "brushtyler-devloop-codex-agent"
+
+[apps.agy]
+app_id = 5735349
+slug = "brushtyler-devloop-agy-agent"
+
+# The app that merges in "strict" and "auto" mode (issue #201), installed on this repository only
+# with contents: write and pull_requests: write. It does nothing else, and scripts/agent-token.py
+# does not expose it. Without it, merges use the local `gh` login.
+[apps.merger]
+app_id = 5792929
+slug = "brushtyler-devloop-merger"
+
+# The supervisor's role app (ADR 0005, P5-4, issue #408), with issues: write and pull_requests:
+# write and no contents. It counts as the supervisor only with [roles.supervisor] as a table.
+# devloop never reads its key, which is in the key_dir of the supervisor's system user, not in
+# devloop's; the supervisor mints its tokens with scripts/supervisor-token.py, and
+# scripts/agent-token.py does not expose it.
+[apps.supervisor]
+app_id = 5824243
+slug = "brushtyler-devloop-supervisor"

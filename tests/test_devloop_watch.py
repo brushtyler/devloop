@@ -19,9 +19,10 @@ from unittest import mock
 from devloop import watch
 from devloop.__main__ import main
 from devloop.apps import DISPATCHER, STEP_TIMEOUT, AppAuth, Identities, http_json
-from devloop.config import load_config
 from devloop.github import GitHub, GitHubError, GitHubNotFound
 from devloop.markdown import marker
+from helpers import ssdlc_project
+from helpers.ssdlc_project import load as load_config
 
 OPERATOR = 'brushtyler'
 CLAUDE, CODEX, DISPATCH = 'dl-claude[bot]', 'dl-codex[bot]', 'dl-dispatcher[bot]'
@@ -947,6 +948,11 @@ class ExecTest(unittest.TestCase):
 
 
 class CommandLineTest(unittest.TestCase):
+    def setUp(self):
+        # The command line reads the installation's config.toml, which has no test_cmd since
+        # ADR 0006, R3: these tests read ssdlc's configuration as one file instead.
+        ssdlc_project.as_default(self)
+
     def test_invalid_combinations_are_refused(self):
         for argv in (['watch', '--exec', 'x', '--timeout', '5'],
                      ['watch', '--exec', 'x', '--until-change'],

@@ -1,7 +1,6 @@
 """devloop: PRs waiting for a person do not take the slots of max_open_prs (#199)."""
 
 import dataclasses
-import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -9,6 +8,7 @@ from unittest import mock
 from devloop import config
 from devloop.config import ConfigError, MergePolicy
 from devloop.planning import Snapshot, issue_priority, parked, plan, pr_counts
+from helpers import ssdlc_project
 from test_devloop import CFG, FakeWS, norm, pr, raw_review, ready
 from test_devloop_merge import AUTO, STRICT, Case
 from test_devloop_zero import changes
@@ -212,7 +212,7 @@ class SnapshotTests(Case):
 
 
 class ConfigTests(unittest.TestCase):
-    DATA = tomllib.loads(config.DEFAULT_CONFIG.read_text())
+    DATA = ssdlc_project.data()
 
     def test_max_parked_prs_is_configured_and_checked(self):
         self.assertEqual(config.Config.max_parked_prs, 3)

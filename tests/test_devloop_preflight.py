@@ -12,6 +12,7 @@ from devloop import agents, config, markdown, schema
 from devloop.dispatcher import FALLBACK_NOTE, Dispatcher, preflight_hash
 from devloop.planning import Snapshot, plan
 from devloop.workspace import Workspace
+from helpers import ssdlc_project
 from helpers.devloop_fakes import FakeGH
 from test_devloop import CFG, IMPL, REV, FakeRunner, FakeWS, implemented, pr
 from test_devloop_fallback import ARGON, HYDROGEN, FakeCLI
@@ -335,7 +336,7 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(self.gh.thread, [])
 
     def test_config_validation(self):
-        data = tomllib.loads(config.DEFAULT_CONFIG.read_text())
+        data = ssdlc_project.data()
         self.assertEqual(config.parse_config(dict(data, preflight=REV)).preflight, REV)
         for value in (IMPL, 'nobody', 1, ''):
             with self.subTest(value=value), self.assertRaises(config.ConfigError):

@@ -13,12 +13,13 @@ from devloop import config, markdown, policy
 from devloop.dispatcher import Dispatcher
 from devloop.planning import Action, Snapshot, counted_rounds, plan
 from devloop.workspace import Workspace
+from helpers import ssdlc_project
 from helpers.devloop_fakes import FakeGH, SnapshotGH
 from test_devloop import (BASE, CFG, SHA1, FakeRunner, FakeWS, finding, fixed, norm, pr,
                           raw_review, receipt)
 
 POLICY = CFG.review_policy
-DATA = tomllib.loads(config.DEFAULT_CONFIG.read_text())
+DATA = ssdlc_project.data()
 # The ssdlc modules that decide permissions, fencing and authorizations (#171).
 SECURITY_MODULES = {
     'ssdlc_writer_gate.py', 'ssdlc_role_fencing.py', 'ssdlc_container_holder.py',
@@ -51,12 +52,13 @@ class PolicyConfigTests(unittest.TestCase):
                               .read_text())
         self.assertEqual(set(POLICY.sensitive_files), set(baseline['files']))
         self.assertIn('ssdlc_grader.py', POLICY.sensitive_files)
-        # Without the table the code defaults apply: the generic paths, without the ssdlc
-        # security modules that config.toml adds (#171).
+        # Without the table the code defaults apply: no sensitive path and no list, since they
+        # are restrictions of the managed repository that its project file adds (ADR 0006, R3).
+        self.assertEqual(policy.ReviewPolicy.sensitive_paths, ())
+        self.assertEqual(config.DEFAULT_SENSITIVE_LISTS, ())
         omitted = {k: v for k, v in DATA.items() if k != 'review_policy'}
         self.assertEqual(config.parse_config(omitted).review_policy,
-                         dataclasses.replace(POLICY, sensitive_paths=policy.ReviewPolicy
-                                             .sensitive_paths))
+                         dataclasses.replace(POLICY, sensitive_paths=(), sensitive_files=()))
 
     def test_policy_version_is_the_hash_of_the_loaded_policy(self):
         self.assertRegex(POLICY.version(), r'^[0-9a-f]{64}$')

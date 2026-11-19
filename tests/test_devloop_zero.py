@@ -2,7 +2,6 @@
 expected CI green (#107, part 2 of #66)."""
 
 import dataclasses
-import tomllib
 import unittest
 from types import SimpleNamespace
 
@@ -10,12 +9,13 @@ from devloop import config, markdown, policy
 from devloop.dispatcher import Dispatcher, ensure_labels
 from devloop.github import GitHub
 from devloop.planning import Action, Snapshot, plan
+from helpers import ssdlc_project
 from helpers.devloop_fakes import FakeGH, SnapshotGH
 from test_devloop import (BASE, CFG, SHA1, SHA2, SHA3, FakeRunner, FakeWS, finding, norm, pr,
                           raw_review, receipt)
 
 POLICY = CFG.review_policy
-DATA = tomllib.loads(config.DEFAULT_CONFIG.read_text())
+DATA = ssdlc_project.data()
 APP = 15368
 ZPOLICY = dataclasses.replace(POLICY, zero_allowlist=('docs/', 'tests/', 'docs/guide.md'),
                               zero_checks=(('unittest', APP),))

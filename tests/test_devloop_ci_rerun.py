@@ -1,7 +1,6 @@
 """Re-run of a CI failure in test modules not pertinent to the PR, without a round (issue #200)."""
 
 import dataclasses
-import tomllib
 import unittest
 from types import SimpleNamespace
 
@@ -12,6 +11,7 @@ from devloop.localtests import failed_modules
 from devloop.planning import plan
 from devloop.ports import summarize_checks
 
+from helpers import ssdlc_project
 from helpers.devloop_fakes import SHA1, FakeIdentities, SnapshotGH
 from test_devloop import CFG, FakeRunner, FakeWS, norm, raw_review
 
@@ -288,12 +288,11 @@ class AdapterTests(unittest.TestCase):
 
 class ConfigTests(unittest.TestCase):
     def data(self):
-        with open(config.DEFAULT_CONFIG, 'rb') as fh:
-            return tomllib.load(fh)
+        return ssdlc_project.data()
 
     def test_on_by_default_and_a_boolean(self):
         self.assertTrue(config.Config.ci_rerun_unrelated)
-        self.assertTrue(config.load_config().ci_rerun_unrelated)
+        self.assertTrue(ssdlc_project.load().ci_rerun_unrelated)
         data = self.data()
         data.pop('ci_rerun_unrelated', None)
         self.assertTrue(config.parse_config(data).ci_rerun_unrelated)

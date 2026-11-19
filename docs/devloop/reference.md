@@ -197,7 +197,26 @@ managed repository tracks, or that is a symbolic link or has other hard links; a
 reached through a link is refused when the file it leads to is tracked by the git checkout that
 holds it (a worktree, another clone). The file is read without following a link, at the start
 and at each reload, and each reload checks it again before reading it. Without the file the
-configuration is the one of before: same keys, same policy version.
+configuration is the installation's with the overlay, and the policy version has no hash of a
+project file.
+
+**ssdlc's project file** (ADR 0006, R3). The installation's `devloop/config.toml` holds no fact
+nor restriction of a project: ssdlc's, as they were in it before R3, are in its project file, of
+which [`ops/host/ssdlc/project.toml`](../../ops/host/ssdlc/project.toml) is the example the
+operator copies to the host. The code has no default of ssdlc for them either: no
+`sensitive_paths` and no `sensitive_path_lists` by default, and `[pin]` watches `devloop/`,
+`core/` and the lists of the configuration. The overlay of ssdlc gains `write_commands` and
+`review_commands` of agy ([`ops/host/ssdlc/overlay.toml`](../../ops/host/ssdlc/overlay.toml)):
+the commands agy had by default from the `test_cmd` of `config.toml`, which the overlay alone
+admits now. `repo`, `trusted_users` and `[apps]` stay in `config.toml` until R6, for
+`scripts/agent-token.py` and `scripts/supervisor-token.py`, which read only them, with no
+project file. Without a project file, or a `test_cmd` in the overlay, devloop stops at startup:
+`test_cmd` is required. `ops/host/ssdlc/check-equivalence.py` compares two installations on a
+host (the one of before R3 with its overlay, the one of R3 with the project file and the
+overlay): the values of the configuration key by key, the rendered prompts and the test modules
+`local_tests` selects. The hash of the project file is left out, since it is in the policy
+version by construction: the version is compared without it
+([ops/host/migrate.md](../../ops/host/migrate.md#configurazione-di-ssdlc-nel-suo-file-di-progetto)).
 
 **Precedence:** installation (`devloop/config.toml` of the pinned copy) < project file <
 overlay. The schema is closed, and a key outside it stops devloop at startup with a message that
@@ -676,7 +695,8 @@ each agy turn its minimal permissions, and treats a stop without output as a fai
   `python3 -m unittest`, `git status`, `git diff`, `git log` and `git show`; write turns get no
   `git add` nor `git commit`, because the dispatcher commits. The `test_cmd` of these defaults is
   that of the overlay or of the installation, never that of the
-  [project file](#project-file) (ADR 0006, D2).
+  [project file](#project-file) (ADR 0006, D2). The installation has none since R3: ssdlc's
+  overlay lists both explicitly, with `python3 scripts/run-tests.py` first, as agy had them.
 - **Never.** devloop refuses at startup a prefix that is a bare interpreter, shell or `git`
   (`python3`, `bash`, `sh`, …), also when given by path (`/usr/bin/python3`, `/bin/sh`,
   `venv/bin/python`), one with wildcards, quotes or shell syntax (`*`, `;`, `&&`, `|`,
@@ -902,10 +922,12 @@ Nothing lowers a level, and nothing takes it below 1, except the operator's `rev
 (see [Level 0](#level-0-no-review)). The level is computed again on every new head, before each
 review, CI round and promotion.
 
-Sensitive paths are configurable under `[review_policy]`: `sensitive_paths` (default `devloop/`,
-`AGENTS.md`, `CLAUDE.md`, `.github/`, `schemas/`; an entry is a directory or a file at the root)
-plus the files listed in the `files` object of each JSON file in `sensitive_path_lists` (default
-`schemas/recovery-grader-baseline.json`). The policy comes from the running dispatcher and its
+Sensitive paths are configurable under `[review_policy]`: `sensitive_paths` (an entry is a
+directory or a file at the root) plus the files listed in the `files` object of each JSON file in
+`sensitive_path_lists`. Neither has a default since ADR 0006, R3: they are restrictions of the
+managed repository, which its [project file](#project-file) adds and the overlay may extend.
+ssdlc's project file lists `devloop/`, `AGENTS.md`, `CLAUDE.md`, `.github/`, `schemas/` and the
+modules below, and the list `schemas/recovery-grader-baseline.json`. The policy comes from the running dispatcher and its
 configuration: the lists are read at startup from the root of the running installation (the
 pinned checkout, see [Run from a pinned installation](guide.md#run-from-a-pinned-installation)), never
 from a PR branch, so a PR that changes `devloop/config.toml`, the prompts or the lists cannot
@@ -917,8 +939,8 @@ an ADR on `main` gets the technical verdict, unless it changes the rule itself (
 `trust_policy`: the fix goes on as for `request_changes`, and the merge is the operator's (#434).
 
 The criterion for a sensitive path: **the code that decides permissions, fencing and
-authorizations goes to level 2**, besides devloop itself and the agents' instructions. So the
-repository's `config.toml` adds to the defaults above the ssdlc security modules (#171): writer
+authorizations goes to level 2**, besides devloop itself and the agents' instructions. So
+ssdlc's project file adds the ssdlc security modules (#171): writer
 fencing and locks (`ssdlc_writer_gate.py`, `ssdlc_role_fencing.py`,
 `ssdlc_container_holder.py`, `ssdlc_locks.py`, `ssdlc_fencing_proof.py`), authorized transitions and gates
 (`ssdlc_transitions.py`, `ssdlc_replay_gate.py`, `ssdlc_grader.py`), delegations and

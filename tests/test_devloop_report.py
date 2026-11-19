@@ -20,7 +20,9 @@ from devloop.github import GitHub, GitHubError
 from devloop.markdown import publishable, read_marker, render_escalation
 from devloop.watch import NOTHING_NEW, Trust
 
-CFG = config.load_config()
+from helpers import ssdlc_project
+
+CFG = ssdlc_project.load()
 TRUST = Trust.from_config(CFG)
 DISPATCHER = TRUST.writers['dispatcher']
 CLAUDE = TRUST.writers['claude']
@@ -613,7 +615,7 @@ class ConfigTest(unittest.TestCase):
                 config.parse_report(table)
 
     def test_the_overlay_may_set_it(self):
-        data = config.apply_overlay(config.load_data(), {'report': {'issue': 300}})
+        data = config.apply_overlay(ssdlc_project.data(), {'report': {'issue': 300}})
         self.assertEqual(config.parse_config(data).report.issue, 300)
 
 

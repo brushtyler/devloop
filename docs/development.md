@@ -100,9 +100,11 @@ round (see [CI failures not pertinent to the PR](devloop/reference.md#ci-failure
 
 ## Documents follow the code
 
-`[docs.map]` in `devloop/config.toml` (#203) maps code paths to the documents that describe them.
-A key is a directory ending in `/` (every file under it) or a single file; the entries that cover a
-file add up. The rule for a change:
+`[docs.map]` (#203) maps code paths to the documents that describe them. Since ADR 0006, R3 it is
+in ssdlc's [project file](devloop/reference.md#project-file), on the host: its example in the
+repository is `ops/host/ssdlc/project.toml`, which a PR changes and the operator copies to the
+host. A key is a directory ending in `/` (every file under it) or a single file; the entries that
+cover a file add up. The rule for a change:
 
 - **Who changes a mapped file updates its documents** when the behaviour they describe changes, in
   the same PR. devloop lists the mapped documents in the implement and fix prompts.

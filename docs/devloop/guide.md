@@ -1275,19 +1275,22 @@ in `[roles]` of the configuration ([reference](reference.md#configuration)).
 ## Usage
 
 ```bash
-python3 -m devloop setup            # create the agent:* labels, the priority:* labels and the review level labels (reviews:0 only when level 0 is on)
-python3 -m devloop status           # running action, devloop PRs (with rounds counted on max_review_rounds, merge state and conflicts), ready issues in start order with their priority, planned actions; with [budget] on, the budget of the stories in progress; a pinned copy behind origin/main in the files of the installation
-python3 -m devloop apps             # check the GitHub App of each actor
-python3 -m devloop tick --dry-run   # print the ready issues in start order and the plan, change nothing (no lock: it runs beside a dispatcher)
-python3 -m devloop tick             # run one round
-python3 -m devloop run --idle-timeout 900  # tick continuously (see Continuous loop)
-python3 -m devloop cleanup          # remove worktrees left by failed steps
-python3 -m devloop gc               # clean up state_dir now: old pinned copies, worktrees of closed issues and PRs, old logs (see Cleanup of the state directory)
-python3 -m devloop follow issue-52  # follow live the implementer of issue #52 (pr-<N>: reviewer or fixer)
-python3 -m devloop watch --timeout 3600  # wait for the next change on GitHub, for the supervising agent
-python3 -m devloop pin origin/main  # pin a commit of origin, after its smoke test (see Run from a pinned installation)
-python3 -m devloop report --day 2026-11-16  # print the summary of a UTC day from devloop's records (default: today; --publish: on [report] issue, see Daily summary)
-python3 -m devloop fallback reset agy  # forget the models agy remembers unavailable (see Memory of unavailable models)
+# Run directly, devloop needs the project file and the overlay of the state_dir, before the
+# command (the launcher, scripts/devloop-pinned, passes them itself):
+devloop="python3 -m devloop --project-config .ssdlc/devloop/project.toml --local-config .ssdlc/devloop/config.local.toml"
+$devloop setup            # create the agent:* labels, the priority:* labels and the review level labels (reviews:0 only when level 0 is on)
+$devloop status           # running action, devloop PRs (with rounds counted on max_review_rounds, merge state and conflicts), ready issues in start order with their priority, planned actions; with [budget] on, the budget of the stories in progress; a pinned copy behind origin/main in the files of the installation
+$devloop apps             # check the GitHub App of each actor
+$devloop tick --dry-run   # print the ready issues in start order and the plan, change nothing (no lock: it runs beside a dispatcher)
+$devloop tick             # run one round
+$devloop run --idle-timeout 900  # tick continuously (see Continuous loop)
+$devloop cleanup          # remove worktrees left by failed steps
+$devloop gc               # clean up state_dir now: old pinned copies, worktrees of closed issues and PRs, old logs (see Cleanup of the state directory)
+$devloop follow issue-52  # follow live the implementer of issue #52 (pr-<N>: reviewer or fixer)
+$devloop watch --timeout 3600  # wait for the next change on GitHub, for the supervising agent
+$devloop pin origin/main  # pin a commit of origin, after its smoke test (see Run from a pinned installation)
+$devloop report --day 2026-11-16  # print the summary of a UTC day from devloop's records (default: today; --publish: on [report] issue, see Daily summary)
+$devloop fallback reset agy  # forget the models agy remembers unavailable (see Memory of unavailable models)
 ```
 
 Run it from any checkout of this repository. Worktrees, agent prompts and logs, and the lock that
@@ -1299,9 +1302,14 @@ For the same reason they never use the [publication outbox](protocol.md#publicat
 Not even its git commands write to the repository: it does not fetch, so it plans from the remote branches as last fetched (a
 branch never fetched leaves its merge mode not computable), and the objects that `git
 merge-tree` writes go to a temporary directory. In daily use run it from the pinned copy, through
-`scripts/devloop-pinned` ([Run from a pinned installation](#run-from-a-pinned-installation)).
+`scripts/devloop-pinned` ([Run from a pinned installation](#run-from-a-pinned-installation)),
+which also passes the [project file](reference.md#project-file) of the `state_dir`: since
+ADR 0006, R3 `devloop/config.toml` has no `test_cmd`, so run directly devloop needs
+`--project-config <state_dir>/project.toml`, before the command, as in the block above (from the
+main checkout).
 `--local-config <file>`, before the command, applies a local overlay to the configuration
-([Local config as an overlay](#local-config-as-an-overlay)). `state_dir` does not grow without
+([Local config as an overlay](#local-config-as-an-overlay)); the launcher passes
+`<state_dir>/config.local.toml` when it exists, and so does the block above. `state_dir` does not grow without
 limits: see [Cleanup of the state directory](#cleanup-of-the-state-directory).
 
 ### Cleanup of the state directory
@@ -1833,10 +1841,16 @@ From the beginning to the end, as root or with `sudo`:
 
 5. **Pin.** The first pin runs the clone's devloop; every later command runs the pinned copy,
    through the [launcher](#launcher). The pin applies the overlay and runs the
-   [smoke test](#pin), so a key the copy refuses stops here.
+   [smoke test](#pin), so a key the copy refuses stops here. Before it, the
+   [project file](reference.md#project-file) is in the `state_dir` (copied from
+   [`ops/host/ssdlc/project.toml`](../../ops/host/ssdlc/project.toml), with the keys of
+   [`ops/host/ssdlc/overlay.toml`](../../ops/host/ssdlc/overlay.toml) in the overlay, ADR 0006,
+   R3): the clone's devloop gets it and the overlay before the command, as the launcher would.
 
    ```bash
-   sudo -u devloop -H sh -c 'cd ~/ssdlc && python3 -m devloop pin origin/main'
+   sudo -u devloop -H sh -c 'cd ~/ssdlc && python3 -m devloop \
+       --project-config .ssdlc/devloop/project.toml \
+       --local-config .ssdlc/devloop/config.local.toml pin origin/main'
    ```
 
 6. **Checks.** From the pinned copy, as the `devloop` user: every app, its installation and its
@@ -2003,8 +2017,9 @@ A systemd unit does the same with restarts on a crash: see [Continuous loop](#co
 
 #### Pin
 
-`python3 -m devloop pin <ref>`, from the main checkout (or `scripts/devloop-pinned pin <ref>`),
-takes the commit from the [installation's source](#installation-source), which is this clone
+`python3 -m devloop --project-config <state_dir>/project.toml --local-config
+<state_dir>/config.local.toml pin <ref>`, from the main checkout (or `scripts/devloop-pinned pin
+<ref>`, which passes both itself), takes the commit from the [installation's source](#installation-source), which is this clone
 unless `source` names another:
 
 1. updates the branches and tags of `origin`, dropping those deleted on `origin` (the tags of
@@ -2014,8 +2029,10 @@ unless `source` names another:
    of `origin`. A commit only local, or reachable only from a local tag or from a branch deleted
    on `origin`, is refused. The commit of a copy already pinned (also abbreviated) is used
    without a fetch: that is the rollback;
-2. reads `devloop/config.toml` of that commit with the local overlay applied, and takes the files
-   of `review_policy.sensitive_path_lists`: each must be a relative path inside the root and a
+2. reads `devloop/config.toml` of that commit with the [project file](reference.md#project-file)
+   of the `state_dir` and the local overlay applied, and takes the files
+   of `review_policy.sensitive_path_lists` (ssdlc's come from its project file since ADR 0006,
+   R3): each must be a relative path inside the root and a
    regular file of the commit. The documents of the [documentation map](reference.md#documentation-map) are
    not taken: they belong to the repository, not to the installation;
 3. extracts `devloop/`, `core/` when the commit has it (devloop imports it for the
@@ -2115,11 +2132,13 @@ state_dir = "/var/lib/devloop/widget"
 - The launcher is installed on the host from the source at the pinned tag, outside the pinned
   copy and the managed repository, and gets the `state_dir` with `--state-dir`; the
   [ops guide](../../ops/README.md) does it with `SOURCE_REPO` and `SOURCE_REF`.
-- The first pin runs devloop of the source clone in the managed checkout, with the overlay:
+- The first pin runs devloop of the source clone in the managed checkout, with the project file
+  (below; since ADR 0006, R3 the installation has no `test_cmd`) and the overlay:
 
   ```bash
   cd /home/devloop/widget
   PYTHONPATH=/home/devloop/devloop-source python3 -P -m devloop \
+      --project-config /var/lib/devloop/widget/project.toml \
       --local-config /var/lib/devloop/widget/config.local.toml pin v1.2.0
   ```
 
@@ -2212,6 +2231,14 @@ stops devloop, naming the key; the trust keys stay in the overlay, and its `test
 enters the default commands of agy: the overlay alone admits it. It must be a regular file of
 its own: a symbolic link, or a file with other hard links, stops devloop. Its hash is part of
 the policy version, and each start and reload records the configuration in the journal.
+
+Since ADR 0006, R3 the installation's `config.toml` holds none of these keys: ssdlc's facts and
+restrictions are in its project file, whose example is
+[`ops/host/ssdlc/project.toml`](../../ops/host/ssdlc/project.toml), and the agy commands derived
+from its tests in its overlay ([`ops/host/ssdlc/overlay.toml`](../../ops/host/ssdlc/overlay.toml)).
+Without a project file, or a `test_cmd` in the overlay, devloop stops at startup (`missing
+'test_cmd'`), and so does the pin of a copy, whose check loads the configuration. The migration
+of a host is in [ops/host/migrate.md](../../ops/host/migrate.md#configurazione-di-ssdlc-nel-suo-file-di-progetto).
 
 #### Changes while the loop runs
 
