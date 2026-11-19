@@ -71,7 +71,7 @@ Sull'host dell'operatore, dove sono configurate le GitHub App del progetto (`[ap
 | Supervisore (app di ruolo, qualunque agent lo esegua) | `supervisor`, solo con `scripts/supervisor-token.py` | `brushtyler-devloop-supervisor[bot]` |
 | Implementer (app di ruolo, qualunque agent implementi) | `implementer`, solo devloop | `brushtyler-devloop-implementer[bot]` |
 
-Lo script [`scripts/agent-token.py`](scripts/agent-token.py) esegue un comando con il token dell'app passato in `GH_TOKEN`. È un involucro di `devloop token` (ADR 0006, R6): lo esegue attraverso il launcher, quindi dalla copia fissata e con la configurazione del progetto del suo `state_dir` (per default `.ssdlc/devloop` del clone; un altro con `--state-dir DIR`), da cui prende `repo` e l'app dell'actor. Ogni repository ha il suo insieme di app, mai condiviso. Si lancia dal checkout del repository gestito o da un suo worktree; il comando gira nella directory corrente:
+Lo script [`scripts/agent-token.py`](scripts/agent-token.py) esegue un comando con il token dell'app passato in `GH_TOKEN`. È un involucro di `devloop token` (ADR 0006, R6): lo esegue attraverso il launcher, quindi dalla copia fissata e con la configurazione del progetto del suo `state_dir` (per default `.ssdlc/devloop` del checkout principale del clone, anche quando lo script si lancia da un worktree; un altro con `--state-dir DIR`), da cui prende `repo` e l'app dell'actor. Ogni repository ha il suo insieme di app, mai condiviso. Si lancia dal checkout del repository gestito o da un suo worktree; il comando gira nella directory corrente:
 
 ```bash
 python3 scripts/agent-token.py <actor> -- gh pr comment <PR> --body-file <FILE>

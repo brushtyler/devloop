@@ -32,6 +32,13 @@ WRAPPER = ROOT / 'scripts' / 'agent-token.py'
 STATE = Path('.ssdlc') / 'devloop'
 
 
+def git(cwd, *args):
+    """``git args`` in ``cwd``, with an identity for commits; its output."""
+    return subprocess.run(['git', '-c', 'user.name=devloop-test',
+                           '-c', 'user.email=devloop-test@example.invalid', *args],
+                          cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
 def wrapper():
     spec = importlib.util.spec_from_file_location('agent_token', WRAPPER)
     module = importlib.util.module_from_spec(spec)
@@ -234,9 +241,26 @@ class WrapperTests(unittest.TestCase):
     def test_it_calls_devloop_token_through_the_launcher(self):
         argv = self.script.command(['claude', '--perm', 'issues=read', '--', 'gh', 'x'],
                                    python='py')
+        # The main checkout of this clone, also when the tests run from a linked worktree.
+        common = Path(git(ROOT, 'rev-parse', '--path-format=absolute', '--git-common-dir'))
         self.assertEqual(argv, ['py', str(LAUNCHER), '--state-dir',
-                                str(ROOT / '.ssdlc' / 'devloop'), 'token', 'claude', '--perm',
-                                'issues=read', '--', 'gh', 'x'])
+                                str(common.parent / '.ssdlc' / 'devloop'), 'token', 'claude',
+                                '--perm', 'issues=read', '--', 'gh', 'x'])
+
+    def test_the_default_state_dir_is_the_main_checkouts(self):
+        tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, tmp)
+        main = tmp / 'main'
+        main.mkdir()
+        git(main, 'init', '-q')
+        git(main, 'commit', '-q', '--allow-empty', '-m', 'init')
+        git(main, 'worktree', 'add', '-q', str(tmp / 'linked'))
+        self.assertEqual(self.script.main_checkout(main), main)
+        self.assertEqual(self.script.main_checkout(tmp / 'linked'), main)
+        # Outside a repository: the script's own clone, as before.
+        outside = tmp / 'outside'
+        outside.mkdir()
+        self.assertEqual(self.script.main_checkout(outside), outside)
 
     def test_the_state_dir_of_another_project(self):
         for given in (['--state-dir', '/var/lib/devloop/widget'],
@@ -328,6 +352,28 @@ class EndToEndTests(unittest.TestCase):
         self.assertNotEqual(done.returncode, 0)
         self.assertIn("no GitHub App configured for 'codex'", done.stderr)
         self.assertIn('acme/widget', done.stderr)
+
+    def test_from_a_linked_worktree_without_state_dir(self):
+        """The wrapper of a linked worktree, run there without ``--state-dir``, reads the pinned
+        copy and the overlay of the main checkout's state_dir: the worktree has none."""
+        scripts = self.root / 'scripts'
+        scripts.mkdir()
+        for script in (WRAPPER, LAUNCHER):
+            shutil.copy(script, scripts / script.name)
+        git(self.root, 'add', 'scripts')
+        git(self.root, 'commit', '-q', '-m', 'scripts')
+        linked = self.tmp / 'linked'
+        git(self.root, 'worktree', 'add', '-q', str(linked))
+        self.assertFalse((linked / STATE).exists())
+        env = {k: v for k, v in os.environ.items()
+               if k not in ('DEVLOOP_APP_KEY_DIR', cli.STATE_ENV, 'PYTHONPATH')}
+        done = subprocess.run([sys.executable, '-B', str(linked / 'scripts' / WRAPPER.name),
+                               'claude', '--', 'true'], cwd=linked, env=env,
+                              capture_output=True, text=True, timeout=120)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertNotIn('no pinned copy', done.stderr)
+        self.assertIn(f'no private key for acme-devloop-claude-agent in {self.keys}',
+                      done.stderr)
 
 
 if __name__ == '__main__':

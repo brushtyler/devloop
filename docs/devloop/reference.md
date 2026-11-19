@@ -1346,8 +1346,9 @@ installation's `config.toml`, the project file and the overlay, as the [launcher
 passes them), never with the `config.toml` beside a checkout: `repo` and `[apps.<actor>]` come
 from the overlay, and only the actor's key is read, from `$DEVLOOP_APP_KEY_DIR` or the project's
 `key_dir`. `scripts/agent-token.py` is a thin wrapper: it runs `scripts/devloop-pinned
---state-dir <DIR> token ...`, with `DIR` by default `.ssdlc/devloop` of its clone, and imports
-nothing from the clone. Run either from the checkout of the managed repository or one of its
+--state-dir <DIR> token ...`, with `DIR` by default `.ssdlc/devloop` of the main checkout of its
+clone (found through git's common directory, also from a linked worktree), and imports nothing
+from the clone. Run either from the checkout of the managed repository or one of its
 worktrees; the command runs in the current directory, and everything after `--` is the
 command's. The actors are `claude`, `codex` and `agy`: the dispatcher's, the merger's and the
 implementer's apps are reserved to devloop, and the supervisor's is not exposed (it uses

@@ -16,8 +16,10 @@ devloop's pinned copy of that state_dir, with the configuration of its project (
 installation's config.toml, the project file and the local overlay), whose ``repo`` and
 ``[apps]`` give the repository and the app; only the actor's key is read, from
 ``$DEVLOOP_APP_KEY_DIR`` or the project's ``key_dir``. The state_dir is DIR, or
-``.ssdlc/devloop`` of this clone, the launcher's default. Run it from the checkout of the
-managed repository, or one of its worktrees: the command runs in the current directory.
+``.ssdlc/devloop`` of the main checkout of this clone, the launcher's default, also when the
+script runs from a linked worktree: git's common directory names the main checkout. Run it from
+the checkout of the managed repository, or one of its worktrees: the command runs in the current
+directory.
 
 Actors: claude, codex, agy. devloop's own apps (dispatcher, merger, implementer) are reserved
 to devloop, and the supervisor's role app is not exposed either: the supervisor uses
@@ -30,21 +32,38 @@ It imports nothing from the clone: the pinned copy is the only devloop code that
 """
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 LAUNCHER = ROOT / 'scripts' / 'devloop-pinned'
-# The launcher's default state_dir, of this clone.
-STATE = ROOT / '.ssdlc' / 'devloop'
+# The launcher's default state_dir, under the main checkout of this clone.
+STATE = Path('.ssdlc') / 'devloop'
 STATE_DIR = '--state-dir'
+
+
+def main_checkout(root=ROOT):
+    """The main checkout of the clone ``root`` is in: ``root`` itself, or the checkout a linked
+    worktree belongs to, whose ``.git`` is git's common directory. ``root`` when git cannot say,
+    or when the common directory is not a checkout's ``.git`` (a bare repository)."""
+    try:
+        done = subprocess.run(['git', 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+                              cwd=root, capture_output=True, text=True)
+    except OSError:
+        return root
+    common = done.stdout.strip()
+    if done.returncode != 0 or not common:
+        return root
+    common = Path(common)
+    return common.parent if common.name == '.git' else root
 
 
 def command(argv, python=sys.executable):
     """The command line of the launcher for ``argv``, or SystemExit with the usage."""
     if not argv or argv[0] in ('-h', '--help'):
         raise SystemExit(__doc__.strip())
-    state = STATE
+    state = None
     if argv[0] == STATE_DIR:
         if len(argv) < 2:
             raise SystemExit(f'agent-token: {STATE_DIR} needs a directory')
@@ -53,6 +72,8 @@ def command(argv, python=sys.executable):
         state, argv = Path(argv[0][len(STATE_DIR) + 1:]), argv[1:]
     if not argv or '--' not in argv:
         raise SystemExit(__doc__.strip())
+    if state is None:
+        state = main_checkout() / STATE
     # The launcher wants it absolute; with it, it leaves the current directory as it is.
     return [python, str(LAUNCHER), STATE_DIR, os.path.abspath(state), 'token', *argv]
 

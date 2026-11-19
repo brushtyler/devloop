@@ -166,8 +166,11 @@ proprietario del repository (`GITHUB_OWNER_TYPE=org` per un'organizzazione). Per
    ruotare): *Generate a private key* nelle impostazioni dell'app; il file scaricato,
    `<slug>.<data>.private-key.pem`, va nella `key_dir` dell'utente che usa l'app (sezioni 4 e 7),
    mode 600, e poi tolto dai Download. Le chiavi che non servono più si revocano lì.
-5. **Configurazione**: `app_id` e `slug` (non segreti) in `[apps]` di `devloop/config.toml`, con
-   una PR. L'app `supervisor` è in `[apps.supervisor]` (ADR 0005, P5-4): devloop non ne legge la
+5. **Configurazione**: `app_id` e `slug` (non segreti), con la `key_dir`, in `[apps]`
+   dell'overlay locale dello `state_dir` del progetto (`config.local.toml`; per ssdlc dalle chiavi
+   di [`ssdlc/overlay.toml`](host/ssdlc/overlay.toml)), non in `devloop/config.toml`, che da
+   ADR 0006, R6 non ha identità di progetto (sezione 4). L'app `supervisor` è in
+   `[apps.supervisor]` (ADR 0005, P5-4): devloop non ne legge la
    chiave, che sta solo nella `key_dir` del supervisore. L'app `implementer` non è ancora in
    `[apps]`: si crea quando serve (ADR 0005, P5-3).
 

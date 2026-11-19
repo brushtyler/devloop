@@ -1961,9 +1961,12 @@ From the beginning to the end, as root or with `sudo`:
    sudo -u devloop -H git clone https://github.com/brushtyler/ssdlc.git /home/devloop/ssdlc
    ```
 
-2. **Keys.** The apps are those of `[apps]` in `devloop/config.toml`, created once by the
-   operator ([GitHub identities](reference.md#github-identities), and
-   [The merger app](reference.md#the-merger-app) for the merger). Each private key goes to
+2. **Keys.** The apps are the repository's own set, created once by the operator from the
+   manifests of [`ops/github/apps/`](../../ops/github/apps/) and never shared with another
+   repository ([GitHub identities](reference.md#github-identities), and
+   [The merger app](reference.md#the-merger-app) for the merger). Since ADR 0006, R6 they are
+   declared in `[apps]` of the local overlay (step 4), not in `devloop/config.toml`: ssdlc's are
+   in [`ops/host/ssdlc/overlay.toml`](../../ops/host/ssdlc/overlay.toml). Each private key goes to
    `~/.ghapps` of the `devloop` user, under the name GitHub gives it,
    `<slug>.<date>.private-key.pem`, mode `600`; a configured app whose key is missing stops
    devloop at startup.
@@ -1978,12 +1981,15 @@ From the beginning to the end, as root or with `sudo`:
    to each one with its logins, as described in [Agent CLIs](#agent-clis).
 
 4. **Overlay.** Write `/home/devloop/ssdlc/.ssdlc/devloop/config.local.toml`, owned by
-   `devloop`, with only the keys the operator overrides
-   ([Local config as an overlay](#local-config-as-an-overlay)). Each of these is the operator's
-   choice: the merge mode, `[pin] auto` ([Pin after a merge](#pin-after-a-merge)) and
-   `[run] alert_issue` ([Continuous loop](#continuous-loop)). On this installation it also sets
-   `[agent_user] name = "devloop-agent"` ([Agent user](#agent-user)). Without the file, the
-   configuration of the pinned copy applies as it is.
+   `devloop` ([Local config as an overlay](#local-config-as-an-overlay)). It is required: since
+   ADR 0006, R6 it holds the project's `repo`, `trusted_users` and `[apps]`, with its `key_dir`
+   (step 2), and for ssdlc the agy commands too, all from
+   [`ops/host/ssdlc/overlay.toml`](../../ops/host/ssdlc/overlay.toml). Without the file, or
+   without `repo` and `trusted_users` in it, devloop stops at startup. The other keys are the
+   operator's overrides, each the operator's choice: the merge mode, `[pin] auto`
+   ([Pin after a merge](#pin-after-a-merge)) and `[run] alert_issue`
+   ([Continuous loop](#continuous-loop)). On this installation it also sets
+   `[agent_user] name = "devloop-agent"` ([Agent user](#agent-user)).
 
 5. **Pin.** The first pin runs the clone's devloop; every later command runs the pinned copy,
    through the [launcher](#launcher). The pin applies the overlay and runs the
