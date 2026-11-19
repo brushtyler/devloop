@@ -63,16 +63,25 @@ carry the same rule, at every review level: a change touches the trust policy wh
 when, it does one of these five things (a closed list):
 
 1. it changes the value, the default or the way devloop reads `trusted_users`,
-   `operator_only_paths`, `[merge] mode`, the levels and paths of `[review_policy]`
-   (`sensitive_paths`, `sensitive_path_lists`, `zero`, `advisory_reviewer`), `[roles]`
-   (`implementer`, `reviewers`, `supervisor`), `max_review_rounds`, `[apps]`, or `write_args`,
-   `review_args` and the other permissions of the agents;
+   `operator_only_paths`, `protected_paths` (which keeps the branches out of `.github/`, the CI
+   the merge depends on), `[merge] mode`, `[merge.levels]`, the levels and paths of
+   `[review_policy]` (`sensitive_paths`, `sensitive_path_lists`, `zero`, `advisory_reviewer`),
+   `[roles]` (`implementer`, `reviewers`, `supervisor`), `conclave` (which moves the decision on
+   a block from the operator to three agents), `max_review_rounds`, `[pin] auto`, `[apps]`, or
+   `write_args`, `review_args` and the other permissions of the agents;
 2. it changes the constants that cap the delegations and the retries, such as `MAX_RETRIES`;
 3. it changes who is believed: the filter of the trusted authors of the comments, the check of
    the identity of markers and records, the identity required for `/devloop` commands;
-4. it changes when a PR is merged or promoted: the merge conditions, the quorum of the
-   reviewers, the check of `operator_only_paths`, the choice of the review level;
-5. it changes the review prompt, the advisory review prompt or the rule itself.
+4. it changes when a PR is merged or promoted, or who decides on it: the merge conditions, the
+   quorum of the reviewers, the checks of `operator_only_paths` and `protected_paths`, the choice
+   of the review level, the classes of escalation the supervisor decides in `auto` mode
+   (`NON_CRITICAL` in `devloop/supervision.py`) and those that stay with the operator: moving
+   `reviewer_decision` among the non-critical ones, for example, would take from the operator
+   the very `needs_operator` of this rule;
+5. it changes one of these prompts in `devloop/prompts/`: the review prompt, the advisory review
+   prompt, the conclave prompts (`conclave_proposal.md`, `conclave_vote.md`, which define the
+   perimeter reserved to the operator), the parts of `implement.md`, `fix.md` and `preflight.md`
+   that instruct the agents on untrusted content and on trust rules, or the rule itself.
 
 Nothing else is policy, unless it also does one of the five things: refactoring without a change
 of behaviour, new functions, texts and comments, operational keys such as timeouts, capacities
@@ -80,7 +89,10 @@ and intervals. The prompts give examples of both. A change that is not policy is
 
 - **Review of the quorum.** A reviewer who finds the policy touched gives the verdict
   `needs_operator`, even when the change is correct and the issue asks for it, and writes in
-  `human_reason` the parts touched, each with its point of the list and its file. Nothing else
+  `human_reason` the parts touched, each with its point of the list and its file. The review
+  prompt asks to assess the rule again at every round, on the whole diff of the PR against its
+  base and not only on what the latest fix changed: a PR already flagged stays `needs_operator`
+  after a fix, as long as its diff still touches the policy. Nothing else
   changes: the verdict is handled like any other `needs_operator`, with an escalation of class
   `reviewer_decision`, which is critical and so stays with the operator in `auto` mode too
   ([Escalations to the supervisor](#escalations-to-the-supervisor)). With a
@@ -92,10 +104,11 @@ and intervals. The prompts give examples of both. A change that is not policy is
 
 **Residual risks**, accepted by the operator (ADR 0005, section 4):
 
-- the rule depends on the attention of the reviewers: at level 2 they are two, of different
-  vendors, but they may both miss a change. devloop checks nothing of it in code: no file is
-  reserved to the operator for the policy, and `devloop/config.toml` is not in
-  `operator_only_paths`;
+- the rule depends on the attention of the reviewers, at every round: at level 2 they are two,
+  of different vendors, but they may both miss a change, and a reviewer of a later round who
+  looks only at the latest fix may approve a PR an earlier round flagged. devloop checks nothing
+  of it in code: no file is reserved to the operator for the policy, and `devloop/config.toml` is
+  not in `operator_only_paths`;
 - a change deliberately disguised as something else is not covered;
 - the operator's local overlay (`config.local.toml`) can weaken the policy without any review;
 - with a conclave configured, a change to the policy stays with the operator only if its members

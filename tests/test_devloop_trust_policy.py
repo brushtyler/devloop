@@ -13,22 +13,33 @@ PROMPTS = ('review', 'advisory')
 # The five points of the closed list, in order, and their key words.
 POINTS = (
     ('1. It changes the value, the default or the way devloop reads one of these configuration '
-     'keys:', ('`trusted_users`', '`operator_only_paths`', '`[merge] mode`', '`[review_policy]`',
-               '`sensitive_paths`', '`sensitive_path_lists`', '`zero`', '`advisory_reviewer`',
-               '`[roles]`', '`implementer`', '`reviewers`', '`supervisor`',
-               '`max_review_rounds`', '`[apps]`', '`write_args`', '`review_args`',
-               'the other permissions of the agents')),
+     'keys:', ('`trusted_users`', '`operator_only_paths`', '`protected_paths`', '`[merge] mode`',
+               '`[merge.levels]`', '`[review_policy]`', '`sensitive_paths`',
+               '`sensitive_path_lists`', '`zero`', '`advisory_reviewer`', '`[roles]`',
+               '`implementer`', '`reviewers`', '`supervisor`', '`conclave`',
+               '`max_review_rounds`', '`[pin] auto`', '`[apps]`', '`write_args`',
+               '`review_args`', 'the other permissions of the agents')),
     ('2. It changes the constants that cap the delegations and the retries',
      ('`MAX_RETRIES`',)),
     ('3. It changes who is believed:',
      ('the filter of the trusted authors of the comments',
       'the identity that wrote a marker or a record',
       'the identity required for `/devloop` commands')),
-    ('4. It changes when a PR is merged or promoted:',
-     ('the merge conditions', 'the quorum of the reviewers', 'the check of `operator_only_paths`',
-      'the choice of the review level')),
-    ('5. It changes the review prompt, the advisory review prompt or this rule itself.', ()),
+    ('4. It changes when a PR is merged or promoted, or who decides on it:',
+     ('the merge conditions', 'the quorum of the reviewers',
+      'the checks of `operator_only_paths` and `protected_paths`',
+      'the choice of the review level',
+      'the classes of escalation the supervisor decides in `auto` mode '
+      '(`NON_CRITICAL` in `devloop/supervision.py`) and those that stay with the operator')),
+    ('5. It changes one of these prompts in `devloop/prompts/`:',
+     ('the review prompt', 'the advisory review prompt',
+      'the conclave prompts (`conclave_proposal.md`, `conclave_vote.md`, which define the '
+      'perimeter reserved to the operator)',
+      'the parts of `implement.md`, `fix.md` and `preflight.md` that instruct the agents on '
+      'untrusted content and on trust rules', 'or this rule itself.')),
 )
+
+ROOT = PROMPT_DIR.parents[1]
 
 
 def flat(text):
@@ -77,8 +88,32 @@ class TrustPolicyPromptTest(unittest.TestCase):
                               'capacities and intervals.', text)
                 self.assertIn('- Trust policy: adding a login to `trusted_users`', text)
                 self.assertIn('raising `max_review_rounds` or `MAX_RETRIES`', text)
+                self.assertIn('`.github/` from `protected_paths`', text)
+                self.assertIn('enabling `conclave` or `[pin] auto`', text)
+                self.assertIn('moving `reviewer_decision` among the non-critical classes of '
+                              'escalation', text)
                 self.assertIn('- Not trust policy: a new or reworded comment or docstring; a new '
                               'timeout key', text)
+
+    def test_the_names_in_the_list_exist(self):
+        # The prompts and the code the list names are real, so the rule does not drift from them.
+        for name in ('review', 'advisory', 'conclave_proposal', 'conclave_vote', 'implement',
+                     'fix', 'preflight'):
+            self.assertTrue((PROMPT_DIR / f'{name}.md').is_file(), name)
+        from devloop import supervision
+        self.assertIn('reviewer_decision', supervision.CRITICAL)
+        self.assertNotIn('reviewer_decision', supervision.NON_CRITICAL)
+        config = (ROOT / 'devloop' / 'config.py').read_text(encoding='utf-8')
+        self.assertIn("'protected_paths'", config)
+
+    def test_the_review_reassesses_the_rule_at_every_round_on_the_whole_diff(self):
+        text = flat(section('review'))
+        self.assertIn('Assess this rule again at every round, on the whole diff of the PR '
+                      'against its base (`git diff origin/$base_branch...HEAD`), not only on '
+                      'what the latest fix changed: a PR that touches the trust policy stays '
+                      '`needs_operator` after any fix', text)
+        self.assertIn('The limit on new findings in later rounds (see "How to classify") does '
+                      'not apply to this rule.', text)
 
     def test_the_two_prompts_share_the_same_rule(self):
         self.assertEqual(shared('review'), shared('advisory'))
@@ -113,6 +148,79 @@ class TrustPolicyPromptTest(unittest.TestCase):
             with self.subTest(prompt=name):
                 rendered = _template(name, pr_number=7, repo='o/r', language='italiano')
                 self.assertIn(flat(shared(name)), flat(rendered))
+
+
+def doc(path):
+    return flat((ROOT / path).read_text(encoding='utf-8'))
+
+
+class TrustPolicyDocsTest(unittest.TestCase):
+    """The guide and the protocol describe the rule and its accepted residual risks (#399)."""
+
+    def guide_section(self):
+        text = (ROOT / 'docs/devloop/guide.md').read_text(encoding='utf-8')
+        match = re.search(r'^### Changes to the trust policy\n(.*?)(?=^#{2,3} |\Z)', text,
+                          re.M | re.S)
+        self.assertTrue(match, 'guide.md has no "Changes to the trust policy" section')
+        return flat(match.group(1))
+
+    def test_the_guide_describes_the_closed_list(self):
+        text = self.guide_section()
+        self.assertIn('at every review level', text)
+        self.assertIn('when, and only when, it does one of these five things (a closed list)',
+                      text)
+        for word in ('`trusted_users`', '`operator_only_paths`', '`protected_paths`',
+                     '`[merge] mode`', '`[merge.levels]`', '`[review_policy]`', '`[roles]`',
+                     '`conclave`', '`max_review_rounds`', '`[pin] auto`', '`[apps]`',
+                     '`write_args`', '`review_args`', '`MAX_RETRIES`',
+                     'the identity required for `/devloop` commands',
+                     'the checks of `operator_only_paths` and `protected_paths`',
+                     '`NON_CRITICAL` in `devloop/supervision.py`',
+                     '`conclave_proposal.md`, `conclave_vote.md`',
+                     '`implement.md`, `fix.md` and `preflight.md`'):
+            self.assertIn(word, text)
+        for point in range(1, 6):
+            self.assertIn(f'{point}. it changes', text)
+        self.assertNotIn('6. it changes', text)
+        self.assertIn('Nothing else is policy, unless it also does one of the five things', text)
+
+    def test_the_guide_describes_the_signals_and_the_rounds(self):
+        text = self.guide_section()
+        self.assertIn('gives the verdict `needs_operator`', text)
+        self.assertIn('assess the rule again at every round, on the whole diff of the PR against '
+                      'its base', text)
+        self.assertIn('a PR already flagged stays `needs_operator` after a fix', text)
+        self.assertIn('its opinion is `dubbi`, or `contrario` when the change weakens a check',
+                      text)
+        self.assertIn('"Policy di fiducia toccata:"', text)
+
+    def test_the_guide_lists_the_residual_risks(self):
+        text = self.guide_section()
+        self.assertIn('**Residual risks**, accepted by the operator', text)
+        risks = text[text.index('**Residual risks**'):]
+        for risk in ('the rule depends on the attention of the reviewers, at every round',
+                     'a reviewer of a later round who looks only at the latest fix may approve '
+                     'a PR an earlier round flagged',
+                     'a change deliberately disguised as something else is not covered',
+                     'the operator\'s local overlay (`config.local.toml`) can weaken the policy',
+                     'with a conclave configured',
+                     'is judged with the prompts of the running installation'):
+            self.assertIn(risk, risks)
+
+    def test_the_protocol_describes_the_rule_and_points_to_the_risks(self):
+        text = doc('docs/devloop/protocol.md')
+        start = text.index('**Trust policy** (#399).')
+        body = text[start:text.index('Findings get stable ids', start)]
+        for words in ('asks for `needs_operator` when the change touches the trust policy, at '
+                      'every review level',
+                      'again at every round on the whole diff of the PR against its base',
+                      'the opinion `dubbi`', '"Policy di fiducia toccata:"',
+                      'the same closed list of five points',
+                      '[Changes to the trust policy](guide.md#changes-to-the-trust-policy)',
+                      'do not change', 'residual risks, accepted by the operator',
+                      'the attention of the reviewers at every round', 'a disguised change',
+                      'the local overlay', 'the reserved perimeter'):
+            self.assertIn(words, body)
 
 
 if __name__ == '__main__':
