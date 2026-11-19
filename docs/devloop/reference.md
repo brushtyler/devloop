@@ -94,6 +94,11 @@ and `interval_minutes` (default 60, the minimum time between two cleanups of the
 every tick with nothing running); a `pins`, `worktrees` or `logs` that is not a boolean, a
 `keep_pins` or `interval_minutes` that is not a whole number of at least 0, a `log_days` that is
 not a whole number of at least 1, or an unknown key, stops devloop at startup.
+`[agent_user]` sets the [agent user](#agent-user) (#415): `name` (default `""`, off), the system
+user the agent CLIs and the test command run as, and `check` (default `true`), the startup check
+that it cannot read `key_dir` nor `state_dir`; a `name` that is not a system user name, a `check`
+that is not a boolean, or an unknown key, stops devloop at startup, and so does a `name` the
+system does not know.
 `[docs] map` sets the
 [documentation map](#documentation-map). Operator overrides go into the
 [local overlay](guide.md#local-config-as-an-overlay), not into this file. A running
@@ -148,7 +153,8 @@ an ignored one; otherwise the verdict is discarded and the PR goes to `agent:nee
 
 Only codex has an OS-level sandbox. claude and agy are limited by their tools and modes, not by
 the system: the tests they run can still reach the network and write outside the copy, as any
-code running as the same user. For them, the copy and the final check catch writes to the
+code running as the same user: the [agent user](#agent-user), when there is one, which cannot
+read the keys nor `state_dir`. For them, the copy and the final check catch writes to the
 reviewed tree, not access to the rest of the system. With the network disabled, codex cannot run tests
 that open TCP sockets, even on loopback.
 
@@ -1067,8 +1073,63 @@ to `test_timeout_seconds`, so a command that asks for it can run the full suite,
 `test_timeout_seconds`), so a command that sets no timeout, such as a wait loop that never ends,
 stops on its own instead of holding the turn for an hour. Values the operator set in the
 environment are kept. This prevents accidental use of the operator's credentials, not
-deliberate access: code running as the same system user can still read files. Real isolation
-needs a dedicated system user or a container.
+deliberate access: code running as the same system user can still read files. The isolation
+comes from the [agent user](#agent-user), which cannot read the keys at all.
+
+### Agent user
+
+With `[agent_user] name` set (#415), the dispatcher starts every agent CLI, its `--version`
+included, and the test command as that system user, so that they cannot read the private keys
+of the apps, `state_dir` nor the local overlay. Without it they run as the dispatcher's user, as
+before. The operator chose the mechanism on #415: one dedicated user for every agent (their CLI
+logins are not isolated from each other); a container would be an alternative. The installation
+is in the [guide](guide.md#agent-user) and in the [ops guide](../../ops/README.md).
+
+- **Start.** `sudo -n -E -u <name> -- <argv>`: `-n` fails at once without a sudo rule, `-E`
+  keeps the isolated environment above, which needs the `SETENV` tag. The environment gets the
+  agent user's `HOME`, `USER` and `LOGNAME`, where its CLIs keep their logins, and
+  `safe.directory=*` for git, because the worktrees belong to the dispatcher's user. The test
+  command runs as `/usr/bin/bash -c <test_cmd>` and the CLIs are found on the `secure_path` of
+  the sudoers rule.
+- **Stop.** A timeout or a stall `abort` kills the process group of the turn or of the tests as
+  the agent user (`sudo -u <name> /usr/bin/kill -KILL -- -<pgid>`), then as the dispatcher's
+  user, which may signal only its own processes. The sudoers rule sets `!use_pty`, so that the
+  command stays in the process group devloop started and the stall check sees its processes.
+- **Files outside the worktree.** What a turn reads or writes besides its worktree is in
+  `<state_dir>/agent-shared`, which the agent user enters but cannot write: the empty `gh` config
+  (`gh-config`), the schema of each turn (`schemas/`, which it cannot write either; codex and agy
+  read it from a path), the final message of codex (`last.json` in a new directory of the turn
+  in `turns/`), the private temporary directories of the tests (a new directory in `tmp/`, with
+  [parallel actions](#parallel-actions)). The agent user writes only in those new directories,
+  which inherit a default ACL; `turns/` and `tmp/` themselves are read-only for it, so it cannot
+  replace what devloop creates there. devloop opens every component of these paths from
+  `state_dir` without following a link (`O_NOFOLLOW`), creates the schema exclusively
+  (`O_EXCL`), reads the final message back only from a regular file with a single link (a link,
+  a hard link or a FIFO fails the turn), copies it to the turn's log and parses that copy, and
+  removes the schema and the directory after the turn. Without an agent user nothing changes:
+  the `gh` config stays in `<state_dir>/agent-gh-config`, the final message of codex in `logs/`,
+  the schema in `devloop/schemas/` and the temporary directories in the system's.
+- **Git metadata.** The git commands devloop runs in a worktree (status, add, commit, merge,
+  push, …) get `GIT_DIR`, `GIT_COMMON_DIR` and `GIT_WORK_TREE` from the repository: the entry of
+  `.git/worktrees` whose `gitdir` names the worktree, never the worktree's own `.git` file, which
+  the agent can rewrite. A `commondir` of that entry leading elsewhere than the repository's
+  `.git` stops the command (git would read the refs there). Every such command runs with
+  `core.hooksPath=/dev/null` and `core.fsmonitor=false`: no hook nor fsmonitor program, not even
+  the repository's. The agent user cannot write `.git`: `worktrees/` is read-only for it, like
+  `turns/`, so a worktree cannot be replaced either.
+- **Startup check.** At the start of `tick` and `run` (not `tick --dry-run` nor `status`), a
+  probe run as the agent user must find that it can neither read nor enter `key_dir` (or
+  `$DEVLOOP_APP_KEY_DIR`) and any entry of `state_dir` but `worktrees` and `agent-shared` (a
+  directory it can enter without listing it fails too: a file in it would be in reach by name),
+  that it cannot read the keys, the `--local-config` file and `state_dir` (list it), and that it
+  can write nothing in the repository's `.git`. It must enter but not write `worktrees`,
+  `agent-shared` and its `schemas`, `turns` and `tmp`; it must write a new directory devloop
+  makes in `turns` and in `tmp`, and read a schema devloop writes. The agent user must also
+  differ from the dispatcher's. Otherwise devloop exits, naming each path, before taking the
+  lock. `[agent_user] check = false` skips the probe and logs that it is off: for development
+  only.
+- **Transcripts.** The stall check and `devloop follow` read the session transcripts in the agent
+  user's home.
 
 ### The merger app
 

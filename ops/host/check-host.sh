@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Verifica l'installazione di devloop e del supervisore: utenti, directory private (700), chiavi
 # delle app (600, del proprietario giusto, solo quelle attese), ACL sulla home di devloop,
-# sudoers, servizio, CLI degli agent e `devloop apps`. Non cambia nulla.
+# sudoers, l'utente degli agent (non legge key_dir né state_dir, non scrive .git né le directory
+# che contengono worktree e turni, è nell'overlay), servizio, CLI degli agent e `devloop apps`.
+# Non cambia nulla.
 # Esce con 0 se non trova errori, con 1 altrimenti; gli avvisi non contano come errori.
 # Va eseguito come root (sudo): alcune verifiche leggono file degli altri utenti.
 #
@@ -107,7 +109,7 @@ check_keys() {
 }
 
 step 'Utenti'
-for user in "$DEVLOOP_USER" "$SUPERVISOR_USER"; do
+for user in "$DEVLOOP_USER" "$SUPERVISOR_USER" "$AGENT_USER"; do
     if user_exists "$user"; then ok "l'utente $user esiste"; else fail "l'utente $user non esiste"; fi
 done
 
@@ -146,25 +148,71 @@ fi
 LOG="$STATE_PATH/run.log"
 check_as "$SUPERVISOR_USER" "$SUPERVISOR_USER legge $LOG" test -r "$LOG"
 
-step "sudoers del supervisore ($SUDOERS_FILE)"
-if [ ! -e "$SUDOERS_FILE" ]; then
-    fail "$SUDOERS_FILE non esiste (setup-supervisor.sh), oppure non è visibile senza root"
-else
-    actual=$(stat -c '%a %U' "$SUDOERS_FILE")
-    [ "$actual" = '440 root' ] && ok "$SUDOERS_FILE: 440, root" || fail "$SUDOERS_FILE è $actual, deve essere 440 root"
-    if cmp -s "$SUDOERS_FILE" <(render "$OPS_DIR/host/sudoers-supervisor"); then
-        ok "$SUDOERS_FILE coincide con ops/host/sudoers-supervisor"
+# Il sudoers FILE: 440 di root, uguale a ops/host/TEMPLATE con questi parametri, accettato da
+# visudo; SETUP è lo script che lo installa.
+check_sudoers() {
+    local file=$1 template=$2 setup=$3 actual
+    if [ ! -e "$file" ]; then
+        fail "$file non esiste ($setup), oppure non è visibile senza root"
+        return
+    fi
+    actual=$(stat -c '%a %U' "$file")
+    [ "$actual" = '440 root' ] && ok "$file: 440, root" || fail "$file è $actual, deve essere 440 root"
+    if cmp -s "$file" <(render "$OPS_DIR/host/$template"); then
+        ok "$file coincide con ops/host/$template"
     else
-        warn "$SUDOERS_FILE è diverso da ops/host/sudoers-supervisor con questi parametri"
+        warn "$file è diverso da ops/host/$template con questi parametri"
     fi
     if [ "$DRY_RUN" = 1 ]; then
-        run visudo -cf "$SUDOERS_FILE"
-    elif visudo -cf "$SUDOERS_FILE" >/dev/null; then
+        run visudo -cf "$file"
+    elif visudo -cf "$file" >/dev/null; then
         ok 'visudo accetta il file'
     else
         fail 'visudo rifiuta il file'
     fi
+}
+
+step "sudoers del supervisore ($SUDOERS_FILE)"
+check_sudoers "$SUDOERS_FILE" sudoers-supervisor setup-supervisor.sh
+
+step "Utente degli agent $AGENT_USER (#415)"
+STATE="$STATE_PATH"
+for private in "$DEVLOOP_KEY_DIR" "$STATE" "$STATE/config.local.toml"; do
+    check_as "$AGENT_USER" "$AGENT_USER non legge $private" /usr/bin/bash -c '! [ -r "$1" ]' _ "$private"
+done
+check_as "$AGENT_USER" "$AGENT_USER non attraversa $DEVLOOP_KEY_DIR" /usr/bin/bash -c '! [ -x "$1" ]' _ "$DEVLOOP_KEY_DIR"
+# Le voci dello state_dir, tranne i worktree e la directory condivisa: né lette né attraversate,
+# così nemmeno un file in una directory non elencabile è alla sua portata.
+for entry in "$STATE"/* "$STATE"/.[!.]*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    case $(basename "$entry") in worktrees | agent-shared) continue ;; esac
+    check_as "$AGENT_USER" "$AGENT_USER non legge né attraversa $entry" \
+        /usr/bin/bash -c '! [ -r "$1" ] && ! { [ -d "$1" ] && [ -x "$1" ]; }' _ "$entry"
+done
+# Le directory che contengono ciò che devloop crea per gli agent: vi entra ma non le scrive,
+# così non sostituisce né collega quello che devloop vi apre (#415).
+for container in "$STATE/worktrees" "$STATE/agent-shared" "$STATE/agent-shared/schemas" \
+    "$STATE/agent-shared/turns" "$STATE/agent-shared/tmp"; do
+    check_as "$AGENT_USER" "$AGENT_USER entra in $container ma non lo scrive" \
+        /usr/bin/bash -c '[ -r "$1" ] && [ -x "$1" ] && ! [ -w "$1" ]' _ "$container"
+done
+# I metadati git: chi li scrive fa eseguire a devloop un hook suo quando committa.
+check_as "$AGENT_USER" "$AGENT_USER non scrive nulla in $DEVLOOP_CLONE/.git" \
+    /usr/bin/bash -c '[ -z "$(find "$1" -writable -print -quit 2>/dev/null)" ]' _ "$DEVLOOP_CLONE/.git"
+OVERLAY="$STATE/config.local.toml"
+if [ -f "$OVERLAY" ] && python3 - "$OVERLAY" "$AGENT_USER" <<'EOF'
+import sys, tomllib
+data = tomllib.load(open(sys.argv[1], 'rb'))
+sys.exit(0 if data.get('agent_user', {}).get('name') == sys.argv[2] else 1)
+EOF
+then
+    ok "$OVERLAY imposta [agent_user] name = \"$AGENT_USER\""
+else
+    fail "$OVERLAY non imposta [agent_user] name = \"$AGENT_USER\": gli agent girerebbero come $DEVLOOP_USER"
 fi
+
+step "sudoers dell'utente degli agent ($AGENT_SUDOERS_FILE)"
+check_sudoers "$AGENT_SUDOERS_FILE" sudoers-agent setup-agent-user.sh
 
 step "Servizio $SERVICE_NAME"
 UNIT="$SYSTEMD_DIR/$SERVICE_NAME.service"
@@ -190,11 +238,11 @@ fi
 
 step 'CLI degli agent'
 for cli in claude codex agy; do
-    exe="$DEVLOOP_HOME/.local/bin/$cli"
+    exe="$AGENT_HOME/.local/bin/$cli"
     if [ -x "$exe" ]; then
-        check_as "$DEVLOOP_USER" "$cli --version come $DEVLOOP_USER" "$exe" --version
+        check_as "$AGENT_USER" "$cli --version come $AGENT_USER" "$exe" --version
     else
-        fail "$exe non trovato"
+        fail "$exe non trovato (setup-agent-user.sh)"
     fi
 done
 exe="$SUPERVISOR_HOME/.local/bin/claude"

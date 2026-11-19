@@ -13,6 +13,8 @@ import time
 from contextlib import nullcontext
 from pathlib import Path
 
+from .agentuser import SHARED_DIR, TMP, SharedDir
+
 # The opening and closing lines git writes around a conflict (`=======` alone also underlines
 # Markdown and reST headings, so it is not a reliable sign).
 _CONFLICT_MARKER = re.compile(rb'^(?:<{7}|>{7})(?: |\r?$)', re.MULTILINE)
@@ -29,11 +31,15 @@ def partial_text(data):
     return data or ''
 
 
-def _kill_group(proc):
-    """Kill the process group of ``proc`` and return what it wrote."""
+def _kill_group(proc, kill=None):
+    """Kill the process group of ``proc`` and return what it wrote. ``kill(pgid)``, if given,
+    kills it first as another user (``agentuser.AgentUser.kill_group``, #415): the processes of
+    a command started as the agent user are not this user's to signal."""
+    if kill is not None:
+        kill(proc.pid)
     try:
         os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         pass
     try:
         return proc.communicate(timeout=5)
@@ -47,10 +53,12 @@ def _kill_group(proc):
         return partial_text(exc.output), partial_text(exc.stderr)
 
 
-def run_in_group(argv, *, timeout=None, input=None, watch=None, watch_interval=30.0, **kwargs):
+def run_in_group(argv, *, timeout=None, input=None, watch=None, watch_interval=30.0, kill=None,
+                 **kwargs):
     """Like ``subprocess.run(..., capture_output=True, text=True)``, but the command gets its own
     process group, and a timeout kills the whole group: the test runner's workers, or the
-    background commands an agent CLI started, do not outlive it.
+    background commands an agent CLI started, do not outlive it. ``kill(pgid)``, if given,
+    kills the group too, as another user: the agent user's processes (#415).
 
     ``watch(pid)``, if given, is called every ``watch_interval`` seconds while the command runs;
     an exception it raises kills the whole group and propagates, with what the command wrote
@@ -73,12 +81,12 @@ def run_in_group(argv, *, timeout=None, input=None, watch=None, watch_interval=3
             break
         except subprocess.TimeoutExpired:
             if watch is None or (deadline is not None and time.monotonic() >= deadline):
-                out, err = _kill_group(proc)
+                out, err = _kill_group(proc, kill)
                 raise subprocess.TimeoutExpired(argv, timeout, output=out, stderr=err) from None
         try:
             watch(proc.pid)
         except BaseException as exc:
-            partial = _kill_group(proc)
+            partial = _kill_group(proc, kill)
             try:
                 exc.partial_output = partial
             except AttributeError:
@@ -138,6 +146,25 @@ def git_config_env(pairs):
     return env
 
 
+def _with_git_config(env, pairs):
+    """``env`` with ``pairs`` applied after the ``GIT_CONFIG_*`` entries it already has."""
+    try:
+        count = max(int(env.get('GIT_CONFIG_COUNT') or 0), 0)
+    except ValueError:
+        count = 0
+    env = dict(env)
+    for i, (key, value) in enumerate(pairs, start=count):
+        env[f'GIT_CONFIG_KEY_{i}'] = key
+        env[f'GIT_CONFIG_VALUE_{i}'] = value
+    env['GIT_CONFIG_COUNT'] = str(count + len(pairs))
+    return env
+
+
+# Applied to every git command the dispatcher runs in a worktree (#415), over every config file:
+# no hook and no fsmonitor program runs, whatever a config says.
+WORKTREE_GIT_CONFIG = (('core.hooksPath', os.devnull), ('core.fsmonitor', 'false'))
+
+
 def _identity_env(author):
     """Variables that make ``author`` (``{name, email}``) both author and committer of one git
     command, or None for the ambient identity."""
@@ -159,18 +186,33 @@ _READ_GIT = ('rev-parse', 'rev-list', 'diff', 'diff-tree', 'cat-file', 'merge-ba
 class Workspace:
     """``private_tmp``: each run of the test command gets a temporary directory of its own
     (``TMPDIR``), removed afterwards, so that test runs of parallel actions (#176) do not share
-    one."""
+    one.
+
+    ``agent_user`` (``agentuser.AgentUser``, #415), if given, runs the test command as that user,
+    and kills it as that user on a timeout; its private temporary directories are then new
+    directories of ``<state_dir>/agent-shared/tmp`` (``agentuser.SharedDir.new_dir``), which
+    that user can write.
+
+    The git commands run in a worktree (``cwd`` in :attr:`root`) never take the repository
+    from the worktree itself (#415): what an agent can change there, the ``.git`` file of the
+    worktree included, could point git to a configuration or a hook of its own, which the
+    dispatcher's user would then run. ``GIT_DIR``, ``GIT_COMMON_DIR`` and ``GIT_WORK_TREE`` are
+    set to the metadata of the repository (:meth:`common_dir`) the dispatcher created with
+    ``git worktree add``, and ``WORKTREE_GIT_CONFIG`` turns hooks and fsmonitor off."""
 
     def __init__(self, repo_root, state_dir, base_branch, run=subprocess.run, test_env=None,
-                 private_tmp=False):
+                 private_tmp=False, agent_user=None):
         self.repo_root = Path(repo_root)
         self.root = self.repo_root / state_dir / 'worktrees'
         self.base_branch = base_branch
         self._run = run
         self._test_env = test_env
         self.private_tmp = private_tmp
+        self.agent_user = agent_user
+        self._shared_dir = SharedDir(self.root.parent / SHARED_DIR)
         self._shared = threading.RLock()
         self._read_only = None
+        self._common = None
 
     @property
     def shared_lock(self):
@@ -191,6 +233,76 @@ class Workspace:
                                str((self.repo_root / common).resolve() / 'objects'),
                            'GIT_OPTIONAL_LOCKS': '0'}
 
+    def common_dir(self):
+        """The git directory shared by the worktrees of the repository: ``<repo_root>/.git``,
+        or, when the repository root is itself a linked worktree, the common directory its
+        ``.git`` file leads to. The repository root is the operator's, never an agent's."""
+        if self._common is None:
+            dot = self.repo_root / '.git'
+            common = dot
+            try:
+                if dot.is_file():
+                    text = dot.read_text(encoding='utf-8').strip()
+                    if text.startswith('gitdir:'):
+                        own = self.repo_root / text[len('gitdir:'):].strip()
+                        try:
+                            common = own / (own / 'commondir').read_text(encoding='utf-8').strip()
+                        except FileNotFoundError:
+                            common = own
+            except OSError:
+                pass
+            self._common = Path(os.path.realpath(common))
+        return self._common
+
+    def _worktree_git_dir(self, common, work):
+        """The metadata of the worktree ``work`` in ``<common>/worktrees``: the entry whose
+        ``gitdir`` file, written by ``git worktree add``, names ``<work>/.git``; by default the
+        entry named as the worktree, as git names it. Raises WorkspaceError when its
+        ``commondir`` leads elsewhere than ``common``: git reads the refs from there whatever
+        ``GIT_COMMON_DIR`` says, and the agent user cannot write these metadata
+        (``agentuser.check``), so that only an alteration can do it."""
+        want = os.path.normpath(work / '.git')
+        meta = common / 'worktrees'
+        try:
+            entries = sorted(meta.iterdir())
+        except OSError:
+            entries = []
+        found = meta / work.name
+        for entry in entries:
+            try:
+                named = (entry / 'gitdir').read_text(encoding='utf-8').strip()
+            except OSError:
+                continue
+            if named and os.path.normpath(named) == want:
+                found = entry
+                break
+        try:
+            target = (found / 'commondir').read_text(encoding='utf-8').strip()
+        except FileNotFoundError:
+            return found  # no such worktree: git fails on its own
+        except OSError as exc:
+            raise WorkspaceError(f'the git metadata of {work}: {exc}') from exc
+        if Path(os.path.realpath(found / target)) != common:
+            raise WorkspaceError(f'the git metadata of {work} were altered: {found}/commondir '
+                                 f'leads to {target!r}, not to {common}; refusing to run git')
+        return found
+
+    def _worktree_env(self, cwd):
+        """The git variables of a command run in ``cwd`` (#415): None outside :attr:`root`,
+        otherwise ``GIT_DIR``, ``GIT_COMMON_DIR`` and ``GIT_WORK_TREE`` of the worktree that
+        holds ``cwd``. The worktree is named as a child of the real path of :attr:`root`: a
+        link an agent left in its place is not followed."""
+        try:
+            rel = Path(os.path.abspath(cwd)).relative_to(os.path.abspath(self.root))
+        except ValueError:
+            return None
+        if not rel.parts:
+            return None
+        work = Path(os.path.realpath(self.root)) / rel.parts[0]
+        common = self.common_dir()
+        return {'GIT_DIR': str(self._worktree_git_dir(common, work)),
+                'GIT_COMMON_DIR': str(common), 'GIT_WORK_TREE': str(work)}
+
     def _git(self, *args, cwd=None, check=True, stdin=None, env=None, unset=(), binary=False):
         return self._git_run(*args, cwd=cwd, check=check, stdin=stdin, env=env,
                              unset=unset, binary=binary).stdout
@@ -206,10 +318,15 @@ class Workspace:
             if args[0] not in _READ_GIT:
                 raise WorkspaceError(f'git {args[0]}: not run, the workspace is read-only')
             env = dict(env or {}, **self._read_only)
+        trusted = self._worktree_env(cwd) if cwd is not None else None
+        if trusted is not None:
+            env = dict(env or {}, **trusted)
         kwargs = {}
         if env or unset:
             inherited = {k: v for k, v in os.environ.items() if k not in unset}
             kwargs['env'] = dict(inherited, **(env or {}))
+            if trusted is not None:
+                kwargs['env'] = _with_git_config(kwargs['env'], WORKTREE_GIT_CONFIG)
         try:
             with self._shared if args[:1] and args[0] in _SHARED_GIT else nullcontext():
                 if binary:
@@ -230,11 +347,47 @@ class Workspace:
     def path(self, name):
         return self.root / name
 
+    def _rmtree(self, path, ignore_errors=False):
+        """Remove ``path``. With an agent user (#415), what it created with a restrictive mode
+        is opened to the group class first (``AgentUser.release``) when the removal fails."""
+        try:
+            shutil.rmtree(path)
+            return
+        except OSError:
+            if self.agent_user is None and not ignore_errors:
+                raise
+        if self.agent_user is not None:
+            self.agent_user.release(path)
+        shutil.rmtree(path, ignore_errors=ignore_errors)
+
+    def _agent_tmp(self):
+        """A new private temporary directory the agent user can write (#415), in
+        ``<state_dir>/agent-shared/tmp`` (``SharedDir.new_dir``: no link followed, mode
+        ``0770``, so that the named entries of its default ACL apply)."""
+        try:
+            return str(self._shared_dir.new_dir(TMP, 'devloop-tests-'))
+        except OSError as exc:
+            raise WorkspaceError(f'the temporary directory of the tests in '
+                                 f'{self._shared_dir.path}: {exc}') from exc
+
+    def _remove_agent_tmp(self, tmp):
+        """Remove the directory of :meth:`_agent_tmp`, without following links; what the agent
+        user created with a restrictive mode is opened first. Never raises."""
+        name = Path(tmp).name
+        try:
+            self._shared_dir.remove_dir(TMP, name)
+        except OSError:
+            self.agent_user.release(tmp)
+            try:
+                self._shared_dir.remove_dir(TMP, name)
+            except OSError:
+                pass
+
     def _fresh(self, path):
         if path.exists():
             self._git('worktree', 'remove', '--force', str(path), check=False)
             if path.exists():
-                shutil.rmtree(path)
+                self._rmtree(path)
         self._git('worktree', 'prune')
         path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -659,18 +812,32 @@ class Workspace:
                                      'credentials other than the app token')
 
     def run_tests(self, path, command, timeout):
-        """``(passed, output_tail)`` for the project test command in ``path``."""
+        """``(passed, output_tail)`` for the project test command in ``path``. With an agent
+        user (#415) the command runs as that user."""
         kwargs = {'env': self._test_env} if self._test_env is not None else {}
         run = run_in_group if self._run is subprocess.run else self._run
-        with (tempfile.TemporaryDirectory(prefix='devloop-tests-') if self.private_tmp
-              else nullcontext()) as tmp:
-            if tmp is not None:
-                base = os.environ if self._test_env is None else self._test_env
-                kwargs['env'] = dict(base, TMPDIR=tmp)
+        argv = ['bash', '-c', command]
+        user = self.agent_user
+        if user is not None:
+            argv = user.shell(command)
+            if run is run_in_group:
+                kwargs['kill'] = user.kill_group
+        tmp = None
+        if self.private_tmp:
+            tmp = (self._agent_tmp() if user is not None
+                   else tempfile.mkdtemp(prefix='devloop-tests-'))
+            base = os.environ if self._test_env is None else self._test_env
+            kwargs['env'] = dict(base, TMPDIR=tmp)
+        try:
             try:
-                done = run(['bash', '-c', command], cwd=path, capture_output=True, text=True,
-                           timeout=timeout, **kwargs)
+                done = run(argv, cwd=path, capture_output=True, text=True, timeout=timeout,
+                           **kwargs)
             except subprocess.TimeoutExpired:
                 return False, f'Test command timed out after {timeout}s'
+        finally:
+            if tmp is not None and user is not None:
+                self._remove_agent_tmp(tmp)
+            elif tmp is not None:
+                shutil.rmtree(tmp, ignore_errors=True)
         tail = '\n'.join((done.stdout + '\n' + done.stderr).strip().splitlines()[-60:])
         return done.returncode == 0, tail

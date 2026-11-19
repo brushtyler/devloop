@@ -39,6 +39,12 @@
 # [report]
 # issue = 124
 
+# L'utente con cui girano le CLI degli agent e i test (#415): lo prepara setup-agent-user.sh.
+# Senza, gli agent girano come l'utente devloop e possono leggere le chiavi delle app;
+# check-host.sh lo segnala come errore.
+# [agent_user]
+# name = "devloop-agent"
+
 # Il supervisore che decide le escalation non critiche (identità della sua app).
 # [roles]
 # supervisor = "claude"

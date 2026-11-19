@@ -27,7 +27,7 @@ VERIFIED_ARCH=aarch64
 OPS_STATE_DIR=.ssdlc/devloop
 
 # I segnaposto @NOME@ che `render` sostituisce nei file dichiarativi (unità, sudoers).
-OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER DEVLOOP_HOME DEVLOOP_CLONE STATE_DIR STATE_PATH LAUNCHER_CMD DEVLOOP_PATH SERVICE_NAME'
+OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER DEVLOOP_HOME AGENT_HOME DEVLOOP_CLONE STATE_DIR STATE_PATH LAUNCHER_CMD DEVLOOP_PATH AGENT_PATH SERVICE_NAME'
 
 say() { printf '%s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }
@@ -83,10 +83,12 @@ ops_load_params() {
     : "${APP_PREFIX:?APP_PREFIX non impostato in $PARAMS_FILE}"
     : "${DEVLOOP_USER:=devloop}"
     : "${SUPERVISOR_USER:=supervisor}"
+    : "${AGENT_USER:=devloop-agent}"
     : "${DEFAULT_BRANCH:=main}"
     : "${GITHUB_OWNER_TYPE:=user}"
     : "${DEVLOOP_HOME:=/home/$DEVLOOP_USER}"
     : "${SUPERVISOR_HOME:=/home/$SUPERVISOR_USER}"
+    : "${AGENT_HOME:=/home/$AGENT_USER}"
     : "${DEVLOOP_CLONE:=$DEVLOOP_HOME/${REPO#*/}}"
     : "${SUPERVISOR_CLONE:=$SUPERVISOR_HOME/${REPO#*/}}"
     : "${STATE_DIR:=$OPS_STATE_DIR}"
@@ -95,9 +97,11 @@ ops_load_params() {
     : "${DEVLOOP_KEYS:=dispatcher merger claude-agent codex-agent agy-agent}"
     : "${SUPERVISOR_KEYS:=supervisor claude-agent}"
     : "${DEVLOOP_PATH:=$DEVLOOP_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin}"
+    : "${AGENT_PATH:=$AGENT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin}"
     : "${SERVICE_NAME:=devloop}"
     : "${SYSTEMD_DIR:=/etc/systemd/system}"
     : "${SUDOERS_FILE:=/etc/sudoers.d/devloop-supervisor}"
+    : "${AGENT_SUDOERS_FILE:=/etc/sudoers.d/devloop-agent}"
     : "${APPS:=dispatcher merger claude-agent codex-agent agy-agent implementer supervisor}"
     : "${SOURCE_REPO:=}"
     : "${SOURCE_REF:=}"
@@ -143,13 +147,19 @@ ops_load_params() {
     fi
     [[ $SERVICE_NAME =~ ^[A-Za-z0-9_-]+$ ]] || die "SERVICE_NAME non valido: '$SERVICE_NAME'"
     [[ $DEVLOOP_PATH =~ ^[A-Za-z0-9._/:-]+$ ]] || die "DEVLOOP_PATH non valido: '$DEVLOOP_PATH'"
-    [[ $(basename "$SUDOERS_FILE") =~ ^[A-Za-z0-9_-]+$ ]] \
-        || die "il nome di SUDOERS_FILE non può contenere '.' né '~' (sudo lo ignorerebbe)"
+    [[ $AGENT_PATH =~ ^[A-Za-z0-9._/:-]+$ ]] || die "AGENT_PATH non valido: '$AGENT_PATH'"
+    local sudoers
+    for sudoers in SUDOERS_FILE AGENT_SUDOERS_FILE; do
+        [[ $(basename "${!sudoers}") =~ ^[A-Za-z0-9_-]+$ ]] \
+            || die "il nome di $sudoers non può contenere '.' né '~' (sudo lo ignorerebbe)"
+    done
     _require_name DEVLOOP_USER
     _require_name SUPERVISOR_USER
+    _require_name AGENT_USER
+    [ "$AGENT_USER" != "$DEVLOOP_USER" ] || die "AGENT_USER deve essere diverso da DEVLOOP_USER"
     local path
-    for path in DEVLOOP_HOME SUPERVISOR_HOME DEVLOOP_CLONE SUPERVISOR_CLONE DEVLOOP_KEY_DIR \
-        SUPERVISOR_KEY_DIR SYSTEMD_DIR SUDOERS_FILE; do
+    for path in DEVLOOP_HOME SUPERVISOR_HOME AGENT_HOME DEVLOOP_CLONE SUPERVISOR_CLONE \
+        DEVLOOP_KEY_DIR SUPERVISOR_KEY_DIR SYSTEMD_DIR SUDOERS_FILE AGENT_SUDOERS_FILE; do
         _require_abs "$path"
     done
 }

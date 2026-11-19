@@ -13,6 +13,8 @@ from pathlib import Path
 
 from . import activity, follow, pin, report, runloop, unavailability, watch
 from .agents import AgentRunner, isolated_env
+from .agentuser import GH_CONFIG, SHARED_DIR, WORKTREES_DIR, AgentUser, AgentUserError, SharedDir
+from .agentuser import check as check_isolation
 from .apps import DISPATCHER, MERGER, Identities
 from .config import ConfigError, Reloader, load_config
 from .context import both_labels_warning, label_transition
@@ -110,13 +112,18 @@ def log(message):
     print(f'{time.strftime("%H:%M:%S")} {message}', flush=True)
 
 
-def agent_environment(cfg, gh_config):
+def agent_environment(cfg, gh_config, agent_user=None):
     """Environment for agent CLIs and the test command: :func:`isolated_env`, plus Bash time
     limits for Claude Code. A command may ask for up to the test timeout, which the full suite
     needs; one that asks for nothing stops after ``agent_command_timeout_seconds``, so a wait loop
     that never ends does not hold the turn for an hour (issue #96). An operator's own values are
-    kept."""
-    env = isolated_env(gh_config)
+    kept. With ``agent_user`` (#415): that user's HOME, USER and LOGNAME, and git trusts the
+    worktrees the dispatcher's user owns (``safe.directory``)."""
+    if agent_user is None:
+        env = isolated_env(gh_config)
+    else:
+        env = agent_user.environment(isolated_env(gh_config,
+                                                  git_config=[('safe.directory', '*')]))
     # The pinned copy on PYTHONPATH (#174) is devloop's own: the tests of a worktree import the
     # worktree's code.
     env.pop('PYTHONPATH', None)
@@ -136,13 +143,21 @@ def build(args):
     except OSError as exc:
         raise ConfigError(f'GitHub App key: {exc}. Set $DEVLOOP_APP_KEY_DIR or remove the app '
                           'from [apps] to use the ambient gh login.') from exc
-    # Agents and the test command never see the operator's GitHub credentials.
-    gh_config = state / 'agent-gh-config'
-    gh_config.mkdir(parents=True, exist_ok=True)
-    agent_env = agent_environment(cfg, gh_config)
+    # Agents and the test command never see the operator's GitHub credentials. With an agent
+    # user (#415) they run as that user, and what they need outside their worktree is in the
+    # shared directory, the only entry of state_dir besides the worktrees that user reaches.
+    agent_user = agent_user_of(cfg)
+    shared = state / SHARED_DIR
+    if agent_user:
+        state.mkdir(parents=True, exist_ok=True)
+        gh_config = SharedDir(shared).ensure(GH_CONFIG)  # no link followed
+    else:
+        gh_config = state / 'agent-gh-config'
+        gh_config.mkdir(parents=True, exist_ok=True)
+    agent_env = agent_environment(cfg, gh_config, agent_user)
     # With parallel actions (#176) each test run gets a temporary directory of its own.
     ws = Workspace(root, cfg.state_dir, cfg.base_branch, test_env=agent_env,
-                   private_tmp=cfg.max_parallel_actions > 1)
+                   private_tmp=cfg.max_parallel_actions > 1, agent_user=agent_user)
     current = activity.Activity(state)
     # One log for the whole tick: each line whole, with the number of its action (#176).
     tick_log = TickLog(log)
@@ -152,7 +167,8 @@ def build(args):
     runner = AgentRunner(state / 'logs', cfg.agent_timeout_seconds, env=agent_env,
                          on_turn=lambda agent, prompt: current.turn(
                              agent.key, prompt, agent.model if agent.fallback_for else None),
-                         stall=stall)
+                         stall=stall, agent_user=agent_user,
+                         shared_dir=shared if agent_user else None)
     # Merges (#172) run with the merger's app (#201), the only one that gets contents=write,
     # or without it with the local gh login devloop runs with.
     # Without the dispatcher lock, status and a dry run read the journal of the turns and never
@@ -181,6 +197,37 @@ def build(args):
                             housekeeping=Housekeeping(state, ws, gh, ledger=ledger,
                                                       log=tick_log))
     return cfg, state, dispatcher
+
+
+def agent_user_of(cfg, factory=AgentUser):
+    """The ``AgentUser`` of ``[agent_user] name`` (#415), or None when it is empty. An unknown
+    user is a ConfigError."""
+    name = cfg.agent_user.name
+    if not name:
+        return None
+    try:
+        return factory(name)
+    except AgentUserError as exc:
+        raise ConfigError(str(exc)) from exc
+
+
+def check_agent_user(cfg, state, local_config, agent_user, log=log, me=None, git_dir=None):
+    """The startup check of the agent user (#415), before ``tick`` and ``run``
+    (``agentuser.check``): an ``AgentUserError`` when it can read or enter ``key_dir`` (or
+    ``$DEVLOOP_APP_KEY_DIR``) or the entries of ``state_dir``, read the local overlay, write
+    ``git_dir`` (the repository's ``.git``), the worktrees directory or the fixed directories
+    of the shared one, or cannot write the directories of its turns. Nothing to check without
+    an agent user; with ``[agent_user] check = false`` a warning in the log."""
+    if agent_user is None:
+        return
+    if not cfg.agent_user.check:
+        log(f'agent_user: the startup check of {agent_user.name} is off ([agent_user] check = '
+            'false): for development only')
+        return
+    for sub in (WORKTREES_DIR, SHARED_DIR):
+        (state / sub).mkdir(parents=True, exist_ok=True)
+    key_dir = os.environ.get('DEVLOOP_APP_KEY_DIR') or cfg.app_key_dir
+    check_isolation(agent_user, key_dir, state, local_config, me=me, git_dir=git_dir)
 
 
 def hold_lock(dispatcher, lock_fd):
@@ -464,7 +511,13 @@ def main(argv=None):
         except ConfigError as exc:
             sys.exit(f'devloop: invalid config: {exc}')
         try:
-            sys.exit(follow.follow(follow.worktrees(root, args.target)))
+            # The transcripts are in the HOME of the user the agents run as (#415).
+            agent_user = agent_user_of(cfg)
+        except ConfigError as exc:
+            sys.exit(f'devloop: invalid config: {exc}')
+        extra = {'home': agent_user.home} if agent_user else {}
+        try:
+            sys.exit(follow.follow(follow.worktrees(root, args.target), **extra))
         except KeyboardInterrupt:
             sys.exit(0)
 
@@ -541,6 +594,17 @@ def main(argv=None):
             log('[dry-run] read-only repository: the remote branches are those last fetched')
             dispatcher.tick(dry_run=True)
         return
+    if args.command in ('tick', 'run'):
+        # Before any agent turn (#415): an agent user that can read the keys stops devloop.
+        ws = getattr(dispatcher, 'ws', None)
+        agent_user = getattr(ws, 'agent_user', None)
+        try:
+            if isinstance(agent_user, AgentUser):
+                common = getattr(ws, 'common_dir', None)
+                check_agent_user(cfg, state, args.local_config, agent_user,
+                                 git_dir=common() if callable(common) else None)
+        except AgentUserError as exc:
+            sys.exit(f'devloop: {exc}')
     with single_instance(state / 'dispatcher.lock') as lock:
         hold_lock(dispatcher, lock.fileno())
         if args.command == 'cleanup':

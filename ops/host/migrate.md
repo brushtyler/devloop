@@ -9,8 +9,8 @@ quando quello vecchio è fermo e non ripartirà.
 
 ## Ordine
 
-1. **Preparare la macchina nuova** senza avviare nulla: `setup-devloop.sh` e
-   `setup-supervisor.sh` ([ops/README.md](../README.md)). Il servizio viene installato ma non
+1. **Preparare la macchina nuova** senza avviare nulla: `setup-devloop.sh`,
+   `setup-agent-user.sh` e `setup-supervisor.sh` ([ops/README.md](../README.md)). Il servizio viene installato ma non
    avviato.
 2. **Fermare devloop sulla macchina vecchia** e attendere la fine delle azioni in corso:
 
@@ -70,8 +70,11 @@ Dal supervisore, come utente `supervisor`:
 
 - **I worktree** (`worktrees/`): non si copiano; devloop li ricrea dai branch su GitHub quando
   riprende un'azione.
-- **I login delle CLI** (`claude`, `codex`, `agy` per `devloop`; `claude` per `supervisor`):
-  interattivi, uno per CLI ([ops/README.md](../README.md#5-cli-degli-agent-passi-manuali)).
+- **L'utente degli agent** (`devloop-agent`, #415): lo prepara `setup-agent-user.sh`, con le ACL
+  sullo `state_dir` e il suo sudoers. Va rieseguito **dopo** la copia dei file dello `state_dir`:
+  dà a ogni voce già presente l'ACL che la chiude a `devloop-agent`.
+- **I login delle CLI** (`claude`, `codex`, `agy` per `devloop-agent`; `claude` per
+  `supervisor`): interattivi, uno per CLI ([ops/README.md](../README.md#5-utente-degli-agent-e-cli)).
 - **Il token di sola lettura del supervisore**: uno nuovo
   ([ops/github/tokens.md](../github/tokens.md)), e si revoca quello della macchina vecchia.
 - **Il servizio**: lo installa `setup-devloop.sh` da `ops/host/devloop.service`; non si copia

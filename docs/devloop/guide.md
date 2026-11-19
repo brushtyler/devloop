@@ -1622,8 +1622,8 @@ An agent can wait without progress until a Bash command's maximum timeout or unt
 `agent_timeout_seconds`, for example on a command that never ends. While a turn runs, the
 dispatcher checks two signals every `agent_stall_seconds / 10` seconds (between 1 and 30):
 
-- the newest session transcript of the turn's worktree, the files `devloop follow` reads: a new
-  event counts as activity;
+- the newest session transcript of the turn's worktree, the files `devloop follow` reads, in the
+  home of the [agent user](#agent-user) when there is one: a new event counts as activity;
 - the processes the agent CLI started (its descendants and the other members of its session, the
   CLI itself excluded): CPU use of at least 1% of the time since the previous check counts as
   activity. A test suite running in the foreground is active; `sleep`, or a loop that waits for
@@ -1666,7 +1666,10 @@ manifests, a host check and the migration steps.
   devloop acts with its apps. A [merge mode](#merge-modes) other than `off` merges with the
   [merger app](reference.md#the-merger-app), whose key is there too; without that app it would
   need a local `gh` login;
-- the agent CLIs installed in the home of that user and logged in with logins of that user
+- a second system user, `devloop-agent`, that runs the agent CLIs and the tests: devloop starts
+  them as that user through `sudo`, so that they cannot read the keys, `state_dir` nor the local
+  overlay ([Agent user](#agent-user), #415);
+- the agent CLIs installed in the home of `devloop-agent` and logged in with logins of that user
   ([Agent CLIs](#agent-clis)).
 
 From the beginning to the end, as root or with `sudo`:
@@ -1691,14 +1694,16 @@ From the beginning to the end, as root or with `sudo`:
    sudo install -o devloop -g devloop -m 600 <slug>.<date>.private-key.pem /home/devloop/.ghapps/
    ```
 
-3. **Agent CLIs.** Install Claude Code, codex and agy as the `devloop` user and log in to each
-   one with that user's logins, as described in [Agent CLIs](#agent-clis).
+3. **Agent user and CLIs.** Prepare `devloop-agent` with `ops/host/setup-agent-user.sh`
+   ([Agent user](#agent-user)), then install Claude Code, codex and agy as that user and log in
+   to each one with its logins, as described in [Agent CLIs](#agent-clis).
 
 4. **Overlay.** Write `/home/devloop/ssdlc/.ssdlc/devloop/config.local.toml`, owned by
    `devloop`, with only the keys the operator overrides
    ([Local config as an overlay](#local-config-as-an-overlay)). Each of these is the operator's
    choice: the merge mode, `[pin] auto` ([Pin after a merge](#pin-after-a-merge)) and
-   `[run] alert_issue` ([Continuous loop](#continuous-loop)). Without the file, the
+   `[run] alert_issue` ([Continuous loop](#continuous-loop)). On this installation it also sets
+   `[agent_user] name = "devloop-agent"` ([Agent user](#agent-user)). Without the file, the
    configuration of the pinned copy applies as it is.
 
 5. **Pin.** The first pin runs the clone's devloop; every later command runs the pinned copy,
@@ -1732,23 +1737,68 @@ binary leaves, for a few seconds, nothing to start (#218; the start is retried o
 
 - disable their automatic updates: for Claude Code, `DISABLE_AUTOUPDATER=1` in the launcher's
   environment. The [launcher](#launcher) exports it unless the environment already sets it, and
-  the `devloop` user's `~/.claude/settings.json` sets it too;
-- and install them in the home of the `devloop` user, Claude Code included, so that the updates
+  the agent user's `~/.claude/settings.json` sets it too;
+- and install them in the home of the agent user, Claude Code included, so that the updates
   of the operator's sessions do not touch them. They change only when the operator updates them
   by hand, with the loop stopped.
 
+#### Agent user
+
+The agent CLIs (claude, codex, agy) and the tests the dispatcher runs (`Workspace.run_tests`)
+run as a system user of their own, `devloop-agent` on this installation (#415, decision of the
+operator): a user that cannot read the private keys of the apps (`key_dir`), `state_dir`
+(journal, logs, registers, pinned copies) nor the local overlay. Without it they would run as
+`devloop`, and an agent could read the key of the merger or of the dispatcher with its own file
+tools. `[agent_user] name` in the local overlay turns it on; empty, the default, they run as the
+dispatcher's user, as before ([reference](reference.md#agent-user)).
+
+- devloop starts each CLI, the test command and its own startup probe with
+  `sudo -n -E -u devloop-agent`. The sudoers rule (`ops/host/sudoers-agent`) allows the `devloop`
+  user only the three CLIs in `/home/devloop-agent/.local/bin`, `/usr/bin/bash` (the test command)
+  and `/usr/bin/kill`, with the environment devloop builds (`SETENV`) and without a terminal
+  (`!use_pty`), so that the command stays in the process group devloop started.
+- A timeout or an `abort` of the [stall check](#stalled-agents) kills that process group as
+  `devloop-agent`: the `devloop` user cannot signal another user's processes.
+- `devloop-agent` writes only inside the worktrees (`state_dir/worktrees/<name>`) and in the
+  directories devloop creates for each turn and test run in a shared directory without secrets
+  (`state_dir/agent-shared`: the empty `gh` config, the schema and the final message of codex
+  for each turn, the temporary directories of the tests), through default ACLs. It enters but
+  cannot write `worktrees`, `agent-shared` and the directories in it that hold what devloop
+  creates, so that it cannot replace them with a link; devloop also opens those paths without
+  following links, and reads the final message of codex only from a regular file. Every other
+  entry of `state_dir` has an ACL entry that gives `devloop-agent` no access, and `state_dir`
+  itself only lets it through to those two.
+- `devloop-agent` cannot write the clone's `.git`. devloop's own git commands in a worktree take
+  the repository from `.git`, not from the worktree's `.git` file, and run no hook: an agent
+  cannot make devloop run a hook or a configuration of its own.
+- `devloop` reads the session transcripts in the home of `devloop-agent` (for the stall check and
+  `devloop follow`) through read ACLs on `~/.claude/projects` and `~/.codex/sessions`.
+- At the start of `tick` and `run` devloop checks, as `devloop-agent`, that it can neither read
+  nor enter `key_dir` (or `$DEVLOOP_APP_KEY_DIR`) and the entries of `state_dir` other than the
+  two above, that it cannot read the keys, `state_dir` and the overlay, that it can write
+  nothing in `.git` nor the directories that hold the worktrees and its turns, and that it can
+  write the directories devloop makes for its turns; otherwise it refuses to start and says
+  what is wrong. `[agent_user] check = false` skips the check, in development only.
+
+`ops/host/setup-agent-user.sh` creates the user, its directories, the ACLs and the sudoers rule;
+`ops/host/check-host.sh` verifies them ([ops guide](../../ops/README.md)). Run the setup script
+again after copying files into `state_dir`: the ACL entries of the entries that already exist are
+its own. All agents share this one user, so their CLI logins are not isolated from each other.
+
 #### Agent CLIs
 
-The agent CLIs devloop runs belong to the `devloop` user: installed in its home, on its `PATH`,
-and logged in with its logins. devloop finds them on the `PATH` of the process that runs it
+The agent CLIs devloop runs belong to the agent user (`devloop-agent`, [Agent user](#agent-user)):
+installed in its home and logged in with its logins. sudo finds them on the `secure_path` of
+`ops/host/sudoers-agent`, with `/home/devloop-agent/.local/bin` first. Without an agent user they
+belong to the `devloop` user and devloop finds them on the `PATH` of the process that runs it
 (the [unit](#continuous-loop) and the [start command](#starting-and-stopping-the-loop) set
 `/home/devloop/.local/bin` first).
 
 - **Claude Code** in `~/.local/bin`, installed with npm under the prefix `~/.local`, with its
-  automatic updates off in `~/.claude/settings.json` of the `devloop` user:
+  automatic updates off in `~/.claude/settings.json` of the agent user:
 
   ```bash
-  sudo -u devloop -H npm install -g --prefix /home/devloop/.local @anthropic-ai/claude-code
+  sudo -u devloop-agent -H npm install -g --prefix /home/devloop-agent/.local @anthropic-ai/claude-code
   ```
 
   ```json
@@ -1760,11 +1810,11 @@ and logged in with its logins. devloop finds them on the `PATH` of the process t
   }
   ```
 
-- **codex** and **agy**, also in the home of the `devloop` user and on its `PATH`.
+- **codex** and **agy**, also in `~/.local/bin` of the agent user.
 
-Log in to each CLI once, in an interactive session of the `devloop` user
-(`sudo -iu devloop`), and check that `claude --version`, `codex --version` and `agy --version`
-answer there.
+Log in to each CLI once, in an interactive session of the agent user
+(`sudo -iu devloop-agent`), and check that `claude --version`, `codex --version` and
+`agy --version` answer there.
 
 **Updating them by hand, with the loop stopped** (decision of the operator, 2026-11-17). No turn
 may start while a binary is being replaced, so:
@@ -1772,10 +1822,10 @@ may start while a binary is being replaced, so:
 1. stop the loop with the `STOP` file and wait until `devloop run` has exited
    ([Starting and stopping the loop](#starting-and-stopping-the-loop)): the tick in progress
    and its actions end first;
-2. update the CLI as the `devloop` user, for Claude Code with the same `npm install` as above
+2. update the CLI as the agent user, for Claude Code with the same `npm install` as above
    (`@anthropic-ai/claude-code@<version>` for a given version), codex and agy each with its own
    installer;
-3. check the new version with `--version`, as the `devloop` user;
+3. check the new version with `--version`, as the agent user;
 4. remove `STOP` and start `devloop run` again.
 
 To go back, install the earlier version the same way, again with the loop stopped.
