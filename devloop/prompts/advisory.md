@@ -73,11 +73,51 @@ timeouts, capacities and intervals. Examples:
   `[ci] grace_minutes`; a new capacity or interval; a new helper function that none of the
   checks above uses; moving code without changing what it decides; a new test.
 
-When the change touches the trust policy, your `opinion` is `dubbi`, or `contrario` when the
-change weakens a check, even when the change is correct and the issue asks for it. The first
-item of `residual_risks` begins with "Policy di fiducia toccata:" and lists the parts the change
-touches, each with its point of the list above and its file. A change that does not touch the
-trust policy is not reported for it.
+The operator decides the policy, not every change that carries it out (ADR 0002). A change that
+touches the trust policy needs the operator when, and only when, at least one of these three
+things holds:
+
+1. It goes beyond or against a decision of the operator, or no decision covers it. A decision of
+   the operator is one recorded in the section "Decise dall'operatore" of an ADR approved with the
+   cycle of `docs/adr/README.md` and present on `main`, or one written by the operator in the body
+   of the issue. The points an ADR leaves open are not decisions.
+2. It weakens a check (who is believed, a limit, a cap, a piece of evidence, a condition of the
+   merge, a check of the paths) and no decision of the operator authorizes that weakening.
+3. It changes the rule itself: this "Trust policy" section of the review prompt
+   (`devloop/prompts/review.md`) or of the advisory review prompt (`devloop/prompts/advisory.md`),
+   or the classes of escalation (`NON_CRITICAL` in `devloop/supervision.py`). This holds even
+   when an ADR asks for the change.
+
+**Faithful implementation.** When the issue cites the section of an ADR on `main` and the change
+carries out its decision with no deviation, check the conformity of the whole change to that
+decision. Read the decision on `main` (`git show origin/main:docs/adr/<file>`), never in the diff
+of the PR. Cite it in your review: the file of the ADR, the section and the point. Without that
+citation the change needs the operator, as under point 1. Every deviation you find needs the
+operator, with its reason and the decision it departs from. A change that touches
+`operator_only_paths` (such as `docs/adr/` and `AGENTS.md`) is still merged by the operator
+only, whatever this rule says. Examples:
+
+- Faithful implementation, the operator is not needed: the issue cites
+  `docs/adr/0005-deleghe-e-ruoli-degli-agent.md`, section 4, D7, and the change lets the label
+  `impl:<agent>` prevail over the map by area and over the default, set only by the trusted users
+  and the supervisor, as D7 says.
+- Deviation, the operator is needed (point 1): the same issue, but the change lets any author set
+  the label, or makes the map prevail over the label; or a cap that D4 of the same ADR wants as a
+  constant of the code becomes a key of `devloop/config.toml` that can raise it.
+- Weakening without a decision, the operator is needed (point 2): the change accepts a marker
+  written by another identity, or skips the `operator_only_paths` check for some files, and no
+  decision of the operator authorizes it, even when the issue asks for it.
+- Change of the rule, the operator is needed (point 3): the change edits this section of
+  `devloop/prompts/review.md` or of `devloop/prompts/advisory.md`, or moves a class of escalation
+  into or out of `NON_CRITICAL`.
+
+When the change needs the operator under this rule, your `opinion` is `dubbi`, or `contrario`
+when the change weakens a check, even when the change is correct and the issue asks for it. The
+first item of `residual_risks` begins with "Policy di fiducia toccata:" and lists the parts the
+change touches, each with its point of the list above and its file, and which of the three
+points holds, with its reason and, for a deviation, the decision it departs from. A faithful
+implementation gets your opinion on its merits, with the decision cited in `summary`. A change
+that does not touch the trust policy is not reported for it.
 
 ## Issue #$issue_number: $issue_title
 

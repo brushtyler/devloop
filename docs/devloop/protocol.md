@@ -539,11 +539,20 @@ merge is the operator's for good: the snapshot plans the PR as mode `off`, the o
 notice lists the parts each reviewer named, and the merge checks it again just before.
 
 **Trust policy** (#399). The review prompt asks for `needs_operator` when the change touches the
-trust policy, at every review level, with the parts touched in `human_reason`, and to assess it
-again at every round on the whole diff of the PR against its base, not only on the latest fix;
-the advisory review prompt asks instead for the opinion `dubbi` (`contrario` when a check is
-weakened) and a first residual risk beginning with "Policy di fiducia toccata:". Both carry the
-same closed list of five points and the same examples, described in
+trust policy and needs the operator for it, at every review level, with the parts touched in
+`human_reason`, and to assess it again at every round on the whole diff of the PR against its
+base, not only on the latest fix; the advisory review prompt asks instead for the opinion `dubbi`
+(`contrario` when a check is weakened) and a first residual risk beginning with "Policy di
+fiducia toccata:". Both carry the same closed list of five points and the same examples. Since
+#447 a change to the policy needs the operator only when it goes beyond or against a decision of
+the operator (or no decision covers it), weakens a check that no decision authorizes, or changes
+the rule itself (the "Trust policy" section of the two prompts, or `NON_CRITICAL`): the operator
+decides the policy, not every change that carries it out
+([ADR 0002](../adr/0002-ruoli-e-responsabilita.md)). A faithful implementation of a decision
+recorded in an ADR on `main`, which the issue cites and the reviewer cites in its review (file,
+section and point), gets the technical verdict, `approve` or `request_changes`, and nothing in
+the merge changes for it; without the citation, or with a deviation, it is `needs_operator` as
+before. All of it is described in
 [Changes to the trust policy](guide.md#changes-to-the-trust-policy). The rule lives only in the
 prompts: the schema `advisory.json` does not change, `review.json` only gains `operator_reason`
 (#434) for it, and devloop does not check in code whether a verdict should have been
