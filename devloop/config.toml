@@ -130,7 +130,7 @@ sensitive_paths = ["devloop/", "AGENTS.md", "CLAUDE.md", ".github/", "schemas/",
                    "ssdlc_feedback_delegation.py", "ssdlc_feedback_admission.py",
                    "ssdlc_usage_admission.py",
                    # App tokens.
-                   "scripts/agent-token.py"]
+                   "scripts/agent-token.py", "scripts/supervisor-token.py"]
 # JSON files whose "files" object lists more sensitive paths, read at startup relative to the
 # root of the running devloop installation (a pinned checkout); a missing file stops devloop.
 sensitive_path_lists = ["schemas/recovery-grader-baseline.json"]
@@ -359,6 +359,7 @@ retry_own_prs = false
 # ADR 0003, I10 (#247): the modules and schemas without a document, each checked against the
 # document that describes its behaviour.
 "scripts/agent-token.py" = ["AGENTS.md", "docs/devloop/reference.md"]
+"scripts/supervisor-token.py" = ["AGENTS.md", "docs/devloop/reference.md"]
 "ssdlc_reconciliation.py" = ["docs/historical-reconciliation.md", "docs/recovery.md"]
 "ssdlc_transitions.py" = ["docs/recovery.md"]
 "ssdlc_preparations.py" = ["docs/continuations.md", "docs/historical-reconciliation.md", "docs/scope-amendments.md"]
@@ -420,6 +421,19 @@ retry_own_prs = false
 # decide (issue #258) and escalate (issue #182). In any merge mode it may ask for a fix of a PR in agent:review or
 # agent:changes with /devloop fix, as a trusted user may (issue #195).
 # supervisor = "claude"
+# The supervisor's role app (ADR 0005, P5-4, issue #408), off by default: turning it on is the
+# operator's decision (D10), best with an empty queue. As a table, roles.supervisor is the
+# supervisor actor, not a key of [agents] (devloop does not run it): its name is
+# "<kind>-supervisor", and kind, provider and model say which agent runs it. Its identity is then
+# the app of [apps.supervisor], and no longer the app of an agent: the commands, labels, issues
+# and fix or hold requests of the agent's app stop counting as the supervisor's. A PR counts as
+# implemented by the supervisor's agent when the kind or the model of its implementer, as its
+# marker records them, is the actor's.
+# [roles.supervisor]
+# name = "claude-supervisor"
+# kind = "claude"
+# provider = "anthropic"
+# model = "claude-opus-5-5"
 implementer = "claude"
 # The reviewer pool, in order; none may be the implementer. Level 1 uses the PR's recorded
 # reviewer (the first of the pool when the PR was opened). Level 2 takes the first pair that
@@ -490,7 +504,8 @@ fallback_models = [
 # review_commands = ["python3 scripts/run-tests.py", "python3 -m unittest", "git diff"]
 # write_commands = [...]
 
-# GitHub Apps (issue #65): one per agent, one for the dispatcher and one for merges (#201). App
+# GitHub Apps (issue #65): one per agent, one for the dispatcher, one for merges (#201) and one
+# for the supervisor (#408). App
 # ids and slugs are not secret. Private keys are read from key_dir (or $DEVLOOP_APP_KEY_DIR) as
 # <slug>.<date>.private-key.pem, mode 600. An actor without an app uses the ambient `gh` login.
 [apps]
@@ -518,3 +533,12 @@ slug = "brushtyler-devloop-agy-agent"
 [apps.merger]
 app_id = 5792929
 slug = "brushtyler-devloop-merger"
+
+# The supervisor's role app (ADR 0005, P5-4, issue #408), with issues: write and pull_requests:
+# write and no contents. It counts as the supervisor only with [roles.supervisor] as a table.
+# devloop never reads its key, which is in the key_dir of the supervisor's system user, not in
+# devloop's; the supervisor mints its tokens with scripts/supervisor-token.py, and
+# scripts/agent-token.py does not expose it.
+[apps.supervisor]
+app_id = 5824243
+slug = "brushtyler-devloop-supervisor"

@@ -60,6 +60,12 @@ stops devloop at startup in any case, until a story at its limit can be extended
 ([prerequisites of activation](#prerequisites-of-activation), #396).
 `[merge]` (`mode`, `levels`, `operator_only_paths`) and `roles.supervisor` set the
 [merge modes](guide.md#merge-modes); an unknown mode, level or key stops devloop at startup.
+`roles.supervisor` is the key of a configured agent, which signs with that agent's app, or the
+table of the supervisor actor (`name`, `kind`, `provider`, `model`), which signs with the role app
+`[apps.supervisor]` ([The supervisor app](#the-supervisor-app), #408); a table with another key,
+a missing or empty value, a `kind` that is not an agent kind, a `name` other than
+`<kind>-supervisor` or equal to a key of `[agents]`, or no `[apps.supervisor]` stops devloop at
+startup.
 `[pin]` (`auto`, default `false`; `restart_max_wait_minutes`, default 30) sets the
 [pin after a merge](guide.md#pin-after-a-merge), by devloop or by anyone else (#430), and how long, in the continuous mode, the restart
 from the new copy may wait for the running actions while new ones, except implementations, still
@@ -806,7 +812,8 @@ fencing and locks (`ssdlc_writer_gate.py`, `ssdlc_role_fencing.py`,
 `ssdlc_container_holder.py`, `ssdlc_locks.py`, `ssdlc_fencing_proof.py`), authorized transitions and gates
 (`ssdlc_transitions.py`, `ssdlc_replay_gate.py`, `ssdlc_grader.py`), delegations and
 admissions (`ssdlc_feedback_delegation.py`, `ssdlc_feedback_admission.py`,
-`ssdlc_usage_admission.py`) and the app tokens (`scripts/agent-token.py`). A PR that changes
+`ssdlc_usage_admission.py`) and the app tokens (`scripts/agent-token.py`,
+`scripts/supervisor-token.py`). A PR that changes
 only other modules, such as `ssdlc_impact.py`, stays at level 1. An entry is only a path: a
 listed file that does not exist yet is no error, and a PR that adds it gets level 2.
 
@@ -1004,6 +1011,7 @@ Each agent and the dispatcher can act on GitHub with its own GitHub App (#65), c
 | reviewer | one native GitHub review (`APPROVE` or `REQUEST_CHANGES`; for `needs_operator`, `REQUEST_CHANGES` while blocking findings of its own stay open, else `APPROVE`, #418) on the reviewed commit, whose body is the review and its record (#325, see [Where a review is published](protocol.md#where-a-review-is-published)); an agent without an app publishes the review comment instead |
 | advisory reviewer (`advisory_reviewer`) | the [advisory review](guide.md#advisory-review-for-the-operator) of a head of a PR in `agent:needs-operator`: always a native review of type `COMMENT`, also from an agent without an app (with the ambient login) and also when it is the PR's implementer; the dispatcher writes its summary and edits the receipt |
 | merger | only the merges of the `strict` and `auto` [merge modes](guide.md#merge-modes) (see [The merger app](#the-merger-app)) |
+| supervisor | not devloop: the supervisor's commands, labels, issues, diary and fix or hold requests, with `[roles.supervisor]` as a table (see [The supervisor app](#the-supervisor-app)) |
 
 Apps are per agent, not per role: GitHub keeps one review state per identity, and it already
 refuses an approval from the author of a PR. Least privilege per role comes from the tokens:
@@ -1035,7 +1043,8 @@ once the call's timeout (300 seconds) is spent, SIGKILL 5 seconds later, so a `g
 network never holds the lock for ever; stopped so, the write is uncertain. With the outbox on,
 and only then, the clients' `submit_review` and `create_pr` tell an uncertain outcome apart
 (`GitHub.uncertain_publications`), as `comment` and `edit_comment` always do.
-An app that is configured but whose key is missing stops devloop at startup instead of
+An app that is configured but whose key is missing (except the
+[supervisor's](#the-supervisor-app), whose key devloop never reads) stops devloop at startup instead of
 silently falling back to the operator's login: remove it from `[apps]` (or use `--config`) to run
 that actor without it. `python3 -m devloop apps` checks each app, its installation and its
 permissions.
@@ -1050,7 +1059,8 @@ Agent CLIs and the test command run without GitHub credentials in reach: `GH_TOK
 repositories (`GIT_ALLOW_PROTOCOL=file`), so neither SSH keys nor HTTPS credentials apply whatever
 the config files say; credential helpers, askpass programs, preconfigured authentication headers
 and SSH are disabled as further layers. `DEVLOOP_APP_KEY_DIR` points to a directory without keys,
-so the GitHub App helpers in the worktree (`devloop.apps`, `scripts/agent-token.py`) cannot mint a
+so the GitHub App helpers in the worktree (`devloop.apps`, `scripts/agent-token.py`,
+`scripts/supervisor-token.py`) cannot mint a
 token: the dispatcher does every GitHub write. For Claude Code, devloop sets `BASH_MAX_TIMEOUT_MS`
 to `test_timeout_seconds`, so a command that asks for it can run the full suite, and
 `BASH_DEFAULT_TIMEOUT_MS` to `agent_command_timeout_seconds` (default ten minutes, at most
@@ -1108,3 +1118,69 @@ before, and the `merged` record carries in `merged_by` the app's login. The text
 "Mergiata da devloop" section, which the dispatcher adds to the comment of the promotion
 ([record](protocol.md#merge-directives-and-record)), names the app that ran the merge; without
 the app, the local `gh` login.
+
+### The supervisor app
+
+The supervisor has a role app of its own (ADR 0005, P5-4, #408): `brushtyler-devloop-supervisor`,
+created by the operator with `Issues: Read and write`, `Pull requests: Read and write` and
+`Metadata: Read-only`, and **no** `Contents`, because the supervisor neither implements nor
+merges. It signs the supervisor's commands on escalations, its labels (`agent:ready`, priorities,
+dependencies), its issues, the diary and its `/devloop fix` and `/devloop hold` requests, whatever
+agent runs the supervisor. `config.toml` declares it:
+
+```toml
+[apps.supervisor]
+app_id = 5824243
+slug = "brushtyler-devloop-supervisor"
+```
+
+It counts only when the operator turns it on (D10, off by default), with `[roles.supervisor]` as
+the table of the supervisor actor, in the local overlay:
+
+```toml
+[roles.supervisor]
+name = "claude-supervisor"
+kind = "claude"
+provider = "anthropic"
+model = "claude-opus-5-5"
+```
+
+- `claude-supervisor` is not a key of `[agents]`: devloop does not run the supervisor. Its `name`
+  names agent and role in full (`<kind>-supervisor`), and no agent may have it nor be called
+  `supervisor`.
+- The supervisor's identity is then the login of `[apps.supervisor]` (`<slug>[bot]`), and no
+  longer the app of an agent: wherever the commands, labels and requests of the supervisor
+  count ([labels](guide.md#labels-from-the-supervisor),
+  [holds](guide.md#merge-modes),
+  [fixes](guide.md#fix-requested-by-the-operator-or-the-supervisor),
+  [escalations](guide.md#escalations-to-the-supervisor)), those of the agent's app that was the
+  supervisor stop counting. An issue the supervisor opens with its app counts as one of devloop's
+  apps, as one opened with the agent's app did.
+- A PR counts as implemented by the supervisor's agent (ADR 0002, principle 4, and
+  `[delegations] retry_own_prs`) when the `kind` or the `model` of its implementer, as the
+  profile of the PR's marker records them, is the actor's (the configured agent the marker names,
+  for a marker without a profile); a PR whose agent cannot be read counts as the supervisor's.
+  The keys are never compared, since `claude-supervisor` is never an implementer's key.
+  `provider` is not compared yet: devloop's agents do not declare one (P5-5).
+- devloop never reads the app's key and never writes with it: the key is in `key_dir` of the
+  supervisor's system user, not in devloop's, and `python3 -m devloop apps` does not list it.
+  `scripts/agent-token.py` refuses it, so no review or interactive session can write a command as
+  the supervisor. The supervisor runs, from its own clone and as its own user:
+
+  ```bash
+  python3 scripts/supervisor-token.py -- gh issue comment <ISSUE> --body-file <FILE>
+  python3 scripts/supervisor-token.py -- gh issue edit <ISSUE> --add-label agent:ready
+  python3 scripts/supervisor-token.py --perm pull_requests=write -- gh pr comment <PR> --body-file <FILE>
+  ```
+
+  The script reads `[apps.supervisor]` from `devloop/config.toml` and only that key, from
+  `$DEVLOOP_APP_KEY_DIR` or `key_dir`. Without `--perm` the token gets `issues=write` and
+  `pull_requests=write`; only `issues` and `pull_requests` (read or write) and `metadata=read`
+  may be asked for. The token reaches the command through `GH_TOKEN` only, and is never printed.
+- Without the table (the key of an agent, or no `roles.supervisor`), nothing changes: the app is
+  only declared, and its comments and labels count for no role.
+
+Turning it on is best done with an empty queue: a command or label of the old identity written
+before the switch, still unapplied, no longer counts afterwards (an issue admitted only by the
+agent's `agent:ready` is no longer admitted, and needs the label again), which stops the flow
+rather than widening it.

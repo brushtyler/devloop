@@ -20,7 +20,7 @@ from .markdown import (PREFLIGHT_RESUME, RESUME, carries_record, operator_retry_
                        read_marker, render_escalation, render_supervision)
 from .planning import (FIX_COMMAND, Action, PullRequest, findings_decreasing, label_names,
                        last_counted_ci, operator_blocked)
-from .policy import ZERO_LEVEL
+from .policy import ZERO_LEVEL, profile_of
 from .review import finding_state
 from .supervision import (ACCEPT_DEFAULTS, DECIDE, DESIGN_LABEL, ESCALATE, GRANT_ROUND,
                           ISSUE_STEPS, MAX_RETRIES, MERGED_ISSUE, PREFLIGHT_DEFAULT, RETRY,
@@ -78,6 +78,28 @@ class SupervisionMixin:
     """The methods of ``Dispatcher`` for supervision and commands (#293). They use the
     dispatcher state and its other methods through ``self``."""
 
+    def _supervisor_implemented(self, pr):
+        """Whether the supervisor's agent implemented ``pr`` (ADR 0002, principle 4). With
+        ``roles.supervisor`` naming an agent, whether the PR's implementer is that agent. With
+        the supervisor actor (``[roles.supervisor]`` as a table, ADR 0005, P5-4, #408) its key is
+        never an implementer's, so the agent that actually ran is compared, never the key: the
+        ``kind`` or the ``model`` of the profile in the PR's marker (of the configured agent the
+        marker names, for a marker without a profile) equal to the actor's. A PR whose agent
+        cannot be read counts as the supervisor's, so it goes to the operator. ``provider`` is
+        not compared yet: devloop's agents do not declare one (P5-5)."""
+        cfg = self.cfg
+        implementer = pr.meta.get('implementer')
+        actor = cfg.supervisor_actor
+        if actor is None:
+            return implementer == cfg.supervisor
+        profile = profile_of(pr.meta)
+        if profile is None and implementer in cfg.agents:
+            agent = cfg.agents[implementer]
+            profile = {'kind': agent.kind, 'model': agent.model}
+        if profile is None:
+            return True
+        return profile['kind'] == actor.kind or profile['model'] == actor.model
+
     def _supervised(self, number, cls, step, pr=None, reviewer=None, key=None):
         """``(route, why)`` of an escalation of class ``cls`` raised by ``step`` on issue or PR
         ``number`` (``pr``: the PR, None for an issue). ``route`` is None when it goes to the
@@ -106,7 +128,7 @@ class SupervisionMixin:
                     return None, ('il corpo della PR non termina più con il suo marker: chi l\'ha '
                                   'implementata e la sua modalità di merge non sono verificabili')
                 labels |= pr.labels
-                if pr.meta.get('implementer') == cfg.supervisor and not (
+                if self._supervisor_implemented(pr) and not (
                         cls == TOOL_FAILURE and cfg.delegations.retry_own_prs):
                     # A retry of a tool failure judges nothing (ADR 0005, P5-2, #406): with
                     # the delegation on, only that class leaves the supervisor's own PRs.

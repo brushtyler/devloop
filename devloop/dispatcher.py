@@ -89,9 +89,10 @@ issue that blocks other ready issues starts first. The issues of the queue on a 
 do not start, and the dispatcher reports the cycle once on each of them (``cycle`` record),
 without labels: once the cycle is gone, they start as usual.
 
-Supervisor labels (#178): with ``roles.supervisor`` and its GitHub App, ``agent:ready`` and the
-priority labels count also when the supervisor's app added them, but only on issues opened by a
-trusted user or by one of devloop's apps (``label_admitters``). On anyone else's issue only a
+Supervisor labels (#178): with ``roles.supervisor`` and its GitHub App (the agent's app, or
+with ``[roles.supervisor]`` as a table the role app ``[apps.supervisor]``, #408),
+``agent:ready`` and the priority labels count also when the supervisor's app added them, but
+only on issues opened by a trusted user or by one of devloop's apps (``label_admitters``). On anyone else's issue only a
 trusted user's label counts. The issue text stays trusted only while no one outside
 ``trusted_users`` edits it after the label.
 
@@ -183,7 +184,7 @@ from pathlib import Path
 
 from .agents import (TAIL_LINES, AgentError, ModelsUnavailable, ModelUnavailable, NoOutput,
                      PermissionDenied, background_unfinished, denied_retry_note)
-from .apps import DISPATCHER, ISSUE_COMMENT, PR_COMMENT
+from .apps import DISPATCHER, ISSUE_COMMENT, PR_COMMENT, SUPERVISOR, app_login
 from .budget import BUDGET, OUTSIDE, BudgetRefused
 from .budget import of_issue as budget_of_issue
 from .budget import reserve as budget_reserve
@@ -792,21 +793,36 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                                     'author': login, 'reason': reason, 'head_sha': pr.head_sha}
         return list(pending.values())
 
+    def _supervisor_login(self):
+        """The login of the supervisor's identity, None without one. With
+        ``[roles.supervisor]`` as a table (ADR 0005, P5-4, #408), the role app of
+        ``[apps.supervisor]``, known by its slug: devloop reads no key of it. With the key of an
+        agent, that agent's app, if it has one."""
+        cfg = self.cfg
+        if cfg.supervisor_actor is not None:
+            return app_login(cfg.apps[SUPERVISOR].slug)
+        return self._app_login(cfg.supervisor) if cfg.supervisor else None
+
+    def _devloop_logins(self):
+        """The logins of devloop's apps whose issues count as devloop's (#178, #182): the
+        agents', the dispatcher's and the supervisor's identity."""
+        return ({self._app_login(actor) for actor in (*self.cfg.agents, DISPATCHER)}
+                | {self._supervisor_login()}) - {None}
+
     def _may_hold(self, login):
         """Whether ``login`` may hold or release a merge (#172), or ask for a fix (#195): a
-        trusted user, or the app of the agent configured as ``roles.supervisor``."""
-        supervisor = self._app_login(self.cfg.supervisor) if self.cfg.supervisor else None
+        trusted user, or the supervisor's identity (``_supervisor_login``)."""
+        supervisor = self._supervisor_login()
         return login in self.cfg.trusted_users or bool(supervisor and login == supervisor)
 
     def _admitters(self, author):
         """The logins whose ``agent:ready`` and priority labels count on an issue opened by
-        ``author`` (#178, ``label_admitters``): the supervisor's app counts only when it has
-        one, and only on issues of trusted users or of devloop's apps."""
-        supervisor = self._app_login(self.cfg.supervisor) if self.cfg.supervisor else None
+        ``author`` (#178, ``label_admitters``): the supervisor's identity counts only when it
+        has one, and only on issues of trusted users or of devloop's apps."""
+        supervisor = self._supervisor_login()
         if not supervisor:
             return set(self.cfg.trusted_users)
-        devloop = {self._app_login(actor) for actor in (*self.cfg.agents, DISPATCHER)} - {None}
-        return label_admitters(author, self.cfg.trusted_users, supervisor, devloop)
+        return label_admitters(author, self.cfg.trusted_users, supervisor, self._devloop_logins())
 
     def _untrusted_change(self, history):
         """``untrusted_change`` of an issue, with the admitters of its author."""
@@ -833,8 +849,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
     def _devloop_author(self, login):
         """Whether an issue opened by ``login`` may have its escalations decided by the
         supervisor: a trusted user or one of devloop's apps."""
-        apps = {self._app_login(actor) for actor in (*self.cfg.agents, DISPATCHER)} - {None}
-        return bool(login) and (login in self.cfg.trusted_users or login in apps)
+        return bool(login) and (login in self.cfg.trusted_users or login in self._devloop_logins())
 
     def _dispatcher_records(self, comments, kind, event=None):
         """``(position, record)`` of the records of ``kind`` the dispatcher signed."""

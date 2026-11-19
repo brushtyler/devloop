@@ -154,8 +154,9 @@ proprietario del repository (`GITHUB_OWNER_TYPE=org` per un'organizzazione). Per
    `<slug>.<data>.private-key.pem`, va nella `key_dir` dell'utente che usa l'app (sezioni 4 e 7),
    mode 600, e poi tolto dai Download. Le chiavi che non servono più si revocano lì.
 5. **Configurazione**: `app_id` e `slug` (non segreti) in `[apps]` di `devloop/config.toml`, con
-   una PR. Le app `implementer` e `supervisor` non sono ancora in `[apps]`: si creano quando
-   servono (ADR 0005, P5-4).
+   una PR. L'app `supervisor` è in `[apps.supervisor]` (ADR 0005, P5-4): devloop non ne legge la
+   chiave, che sta solo nella `key_dir` del supervisore. L'app `implementer` non è ancora in
+   `[apps]`: si crea quando serve (ADR 0005, P5-3).
 
 Se una regola del branch principale limita chi può fare push o merge, aggiungere `merger` fra gli
 ammessi.
@@ -278,9 +279,11 @@ tail -f /home/devloop/ssdlc/.ssdlc/devloop/run.log
 Poi, a mano:
 
 - **chiavi** in `key_dir` del supervisore (`/home/supervisor/.ghapps`, 600): solo `supervisor` e,
-  finché P5-4 non è attivo, `claude-agent`. Le scritture del supervisore passano da
-  `scripts/agent-token.py`, che conia un token con i soli permessi dell'azione (oggi lo script
-  accetta gli attori `claude`, `codex` e `agy`);
+  finché P5-4 non è attivo, `claude-agent`. Con P5-4 attivo (`[roles.supervisor]` come tabella
+  nell'overlay di devloop), le scritture del supervisore passano da
+  `scripts/supervisor-token.py`, che conia un token dell'app `supervisor` con i soli permessi
+  dell'azione (solo `issues` e `pull_requests`); prima passano da `scripts/agent-token.py`, con
+  l'attore `claude`, che non espone l'app `supervisor`;
 - **token di sola lettura** per `gh` ([github/tokens.md](github/tokens.md));
 - **Claude Code** come utente `supervisor`, con lo stesso `npm install` del passo 5 e il login;
 - gli strumenti del diario (`~/supervisor`) e la memoria di Claude Code non vengono dal
