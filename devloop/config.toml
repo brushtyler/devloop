@@ -253,8 +253,9 @@ required_timeout_minutes = 30
 # claude. The limits a story gets at its first booking stay its own: a later change applies to
 # new stories. Token caps are refused: not supported yet. Off here: the values and turning it on
 # are the operator's decisions (ADR 0004, D2 and D8). enabled = true is refused at startup until
-# a story at its limit can be extended (grant-budget, ADR 0005; docs/devloop/reference.md,
-# "Prerequisites of activation").
+# the operator lifts the gate of the activation (BUDGET_EXTENSION in devloop/config.py); the
+# extension of a story at its limit is [delegations] budget below (grant-budget, ADR 0005;
+# docs/devloop/reference.md, "Prerequisites of activation").
 # The shape, with no value: the values are not decided yet (D2).
 [budget]
 enabled = false
@@ -291,16 +292,22 @@ enabled = false
 # startup. retry_own_prs (issue #406, P5-2): in "auto", a tool_failure escalation on a PR
 # implemented by the agent of roles.supervisor goes to the supervisor, who may retry it with
 # /devloop retry within the 2 retries it shares with the operator; every other class on such a PR
-# still goes to the operator. capacity (issue #412, P5-8): in "auto", `/devloop capacity <key>
-# <value> <duration> <reason>` on [report] issue (required when on) sets max_open_prs or
-# max_parked_prs to value for duration (<N>h or <N>m), then the configured value is back; each
-# grant counts against max_grants_per_day. max_parallel_actions is refused: it needs a restart.
-# When off, a command on [report] issue is refused as not applicable and spent.
+# still goes to the operator. budget (issue #411, P5-7): in "auto", a turn the budget envelope of
+# its story refused at a limit (LIMIT_REACHED) that one extension would cover, on a story never
+# extended, goes to the supervisor as budget_grantable, and `/devloop grant-budget <reason>`
+# extends the envelope of that story once: each turn cap and the time by 25% of their value,
+# rounded down (ADR 0005, D3), never dollars nor tokens, within max_grants_per_day; turned off,
+# the refused turn goes to the operator, as before. capacity (issue #412, P5-8): in "auto",
+# `/devloop capacity <key> <value> <duration> <reason>` on [report] issue (required when on) sets
+# max_open_prs or max_parked_prs to value for duration (<N>h or <N>m), then the configured value
+# is back; each grant counts against max_grants_per_day. max_parallel_actions is refused: it
+# needs a restart. When off, a command on [report] issue is refused as not applicable and spent.
 # capacity_max_open_prs, capacity_max_parked_prs and capacity_max_hours may only lower the caps of
 # the code (6, 6 and 24 hours).
 [delegations]
 rounds = false
 retry_own_prs = false
+budget = false
 capacity = false
 # max_rounds_per_pr = 2
 # max_grants_per_day = 3

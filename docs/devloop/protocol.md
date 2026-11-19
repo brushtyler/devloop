@@ -191,7 +191,10 @@ resolved, a new review of the same head or of a new one; a round the CI failure 
 joined adds `con la CI fallita dello stesso head`, and `che ne ha fatto decadere l'approvazione`
 when the round had approved), then the rounds that do not count with theirs, and recalls that the operator can grant more rounds by raising `max_review_rounds` (#289).
 A `round_grantable` escalation (#405) has the same lists and says instead that the supervisor
-may grant one more round with `/devloop grant-round <reason>`.
+may grant one more round with `/devloop grant-round <reason>`. A `budget_grantable` escalation
+(#411) of a turn the budget refused records, besides the step and its key, the `story`, the
+`extension` the supervisor may grant with `/devloop grant-budget <reason>`, and the `kind` and
+`agent` of the refused turn.
 `devloop status` shows the counted rounds of each PR on the limit, as `rounds=<counted>/<max>`,
 with the rounds granted in `<max>` and `(+<n> granted)` after it when the supervisor granted some,
 followed by `(+<n> not counted)` when some rounds did not count. It reads them from the thread
@@ -471,7 +474,27 @@ these records are what raises the round limit of the PR. The same figures go in 
 command's comment, and, before both, a `grant` event in the
 [turn journal](#turn-journal), which counts the grants of the day across every PR: the daily cap
 is checked again and the event written in one step, so `daily` is the count with this grant and
-never passes the cap. A temporary capacity limit set with `/devloop capacity` (#412,
+never passes the cap. An extension of the budget envelope granted with `/devloop grant-budget`
+(#411) carries the analysis of the causes in `reason`, the `story`, the `extension` (`percent`,
+and the `turns`, `role_turns`, `phase_turns` and `wall_seconds` it adds) and the same daily
+figures; its ledger `event` `delegation_grant` has the `delegation` `budget`, and its `grant`
+event in the turn journal, written first, also records the story, the extension and the text of
+the command (`reason`), which from then on are part of the envelope of the story. Here the
+ledger event comes before the `supervision` record, which spends the command: a dispatcher
+stopped after the journal and before the record, or whose write failed there, finds, for the
+story of any `budget_grantable` escalation of the thread, the `grant` of the item in the
+journal that no `supervision` record of the thread carries. It completes that grant before any
+other command, the latest one included, rebuilding the command from the journal (comment,
+author, text): the ledger event only if absent and the record `granted`, without checking nor
+extending the story again. The labels change and the step resumes only on an item still in
+`agent:needs-supervisor` whose latest escalation is that `budget_grantable` one: an issue that a
+merged devloop PR resolved meanwhile gets the records and then a `merged_issue` escalation,
+without running its step, and an issue blocked by an open issue waits, with nothing written.
+Anywhere else, for instance on an item that the `failure` escalation of a `GitHubError` while
+the records were written handed to the operator, or behind a later escalation, only the records
+are written, with `trace_only: true`, and the item stays where it is: such a record does not end
+the operator's block. A temporary capacity limit
+set with `/devloop capacity` (#412,
 [Temporary capacity limits](guide.md#temporary-capacity-limits)) has its record on
 `[report] issue`, with no class: the analysis of the causes in `reason`, the key (`setting`), the
 `value`, the `configured` value, the `cap` of the key, the duration in `minutes`, its end
@@ -489,8 +512,9 @@ supervisor's and the operator's.
 **Escalation.** The `notice` marker of an escalation to the operator records, as one to the
 supervisor does, the step that failed, the key of its input and, for a PR, the label a retry
 resumes from, when the step is one a retry runs again (#321). A supervisor's escalation handed to
-the operator (`supervisor_escalated`, `supervisor_refused`) keeps them only for `tool_failure` and
-`sync_failed`: the key of a `preflight_default` or `merged_issue` escalation only routes it.
+the operator (`supervisor_escalated`, `supervisor_refused`) keeps them only for `tool_failure`,
+`sync_failed` and `budget_grantable` (#411), whose step the operator may retry as on a `budget`
+escalation: the key of a `preflight_default` or `merged_issue` escalation only routes it.
 
 ## Dependency cycles
 
@@ -1040,7 +1064,11 @@ their format does not change. The journal is append-only, one JSON event per lin
   the PR, the id of the command's comment and its author; written before the grant applies, the
   grants of a UTC day count against the daily cap, which is checked again under the journal's
   lock in the same step as the write: past the cap nothing is written and the grant does not
-  apply ([Granting a review round](guide.md#granting-a-review-round)). The events of the
+  apply ([Granting a review round](guide.md#granting-a-review-round)). The extension of a budget
+  envelope (#411, `/devloop grant-budget`) is a `grant` of the delegation `budget` that also
+  records the `story` and the `extension` it adds; one per story, ever, checked under the lock in
+  the same step as the daily cap and the write, and from then on part of the envelope of that
+  story ([Extending the budget envelope](guide.md#extending-the-budget-envelope)). The events of the
   [publication outbox](#publication-outbox) start with `publication`.
 - `config` (ADR 0006, R2, trace T1 of K1): the configuration the dispatcher read, at each start
   of `tick` and `run` (`when: start`, before any tick: a start whose record cannot be written

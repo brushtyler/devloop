@@ -816,6 +816,9 @@ SUPERVISOR_RESUME = (
     '- `/devloop grant-round <motivo>`: concede un round di review in più a una PR al limite dei '
     'round (`round_grantable`), entro i tetti della delega; il motivo, che può continuare nelle '
     'righe successive, riporta o cita l\'analisi delle cause;\n'
+    '- `/devloop grant-budget <motivo>`: estende una volta l\'envelope di budget della storia, solo '
+    'in turni e tempo (`budget_grantable`), entro i tetti della delega; il motivo, come per '
+    '`grant-round`, riporta o cita l\'analisi delle cause;\n'
     '- `/devloop escalate <motivo>`: passa l\'escalation all\'operatore (`agent:needs-operator`).')
 
 

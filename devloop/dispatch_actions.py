@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from .acceptance import acceptance_criteria, format_criteria, format_map, latest_map, render_map
 from .agents import AgentError
 from .apps import DISPATCHER, IMPLEMENT, PR_COMMENT, RERUN, REVIEW
+from .budget import BudgetRefused
 from .context import (_failure_text, _format_conflicts, _format_findings, _review_failure,
                       _start_failure, _template, _trusted_comments, docs_diff_section,
                       docs_map_section, docs_review_section, format_ci_summary,
@@ -180,7 +181,9 @@ class ActionsMixin:
             result, failure, used, tested, local = self._write_turn(
                 agent, prompt, 'implement', path, f'issue-{number}-implement',
                 where=(number, 'implement'))
-        except AgentError as exc:
+        except (AgentError, BudgetRefused) as exc:
+            # A turn the budget refused (#411) keeps its input too: the escalation that the
+            # supervisor may answer with an extension is bound to it, as a retry is.
             exc.key = key
             raise
         if result['status'] == 'blocked':

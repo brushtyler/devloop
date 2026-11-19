@@ -185,7 +185,7 @@ from pathlib import Path
 from .agents import (TAIL_LINES, AgentError, ModelsUnavailable, ModelUnavailable, NoOutput,
                      PermissionDenied, background_unfinished, denied_retry_note)
 from .apps import DISPATCHER, ISSUE_COMMENT, PR_COMMENT, SUPERVISOR, app_login
-from .budget import BUDGET, OUTSIDE, BudgetRefused
+from .budget import BUDGET, OUTSIDE, BudgetRefused, extension_text
 from .budget import of_issue as budget_of_issue
 from .budget import reserve as budget_reserve
 from .budget import status_lines as budget_status_lines
@@ -213,15 +213,15 @@ from .planning import (BASE_CHANGED, MERGE_LANE, MERGING, RESYNC_AFTER_APPROVAL,
                        Snapshot,
                        admit, changes_before_ci, ci_unknown, counted_rounds, issue_priority,
                        label_names, numbers_of, operator_blocked, operator_held,
-                       pending_reviewers, plan, pr_counts, queue_lines, round_reasons, schedule,
-                       waived_rounds, zero_labels_hold)
+                       pending_reviewers, plan, pr_counts, queue_lines, round_reasons,
+                       runs_issue_step, schedule, waived_rounds, zero_labels_hold)
 from .policy import (BINDING, MAX_LISTED_PATHS, agent_profile, differences, profile_of,
                      receipt_of)
 from .ports import Backend, Tracker, summarize_checks
 from .review import (CI, OPERATOR, current_round, finding_commands, finding_key, flow_verdict,
                      open_findings, owner_of, round_verdict, trust_policy_parts)
-from .supervision import (ACCEPT_DEFAULTS, DECIDE, ISSUE_STEPS, RETRY, ROUND_GRANTABLE,
-                          TOOL_FAILURE, UNCERTAIN_TURN, supervisor_command)
+from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, DECIDE, RETRY,
+                          ROUND_GRANTABLE, TOOL_FAILURE, UNCERTAIN_TURN, supervisor_command)
 from .workspace import WorkspaceError
 
 LEVEL_LABEL_STYLE = ('5319e7', 'devloop: la PR richiede una review di livello 2')
@@ -1237,7 +1237,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         """The issues and PRs in ``agent:needs-supervisor``, not in ``agent:needs-operator``,
         with a supervisor command to apply (#182), and those in ``agent:needs-operator`` with a
         command of a trusted user (#321); either may be a command only to answer
-        (``_supervisor_view``)."""
+        (``_supervisor_view``). An extension of the budget envelope recorded in the journal and
+        not yet traced (``_pending_extension``, #411) is the command of its item."""
         lb = self.cfg.labels
         items = [(pr.number, True, self.gh.pr_comments, operator_blocked(pr.labels, lb))
                  for pr in prs if lb.needs_supervisor in pr.labels
@@ -1251,18 +1252,27 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                                   operator_blocked(label_names(raw['labels']), lb)))
         found = []
         for number, is_pr, read, operator in items:
-            view = self._supervisor_view(number, read(number), operator)
+            comments = read(number)
+            # An extension of the budget envelope whose records a stopped or failed run did not
+            # write (#411) is the command to complete, whatever command is the latest now and
+            # wherever the item is; ``trace_only`` when its step does not resume from it.
+            pending = self._pending_extension(number, comments, is_pr, operator)
+            view = (dict(pending['command'], step=pending['escalation'].get('step'),
+                         anchor={'kind': 'notice', 'record': pending['escalation']},
+                         trace_only=not pending['resume'])
+                    if pending else self._supervisor_view(number, comments, operator))
             if view is not None:
                 found.append(dict(view, number=number, pr=is_pr))
-        # A retry of an issue's step waits while the issue is blocked (#277), as a ready issue
-        # does: ``blocked_by`` holds its open blocks.
-        retries = [item for item in found if item['command'] == RETRY and not item['pr']
-                   and item.get('step') in ISSUE_STEPS and not item.get('refusal')]
+        # A retry of an issue's step, or an extension of the budget envelope that runs it
+        # (#411), waits while the issue is blocked (#277), as a ready issue does: ``blocked_by``
+        # holds its open blocks.
+        retries = [item for item in found if runs_issue_step(item)]
         views = self._dependency_view([item['number'] for item in retries]) if retries else {}
         for item in retries:
             item['blocked_by'] = views[item['number']]['blocked_by']
             if item['blocked_by']:
-                self.log(f'  issue #{item["number"]}: the retry waits, blocked by '
+                what = 'the retry' if item['command'] == RETRY else 'the extension'
+                self.log(f'  issue #{item["number"]}: {what} waits, blocked by '
                          + ', '.join(item['blocked_by']))
         return found
 
@@ -1746,7 +1756,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         The escalation of a ``TurnBlocked`` records the ids of the turns it names (``turns``).
         A turn the budget envelope does not cover (``BudgetRefused``, #365, a ``TurnBlocked``
         with no turns) escalates the same way, with class ``budget``, its ``category`` and, on
-        a PR, its ``head`` (#396)."""
+        a PR, its ``head`` (#396); or, when the supervisor may extend the envelope of its story
+        (``_budget_grant``, #411), to the supervisor as ``budget_grantable``, with the story
+        and the extension in its record."""
         if action.kind == 'conclave' and not isinstance(exc, TurnBlocked):
             self.log('  conclave: no escalation, it resumes from its record')
             return
@@ -1772,6 +1784,16 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         try:
             reviewer, key = getattr(exc, 'reviewer', None), getattr(exc, 'key', None)
             supervised, why = self._supervised(number, cls, action.kind, pr, reviewer, key=key)
+            if isinstance(exc, BudgetRefused):
+                # The one extension of the envelope, when the supervisor may grant it (#411).
+                supervised, why = self._budget_grant(number, action.kind, pr, reviewer, key,
+                                                     exc)
+                if supervised:
+                    cls = BUDGET_GRANTABLE
+                    reason += ('\n\nIl supervisore può estendere una volta l\'envelope di questa '
+                               'storia, solo in turni e tempo, con `/devloop grant-budget '
+                               '<motivo>`, dove il motivo riporta o cita l\'analisi delle '
+                               'cause: ' + extension_text(supervised['extension']) + '.')
             # To the operator the step stays recorded too, for a trusted user's retry (#321).
             retry = None if supervised else self._retry_payload(action.kind, pr, reviewer, key)
             if retry and retry['step'] == 'preflight':

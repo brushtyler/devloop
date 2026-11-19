@@ -14,6 +14,8 @@ from datetime import datetime
 from .activity import iso
 from .agents import AgentError
 from .apps import DISPATCHER
+from .budget import BUDGET, extension_text
+from .budget import grantable as budget_grantable
 from .config import same_agent
 from .context import operator_comments, requests_rereview
 from .github import GitHubError
@@ -25,11 +27,12 @@ from .planning import (FIX_COMMAND, Action, PullRequest, findings_decreasing, la
                        last_counted_ci, operator_blocked)
 from .policy import ZERO_LEVEL, profile_of
 from .review import finding_state
-from .supervision import (ACCEPT_DEFAULTS, CAPACITY, CAPACITY_REFUSED, DECIDE, DESIGN_LABEL,
-                          ESCALATE, GRANT_ROUND, ISSUE_STEPS, MAX_CAPACITY, MAX_RETRIES,
-                          MERGED_ISSUE, PREFLIGHT_DEFAULT, RETRY, RETRY_STEPS, ROUND_GRANTABLE,
-                          SYNC_FAILED, TOOL_FAILURE, capacity_arguments, critical,
-                          preflight_class, retries_done, supervisor_command)
+from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, CAPACITY, CAPACITY_REFUSED, DECIDE,
+                          DESIGN_LABEL, ESCALATE, GRANT_BUDGET, GRANT_ROUND, ISSUE_STEPS,
+                          MAX_CAPACITY, MAX_RETRIES, MERGED_ISSUE, PREFLIGHT_DEFAULT, RETRY,
+                          RETRY_STEPS, ROUND_GRANTABLE, SYNC_FAILED, TOOL_FAILURE,
+                          capacity_arguments, critical, preflight_class, retries_done,
+                          supervisor_command)
 from .workspace import WorkspaceError
 
 # Hold and release a merge in ``auto`` mode (#172): the first line of a comment, after the
@@ -276,8 +279,11 @@ class SupervisionMixin:
         start, kind, record = anchors[-1] if anchors else (-1, None, {})
         moved = {p for p, r in checks if r['ready']}
         moved |= {p for p, r in policy if not r.get('class')}
+        # The records of an extension of the budget envelope completed on an item already with
+        # the operator (``trace_only``, #411) move nothing: the item stays the operator's.
         moved |= {p for p, r in self._dispatcher_records(comments, 'supervision')
-                  if r.get('outcome') in ('applied', 'accepted', 'decided', 'granted')}
+                  if r.get('outcome') in ('applied', 'accepted', 'decided', 'granted')
+                  and r.get('trace_only') is not True}
         for position, comment in enumerate(comments):
             body = comment.get('body', '')
             if any(read_marker(body, kind) is not None for kind in ('review', 'fix', 'sync')) \
@@ -396,6 +402,8 @@ class SupervisionMixin:
           (``_decide``, #258).
         - ``grant-round``: only for a ``round_grantable`` escalation of a PR (``_grant_round``,
           #405).
+        - ``grant-budget``: only for a ``budget_grantable`` escalation of an issue or a PR
+          (``_grant_budget``, #411).
         - ``retry``: only for ``tool_failure`` and ``sync_failed``, and only while the input of
           the step is the one that failed (the key of the escalation). A PR goes back to the
           label of its step, and the next tick runs it; an issue's step runs now. Retries
@@ -409,7 +417,12 @@ class SupervisionMixin:
         supervisor, accepts no command: the item goes to ``agent:needs-operator``. A command
         that is not applicable (``_supervisor_view``) is answered and spent, and the item stays
         where it is (#321). An item in ``agent:needs-operator`` gets ``_operator_command``. The
-        escalations to the operator keep the step a retry runs and its key (#321)."""
+        escalations to the operator keep the step a retry runs and its key (#321).
+
+        Before any command, an extension of the budget envelope that the journal recorded and a
+        stopped or failed run did not trace (``_pending_extension``, #411) is completed with its
+        own command (``_finish_extension``), whatever command is the latest now, also on an item
+        in ``agent:needs-operator``, where only its records are written."""
         lb = self.cfg.labels
         is_pr = isinstance(target, PullRequest)
         number = target.number if is_pr else target
@@ -425,6 +438,34 @@ class SupervisionMixin:
             self.log('  in neither agent:needs-supervisor nor agent:needs-operator any more; '
                      'nothing to do')
             return
+
+        def tracer(command, cls):
+            """The ``trace(outcome, text, **extra)`` of the ``supervision`` record of
+            ``command`` on an escalation of class ``cls``."""
+            name, by = command['command'], command['by']
+
+            def trace(outcome, text, **extra):
+                record = dict(command=name, by=by, reason=command['reason'] or '',
+                              comment=command['comment'], outcome=outcome, **extra)
+                record['class'] = cls if isinstance(cls, str) else None
+                self.gh.comment(number, render_supervision(
+                    record, f'`/devloop {name}` di `{by}`: {text.strip()}',
+                    OPERATOR_TITLE if operator else SUPERVISOR_TITLE))
+                self.log(f'  {name} by {by}: {outcome}')
+            return trace
+
+        # An extension of the budget envelope the journal recorded, whose records a stopped or
+        # failed run did not write (#411), is completed first, whatever command is the latest
+        # now, whatever changed since and wherever the item is: it is part of the envelope of
+        # the story already. Its step resumes only from its own escalation, still the
+        # supervisor's; on an item with the operator only the records are written.
+        pending = self._pending_extension(number, comments, is_pr, operator)
+        if pending is not None:
+            escalation, command = pending['escalation'], pending['command']
+            return self._finish_extension(number, is_pr, comments, escalation, command,
+                                          tracer(command, escalation.get('class')),
+                                          pending['grant'], pending['daily'], recovered=True,
+                                          resume=pending['resume'], operator=operator)
         command = self._supervisor_view(number, comments, operator)
         if command is None:
             self.log('  no command to apply')
@@ -433,11 +474,13 @@ class SupervisionMixin:
         cls = escalation.get('class')
         name, by = command['command'], command['by']
         # The step a retry runs again stays recorded on the way to the operator (#321), only for
-        # the classes a retry admits: the key of a preflight_default or merged_issue escalation
-        # only routes it.
+        # the classes whose step the operator may retry: the failures a retry admits, and a turn
+        # the budget refused (#411), which the operator may retry as when the refusal goes to the
+        # operator directly. The key of a preflight_default or merged_issue escalation only
+        # routes it.
         carry = ({k: escalation[k] for k in ('step', 'key', 'resume') if k in escalation}
-                 if cls in (TOOL_FAILURE, SYNC_FAILED) and self._retryable(escalation, is_pr)
-                 else None)
+                 if cls in (TOOL_FAILURE, SYNC_FAILED, BUDGET_GRANTABLE)
+                 and self._retryable(escalation, is_pr) else None)
         # A tool failure of an issue loses agent:ready on its way to the operator, as any failed
         # step does; the readiness check keeps it, and so does a readiness check the operator
         # may retry, which runs again only with agent:ready.
@@ -445,16 +488,7 @@ class SupervisionMixin:
         human_remove = [] if keep_ready else [lb.ready]
         carried_remove = [] if keep_ready or (carry and carry['step'] == 'preflight') \
             else [lb.ready]
-
-        def trace(outcome, text, **extra):
-            record = dict(command=name, by=by, reason=command['reason'] or '',
-                          comment=command['comment'], outcome=outcome, **extra)
-            record['class'] = cls if isinstance(cls, str) else None
-            self.gh.comment(number, render_supervision(
-                record, f'`/devloop {name}` di `{by}`: {text.strip()}',
-                OPERATOR_TITLE if operator else SUPERVISOR_TITLE))
-            self.log(f'  {name} by {by}: {outcome}')
-
+        trace = tracer(command, cls)
         stays = 'Il comando è speso; l\'escalation resta al supervisore.'
         if command.get('refusal'):
             where = 'la PR' if is_pr else 'l\'issue'
@@ -493,6 +527,13 @@ class SupervisionMixin:
                              + self._supervisor_resume(escalation, is_pr))
             return self._grant_round(target, number, fresh, labels, comments, command,
                                      escalation, trace)
+        if name == GRANT_BUDGET:
+            if cls != BUDGET_GRANTABLE:
+                return trace('refused', 'rifiutato: vale solo per un\'escalation '
+                             f'`{BUDGET_GRANTABLE}` di un turno rifiutato dall\'envelope di '
+                             f'budget. {stays}\n\n' + self._supervisor_resume(escalation, is_pr))
+            return self._grant_budget(target, number, fresh if is_pr else None, labels,
+                                      comments, command, escalation, trace, human_remove)
         if name in (ACCEPT_DEFAULTS, DECIDE):
             if is_pr or cls != PREFLIGHT_DEFAULT:
                 return trace('refused', 'rifiutato: vale solo per un\'escalation `preflight_default` '
@@ -704,6 +745,336 @@ class SupervisionMixin:
         self.ledger.event(number, 'delegation_grant', delegation='rounds', by=by,
                           comment=command['comment'], **figures)
         self.gh.edit_labels(number, add=[resume], remove=[lb.needs_supervisor])
+
+    def _budget_extension(self, issue, kind, agent):
+        """``(found, why)`` of the one extension of the envelope of the story of issue
+        ``issue`` (#411, ADR 0005, P5-7), for a turn of ``kind`` of the agent ``agent`` (its
+        key) that the envelope refused: ``found`` is ``{story, extension, kind, agent}`` when
+        the delegation applies now, None otherwise, with ``why``. It applies only within the
+        daily cap of the delegations, for an agent still configured, and when the extension can
+        be granted (``budget.grantable``): the story never extended, refused at a limit that
+        the extension would cover. Anything that cannot be verified refuses it."""
+        cfg = self.cfg
+        cap = cfg.delegations.max_grants_per_day
+        today = self._grants_today()
+        if today is None:
+            return None, ('le concessioni di oggi non sono verificabili: il journal dei turni '
+                          'non è disponibile o non è leggibile')
+        if today >= cap:
+            return None, (f'oggi sono già state fatte {today} concessioni, il massimo '
+                          f'giornaliero (`[delegations] max_grants_per_day` = {cap})')
+        if not isinstance(agent, str) or agent not in cfg.agents or not isinstance(kind, str):
+            return None, ('il turno rifiutato non è ricostruibile: il suo agent (`'
+                          f'{agent}`) non è configurato, o il tipo del turno manca')
+        try:
+            story, extension, why = budget_grantable(
+                cfg.budget, self.ledger.journal, repo=cfg.repo, issue=issue, kind=kind,
+                agent=cfg.agent(agent))
+        except JournalError as exc:
+            return None, f'il journal dei turni non è leggibile ({exc})'
+        if why:
+            return None, why
+        return {'story': story, 'extension': extension, 'kind': kind, 'agent': agent}, ''
+
+    def _budget_grant(self, number, step, pr, reviewer, key, exc):
+        """``(route, why)`` of the turn of ``step`` on issue or PR ``number`` (``pr``: the PR,
+        None for an issue) that the budget envelope of its story refused (``exc``, a
+        ``BudgetRefused``) (#411, ADR 0005, P5-7). ``route`` is the payload of a
+        ``budget_grantable`` escalation to the supervisor: the one of ``_supervised`` (the step,
+        the key of its input and, for a PR, the label it resumes from) with the story, the
+        extension, the kind and the agent of the refused turn; None when the escalation goes to
+        the operator as ``budget``, with ``why`` the delegation, when on, does not apply ('' if
+        it does). With ``[delegations] budget`` off it never applies, and says nothing.
+
+        The delegation applies only when every condition holds, each verified now: those of
+        ``_supervised`` (merge mode ``auto`` with a supervisor, a step the supervisor may
+        resume, a PR in merge mode ``auto`` that the supervisor did not implement, a trusted
+        issue still approved, no ``phase:design``) and those of ``_budget_extension``. The turns
+        of a conclave or of an advisory review, on an item already with the operator, never
+        apply."""
+        if not self.cfg.delegations.budget or step not in RETRY_STEPS:
+            return None, ''
+        route, why = self._supervised(number, BUDGET_GRANTABLE, step, pr, reviewer, key=key)
+        if route is None:
+            return None, why and f'la delega del budget non si applica: {why}'
+        issue = pr.issue if pr is not None else number
+        found, why = self._budget_extension(issue, exc.kind or step, exc.agent)
+        if found is None:
+            return None, f'la delega del budget non si applica: {why}'
+        return dict(route, **found, category=exc.category), ''
+
+    def _pending_extension(self, number, comments, is_pr, operator=False):
+        """The extension of the budget envelope that the journal recorded for a command on
+        issue or PR ``number`` and whose records a stopped or failed run did not write (#411):
+        ``{escalation, command, grant, daily, resume}``, or None.
+
+        It is pending when a ``budget_grantable`` escalation of the dispatcher to the supervisor
+        in ``comments``, any of them and not only the latest, names a story whose one extension
+        the journal holds, granted on ``number`` by a command that no dispatcher
+        ``supervision`` record of the thread carries; ``escalation`` is the latest one of that
+        story. The command is rebuilt from the journal (its comment, author and text), so it
+        does not depend on the command that is the latest now; a text the journal lacks is read
+        from the comment, when still there. ``daily`` is the count of the grants of its UTC day
+        up to it. None too when the journal cannot be read.
+
+        Completing the records never depends on where the item is now: on an item handed to the
+        operator meanwhile (``operator``, for instance by the ``failure`` escalation of a
+        ``GitHubError`` while the records were written) or behind a later escalation they are
+        written all the same. ``resume`` says whether the step of the refused turn resumes too:
+        only on an item still in ``agent:needs-supervisor`` whose latest escalation is that
+        one, with a step the supervisor may resume (``_retryable``)."""
+        escalations = self._dispatcher_records(comments, 'notice', 'escalation')
+        candidates = {}
+        for position, record in escalations:
+            story = record.get('story')
+            if record.get('class') == BUDGET_GRANTABLE and record.get('to') == 'supervisor' \
+                    and isinstance(story, str):
+                candidates[story] = (position, record)  # the latest escalation of each story
+        journal = getattr(self.ledger, 'journal', None)
+        if not candidates or journal is None:
+            return None
+        traced = {r.get('comment') for _, r in self._dispatcher_records(comments, 'supervision')}
+        found = None
+        try:
+            for story, (position, escalation) in sorted(candidates.items(),
+                                                       key=lambda item: -item[1][0]):
+                grant = journal.extension(story)
+                if grant is not None and grant.get('number') == number \
+                        and grant.get('comment') not in traced:
+                    found = position, escalation, grant
+                    break
+            if found is None:
+                return None
+            position, escalation, grant = found
+            ident = grant.get('comment')
+            day = [g.get('comment') for g in journal.grants(str(grant.get('at', ''))[:10])]
+        except JournalError as exc:
+            self.log(f'  the extensions of stories {", ".join(sorted(candidates))} cannot be '
+                     f'read: {exc}')
+            return None
+        resume = (not operator and position == escalations[-1][0]
+                  and self._retryable(escalation, is_pr))
+        reason = grant.get('reason')
+        if not isinstance(reason, str):
+            parsed = [supervisor_command(c.get('body') or '') for c in comments
+                      if c.get('id') == ident]
+            reason = parsed[0][1] if parsed and parsed[0] and parsed[0][1] else ''
+        command = {'command': GRANT_BUDGET, 'by': grant.get('by'), 'reason': reason,
+                   'comment': ident}
+        return {'escalation': escalation, 'command': command, 'grant': grant,
+                'daily': day.index(ident) + 1 if ident in day else 1, 'resume': resume}
+
+    def _issue_blocked(self, number):
+        """Whether issue ``number`` is blocked by an open issue (#277), read now: its step
+        does not run, as for a retry (``_apply_retry``)."""
+        blocked_by = self._dependency_view([number])[number]['blocked_by']
+        if blocked_by:
+            self.log('  the extension waits, blocked by ' + ', '.join(blocked_by))
+        return bool(blocked_by)
+
+    def _granted_event(self, comments, comment):
+        """Whether ``comments`` hold the ledger ``event`` ``delegation_grant`` of the budget
+        written for the command of comment ``comment`` (#411), by the dispatcher."""
+        return any(r.get('event') == 'delegation_grant' and r.get('delegation') == 'budget'
+                   and r.get('comment') == comment
+                   for _, r in ledger_entries(comments, self._signed))
+
+    def _grant_budget(self, target, number, fresh, labels, comments, command, escalation, trace,
+                      remove):
+        """Apply ``/devloop grant-budget <reason>`` on issue or PR ``number`` in a
+        ``budget_grantable`` escalation (#411, ADR 0005, P5-7): the one extension of the budget
+        envelope of its story, in turns and time only, by ``BUDGET_TOLERANCE_PERCENT`` of the
+        frozen values rounded down, never in dollars nor tokens. ``fresh``: the state of the PR
+        read now, None for an issue.
+
+        An issue a merged devloop PR already resolved (#228) is refused first and becomes a
+        ``merged_issue`` escalation, as for a retry. The extension is bound to the input of the
+        refused turn, as a retry is: when the key of the escalation is no longer the current one
+        (the PR's head, or the issue's base or request) the command is refused and the
+        escalation stays with the supervisor. The conditions are verified again now
+        (``_supervised`` on the PR read now and ``_budget_extension``), and the story must be
+        the one of the escalation: a delegation turned off, a story already extended, a cap
+        reached, an extension that would no longer cover the turn, or anything that cannot be
+        verified hand the item to the operator as ``budget``, removing ``remove``. Granted, the
+        extension is written in the journal of the turns first (``TurnJournal.extend``), which
+        checks again that the story has none and the daily cap, and records it, in one step
+        under its lock: from then on it is part of the envelope of the story. Then the ledger
+        ``event`` with the delegation, the extension and the daily figures; then the
+        ``supervision`` record, which spends the command; last the labels: a PR goes back to
+        the label of its step, and the next tick runs it; an issue loses
+        ``agent:needs-supervisor`` and its step runs now, as after a retry. An issue blocked by
+        an open issue (#277) waits, with nothing recorded nor spent.
+
+        A run stopped after the journal recorded the extension and before the ``supervision``
+        record, or failed there and handed to the operator, is completed by ``_do_supervise``
+        before any command (``_pending_extension`` and ``_finish_extension``), never here."""
+        lb = self.cfg.labels
+        rules = self.cfg.delegations
+        by = command['by']
+        is_pr = fresh is not None
+        carry = ({k: escalation[k] for k in ('step', 'key', 'resume') if k in escalation}
+                 if self._retryable(escalation, is_pr) else None)
+
+        def refuse(why):
+            trace('refused', f'rifiutato: {why}.')
+            return self._to_operator(number, 'Il supervisore non può estendere l\'envelope di '
+                                     f'budget di questa storia: {why}. `/devloop {GRANT_BUDGET}` '
+                                     f'di `{by}` è stato rifiutato.\n\nI valori dell\'envelope e '
+                                     'le estensioni oltre l\'unica delegata al supervisore '
+                                     'restano decisioni dell\'operatore (ADR 0004, D2).',
+                                     BUDGET, remove, carry)
+
+        # An issue a merged devloop PR already resolved is never implemented again (#228), as
+        # for a retry: the command becomes a merged_issue escalation, and nothing is extended.
+        merged = [] if is_pr else self._merged_prs(number)
+        if merged:
+            trace('refused', 'rifiutato: l\'issue è già risolta da una PR devloop mergiata ('
+                  + ', '.join(f'#{m["number"]}' for m in merged) + '), quindi ripeterne il '
+                  'passo duplicherebbe il lavoro. Il comando è speso; l\'issue passa a '
+                  'un\'escalation `merged_issue`.')
+            return self._do_merged_issue(number, merged)
+        key, step = escalation.get('key'), escalation.get('step')
+        if not rules.budget:
+            return refuse('la delega del budget è spenta (`[delegations] budget`)')
+        if carry is None:
+            return refuse('l\'escalation non registra il passo del turno rifiutato')
+        current = self._current_key(number, key, target if is_pr else None)
+
+        def superseded():
+            return trace('refused', 'rifiutato: l\'input del passo è cambiato dopo '
+                         'l\'escalation (' + ', '.join(f'`{k}`' for k in sorted(current)
+                                                        if current[k] != key.get(k))
+                         + '), quindi la concessione si riferisce a un input superato. Il '
+                         'comando è speso; l\'escalation resta al supervisore.\n\n'
+                         + self._supervisor_resume(escalation, is_pr, superseded=True))
+
+        # As a retry: the extension is bound to the input of the refused turn (the key of the
+        # escalation). A PR whose head moved is refused first, its merge mode would be the one
+        # of another diff; an issue's base and request after its other checks.
+        if is_pr and current != key:
+            return superseded()
+        pr = self._fresh_pr(target, labels, fresh, comments) if is_pr else None
+        route, why = self._supervised(number, BUDGET_GRANTABLE, step, pr,
+                                      key.get('reviewer'), key=key)
+        if route is None:
+            return refuse(f'la delega del budget non si applica: {why}' if why else
+                          'la modalità di merge non è più `auto` con un supervisore')
+        if current != key:
+            return superseded()
+        found, why = self._budget_extension(pr.issue if is_pr else number,
+                                            escalation.get('kind'), escalation.get('agent'))
+        if found is None:
+            return refuse(f'la delega del budget non si applica: {why}')
+        story, extension = found['story'], found['extension']
+        if story != escalation.get('story'):
+            return refuse(f'la storia del lavoro (`{story}`) non è quella dell\'escalation '
+                          f'(`{escalation.get("story")}`)')
+        # As a retry (``_apply_retry``): an issue blocked by an open issue (#277) does not run
+        # its step, so the command waits, unspent, until the last block closes.
+        if not is_pr and self._issue_blocked(number):
+            return None
+        # The text of the command goes in the journal with the extension: a run stopped before
+        # the records completes them with this command, whatever the thread holds by then.
+        daily, problem = self.ledger.journal.extend(story, extension, number,
+                                                    command['comment'], by,
+                                                    rules.max_grants_per_day,
+                                                    reason=command['reason'] or '')
+        if problem == 'spent':
+            return refuse(f'nel frattempo la storia `{story}` ha già avuto la sua unica '
+                          'estensione')
+        if problem:
+            return refuse('nel frattempo le concessioni di oggi hanno raggiunto il massimo '
+                          f'giornaliero (`[delegations] max_grants_per_day` = '
+                          f'{rules.max_grants_per_day})')
+        return self._finish_extension(number, is_pr, comments, escalation, command, trace,
+                                      {'story': story, 'extension': extension}, daily)
+
+    def _finish_extension(self, number, is_pr, comments, escalation, command, trace, grant,
+                          daily, recovered=False, resume=True, operator=False):
+        """Write the records of the extension ``grant`` (``{story, extension}``) of the budget
+        envelope that the journal recorded for ``command`` on issue or PR ``number``, in the
+        ``budget_grantable`` escalation ``escalation`` (#411), and resume its step: ``daily``
+        is the count of the grants of its UTC day up to it. First the ledger ``event``
+        ``delegation_grant``, unless ``comments`` hold it already (``_granted_event``); then the
+        ``supervision`` record ``granted`` with ``trace``, which spends the command; last the
+        labels: a PR goes back to the label of its step, and the next tick runs it; an issue
+        loses ``agent:needs-supervisor`` and its step runs now, as after a retry.
+
+        ``recovered``: the extension of a run stopped before its records
+        (``_pending_extension``). It is part of the envelope of the story already, so nothing is
+        checked nor applied again, whatever changed since: an issue a merged devloop PR resolved
+        meanwhile (#228) gets its records without running its step, and becomes a
+        ``merged_issue`` escalation; an issue blocked by an open issue (#277) waits, with nothing
+        written, until the last block closes.
+
+        ``resume`` false (``_pending_extension``): only the records are completed, and the item
+        stays where it is, its labels unchanged and no step run. So on an item handed to the
+        operator meanwhile (``operator``), whose block the record does not end
+        (``trace_only``, ``_operator_anchor``), or behind a later escalation."""
+        lb = self.cfg.labels
+        rules = self.cfg.delegations
+        by, ident, step = command['by'], command['comment'], escalation.get('step')
+        story, extension = grant['story'], grant['extension']
+        merged = self._merged_prs(number) if resume and recovered and not is_pr else []
+        if resume and recovered and not is_pr and not merged and self._issue_blocked(number):
+            return None
+        if recovered:
+            self.log(f'  the extension of the command of comment {ident} is in the journal '
+                     'already: completing its records')
+        figures = {'story': story, 'extension': extension, 'daily': daily,
+                   'daily_cap': rules.max_grants_per_day,
+                   'daily_left': rules.max_grants_per_day - daily}
+        # The ledger event before the supervision record, which spends the command: a run
+        # stopped between the two finds the event and does not write it again.
+        if not self._granted_event(comments, ident):
+            self.ledger.event(number, 'delegation_grant', delegation='budget', by=by,
+                              comment=ident, **figures)
+        extra = {}
+        if not resume:
+            held = lb.needs_operator if operator else lb.needs_supervisor
+            what = 'La PR' if is_pr else 'L\'issue'
+            where = (f'{what} resta in `{held}`' + (', dove decide l\'operatore come prima'
+                                                    if operator else
+                                                    ', con la sua escalation più recente')
+                     + f': il passo `{step}` non riparte da qui.')
+            extra['trace_only'] = True
+        elif is_pr:
+            label = escalation.get('resume')
+            label = label if label in (lb.review, lb.changes) else lb.review
+            where = f'La PR torna in `{label}`.'
+        elif merged:
+            where = ('L\'issue è però già risolta da una PR devloop mergiata ('
+                     + ', '.join(f'#{m["number"]}' for m in merged) + f'): il passo `{step}` '
+                     'non riparte e l\'issue passa a un\'escalation `merged_issue`.')
+        else:
+            where = f'Il passo `{step}` dell\'issue riparte ora, come dopo un retry.'
+        if recovered:
+            where = ('Un\'elaborazione precedente si era fermata dopo aver registrato '
+                     'l\'estensione nel journal dei turni: qui se ne completa la traccia, senza '
+                     f'applicarla di nuovo. {where}')
+        reason = command['reason'] or ''
+        trace('granted', f'estesi i tetti dell\'envelope di budget della storia `{story}`: '
+              f'{extension_text(extension)} (il {extension["percent"]}% dei valori fissati alla '
+              'sua prima prenotazione, arrotondato per difetto; nessun dollaro né token). È '
+              'l\'unica estensione della storia: un altro rifiuto va all\'operatore. Concessioni '
+              f'del giorno: {daily} di {rules.max_grants_per_day}. {where}\n\n**Motivo e '
+              'analisi delle cause:**\n\n'
+              + '\n'.join(f'> {line}'.rstrip() for line in reason.splitlines()),
+              **figures, **extra)
+        if not resume:
+            return None
+        if merged:
+            return self._do_merged_issue(number, merged)
+        if is_pr:
+            self.gh.edit_labels(number, add=[label], remove=[lb.needs_supervisor])
+            return None
+        self.gh.edit_labels(number, remove=[lb.needs_supervisor])
+        try:
+            getattr(self, f'_do_{step}')(number)
+        except (AgentError, GitHubError, WorkspaceError, UntrustedChange) as exc:
+            self.log(f'  failed: {exc}')
+            self._escalate_failure(Action(step, number, 'grant-budget'), None, exc)
+        return None
 
     # Temporary capacity limits (#412, ADR 0005, P5-8) ------------------------
     def _capacity(self, dry_run=False):
@@ -948,6 +1319,8 @@ class SupervisionMixin:
             valid = [f'`/devloop {RETRY}`']
         elif not superseded and is_pr and cls == ROUND_GRANTABLE:
             valid = [f'`/devloop {GRANT_ROUND} <motivo>`']
+        elif not superseded and cls == BUDGET_GRANTABLE:
+            valid = [f'`/devloop {GRANT_BUDGET} <motivo>`']
         valid.append(f'`/devloop {ESCALATE} <motivo>`')
         return ('Per riprendere, il supervisore o un utente fidato scrive come prima riga di un '
                 'commento ' + ' oppure '.join(valid) + '. Per riprendere senza il supervisore: '
@@ -990,7 +1363,9 @@ class SupervisionMixin:
           readiness check of class ``preflight_default``, or a ``preflight_default``
           escalation the supervisor handed to the operator, under the conditions of the
           supervisor's commands (``_accept_defaults``, ``_decide``).
-        - ``escalate``: never, the escalation is already the operator's."""
+        - ``escalate``: never, the escalation is already the operator's.
+        - ``grant-round`` and ``grant-budget``: never, they are delegations to the supervisor
+          (#405, #411)."""
         lb = self.cfg.labels
         is_pr = isinstance(target, PullRequest)
         name, anchor = command['command'], command['anchor']
@@ -1010,6 +1385,12 @@ class SupervisionMixin:
             return refuse(f'`/devloop {GRANT_ROUND}` è una delega del supervisore, solo su '
                           f'un\'escalation `{ROUND_GRANTABLE}`; l\'operatore concede altri round '
                           'alzando `max_review_rounds`')
+        if name == GRANT_BUDGET:
+            # A delegation of the operator to the supervisor (#411): the values of the envelope
+            # and the extensions beyond it stay the operator's (ADR 0004, D2).
+            return refuse(f'`/devloop {GRANT_BUDGET}` è una delega del supervisore, solo su '
+                          f'un\'escalation `{BUDGET_GRANTABLE}`; i valori dell\'envelope e le '
+                          'altre estensioni restano decisioni dell\'operatore')
         if name in (ACCEPT_DEFAULTS, DECIDE):
             # The check itself, or a supervisor's escalation of it handed to the operator.
             check = (kind == 'preflight' and preflight_class(record) == PREFLIGHT_DEFAULT
