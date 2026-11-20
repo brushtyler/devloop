@@ -355,16 +355,62 @@ root; e lì manca `ops/params.env`.
    che è sigillato (per esempio un eseguibile fuori da `~/.local`) va reso di root a mano, o
    sostituito. I file sigillati restano leggibili da `devloop-agent` tramite il suo gruppo,
    anche quelli che erano 600 (come il `settings.json` di una versione precedente);
-5. provare una CLI per tipo come `devloop-agent` (`sudo -iu devloop-agent claude -p ciao`, e lo
-   stesso per `codex exec` e `agy -p`): se una non trova una voce che vuole creare nella sua
-   directory, `sudo bash /root/repos/ssdlc/ops/host/setup-agent-user.sh --unseal`, un avvio della
-   CLI, poi di nuovo lo script senza `--unseal`;
+5. provare lo strumento di shell di una CLI per tipo come `devloop-agent`, con un prompt che
+   esegue `git --version`: una domanda senza comandi non lo avvia, e agy crea la directory del
+   wrapper del suo strumento di shell solo al primo comando (#494). Il passo 4 lo fa già
+   (`check-host.sh`, passo `CLI degli agent`); a mano, come root:
+
+   ```bash
+   P='Run the shell command `git --version` with your shell tool, then reply with its output only.'
+   cd /tmp
+   sudo -u devloop-agent -H /home/devloop-agent/.local/bin/claude -p "$P" \
+       --allowedTools 'Bash(git --version)'
+   sudo -u devloop-agent -H /home/devloop-agent/.local/bin/codex exec --skip-git-repo-check \
+       -s read-only "$P"
+   sudo -u devloop-agent -H /home/devloop-agent/.local/bin/agy -p "$P" --output-format json \
+       --settings '{"permissions": {"allow": ["command(git --version)"]}}'
+   ```
+
+   Ognuna deve rispondere con `git version …`. Se una si ferma con `permission denied` su una
+   voce di una directory sigillata, vedere [qui sotto](#una-cli-si-ferma-con-permission-denied);
 6. il pin a mano (`sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned pin
    origin/main`) e `sudo systemctl start devloop`.
 
 **Rollback.** La copia di prima parte anche con i file di root. Per riaprirli,
 `sudo bash /root/repos/ssdlc/ops/host/setup-agent-user.sh --unseal`: devloop di #438 però non
 parte finché non si richiudono.
+
+### Una CLI si ferma con `permission denied`
+
+Le directory delle CLI sono di root: una CLI che al primo uso, o dopo un aggiornamento, vuole
+creare una voce in una di esse si ferma. Per esempio agy, prima di #494, non eseguiva nessun
+comando di shell: `mkdir /home/devloop-agent/.gemini/antigravity-cli/bin: permission denied`.
+In devloop appare come un permesso negato o un `tool_failure` dei turni di quella CLI;
+`check-host.sh` lo segnala nel passo `CLI degli agent` (`non esegue git --version con il suo
+strumento di shell`). Le voci note (`AGENT_CLI_WRITABLE` di `ops/lib.sh`, `CLI_WRITABLE` di
+`devloop/agentuser.py`) le crea `setup-agent-user.sh`, di `devloop-agent`. Per una voce nuova, a
+loop fermo (`sudo systemctl stop devloop`):
+
+1. aprire le directory delle CLI, come root:
+   `sudo bash /root/repos/ssdlc/ops/host/setup-agent-user.sh --unseal`;
+2. avviare la CLI come `devloop-agent` con il comando che si fermava (per lo strumento di shell,
+   il prompt del passo 5 qui sopra): crea la voce, che resta sua;
+3. richiudere, come root: `sudo bash /root/repos/ssdlc/ops/host/setup-agent-user.sh`, poi
+   `sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps`;
+4. aggiungere la voce, con una PR, a `AGENT_CLI_WRITABLE` di `ops/lib.sh` e a `CLI_WRITABLE` di
+   `devloop/agentuser.py`: lo script la crea su un host nuovo, e il controllo all'avvio di devloop
+   la conosce.
+
+Una voce che le CLI scrivono non deve portare istruzioni o binari ai turni dopo. Per `bin` di
+agy, dove agy riscrive a ogni avvio dello strumento di shell il wrapper `agentapi`
+(`#!/bin/sh` e `exec "/home/devloop-agent/.local/bin/agy" agentapi "$@"`), devloop la legge come
+`devloop-agent` prima di ogni turno di agy: un altro file, o un `agentapi` diverso, rifiuta il
+turno prima di avviarlo, con un `tool_failure` che dice che cosa è cambiato. A loop fermo si
+guarda che cosa c'è (`sudo -u devloop-agent ls -la
+/home/devloop-agent/.gemini/antigravity-cli/bin`), si cerca nei log di `state_dir` il turno che
+l'ha scritto, e si rimuove come `devloop-agent` ciò che non è il wrapper. Se il wrapper è cambiato
+perché agy è stato aggiornato e lo scrive in un altro modo, serve una PR che aggiorni
+`agy_wrapper` di `devloop/agentuser.py`.
 
 ## Attivazione dell'utente degli agent (#415)
 
@@ -456,6 +502,10 @@ aggiorna come `devloop`; ogni comando dice l'utente con cui gira.
    ```bash
    sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps
    ```
+
+   Nel passo `CLI degli agent` ogni CLI esegue come `devloop-agent` il comando git --version
+   con il suo strumento di shell (#494). Una CLI che si ferma con `permission denied` su una directory
+   sigillata: [Una CLI si ferma con `permission denied`](#una-cli-si-ferma-con-permission-denied).
 
    Con sudo-rs (`ERRORE: sudo è sudo-rs …`, `ERRORE: l'ambiente non arriva a devloop-agent con
    sudo -E …`) gli agent girerebbero senza l'ambiente che devloop prepara (#496): come root,

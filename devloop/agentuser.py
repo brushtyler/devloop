@@ -50,15 +50,22 @@ them only when it is sticky and neither it nor the entry is the agent user's: th
 the agent user writes, is root's and sticky. A link among them, or inside a sealed one, is
 followed, and what it leads to must be protected the same way; the sealed files must stay
 readable by the agent user. The probe runs only the system's tools, never those of the agent
-user's PATH. In every claude turn, the auto memory, which ``~/.claude/projects`` keeps and
+user's PATH. What the CLIs create on their first use in their directories (``CLI_WRITABLE``,
+#494: the ``bin`` of agy's shell tool) stays the agent user's, and ``check`` wants it writable;
+before each agy turn the dispatcher reads it as the agent user and refuses the turn when it
+holds anything but the wrapper agy writes there (``AgentUser.agy_bin_problems``). In every
+claude turn, the auto memory, which ``~/.claude/projects`` keeps and
 shares among the worktrees of a repository, is off, also over the settings of the project that a
 turn writes in the worktree (``agents.CLAUDE_TURN_SETTINGS``, given with ``--settings``), and only
 the MCP servers of the command line count, never those of ``~/.claude.json``, which the agent
 user writes (``agents.CLAUDE_TURN_ENV``, ``agents.build_command``).
 """
 
+import base64
+import binascii
 import contextlib
 import errno
+import hashlib
 import os
 import pwd
 import secrets
@@ -98,6 +105,15 @@ CLI_SEALED = (
     '.gemini/settings.json', '.gemini/GEMINI.md', '.gemini/antigravity-cli/settings.json',
     '.local')
 CLIS = ('claude', 'codex', 'agy')
+# The entries the CLIs create on their first use inside the directories of ``CLI_DIRS``, where
+# the agent user creates nothing (#494): ``ops/host/setup-agent-user.sh`` creates them as the
+# agent user's, mode 700, and the startup check wants them writable. agy writes the wrapper of
+# its shell tool, ``AGY_WRAPPER``, in ``AGY_BIN`` each time it starts it.
+CLI_WRITABLE = ('.gemini/antigravity-cli/bin',)
+AGY_BIN = '.gemini/antigravity-cli/bin'
+AGY_WRAPPER = 'agentapi'
+# The largest wrapper read back: the expected one is a few dozen bytes.
+WRAPPER_LIMIT = 4096
 # Each argument is ``<kind>:<path>``; prints, NUL-terminated, ``<problem>:<path>`` for each
 # problem found: ``secret``, a path the user must neither read nor enter (r, x); ``list``, one it
 # must not read (r); ``ro``, one it must enter but not write (e, w); ``tree``, one where nothing
@@ -230,6 +246,25 @@ class AgentUser:
                       capture_output=True, text=True, timeout=300)
         except (OSError, subprocess.SubprocessError):
             pass
+
+    def agy_bin_problems(self):
+        """The problems of ``AGY_BIN`` in the agent user's home, read as that user
+        (``wrapper_problems``, #494): agy writes it, so a turn could leave there, for the turns
+        after it, a wrapper of agy's shell tool that runs something else, or another
+        executable. Raises AgentUserError when it cannot be read."""
+        argv = self.command([BASH, '-c', _WRAPPER_PROBE, 'wrapper', str(self.home / AGY_BIN),
+                             AGY_WRAPPER, str(WRAPPER_LIMIT + 1)])
+        env = self.environment({'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
+                                'LC_ALL': 'C'})
+        try:
+            done = self._run(argv, capture_output=True, timeout=60, env=env)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise AgentUserError(f'cannot run commands as {self.name}: {exc}') from exc
+        if done.returncode != 0:
+            detail = os.fsdecode(done.stderr or b'').strip()[:500]
+            raise AgentUserError(f'cannot read {self.home / AGY_BIN} as {self.name} (exit '
+                                 f'{done.returncode}): {detail or "no output"}')
+        return wrapper_problems(self.home, done.stdout or b'')
 
     def check_environment(self):
         """Raise AgentUserError when the environment devloop passes with ``sudo -E`` does not
@@ -411,6 +446,76 @@ class SharedDir:
             pass
 
 
+def agy_wrapper(home):
+    """The wrapper of agy's shell tool in ``AGY_BIN`` of ``home`` (#494), as the current version
+    of agy writes it each time it starts the tool; ``wrapper_problems`` accepts it also without
+    its final newline."""
+    return f'#!/bin/sh\nexec "{home}/.local/bin/agy" agentapi "$@"\n'.encode()
+
+
+# Run as the agent user, on ``AGY_BIN``: NUL-terminated records, ``l:`` when it is a link,
+# ``n:`` when it is not a directory, ``e:<type>:<name>`` for each entry (the type is find's
+# ``%y``: ``f`` a regular file, ``l`` a link, ``d`` a directory), then ``c:<base64>``, the first
+# bytes of ``AGY_WRAPPER`` when it is a regular file. Nothing when ``AGY_BIN`` does not exist; an
+# exit status other than 0 when it cannot be listed or read. Only the system's tools, as for
+# ``_PROBE``.
+_WRAPPER_PROBE = r'''PATH=/usr/bin:/bin
+set -o pipefail
+d=$1 f=$1/$2
+if [ -L "$d" ]; then printf 'l:\0'; exit 0; fi
+[ -e "$d" ] || exit 0
+if ! [ -d "$d" ]; then printf 'n:\0'; exit 0; fi
+find "$d" -mindepth 1 -maxdepth 1 -printf 'e:%y:%f\0' || exit 1
+if [ -f "$f" ] && ! [ -L "$f" ]; then
+    printf 'c:'
+    head -c "$3" -- "$f" | base64 -w0 || exit 1
+    printf '\0'
+fi'''
+
+
+def _shown(name, width=80):
+    """``name``, which the agent user chose, as a short quoted text."""
+    text = repr(name)
+    return text if len(text) <= width else text[:width - 3] + '...'
+
+
+def wrapper_problems(home, records):
+    """The problems of ``AGY_BIN`` in ``home`` from ``records``, the output of
+    ``_WRAPPER_PROBE`` (bytes): none when it holds only ``AGY_WRAPPER`` with the content of
+    ``agy_wrapper``, or holds nothing, or does not exist."""
+    expected = agy_wrapper(home)
+    where = Path(home) / AGY_BIN
+    problems, entries, content = [], [], None
+    for record in records.split(b'\0'):
+        kind, _, rest = record.partition(b':')
+        if kind == b'l':
+            problems.append(f'{where} is a symbolic link')
+        elif kind == b'n':
+            problems.append(f'{where} is not a directory')
+        elif kind == b'e':
+            kind, _, name = rest.partition(b':')
+            entries.append((kind.decode('ascii', 'replace'), os.fsdecode(name)))
+        elif kind == b'c':
+            try:
+                content = base64.b64decode(rest, validate=True)
+            except binascii.Error:
+                content = None
+    for kind, name in entries:
+        if name != AGY_WRAPPER:
+            problems.append(f'{where} holds {_shown(name)}, which agy does not write there')
+        elif kind != 'f':
+            problems.append(f'{where / name} is not a regular file (type {kind!r})')
+        elif content is None:
+            problems.append(f'{where / name} could not be read')
+        elif content not in (expected, expected.rstrip(b'\n')):
+            size = (f'more than {WRAPPER_LIMIT}' if len(content) > WRAPPER_LIMIT
+                    else str(len(content)))
+            digest = hashlib.sha256(content).hexdigest()[:16]
+            problems.append(f'{where / name} is not the wrapper agy writes: {size} bytes, '
+                            f'sha256 {digest}..., instead of {expected.decode()!r}')
+    return problems
+
+
 def _entries(path):
     """``path`` itself and what it lists, as the dispatcher's user sees it."""
     path = Path(path)
@@ -422,11 +527,12 @@ def _entries(path):
 
 def cli_items(home):
     """The probe items of the CLIs in ``home``, the agent user's home (#438): what a turn must
-    not change for the turns after it."""
+    not change for the turns after it, and what the CLIs must write (#494)."""
     home = Path(home)
     return ([('fixed', home / d) for d in CLI_DIRS]
             + [('sealed', home / p) for p in CLI_SEALED]
-            + [('bin', home / '.local' / 'bin' / cli) for cli in CLIS])
+            + [('bin', home / '.local' / 'bin' / cli) for cli in CLIS]
+            + [('rw', home / p) for p in CLI_WRITABLE])
 
 
 def check(agent_user, key_dir, state_dir, local_config=None, me=None, git_dir=None):
@@ -439,7 +545,8 @@ def check(agent_user, key_dir, state_dir, local_config=None, me=None, git_dir=No
     ``.git``), nor the worktrees directory and the fixed directories of the shared one, which
     it must enter; it must write the directories the dispatcher makes for its turns and test
     runs, and read the schemas. It must not write, own, create, rename nor remove the files of
-    the CLIs in its home that later turns use (``cli_items``, #438). Raises AgentUserError, listing
+    the CLIs in its home that later turns use (``cli_items``, #438), and must write the entries
+    its CLIs create on their first use (``CLI_WRITABLE``, #494). Raises AgentUserError, listing
     every problem."""
     me = me if me is not None else pwd.getpwuid(os.geteuid()).pw_name
     if agent_user.name == me:

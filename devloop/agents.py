@@ -10,7 +10,7 @@ import threading
 import time
 from pathlib import Path
 
-from .agentuser import SCHEMAS, TURNS, SharedDir
+from .agentuser import SCHEMAS, TURNS, AgentUserError, SharedDir
 from .markdown import agent_bot, devloop_version, header, parse_version
 from .schema import load_schema, schema_path, validate, with_defaults, SchemaError
 from .unavailability import delimited, reset_seconds
@@ -707,6 +707,12 @@ class StartFailure(AgentError):
     change: its escalation is a ``tool_failure`` whatever the step."""
 
 
+class ToolChanged(StartFailure):
+    """An agy turn refused before it started (#494): the agent user's ``bin`` of agy's shell
+    tool holds something other than the wrapper agy writes there, which a turn may have left
+    for the turns after it. A failure of the tool, as ``StartFailure``: a ``tool_failure``."""
+
+
 # A CLI that could not start for a missing or non-executable binary is started once more, after
 # this pause, in the same turn (#218): an update that replaces the binary lasts a few seconds.
 START_RETRY_SECONDS = 30
@@ -734,7 +740,9 @@ class AgentRunner:
     which that user cannot write, the final message in a new directory of the turn in its
     ``turns``, the only place that user writes. The final message is then copied to the turn's
     log without following links, and read from there, as without an agent user: a link, a hard
-    link or anything but a regular file fails the turn."""
+    link or anything but a regular file fails the turn. Before each agy turn, the ``bin`` of
+    agy's shell tool in that user's home is read as that user: anything but the wrapper agy
+    writes there refuses the turn before it starts (``ToolChanged``, #494)."""
 
     def __init__(self, log_dir, timeout, run=subprocess.run, env=None, on_turn=None, stall=None,
                  clock=time.time, sleep=time.sleep, agent_user=None, shared_dir=None):
@@ -807,6 +815,8 @@ class AgentRunner:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         stem = self.log_dir / f'{time.strftime("%Y%m%dT%H%M%S")}-{label}-{agent.key}'
         logged = stem.with_suffix('.last.json')
+        if self.agent_user is not None and agent.kind == 'agy':
+            self._check_agy_bin(agent)
         if self.agent_user is None:
             return self._turn(agent, mode, prompt, schema_name, workdir, stem, logged,
                               schema_path(schema_name))
@@ -852,6 +862,19 @@ class AgentRunner:
                 pass
             self._discard(SCHEMAS, schema_file)
             self._discard(TURNS, turn_dir)
+
+    def _check_agy_bin(self, agent):
+        """Refuse the agy turn (``ToolChanged``) when the agent user's ``bin`` of agy's shell
+        tool holds anything but the wrapper agy writes there, or cannot be read (#494)."""
+        try:
+            problems = self.agent_user.agy_bin_problems()
+        except AgentUserError as exc:
+            problems = [str(exc)]
+        if problems:
+            raise ToolChanged(f'{agent.key}: turn refused before it started, the shell tool of '
+                              f'agy has changed: {"; ".join(problems)}. Remove what is not the '
+                              'wrapper as the agent user, with the loop stopped, and find which '
+                              'turn wrote it (ops/host/migrate.md)')
 
     def _discard(self, sub, path):
         """Remove ``path``, a file of ``SCHEMAS`` or a directory of ``TURNS``, from the shared
