@@ -190,6 +190,14 @@ The limit on new findings in later rounds (see "How to classify") does not apply
 
 - **Blocking**: a defect you can state concretely (file, line, failure scenario) that must be fixed
   before merge. Style preferences and optional improvements are never blocking.
+- **Evidence**: every blocking finding states in `evidence` what shows the defect, so that the
+  implementer can verify it: the scenario you reproduced (a test that fails, a command with its
+  output, a concrete input and the behaviour you observed) or, for a defect that cannot be run,
+  the precise reference to the code and to the rule it violates (the issue, an ADR, a document)
+  with the quotation. Check it yourself before you write it. devloop records a blocking finding
+  with an empty `evidence` as non-blocking, and it does not send the PR to the fix; a finding
+  with `security` set to `true` stays blocking even without evidence, but give it one all the
+  same.
 - **Non-blocking**: worthwhile but optional.
 - **Security**: set `security` to `true` on every finding, blocking or not, that concerns
   security: a vulnerability, a secret or credential exposed, untrusted content reaching an agent,
@@ -199,6 +207,10 @@ The limit on new findings in later rounds (see "How to classify") does not apply
   it reaches the limit of review rounds: the supervisor cannot grant it another round.
 - In rounds after the first, judge whether each previous finding is resolved, using the
   implementer's responses below. Accept a reasoned dispute when it is right (`withdrawn`).
+  When the implementer disputes one of your findings because its evidence does not hold, and
+  reports how it verified it, check that verification: either withdraw the finding
+  (`withdrawn`), or keep it `unresolved` and give in `note` new evidence that answers the
+  dispute. Keeping it open without new evidence is not enough.
   Do not raise new findings on code that did not change since the previous round unless they are
   serious defects you missed: the review must converge.
 - A previous finding is identified as `round/reviewer/ID` (for example `2/codex/R2-1`): use that

@@ -341,13 +341,52 @@ def docs_review_section(documents):
               'correct without changes, say so in `checks_performed`.')
 
 
-def _format_findings(findings):
+def owner_assessments(reviews):
+    """The latest assessment of each finding by its owner (#481), ``{key: (round, status,
+    note)}``: after a dispute, the owner keeps a finding open by answering with new evidence in
+    its ``note``, and the implementer verifies that, not only the evidence it disputed. The
+    assessments of other reviewers, and those of records without keys, are left out."""
+    latest = {}
+    for review in reviews:
+        owner = owner_of(review)
+        for p in review.get('previous_findings', ()):
+            key, note = p.get('key'), p.get('note')
+            parts = key.split('/') if isinstance(key, str) else []
+            if len(parts) >= 3 and parts[1] == owner and isinstance(note, str) and note.strip():
+                latest[key] = (review['round'], p.get('status'), note.strip())
+    return latest
+
+
+def _format_findings(findings, assessments=None):
+    """The findings of a prompt, each with its evidence and, from ``assessments`` (see
+    :func:`owner_assessments`), the latest assessment of its owner (#481)."""
     lines = []
     for f in findings:
         where = f' ({f["file"]}{":" + str(f["line"]) if f["line"] > 0 else ""})' if f['file'] else ''
+        evidence = f.get('evidence')
+        assessed = (assessments or {}).get(f.get('key'))
         lines.append(f'- **{f.get("key") or f["id"]}**{where}: {f["title"]}\n  {f["detail"]}'
+                     # The evidence the reviewer gave (#481), for the implementer to verify.
+                     + (f'\n  Evidence: {evidence.strip()}'
+                        if isinstance(evidence, str) and evidence.strip() else '')
+                     # The owner's answer to a dispute, with its new evidence (#481).
+                     + (f'\n  Latest assessment by its owner (round {assessed[0]}, '
+                        f'{assessed[1]}): {assessed[2]}' if assessed else '')
                      + (f'\n  Suggested fix: {f["suggested_fix"]}' if f['suggested_fix'] else ''))
     return '\n'.join(lines) or '(none)'
+
+
+def _format_assessments(review):
+    """A review's assessments of the earlier findings (#481), with the new evidence that
+    answers a dispute in their ``note``."""
+    return '\n'.join(f'- {p.get("key") or p.get("id")}: {p.get("status")}: {p.get("note", "")}'
+                     for p in review.get('previous_findings', ()))
+
+
+def _unproven(review):
+    """A review's blocking findings recorded as non-blocking for lack of evidence (#481)."""
+    return [f for f in review.get('non_blocking_findings', ())
+            if f.get('without_evidence') is True]
 
 
 def format_fix_requests(requests):
@@ -384,6 +423,15 @@ def format_previous_rounds(reviews, fixes, closures=()):
                      'Blocking findings:\n' + _format_findings(
                          [dict(f, key=f.get('key') or finding_key(review['round'], owner, f['id']))
                           for f in review['blocking_findings']]))
+        # #481: the owner's answers to the disputes, and the findings demoted for lack of
+        # evidence, which the advisory review judges.
+        if review.get('previous_findings'):
+            parts.append('Assessments of earlier findings:\n' + _format_assessments(review))
+        if _unproven(review):
+            parts.append('Blocking findings without evidence, recorded by devloop as '
+                         'non-blocking:\n' + _format_findings(
+                             [dict(f, key=finding_key(review['round'], owner, f['id']))
+                              for f in _unproven(review)]))
         if reviews[position + 1:position + 2] and reviews[position + 1]['round'] == review['round']:
             continue  # the fix answers the whole round: after its last review
         for fix in fixes:

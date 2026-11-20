@@ -55,6 +55,15 @@ an explicit statement that the reviewer is not the author (see
 [What the reviewers read](protocol.md#attribution)). devloop still keeps the implementer out of
 the reviewers, from the PR's marker.
 
+A blocking finding carries its evidence (#481): the scenario that shows it, or the code and the
+rule it violates with the quotation. One without evidence is recorded as non-blocking and does
+not send the PR to the fix, unless it is a security finding, which stays blocking. A reviewer
+left with only such findings gives the neutral verdict `unproven`, which is no approval: the PR
+is not promoted without the explicit approvals of the quorum, and gets a new review. The fix
+prompt asks the implementer to verify the evidence before fixing, and to dispute a finding whose
+evidence does not hold; the reviewer who opened it then withdraws it or answers with new
+evidence (see [Evidence of a blocking finding](reference.md#evidence-of-a-blocking-finding)).
+
 ### Changes to the trust policy
 
 The trust policy decides who devloop believes and when a change is merged, and only the operator
@@ -799,6 +808,46 @@ from anyone else, a bot or a devloop app included, is ignored and logged.
 - Commits already published are not reverted. A veto after the merge has no effect: the merge
   stays a human act.
 
+### Tests red on the base too
+
+PRs green on their own base can leave `main` red once merged together. An issue started from
+that `main` then fails its local tests for a defect that is not its own (#459). So, when the
+local tests of an implementation or of a fix fail, before counting the failure against the
+implementer devloop reads the identities of the failed tests from the whole output and runs their
+modules, one at a time, on the base commit of the branch, in a disposable worktree:
+
+- **every failed test fails on the base too**: the step is `base_broken`. No other attempt of
+  the agent and no escalation: the dispatcher writes a comment "Test rossi anche sulla base" with
+  a `basebroken` record (the base commit and the failed tests) on the issue or on the PR, and
+  nothing is pushed. The issue keeps `agent:working`, the PR its label. When `main` moves past
+  that commit the step starts again by itself: the issue as a new implementation, in a free slot
+  of `max_open_prs`; the fix at its next tick. Until then the issue is not `stale`. The blocks of
+  the issue hold its restart as they hold a ready issue: `agent:needs-operator`,
+  `agent:needs-supervisor` or a label of `blocked_labels`. With the readiness check (`preflight`)
+  the restart goes through it: an issue whose request changed during the wait, or with a new
+  `/devloop recheck`, is checked again before the implementation, and one whose check failed is
+  blocked as a ready issue is. An escalation of that check keeps `agent:working` and the wait,
+  so the issue is never `stale` meanwhile: gaps that all have a default go to the supervisor,
+  and once `/devloop accept-defaults` or `/devloop decide` (or the operator, after a
+  `/devloop escalate`) settles them the check runs again; a check that failed with its step
+  recorded (a `tool_failure`, for one) resumes with `/devloop retry`, from the supervisor or,
+  in `agent:needs-operator`, from a trusted user;
+- **a test fails only on the branch**, or the failed tests cannot be identified (a timeout, an
+  output without them, a module that does not start, whose id unittest makes up the same whatever
+  the error, a project whose `[tests].selection` is not
+  `python-unittest-modules`): the failure stays the implementer's, as before:
+  `implement_test_retries` more attempts, then `tests_failed`.
+
+### Red CI on `main`
+
+With `[run].alert_issue`, at each tick (not in a dry run) devloop reads the checks of the current
+commit of `origin/main`. When one ended with a failure, it publishes **one** alert "CI rossa su
+`main`" on that issue, with the commit, the failed checks and the commits of `main` since the
+latest green one, at most 10 back on its first-parent chain. A new alert comes only for a new red
+commit; the commit alerted is kept in `state_dir` (`main-ci-alert.json`), so a restart does not
+repeat it. Pending, missing or unreadable checks give no alert, and without `[run].alert_issue`
+nothing is read. It is only a report: merges go on as before.
+
 ## Merge modes
 
 This is the only description of the merge modes in this guide; the other sections link here.
@@ -1305,7 +1354,8 @@ no command applies, and the answer gives the manual steps. The commands valid th
   same head, base and request), the issue must not be resolved by a merged devloop PR, a blocked
   issue waits, and at most **two** retries run for the same key, the supervisor's and the
   operator's together (so not after `retry_limit`). The readiness check runs again only on an
-  issue that still has `agent:ready`. devloop removes `agent:needs-operator` (and
+  issue that still has `agent:ready`, or `agent:working` while its implementation waits for the
+  base branch ([Tests red on the base too](#tests-red-on-the-base-too)). devloop removes `agent:needs-operator` (and
   `agent:needs-supervisor`); a PR goes back to the label of its step and the next tick runs it,
   an issue's step runs at once.
 - `/devloop accept-defaults` and `/devloop decide <decisions>`, when that record is a failed
@@ -1435,7 +1485,8 @@ the operator gets the opinion `dubbi` or `contrario` and a first residual risk t
   the issue, the PR, its changed files and the reviews of the quorum, and the schema
   [`devloop/schemas/advisory.json`](../../devloop/schemas/advisory.json): a summary of the PR,
   the residual risks, what the operator should look at, points the reviewers of the quorum may
-  have missed, and a non-binding opinion (`ok`, `dubbi`, `contrario`). A head gets one turn,
+  have missed, the findings of the quorum whose evidence does not hold and the fixes that were
+  not needed ("Finding senza evidenza o corretti senza necessità", #481), and a non-binding opinion (`ok`, `dubbi`, `contrario`). A head gets one turn,
   even when it failed or its publication did (an action that failed before its result was kept
   gets one retry, see below); a new head gets its own while the PR is still in
   `agent:needs-operator`. The PR is read again before the turn and after it: when it is no
@@ -1495,7 +1546,7 @@ in `[roles]` of the configuration ([reference](reference.md#configuration)).
 devloop="python3 -m devloop --project-config .ssdlc/devloop/project.toml --local-config .ssdlc/devloop/config.local.toml"
 $devloop setup            # create the agent:* labels, the priority:* labels and the review level labels (reviews:0 only when level 0 is on)
 $devloop status           # running action, devloop PRs (with rounds counted on max_review_rounds, merge state and conflicts), ready issues in start order with their priority, planned actions; with [budget] on, the budget of the stories in progress; a pinned copy behind origin/main in the files of the installation
-$devloop apps             # check the GitHub App of each actor
+$devloop apps             # check the GitHub App of each actor, on the project's repo and with its key_dir
 $devloop tick --dry-run   # print the ready issues in start order and the plan, change nothing (no lock: it runs beside a dispatcher)
 $devloop tick             # run one round
 $devloop run --idle-timeout 900  # tick continuously (see Continuous loop)
@@ -1506,6 +1557,7 @@ $devloop watch --timeout 3600  # wait for the next change on GitHub, for the sup
 $devloop pin origin/main  # pin a commit of origin, after its smoke test (see Run from a pinned installation)
 $devloop report --day 2026-11-16  # print the summary of a UTC day from devloop's records (default: today; --publish: on [report] issue, see Daily summary)
 $devloop fallback reset agy  # forget the models agy remembers unavailable (see Memory of unavailable models)
+$devloop token claude -- gh pr comment 70 --body-file reply.md  # run a command as an agent's app of the project (see GitHub identities; scripts/agent-token.py calls it)
 ```
 
 Run it from any checkout of this repository. Worktrees, agent prompts and logs, and the lock that
@@ -2041,9 +2093,12 @@ From the beginning to the end, as root or with `sudo`:
    sudo -u devloop -H git clone https://github.com/brushtyler/ssdlc.git /home/devloop/ssdlc
    ```
 
-2. **Keys.** The apps are those of `[apps]` in `devloop/config.toml`, created once by the
-   operator ([GitHub identities](reference.md#github-identities), and
-   [The merger app](reference.md#the-merger-app) for the merger). Each private key goes to
+2. **Keys.** The apps are the repository's own set, created once by the operator from the
+   manifests of [`ops/github/apps/`](../../ops/github/apps/) and never shared with another
+   repository ([GitHub identities](reference.md#github-identities), and
+   [The merger app](reference.md#the-merger-app) for the merger). Since ADR 0006, R6 they are
+   declared in `[apps]` of the local overlay (step 4), not in `devloop/config.toml`: ssdlc's are
+   in [`ops/host/ssdlc/overlay.toml`](../../ops/host/ssdlc/overlay.toml). Each private key goes to
    `~/.ghapps` of the `devloop` user, under the name GitHub gives it,
    `<slug>.<date>.private-key.pem`, mode `600`; a configured app whose key is missing stops
    devloop at startup.
@@ -2054,16 +2109,20 @@ From the beginning to the end, as root or with `sudo`:
    ```
 
 3. **Agent user and CLIs.** Prepare `devloop-agent` with `ops/host/setup-agent-user.sh`
-   ([Agent user](#agent-user)), then install Claude Code, codex and agy as that user and log in
-   to each one with its logins, as described in [Agent CLIs](#agent-clis).
+   ([Agent user](#agent-user)), then, after `setup-agent-user.sh --unseal`, install Claude Code,
+   codex and agy as that user and log in to each one with its logins, as described in
+   [Agent CLIs](#agent-clis), and run `setup-agent-user.sh` again without `--unseal`.
 
 4. **Overlay.** Write `/home/devloop/ssdlc/.ssdlc/devloop/config.local.toml`, owned by
-   `devloop`, with only the keys the operator overrides
-   ([Local config as an overlay](#local-config-as-an-overlay)). Each of these is the operator's
-   choice: the merge mode, `[pin] auto` ([Pin after a merge](#pin-after-a-merge)) and
-   `[run] alert_issue` ([Continuous loop](#continuous-loop)). On this installation it also sets
-   `[agent_user] name = "devloop-agent"` ([Agent user](#agent-user)). Without the file, the
-   configuration of the pinned copy applies as it is.
+   `devloop` ([Local config as an overlay](#local-config-as-an-overlay)). It is required: since
+   ADR 0006, R6 it holds the project's `repo`, `trusted_users` and `[apps]`, with its `key_dir`
+   (step 2), and for ssdlc the agy commands too, all from
+   [`ops/host/ssdlc/overlay.toml`](../../ops/host/ssdlc/overlay.toml). Without the file, or
+   without `repo` and `trusted_users` in it, devloop stops at startup. The other keys are the
+   operator's overrides, each the operator's choice: the merge mode, `[pin] auto`
+   ([Pin after a merge](#pin-after-a-merge)) and `[run] alert_issue`
+   ([Continuous loop](#continuous-loop)). On this installation it also sets
+   `[agent_user] name = "devloop-agent"` ([Agent user](#agent-user)).
 
 5. **Pin.** The first pin runs the clone's devloop; every later command runs the pinned copy,
    through the [launcher](#launcher). The pin applies the overlay and runs the
@@ -2144,11 +2203,47 @@ dispatcher's user, as before ([reference](reference.md#agent-user)).
   nothing in `.git` nor the directories that hold the worktrees and its turns, and that it can
   write the directories devloop makes for its turns; otherwise it refuses to start and says
   what is wrong. `[agent_user] check = false` skips the check, in development only.
+- One user runs implementers and reviewers, so a turn must not change what later turns use
+  (#438, decision of the operator): the instructions, the configuration and the binaries of the
+  CLIs are root's, and `devloop-agent` writes only its credentials, sessions, caches and logs.
+  Its home is root's and sticky (`1770`, its group): it creates the state and cache entries of
+  the CLIs there (such as `~/.claude.json`, which stays its own) but cannot rename nor remove
+  root's. `~/.claude`, `~/.codex`, `~/.gemini`, `~/.gemini/antigravity-cli` and `~/.local` are
+  root's: it enters them but creates nothing there (an instruction file, an agent, a skill, a
+  hook). What carries instructions, configuration or binaries is root's, of the group of
+  `devloop-agent`, which reads it but cannot write it: `CLI_SEALED` in `devloop/agentuser.py`
+  (`settings.json`, `CLAUDE.md`, `rules`, `agents`, `commands`, `skills`, `hooks`,
+  `output-styles` and `plugins` of `~/.claude`; `config.toml`, `AGENTS.md`,
+  `AGENTS.override.md`, `prompts`, `rules`, `skills` and `packages` of `~/.codex`;
+  `~/.gemini/settings.json`, `~/.gemini/GEMINI.md`, `~/.gemini/antigravity-cli/settings.json`;
+  all of `~/.local`). The startup check above also refuses to start when, as `devloop-agent`, it
+  can write, own (an owner changes the mode), create, rename or remove any of them, or a CLI of
+  `~/.local/bin`, the file it leads to and that file's directory; in a directory above them that
+  it can write, only the sticky bit protects an entry, and only when neither the entry nor the
+  directory is its own. A link along these paths, or inside them, is followed one step at a
+  time, and what it leads to must be protected the same way; a link that cannot be followed (a
+  loop) is refused. It also refuses a file of them that `devloop-agent` cannot read, or a
+  directory it cannot enter. The check runs only the system's tools (`PATH=/usr/bin:/bin`),
+  never those of `~/.local/bin`, which comes first in the PATH of `devloop-agent`.
+- What the CLIs keep writable must not carry instructions into the next turn either. Every
+  claude turn runs with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, whatever the operator's
+  environment says: the auto memory of `~/.claude/projects/<project>/memory`, shared by the
+  worktrees of a repository, is neither loaded nor written. The environment alone would not
+  bind: the `env` of the settings overrides it, and a turn writes `.claude/settings.json` and
+  `.claude/settings.local.json` in its worktree, which the next turns of the pull request read.
+  So the same value, with `autoMemoryEnabled: false`, also comes with `--settings`, whose
+  settings come before those of the project and the local ones (after the managed ones only,
+  which are root's); a `--settings` in the `write_args` or `review_args` of a claude agent, which
+  would replace it, stops devloop at startup. It runs with `--strict-mcp-config`:
+  the MCP servers of `~/.claude.json`, which `devloop-agent` writes, are ignored, and only those
+  of a `--mcp-config` in `write_args` or `review_args` count (`agents.CLAUDE_TURN_ENV`,
+  `agents.CLAUDE_TURN_SETTINGS`, `agents.build_command`).
 
-`ops/host/setup-agent-user.sh` creates the user, its directories, the ACLs and the sudoers rule;
-`ops/host/check-host.sh` verifies them ([ops guide](../../ops/README.md)). Run the setup script
-again after copying files into `state_dir`: the ACL entries of the entries that already exist are
-its own. All agents share this one user, so their CLI logins are not isolated from each other.
+`ops/host/setup-agent-user.sh` creates the user, its directories, the ACLs and the sudoers rule,
+and makes the files of the CLIs root's; `ops/host/check-host.sh` verifies them
+([ops guide](../../ops/README.md)). Run the setup script again after copying files into
+`state_dir`: the ACL entries of the entries that already exist are its own. All agents share
+this one user, so their CLI logins are not isolated from each other.
 
 #### Agent CLIs
 
@@ -2177,9 +2272,12 @@ belong to the `devloop` user and devloop finds them on the `PATH` of the process
 
 - **codex** and **agy**, also in `~/.local/bin` of the agent user.
 
-Log in to each CLI once, in an interactive session of the agent user
-(`sudo -iu devloop-agent`), and check that `claude --version`, `codex --version` and
-`agy --version` answer there.
+Installing them, logging in and updating them need the directories of the CLIs open to the agent
+user: `sudo bash ops/host/setup-agent-user.sh --unseal`, with the loop stopped, gives them back
+to it, and the same script without `--unseal` makes them root's again (#438, [Agent
+user](#agent-user)); until then devloop refuses to start. Log in to each CLI once, in an
+interactive session of the agent user (`sudo -iu devloop-agent`), and check that
+`claude --version`, `codex --version` and `agy --version` answer there.
 
 **Updating them by hand, with the loop stopped** (decision of the operator, 2026-11-17). No turn
 may start while a binary is being replaced, so:
@@ -2187,11 +2285,15 @@ may start while a binary is being replaced, so:
 1. stop the loop with the `STOP` file and wait until `devloop run` has exited
    ([Starting and stopping the loop](#starting-and-stopping-the-loop)): the tick in progress
    and its actions end first;
-2. update the CLI as the agent user, for Claude Code with the same `npm install` as above
+2. open the directories of the CLIs to the agent user with
+   `sudo bash ops/host/setup-agent-user.sh --unseal`;
+3. update the CLI as the agent user, for Claude Code with the same `npm install` as above
    (`@anthropic-ai/claude-code@<version>` for a given version), codex and agy each with its own
    installer;
-3. check the new version with `--version`, as the agent user;
-4. remove `STOP` and start `devloop run` again.
+4. check the new version with `--version`, as the agent user, and start it once, so that it
+   creates the entries it needs;
+5. make them root's again with `sudo bash ops/host/setup-agent-user.sh`;
+6. remove `STOP` and start `devloop run` again.
 
 To go back, install the earlier version the same way, again with the loop stopped.
 
@@ -2423,9 +2525,12 @@ reports an overlay without it as an error.
 
 #### Local config as an overlay
 
-`.ssdlc/devloop/config.local.toml` holds **only the keys the operator overrides**, for example:
+`.ssdlc/devloop/config.local.toml` holds the project's identities and trust and **the keys the
+operator overrides**, for example:
 
 ```toml
+repo = "brushtyler/ssdlc"
+trusted_users = ["brushtyler"]
 preflight = "codex"
 max_open_prs = 3
 max_review_rounds = 4
@@ -2438,6 +2543,13 @@ auto = true
 
 [run]
 alert_issue = 123
+
+[apps]
+key_dir = "~/.ghapps"
+
+[apps.dispatcher]
+app_id = 5747835
+slug = "brushtyler-devloop-dispatcher"
 ```
 
 devloop applies it over `devloop/config.toml` of the pinned copy: a table merges key by key
@@ -2466,6 +2578,17 @@ Without a project file, or a `test_cmd` in the overlay, devloop stops at startup
 'test_cmd'`), and so does the pin of a copy, whose check loads the configuration. The migration
 of a running host, and the order to follow so that the pin after the merge finds the project
 file, are in [ops/host/migrate.md](../../ops/host/migrate.md#migrazione-di-r3-su-un-host-attivo).
+
+Since ADR 0006, R6 the installation's `config.toml` has no `repo`, `trusted_users` nor `[apps]`
+either: the managed repository, the logins devloop trusts and the project's set of GitHub Apps,
+with its `key_dir`, are the operator's, in the overlay of the project's `state_dir`. Each
+repository has its own set of apps, installed on that repository only and never shared with
+another, and its own `key_dir`; the merger app only where devloop merges (D3,
+[GitHub identities](reference.md#github-identities)). ssdlc's are in
+[`ops/host/ssdlc/overlay.toml`](../../ops/host/ssdlc/overlay.toml). Without `repo` and
+`trusted_users` in the overlay devloop stops at startup, naming the overlay, and so does the pin
+of a copy. The overlay of a host gains them before devloop takes a copy of R6
+([ops/host/migrate.md](../../ops/host/migrate.md#identità-di-ssdlc-nelloverlay)).
 
 #### Changes while the loop runs
 

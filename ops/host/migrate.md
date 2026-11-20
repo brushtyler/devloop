@@ -80,6 +80,8 @@ Dal supervisore, come utente `supervisor`:
   dà a ogni voce già presente l'ACL che la chiude a `devloop-agent`.
 - **I login delle CLI** (`claude`, `codex`, `agy` per `devloop-agent`; `claude` per
   `supervisor`): interattivi, uno per CLI ([ops/README.md](../README.md#5-utente-degli-agent-e-cli)).
+  Per `devloop-agent` fra `setup-agent-user.sh --unseal` e una nuova esecuzione dello script
+  senza, che rende di root istruzioni, configurazione e binari delle CLI (#438).
 - **Il token di sola lettura del supervisore**: uno nuovo
   ([ops/github/tokens.md](../github/tokens.md)), e si revoca quello della macchina vecchia.
 - **Il servizio**: lo installa `setup-devloop.sh` da `ops/host/devloop.service`; non si copia
@@ -304,6 +306,37 @@ All'avvio, e a ogni rilettura, devloop scrive nel log, e una volta su `[run].ale
 tabelle del file di progetto che la copia in uso conosce e che la configurazione non ha
 (`[prompts]`, `[tests]`).
 
+## File delle CLI di root sull'utente degli agent (#438)
+
+Dal #438 devloop, all'avvio di `tick` e `run`, non parte se `devloop-agent` può scrivere,
+possedere, creare, rinominare o rimuovere le istruzioni, la configurazione o i binari delle sue
+CLI ([ops/README.md](../README.md#5-utente-degli-agent-e-cli)). Un host preparato prima ha la home
+e le directory delle CLI di `devloop-agent`: la copia nuova rifiuterebbe di partire. Il passo si
+fa dopo il merge, prima del pin, a loop fermo; la copia di prima non controlla questi file e
+parte anche dopo il passo:
+
+1. fermare il loop: `sudo systemctl stop devloop`;
+2. aggiornare il clone di devloop, per avere gli script nuovi: `sudo -u devloop -H git -C
+   /home/devloop/ssdlc pull --ff-only`. Verificare che l'overlay non abbia `--settings` nei
+   `write_args` o nei `review_args` di un agent claude: devloop passa a ogni turno di Claude
+   Code il proprio `--settings`, con la memoria automatica spenta, e rifiuta di partire con un
+   altro;
+3. rendere di root la home di `devloop-agent` e i file delle sue CLI:
+   `sudo bash ops/host/setup-agent-user.sh --dry-run`, poi senza `--dry-run`, dal clone;
+4. verificare con `sudo bash ops/host/check-host.sh --no-apps`: nessun errore nel passo
+   `File delle CLI di devloop-agent`. Un link segnalato dallo script perché porta fuori da ciò
+   che è sigillato (per esempio un eseguibile fuori da `~/.local`) va reso di root a mano, o
+   sostituito. I file sigillati restano leggibili da `devloop-agent` tramite il suo gruppo,
+   anche quelli che erano 600 (come il `settings.json` di una versione precedente);
+5. provare una CLI per tipo come `devloop-agent` (`sudo -iu devloop-agent claude -p ciao`, e lo
+   stesso per `codex exec` e `agy -p`): se una non trova una voce che vuole creare nella sua
+   directory, `setup-agent-user.sh --unseal`, un avvio della CLI, poi di nuovo lo script senza;
+6. il pin a mano (`sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned pin
+   origin/main`) e `sudo systemctl start devloop`.
+
+**Rollback.** La copia di prima parte anche con i file di root. Per riaprirli,
+`setup-agent-user.sh --unseal`: devloop di #438 però non parte finché non si richiudono.
+
 ## Dati di ssdlc nei prompt
 
 Con l'ADR 0006, R4, i prompt di `devloop/prompts/` non contengono più il testo di ssdlc: le
@@ -494,3 +527,50 @@ python3 scripts/devloop-pinned pin <sha12>
 
 Poi, come root, `sudo systemctl start devloop`. `<sha12>` è la copia di prima (`pinned-<sha12>`
 nello `state_dir`).
+
+## Identità di ssdlc nell'overlay
+
+Con l'ADR 0006, R6, `devloop/config.toml` non ha più `repo`, `trusted_users` né `[apps]`: il
+repository gestito, gli utenti fidati e l'insieme di app del progetto sono dell'operatore,
+nell'overlay del suo `state_dir`
+([docs/devloop/reference.md](../../docs/devloop/reference.md#identities-of-a-project)). Gli
+stessi valori che `config.toml` aveva stanno in [`ssdlc/overlay.toml`](ssdlc/overlay.toml). Senza
+`repo` e `trusted_users` nell'overlay la copia di R6 non parte, e il suo pin fallisce lasciando la
+copia di prima (`pin failed, the pinned copy is unchanged`).
+
+La copia di prima accetta già queste chiavi nell'overlay, e con gli stessi valori la
+configurazione effettiva e la versione della policy non cambiano: l'overlay si aggiorna **prima**
+del pin della copia di R6, anche a loop avviato (la rilettura trova gli stessi valori). Come
+utente `devloop`, dal clone:
+
+1. **Le chiavi nell'overlay.** `repo`, `trusted_users` e le tabelle `[apps]` (con `key_dir`) di
+   `ssdlc/overlay.toml` della testa della PR di R6, o di `origin/main` dopo il merge
+   (`git show origin/main:ops/host/ssdlc/overlay.toml`), vanno aggiunte a
+   `.ssdlc/devloop/config.local.toml`. Una chiave che l'overlay ha già resta com'è.
+2. **Verifica dell'equivalenza**, con la copia fissata e un checkout del commit di R6:
+
+   ```bash
+   cd ~/ssdlc && git fetch origin
+   git worktree add --detach /tmp/ssdlc-r6 origin/main
+   python3 -B /tmp/ssdlc-r6/ops/host/ssdlc/check-equivalence.py \
+       --before .ssdlc/devloop/current --before-local .ssdlc/devloop/config.local.toml \
+       --before-project .ssdlc/devloop/project.toml \
+       --after /tmp/ssdlc-r6 --after-local .ssdlc/devloop/config.local.toml \
+       --after-project .ssdlc/devloop/project.toml
+   git worktree remove /tmp/ssdlc-r6
+   ```
+
+   Esce con 0 ed `equivalent: …`; con 2 (`trusted_users` o `repo` nel messaggio) all'overlay
+   manca una chiave del passo 1, e il pin non va fatto.
+3. **Pin della copia di R6**, come ogni pin: dopo un merge con `[pin] auto`, oppure a mano
+   (`python3 scripts/devloop-pinned pin origin/main`, poi stop e avvio del loop). Il pin la
+   verifica con l'overlay del passo 1. `python3 scripts/devloop-pinned apps` nomina per prima
+   cosa il repository e la `key_dir` del progetto (`apps of brushtyler/ssdlc, keys in …`).
+4. **Token.** Dal pin della copia di R6, `python3 scripts/agent-token.py` passa da `devloop token`
+   della copia fissata, con `repo` e `[apps]` dell'overlay; prima, la copia fissata non ha il
+   sottocomando `token`. Il supervisore, dal suo clone aggiornato, aggiunge
+   `--state-dir /home/devloop/ssdlc/.ssdlc/devloop` ai comandi di `scripts/supervisor-token.py`:
+   ne legge l'overlay come legge `run.log`, senza segreti.
+
+**Rollback.** Il pin della copia di prima (`python3 scripts/devloop-pinned pin <sha12>`) basta:
+accetta le stesse chiavi nell'overlay, che possono restare.

@@ -16,6 +16,11 @@ whose modules ``select_modules`` picks for the PR's diff is re-run once instead 
 round. ``suite_summary`` reads the final lines of ``scripts/run-tests.py`` in a CI job log, for
 the summary of the CI in the review and fix prompts (#300).
 
+``failed_cases`` reads the identities of the failed tests from the whole output of a local run
+(#459), and ``case_modules`` the test modules they belong to: a failure that the same modules
+reproduce on the base commit of the branch is the base's, not the implementer's. Both read what
+unittest prints, so the check runs only with the ``python-unittest-modules`` selection.
+
 The project declares both (ADR 0006, R5, ``Tests``): the selection is a strategy of the
 installation, with a name, and the project's name rules as its parameters (``SELECTIONS``); the
 format of the CI logs has a name too (``CI_LOG_FORMATS``). The code holds no rule of a project.
@@ -62,6 +67,16 @@ _SUITE_RAN = re.compile(r'(?:^|\s)(Ran \d+ tests? in [\d.]+s \(\d+ modules?, [^(
                         r'\s*$')
 _SUITE_SLOWEST = re.compile(r'(?:^|\s)(Slowest: [^`\n]*?)\s*$')
 SUITE_LINE_LIMIT = 300
+# A failed test as unittest reports it (#459): after a line of 70 "=", "FAIL: <name> (<id>)" or
+# "ERROR: <name> (<id>)", then the parameters of a subtest, if any; and the summary of a failed
+# run, "FAILED (failures=N, errors=M, ...)", once per run of a TextTestRunner.
+_SEPARATOR = '=' * 70
+_CASE = re.compile(r'(?:FAIL|ERROR): (\S+) \(([\w.]+)\)(.*)')
+_UNITTEST_FAILED = re.compile(r'FAILED \(([^()]*)\)')
+_COUNT = re.compile(r'([a-z ]+)=(\d+)')
+# A test module, or a test, that unittest could not load (an import error, a broken
+# ``load_tests``): ``unittest.loader._FailedTest.<name>``, the same id whatever the error.
+_LOAD_FAILURE = 'unittest.loader.'
 
 
 def failed_modules(log):
@@ -99,6 +114,54 @@ def suite_summary(log):
         return None
     return {'ran': ran[:SUITE_LINE_LIMIT],
             'slowest': slowest[:SUITE_LINE_LIMIT] if slowest is not None else None}
+
+
+def failed_cases(output):
+    """The identities of the failed tests in ``output``, the whole output of a failed run of
+    unittest or of ``scripts/run-tests.py`` (#459), as a sorted list of ``<id>`` followed by the
+    parameters of a subtest, if any (``test_x.Case.test_y (i=1)``); None when they cannot be
+    told for sure: no failed test reported, no summary of unittest, a count that differs from
+    its summaries (``failures`` plus ``errors``), an unexpected success, which has no report of
+    its own, a worker problem of ``scripts/run-tests.py``, or a module that unittest could not
+    load: its synthetic id (``unittest.loader._FailedTest.<module>``) is the same whatever the
+    error, so it tells nothing of which tests fail, and a module that does not start stays a
+    failure of the branch."""
+    lines = (output or '').splitlines()
+    cases, counted, summaries = [], 0, 0
+    for before, line in zip([''] + lines, lines):
+        line = line.strip()
+        if line == 'WORKER PROBLEM':
+            return None
+        if (match := _UNITTEST_FAILED.fullmatch(line)) and 'modules=' not in line:
+            summaries += 1
+            counts = {k.strip(): int(v) for k, v in _COUNT.findall(match.group(1))}
+            if counts.get('unexpected successes'):
+                return None
+            counted += counts.get('failures', 0) + counts.get('errors', 0)
+        elif before.strip() == _SEPARATOR and (match := _CASE.fullmatch(line)):
+            name, test_id, rest = match.groups()
+            if test_id.startswith(_LOAD_FAILURE):
+                return None
+            if not test_id.endswith(f'.{name}'):
+                test_id = f'{test_id}.{name}'  # before Python 3.11: "(module.Case)"
+            cases.append(test_id + (f' {rest.strip()}' if rest.strip() else ''))
+    if not cases or not summaries or counted != len(cases):
+        return None
+    return sorted(set(cases))
+
+
+def case_modules(cases):
+    """The test modules (``test_x.py``) of the failed tests ``cases`` (``failed_cases``), sorted,
+    or None when one of them belongs to no module of ``tests/``: its id does not start with
+    ``test_<name>.``."""
+    modules = set()
+    for case in cases:
+        test_id = case.split(' ', 1)[0]
+        module = test_id.split('.', 1)[0] if '.' in test_id else ''
+        if not _MODULE.fullmatch(module):
+            return None
+        modules.add(f'{module}.py')
+    return sorted(modules)
 
 
 def _prefixes(stem, source_prefixes):

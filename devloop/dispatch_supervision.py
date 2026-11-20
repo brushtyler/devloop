@@ -1360,7 +1360,8 @@ class SupervisionMixin:
           the supervisor, only while the input of the step is the one that failed, at most
           ``MAX_RETRIES`` times per key (the supervisor's retries count too), never on an issue
           a merged devloop PR resolved, and a blocked issue waits. A readiness check runs again
-          only on an issue that still has ``agent:ready``. A PR goes back to the label of its
+          only on an issue that still has ``agent:ready``, or ``agent:working`` while its
+          implementation waits for the base branch (#459, ``_base_wait``). A PR goes back to the label of its
           step, an issue's step runs now; the operator labels (and ``agent:needs-supervisor``)
           go.
         - ``accept-defaults`` and ``decide``: only on an issue whose latest record is a failed
@@ -1416,7 +1417,10 @@ class SupervisionMixin:
             return refuse('quello che ha portato qui ' + ('la PR' if is_pr else 'l\'issue')
                           + ' non è un\'escalation che registri un passo da ripetere')
         key, step = record['key'], record['step']
-        if step == 'preflight' and lb.ready not in labels:
+        # The check that restarts an implementation waiting for its base (#459) runs on an
+        # issue in agent:working, which keeps it.
+        if step == 'preflight' and lb.ready not in labels and not (
+                lb.working in labels and self._base_wait(comments, 'implement')):
             return refuse(f'il controllo di prontezza riparte rimettendo `{lb.ready}`, che '
                           'l\'issue non ha più', f'Per riprendere: rimuovere '
                           f'`{lb.needs_operator}` e rimettere `{lb.ready}`.')

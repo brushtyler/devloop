@@ -537,6 +537,32 @@ the cycle is gone. A `cycle` record counts only from the dispatcher's identity, 
 cycle is reported once on each issue; another cycle on the same issue is reported again. The
 record adds no label and blocks nothing by itself: the open blocks do.
 
+## Base broken records
+
+When every failed test of an implementation or of a fix fails on the base commit of its branch
+too ([Tests red on the base too](guide.md#tests-red-on-the-base-too), #459), the dispatcher writes
+a comment ("Test rossi anche sulla base") on the issue (implement) or on the PR (fix), ending
+with a `basebroken` marker: `step` (`implement` or `fix`), `base` (the base commit, the merge
+base of the branch with `origin/main`), `head` (the commit the step started from: the PR's head
+for a fix), `count` (the failed tests) and `cases` (their identities, at most 30). A record
+counts only from the dispatcher's identity, and only the latest one, while no notice of the
+dispatcher follows it (an escalation, a block) other than one of the readiness check that
+restarts the implementation: an escalation with `step` `preflight` or of class
+`operator_decision` or `preflight_default`, or a handoff to the operator
+(`supervisor_escalated`, `supervisor_refused`, `retry_limit`) of such an escalation to the
+supervisor. Those keep `agent:working` and the wait, and their block holds the restart:
+
+- an issue in `agent:working` without a PR whose latest record is of `implement` is not `stale`:
+  it waits while `origin/main` is at `base`, then starts again as an implementation, unless
+  `agent:needs-operator`, `agent:needs-supervisor` or a label of `blocked_labels` holds it; with
+  `preflight`, through the readiness check of its current request, as a ready issue;
+- a PR whose latest record is of `fix` on its current head runs no fix while `origin/main` is at
+  `base`. A base that cannot be read keeps the wait.
+
+The alert of a [red CI on `main`](guide.md#red-ci-on-main) is a dispatcher comment on
+`[run].alert_issue` without a record; with the outbox its publication covers `main_red:<sha>`, so
+that an uncertain outcome is reconciled and not published twice.
+
 ## Daily summary
 
 The [daily summary](guide.md#daily-summary) (#256) reads only records bound to identities: the
@@ -575,12 +601,40 @@ blocking finding whose `security` is not `false`, a finding of a review written 
 included, keeps a PR at the round limit with the operator: the supervisor may not
 [grant it a round](guide.md#granting-a-review-round). The findings devloop writes itself, of a CI
 failure and of the acceptance map, carry `security: false`; the published review marks a
-security finding with *(sicurezza)*. devloop then enforces consistency:
+security finding with *(sicurezza)*.
+
+**Evidence** (#481). A blocking finding also carries `evidence`, required by the schema of the
+blocking findings only: what shows the defect, so that the implementer can verify it. That is
+the scenario the reviewer reproduced (a test that fails, a command with its output, a concrete
+input and the behaviour observed) or, for a defect that cannot be run, the precise reference to
+the code and to the rule it violates (the issue, an ADR, a document) with the quotation. devloop
+records a blocking finding whose `evidence` is empty, or only blanks, among the non-blocking
+findings of the review, with `without_evidence: true`, and the `note` of the record names it: it
+opens no finding and does not send the PR to the fix. A finding with `security: true` stays
+blocking without evidence too: in doubt, the rule fails closed. The published review shows the
+evidence of each finding (*Evidenza:*) and marks a demoted one *(bloccante senza evidenza:
+registrato come non bloccante)*; the fix prompt and the previous rounds of the next review show
+it as `Evidence:`. The previous rounds, which the review and the advisory review read, also list
+each review's assessments of the earlier findings and its findings demoted for lack of evidence
+("Blocking findings without evidence"); the fix prompt shows, under each open finding, the
+latest assessment of its owner (`Latest assessment by its owner`), with the new evidence that
+answers a dispute. The findings devloop writes itself, of a CI failure and of the acceptance
+map, stay blocking as before. devloop then enforces consistency:
 
 - `approve` with a blocking finding, or with one of the reviewer's own earlier findings
   unresolved, becomes `request_changes` (another owner's open finding does not change it: the
   dispatcher checks it before promoting);
-- `request_changes` with nothing to fix becomes `needs_operator`;
+- `request_changes` whose only blocking findings were demoted for lack of evidence (#481), with
+  none of the reviewer's own earlier findings left unresolved, becomes `unproven` (another
+  owner's open finding does not keep the request for changes: the dispatcher checks it before
+  promoting). `unproven` is a neutral verdict that devloop writes, never the reviewer: it does
+  not send the PR to the fix, and it is no approval. The quorum counts only explicit
+  approvals, so a round with an `unproven`, and no `needs_operator` or `request_changes`, is
+  not approved: the PR stays in `agent:review` and the next tick plans a new review of the same
+  head, a new round within the round limit (at the limit, the usual `round_limit`). Nor does it
+  clear a `trust_policy` of its reviewer (#461), which needs an `approve`. Its native review is
+  a `COMMENT`;
+- `request_changes` with nothing else to fix becomes `needs_operator`;
 - an earlier finding the reviewer does not assess stays open;
 - `operator_reason` (#434) says why a reviewer asks for the operator: `trust_policy` or
   `decision`, `none` with the other verdicts. The record keeps it only with `needs_operator`, as
@@ -655,7 +709,12 @@ change, the local overlay, with a conclave the reserved perimeter its members re
 PR that changes the rule, judged with the prompts of the running installation.
 
 Findings get stable ids (`R<round>-<n>`). The fix step answers each one (`fixed`, `disputed`,
-`not_applicable`), and the next round sees those answers. The review is published in readable
+`not_applicable`), and the next round sees those answers. The fix prompt asks the implementer
+to verify the evidence of each finding first, running its scenario again or reading again the
+code and the rule it cites, and to dispute (`disputed`) one whose evidence does not hold,
+reporting in its `note` how it verified it, instead of changing the code; the review prompt asks
+the reviewer who opened it to withdraw it (`withdrawn`) or to keep it `unresolved` with new
+evidence in its `note` (#481). Who closes a finding does not change. The review is published in readable
 form, with the full record in a hidden base64 marker for the next tick: as the body of a native
 GitHub review for an agent with an app of its own, as a comment for any other agent (see
 [Where a review is published](#where-a-review-is-published)).
@@ -673,7 +732,9 @@ Since #325 each review is **one element** of the PR's timeline:
   same reviewer's earlier `REQUEST_CHANGES`, which would block the merge after the operator's
   decision. The body states the verdict and the event, and devloop still keeps the PR in
   `agent:needs-operator` for a decision, or goes on with the fix or the operator merge for the
-  trust policy (#434): it reads the verdict from the record, never from the event. No review
+  trust policy (#434): it reads the verdict from the record, never from the event. The
+  neutral `unproven` (#481) is a `COMMENT`: it neither approves nor asks for changes, and an
+  earlier `REQUEST_CHANGES` of the same reviewer stays until it approves. No review
   is dismissed, neither the reviewer's own nor another reviewer's. That native review is the record devloop reads, and no review comment is
   written. Its submission is required: a failure is tried again, up to three attempts in all,
   after a pause of 5 seconds and then 10. Before each new attempt the dispatcher reads the PR's
@@ -699,7 +760,9 @@ PR in `agent:needs-operator` is always a native review of type `COMMENT`, with t
 the agent of `advisory_reviewer` (its app, or the ambient login without one), titled "Review
 consultiva: non conta per il quorum". The agent answers with JSON validated against
 [`devloop/schemas/advisory.json`](../../devloop/schemas/advisory.json) (prompt
-`devloop/prompts/advisory.md`). Its body ends with an `advisory` marker, never a `review`
+`devloop/prompts/advisory.md`); since #481 its `unfounded` field lists the findings of the
+quorum whose evidence does not hold and the fixes that were not needed, shown in the section
+"Finding senza evidenza o corretti senza necessità". Its body ends with an `advisory` marker, never a `review`
 one: `head`, `reviewer`, `outcome` (`done`) and `opinion` (`ok`, `dubbi`, `contrario`). It is
 never part of the PR's conversation as the review records see it, so it is no round, no verdict
 and no finding. The dispatcher's summary of it ("Review consultiva per l'operatore") ends with

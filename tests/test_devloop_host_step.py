@@ -904,9 +904,13 @@ class ProjectTablesTests(unittest.TestCase):
     def test_each_reload_checks_again(self):
         project = self.tmp / 'project.toml'
         project.write_text('test_cmd = "python3 -m unittest"\n', encoding='utf-8')
-        cfg = config.load_config(None, None, project)
+        # R6: repo and trusted_users are the overlay's.
+        local = self.tmp / 'config.local.toml'
+        local.write_text('repo = "acme/widget"\ntrusted_users = ["acme-operator"]\n',
+                         encoding='utf-8')
+        cfg = config.load_config(None, local, project)
         seen = []
-        reloader = config.Reloader(cfg, None, None, project, log=self.logs.append,
+        reloader = config.Reloader(cfg, None, local, project, log=self.logs.append,
                                    notice=lambda data: seen.append(
                                        config.missing_project_tables(data)))
         reloader.refresh()

@@ -544,6 +544,22 @@ def _valid_story(s):
                  and all(isinstance(h, str) for h in hashes) if root else hashes is None))
 
 
+BASE_BROKEN_STEPS = ('implement', 'fix')
+
+
+def _valid_basebroken(b):
+    """A step whose local tests failed only with tests that fail on the base commit of its
+    branch too (#459): the step (``implement`` or ``fix``), that commit (``base``), the head it
+    started from (``head``: the PR's, or the base's for an implementation), how many tests
+    failed (``count``) and the first of them (``cases``). The step waits for the base branch to
+    move past ``base``."""
+    return (b.get('step') in BASE_BROKEN_STEPS
+            and isinstance(b.get('base'), str) and _SHA.fullmatch(b['base']) is not None
+            and isinstance(b.get('head'), str) and _is_int(b.get('count'), 1)
+            and isinstance(b.get('cases'), list) and bool(b['cases'])
+            and all(isinstance(c, str) for c in b['cases']))
+
+
 _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy': _valid_policy,
           'finding': _valid_finding, 'sync': _valid_sync, 'preflight': _valid_preflight,
           'notice': _valid_notice, 'ledger': _valid_ledger, 'merged': _valid_merged,
@@ -551,7 +567,8 @@ _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy':
           'closed': _valid_closed, 'cycle': _valid_cycle, 'recheck': _valid_recheck,
           'report': _valid_report,
           'receipt': _valid_pr_receipt, 'conclave': _valid_conclave,
-          'advisory': _valid_advisory, 'story': _valid_story, 'pin': _valid_pin}
+          'advisory': _valid_advisory, 'story': _valid_story, 'pin': _valid_pin,
+          'basebroken': _valid_basebroken}
 
 
 def read_marker(text, kind):
@@ -588,6 +605,8 @@ _VERDICT_TEXT = {
     'approve': 'Approvata',
     'request_changes': 'Modifiche richieste',
     'needs_operator': 'Serve una decisione dell\'operatore',
+    # #481: a request for changes whose blocking findings all lacked evidence.
+    'unproven': 'Nessun finding bloccante con evidenza: non approvata',
 }
 # A ``needs_operator`` for the trust policy (#434).
 _TRUST_TEXT = 'Policy di fiducia: review e merge dell\'operatore'
@@ -607,9 +626,14 @@ def _findings(findings):
     for f in findings:
         # A finding the reviewer marked as one of security (#405, ADR 0005, D5).
         tag = ' *(sicurezza)*' if f.get('security') is True else ''
+        # A blocking finding without evidence, recorded as non-blocking (#481).
+        if f.get('without_evidence') is True:
+            tag += ' *(bloccante senza evidenza: registrato come non bloccante)*'
         lines.append(f'- **{f.get("key") or f["id"]}**{_location(f)}: {f["title"]}{tag}')
         if f['detail']:
             lines.append(f'  {f["detail"]}'.replace('\n', '\n  '))
+        if isinstance(f.get('evidence'), str) and f['evidence'].strip():
+            lines.append(f'  *Evidenza:* {f["evidence"].strip()}'.replace('\n', '\n  '))
         if f['suggested_fix']:
             lines.append(f'  *Correzione suggerita:* {f["suggested_fix"]}'.replace('\n', '\n  '))
     return '\n'.join(lines)
@@ -704,12 +728,15 @@ def fitted(head, text, kind, payload, limit=MAX_BODY):
     return top + neutralize(text)[:room].rstrip('\n') + tail
 
 
-_REVIEW_EVENT = {'approve': 'APPROVE', 'request_changes': 'REQUEST_CHANGES'}
+# ``unproven`` (#481) neither approves nor asks for changes: ``COMMENT``.
+_REVIEW_EVENT = {'approve': 'APPROVE', 'request_changes': 'REQUEST_CHANGES',
+                 'unproven': 'COMMENT'}
 
 
 def native_event(review):
     """The event of the native review that carries ``review``. ``approve`` and
-    ``request_changes`` mirror the verdict. ``needs_operator`` mirrors the reviewer's technical
+    ``request_changes`` mirror the verdict, and ``unproven`` (#481), which does neither, is a
+    ``COMMENT``. ``needs_operator`` mirrors the reviewer's technical
     outcome (#418): ``REQUEST_CHANGES`` while blocking findings of its own stay open, otherwise
     ``APPROVE``, so that its earlier ``REQUEST_CHANGES`` does not block the merge after the
     operator's decision. The body still states the verdict, and devloop keeps the PR with the

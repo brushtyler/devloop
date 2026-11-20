@@ -11,13 +11,15 @@ app's key; ``scripts/agent-token.py`` does not expose it, and the supervisor min
 import dataclasses
 import importlib.util
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from devloop import apps, config
+import devloop.__main__ as cli
+from devloop import apps, config, token
 from devloop.config import AppConfig, ConfigError, SupervisorActor
 from devloop.dispatcher import Dispatcher
 from devloop.watch import Trust
@@ -240,13 +242,13 @@ class CommandTests(Case):
 
 class AgentTokenTests(unittest.TestCase):
     def test_the_supervisors_app_is_not_exposed(self):
-        token = script('agent-token')
+        # devloop token (ADR 0006, R6), which scripts/agent-token.py calls.
         for actor in ('supervisor', 'SUPERVISOR'):
             with self.subTest(actor=actor), \
-                    mock.patch.object(token, 'load_config') as load, \
+                    mock.patch.object(cli, 'load') as load, \
                     mock.patch.object(token.subprocess, 'run') as run:
                 with self.assertRaisesRegex(SystemExit, 'scripts/supervisor-token.py'):
-                    token.main([actor, '--', 'gh', 'issue', 'comment', '76'])
+                    cli.main(['token', actor, '--', 'gh', 'issue', 'comment', '76'])
                 load.assert_not_called()
                 run.assert_not_called()
 
@@ -256,11 +258,21 @@ class SupervisorTokenTests(unittest.TestCase):
     def setUpClass(cls):
         cls.script = script('supervisor-token')
 
+    def setUp(self):
+        # The project's state_dir, with ssdlc's overlay (ADR 0006, R6): repo and [apps].
+        self.state = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.state)
+        shutil.copy(ssdlc_project.OVERLAY, self.state / 'config.local.toml')
+
     def test_permissions(self):
+        state = self.script.STATE
         self.assertEqual(self.script.parse(['--', 'gh', 'x']),
-                         ({'issues': 'write', 'pull_requests': 'write'}, ['gh', 'x']))
+                         (state, {'issues': 'write', 'pull_requests': 'write'}, ['gh', 'x']))
         self.assertEqual(self.script.parse(['--perm', 'issues=read', '--', 'gh', 'x']),
-                         ({'issues': 'read'}, ['gh', 'x']))
+                         (state, {'issues': 'read'}, ['gh', 'x']))
+        self.assertEqual(self.script.parse(['--state-dir', '/srv/p', '--', 'gh', 'x']),
+                         (Path('/srv/p'), {'issues': 'write', 'pull_requests': 'write'},
+                          ['gh', 'x']))
         # The supervisor neither implements nor merges: no contents, no other permission.
         for perm in ('contents=read', 'contents=write', 'actions=write', 'checks=read',
                      'administration=write', 'metadata=write'):
@@ -287,10 +299,20 @@ class SupervisorTokenTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {'DEVLOOP_APP_KEY_DIR': tmp, 'GH_TOKEN': 'op'}), \
                     mock.patch.object(self.script.AppAuth, 'token', token), \
                     mock.patch.object(self.script.subprocess, 'run', fake_run):
-                self.assertEqual(self.script.main(['--', 'gh', 'x']), 0)
+                self.assertEqual(self.script.main(['--state-dir', str(self.state), '--',
+                                                   'gh', 'x']), 0)
         self.assertEqual(seen, {'command': ['gh', 'x'], 'token': 'sup-tok',
                                 'app': (5824243, 'brushtyler-devloop-supervisor', key),
                                 'permissions': {'issues': 'write', 'pull_requests': 'write'}})
+
+    def test_the_repository_is_the_projects(self):
+        # ADR 0006, R6: repo and the app come from the overlay of the state_dir given.
+        (self.state / 'config.local.toml').write_text(
+            (self.state / 'config.local.toml').read_text(encoding='utf-8').replace(
+                'repo = "brushtyler/ssdlc"', 'repo = "brushtyler/widget"'), encoding='utf-8')
+        cfg = self.script.load_config(self.state)
+        self.assertEqual(cfg.repo, 'brushtyler/widget')
+        self.assertEqual(cfg.apps[apps.SUPERVISOR].slug, 'brushtyler-devloop-supervisor')
 
     def test_no_key_in_an_agents_environment(self):
         # devloop's agents run with a key directory without keys: they cannot mint it.
@@ -298,7 +320,7 @@ class SupervisorTokenTests(unittest.TestCase):
                 mock.patch.dict(os.environ, {'DEVLOOP_APP_KEY_DIR': tmp}), \
                 mock.patch.object(self.script.subprocess, 'run') as run:
             with self.assertRaises(FileNotFoundError):
-                self.script.main(['--', 'gh', 'x'])
+                self.script.main(['--state-dir', str(self.state), '--', 'gh', 'x'])
             run.assert_not_called()
 
     def test_without_the_app_it_refuses(self):

@@ -19,11 +19,12 @@ from .acceptance import acceptance_criteria, format_criteria, format_map, latest
 from .agents import AgentError
 from .apps import DISPATCHER, IMPLEMENT, PR_COMMENT, RERUN, REVIEW
 from .budget import BudgetRefused
+from .dispatch_base import BaseBroken
 from .context import (_failure_text, _format_conflicts, _format_findings, _review_failure,
                       _start_failure, _template, _trusted_comments, docs_diff_section,
                       docs_map_section, docs_review_section, format_ci_summary,
                       format_fix_requests, format_operator_comments, format_operator_decisions,
-                      format_previous_rounds, prompt_values)
+                      format_previous_rounds, owner_assessments, prompt_values)
 from .github import GitHubError, GitHubUncertain, job_id
 from .hoststep import format_step, render_step
 from .hoststep import latest as latest_host_step
@@ -182,7 +183,7 @@ class ActionsMixin:
         try:
             result, failure, used, tested, local = self._write_turn(
                 agent, prompt, 'implement', path, f'issue-{number}-implement',
-                where=(number, 'implement'))
+                where=(number, 'implement'), base_check=True)
         except (AgentError, BudgetRefused) as exc:
             # A turn the budget refused (#411) keeps its input too: the escalation that the
             # supervisor may answer with an extension is bound to it, as a retry is.
@@ -191,6 +192,12 @@ class ActionsMixin:
         if result['status'] == 'blocked':
             return self._blocked(number, used, result['blocked_reason'], remove=[lb.working],
                                  on_pr=False, step='implement', head=start, conclave=decision)
+        if isinstance(failure, BaseBroken):
+            # The base's failure, not the implementer's (#459): the issue keeps agent:working
+            # and starts again once the base branch advances.
+            self._wait_base(number, 'implement', failure, head=start)
+            self.ws.remove(name)
+            return
         if failure:
             return self._escalate(number, failure[0], failure[1], remove=[lb.working],
                                   cls='tests_failed')
@@ -862,8 +869,9 @@ class ActionsMixin:
             return _template('fix', **prompt_values(cfg), repo=cfg.repo, pr_number=pr.number,
                              issue_number=pr.issue,
                              issue_title=issue['title'], issue_body=issue.get('body') or '',
-                             findings=_format_findings(findings), test_cmd=cfg.test_cmd,
-                             ci_summary=ci_summary,
+                             findings=_format_findings(findings,
+                                                       owner_assessments(pr.reviews)),
+                             test_cmd=cfg.test_cmd, ci_summary=ci_summary,
                              acceptance_criteria=format_criteria(
                                  acceptance_criteria(issue.get('body'))),
                              acceptance_map=format_map(latest_map(pr.meta, pr.fixes)),
@@ -874,7 +882,8 @@ class ActionsMixin:
         # One register for the fix's turns, local tests and sync (#355).
         where = self._fix_where(pr.number, latest['round'])
         result, failure, used, tested, local = self._write_turn(
-            agent, prompt, 'fix', path, f'pr-{pr.number}-fix-r{latest["round"]}', where=where)
+            agent, prompt, 'fix', path, f'pr-{pr.number}-fix-r{latest["round"]}', where=where,
+            base_check=True)
         self._publish_fix(pr, agent, name, path, (result, failure, used, tested, local),
                           since=start, round_no=latest['round'], remove=[lb.changes],
                           merged=merged, conclave=decision, where=where)
@@ -929,6 +938,12 @@ class ActionsMixin:
         if result['status'] == 'blocked':
             return self._blocked(pr.number, used, result['blocked_reason'], remove=remove,
                                  on_pr=True, step='fix', head=pr.head_sha, conclave=conclave)
+        if isinstance(failure, BaseBroken):
+            # The base's failure, not the fix's (#459): nothing is pushed, the labels stay, and
+            # the fix runs again once the base branch advances.
+            self._wait_base(pr.number, 'fix', failure, head=pr.head_sha)
+            self.ws.remove(name)
+            return
         if failure:
             return self._escalate(pr.number, failure[0], failure[1], remove=remove,
                                   cls='tests_failed')
@@ -1005,8 +1020,9 @@ class ActionsMixin:
             return _template('fix', **prompt_values(cfg), repo=cfg.repo, pr_number=pr.number,
                              issue_number=pr.issue,
                              issue_title=issue['title'], issue_body=issue.get('body') or '',
-                             findings=_format_findings(findings), test_cmd=cfg.test_cmd,
-                             ci_summary=ci_summary,
+                             findings=_format_findings(findings,
+                                                       owner_assessments(pr.reviews)),
+                             test_cmd=cfg.test_cmd, ci_summary=ci_summary,
                              requests=format_fix_requests(requests),
                              acceptance_criteria=format_criteria(
                                  acceptance_criteria(issue.get('body'))),
@@ -1017,7 +1033,7 @@ class ActionsMixin:
                              conclave=resolution)
         where = self._fix_where(pr.number, round_no)
         turn = self._write_turn(agent, prompt, 'fix', path, f'pr-{pr.number}-fix-request',
-                                where=where)
+                                where=where, base_check=True)
         self._publish_fix(pr, agent, name, path, turn, since=start, round_no=round_no,
                           remove=remove, extra={'requests': requests, 'from': pr.head_sha},
                           merged=merged, conclave=decision, where=where)
