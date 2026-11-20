@@ -795,7 +795,8 @@ def _plan_preflight(snapshot, cfg, pr_issues, free, urgent='', implement=True):
     for it or someone who may admit it added ``agent:ready`` again (#270); when the base branch
     advanced past a failure that depends on it (#270), only within ``free``, as any check. On
     such a request the block need only be the issue's latest (#468); a request that runs no
-    check is answered once (``recheck_refused``). Any
+    check is answered once (``recheck_refused``), and so is a ``/devloop approve`` refused
+    that no check answers (``approve_refused``, #483). Any
     other ``agent:needs-operator`` (or its name before #248) is left alone. An issue in
     ``agent:needs-supervisor`` waits for the supervisor (#182): a request of a person for a
     new check is answered once there too, and runs none (#468). Without ``implement`` (#342) an
@@ -844,6 +845,15 @@ def _plan_preflight(snapshot, cfg, pr_issues, free, urgent='', implement=True):
             actions.append(Action('implement', issue['number'], urgent) if state == 'ready'
                            else Action('preflight', issue['number'],
                                        f'{reason}; {urgent}' if urgent else reason))
+    # The ``/devloop approve`` devloop refuses and has not answered yet (#483) are answered
+    # once, whatever the state of the issue: by the check planned for it, if any, otherwise by
+    # the dispatcher, since such a command changes nothing that runs a new check.
+    checked = {a.number for a in actions if a.kind == 'preflight'}
+    for issue in snapshot.ready_issues:
+        count = (issue.get('preflight') or {}).get('approvals')
+        if count and issue['number'] not in checked:
+            actions.append(Action('approve_refused', issue['number'],
+                                  f'{count} /devloop approve refused, not answered yet'))
     return actions
 
 

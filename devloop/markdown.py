@@ -328,9 +328,11 @@ def _valid_preflight(p):
     (#248: of the label under both its names). ``base`` (#270), the commit of the base branch
     the check ran on, is missing from the records written before, and so are ``trust_policy``
     and ``trust_policy_reason`` (#472) from those written before them; ``uncovered`` is never
-    ``ready``."""
+    ``ready``. ``refused`` (#483): the ids of the comments with a ``/devloop approve`` the
+    check answered as refused, missing when it answered none."""
     trust = p.get('trust_policy', 'none')
     return (all(isinstance(p.get(k), str) for k in ('hash', 'agent', 'split'))
+            and _comment_ids(p.get('refused', [0]))
             and isinstance(p.get('base', ''), str)
             and trust in PREFLIGHT_TRUST and isinstance(p.get('trust_policy_reason', ''), str)
             and not (trust == 'uncovered' and p.get('ready'))
@@ -469,6 +471,17 @@ def _valid_recheck(r):
             and isinstance(r.get('reason'), str) and isinstance(r.get('labeled', ''), str))
 
 
+def _comment_ids(ids):
+    """A non-empty list of comment ids."""
+    return isinstance(ids, list) and bool(ids) and all(_is_int(i) for i in ids)
+
+
+def _valid_approve(a):
+    """The dispatcher's answer to the ``/devloop approve`` it refuses outside a readiness check
+    (#483): the ids of the comments it answers, each once."""
+    return _comment_ids(a.get('comments'))
+
+
 RECEIPT_STATES = ('current', 'superseded')
 
 
@@ -568,7 +581,7 @@ _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy':
           'report': _valid_report,
           'receipt': _valid_pr_receipt, 'conclave': _valid_conclave,
           'advisory': _valid_advisory, 'story': _valid_story, 'pin': _valid_pin,
-          'basebroken': _valid_basebroken}
+          'basebroken': _valid_basebroken, 'approve': _valid_approve}
 
 
 def read_marker(text, kind):
@@ -828,8 +841,31 @@ PREFLIGHT_RESUME = (
     'messo e l\'issue torna in coda.')
 
 
-def render_preflight(record, head, note=''):
-    """The comment of a readiness check (#114): ``record`` is its ``preflight`` marker."""
+def _refused_lines(refused):
+    """The lines that answer the ``/devloop approve`` refused (#483), ``(login, time,
+    reason)``."""
+    return ['Questi comandi non valgono come decisione dell\'operatore:', '',
+            *(f'- il commento di `{login}` del {at or "momento non noto"}: {reason}.'
+              for login, at, reason in refused)]
+
+
+def render_approve_refused(ids, refused):
+    """The dispatcher's answer to the ``/devloop approve`` it refuses when no readiness check
+    answers them (#483), with an ``approve`` marker that names the comments ``ids``: each is
+    answered once. ``refused``: ``(login, time, reason)``, as ``render_preflight`` shows them."""
+    return publishable(
+        dispatcher_header() + '\n## `/devloop approve` rifiutati\n\n'
+        + '\n'.join(_refused_lines(refused)) + '\n\n'
+        'Una decisione sulla policy di fiducia la prende solo l\'operatore, di persona: un '
+        'commento la cui prima riga è `/devloop approve`, seguita dal testo della decisione, '
+        'scritto dopo l\'ultima modifica del testo dell\'issue e prima della presa in carico.\n',
+        'approve', {'comments': list(ids)})
+
+
+def render_preflight(record, head, note='', refused=()):
+    """The comment of a readiness check (#114): ``record`` is its ``preflight`` marker.
+    ``refused``: the ``/devloop approve`` the check did not count as decisions of the operator
+    (#483), as ``(login, time, reason)``, answered here; they are not part of the record."""
     if record['ready']:
         parts = ['## Controllo di prontezza superato', '',
                  'L\'issue è implementabile in una RUN: l\'implementazione può partire.']
@@ -860,6 +896,8 @@ def render_preflight(record, head, note=''):
         reason = record.get('trust_policy_reason', '').strip()
         parts += ['', '**Policy di fiducia:** toccata, coperta da una decisione dell\'operatore.'
                       + (f' {reason}' if reason else '')]
+    if refused:
+        parts += ['', '### `/devloop approve` rifiutati', '', *_refused_lines(refused)]
     if note:
         parts += ['', f'> {note}']
     return publishable(head + '\n' + '\n'.join(parts), 'preflight', record)

@@ -193,7 +193,7 @@ from .budget import status_lines as budget_status_lines
 from .config import INSTALL_ROOT, LEGACY_NEEDS_OPERATOR, ConfigError, key_role
 from .context import (LABEL_STYLE, _describe_bases, _failure_text, _open_findings_reason,
                       _render_issue_comments, both_labels_warning, issue_decisions,
-                      label_transition, transition_labels)
+                      label_transition, refused_approvals, transition_labels)
 from .dispatch_actions import ActionsMixin, Models, ready_approval, rerun_of
 from .dispatch_advisory import AdvisoryFailures, AdvisoryMixin, AdvisoryResults
 from .dispatch_base import BaseMixin, MainAlerts
@@ -560,8 +560,9 @@ def preflight_hash(title, body, comments, trusted_users, automatic, accepted=Non
     other trusted comment counts, header or not, and so does a dispatcher record of defaults
     the supervisor accepted (``accepted(comment)``, #182), as a trusted comment would.
 
-    ``decisions``: the comments that may record a decision of the operator (``issue_decisions``,
-    #472), each by its author and its time. Their validity depends on the history of the text,
+    ``decisions``: the comments that record a decision of the operator (``issue_decisions``,
+    #472), each by its author, its time and its text: a ``/devloop approve`` (#483) is a command,
+    so its text is not among the others. Their validity depends on the history of the text,
     not only on the text: a change of the title or body, undone later, leaves the text as it was
     but drops them, and with them the hash, so the check that relied on them runs again. Without
     such comments the hash is the one of before #472."""
@@ -572,7 +573,8 @@ def preflight_hash(title, body, comments, trusted_users, automatic, accepted=Non
                                and supervisor_command(c.get('body')) is None)]
     request = [title or '', body or '', kept]
     if decisions:
-        request.append([[c['author']['login'], c['created_at']] for c in decisions])
+        request.append([[c['author']['login'], c['created_at'], c.get('body') or '']
+                        for c in decisions])
     data = json.dumps(request, ensure_ascii=False, separators=(',', ':'))
     return hashlib.sha256(data.encode('utf-8')).hexdigest()
 
@@ -860,9 +862,14 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
     def _issue_decisions(self, comments, history, taken=False):
         """``issue_decisions`` of an issue (#472): neither the supervisor's identity nor any
-        other app of devloop decides for the operator."""
+        other app decides for the operator."""
         return issue_decisions(comments, history, self.cfg.trusted_users, self._devloop_logins(),
                                self.cfg.labels.working, taken=taken)
+
+    def _refused_approvals(self, comments):
+        """``refused_approvals`` of an issue (#483), with the apps of devloop and the
+        supervisor's identity."""
+        return refused_approvals(comments, self.cfg.trusted_users, self._devloop_logins())
 
     def _untrusted_change(self, history):
         """``untrusted_change`` of an issue, with the admitters of its author."""

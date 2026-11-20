@@ -22,6 +22,9 @@ from .supervision import DECIDE
 
 PROMPT_DIR = Path(__file__).resolve().parent / 'prompts'
 REREVIEW_COMMAND = '/devloop rereview'
+# The decision of the operator on the trust policy of an issue (#483): the first line of a
+# comment of a trusted user, followed by the text of the decision.
+APPROVE_COMMAND = '/devloop approve'
 LABEL_STYLE = {
     'ready': ('0e8a16', 'devloop: pronta per essere implementata da un agent'),
     'working': ('fbca04', 'devloop: implementazione in corso'),
@@ -59,18 +62,45 @@ def text_changed_at(history):
     return max((t for t in times if isinstance(t, str)), default=None)
 
 
+def approve_command(body, after_header=False):
+    """The text of the decision of a ``APPROVE_COMMAND`` (#483): the rest of the comment after
+    the command, its first line included, stripped (``''`` without a text); None when the
+    comment is no such command. The command is the first line of the comment; with
+    ``after_header``, the first line after the attribution header and any other quoted line, as
+    ``supervision.supervisor_command`` reads it, to find the commands that are refused."""
+    lines = (body or '').strip().splitlines()
+    if after_header:
+        while lines and (not lines[0].strip() or lines[0].strip().startswith('>')):
+            lines.pop(0)
+    tokens = lines[0].strip().split(None, 2) if lines else []
+    if tokens[:2] != APPROVE_COMMAND.split():
+        return None
+    return '\n'.join([tokens[2] if len(tokens) > 2 else '', *lines[1:]]).strip()
+
+
+def _app(login, devloop_logins):
+    """Whether ``login`` is an app: one of devloop's (the supervisor's identity included) or any
+    other GitHub App (``<slug>[bot]``)."""
+    return login in devloop_logins or (login or '').endswith('[bot]')
+
+
 def issue_decisions(comments, history, trusted_users, devloop_logins, working, taken=False):
-    """The comments of an issue that may record a decision of the operator on it (#472), oldest
-    first: those a trusted user wrote in person (``operator_comments``), not from one of
-    ``devloop_logins`` (the supervisor's identity, the agents' and the dispatcher's apps), after
-    the latest change of the issue's text (``text_changed_at``) and before devloop took it on,
-    the first ``labeled`` event of ``working`` after that change. A change of the text after a
-    comment drops it. With ``taken`` (a review) the issue must have been taken on after that
-    change: without such an event no comment counts. The comment is read as it is now, so its
-    latest change (``updated_at``), not only its creation (``created_at``), must come before
-    the takeover: a comment rewritten after it, into an approval or not, does not count. A
-    comment without both times, or written in the same second as a bound, does not count.
-    Whether a comment approves the change is the agents' to judge."""
+    """The comments of an issue that record a decision of the operator on it (#472), oldest
+    first: the ``APPROVE_COMMAND`` with a text (``approve_command``, #483) a trusted user wrote
+    in person (``operator_comments``), not from an app (``_app``: one of ``devloop_logins``,
+    the supervisor's identity, the agents' and the dispatcher's apps, or any other), after the
+    latest change of the issue's text (``text_changed_at``) and before devloop took it on, the
+    first ``labeled`` event of ``working`` after that change. Any other comment, an approval
+    without the command too, decides nothing. A change of the text after a command drops it.
+    With ``taken`` (a review) the issue must have been taken on after that change: without
+    such an event no command counts. The comment is read as it is now, so its latest change
+    (``updated_at``), not only its creation (``created_at``), must come before the takeover: a
+    comment rewritten after it does not count. A comment without both times, or written in the
+    same second as a bound, does not count. A history read only in part (``complete`` not
+    True, #483) admits none: the takeover or the latest change might be among the events not
+    read. What a command approves is the agents' to judge."""
+    if history.get('complete') is not True:
+        return []
     changed = text_changed_at(history)
     takeovers = sorted(at for label, _, at in history.get('labeled') or ()
                        if label == working and isinstance(at, str)
@@ -81,7 +111,7 @@ def issue_decisions(comments, history, trusted_users, devloop_logins, working, t
     found = []
     for c in operator_comments(comments, trusted_users):
         at, edited = c.get('created_at'), c.get('updated_at')
-        if (c['author']['login'] in devloop_logins
+        if (_app(c['author']['login'], devloop_logins) or not approve_command(c.get('body'))
                 or not (isinstance(at, str) and at) or not (isinstance(edited, str) and edited)
                 or (changed is not None and at <= changed)
                 or (bound is not None and max(at, edited) >= bound)):
@@ -90,18 +120,54 @@ def issue_decisions(comments, history, trusted_users, devloop_logins, working, t
     return found
 
 
+def refused_approvals(comments, trusted_users, devloop_logins):
+    """The ``APPROVE_COMMAND`` of ``comments`` that devloop refuses and says so (#483), oldest
+    first, as ``(comment, reason)``: one written by an app (``_app``: the supervisor's identity,
+    an app of devloop or any other), one of a trusted user after the attribution header (the
+    text of an agent or of the supervisor with the operator's login), and one of a trusted user
+    not on the first line of the comment or without the text of the decision. The command of
+    anyone else is ignored, as any text of an untrusted author; one written outside the bounds
+    of ``issue_decisions`` simply does not count."""
+    found = []
+    for c in comments:
+        body = c.get('body') or ''
+        if approve_command(body, after_header=True) is None:
+            continue
+        login = (c.get('author') or {}).get('login')
+        if _app(login, devloop_logins):
+            reason = ('l\'autore è il supervisore o un\'app: una decisione sulla policy di '
+                      'fiducia la prende solo l\'operatore, di persona')
+        elif login not in trusted_users:
+            continue
+        elif body.lstrip().startswith('> [!NOTE]'):
+            reason = ('il commento porta l\'intestazione degli agent: è il testo di un agent o '
+                      'del supervisore, non dell\'operatore di persona')
+        elif approve_command(body) is None:
+            reason = 'il comando non è la prima riga del commento'
+        elif not approve_command(body):
+            reason = 'manca il testo della decisione dopo il comando'
+        else:
+            continue
+        found.append((c, reason))
+    return found
+
+
 def format_operator_decisions(decisions):
     """The section "Decisions of the operator on the issue" of a preflight, review or advisory
-    prompt (#472): the comments ``issue_decisions`` keeps, or a line that says there are none."""
+    prompt (#472): the commands ``issue_decisions`` keeps, or a line that says there are none."""
     head = '## Decisions of the operator on the issue\n\n'
     if not decisions:
-        return head + 'None: no comment on the issue counts as a decision of the operator.'
+        return head + (f'None: no comment on the issue counts as a decision of the operator. '
+                       f'An approval written without `{APPROVE_COMMAND}` is not one.')
     rendered = '\n\n'.join(f'### Comment by {c["author"]["login"]}, {c["created_at"]}\n\n'
                            f'{c["body"]}' for c in decisions)
-    return (head + 'The comments a trusted user wrote in person on the issue after the latest '
-                   'change of its title or body and before devloop took it on. One that '
-                   'approves the change the issue asks for is a decision of the operator, as '
-                   'one written in the body of the issue: see "Trust policy".\n\n' + rendered)
+    return (head + f'The `{APPROVE_COMMAND}` commands a trusted user wrote in person on the '
+                   'issue after the latest change of its title or body and before devloop took '
+                   'it on, each followed by the text of the decision. A decision of the '
+                   'operator, as one written in the body of the issue: see "Trust policy". It '
+                   'covers only what its text approves, within the limits and on the '
+                   'conditions it sets; any other comment, an approval without the command too, '
+                   'decides nothing.\n\n' + rendered)
 
 
 def trust_policy_rule():

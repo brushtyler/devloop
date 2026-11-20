@@ -22,13 +22,20 @@ from .ports import summarize_checks
 
 _RUN_ID = re.compile(r'/actions/runs/(\d+)')
 _JOB_ID = re.compile(r'/actions/runs/\d+/job/(\d+)')
+# The text of an issue and its ``labeled`` and ``renamed`` events, read forwards one page at a
+# time from ``$after`` (#483: every page, not only the latest 100 events).
 _ISSUE_HISTORY = (
-    'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){'
+    'query($owner:String!,$name:String!,$number:Int!,$after:String){'
+    'repository(owner:$owner,name:$name){'
     'issue(number:$number){title body author{__typename login} lastEditedAt '
     'editor{__typename login} '
-    'timelineItems(itemTypes:[LABELED_EVENT,RENAMED_TITLE_EVENT],last:100){nodes{__typename '
+    'timelineItems(itemTypes:[LABELED_EVENT,RENAMED_TITLE_EVENT],first:100,after:$after){'
+    'pageInfo{hasNextPage endCursor} nodes{__typename '
     '... on LabeledEvent{createdAt actor{__typename login} label{name}} '
     '... on RenamedTitleEvent{createdAt actor{__typename login}}}}}}}')
+# The most pages ``GitHub.issue_history`` reads (#483): far more than any issue has. Past them
+# the read is incomplete.
+_HISTORY_PAGES = 100
 # Native dependencies of an issue (#277): the issues that block it, with their state (GitHub
 # allows at most 50 per issue), and who added each "blocked by" (the timeline events, read
 # backwards one page at a time, from ``$before``).
@@ -285,15 +292,34 @@ class GitHub:
                  '-F', 'body=@-', stdin=body)
 
     def issue_history(self, number):
-        """Title, body and who changed them, read in one query so that the text and its history
-        match: ``{title, body, author, last_edited_at, editor, labeled, renamed}``. ``labeled`` is
-        a list of ``(label, login, at)`` and ``renamed`` of ``(login, at)``, oldest first. Logins
-        are in REST form (``graphql_login``): an app is ``<slug>[bot]``."""
+        """Title, body and who changed them, with their history: ``{title, body, author,
+        last_edited_at, editor, labeled, renamed, complete}``. ``labeled`` is a list of
+        ``(label, login, at)`` and ``renamed`` of ``(login, at)``, oldest first. Logins are in
+        REST form (``graphql_login``): an app is ``<slug>[bot]``.
+
+        The events are read forwards, 100 at a time, up to the last page (#483). The text is
+        the one of the last read, so it is never older than the events read before it.
+        ``complete`` is True only when the last page read says there is no other. A page that
+        says nothing about the next one, one that says there is another without its cursor, or
+        more than ``_HISTORY_PAGES`` pages leave it False: what needs every event
+        (``context.issue_decisions``) then admits nothing."""
         owner, name = self.repo.split('/', 1)
-        data = self._json('api', 'graphql', '-f', f'query={_ISSUE_HISTORY}', '-f', f'owner={owner}',
-                          '-f', f'name={name}', '-F', f'number={int(number)}')
-        issue = data['data']['repository']['issue']
-        nodes = issue['timelineItems']['nodes']
+        nodes, after, complete = [], None, False
+        for _ in range(_HISTORY_PAGES):
+            cursor = ['-f', f'after={after}'] if after else []
+            data = self._json('api', 'graphql', '-f', f'query={_ISSUE_HISTORY}',
+                              '-f', f'owner={owner}', '-f', f'name={name}',
+                              '-F', f'number={int(number)}', *cursor)
+            issue = data['data']['repository']['issue']
+            timeline = issue['timelineItems']
+            nodes.extend(n for n in timeline['nodes'] if n)
+            info = timeline.get('pageInfo') or {}
+            if info.get('hasNextPage') is False:
+                complete = True
+                break
+            after = info.get('endCursor')
+            if info.get('hasNextPage') is not True or not after:
+                break
         return {
             'title': issue['title'], 'body': issue['body'] or '',
             'author': graphql_login(issue['author']), 'last_edited_at': issue['lastEditedAt'],
@@ -303,6 +329,7 @@ class GitHub:
                         for n in nodes if n['__typename'] == 'LabeledEvent'],
             'renamed': [(graphql_login(n['actor']), n['createdAt'])
                         for n in nodes if n['__typename'] == 'RenamedTitleEvent'],
+            'complete': complete,
         }
 
     def issue_dependencies(self, number):

@@ -256,6 +256,100 @@ _TRUST_POLICY_472 = (
         '  of the operator asks for it.\n'),
     ('$issue_body\n\n', '$operator_decisions\n\n'),
 )
+# #483: a decision on the issue is a `/devloop approve`, and what stays with the operator whatever
+# a decision prescribes is listed, with an example. Applied after ``_TRUST_POLICY_472``.
+_TRUST_POLICY_483 = (
+    Replaced(
+        '   of the issue, or a comment of the operator that approves the change, among those '
+        'listed under\n'
+        '   "Decisions of the operator on the issue" below (#472). A comment that section does '
+        'not list\n'
+        '   is not a decision. The points an ADR leaves open are not decisions.\n',
+        '   of the issue, or a `/devloop approve` of the operator, among those listed under '
+        '"Decisions of\n'
+        '   the operator on the issue" below (#472, #483). A comment that section does not list, '
+        'an\n'
+        '   approval written without the command included, is not a decision. A `/devloop '
+        'approve` covers\n'
+        '   only what its text approves, within the limits and on the conditions it sets: an '
+        'approval of\n'
+        '   one part, or one subject to a condition, does not cover the rest of the change. The '
+        'points an\n'
+        '   ADR leaves open are not decisions.\n'),
+    Replaced(
+        '   or the conditions that decide when a change needs the operator. This holds even when '
+        'an ADR\n'
+        '   asks for the change.\n',
+        '   or the conditions that decide when a change needs the operator. This holds even when '
+        'an ADR\n'
+        '   asks for the change. These conditions always include, and stay with the operator '
+        'even when a\n'
+        '   decision of the operator, a `/devloop approve` on the issue included, prescribes the '
+        'change\n'
+        '   (#483): the quorum and the choice of the reviewers; the checks of '
+        '`operator_only_paths` and\n'
+        '   of `protected_paths`; the names of the labels of hold, of escalation and of merge;\n'
+        '   `trusted_users`; this "Trust policy" section itself.\n'),
+    Replaced(
+        'added beside the one it names, needs the operator under point 1.\n',
+        'added beside the one it names, needs the operator under point 1. What point 3 lists is '
+        'never a\n'
+        'faithful implementation: a change of the quorum, for one, is a condition of the merge '
+        'that still\n'
+        'needs the operator.\n'),
+    Replaced(
+        'for a decision in the body of the issue or in a comment listed under "Decisions of the '
+        'operator\n'
+        'on the issue": cite the comment with its author and its time. Without that citation '
+        'the change\n'
+        'needs the operator, as under point 1. Every deviation you find needs the operator, '
+        'with its\n'
+        'reason and the decision it departs from. A change that touches `operator_only_paths` '
+        '(such as\n'
+        '`docs/adr/` and `AGENTS.md`) is still merged by the operator only, whatever this rule '
+        'says.\n',
+        'for a decision in the body of the issue or in a `/devloop approve` listed under '
+        '"Decisions of the\n'
+        'operator on the issue": cite the command with its author and its time. Without that '
+        'citation the\n'
+        'change needs the operator, as under point 1. Every deviation you find needs the '
+        'operator, with\n'
+        'its reason and the decision it departs from. A change that touches '
+        '`operator_only_paths` (such\n'
+        'as `docs/adr/` and `AGENTS.md`) is still merged by the operator only, whatever this '
+        'rule says.\n'),
+    ('  of the operator asks for it.\n',
+     '- Change of the rule, the operator is needed (point 3): the issue carries a `/devloop '
+     'approve` of\n'
+     '  the operator that names the change, and the change lowers the quorum of a level, from '
+     'two\n'
+     '  approvals to one, or narrows the check of `operator_only_paths` so that it no longer '
+     'covers\n'
+     '  `docs/adr/`. The approval does not make it a faithful implementation.\n'),
+)
+# #483: the same in the readiness check, applied after ``_TRUST_POLICY_PREFLIGHT``.
+_TRUST_POLICY_PREFLIGHT_483 = (
+    Replaced(
+        '  the body of the issue, or a comment of the operator that approves the change, listed '
+        'under\n'
+        '  "Decisions of the operator on the issue" below. Any other comment, also of a trusted '
+        'user, is\n'
+        '  not such a decision;\n',
+        '  the body of the issue, or a `/devloop approve` of the operator, listed under '
+        '"Decisions of the\n'
+        '  operator on the issue" below (#483). Any other comment, also of a trusted user and '
+        'also one\n'
+        '  that approves the change without the command, is not such a decision, and a command '
+        'covers\n'
+        '  only what its text approves, on the conditions it sets;\n'),
+    ('  `uncovered` too, unless a decision of the operator approves it.\n\n',
+     'A change of the rule, what point 3 lists included, still goes to the operator for the '
+     'merge\n'
+     'even when a decision covers it: with `covered`, say so in `trust_policy_reason`.\n\n'),
+    Replaced(
+        'of the ADR, or the author and the time of the comment) or why none does;',
+        'of the ADR, or the author and the time of the command) or why none does;'),
+)
 # #472: the readiness check applies the trust policy to the issue and declares it.
 _TRUST_POLICY_PREFLIGHT = """\
 ## Trust policy
@@ -348,6 +442,7 @@ SINCE_R4 = {
          '## Step on the host\n\nLatest declaration of the pull request (`host_step`), from the '
          'implementer or its latest fix:\n\n$host_step\n\n'),
         *_TRUST_POLICY_472,
+        *_TRUST_POLICY_483,
         # #481
         ('  before merge. Style preferences and optional improvements are never blocking.\n',
          _EVIDENCE_REVIEW),
@@ -356,6 +451,7 @@ SINCE_R4 = {
     ),
     'advisory': (
         *_TRUST_POLICY_472,
+        *_TRUST_POLICY_483,
         # #481: the findings of the quorum without evidence, or fixed without need.
         ('- `overlooked`: points the reviews below may have missed; `[]` when you see none.\n',
          _UNFOUNDED_ADVISORY),
@@ -370,6 +466,7 @@ SINCE_R4 = {
                  'Write `description`, `proposed_default`, `split` and `trust_policy_reason` in '
                  '$language.\n'),
         ('$issue_comments\n', '\n$operator_decisions\n'),
+        *_TRUST_POLICY_PREFLIGHT_483,
     ),
 }
 
