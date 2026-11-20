@@ -450,10 +450,16 @@ class StartupCheckTests(unittest.TestCase):
             (self.state / name).mkdir(parents=True)
         (self.state / 'turn-journal.jsonl').write_text('')
         self.calls = []
+        self.env_checks = []
 
     def fake(self, problems=(), returncode=0, stderr=''):
-        """An agent user whose probe reports ``problems``, ``(code, path)`` pairs."""
+        """An agent user whose probe reports ``problems``, ``(code, path)`` pairs, and whose
+        sudo passes the environment (#496)."""
         def run(argv, **kw):
+            if 'probe' not in argv:  # the check of the environment
+                self.env_checks.append(argv)
+                return SimpleNamespace(returncode=0, stdout=kw['env'][agentuser.ENV_PROBE],
+                                       stderr='')
             self.calls.append(argv)
             self.probed = [arg.split(':', 1) for arg in argv[argv.index('probe') + 1:]]
             out = ''.join(f'{code}:{path}\0' for code, path in problems)
@@ -608,6 +614,95 @@ class StartupCheckTests(unittest.TestCase):
         dispatcher.tick.assert_not_called()
         # The check covers the repository's .git too (1/codex/R1-1).
         self.assertEqual(run.call_args.kwargs['git_dir'], Path('/repo/.git'))
+
+
+class EnvironmentCheckTests(unittest.TestCase):
+    """#496: sudo-rs ignores ``sudo -E`` and starts the agents with a minimal environment, also
+    with ``SETENV`` in sudoers; at the start of ``tick`` and ``run`` devloop checks that the
+    environment reaches the agent user, and stops with the reason when it does not."""
+
+    SUDO_RS = "sudo: preserving the entire environment is not supported, '-E' is ignored"
+    NO_SETENV = 'sudo: sorry, you are not allowed to preserve the environment'
+
+    setUp = StartupCheckTests.setUp
+
+    def sudo(self, keeps_env=True, returncode=0, stderr=''):
+        """An agent user whose sudo passes the environment or drops it; its probe finds
+        nothing."""
+        def run(argv, **kw):
+            self.calls.append((argv, kw))
+            if 'probe' in argv:
+                return SimpleNamespace(returncode=0, stdout='', stderr='')
+            out = kw['env'][agentuser.ENV_PROBE] if keeps_env else ''
+            return SimpleNamespace(returncode=returncode, stdout=out, stderr=stderr)
+        return AgentUser('devloop-agent', home='/home/devloop-agent', run=run)
+
+    def cfg(self, check=True):
+        return dataclasses.replace(CFG, app_key_dir=str(self.keys), agent_user=config.
+                                   AgentUserPolicy(name='devloop-agent', check=check))
+
+    def start(self, user, check=True):
+        with mock.patch.dict(os.environ):
+            os.environ.pop('DEVLOOP_APP_KEY_DIR', None)
+            cli.check_agent_user(self.cfg(check), self.state, None, user, log=lambda m: None,
+                                 me='devloop')
+
+    def test_the_check_runs_the_sudo_of_the_turns_and_passes(self):
+        self.start(self.sudo())
+        (argv, kw), probe = self.calls[0], self.calls[1][0]
+        self.assertEqual(argv, SUDO + ['/usr/bin/bash', '-c', 'printf %s "$DEVLOOP_ENV_PROBE"'])
+        self.assertRegex(kw['env'][agentuser.ENV_PROBE], r'^[0-9a-f]{16}$')
+        self.assertEqual(kw['env']['HOME'], '/home/devloop-agent')
+        self.assertIn('probe', probe)  # then the check of the isolation
+
+    def test_sudo_rs_stops_devloop_with_the_reason_and_the_fix(self):
+        for check in (True, False):  # check = false turns off the isolation check only
+            with self.subTest(check=check):
+                self.calls = []
+                with self.assertRaises(AgentUserError) as ctx:
+                    self.start(self.sudo(keeps_env=False, stderr=self.SUDO_RS), check=check)
+                message = str(ctx.exception)
+                self.assertIn('does not reach devloop-agent through sudo -E', message)
+                self.assertIn('sudo is sudo-rs, which ignores -E: devloop needs sudo 1.9', message)
+                self.assertIn('update-alternatives --set sudo /usr/bin/sudo.ws', message)
+                self.assertIn(self.SUDO_RS, message)
+                self.assertEqual(len(self.calls), 1)  # no isolation probe
+
+    def test_a_rule_without_setenv_stops_devloop_with_the_reason(self):
+        with self.assertRaisesRegex(AgentUserError, 'lacks the SETENV tag'):
+            self.start(self.sudo(keeps_env=False, returncode=1, stderr=self.NO_SETENV))
+
+    def test_an_environment_dropped_silently_names_both_causes(self):
+        with self.assertRaises(AgentUserError) as ctx:
+            self.start(self.sudo(keeps_env=False))
+        message = str(ctx.exception)
+        self.assertIn('sudo-rs ignores -E (update-alternatives --set sudo /usr/bin/sudo.ws)',
+                      message)
+        self.assertIn('SETENV', message)
+
+    def test_a_sudo_that_does_not_start_is_reported(self):
+        with self.assertRaisesRegex(AgentUserError, 'through sudo .exit 1.: sudo: a password'):
+            self.start(self.sudo(keeps_env=False, returncode=1,
+                                 stderr='sudo: a password is required'))
+
+    def test_the_real_check_reads_the_variable_with_bash(self):
+        class Dropping(LocalUser):  # as sudo-rs: the command starts with a minimal environment
+            def command(self, argv):
+                return ['env', '-i', 'PATH=/usr/bin:/bin', *argv]
+        LocalUser(self.tmp).check_environment()
+        with self.assertRaisesRegex(AgentUserError, 'does not reach devloop-agent'):
+            Dropping(self.tmp).check_environment()
+
+    def test_main_stops_before_any_tick(self):
+        user = self.sudo(keeps_env=False, stderr=self.SUDO_RS)
+        dispatcher = SimpleNamespace(ws=SimpleNamespace(agent_user=user), tick=mock.Mock())
+        with mock.patch.object(cli, 'build', return_value=(self.cfg(), self.state, dispatcher)):
+            with self.assertRaises(SystemExit) as ctx:
+                cli.main(['tick'])
+        self.assertIn('devloop: the environment devloop prepares does not reach devloop-agent',
+                      str(ctx.exception.code))
+        self.assertIn('sudo-rs', str(ctx.exception.code))
+        dispatcher.tick.assert_not_called()
 
 
 class NoAgentUserWarningTests(unittest.TestCase):

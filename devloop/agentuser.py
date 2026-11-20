@@ -32,7 +32,9 @@ The mechanism, chosen by the operator on #415:
   without listing it is refused too: its files would be in reach), or can read the overlay; when
   it can write the repository's ``.git``, the worktrees directory or the fixed directories of the
   shared one; and when it cannot write the directories made for its turns and test runs.
-  ``[agent_user] check = false`` turns it off, for development only.
+  ``[agent_user] check = false`` turns it off, for development only. Before it, and also with
+  ``check = false``, ``AgentUser.check_environment`` refuses a ``sudo`` that does not pass the
+  environment (sudo-rs, a rule without ``SETENV``, #496).
 
 One user runs every agent, implementers and reviewers (#438): a turn must not change what the
 turns after it use. The files of the CLIs that carry instructions or configuration, and the CLIs
@@ -77,6 +79,10 @@ SUDO = 'sudo'
 # is never the one started.
 BASH = '/usr/bin/bash'
 KILL = '/usr/bin/kill'
+# The variable of the startup check of the environment (#496), and the fix of the host where
+# ``sudo`` is sudo-rs (the default of Ubuntu), which ignores ``-E``.
+ENV_PROBE = 'DEVLOOP_ENV_PROBE'
+SUDO_FIX = 'update-alternatives --set sudo /usr/bin/sudo.ws'
 # In ``state_dir``: the only entries the agent user may reach besides the worktrees.
 SHARED_DIR = 'agent-shared'
 WORKTREES_DIR = 'worktrees'
@@ -259,6 +265,41 @@ class AgentUser:
             raise AgentUserError(f'cannot read {self.home / AGY_BIN} as {self.name} (exit '
                                  f'{done.returncode}): {detail or "no output"}')
         return wrapper_problems(self.home, done.stdout or b'')
+
+    def check_environment(self):
+        """Raise AgentUserError when the environment devloop passes with ``sudo -E`` does not
+        reach the agent user (#496): a variable of ``ENV_PROBE``, with a random value, run
+        through the same ``sudo`` as the turns and read by ``BASH``. sudo-rs ignores ``-E``
+        and starts the command with a minimal environment, also with ``SETENV`` in sudoers;
+        sudo 1.9 refuses ``-E`` without ``SETENV``. Either way the agents would run without
+        the isolated environment (``agents.isolated_env``)."""
+        value = secrets.token_hex(8)
+        argv = self.command([BASH, '-c', f'printf %s "${ENV_PROBE}"'])
+        env = self.environment({'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
+                                'LC_ALL': 'C', ENV_PROBE: value})
+        try:
+            done = self._run(argv, capture_output=True, text=True, timeout=60, env=env)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise AgentUserError(f'cannot run commands as {self.name}: {exc}') from exc
+        detail = (done.stderr or '').strip()[:500]
+        if done.returncode == 0 and (done.stdout or '') == value:
+            return
+        lowered = detail.lower()
+        if 'sudo-rs' in lowered or "'-e' is ignored" in lowered or 'not supported' in lowered:
+            reason = ('sudo is sudo-rs, which ignores -E: devloop needs sudo 1.9 '
+                      f'({SUDO_FIX})')
+        elif 'preserve the environment' in lowered:
+            reason = ('the sudoers rule lacks the SETENV tag (ops/host/sudoers-agent, '
+                      'ops/host/setup-agent-user.sh)')
+        elif done.returncode != 0:
+            raise AgentUserError(f'cannot run commands as {self.name} through sudo (exit '
+                                 f'{done.returncode}): {detail or "no output"}')
+        else:
+            reason = (f'sudo drops it: sudo-rs ignores -E ({SUDO_FIX}), sudo 1.9 needs the '
+                      'SETENV tag in sudoers (ops/host/sudoers-agent)')
+        raise AgentUserError(f'the environment devloop prepares does not reach {self.name} '
+                             f'through sudo -E, and the agents would run without it: {reason}'
+                             + (f' [sudo: {detail}]' if detail else ''))
 
     def probe(self, items):
         """The problems the agent user has with ``items``, ``(kind, path)`` pairs (``_PROBE``),
