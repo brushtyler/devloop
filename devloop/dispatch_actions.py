@@ -19,7 +19,7 @@ from .acceptance import acceptance_criteria, format_criteria, format_map, latest
 from .agents import AgentError
 from .apps import DISPATCHER, IMPLEMENT, PR_COMMENT, RERUN, REVIEW
 from .budget import BudgetRefused
-from .dispatch_base import BaseBroken
+from .dispatch_base import BaseBroken, HostTests
 from .context import (_failure_text, _format_conflicts, _format_findings, _review_failure,
                       _start_failure, _template, _trusted_comments, docs_diff_section,
                       docs_map_section, docs_review_section, format_ci_summary,
@@ -193,6 +193,9 @@ class ActionsMixin:
         if result['status'] == 'blocked':
             return self._blocked(number, used, result['blocked_reason'], remove=[lb.working],
                                  on_pr=False, step='implement', head=start, conclave=decision)
+        if isinstance(failure, HostTests):
+            # The host's failure (#497): to the operator, no wait for the base branch.
+            return self._escalate_host(number, 'implement', failure, remove=[lb.working])
         if isinstance(failure, BaseBroken):
             # The base's failure, not the implementer's (#459): the issue keeps agent:working
             # and starts again once the base branch advances.
@@ -958,6 +961,9 @@ class ActionsMixin:
         if result['status'] == 'blocked':
             return self._blocked(pr.number, used, result['blocked_reason'], remove=remove,
                                  on_pr=True, step='fix', head=pr.head_sha, conclave=conclave)
+        if isinstance(failure, HostTests):
+            # The host's failure (#497): to the operator, nothing pushed.
+            return self._escalate_host(pr.number, 'fix', failure, remove=remove)
         if isinstance(failure, BaseBroken):
             # The base's failure, not the fix's (#459): nothing is pushed, the labels stay, and
             # the fix runs again once the base branch advances.

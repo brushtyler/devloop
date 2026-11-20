@@ -2998,7 +2998,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         """Run a writing agent, then the local tests (``_verify``); retry with the failures.
         With ``base_check`` (an implementation or a fix, #459) a failure whose failed tests all
         fail on the base commit of the branch too is not retried: the reason to escalate is then
-        a ``BaseBroken`` (``dispatch_base``), and the step waits for the base branch to advance.
+        a ``BaseBroken`` (``dispatch_base``), and the step waits for the base branch to advance;
+        a ``HostTests`` when they pass in the CI of that commit (#497), escalated to the operator.
         ``prompt`` is the text, or a function of the attempt (0 first) that renders it, so that
         each attempt gets what its worktree holds then (#203).
         Returns the output, ``None`` on success or a reason to escalate, the agent configuration

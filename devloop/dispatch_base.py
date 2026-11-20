@@ -13,7 +13,16 @@ past that commit, as a readiness check that depends on the repository (#270). An
 it, and through the readiness check when one is configured (``planning.base_restart``): an
 escalation of that check (its gaps to the supervisor or the operator, a failed check that
 records its step) keeps both ``agent:working`` and the wait, and the issue resumes once a retry
-or the decision on its gaps lifts the block. The fix of a PR runs again on its next tick. A failure only on the branch, identities that cannot be told (a timeout, an
+or the decision on its gaps lifts the block. The fix of a PR runs again on its next tick.
+
+**Tests red on the host only (#497).** Before ``base_broken`` the dispatcher reads the CI of
+that base commit: when its checks all passed, the tests fail only where devloop runs them (the
+user, the permissions, the programs of the host), and a new commit of the base branch would not
+change that. The step is then ``host_tests`` (``HostTests``): a critical escalation to the
+operator, with the failed tests, the base commit and the link to its green CI, and no wait for
+the base branch. A failed, pending, missing or unreadable CI leaves ``base_broken``.
+
+A failure only on the branch, identities that cannot be told (a timeout, an
 output without them, a module that does not start), a project whose test selection is not
 ``python-unittest-modules`` (the check reads what unittest prints), or any error of the check
 leaves the failure as it was: further attempts, then ``tests_failed``.
@@ -38,7 +47,7 @@ from .localtests import UNITTEST_MODULES, case_modules, module_command
 from .markdown import dispatcher_header, publishable
 from .outbox import SENT as PUBLISHED
 from .ports import summarize_checks
-from .supervision import PREFLIGHT_DEFAULT
+from .supervision import HOST_TESTS, PREFLIGHT_DEFAULT
 from .workspace import WorkspaceError
 
 # The failed tests a record and its comment list at most; the count is always the whole.
@@ -63,6 +72,16 @@ class BaseBroken:
         self.base = base
         self.cases = list(cases)
         self.tail = tail
+
+
+class HostTests(BaseBroken):
+    """A ``BaseBroken`` whose failed tests pass in the CI of the base commit (#497): the failure
+    is of the host where the local tests run, not of the base branch. ``ci``, the link to the
+    checks of that commit. The step escalates ``host_tests`` to the operator."""
+
+    def __init__(self, base, cases, tail='', ci=''):
+        super().__init__(base, cases, tail)
+        self.ci = ci
 
 
 class MainAlerts:
@@ -172,9 +191,45 @@ class BaseMixin:
             self.log(f'  {len(only)} of {len(cases)} failed tests pass on the base commit '
                      f'{base[:12]}: the failure counts against the branch')
             return None
+        ci = self._base_ci_green(base)
+        if ci:
+            self.log(f'  all {len(cases)} failed tests fail on the base commit {base[:12]} too, '
+                     'whose CI passed: host_tests')
+            return HostTests(base, cases, tail, ci)
         self.log(f'  all {len(cases)} failed tests fail on the base commit {base[:12]} too: '
                  'base_broken')
         return BaseBroken(base, cases, tail)
+
+    def _base_ci_green(self, base):
+        """The link to the checks of commit ``base`` when they all passed (#497), else '': a
+        failed, pending, missing or unreadable CI leaves ``base_broken``."""
+        try:
+            state = summarize_checks(self.gh.check_details(base))[0]
+        except GitHubError as exc:
+            self.log(f'  the CI of the base commit {base[:12]} not read: {exc}')
+            return ''
+        if state != 'pass':
+            return ''
+        return f'https://github.com/{self.cfg.repo}/commit/{base}/checks'
+
+    def _escalate_host(self, number, step, broken, remove):
+        """Escalate issue or PR ``number`` to the operator with class ``host_tests`` (#497): the
+        tests of ``step`` fail on its base commit too, but they pass in the CI of that commit
+        (``broken``, a ``HostTests``). A critical class: never to the supervisor, and no wait for
+        the base branch, whose next commit would not change the host."""
+        base = self.cfg.base_branch
+        what = 'dell\'issue' if step == 'implement' else 'della PR'
+        reason = (f'Dopo il passo `{step}` i test locali falliscono, e tutti i test falliti '
+                  f'falliscono anche sul commit base del branch, `{broken.base[:12]}`; ma nella '
+                  f'CI dello stesso commit passano ({broken.ci}). Il difetto è dell\'ambiente in '
+                  f'cui girano i test locali (utente, permessi, programmi dell\'host), non di '
+                  f'`{base}` né della modifica {what}: il passo non attende che `{base}` avanzi, '
+                  f'perché un nuovo commit non cambierebbe l\'host.\n\n'
+                  f'Test falliti ({len(broken.cases)}):\n{_listed(broken.cases)}')
+        self._escalate(number, reason, broken.tail, remove=remove, cls=HOST_TESTS,
+                       extra={'host_tests': {'step': step, 'base': broken.base, 'ci': broken.ci,
+                                             'count': len(broken.cases),
+                                             'cases': broken.cases[:MAX_CASES_LISTED]}})
 
     def _wait_base(self, number, step, broken, head):
         """Record on issue or PR ``number`` that ``step``, started from ``head``, waits for the

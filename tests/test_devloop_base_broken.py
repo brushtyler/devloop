@@ -21,8 +21,8 @@ from helpers.devloop_fakes import FakeGH
 from test_devloop import (BASE, CFG, REV, FakeRunner, FakeWS, finding, fixed, implemented, norm,
                           pr, raw_review)
 from test_devloop_preflight import PCFG, IssueGH, checked, gap
-from test_devloop_supervision import (HUMAN, PREFLIGHT_AUTO, SUPER, SUPERVISOR_LOGIN, Case,
-                                      crash)
+from test_devloop_supervision import (AUTO, HUMAN, PREFLIGHT_AUTO, SUPER, SUPERVISOR_LOGIN,
+                                      Case, crash)
 
 WORKING = 'agent:working'
 
@@ -668,6 +668,106 @@ class MainAlertTests(unittest.TestCase):
         self.assertEqual(self.gh.comments, [])
         d.tick()
         self.assertEqual([n for n, _ in self.gh.comments], [459])
+
+
+PENDING = [{'name': 'Unit Tests (Python 3.12)', 'bucket': 'pending', 'conclusion': ''}]
+
+
+class HostTestsTests(unittest.TestCase):
+    """#497: tests red on the branch and on its base commit, green in the CI of that commit, are
+    the host's failure (``host_tests``), not the base's (``base_broken``)."""
+
+    LINK = f'https://github.com/{CFG.repo}/commit/{BASE}/checks'
+
+    def implement(self, checks, cfg=CFG, gh=None):
+        """``_do_implement`` of issue 7 whose local tests fail with ``BRANCH`` on the branch and
+        on the base commit ``BASE``, whose CI has ``checks``."""
+        self.gh = gh or MainGH({BASE: checks})
+        self.runner = FakeRunner(implemented(), implemented())
+        self.ws = FakeWS(files=['ssdlc_impact.py'], modules=['test_impact.py'], tests=(False,))
+        self.ws.cases = {'issue-7': BRANCH, 'issue-7-base': BRANCH}
+        Dispatcher(cfg, self.gh, self.ws, self.runner, log=lambda m: None)._do_implement(7)
+
+    def notices(self, number):
+        return [markdown.read_marker(b, 'notice') for n, b in self.gh.comments
+                if n == number and markdown.read_marker(b, 'notice')]
+
+    def basebroken(self, number):
+        return [markdown.read_marker(b, 'basebroken') for n, b in self.gh.comments
+                if n == number and markdown.read_marker(b, 'basebroken')]
+
+    def test_a_green_ci_of_the_base_escalates_host_tests_to_the_operator(self):
+        # Even in merge mode auto: a new class is critical, never the supervisor's.
+        for label, cfg in (('off', CFG), ('auto', AUTO)):
+            with self.subTest(label):
+                self.implement(PASSED, cfg)
+                self.assertIn(BASE, self.gh.reads)
+                # One turn: no other attempt of the agent, no PR, no wait for the base.
+                self.assertEqual(len(self.runner.calls), 1)
+                self.assertEqual(self.gh.created, [])
+                self.assertEqual(self.gh.labels[7], {'agent:needs-operator'})
+                self.assertEqual(self.basebroken(7), [])
+                notice, = self.notices(7)
+                self.assertEqual((notice['class'], notice['critical'], notice['to']),
+                                 ('host_tests', True, 'operator'))
+                self.assertEqual(notice['host_tests'], {
+                    'step': 'implement', 'base': BASE, 'ci': self.LINK, 'count': 2,
+                    'cases': BRANCH})
+                text = self.gh.comments[-1][1]
+                self.assertIn(self.LINK, text)
+                self.assertIn(BASE[:12], text)
+                self.assertIn('`test_x.Case.test_b`', text)
+                self.assertIn('**Classe:** `host_tests`', text)
+                self.assertIn('critica', text)
+
+    def test_a_red_ci_of_the_base_stays_base_broken(self):
+        self.implement(FAILED)
+        self.assertIn(BASE, self.gh.reads)
+        self.assertEqual(len(self.runner.calls), 1)
+        self.assertEqual(self.gh.labels[7], {'agent:working'})
+        self.assertEqual(self.notices(7), [])
+        record, = self.basebroken(7)
+        self.assertEqual((record['step'], record['base'], record['cases']),
+                         ('implement', BASE, BRANCH))
+
+    def test_a_ci_not_known_green_stays_base_broken(self):
+        unreadable = MainGH({})
+
+        def fail(sha):
+            raise GitHubError('HTTP 502')
+        unreadable.check_details = fail
+        for label, checks, gh in (('pending', PENDING, None), ('missing', [], None),
+                                  ('unreadable', None, unreadable)):
+            with self.subTest(label):
+                self.implement(checks, gh=gh)
+                self.assertEqual(self.gh.labels[7], {'agent:working'})
+                self.assertEqual(self.notices(7), [])
+                self.assertEqual(len(self.basebroken(7)), 1)
+
+    def test_a_fix_with_a_green_ci_of_the_base_escalates_without_push(self):
+        first = norm(raw_review('request_changes', [finding()]))
+        for checks, cls in ((PASSED, 'host_tests'), (FAILED, None)):
+            with self.subTest(cls=cls):
+                self.gh = MainGH({BASE: checks})
+                ws = FakeWS(files=['devloop/review.py'], modules=['test_devloop.py'],
+                            tests=(False,))
+                ws.cases = {'pr-100': BRANCH, 'pr-100-base': BRANCH}
+                runner = FakeRunner(fixed(), fixed())
+                item = pr(labels=['agent:changes'], reviews=[first])
+                self.gh.labels[100] = {'agent:changes'}
+                Dispatcher(CFG, self.gh, ws, runner, log=lambda m: None)._do_fix(item)
+                self.assertEqual(len(runner.calls), 1)
+                self.assertEqual(ws.pushes, [])
+                if cls is None:
+                    self.assertEqual(self.gh.labels[100], {'agent:changes'})
+                    self.assertEqual(len(self.basebroken(100)), 1)
+                    continue
+                self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
+                self.assertEqual(self.basebroken(100), [])
+                notice, = self.notices(100)
+                self.assertEqual(notice['class'], 'host_tests')
+                self.assertEqual(notice['host_tests']['step'], 'fix')
+                self.assertEqual(notice['host_tests']['ci'], self.LINK)
 
 
 if __name__ == '__main__':

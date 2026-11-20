@@ -597,6 +597,11 @@ supervisor. Those keep `agent:working` and the wait, and their block holds the r
 - a PR whose latest record is of `fix` on its current head runs no fix while `origin/main` is at
   `base`. A base that cannot be read keeps the wait.
 
+When those failed tests pass in the CI of the base commit (all its checks passed, #497), the
+dispatcher writes no `basebroken` record: it escalates to the operator with class `host_tests`
+(critical), whose `notice` marker adds `host_tests`: `step`, `base`, `ci` (the link to the checks
+of the base commit), `count` and `cases`, as above. Nothing waits for `main`.
+
 The alert of a [red CI on `main`](guide.md#red-ci-on-main) is a dispatcher comment on
 `[run].alert_issue` without a record; with the outbox its publication covers `main_red:<sha>`, so
 that an uncertain outcome is reconciled and not published twice.
