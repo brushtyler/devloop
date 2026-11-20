@@ -24,7 +24,8 @@ from .github import GitHubError
 from .hoststep import render_step
 from .journal import ATTEMPT_ID, PHASES, STORY_ID
 from .policy import EVENTS, valid_receipt
-from .review import LEGACY_VERDICT, current_verdict, own_open_findings, trust_policy
+from .review import (LEGACY_VERDICT, current_verdict, findings_only, own_open_findings,
+                     trust_policy)
 from .supervision import COMMANDS, MAX_RETRIES, OUTCOMES, critical, describe
 
 UNKNOWN = 'non noto'
@@ -652,6 +653,9 @@ def render_review(review, head, native=None):
         parts[-1] += '  '
         parts.append(f'**Livello di review:** {receipt["level"]} · **Base:** '
                      f'`{receipt["base"][:12]}` · **Policy:** `{receipt["policy"][:12]}`')
+    if findings_only(review):
+        parts[0] = (f'## Review di soli finding, round {review["round"]}/'
+                    f'{review["max_rounds"]}')
     if review.get('note'):
         parts += ['', f'> {review["note"]}']
     # #160: the base advanced during the round.
@@ -741,8 +745,12 @@ def native_event(review):
     ``APPROVE``, so that its earlier ``REQUEST_CHANGES`` does not block the merge after the
     operator's decision. The body still states the verdict, and devloop keeps the PR with the
     operator: it reads the verdict from the record, never from the event. No review is ever
-    dismissed."""
+    dismissed. A findings-only review (#416) is always a ``COMMENT``: its approval counts
+    nowhere, and its findings are closed by the quorum, not by a later review of its own."""
     verdict = review['verdict']
+    if findings_only(review):
+        # #416: neither an approval nor a request for changes GitHub would count.
+        return 'COMMENT'
     if verdict == 'needs_operator':
         return 'REQUEST_CHANGES' if own_open_findings(review) else 'APPROVE'
     return _REVIEW_EVENT[verdict]

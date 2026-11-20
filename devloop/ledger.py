@@ -377,7 +377,7 @@ class Ledger:
 
     def open_turn(self, number, *, kind, agent, identity, mode, model, effort, fallback_for,
                   label, round_no=None, register=None, issue=None, repo=None, attempt=None,
-                  reserve=None, measure=False):
+                  reserve=None, measure=False, role=None):
         """Write the record of a turn about to start; raises ``GitHubError`` if it cannot, and
         then the turn must not start. Its intent is made durable in the journal first, with
         ``issue``, the issue of its work, and ``repo`` (#362), so that a crash right after
@@ -390,7 +390,10 @@ class Ledger:
 
         With the budget on (#365): ``reserve`` books the turn in the envelope of its story, in
         its intent (``TurnJournal.intent``), or raises ``BudgetRefused`` and nothing is written;
-        ``measure``: its outcome records the dollars the CLI reported (``usage``)."""
+        ``measure``: its outcome records the dollars the CLI reported (``usage``).
+
+        ``role``: ``findings`` for the turn of a findings-only review (ADR 0005, D8, #416), in
+        the record; without one the record has no such field, as before."""
         turn = self.journal.intent(number, issue=number if issue is None else issue, repo=repo,
                                    kind=kind, agent=agent, model=model, label=label,
                                    attempt=attempt, reserve=reserve)
@@ -401,6 +404,8 @@ class Ledger:
             'duration_ms': None, 'outcome': None, 'error': None, 'telemetry': None}
         if attempt is not None:
             record['attempt'] = attempt
+        if role:
+            record['role'] = role
         try:
             if round_no is None and register is None:
                 entry = self._post(number, record)
@@ -555,6 +560,9 @@ def _render_turn(r, title=None):
         rows.append(('Modello di fallback per', r['fallback_for']))
     if r.get('attempt'):
         rows.append(('Tentativo', r['attempt']))
+    if r.get('role') == 'findings':
+        # #416: its verdict does not count for the quorum.
+        rows.append(('Ruolo', 'finding-only'))
     rows += [('Modello reale (attestato dalla CLI)', r.get('model_real')),
              ('Inizio', r.get('started_at')), ('Fine', r.get('ended_at')),
              ('Durata (ms)', r.get('duration_ms')), ('Esito', r.get('outcome'))]

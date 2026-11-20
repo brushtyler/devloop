@@ -17,7 +17,7 @@ from .config import LEGACY_NEEDS_OPERATOR
 from .markdown import without_attribution
 from .planning import FIX_COMMAND
 from .ports import Tracker
-from .review import CI, FINDING_COMMAND, finding_key, owner_of
+from .review import CI, FINDING_COMMAND, finding_key, findings_only, owner_of
 from .supervision import DECIDE
 
 PROMPT_DIR = Path(__file__).resolve().parent / 'prompts'
@@ -352,8 +352,10 @@ def format_previous_rounds(reviews, fixes, closures=()):
         return '\n\n'.join(parts) or 'This is the first round.'
     for position, review in enumerate(reviews):
         owner = owner_of(review)
+        # A findings-only review (#416): its findings are closed by the quorum.
+        role = ', findings-only' if findings_only(review) else ''
         parts.append(f'### Round {review["round"]}: {review["verdict"]} on {review["head_sha"][:12]}'
-                     f' ({review["source"]}, reviewer {owner})\n\n{review["summary"]}\n\n'
+                     f' ({review["source"]}, reviewer {owner}{role})\n\n{review["summary"]}\n\n'
                      'Blocking findings:\n' + _format_findings(
                          [dict(f, key=f.get('key') or finding_key(review['round'], owner, f['id']))
                           for f in review['blocking_findings']]))

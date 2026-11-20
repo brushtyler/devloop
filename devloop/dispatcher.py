@@ -2159,10 +2159,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         """Whether ``login`` signs as the dispatcher, as its other records do."""
         return self._wrote(login, DISPATCHER)
 
-    def _open_turn(self, where, candidate, mode, label):
+    def _open_turn(self, where, candidate, mode, label, role=None):
         """The ledger record of a turn about to start, or None without a ledger. A failed write
         raises ``GitHubError``: the turn does not start. ``where``: ``(number, kind)``, with the
         round of a review turn (#325) or the ``FixRegister`` of a fix turn (#355) after them.
+        ``role``: ``FINDINGS_ONLY`` for the turn of a findings-only review (#416), recorded.
 
         With ``block_uncertain_turns`` (#362) a turn of a work, the issue and its PRs, with
         turns that block it (``_check_turns``) is refused before its intent (``TurnBlocked``):
@@ -2194,7 +2195,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 fallback_for=candidate.fallback_for, label=label,
                 round_no=place[0] if place and fix is None else None, register=fix,
                 issue=issue, repo=self.cfg.repo, attempt=self._turn_attempt(number, issue, kind),
-                reserve=reserve, measure=budget.enabled)
+                reserve=reserve, measure=budget.enabled, **({'role': role} if role else {}))
         except BudgetRefused as exc:
             self.log(f'  turn refused on #{number}: not covered by the budget envelope '
                      f'({exc.category})')
@@ -2792,7 +2793,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             self.log(f'  {candidate.key}: model {candidate.model} not forgotten: {error}')
 
     def _turn(self, models, mode, prompt, schema, path, label, allowed=None, where=None,
-              note=None):
+              note=None, role=None):
         """Run one agent turn on the first of ``models`` (``Models``) that is available, and
         return its output and the agent configuration it ran with.
 
@@ -2820,7 +2821,8 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         label; a second empty run fails as any other error.
 
         ``where``, ``(number, kind)``, is the issue or PR whose ledger records each CLI
-        invocation as a turn (#133): written before the CLI starts, closed when it ends. An
+        invocation as a turn (#133): written before the CLI starts, closed when it ends; with
+        ``role`` (``FINDINGS_ONLY``, #416) the record says the turn is a findings-only review. An
         exception that is not an ``AgentError`` closes it too, ``failure``, and propagates
         (#381): a turn is never left ``open`` by an error of the dispatcher.
 
@@ -2856,7 +2858,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             suffix = f'-{candidate.model}' if candidate.fallback_for else ''
             # Its own log: the first attempt's stays as it was.
             suffix += '-retry' * ((candidate.model in retried) + (candidate.model in emptied))
-            entry = self._open_turn(where, candidate, mode, label + suffix)
+            entry = self._open_turn(where, candidate, mode, label + suffix, role)
             try:
                 output = self.runner.run(candidate, mode, text, schema, path, label + suffix)
             except ModelUnavailable as exc:

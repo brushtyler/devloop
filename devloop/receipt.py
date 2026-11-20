@@ -37,7 +37,8 @@ from .budget import NOT_ATTESTED, consumed_usd, usd
 from .markdown import dispatcher_header, publishable, split_markers, with_record
 from .planning import counted_rounds
 from .policy import describe as describe_policy
-from .review import CI, CLOSING, OPERATOR, finding_key, finding_state, owner_of
+from .review import (CI, CLOSING, FINDINGS_ONLY, OPERATOR, finding_key, finding_state,
+                     findings_only, owner_of)
 
 NOT_REPORTED = 'non riportato'
 # The class of the escalation of a receipt that contradicts the markers: critical.
@@ -78,6 +79,9 @@ def _turn(record, where):
     telemetry = record.get('telemetry') or {}
     turn['telemetry'] = {k: telemetry.get(k) for k in TELEMETRY_FIELDS}
     turn['on'] = where
+    if record.get('role') == FINDINGS_ONLY:
+        # The turn of a findings-only review (#416); without one the content is the one before.
+        turn['role'] = FINDINGS_ONLY
     return turn
 
 
@@ -100,7 +104,11 @@ def _rounds(reviews):
     for review in reviews:
         entry = rounds.setdefault(review['round'], {'round': review['round'],
                                                     'head': review['head_sha'], 'verdicts': []})
-        entry['verdicts'].append({'reviewer': owner_of(review), 'verdict': review['verdict']})
+        verdict = {'reviewer': owner_of(review), 'verdict': review['verdict']}
+        if findings_only(review):
+            # #416: recorded as finding-only; without one the content is the one before.
+            verdict['role'] = FINDINGS_ONLY
+        entry['verdicts'].append(verdict)
     return [rounds[n] for n in sorted(rounds)]
 
 
@@ -108,13 +116,13 @@ def _findings(reviews, closures):
     """Every blocking finding ever opened, ``{key, status, by, author, round}``: ``open``, or
     how it was closed and by whom (its owner in a later round, ``ci`` or ``operator`` with the
     author). A finding closed under the rules before #110 has no recorded closer (None)."""
-    owners, order, closed = {}, [], {}
+    owners, order, closed, quorum = {}, [], {}, set()
     for review in reviews:
         owner = owner_of(review)
         for p in review['previous_findings']:
             key = p.get('key')
             if (key and p.get('status') in CLOSING and owners.get(key) == owner
-                    and key not in closed):
+                    and key not in closed and key not in quorum):
                 closed[key] = {'status': p['status'], 'by': owner, 'author': None,
                                'round': review['round']}
         for f in review['blocking_findings']:
@@ -122,12 +130,18 @@ def _findings(reviews, closures):
             if key not in owners:
                 owners[key] = owner
                 order.append(key)
+                if findings_only(review):
+                    quorum.add(key)
+    state = finding_state(reviews, closures)
+    # A findings-only finding (#416) is closed by the quorum of a round, never by its owner.
+    for key, closure in state.quorum_closed.items():
+        closed[key] = dict(closure, author=None)
     for c in closures:
         key = c['key']
         if key in owners and key not in closed and (c['by'] == OPERATOR or owners[key] == CI):
             closed[key] = {'status': c['status'], 'by': c['by'], 'author': c.get('author'),
                            'round': None}
-    still_open = {f['key'] for f in finding_state(reviews, closures).open}
+    still_open = {f['key'] for f in state.open}
     found = []
     for key in order:
         if key in still_open:
@@ -370,7 +384,8 @@ def _turns(turns):
                                   if t.get('fallback_for') else '')
         outcome = t['outcome'] or (t['state'] if t['state'] != 'closed' else None)
         tel = t['telemetry']
-        lines.append(f'| {i} | {t["on"]} | {_v(t["kind"])} | {_v(t["agent"])} | '
+        step = _v(t['kind']) + (' (finding-only)' if t.get('role') == FINDINGS_ONLY else '')
+        lines.append(f'| {i} | {t["on"]} | {step} | {_v(t["agent"])} | '
                      f'{_cell(model)} | {_cell(_v(t["model_real"]))} | {_v(t["started_at"])} | '
                      f'{_v(outcome)} | {_v(t["duration_ms"])} | '
                      f'{_v(tel["input_tokens"])} / {_v(tel["output_tokens"])} | '
@@ -422,7 +437,9 @@ def _rounds_text(rounds, approved):
     for r in rounds:
         for v in r['verdicts']:
             mark = ' (approvato, promosso)' if r['round'] == approved else ''
-            lines.append(f'| {r["round"]}{mark} | {_sha(r["head"])} | {_v(v["reviewer"])} | '
+            # #416: a findings-only review, whose verdict does not count for the quorum.
+            who = _v(v['reviewer']) + (' (finding-only)' if v.get('role') == FINDINGS_ONLY else '')
+            lines.append(f'| {r["round"]}{mark} | {_sha(r["head"])} | {who} | '
                          f'{_VERDICT.get(v["verdict"], _cell(v["verdict"]))} |')
     return lines
 

@@ -98,6 +98,13 @@ class ReviewPolicy:
     # never counts for the quorum, so it stays out of the version: turning it on or off voids
     # no approval.
     advisory_reviewer: str = ''
+    # The findings-only reviewer (ADR 0005, D8, integration of 2026-11-19, #416), '' when off
+    # (D10): at level 2, on a PR whose implementer signs with the implementer app and is the same
+    # agent, it reviews each round besides the quorum, with another model. Its findings go to the
+    # fix and the quorum closes them; its approval never counts and it never takes the place of a
+    # reviewer of the quorum. It stays out of the version, as the advisory review: turning it on
+    # or off voids no approval.
+    findings_reviewer: str = ''
     # The SHA-256 of the project file on the host (ADR 0006, R2), '' without one. A change of
     # the file changes the version, and so voids every approval, as a change of the
     # configuration does.
@@ -409,6 +416,11 @@ def describe(receipt):
                  or ('nessuno (livello 0)' if receipt['level'] == ZERO_LEVEL
                      else 'nessun agent indipendente'))
     lines.append(f'- Reviewer richiesti: {reviewers}.')
+    # The findings-only reviewer (#416): outside the binding fields, never required.
+    findings = receipt.get('findings')
+    if isinstance(findings, list) and findings:
+        lines.append('- Reviewer di soli finding, che non conta per il quorum: '
+                     + ', '.join(f'`{r}`' for r in findings) + '.')
     return '\n'.join(lines)
 
 

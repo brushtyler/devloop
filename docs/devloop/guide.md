@@ -494,6 +494,11 @@ independent of `provider_quorum`, a reviewer never falls back on a model of an a
 at either level, and a reviewer of the pool that falls back on the provider of an agent that may
 implement stops devloop at startup: see
 [No fallback on the authors' provider](reference.md#no-fallback-on-the-authors-provider).
+With `[review_policy] findings_reviewer` (#416, ADR 0005, D8), off by default, a reviewer of the
+same agent as the implementer, with another model and outside the pool, reviews each level 2
+round of a PR signed with the implementer app for its findings only: they go to the fix and the
+quorum closes them, while its approval never counts nor takes the place of a missing reviewer.
+See [Findings-only reviewer](reference.md#findings-only-reviewer).
 
 ### Readiness check before implementation
 

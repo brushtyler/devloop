@@ -908,15 +908,27 @@ def preflight_state(view):
     return ('ready' if record['ready'] else 'not_ready'), ''
 
 
+def findings_reviewers(records):
+    """The findings-only reviewers (ADR 0005, D8, #416) the receipt of the first review of the
+    agent round ``records`` names (``findings``), ``[]`` when none: they are not required by
+    the level, but their findings join the round."""
+    receipt = receipt_of(records[0]) if records and records[0]['source'] == 'agent' else None
+    keys = (receipt or {}).get('findings')
+    if not isinstance(keys, list):
+        return []
+    return [key for key in keys if isinstance(key, str) and key not in receipt['reviewers']]
+
+
 def pending_reviewers(records):
     """The reviewers an agent round still waits for: those the receipt of its first review
-    requires and that have not reviewed yet. A CI round, or a review without a receipt, is
-    complete as it is."""
+    requires and that have not reviewed yet, and the findings-only reviewer it names (#416),
+    whose findings join the round before its verdict counts. A CI round, or a review without a
+    receipt, is complete as it is."""
     receipt = receipt_of(records[0]) if records and records[0]['source'] == 'agent' else None
     if receipt is None:
         return []
     done = {owner_of(r) for r in records}
-    return [key for key in receipt['reviewers'] if key not in done]
+    return [key for key in receipt['reviewers'] + findings_reviewers(records) if key not in done]
 
 
 def waiting_reviewers(records, conclave=()):

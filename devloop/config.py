@@ -905,6 +905,7 @@ def parse_review_policy(table, root, reviewers=(), agents=None):
         raise ConfigError(f'{where}.advisory_reviewer: unknown agent {advisory!r}')
     if advisory:
         _check_role(advisory, 'reviewer', f'{where}.advisory_reviewer')
+    findings = _findings_reviewer(table, default, [r[0] for r in reviewers], agents)
     quorum = default.provider_quorum
     if 'provider_quorum' in table:
         quorum = _require(table, 'provider_quorum', bool, where)
@@ -914,8 +915,29 @@ def parse_review_policy(table, root, reviewers=(), agents=None):
     return ReviewPolicy(default_level=level, label=label, sensitive_paths=paths,
                         sensitive_files=tuple(files), reviewers=tuple(reviewers),
                         zero_label=zero_label, zero_allowlist=allowlist, zero_checks=checks,
-                        advisory_reviewer=advisory, provider_quorum=quorum,
-                        fallback_provider_ban=ban)
+                        advisory_reviewer=advisory, findings_reviewer=findings,
+                        provider_quorum=quorum, fallback_provider_ban=ban)
+
+
+def _findings_reviewer(table, default, pool, agents):
+    """``findings_reviewer`` (ADR 0005, D8, integration of 2026-11-19, #416): '' (off, D10) or a
+    configured key that may review (not an implementer's), outside the pool ``pool``, so that
+    it never enters the quorum, not even in the place of a missing reviewer. A key that signs
+    with a role app never reviews (``Dispatcher._findings_reviewers``)."""
+    where = 'review_policy.findings_reviewer'
+    key = table.get('findings_reviewer', default.findings_reviewer)
+    if not isinstance(key, str):
+        raise ConfigError(f'{where}: expected a string')
+    if not key:
+        return key
+    _check_role(key, 'reviewer', where)
+    if agents is not None and key not in agents:
+        raise ConfigError(f'{where}: unknown agent {key!r}')
+    if key in pool:
+        raise ConfigError(f'{where}: {key!r} is in the reviewer pool (roles.reviewers): the '
+                          'findings-only reviewer never counts for the quorum, nor takes the '
+                          'place of a missing reviewer')
+    return key
 
 
 def _zero_policy(table, level_label, default):
@@ -1873,7 +1895,7 @@ OVERLAY_KEYS = {
                      'protected_paths')),
     'review_policy': {**dict.fromkeys(('default_level', 'label', 'sensitive_paths',
                                        'sensitive_path_lists', 'advisory_reviewer',
-                                       'provider_quorum', 'fallback_provider_ban')),
+                                       'findings_reviewer', 'provider_quorum', 'fallback_provider_ban')),
                       'zero': dict.fromkeys(('label', 'allowlist', 'checks'))},
     'merge': {'mode': None, 'operator_only_paths': None, 'levels': {'*': None}},
     'roles': {**dict.fromkeys(('implementer', 'reviewer', 'reviewers', 'supervisor')),
