@@ -1112,6 +1112,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         # The base branch, fetched at most once per snapshot, for the failed checks that depend
         # on it (#270) and the steps that wait for it to advance (#459).
         base_head = functools.cache(lambda: self.ws.base_head())
+        # The CI of the base commit of a wait that holds, read at most once per commit: once
+        # green, the step escalates host_tests instead of waiting further (#497).
+        base_ci = functools.cache(self._base_ci_green)
         for raw in self.gh.open_prs():
             pr = self._devloop_pr(raw)
             if pr is None:
@@ -1122,9 +1125,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 # A fix whose failed tests fail on the base too waits for it to advance (#459).
                 wait = self._base_wait(thread, 'fix', pr.head_sha)
                 if wait is not None and self._base_holds(wait, base_head):
-                    pr.base_broken = wait
+                    pr.base_broken = dict(wait, ci=base_ci(wait['base']))
                     self.log(f'  PR #{pr.number}: the fix waits for {self.cfg.base_branch} to '
-                             f'move past {wait["base"][:12]}, where its failed tests fail too')
+                             f'move past {wait["base"][:12]}, where its failed tests fail too'
+                             + (', but its CI passed: host_tests' if pr.base_broken['ci']
+                                else ''))
                 # A veto to apply, or a review block restarted by a conclave (#142).
                 self._conclave_pr_state(pr, thread)
             # In agent:changes CI matters to close an open CI finding, and after a review that
@@ -1243,11 +1248,13 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 continue
             labels = label_names(raw.get('labels') or [])
             holds = self._base_holds(wait, base_head)
-            waits[number] = {'holds': holds, 'labels': labels, 'preflight': None}
+            ci = base_ci(wait['base']) if holds else ''
+            waits[number] = {'holds': holds, 'labels': labels, 'preflight': None, 'ci': ci}
             if not holds and self.cfg.preflight:
                 waits[number]['preflight'] = self._preflight_view(number, labels, base_head)
             self.log(f'  issue #{number}: the implementation '
                      + (f'waits for {self.cfg.base_branch} to move past {wait["base"][:12]}'
+                        + (', but its CI passed: host_tests' if ci else '')
                         if holds else f'may start again: {self.cfg.base_branch} moved '
                         f'past {wait["base"][:12]}'))
         return Snapshot(prs=prs, ready_issues=ready, working_issues=working, base_waits=waits,

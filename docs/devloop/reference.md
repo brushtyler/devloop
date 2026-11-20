@@ -439,8 +439,9 @@ implementation or of a fix goes back to the implementer, the dispatcher runs the
 failed tests, read from the whole output, on the base commit of the branch (#459). When every
 failed test fails there too the step waits for the base branch to advance, without further
 attempts nor escalation ([Tests red on the base too](guide.md#tests-red-on-the-base-too)), unless
-the CI of that base commit passed: then the failure is the host's, and the step escalates
-`host_tests` to the operator (#497). Each module runs with `test_timeout_seconds`.
+the CI of that base commit passed, every check with a success: then the failure is the host's,
+and the step escalates `host_tests` to the operator (#497), also when that CI turns green during
+the wait. Each module runs with `test_timeout_seconds`.
 
 **The CI stays the gate.** A defect the local modules miss becomes a CI round. The review may
 start while the CI runs, but an approval leads to `agent:ready-to-merge` only once the CI of the

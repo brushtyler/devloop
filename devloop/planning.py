@@ -150,7 +150,9 @@ class PullRequest:
     # that the dispatcher has not applied yet (#142): ``{comment, by, reason, conclave}``.
     veto: dict = None
     # The ``basebroken`` record of a fix of the current head whose failed tests fail on the base
-    # commit too (#459), while the base branch has not moved past that commit: no fix runs.
+    # commit too (#459), while the base branch has not moved past that commit: no fix runs. Its
+    # ``ci``, the link to the CI of that commit once all its checks succeeded, else '' (#497):
+    # the PR escalates ``host_tests``.
     base_broken: dict = None
 
 
@@ -206,10 +208,12 @@ class Snapshot:
     # whose head has no advisory review yet: dicts ``{number, head}``, one action each.
     advisories: list = field(default_factory=list)
     # The issues of ``working_issues`` without a PR whose implementation failed with tests that
-    # fail on the base commit too (#459): dicts ``{holds, labels, preflight}``, whether each
+    # fail on the base commit too (#459): dicts ``{holds, labels, preflight, ci}``, whether each
     # still waits for the base branch to move past that commit (``holds``), the issue's labels
-    # (a set), and with ``preflight`` configured, the view of its readiness check
-    # (``preflight_state``) once the wait no longer holds, else None (``base_restart``).
+    # (a set), with ``preflight`` configured, the view of its readiness check
+    # (``preflight_state``) once the wait no longer holds, else None (``base_restart``), and
+    # while it holds, the link to the CI of that commit once all its checks succeeded, else ''
+    # (#497): the issue escalates ``host_tests``.
     base_waits: dict = field(default_factory=dict)
 
 
@@ -503,7 +507,8 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
             actions.append(Action('settle', number, 'agent:working but its PR is open'))
         elif number in snapshot.base_waits:
             # Its failed tests failed on the base too (#459): it waits for the base branch to
-            # advance, then starts again in a free slot (``base_restart``).
+            # advance, then starts again in a free slot (``base_restart``), or escalates
+            # host_tests once the CI of the base commit passed (#497).
             if number in busy:
                 continue
             action = base_restart(number, snapshot.base_waits[number], cfg, free, implement)
@@ -598,7 +603,10 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
                                   else 'operator command'))
             continue
         if pr.fix_requests and pr.base_broken:
-            continue  # the fix waits for the base branch to advance (#459)
+            # The fix waits for the base branch to advance (#459), unless the CI of the base
+            # commit passed meanwhile (#497).
+            actions += host_tests(pr.number, pr.base_broken)
+            continue
         if pr.fix_requests:
             # A fix of the current head asked by a trusted user or the supervisor (#195): no
             # review first, and no round, since it writes no review record.
@@ -626,7 +634,10 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
                 actions.append(Action('ci_failed', pr.number, 'CI failed after the review')
                                if rounds_left else Action('round_limit', pr.number))
             elif pr.base_broken:
-                continue  # the fix waits for the base branch to advance (#459)
+                # The fix waits for the base branch to advance (#459), unless the CI of the
+                # base commit passed meanwhile (#497).
+                actions += host_tests(pr.number, pr.base_broken)
+                continue
             else:
                 actions.append(Action('fix', pr.number))
         elif lb.review in pr.labels:
@@ -861,6 +872,15 @@ BASE_ADVANCED = 'the base branch advanced since the failed readiness check, whos
 # The reason of an implementation that starts again after its failed tests failed on the base
 # too (#459), once the base branch moved past that commit.
 BASE_REPAIRED = 'the base branch moved past the commit where its failed tests failed too'
+# The reason of a step that waited for the base branch and escalates ``host_tests`` (#497).
+BASE_GREEN = 'the CI of the base commit where its failed tests failed too passed'
+
+
+def host_tests(number, wait):
+    """The ``host_tests`` action of issue or PR ``number`` whose step waits for the base branch
+    (#459), once the CI of the base commit passed (``wait['ci']``, #497), as a list: empty
+    while that CI is not known green."""
+    return [Action('host_tests', number, BASE_GREEN)] if wait.get('ci') else []
 
 
 def base_restart(number, wait, cfg, free, implement=True):
@@ -873,12 +893,17 @@ def base_restart(number, wait, cfg, free, implement=True):
     changed during the wait, a new check was asked) is checked first, one whose check failed
     is blocked again (``preflight_block``); under a block that the check owns, only a check
     asked by a change of the text runs. An implementation or a check takes a ``free`` slot;
-    without ``implement`` (#342) no implementation is planned."""
+    without ``implement`` (#342) no implementation is planned.
+
+    While the wait holds, once the CI of the base commit passed (#497) the issue escalates
+    ``host_tests`` (``host_tests``), unless the same blocks hold it: no slot is taken."""
     lb = cfg.labels
-    if wait['holds']:
-        return None
     labels = set(wait['labels'])
-    if labels & (set(cfg.blocked_labels) | {lb.needs_supervisor}):
+    blocked = bool(labels & (set(cfg.blocked_labels) | {lb.needs_supervisor}))
+    if wait['holds']:
+        held = blocked or operator_blocked(labels, lb)
+        return next(iter(host_tests(number, wait)), None) if not held else None
+    if blocked:
         return None
     view = wait.get('preflight') if cfg.preflight else None
     if cfg.preflight and view is None:

@@ -838,8 +838,13 @@ modules, one at a time, on the base commit of the branch, in a disposable worktr
   host), and a new commit of `main` would not change that. The step is `host_tests`, a critical
   escalation to the operator, never to the supervisor, with the failed tests, the base commit
   and the link to its green CI: no wait for `main`, and nothing is pushed. The issue leaves
-  `agent:working`, the PR its label, as with `tests_failed`. A CI of the base commit that failed,
-  is still running, has no check or cannot be read leaves `base_broken`;
+  `agent:working`, the PR its label, as with `tests_failed`. The CI is green only when every
+  check of that commit concluded with a success: a skipped or neutral check does not prove that
+  its tests ran. A CI of the base commit that failed, is still running, has no check, has a
+  check without a success or cannot be read leaves `base_broken`; while that wait holds, devloop
+  reads the CI of the same commit again at each tick, and once it is green the step escalates
+  `host_tests` as above, without waiting for `main` to move (the blocks of the issue hold that
+  escalation as they hold its restart);
 - **a test fails only on the branch**, or the failed tests cannot be identified (a timeout, an
   output without them, a module that does not start, whose id unittest makes up the same whatever
   the error, a project whose `[tests].selection` is not

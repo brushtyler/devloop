@@ -20,7 +20,11 @@ that base commit: when its checks all passed, the tests fail only where devloop 
 user, the permissions, the programs of the host), and a new commit of the base branch would not
 change that. The step is then ``host_tests`` (``HostTests``): a critical escalation to the
 operator, with the failed tests, the base commit and the link to its green CI, and no wait for
-the base branch. A failed, pending, missing or unreadable CI leaves ``base_broken``.
+the base branch. The CI is green only when every check of the commit concluded with a success: a
+skipped or neutral check does not prove that its tests ran. A failed, pending, missing or
+unreadable CI leaves ``base_broken``, and while its record holds the snapshot reads that CI again
+at each tick (``Snapshot.base_waits``, ``PullRequest.base_broken``): once it is green the step
+escalates ``host_tests`` (action ``host_tests``, ``_do_host_tests``) instead of waiting further.
 
 A failure only on the branch, identities that cannot be told (a timeout, an
 output without them, a module that does not start), a project whose test selection is not
@@ -66,12 +70,15 @@ HANDOFFS = ('supervisor_escalated', 'supervisor_refused', 'retry_limit')
 class BaseBroken:
     """The local tests of a writing turn failed only with tests that fail on the base commit of
     the branch too (#459): ``base``, that commit, ``cases``, the identities of the failed tests,
-    and ``tail``, the last lines of the branch's run. A truthy failure of ``_write_turn``."""
+    and ``tail``, the last lines of the branch's run. ``count``, how many tests failed: the
+    length of ``cases`` unless they are the first of a ``basebroken`` record. A truthy failure
+    of ``_write_turn``."""
 
-    def __init__(self, base, cases, tail=''):
+    def __init__(self, base, cases, tail='', count=None):
         self.base = base
         self.cases = list(cases)
         self.tail = tail
+        self.count = len(self.cases) if count is None else count
 
 
 class HostTests(BaseBroken):
@@ -79,8 +86,8 @@ class HostTests(BaseBroken):
     is of the host where the local tests run, not of the base branch. ``ci``, the link to the
     checks of that commit. The step escalates ``host_tests`` to the operator."""
 
-    def __init__(self, base, cases, tail='', ci=''):
-        super().__init__(base, cases, tail)
+    def __init__(self, base, cases, tail='', ci='', count=None):
+        super().__init__(base, cases, tail, count)
         self.ci = ci
 
 
@@ -138,9 +145,9 @@ def _of_check(notice, earlier):
     return bool(handed) and _check_escalation(handed[-1])
 
 
-def _listed(cases):
+def _listed(cases, count=None):
     shown = ''.join(f'\n- `{c.replace("`", "")}`' for c in cases[:MAX_CASES_LISTED])
-    more = len(cases) - MAX_CASES_LISTED
+    more = (len(cases) if count is None else count) - min(len(cases), MAX_CASES_LISTED)
     return shown + (f'\n- … e altri {more}' if more > 0 else '')
 
 
@@ -201,35 +208,70 @@ class BaseMixin:
         return BaseBroken(base, cases, tail)
 
     def _base_ci_green(self, base):
-        """The link to the checks of commit ``base`` when they all passed (#497), else '': a
-        failed, pending, missing or unreadable CI leaves ``base_broken``."""
+        """The link to the checks of commit ``base`` when they all succeeded (#497), else '': a
+        failed, pending, missing or unreadable CI leaves ``base_broken``. Only a check concluded
+        with ``success`` counts, as in ``policy.check_outcome``: one ``skipped`` or ``neutral``,
+        which ``summarize_checks`` counts as passed for the gates of a PR, does not prove that
+        its tests ran."""
         try:
-            state = summarize_checks(self.gh.check_details(base))[0]
+            checks = self.gh.check_details(base)
         except GitHubError as exc:
             self.log(f'  the CI of the base commit {base[:12]} not read: {exc}')
             return ''
-        if state != 'pass':
+        if not checks or any(c.get('conclusion') != 'success' for c in checks):
+            if summarize_checks(checks)[0] == 'pass':
+                self.log(f'  the CI of the base commit {base[:12]} has checks not concluded '
+                         'with a success (skipped, neutral): not known green')
             return ''
         return f'https://github.com/{self.cfg.repo}/commit/{base}/checks'
 
-    def _escalate_host(self, number, step, broken, remove):
+    def _escalate_host(self, number, step, broken, remove, waited=False):
         """Escalate issue or PR ``number`` to the operator with class ``host_tests`` (#497): the
         tests of ``step`` fail on its base commit too, but they pass in the CI of that commit
         (``broken``, a ``HostTests``). A critical class: never to the supervisor, and no wait for
-        the base branch, whose next commit would not change the host."""
+        the base branch, whose next commit would not change the host. ``waited``: the step was
+        waiting for the base branch, and that CI turned green during the wait."""
         base = self.cfg.base_branch
         what = 'dell\'issue' if step == 'implement' else 'della PR'
+        when = (f', e lo è diventata mentre il passo attendeva che `{base}` avanzasse'
+                if waited else '')
         reason = (f'Dopo il passo `{step}` i test locali falliscono, e tutti i test falliti '
                   f'falliscono anche sul commit base del branch, `{broken.base[:12]}`; ma nella '
-                  f'CI dello stesso commit passano ({broken.ci}). Il difetto è dell\'ambiente in '
-                  f'cui girano i test locali (utente, permessi, programmi dell\'host), non di '
-                  f'`{base}` né della modifica {what}: il passo non attende che `{base}` avanzi, '
-                  f'perché un nuovo commit non cambierebbe l\'host.\n\n'
-                  f'Test falliti ({len(broken.cases)}):\n{_listed(broken.cases)}')
+                  f'CI dello stesso commit passano ({broken.ci}){when}. Il difetto è '
+                  f'dell\'ambiente in cui girano i test locali (utente, permessi, programmi '
+                  f'dell\'host), non di `{base}` né della modifica {what}: il passo non attende '
+                  f'che `{base}` avanzi, perché un nuovo commit non cambierebbe l\'host.\n\n'
+                  f'Test falliti ({broken.count}):\n{_listed(broken.cases, broken.count)}')
         self._escalate(number, reason, broken.tail, remove=remove, cls=HOST_TESTS,
                        extra={'host_tests': {'step': step, 'base': broken.base, 'ci': broken.ci,
-                                             'count': len(broken.cases),
+                                             'count': broken.count,
                                              'cases': broken.cases[:MAX_CASES_LISTED]}})
+
+    def _do_host_tests(self, item):
+        """The CI of the base commit of a ``basebroken`` record that still holds turned green
+        during the wait (#497, planned from ``Snapshot.base_waits`` or
+        ``PullRequest.base_broken``): escalate ``host_tests`` with the tests of the record. An
+        issue (``item``, its number) leaves ``agent:working``, a PR its state label. The record
+        of an issue and the CI are read again: a record that no longer holds, or a CI no longer
+        green, leaves things as they are."""
+        lb = self.cfg.labels
+        if isinstance(item, int):
+            number, step, remove = item, 'implement', [lb.working]
+            wait = self._base_wait(self.gh.issue_comments(item), step)
+        else:
+            number, step, remove = item.number, 'fix', [lb.review, lb.changes]
+            wait = item.base_broken
+        if wait is None:
+            self.log(f'  #{number}: its wait for the base branch no longer holds')
+            return
+        ci = self._base_ci_green(wait['base'])
+        if not ci:
+            self.log(f'  #{number}: the CI of {wait["base"][:12]} is not known green, the wait '
+                     'holds')
+            return
+        self._escalate_host(number, step, HostTests(wait['base'], wait['cases'], '', ci,
+                                                     count=wait['count']),
+                            remove, waited=True)
 
     def _wait_base(self, number, step, broken, head):
         """Record on issue or PR ``number`` that ``step``, started from ``head``, waits for the
