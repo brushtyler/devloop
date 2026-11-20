@@ -6,12 +6,28 @@ import subprocess
 from ssdlc_tasks import TaskError, digest, file_hash
 
 
+def _trusted_root(root, environ) -> list:
+    """``-c safe.directory=<root>`` if the environment's command-scope config trusts exactly
+    ``root`` (resolved), else nothing: never ``*``, another directory or any other key (#504)."""
+    try:
+        count = int(environ.get('GIT_CONFIG_COUNT', '0'))
+    except ValueError:
+        return []
+    for index in range(max(count, 0)):
+        key = environ.get(f'GIT_CONFIG_KEY_{index}', '')
+        if key.lower() == 'safe.directory' and environ.get(f'GIT_CONFIG_VALUE_{index}') == str(root):
+            return ['-c', f'safe.directory={root}']
+    return []
+
+
 def _snapshot_git(root, *args):
+    root = Path(root).resolve()
+    trusted = _trusted_root(root, os.environ)
     env = {key: value for key, value in os.environ.items()
            if not key.startswith('GIT_CONFIG_')}
     # Observation only: status must not refresh the index (read-only preflight).
     env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1', GIT_OPTIONAL_LOCKS='0')
-    proc = subprocess.run(['git', '--literal-pathspecs', '-c', 'core.excludesFile=',
+    proc = subprocess.run(['git', '--literal-pathspecs', *trusted, '-c', 'core.excludesFile=',
                            '-c', 'core.fsmonitor=false', *args],
                           cwd=root, env=env, capture_output=True, text=True)
     if proc.returncode:
