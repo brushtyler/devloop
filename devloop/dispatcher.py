@@ -2477,17 +2477,19 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
     def _close_turn(self, entry, outcome, error=None):
         """Close a turn's record with what the CLI attested and the last command its output
-        exposes (#215). A failed write leaves the turn open, and the next tick marks it
+        exposes (#215); for an agy turn stopped on a denied permission, the permission and the
+        command agy reports (#479). A failed write leaves the turn open, and the next tick marks it
         incomplete. If its outcome cannot be written in the journal (#362), with
         ``block_uncertain_turns`` no other turn of its work starts (``_check_turns``): the next
         one of this step, a retry or a fallback, is refused and the step escalates."""
         if entry is None:
             return
+        denied = error if isinstance(error, PermissionDenied) else None
         try:
             self.ledger.close_turn(entry, outcome, getattr(self.runner, 'last_report', None),
                                    error, getattr(self.runner, 'last_command', None),
-                                   error.command if isinstance(error, PermissionDenied)
-                                   else None)
+                                   denied.command if denied else None,
+                                   (denied.permission or 'non riportato') if denied else None)
         except GitHubError as exc:
             self.log(f'  turn record on #{entry.number} not closed: {exc}')
 

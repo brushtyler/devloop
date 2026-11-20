@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from devloop import agents, config, markdown, unavailability
+from devloop import agents, config, markdown, report, unavailability
 from devloop.dispatcher import Dispatcher
 from devloop.ledger import Ledger
 from devloop.planning import Action, Snapshot
@@ -120,9 +120,11 @@ class DeniedRecordTests(Base):
         turns, log = self.records(cli)
         self.assertEqual([r['outcome'] for r, _ in turns], ['failure', 'success'])
         denied, body = turns[0]
-        self.assertEqual(denied['denied_command'], COMMAND)
+        self.assertEqual((denied['denied_command'], denied['denied_permission']),
+                         (COMMAND, 'command'))
         self.assertIn(f'- **Comando negato (riportato da agy):** ` {COMMAND} `', body)
         self.assertNotIn('denied_command', turns[1][0])  # the retry was not denied
+        self.assertNotIn('denied_permission', turns[1][0])
         target = agents.denied_target('agy', COMMAND_ENVELOPE)
         self.assertIn(f'agy: model {ARGON} denied the "command" permission (command '
                       f'`{COMMAND}`; {target}); retrying once', log)
@@ -133,8 +135,29 @@ class DeniedRecordTests(Base):
         self.assertEqual([r['outcome'] for r, _ in turns], ['failure', 'success'])
         self.assertNotIn('denied_command', turns[0][0])
         self.assertNotIn('Comando negato', turns[0][1])
+        # The denial is still recorded, for the daily summary to count it.
+        self.assertEqual(turns[0][0]['denied_permission'], 'command')
         self.assertIn(f'agy: model {ARGON} denied the "command" permission '
                       f'({DENIED[1:-1]}); retrying once', log)
+
+    def test_the_daily_summary_counts_the_denials_per_model(self):
+        # Issue #479, point 3: Argon denied twice (the second time without the command), then
+        # Hydrogen once, then Hydrogen succeeds; the summary of the day counts three denials, two
+        # for Argon and one for Hydrogen, and the turns stay in the actions as failures.
+        cli = SequenceCLI(gemini_4_argon_high=[(0, COMMAND_ENVELOPE, JETSKI),
+                                               (0, DENIED_ENVELOPE, JETSKI)],
+                          gemini_4_hydrogen_high=[(0, DENIED_ENVELOPE, JETSKI)])
+        turns, _ = self.records(cli)
+        self.assertEqual([(r['model'], r['outcome']) for r, _ in turns],
+                         [(ARGON, 'failure'), (ARGON, 'failure'), (HYDROGEN, 'failure'),
+                          (HYDROGEN, 'success')])
+        day = turns[0][0]['started_at'][:10]
+        out = report.Summary(day)
+        for record, _ in turns:
+            report.Records._ledger(out, day, 100, record, None)
+        self.assertEqual(out.denied, {ARGON: 2, HYDROGEN: 1})
+        self.assertIn(f'- Permessi negati per modello: 3 (`{ARGON}`: 2, `{HYDROGEN}`: 1)',
+                      report.render(out))
 
 
 class RetryPromptTests(Base):

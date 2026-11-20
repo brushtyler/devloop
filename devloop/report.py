@@ -10,8 +10,9 @@ Days are UTC days:
   comment only when that comment is not the promotion's, written earlier; any other record to
   the day of its own time (``at``) or, without one, of the creation of its comment;
 - the totals count the PRs opened that day, the PRs merged that day (by devloop or by a person),
-  the review rounds opened that day (the first review record of the round) and the turns run
-  with a fallback model (``fallback_for``);
+  the review rounds opened that day (the first review record of the round), the turns run
+  with a fallback model (``fallback_for``) and, per model, the turns stopped on a permission
+  headless agy denied (``denied_permission``, #479, with or without the command agy reports);
 - the grants of the supervisor (#466, ADR 0005, section 3.1, rule 4): every ``grant-round``,
   ``grant-budget`` and ``capacity`` the dispatcher answered that day, from its ``supervision``
   records, with the time, the issue or PR, the first line of the reason, the outcome and the
@@ -119,6 +120,8 @@ class Summary:
     merged: list = field(default_factory=list)       # PR numbers
     rounds: int = 0
     fallbacks: int = 0
+    # {model: turns}: the turns stopped on a permission headless agy denied (#479)
+    denied: dict = field(default_factory=dict)
     open: int = 0                                    # turns not closed yet
 
     def empty(self):
@@ -281,6 +284,9 @@ class Records:
                                 outcome, record.get('duration_ms')))
             if record.get('fallback_for'):
                 out.fallbacks += 1
+            if record.get('denied_permission'):
+                model = str(record.get('model') or NOT_REPORTED)
+                out.denied[model] = out.denied.get(model, 0) + 1
             if record['state'] == 'open':
                 out.open += 1
             return
@@ -403,11 +409,15 @@ def render(summary):
 
     def listed(numbers):
         return f'{len(numbers)}' + (f' ({", ".join(f"#{n}" for n in numbers)})' if numbers else '')
+    denied = ', '.join(f'`{_code(model)}`: {count}'
+                       for model, count in sorted(summary.denied.items()))
     parts += ['### Totali', '',
               f'- PR aperte: {listed(summary.opened)}',
               f'- PR mergiate: {listed(summary.merged)}',
               f'- Round di review aperti: {summary.rounds}',
-              f'- Turni con un modello di fallback: {summary.fallbacks}']
+              f'- Turni con un modello di fallback: {summary.fallbacks}',
+              f'- Permessi negati per modello: {sum(summary.denied.values())}'
+              + (f' ({denied})' if denied else '')]
     return '\n'.join(parts)
 
 

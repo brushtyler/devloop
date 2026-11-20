@@ -418,13 +418,15 @@ class Ledger:
         return entry
 
     def close_turn(self, entry, outcome, report=None, error=None, last_command=None,
-                   denied_command=None):
+                   denied_command=None, denied_permission=None):
         """Close a turn: ``outcome`` is ``success``, ``failure`` or ``unavailable``; ``report``
         the CLI's ``(fields, models)`` (``agents.telemetry``), None when the CLI did not
         complete; ``last_command`` the last command its output exposes, already cleaned
         (``agents.public_command``), None when it exposes none (#215); ``denied_command`` the
         command headless agy denied, already cleaned (``agents.denied_command``), None when agy
-        does not report it (#479).
+        does not report it (#479); ``denied_permission`` the permission headless agy denied, for
+        a turn stopped on one, None otherwise: the daily summary counts those turns per model
+        from it, whether agy reports the command or not (#479).
 
         The journal records the outcome first (``returned`` for ``success``, ``failed``
         otherwise); if it cannot, the record stays open and the turn becomes ``uncertain`` at
@@ -436,6 +438,8 @@ class Ledger:
         changes = {'last_command': last_command} if last_command else {}
         if denied_command:
             changes['denied_command'] = denied_command
+        if denied_permission:
+            changes['denied_permission'] = denied_permission
         if entry.turn is not None:
             self.journal.outcome(entry.turn, JOURNAL_OUTCOME[outcome], error,
                                  usage=observed(fields) if entry.measure else None)
