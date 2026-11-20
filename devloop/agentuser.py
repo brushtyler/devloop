@@ -31,8 +31,12 @@ The mechanism, chosen by the operator on #415:
   anything in ``state_dir`` but the worktrees and the shared directory (a directory it can enter
   without listing it is refused too: its files would be in reach), or can read the overlay; when
   it can write the repository's ``.git``, the worktrees directory or the fixed directories of the
-  shared one; and when it cannot write the directories made for its turns and test runs.
-  ``[agent_user] check = false`` turns it off, for development only.
+  shared one; when it cannot write the directories made for its turns and test runs; and when
+  git, run as the agent user with the environment of the turns, refuses a worktree of the
+  dispatcher's user (#500). ``[agent_user] check = false`` turns it off, for development only;
+- the worktrees belong to the dispatcher's user: each turn and test run gets, in git's command
+  scope (``GIT_CONFIG_*``), ``safe.directory`` for its own worktree and nothing else, never
+  ``*`` (``AgentUser.git_env``, #500).
 
 One user runs every agent, implementers and reviewers (#438): a turn must not change what the
 turns after it use. The files of the CLIs that carry instructions or configuration, and the CLIs
@@ -165,6 +169,10 @@ for a; do
     esac
 done
 true'''
+# Run as the agent user in a worktree of the dispatcher's user (#500): git must not refuse it as
+# of dubious ownership. The system's git; no optional lock, so nothing is written there.
+_GIT_PROBE = ('export PATH=/usr/bin:/bin GIT_OPTIONAL_LOCKS=0; '
+              'git -C "$1" status --porcelain >/dev/null')
 _PROBLEMS = {'r': 'can read', 'x': 'can enter', 'w': 'can write', 'e': 'cannot enter',
              'u': 'cannot write', 'n': 'cannot read', 'c': 'can create', 'o': 'owns',
              'm': 'can rename or remove', 'l': 'cannot follow the link'}
@@ -174,6 +182,33 @@ _DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 class AgentUserError(RuntimeError):
     """The agent user is unusable or does not isolate: devloop does not start."""
+
+
+def with_git_config(env, pairs):
+    """``env`` with ``pairs`` applied after the ``GIT_CONFIG_*`` entries it already has."""
+    try:
+        count = max(int(env.get('GIT_CONFIG_COUNT') or 0), 0)
+    except ValueError:
+        count = 0
+    env = dict(env)
+    for i, (key, value) in enumerate(pairs, start=count):
+        env[f'GIT_CONFIG_KEY_{i}'] = key
+        env[f'GIT_CONFIG_VALUE_{i}'] = value
+    env['GIT_CONFIG_COUNT'] = str(count + len(pairs))
+    return env
+
+
+def trusted_paths(worktree):
+    """The ``safe.directory`` values of ``worktree`` (#500): its absolute path and its real
+    path, when different. A wildcard is refused (ValueError): git would trust every repository
+    it covers."""
+    found = []
+    for path in (os.path.abspath(worktree), os.path.realpath(worktree)):
+        if path == '*' or path.endswith('/*'):
+            raise ValueError(f'safe.directory: {path!r} is a wildcard')
+        if path not in found:
+            found.append(path)
+    return found
 
 
 class AgentUser:
@@ -198,6 +233,15 @@ class AgentUser:
     def environment(self, env):
         """``env`` with the agent user's identity: its HOME, where its CLIs keep their logins."""
         return dict(env, HOME=str(self.home), USER=self.name, LOGNAME=self.name)
+
+    @staticmethod
+    def git_env(env, worktree):
+        """``env`` for a turn or a test run in ``worktree`` (#500): git, as the agent user,
+        trusts that worktree, which belongs to the dispatcher's user (``safe.directory`` in
+        git's command scope, after the ``GIT_CONFIG_*`` entries ``env`` already has). Only that
+        path, as given and resolved, never ``*`` nor a prefix that ends in ``/*``: in a linked
+        worktree git checks the ownership of the worktree alone, not of the main checkout."""
+        return with_git_config(env, [('safe.directory', p) for p in trusted_paths(worktree)])
 
     def shell(self, command):
         """The test command ``command`` run by ``BASH`` as the agent user."""
@@ -247,6 +291,28 @@ class AgentUser:
             if sep and problem in _PROBLEMS:
                 found.append((problem, path))
         return found
+
+    def git_probe(self, worktree, env=None):
+        """Why git, run as the agent user with ``env`` (default: a minimal one) as a turn gets
+        it (:meth:`git_env`), refuses ``worktree``, a worktree of the dispatcher's user, or None
+        when it works (#500). Raises AgentUserError when the command cannot run as the agent
+        user at all."""
+        if env is None:
+            env = self.environment({'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
+                                    'LC_ALL': 'C'})
+        argv = self.command([BASH, '-c', _GIT_PROBE, 'git-probe', str(worktree)])
+        try:
+            done = self._run(argv, capture_output=True, text=True, timeout=120,
+                             env=self.git_env(env, worktree))
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise AgentUserError(f'cannot run commands as {self.name}: {exc}') from exc
+        if done.returncode == 0:
+            return None
+        detail = ' '.join((done.stderr or done.stdout or '').split())[:500]
+        return (f'{self.name} cannot run git in a worktree of the dispatcher\'s user '
+                f'({detail or f"exit {done.returncode}"}): devloop gives each turn '
+                'safe.directory for its worktree in GIT_CONFIG_*, which sudo must keep (-E, '
+                'SETENV in ops/host/sudoers-agent)')
 
 
 class UnsafeFile(OSError):
@@ -388,7 +454,31 @@ def cli_items(home):
             + [('bin', home / '.local' / 'bin' / cli) for cli in CLIS])
 
 
-def check(agent_user, key_dir, state_dir, local_config=None, me=None, git_dir=None):
+def probe_worktree(path):
+    """Make in ``path`` (a new directory of the dispatcher's user) a repository ``main`` and a
+    linked worktree of it, ``worktree``, laid out as the worktrees of devloop are, and return
+    the worktree (#500). Without the dispatcher's config files and hooks. Raises
+    AgentUserError when git fails."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+    env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull, LC_ALL='C',
+               GIT_AUTHOR_NAME='devloop', GIT_AUTHOR_EMAIL='devloop@localhost',
+               GIT_COMMITTER_NAME='devloop', GIT_COMMITTER_EMAIL='devloop@localhost')
+    main, worktree = Path(path) / 'main', Path(path) / 'worktree'
+    git = ['git', '-c', f'core.hooksPath={os.devnull}']
+    for argv in ([*git, 'init', '-q', str(main)],
+                 [*git, '-C', str(main), 'commit', '-q', '--allow-empty', '-m', 'probe'],
+                 [*git, '-C', str(main), 'worktree', 'add', '-q', '--detach', str(worktree)]):
+        try:
+            done = subprocess.run(argv, capture_output=True, text=True, timeout=60, env=env)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise AgentUserError(f'the git probe in {path}: {exc}') from exc
+        if done.returncode != 0:
+            raise AgentUserError(f'the git probe in {path}: {" ".join(argv[3:])}: '
+                                 f'{(done.stderr or done.stdout).strip()[:500]}')
+    return worktree
+
+
+def check(agent_user, key_dir, state_dir, local_config=None, me=None, git_dir=None, env=None):
     """Refuse an agent user that does not isolate (#415). It must be another user than the
     dispatcher's (``me``, default: the effective user) and able to run through sudo. It must
     not read nor enter ``key_dir`` and any entry of ``state_dir`` but the worktrees and the
@@ -398,8 +488,11 @@ def check(agent_user, key_dir, state_dir, local_config=None, me=None, git_dir=No
     ``.git``), nor the worktrees directory and the fixed directories of the shared one, which
     it must enter; it must write the directories the dispatcher makes for its turns and test
     runs, and read the schemas. It must not write, own, create, rename nor remove the files of
-    the CLIs in its home that later turns use (``cli_items``, #438). Raises AgentUserError, listing
-    every problem."""
+    the CLIs in its home that later turns use (``cli_items``, #438). Git, run as the agent user
+    with ``env`` (the environment of the turns, default a minimal one) and the ``safe.directory``
+    a turn gets, must work in a linked worktree of the dispatcher's user, made for the check in
+    the shared directory (``probe_worktree``, #500). Raises AgentUserError, listing every
+    problem."""
     me = me if me is not None else pwd.getpwuid(os.geteuid()).pw_name
     if agent_user.name == me:
         raise AgentUserError(f'agent_user.name: {me!r} is the dispatcher\'s own user: agents '
@@ -428,9 +521,12 @@ def check(agent_user, key_dir, state_dir, local_config=None, me=None, git_dir=No
             schema = shared.write(SCHEMAS, f'.check-{secrets.token_hex(6)}.json', b'{}\n')
             made.append((SCHEMAS, schema))
             items.append(('rd', schema))
+            made.append((TMP, shared.new_dir(TMP, '.check-git-')))
         except OSError as exc:
             raise AgentUserError(f'the shared directory {shared.path}: {exc}') from exc
+        worktree = probe_worktree(made[-1][1])
         found = agent_user.probe(items)
+        refused = agent_user.git_probe(worktree, env)
     finally:
         for sub, path in made:
             try:
@@ -442,6 +538,8 @@ def check(agent_user, key_dir, state_dir, local_config=None, me=None, git_dir=No
                 pass
     problems = [f'{agent_user.name} {_PROBLEMS[problem]} {path}'
                 for problem, path in dict.fromkeys(found)]
+    if refused:
+        problems.append(refused)
     if problems:
         raise AgentUserError('the agent user does not isolate: ' + '; '.join(problems)
                              + ' (ops/host/setup-agent-user.sh prepares the permissions; '

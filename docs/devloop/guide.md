@@ -2228,9 +2228,11 @@ a host already in service is in
 - At the start of `tick` and `run` devloop checks, as `devloop-agent`, that it can neither read
   nor enter `key_dir` (or `$DEVLOOP_APP_KEY_DIR`) and the entries of `state_dir` other than the
   two above, that it cannot read the keys, `state_dir` and the overlay, that it can write
-  nothing in `.git` nor the directories that hold the worktrees and its turns, and that it can
-  write the directories devloop makes for its turns; otherwise it refuses to start and says
-  what is wrong. `[agent_user] check = false` skips the check, in development only.
+  nothing in `.git` nor the directories that hold the worktrees and its turns, that it can
+  write the directories devloop makes for its turns, and that git, run as `devloop-agent` with
+  the environment of the turns, works in a worktree of `devloop` (#500: each turn and test run
+  trusts its own worktree with `safe.directory`, never `*`); otherwise it refuses to start and
+  says what is wrong. `[agent_user] check = false` skips the check, in development only.
 - One user runs implementers and reviewers, so a turn must not change what later turns use
   (#438, decision of the operator): the instructions, the configuration and the binaries of the
   CLIs are root's, and `devloop-agent` writes only its credentials, sessions, caches and logs.

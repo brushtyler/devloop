@@ -54,7 +54,7 @@ class LocalUser(AgentUser):
 
 class LaunchTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix='agent-user-'))
+        self.tmp = Path(tempfile.mkdtemp(prefix='agent-user-')).resolve()
         self.addCleanup(lambda: subprocess.run(['rm', '-rf', str(self.tmp)]))
         self.calls = []
         self.user = AgentUser('devloop-agent', home='/home/devloop-agent', run=self.record)
@@ -81,13 +81,13 @@ class LaunchTests(unittest.TestCase):
             cli.agent_user_of(cfg)
         self.assertIsNone(cli.agent_user_of(CFG))
 
-    def test_the_environment_has_the_agent_users_home_and_trusts_the_worktrees(self):
+    def test_the_environment_has_the_agent_users_home_and_trusts_no_repository(self):
         env = cli.agent_environment(CFG, self.tmp / 'gh', self.user)
         self.assertEqual((env['HOME'], env['USER']), ('/home/devloop-agent', 'devloop-agent'))
         pairs = {(env[f'GIT_CONFIG_KEY_{i}'], env[f'GIT_CONFIG_VALUE_{i}'])
                  for i in range(int(env['GIT_CONFIG_COUNT']))}
-        self.assertEqual(pairs, {('credential.helper', ''), ('http.extraHeader', ''),
-                                 ('safe.directory', '*')})
+        # #500: no safe.directory=*; each turn and test run adds its own worktree.
+        self.assertEqual(pairs, {('credential.helper', ''), ('http.extraHeader', '')})
         self.assertNotIn('safe.directory', json.dumps(cli.agent_environment(CFG, self.tmp)))
 
     def test_follow_reads_the_transcripts_in_the_agent_users_home(self):
@@ -132,7 +132,10 @@ class LaunchTests(unittest.TestCase):
         for path in (schema, out.parent):
             self.assertFalse(path.exists(), path)
         self.assertEqual(seen['schema']['type'], 'object')
-        self.assertEqual(seen['env'], {'HOME': '/home/devloop-agent'})
+        # Git trusts the worktree of the turn, and only it (#500).
+        self.assertEqual(seen['env'], {'HOME': '/home/devloop-agent', 'GIT_CONFIG_COUNT': '1',
+                                       'GIT_CONFIG_KEY_0': 'safe.directory',
+                                       'GIT_CONFIG_VALUE_0': str(self.tmp)})
         # The final message stays in the log of the turn, the CLI's name in its first line.
         self.assertEqual([json.loads(p.read_text())['verdict']
                           for p in logs.glob('*.last.json')], ['approve'])
@@ -164,12 +167,124 @@ class LaunchTests(unittest.TestCase):
             return SimpleNamespace(returncode=0, stdout='ok', stderr='')
         ws = Workspace(self.tmp, 'state', 'main', run=fake_run, test_env={'X': '1'},
                        private_tmp=True, agent_user=self.user)
-        self.assertEqual(ws.run_tests(self.tmp, 'make test', 5), (True, 'ok'))
+        worktree = self.tmp / 'state/worktrees/pr-7'
+        worktree.mkdir(parents=True)
+        self.assertEqual(ws.run_tests(worktree, 'make test', 5), (True, 'ok'))
         self.assertEqual(seen['argv'], SUDO + ['/usr/bin/bash', '-c', 'make test'])
+        # Git trusts the worktree of the run, and only it (#500).
+        self.assertEqual({k: v for k, v in seen['env'].items() if k.startswith('GIT_')},
+                         {'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'safe.directory',
+                          'GIT_CONFIG_VALUE_0': str(worktree)})
+        self.assertEqual(ws.test_env, {'X': '1'})
         tmp = Path(seen['env']['TMPDIR'])
         self.assertEqual(tmp.parent, self.tmp / 'state/agent-shared/tmp')
         self.assertEqual(seen['mode'], 0o770)
         self.assertFalse(tmp.exists())
+
+
+def safe_directories(env):
+    """The ``safe.directory`` values ``env`` gives git in its command scope."""
+    return [env[f'GIT_CONFIG_VALUE_{i}'] for i in range(int(env.get('GIT_CONFIG_COUNT', 0)))
+            if env[f'GIT_CONFIG_KEY_{i}'] == 'safe.directory']
+
+
+# The environment of a turn as git sees it when the repository belongs to another user: git
+# itself simulates the other owner (``GIT_TEST_ASSUME_DIFFERENT_OWNER``), without the config of
+# the machine.
+OTHER_OWNER = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'LC_ALL': 'C',
+               'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull,
+               'GIT_TEST_ASSUME_DIFFERENT_OWNER': '1'}
+
+
+class SafeDirectoryTests(unittest.TestCase):
+    """#500: the worktrees belong to the dispatcher's user, agents and tests run as another one.
+    Git trusts, in each turn and test run, its own worktree and nothing else."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='agent-user-git-')).resolve()
+        self.addCleanup(lambda: subprocess.run(['rm', '-rf', str(self.tmp)]))
+        self.worktree = agentuser.probe_worktree(self.tmp)
+        self.main = self.tmp / 'main'
+
+    def status(self, env):
+        return subprocess.run(['git', '-C', str(self.worktree), 'status', '--porcelain'],
+                              capture_output=True, text=True, env=env)
+
+    def test_git_works_in_a_worktree_of_another_user_with_its_safe_directory_only(self):
+        refused = self.status(OTHER_OWNER)
+        if refused.returncode == 0:
+            self.skipTest('this git does not simulate another owner')
+        self.assertIn('dubious ownership', refused.stderr)
+        self.assertEqual(self.status(AgentUser.git_env(OTHER_OWNER, self.worktree)).returncode,
+                         0)
+        # The main checkout, or another worktree, does not make it trusted.
+        for other in (self.main, self.tmp / 'pr-1'):
+            done = self.status(AgentUser.git_env(OTHER_OWNER, other))
+            self.assertIn('dubious ownership', done.stderr, other)
+        # What the agent environment already gives git stays (#415).
+        env = AgentUser.git_env(agents.isolated_env(self.tmp / 'gh', base=OTHER_OWNER),
+                                self.worktree)
+        self.assertEqual(self.status(env).returncode, 0)
+        self.assertEqual(env['GIT_CONFIG_KEY_0'], 'credential.helper')
+
+    def test_safe_directory_is_never_a_wildcard(self):
+        env = AgentUser.git_env({}, self.worktree)
+        self.assertEqual(safe_directories(env), [str(self.worktree)])
+        # A path through a link: both the path given and the real one, nothing else.
+        link = self.tmp / 'link'
+        link.symlink_to(self.worktree)
+        self.assertEqual(safe_directories(AgentUser.git_env({}, link)),
+                         [str(link), str(self.worktree)])
+        for wildcard in ('*', '/home/devloop/worktrees/*'):
+            with self.assertRaisesRegex(ValueError, 'wildcard'):
+                AgentUser.git_env({}, wildcard)
+
+    def test_a_turn_and_the_tests_trust_only_their_worktree(self):
+        seen = []
+
+        def fake_run(argv, **kw):
+            seen.append(kw['env'])
+            if argv[-1:] == ['make test']:
+                return SimpleNamespace(returncode=0, stdout='ok', stderr='')
+            return SimpleNamespace(returncode=0, stdout=json.dumps(
+                {'is_error': False, 'structured_output': review()}), stderr='')
+        user = AgentUser('devloop-agent', home='/home/devloop-agent')
+        env = cli.agent_environment(CFG, self.tmp / 'gh', user)
+        runner = agents.AgentRunner(self.tmp / 'logs', 10, run=fake_run, env=env,
+                                    agent_user=user, shared_dir=self.tmp / 'agent-shared')
+        runner.run(CFG.agent('claude'), 'review', 'p', 'review', self.worktree, 'pr-1')
+        Workspace(self.tmp, 'state', 'main', run=fake_run, test_env=env,
+                  agent_user=user).run_tests(self.main, 'make test', 5)
+        self.assertEqual([safe_directories(e) for e in seen],
+                         [[str(self.worktree)], [str(self.main)]])
+        self.assertNotIn('safe.directory', json.dumps(env))  # the base environment: none
+
+    def test_the_startup_check_runs_git_as_the_agent_user_in_a_worktree_of_another(self):
+        if self.status(OTHER_OWNER).returncode == 0:
+            self.skipTest('this git does not simulate another owner')
+        state = self.tmp / 'state'
+        for name in ('worktrees', 'agent-shared'):
+            (state / name).mkdir(parents=True)
+        keys = self.tmp / 'ghapps'
+        keys.mkdir()
+
+        class GitOnly(LocalUser):
+            """The real git probe as the current user; the other probe finds nothing."""
+
+            def probe(self, items):
+                return []
+        agentuser.check(GitOnly(self.tmp), keys, state, me='devloop', env=OTHER_OWNER)
+
+        class DropsTheEnvironment(GitOnly):
+            """A sudo that does not keep the environment devloop gives (#496)."""
+
+            def command(self, argv):
+                return ['env', 'GIT_CONFIG_COUNT=0', *argv]
+        with self.assertRaisesRegex(AgentUserError, 'cannot run git in a worktree.*dubious '
+                                                    'ownership'):
+            agentuser.check(DropsTheEnvironment(self.tmp), keys, state, me='devloop',
+                            env=OTHER_OWNER)
+        self.assertEqual(list((state / 'agent-shared/tmp').iterdir()), [])
 
 
 def git(*args, cwd):
@@ -439,7 +554,7 @@ class TerminationTests(unittest.TestCase):
 
 class StartupCheckTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix='agent-user-check-'))
+        self.tmp = Path(tempfile.mkdtemp(prefix='agent-user-check-')).resolve()
         self.addCleanup(lambda: subprocess.run(['rm', '-rf', str(self.tmp)]))
         self.keys = self.tmp / 'ghapps'
         self.keys.mkdir()
@@ -450,9 +565,15 @@ class StartupCheckTests(unittest.TestCase):
         (self.state / 'turn-journal.jsonl').write_text('')
         self.calls = []
 
-    def fake(self, problems=(), returncode=0, stderr=''):
-        """An agent user whose probe reports ``problems``, ``(code, path)`` pairs."""
+    def fake(self, problems=(), returncode=0, stderr='', git=(0, '')):
+        """An agent user whose probe reports ``problems``, ``(code, path)`` pairs, and whose git
+        probe (#500) ends with ``git``, ``(returncode, stderr)``."""
+        self.git_probes = []
+
         def run(argv, **kw):
+            if 'git-probe' in argv:
+                self.git_probes.append((argv, kw['env']))
+                return SimpleNamespace(returncode=git[0], stdout='', stderr=git[1])
             self.calls.append(argv)
             self.probed = [arg.split(':', 1) for arg in argv[argv.index('probe') + 1:]]
             out = ''.join(f'{code}:{path}\0' for code, path in problems)
@@ -493,9 +614,37 @@ class StartupCheckTests(unittest.TestCase):
         # The directories of the turns and of the tests are writable; the schemas readable.
         self.assertEqual([Path(p).parent for p in kinds['rw']], [shared / 'turns', shared / 'tmp'])
         self.assertEqual([Path(p).parent for p in kinds['rd']], [shared / 'schemas'])
+        # Git runs as the agent user in a linked worktree the check made in the shared
+        # directory, trusting only that worktree (#500).
+        (argv, env), = self.git_probes
+        self.assertEqual(argv[:8], SUDO + ['/usr/bin/bash', '-c'])
+        probed = Path(argv[-1])
+        self.assertEqual((probed.parent.parent, probed.name), (shared / 'tmp', 'worktree'))
+        self.assertEqual(safe_directories(env), [str(probed)])
         # What the check made for the probe is gone.
         for sub in ('schemas', 'turns', 'tmp'):
             self.assertEqual(list((shared / sub).iterdir()), [], sub)
+
+    def test_a_host_where_git_refuses_the_worktrees_is_refused(self):
+        # #500: git as the agent user finds the worktree of another user of dubious ownership.
+        user = self.fake(git=(128, "fatal: detected dubious ownership in repository at '/w'"))
+        with self.assertRaisesRegex(AgentUserError, 'cannot run git in a worktree.*dubious '
+                                                    'ownership'):
+            agentuser.check(user, self.keys, self.state, me='devloop')
+        for sub in ('turns', 'tmp'):
+            self.assertEqual(list((self.state / 'agent-shared' / sub).iterdir()), [], sub)
+
+    def test_the_git_probe_runs_with_the_environment_of_the_turns(self):
+        user = self.fake()
+        agentuser.check(user, self.keys, self.state, me='devloop',
+                        env={'HOME': '/home/devloop-agent', 'GIT_CONFIG_COUNT': '1',
+                             'GIT_CONFIG_KEY_0': 'credential.helper',
+                             'GIT_CONFIG_VALUE_0': ''})
+        (argv, env), = self.git_probes
+        self.assertEqual(env['HOME'], '/home/devloop-agent')
+        self.assertEqual((env['GIT_CONFIG_KEY_0'], env['GIT_CONFIG_COUNT']),
+                         ('credential.helper', '2'))
+        self.assertEqual(safe_directories(env), [argv[-1]])
 
     def test_a_user_that_cannot_write_the_directory_of_its_turns_is_refused(self):
         turn = self.state / 'agent-shared/turns/.check-x'
@@ -592,7 +741,8 @@ class StartupCheckTests(unittest.TestCase):
         cli.check_agent_user(cfg, self.state, None, None, me='x')  # no agent user: no check
 
     def test_main_exits_before_any_tick(self):
-        ws = SimpleNamespace(agent_user=self.fake(), common_dir=lambda: Path('/repo/.git'))
+        ws = SimpleNamespace(agent_user=self.fake(), common_dir=lambda: Path('/repo/.git'),
+                             test_env={'HOME': '/home/devloop-agent'})
         dispatcher = SimpleNamespace(ws=ws, tick=mock.Mock())
         with mock.patch.object(cli, 'build', return_value=(CFG, self.state, dispatcher)), \
                 mock.patch.object(cli, 'check_agent_user',
@@ -601,8 +751,21 @@ class StartupCheckTests(unittest.TestCase):
                 cli.main(['tick'])
         self.assertIn('devloop-agent can read /k', str(ctx.exception.code))
         dispatcher.tick.assert_not_called()
-        # The check covers the repository's .git too (1/codex/R1-1).
+        # The check covers the repository's .git too (1/codex/R1-1), and git runs with the
+        # environment of the turns (#500).
         self.assertEqual(run.call_args.kwargs['git_dir'], Path('/repo/.git'))
+        self.assertEqual(run.call_args.kwargs['env'], {'HOME': '/home/devloop-agent'})
+
+    def test_devloop_refuses_to_start_when_git_refuses_the_worktrees(self):
+        # #500, through the startup step: the message says why.
+        user = self.fake(git=(128, 'fatal: detected dubious ownership in repository'))
+        with mock.patch.dict(os.environ):
+            os.environ.pop('DEVLOOP_APP_KEY_DIR', None)
+            with self.assertRaisesRegex(AgentUserError, 'cannot run git.*safe.directory'):
+                cli.check_agent_user(dataclasses.replace(CFG, app_key_dir=str(self.keys)),
+                                     self.state, None, user, log=lambda m: None, me='x',
+                                     env={'HOME': '/home/devloop-agent'})
+        self.assertEqual(self.git_probes[0][1]['HOME'], '/home/devloop-agent')
 
 
 class NoAgentUserWarningTests(unittest.TestCase):

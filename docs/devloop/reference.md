@@ -1454,8 +1454,13 @@ is in the [guide](guide.md#agent-user) and in the [ops guide](../../ops/README.m
 
 - **Start.** `sudo -n -E -u <name> -- <argv>`: `-n` fails at once without a sudo rule, `-E`
   keeps the isolated environment above, which needs the `SETENV` tag. The environment gets the
-  agent user's `HOME`, `USER` and `LOGNAME`, where its CLIs keep their logins, and
-  `safe.directory=*` for git, because the worktrees belong to the dispatcher's user. The test
+  agent user's `HOME`, `USER` and `LOGNAME`, where its CLIs keep their logins. The worktrees
+  belong to the dispatcher's user, and git refuses a repository of another user ("dubious
+  ownership"): each turn and each test run gets, in git's command scope (`GIT_CONFIG_COUNT`,
+  `GIT_CONFIG_KEY_n`, `GIT_CONFIG_VALUE_n`, after the entries above), `safe.directory` for its
+  own worktree only, as given and as resolved, never `*` (#500). In a linked worktree git checks
+  the ownership of the worktree alone, so the main checkout is not trusted, and nothing is
+  written in the agent user's home. The test
   command runs as `/usr/bin/bash -c <test_cmd>` and the CLIs are found on the `secure_path` of
   the sudoers rule.
 - **Stop.** A timeout or a stall `abort` kills the process group of the turn or of the tests as
@@ -1491,7 +1496,12 @@ is in the [guide](guide.md#agent-user) and in the [ops guide](../../ops/README.m
   that it cannot read the keys, the `--local-config` file and `state_dir` (list it), and that it
   can write nothing in the repository's `.git`. It must enter but not write `worktrees`,
   `agent-shared` and its `schemas`, `turns` and `tmp`; it must write a new directory devloop
-  makes in `turns` and in `tmp`, and read a schema devloop writes. The agent user must also
+  makes in `turns` and in `tmp`, and read a schema devloop writes. Git, run as the agent user
+  through the same `sudo -n -E` and with the environment of the turns plus the
+  `safe.directory` of the worktree, must work (`git status`, without optional locks) in a
+  linked worktree of the dispatcher's user that the check makes in a new directory of
+  `agent-shared/tmp` and removes: a sudo that drops the environment, or a git that refuses the
+  worktree, stops devloop with git's message (#500). The agent user must also
   differ from the dispatcher's. Otherwise devloop exits, naming each path, before taking the
   lock. `[agent_user] check = false` skips the probe and logs that it is off: for development
   only.

@@ -882,10 +882,12 @@ class AgentRunner:
         if self._on_turn:
             self._on_turn(agent, prompt_file)
         log = stem.with_suffix('.log')
-        kwargs = {'env': self._env} if self._env is not None else {}
+        env = self._env
+        if self.agent_user is not None:  # git trusts the worktree of the turn, not ours (#500)
+            env = self.agent_user.git_env(os.environ if env is None else env, workdir)
+        kwargs = {'env': env} if env is not None else {}
         if agent.kind == 'claude':
-            kwargs['env'] = {**(os.environ if self._env is None else self._env),
-                             **CLAUDE_TURN_ENV}
+            kwargs['env'] = {**(os.environ if env is None else env), **CLAUDE_TURN_ENV}
         # Its own process group: a timeout also stops the commands the CLI left in the background.
         run = self._run
         watched = run is subprocess.run and self._stall is not None

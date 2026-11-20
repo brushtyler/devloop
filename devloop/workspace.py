@@ -13,7 +13,7 @@ import time
 from contextlib import nullcontext
 from pathlib import Path
 
-from .agentuser import SHARED_DIR, TMP, SharedDir
+from .agentuser import SHARED_DIR, TMP, SharedDir, with_git_config
 from .localtests import failed_cases
 
 # The opening and closing lines git writes around a conflict (`=======` alone also underlines
@@ -147,20 +147,6 @@ def git_config_env(pairs):
     return env
 
 
-def _with_git_config(env, pairs):
-    """``env`` with ``pairs`` applied after the ``GIT_CONFIG_*`` entries it already has."""
-    try:
-        count = max(int(env.get('GIT_CONFIG_COUNT') or 0), 0)
-    except ValueError:
-        count = 0
-    env = dict(env)
-    for i, (key, value) in enumerate(pairs, start=count):
-        env[f'GIT_CONFIG_KEY_{i}'] = key
-        env[f'GIT_CONFIG_VALUE_{i}'] = value
-    env['GIT_CONFIG_COUNT'] = str(count + len(pairs))
-    return env
-
-
 # Applied to every git command the dispatcher runs in a worktree (#415), over every config file:
 # no hook and no fsmonitor program runs, whatever a config says.
 WORKTREE_GIT_CONFIG = (('core.hooksPath', os.devnull), ('core.fsmonitor', 'false'))
@@ -217,6 +203,12 @@ class Workspace:
         # The identities of the failed tests of the latest run in each worktree (#459,
         # ``failed_cases``), read from its whole output.
         self._failed = {}
+
+    @property
+    def test_env(self):
+        """The environment of the test command and of the agent turns, before the
+        ``safe.directory`` of a worktree (#500); None: the dispatcher's own."""
+        return self._test_env
 
     @property
     def shared_lock(self):
@@ -330,7 +322,7 @@ class Workspace:
             inherited = {k: v for k, v in os.environ.items() if k not in unset}
             kwargs['env'] = dict(inherited, **(env or {}))
             if trusted is not None:
-                kwargs['env'] = _with_git_config(kwargs['env'], WORKTREE_GIT_CONFIG)
+                kwargs['env'] = with_git_config(kwargs['env'], WORKTREE_GIT_CONFIG)
         try:
             with self._shared if args[:1] and args[0] in _SHARED_GIT else nullcontext():
                 if binary:
@@ -865,13 +857,17 @@ class Workspace:
 
     def run_tests(self, path, command, timeout):
         """``(passed, output_tail)`` for the project test command in ``path``. With an agent
-        user (#415) the command runs as that user. The identities of the failed tests, read from
-        the whole output, are kept for ``failed_cases`` (#459)."""
+        user (#415) the command runs as that user, and git trusts ``path``, which belongs to the
+        dispatcher's user (#500, ``AgentUser.git_env``). The identities of the failed tests,
+        read from the whole output, are kept for ``failed_cases`` (#459)."""
         self._failed[str(path)] = None
-        kwargs = {'env': self._test_env} if self._test_env is not None else {}
+        env = self._test_env
         run = run_in_group if self._run is subprocess.run else self._run
         argv = ['bash', '-c', command]
         user = self.agent_user
+        if user is not None:
+            env = user.git_env(os.environ if env is None else env, path)
+        kwargs = {'env': env} if env is not None else {}
         if user is not None:
             argv = user.shell(command)
             if run is run_in_group:
@@ -880,8 +876,7 @@ class Workspace:
         if self.private_tmp:
             tmp = (self._agent_tmp() if user is not None
                    else tempfile.mkdtemp(prefix='devloop-tests-'))
-            base = os.environ if self._test_env is None else self._test_env
-            kwargs['env'] = dict(base, TMPDIR=tmp)
+            kwargs['env'] = dict(os.environ if env is None else env, TMPDIR=tmp)
         try:
             try:
                 done = run(argv, cwd=path, capture_output=True, text=True, timeout=timeout,

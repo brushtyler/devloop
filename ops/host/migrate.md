@@ -473,6 +473,30 @@ sudo systemctl start devloop
 Gli agent tornano a girare come `devloop`, con i login delle CLI di `devloop`, e l'avviso su
 `[run].alert_issue` parte di nuovo, una volta.
 
+## git nei worktree come utente degli agent (#500)
+
+I worktree sono di `devloop`, agent e test girano come `devloop-agent`: git li rifiuta
+(`detected dubious ownership`) se non sono in `safe.directory`. Dal #500 devloop passa a ogni
+turno e a ogni esecuzione dei test, nell'ambiente (`GIT_CONFIG_*`, con `sudo -n -E`),
+`safe.directory` per il solo worktree di quel turno, e all'avvio non parte se git, come
+`devloop-agent`, rifiuta un worktree di `devloop`. Serve che `sudo` mantenga l'ambiente che
+devloop prepara. La soluzione temporanea `/home/devloop-agent/.gitconfig` (di root, con
+`safe.directory = …/worktrees/*`) non serve più e va tolta: copre ogni worktree, e nasconderebbe
+a `check-host.sh` un `sudo` che non mantiene l'ambiente. A loop fermo, come root, dal checkout
+dell'operatore aggiornato come al passo 1 della sezione precedente:
+
+```bash
+sudo systemctl stop devloop
+sudo rm -f /home/devloop-agent/.gitconfig
+sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps
+```
+
+`check-host.sh` deve dare `ok: devloop-agent esegue git in … con il suo safe.directory` (con
+almeno un worktree in `worktrees`). Poi il pin a mano (`sudo -u devloop -H python3
+/home/devloop/ssdlc/scripts/devloop-pinned pin origin/main`) e `sudo systemctl start devloop`;
+all'avvio devloop rifà la stessa prova su un worktree di prova. Se git rifiuta il worktree,
+`sudo` non mantiene l'ambiente: il file si rimette com'era e si resta sul pin precedente.
+
 ## Dati di ssdlc nei prompt
 
 Con l'ADR 0006, R4, i prompt di `devloop/prompts/` non contengono più il testo di ssdlc: le
