@@ -429,6 +429,7 @@ Every agent review, CI round and promotion records a **receipt** in its marker:
 | `level`, `reasons` | The effective level and why: default, label with its author, sensitive paths, earlier level, and with level 0 enabled the `reviews:0` label with its author, time, whether it applied and the paths outside the allowlist |
 | `reviewers` | The reviewers the level requires, in order (none at level 0, or when the pool has not enough independent ones). With `review_policy.provider_quorum` (#409) a round keeps the reviewers its receipt recorded while they still meet the rules, and only a new round chooses again |
 | `profiles` | The identity and tuple `(kind, model, effort, review_args)` each required reviewer reviews with now, and its `provider` when declared (#409). At level 1 the PR's recorded reviewer stays required even when it is no longer in the pool, so the policy version does not cover it: its profile does |
+| `findings` | Only in the reviews of a round with a [findings-only review](#findings-only-reviews) (#416): its reviewer, never required and never compared when an approval is checked |
 
 Promotions and escalations for a pool without enough independent reviewers are dispatcher
 comments with a `policy` marker, read only from the dispatcher's identity. Before promoting a
@@ -910,7 +911,8 @@ a review of the reviewer `ci`. A finding stays open until one of these closes it
 
 | Who | How |
 |---|---|
-| The reviewer that opened it | `resolved` or `withdrawn` in one of its later reviews |
+| The reviewer that opened it | `resolved` or `withdrawn` in one of its later reviews; never for a finding of a findings-only review (#416) |
+| The reviewers of the quorum, for a finding of a findings-only review | `resolved` or `withdrawn` from every reviewer the receipt of a later round requires, in that round ([Findings-only reviews](#findings-only-reviews)) |
 | The dispatcher, for a `ci` finding | Automatically, when CI passes on the PR's current head (the same commit that failed after a re-run, or a later one), in `agent:review` or still in `agent:changes` before the implementer starts |
 | The operator | The `/devloop finding` command below |
 
@@ -935,6 +937,30 @@ read only from the dispatcher's identity: each entry records the key, `resolved`
 closed finding stays closed. When they close every finding of a request for changes, the PR
 goes back to `agent:review` and the head gets a new review. The tick that records closures
 does nothing else on that PR; the next tick continues with them.
+
+#### Findings-only reviews
+
+With `[review_policy] findings_reviewer` ([Findings-only reviewer](reference.md#findings-only-reviewer),
+#416, ADR 0005, D8, integration of 2026-11-19; off by default) a level 2 round of a PR whose
+implementer signs with the implementer app has one more review, by a reviewer of the same agent
+with another model, outside the pool:
+
+- The receipt of the round's reviews names it in `findings`, apart from `reviewers`; the round
+  waits for it before its verdict counts, and its record has the round's number: it is not a
+  round of its own and does not count against `max_review_rounds`.
+- Its record carries `role: "findings"`, and its native review is always a `COMMENT`. Its
+  verdict acts only through its blocking findings (`flow_verdict`): with some, a request for
+  changes, and the fix receives them with the others; without, nothing. Its approval never
+  counts for the quorum, and a `needs_operator` of its own neither stops the loop nor holds the
+  merge for the trust policy.
+- A finding it opens is closed by the quorum: in a later round in which every reviewer the
+  round's receipt requires marks it `resolved` or `withdrawn`. Its own assessment closes
+  nothing. A reviewer of the quorum that keeps it `unresolved` cannot approve: its approval is
+  recorded as `request_changes`, as for a finding of its own. Its entry in `previous_findings`
+  carries `findings_only: true`. The operator closes it as any other.
+- Its review turns carry `role: "findings"` in the [round register](#round-register) (shown as
+  "Ruolo: finding-only"), and in the [PR receipt](#pr-receipt) its verdicts carry `role` and are
+  shown `(finding-only)`; a finding the quorum closed names those reviewers as who closed it.
 
 #### Closing a finding as the operator
 

@@ -29,11 +29,20 @@ recorded in the marker. Only its owner closes it, in a later review. A finding o
 ``ci`` is closed by the dispatcher when CI passes on the current head, and the operator can close
 any finding with an explicit command: both are dispatcher records (``finding`` markers). Another
 reviewer's assessment never closes a finding.
+
+The findings-only reviewer (ADR 0005, D8, integration of 2026-11-19, #416) is the exception:
+its record carries ``role`` ``FINDINGS_ONLY``, and its verdict acts only through its blocking
+findings (``flow_verdict``), which send the PR to the fix as any other's. Its approval approves
+nothing, and it never asks for the operator. Its findings are closed by the reviewers of the
+quorum, not by it: in a later round where every reviewer the round's receipt requires marks one
+``resolved`` or ``withdrawn`` (``finding_state``); while a reviewer of the quorum keeps one
+``unresolved`` its approval becomes a request for changes, as for a finding of its own.
 """
 
 import re
 
 from .acceptance import acceptance_findings
+from .policy import receipt_of
 from .schema import load_schema, validate, with_defaults
 
 # The verdicts a reviewer gives: those of the schema.
@@ -56,6 +65,9 @@ CLOSING = ('resolved', 'withdrawn')
 KEY = re.compile(r'[1-9][0-9]*/[A-Za-z0-9_.-]+/R[1-9][0-9]*-[1-9][0-9]*')
 FINDING_COMMAND = '/devloop finding'
 _COMMAND = re.compile(r'/devloop finding\s+(\S+)\s+(\S+)\s+(\S.*)')
+# The ``role`` of the record of a findings-only review (ADR 0005, D8, #416); the records of the
+# reviewers of the quorum have none.
+FINDINGS_ONLY = 'findings'
 
 
 def current_verdict(verdict):
@@ -64,21 +76,31 @@ def current_verdict(verdict):
     return 'needs_operator' if verdict == LEGACY_VERDICT else verdict
 
 
+def findings_only(review):
+    """Whether ``review`` is the record of a findings-only review (#416)."""
+    return review.get('source') == 'agent' and review.get('role') == FINDINGS_ONLY
+
+
 def trust_policy(review):
     """Whether ``review`` asks for the operator because the PR touches the trust policy
     (#434). A ``needs_operator`` without ``operator_reason``, recorded before #434, is a
-    ``decision``."""
+    ``decision``. A findings-only review (#416) never does: the trust policy is for the
+    reviewers of the quorum to recognize."""
     return (current_verdict(review.get('verdict')) == 'needs_operator'
-            and review.get('operator_reason') == TRUST_POLICY)
+            and review.get('operator_reason') == TRUST_POLICY and not findings_only(review))
 
 
 def own_open_findings(review):
     """The blocking findings of its own that ``review`` leaves open: those it opens, and those
     of its reviewer from earlier rounds it marks ``unresolved``. Another owner's finding is not
-    its to close (#111), so it does not count."""
+    its to close (#111), so it does not count; a findings-only finding (#416) counts for a
+    reviewer of the quorum, which closes it, and not for the findings-only reviewer."""
     owner = review.get('reviewer')
+    quorum = not findings_only(review)
     earlier = [p for p in review['previous_findings'] if p['status'] == 'unresolved'
-               and str(p.get('key', '')).split('/')[1:2] == [owner]]
+               and (quorum and p.get('findings_only') is True
+                    or not p.get('findings_only') and str(p.get('key', '')).split('/')[1:2]
+                    == [owner])]
     return list(review['blocking_findings']) + earlier
 
 
@@ -87,7 +109,13 @@ def flow_verdict(review):
     trust policy does not stop the loop: ``request_changes`` while blocking findings of its
     own stay open, otherwise ``approve``, whose merge stays the operator's
     (``trust_policy_parts``). Every other verdict is itself, under its current name: a
-    ``needs_operator`` for a decision, or without a reason, stops the loop at once."""
+    ``needs_operator`` for a decision, or without a reason, stops the loop at once.
+
+    A findings-only review (#416) acts only through its findings: ``request_changes`` when it
+    opens blocking ones, otherwise ``approve``, which only leaves the round to the reviewers of
+    the quorum: their approvals alone reach it (``_approvals_match``)."""
+    if findings_only(review):
+        return 'request_changes' if review['blocking_findings'] else 'approve'
     if trust_policy(review):
         return 'request_changes' if own_open_findings(review) else 'approve'
     return current_verdict(review['verdict'])
@@ -123,12 +151,45 @@ def _keys(review):
 class FindingState:
     """``open``: blocking findings still open, oldest first, each with its ``key`` and
     ``owner``. ``known``: the key of every finding ever opened. ``problems``: why the owner of
-    some finding cannot be reconstructed."""
+    some finding cannot be reconstructed. ``quorum_closed``: the findings-only findings (#416)
+    the quorum closed, by key: ``{status, by, round}``, ``by`` the reviewers of the quorum."""
 
-    def __init__(self, open_, known, problems):
+    def __init__(self, open_, known, problems, quorum_closed=None):
         self.open = open_
         self.known = known
         self.problems = problems
+        self.quorum_closed = quorum_closed or {}
+
+
+def _quorum_closures(records, open_):
+    """The findings-only findings of ``open_`` (#416) that round ``records`` closes, as
+    ``{key: {status, by, round}}``: every reviewer the receipt of the round's first agent record
+    requires, or without a receipt every reviewer of the round other than a findings-only one,
+    assessed it ``resolved`` or ``withdrawn``. A findings-only review, the CI and another
+    reviewer outside the quorum do not count."""
+    agents = [r for r in records if r.get('source') == 'agent']
+    receipt = receipt_of(agents[0]) if agents else None
+    quorum = (list(receipt['reviewers']) if receipt is not None
+              else [owner_of(r) for r in agents if not findings_only(r)])
+    if not quorum:
+        return {}
+    statuses = {}
+    for record in agents:
+        owner = owner_of(record)
+        if owner not in quorum or findings_only(record):
+            continue
+        for p in record['previous_findings']:
+            statuses.setdefault(p.get('key'), {}).setdefault(owner, p.get('status'))
+    closed = {}
+    for key, given in statuses.items():
+        finding = open_.get(key)
+        if (finding is None or not finding.get('findings_only')
+                or any(given.get(who) not in CLOSING for who in quorum)):
+            continue
+        status = 'resolved' if 'resolved' in given.values() else 'withdrawn'
+        closed[key] = {'status': status, 'by': ', '.join(quorum),
+                       'round': records[0]['round']}
+    return closed
 
 
 def finding_state(reviews, closures=()):
@@ -142,10 +203,24 @@ def finding_state(reviews, closures=()):
     historical prefix: once a record carries keys, a later record without them (or with keys on
     only some findings) closes nothing and only opens its own findings. A closure is final: by
     ``ci`` it closes only a CI finding, by ``operator`` any finding.
+
+    A finding a findings-only review opens (#416) is closed neither by that reviewer nor by any
+    single other one: only by the quorum of a later round, once that round's records are all
+    read (``_quorum_closures``).
     """
     open_, seen, known, problems = {}, {}, set(), []
     keyed_seen = False
+    quorum_closed, round_records = {}, []
+
+    def close_round():
+        for key, closure in _quorum_closures(round_records, open_).items():
+            del open_[key]
+            quorum_closed[key] = closure
     for review in reviews:
+        if round_records and review['round'] != round_records[0]['round']:
+            close_round()
+            round_records = []
+        round_records.append(review)
         owner, round_no = owner_of(review), review['round']
         if not isinstance(owner, str) or not owner:
             problems.append(f'il round {round_no} non registra il reviewer')
@@ -154,7 +229,9 @@ def finding_state(reviews, closures=()):
         if with_key == total:
             for p in review['previous_findings']:
                 earlier = open_.get(p['key'])
-                if p['status'] in CLOSING and earlier is not None and earlier['owner'] == owner:
+                # A findings-only finding is the quorum's to close (#416), never its owner's.
+                if (p['status'] in CLOSING and earlier is not None and earlier['owner'] == owner
+                        and not earlier.get('findings_only')):
                     del open_[p['key']]
             own = review['blocking_findings']
         elif with_key or keyed_seen:
@@ -177,15 +254,17 @@ def finding_state(reviews, closures=()):
                    for f in review['blocking_findings']]
         keyed_seen = keyed_seen or with_key > 0
         for f in own:
-            f = dict(f, owner=owner)
+            f = dict(f, owner=owner, **({'findings_only': True} if findings_only(review) else {}))
             open_[f['key']] = f
             seen.setdefault(f['id'], f)
             known.add(f['key'])
+    if round_records:
+        close_round()
     for closure in closures:
         f = open_.get(closure['key'])
         if f is not None and (closure['by'] == OPERATOR or f['owner'] == CI):
             del open_[closure['key']]
-    return FindingState(list(open_.values()), known, problems)
+    return FindingState(list(open_.values()), known, problems, quorum_closed)
 
 
 def open_findings(reviews, closures=()):
@@ -194,7 +273,7 @@ def open_findings(reviews, closures=()):
 
 
 def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, reviewer,
-                     criteria=(), acceptance_map=None):
+                     criteria=(), acceptance_map=None, role=None):
     """Validate ``raw`` against the review schema and return a review record.
 
     ``previous_open`` comes from :func:`open_findings`. The reviewer may name a finding by its
@@ -215,6 +294,10 @@ def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, 
     ``request_changes`` left with nothing to fix by that alone becomes ``UNPROVEN``: the
     finding does not send the PR to the fix, and the reviewer, who never approved, gives no
     approval either.
+
+    ``role`` ``FINDINGS_ONLY`` (#416) records a findings-only review: its verdict acts only
+    through its findings (``flow_verdict``). For a reviewer of the quorum, a findings-only
+    finding it leaves ``unresolved`` counts as one of its own: it cannot approve.
     """
     # An output without ``operator_reason`` (#434) is read as before: a ``decision``.
     raw = with_defaults('review', raw)
@@ -248,16 +331,23 @@ def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, 
         p = assessed.get(finding['key'])
         previous.append({'id': finding['id'], 'key': finding['key'],
                          'status': p['status'] if p else 'unresolved',
-                         'note': p['note'] if p else 'Non valutato dal reviewer.'})
+                         'note': p['note'] if p else 'Non valutato dal reviewer.',
+                         # The quorum closes it (#416): ``own_open_findings`` reads this.
+                         **({'findings_only': True} if finding.get('findings_only') else {})})
     if len(assessed) < len(previous_open):
         notes.append('Il reviewer non ha valutato tutti i finding precedenti: quelli mancanti restano aperti.')
     unresolved = [p for p in previous if p['status'] == 'unresolved']
     # Another owner's open finding alone does not turn an approval into a request for changes
     # (#111): the dispatcher checks every finding before promoting or fixing.
+    # A findings-only finding (#416) is the quorum's to close: for a reviewer of the quorum it
+    # counts as its own, and for the findings-only reviewer, which closes none, it does not.
+    quorum = role != FINDINGS_ONLY
     own_unresolved = [p for p, f in zip(previous, previous_open)
-                      if p['status'] == 'unresolved' and f['owner'] == reviewer]
+                      if p['status'] == 'unresolved' and quorum
+                      and (f['owner'] == reviewer or f.get('findings_only'))]
     foreign = [p['key'] for p, f in zip(previous, previous_open)
-               if p['status'] in CLOSING and f['owner'] != reviewer]
+               if p['status'] in CLOSING and f['owner'] != reviewer
+               and not (quorum and f.get('findings_only'))]
 
     verdict = raw['verdict']
     human_reason = raw['human_reason']
@@ -299,6 +389,12 @@ def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, 
     }
     if verdict == 'needs_operator':
         record['operator_reason'] = TRUST_POLICY if reason == TRUST_POLICY else DECISION
+    if role == FINDINGS_ONLY:
+        record['role'] = FINDINGS_ONLY
+        record['note'] = ' '.join(filter(None, [
+            'Review di soli finding: il verdetto non conta per il quorum né come round a sé; i '
+            'finding bloccanti vanno in correzione e li chiudono i reviewer del quorum.',
+            record['note']]))
     return record
 
 

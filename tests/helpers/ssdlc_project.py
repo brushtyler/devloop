@@ -398,6 +398,12 @@ _DISPUTE_REVIEW = """\
   (`withdrawn`), or keep it `unresolved` and give in `note` new evidence that answers the
   dispute. Keeping it open without new evidence is not enough.
 """
+_FINDINGS_ONLY_REVIEW = """\
+  The exception is a finding of a findings-only reviewer (its round is marked `findings-only`
+  below): the reviewers of the quorum close it together, when each of them marks it `resolved` or
+  `withdrawn` in the same round. Judge it as if it were yours: while you keep it `unresolved` you
+  cannot approve.
+"""
 _EVIDENCE_FIX = """\
 - Before fixing a finding, verify its evidence (`Evidence` below, when the reviewer gave one,
   and the `Latest assessment by its owner`, which answers an earlier dispute with new evidence):
@@ -448,6 +454,9 @@ SINCE_R4 = {
          _EVIDENCE_REVIEW),
         ('  implementer\'s responses below. Accept a reasoned dispute when it is right '
          '(`withdrawn`).\n', _DISPUTE_REVIEW),
+        # #416: the findings of the findings-only reviewer, closed by the quorum.
+        ('  A finding opened by CI or by another reviewer stays open whatever you write: assess '
+         'it anyway.\n', _FINDINGS_ONLY_REVIEW),
     ),
     'advisory': (
         *_TRUST_POLICY_472,

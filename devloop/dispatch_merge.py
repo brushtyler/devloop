@@ -34,8 +34,8 @@ from .markdown import (MAX_BODY, dispatcher_header, publishable, read_marker, sp
 from .pin import ScanFailed, merge_known
 from .planning import MERGING, label_names, pending_reviewers, touched_by_base
 from .policy import describe as describe_receipt
-from .policy import (MAX_LISTED_PATHS, ZERO_LEVEL, changes_requested, check_outcome,
-                     check_states, differences, distinct, evaluate, independent, profile_of,
+from .policy import (MAX_LISTED_PATHS, ZERO_LEVEL, another_model, changes_requested,
+                     check_outcome, check_states, differences, distinct, evaluate, independent, profile_of,
                      receipt_of, recorded_level, zero_refused)
 from .config import provider_quorum, same_agent
 from .receipt import CONFLICT as RECEIPT_CONFLICT
@@ -289,6 +289,30 @@ class MergeMixin:
             self.log(f'  reviewer {key} skipped: every model of its chain is remembered '
                      'unavailable')
         return chosen, ''
+
+    def _findings_reviewers(self, pr, receipt):
+        """The findings-only reviewer of a new round of ``pr`` under ``receipt`` (ADR 0005, D8,
+        integration of 2026-11-19, #416), as ``[key]``, or ``[]``. It reviews only when
+        ``review_policy.findings_reviewer`` is set, the level is 2, the PR's implementer signs
+        with the implementer app (P5-3, #407) and is the same agent in effect as it
+        (``same_agent``), and its profile is independent of every author of the PR with a
+        model of another name, whatever the effort (``another_model``). It is never one of the
+        reviewers the receipt requires: it adds its findings to their round, and its approval
+        never counts for the quorum."""
+        cfg, key = self.cfg, self.cfg.review_policy.findings_reviewer
+        implementer = profile_of(pr.meta)
+        if (not key or receipt['level'] != 2 or key in receipt['reviewers']
+                or key not in cfg.agents or cfg.signs_for_role(key) or implementer is None
+                or not cfg.signs_for_role(pr.meta.get('implementer'))
+                or not same_agent(cfg.agent(key), implementer)):
+            return []
+        authors = self._authors(pr)
+        profile = self._profile(key, 'review')
+        if authors is None or not all(another_model(profile, a) for a in authors):
+            self.log(f'  findings-only reviewer {key} skipped: not independent of the authors '
+                     'of the PR, or of the model of one of them')
+            return []
+        return [key]
 
     def _round_reviewers(self, reviews, level):
         """The reviewers the receipt of the latest agent round of ``reviews`` requires, when it

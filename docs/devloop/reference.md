@@ -165,7 +165,9 @@ or the reviewers of the pool (their order, app, kind, model, effort, `review_arg
 `agent:needs-operator` (#369); it may be the implementer, and an agent that is not configured,
 or a value that is not a string, stops devloop at startup. It counts for no quorum, so it is
 not part of the policy version: turning it on or off voids no approval. The local overlay
-turns it on. The [project file](#project-file) (ADR 0006, R2) sits between the installation's
+turns it on. `findings_reviewer` (empty by default: off) names the
+[findings-only reviewer](#findings-only-reviewer) of level 2 (#416), outside the pool and out of
+the policy version too. The [project file](#project-file) (ADR 0006, R2) sits between the installation's
 file and the overlay.
 
 Each PR records its implementer and the first reviewer of the pool when it is opened, so
@@ -1898,4 +1900,49 @@ false`. Both keys may be set in the local overlay.
 ```toml
 [review_policy]
 fallback_provider_ban = true
+```
+
+### Findings-only reviewer
+
+ADR 0005, D8, integration of 2026-11-19 (#416): when the implementer signs with the implementer
+app, a reviewer of the same agent as the implementer, with another model, reviews each level 2
+round besides the quorum, **for its findings only**. **Off by default** (D10):
+`[review_policy] findings_reviewer = ""`. The local overlay may set it.
+
+- **The key.** A configured agent key that may review: a `-implementer` key, an agent that is
+  not configured, a key of the reviewer pool (`roles.reviewers`) or a value that is not a string
+  stops devloop at startup. Outside the pool, it is never one of the reviewers a level requires,
+  not even in the place of a missing one: a pool without enough independent reviewers still
+  sends the PR to the operator ([review level](#review-level-and-policy-receipt)), and the
+  findings-only reviewer does not run.
+- **When it reviews.** Only at level 2, on a PR whose implementer, as its marker records it, signs
+  with the implementer app ([the keys by role](#the-implementer-app-and-the-keys-by-role)) and is
+  the same agent in effect as the key (the same kind, model or provider): claude-reviewer with
+  Sonnet on the code of claude-implementer with Opus. Every model its turn runs, fallbacks
+  included, must differ from every author of the PR by GitHub identity and by model: the same
+  model with another effort does not count as another model. Otherwise it does not review, or
+  its turn fails. With `fallback_provider_ban` its
+  fallbacks on an author's provider never run, as for any reviewer. Its review is blind to the
+  author like the others' (#389), and its prompt adds that its role is findings only.
+- **Its round.** A new round names it in the policy receipt of its reviews (`findings`, outside
+  the fields an approval must match) and waits for its review too: its record has the number of
+  the round in progress, which it neither opens nor counts against `max_review_rounds`.
+- **Its verdict.** Its blocking findings, with the same rules on evidence, send the PR to the fix
+  like any other reviewer's. Its approval, a `needs_operator` or an `unproven` verdict do
+  nothing: the round is approved only by the approvals of the reviewers the level requires, and
+  the trust policy is theirs to recognize. Its native review is always a `COMMENT`, under the app
+  of its agent.
+- **Its findings** are closed by the quorum, never by itself: in a later round where every
+  reviewer the round's receipt requires marks one `resolved` or `withdrawn`; while one of them
+  keeps it `unresolved` its verdict is a request for changes. The operator may close it with
+  `/devloop finding`, as any other.
+- **Policy version.** It stays out of it, as `advisory_reviewer`: turning it on or off voids no
+  approval.
+- **Records.** Its review record carries `role` `findings`, its turns in the round's register
+  carry the same `role` ("Ruolo: finding-only"), and the receipt of the PR marks its verdicts
+  `(finding-only)`: [Findings-only reviews](protocol.md#findings-only-reviews).
+
+```toml
+[review_policy]
+findings_reviewer = "claude-reviewer"   # outside roles.reviewers, with another model
 ```

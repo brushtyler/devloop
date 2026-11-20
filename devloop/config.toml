@@ -119,6 +119,15 @@ label = "reviews:2"
 # local overlay turns it on, e.g. advisory_reviewer = "claude". It is not part of the policy
 # version.
 advisory_reviewer = ""
+# The findings-only reviewer of ADR 0005, D8, integration of 2026-11-19 (issue #416), off by
+# default (D10): turning it on is the operator's decision. At level 2, on a PR whose implementer
+# signs with the implementer app and is the same agent, this reviewer key, outside
+# roles.reviewers and with another model (claude-reviewer with Sonnet beside claude-implementer
+# with Opus), reviews each round besides the quorum. Its findings join the round in progress
+# and go to the fix; the reviewers of the quorum close them. Its approval never counts for the
+# quorum, it never takes the place of a missing reviewer, and it is not part of the policy
+# version.
+# findings_reviewer = "claude-reviewer"
 # The reviewer rules of ADR 0005, P5-5 (issue #409), off by default (D10): turning them on is the
 # operator's decision, best with no PR close to its merge (the policy version changes). On, every
 # agent and every fallback model declares its `provider` (checked against the prefix of the

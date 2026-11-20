@@ -216,6 +216,10 @@ The limit on new findings in later rounds (see "How to classify") does not apply
 - A previous finding is identified as `round/reviewer/ID` (for example `2/codex/R2-1`): use that
   identifier as `id` in `previous_findings`. Your assessment closes only the findings you opened.
   A finding opened by CI or by another reviewer stays open whatever you write: assess it anyway.
+  The exception is a finding of a findings-only reviewer (its round is marked `findings-only`
+  below): the reviewers of the quorum close it together, when each of them marks it `resolved` or
+  `withdrawn` in the same round. Judge it as if it were yours: while you keep it `unresolved` you
+  cannot approve.
 
 ## Verdict
 

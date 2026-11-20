@@ -34,13 +34,13 @@ from .markdown import (dispatcher_header, publishable, render_fix, render_native
                        render_review, without_attribution)
 from .config import foreign, provider_quorum, same_agent
 from .planning import (BASE_CHANGED, FIX_COMMAND, RESYNC_AFTER_APPROVAL, RESYNC_CONFLICTS,
-                       carried_resync, ci_joins_round,
-                       counted_rounds, implementer_choice, pending_reviewers, preflight_state,
-                       voided_approval, waived_rounds, waiting_reviewers)
-from .policy import ZERO_LEVEL, distinct, independent, profile_of
+                       carried_resync, ci_joins_round, counted_rounds, findings_reviewers,
+                       implementer_choice, pending_reviewers, preflight_state, voided_approval,
+                       waived_rounds, waiting_reviewers)
+from .policy import ZERO_LEVEL, another_model, distinct, independent, profile_of
 from .ports import summarize_checks
-from .review import (ci_failure_review, current_round, last_round, normalize_review,
-                     open_findings, owner_of, round_verdict)
+from .review import (FINDINGS_ONLY, ci_failure_review, current_round, findings_only,
+                     last_round, normalize_review, open_findings, owner_of, round_verdict)
 from .supervision import SYNC_FAILED, TOOL_FAILURE
 from .workspace import WorkspaceError
 
@@ -49,6 +49,18 @@ from .workspace import WorkspaceError
 # is tried again, after a pause doubled each time, before the step escalates.
 REVIEW_ATTEMPTS = 3
 REVIEW_RETRY_PAUSE = 5  # seconds before the second attempt
+
+# What the findings-only reviewer (ADR 0005, D8, #416) reads after the review prompt.
+FINDINGS_ONLY_NOTE = '''
+
+## Your role in this round: findings only
+
+You review this round besides the reviewers of the quorum, as a findings-only reviewer. Your
+blocking findings go to the fix like theirs, with the same rules on evidence. Your verdict does
+not count: your approval approves nothing, and only the reviewers of the quorum decide whether
+your earlier findings are resolved. Report concrete, verifiable defects; do not repeat a finding
+of yours that is still open.
+'''
 
 
 def rerun_of(reruns, head):
@@ -541,8 +553,16 @@ class ActionsMixin:
         if counted > limit:
             return self._do_round_limit(pr)
         max_rounds = limit + round_no - counted
+        # The findings-only reviewer (ADR 0005, D8, #416): the one the round recorded when it
+        # joins one, else the one a new round chooses now. It is never a required reviewer: the
+        # receipt names it apart (``findings``), outside the fields an approval must match.
+        findings = (findings_reviewers(latest) if joins
+                    else self._findings_reviewers(pr, receipt))
+        findings = [key for key in findings if key in cfg.agents and not cfg.signs_for_role(key)]
+        if findings:
+            receipt = dict(receipt, findings=findings)
         reviewed = {owner_of(r) for r in done}
-        waited = [key for key in receipt['reviewers'] if key not in reviewed]
+        waited = [key for key in receipt['reviewers'] + findings if key not in reviewed]
         # One reviewer per action, or with parallel actions (#176) every one the round waits
         # for, each in a thread of its own.
         keys = waited if cfg.max_parallel_actions > 1 else waited[:1]
@@ -589,7 +609,8 @@ class ActionsMixin:
         level2 = receipt['level'] > 1
         by_provider = cfg.review_policy.provider_quorum
         authors = (self._authors(pr) or []) if level2 or by_provider else []
-        peers = [p for p in map(profile_of, done) if p]
+        # The findings-only reviewer's profile never counts among the quorum's (#416).
+        peers = [profile_of(r) for r in done if profile_of(r) and not findings_only(r)]
         # The profile each reviewer of this action runs with, reserved before any turn starts
         # and replaced atomically when a fallback model takes over (#176); a reviewer that
         # fails gives its reservation up.
@@ -613,7 +634,7 @@ class ActionsMixin:
                 if candidate.fallback_for and not foreign(p, authors):
                     return False
                 with reserving:
-                    others = [q for k, q in reserved.items() if k != key]
+                    others = [q for k, q in reserved.items() if k != key and k not in findings]
                     waiting = [self._profile(k, 'review') for k in receipt['reviewers']
                                if k not in reviewed and k not in reserved and k != key]
                     if not (all(independent(p, a) for a in authors)
@@ -624,7 +645,21 @@ class ActionsMixin:
                     return True
             return allowed
 
+        # The findings-only reviewer (#416): every model it runs, fallbacks included, is
+        # independent of every author and of another model than theirs, whatever the effort
+        # (``another_model``); the rules of the quorum do not apply to it, since it is not
+        # part of the quorum.
+        everyone = self._authors(pr) if findings else []
+
+        def allowed_findings(key):
+            def allowed(candidate):
+                p = self._profile(key, 'review', candidate)
+                return everyone is not None and all(another_model(p, a) for a in everyone)
+            return allowed
+
         def allowed_for(key):
+            if key in findings:
+                return allowed_findings(key)
             if by_provider:
                 return allowed_by_provider(key)
             if not level2:
@@ -638,7 +673,7 @@ class ActionsMixin:
                     return False
                 p = self._profile(key, 'review', candidate)
                 with reserving:
-                    others = [q for k, q in reserved.items() if k != key]
+                    others = [q for k, q in reserved.items() if k != key and k not in findings]
                     if not (all(independent(p, a) for a in authors)
                             and all(distinct(p, q) for q in peers + others)):
                         return False
@@ -672,11 +707,15 @@ class ActionsMixin:
             # worktree must come out of the review untouched, or the verdict is discarded.
             copy_name, copy = (self.ws.review_copy(path, key) if len(keys) > 1
                                else self.ws.review_copy(path))
+            # The findings-only reviewer (#416) reads its role, and its turns are recorded as
+            # findings-only in the round's register.
+            extra = {'role': FINDINGS_ONLY} if key in findings else {}
             try:
                 # Every turn of the round goes to the round's register (#325).
-                return self._turn(Models(cfg.agent(key)), 'review', prompt, 'review', copy,
-                                  f'pr-{pr.number}-review', admitted(key),
-                                  where=(pr.number, 'review', round_no))
+                return self._turn(Models(cfg.agent(key)), 'review',
+                                  prompt + FINDINGS_ONLY_NOTE if extra else prompt, 'review',
+                                  copy, f'pr-{pr.number}-review', admitted(key),
+                                  where=(pr.number, 'review', round_no), **extra)
             except BaseException as exc:
                 with reserving:
                     reserved.pop(key, None)
@@ -717,7 +756,8 @@ class ActionsMixin:
             review = normalize_review(raw, previous_open=previous_open, round_no=round_no,
                                       max_rounds=max_rounds, head_sha=pr.head_sha,
                                       ci=ci, reviewer=key, criteria=criteria,
-                                      acceptance_map=acceptance_map)
+                                      acceptance_map=acceptance_map,
+                                      role=FINDINGS_ONLY if key in findings else None)
             review['receipt'] = receipt
             if joins and bases:
                 review['bases'] = bases  # the round's earlier bases, checked up to this one
