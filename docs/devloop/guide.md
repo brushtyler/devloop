@@ -833,6 +833,18 @@ modules, one at a time, on the base commit of the branch, in a disposable worktr
   `/devloop escalate`) settles them the check runs again; a check that failed with its step
   recorded (a `tool_failure`, for one) resumes with `/devloop retry`, from the supervisor or,
   in `agent:needs-operator`, from a trusted user;
+- **every failed test fails on the base too, and the CI of that base commit is green** (#497):
+  the tests fail only where devloop runs them (its user, the permissions, the programs of the
+  host), and a new commit of `main` would not change that. The step is `host_tests`, a critical
+  escalation to the operator, never to the supervisor, with the failed tests, the base commit
+  and the link to its green CI: no wait for `main`, and nothing is pushed. The issue leaves
+  `agent:working`, the PR its label, as with `tests_failed`. The CI is green only when every
+  check of that commit concluded with a success: a skipped or neutral check does not prove that
+  its tests ran. A CI of the base commit that failed, is still running, has no check, has a
+  check without a success or cannot be read leaves `base_broken`; while that wait holds, devloop
+  reads the CI of the same commit again at each tick, and once it is green the step escalates
+  `host_tests` as above, without waiting for `main` to move (the blocks of the issue hold that
+  escalation as they hold its restart);
 - **a test fails only on the branch**, or the failed tests cannot be identified (a timeout, an
   output without them, a module that does not start, whose id unittest makes up the same whatever
   the error, a project whose `[tests].selection` is not
@@ -997,6 +1009,7 @@ next to the review; one for the trust policy gets none (#434, see
 | `review_level`, `level_zero` | Not enough independent reviewers; a level-0 head that cannot be promoted | Yes |
 | `sync_sensitive`, `protected_paths` | A sync conflict on a sensitive or operator-only path; a change to `protected_paths` | Yes |
 | `tests_failed`, `blocked`, `interrupted`, `unattributable`, `lost_meta`, `inconsistent`, `configuration`, `failure` | Tests still failing (or no change), an agent that declared itself blocked, an interrupted implementation, findings without an owner, a lost PR marker, an inconsistent PR state, a configuration to decide, a `gh`, git or dispatcher error | Yes |
+| `host_tests` | Local tests that fail on the base commit of the branch too, but pass in the CI of that commit: a [failure of the host](#tests-red-on-the-base-too), not of `main` | Yes |
 | `receipt_conflict` | The [receipt of the PR](protocol.md#pr-receipt) contradicts the markers at its promotion | Yes |
 | `retry_limit`, `supervisor_escalated`, `supervisor_refused` | The supervisor's retries are spent, it handed the escalation over, or it gave a command the escalation does not admit | Yes |
 | `conclave_veto` | A trusted user annulled the latest decision of a [conclave](#conclave-on-a-block) with `/devloop veto` | Yes |

@@ -41,6 +41,13 @@ MUTATING = ('sudo', 'apt-get', 'useradd', 'setfacl', 'visudo', 'chown', 'chmod',
 # checks (ADR 0006, R8), one the user is a member of.
 GROUP = grp.getgrgid(os.getgid()).gr_name
 LEVEL = {'read': 1, 'write': 2}
+# The users of the host the fakes simulate (``OpsTestCase.fake_host``, #497), never the user that
+# runs the tests: a default of params.env (devloop-agent, supervisor) may be that user.
+FAKE_AGENT = 'opsdry-agent'
+FAKE_SUPERVISOR = 'opsdry-supervisor'
+# What ``sudo --version`` prints for each sudo the fakes simulate: the host moved from sudo-rs to
+# the classic sudo on 2026-11-20, and the scripts behave the same with either.
+SUDO_FLAVORS = {'sudo-rs': 'sudo-rs 0.2.8', 'classic sudo': 'Sudo version 1.9.17p2'}
 
 
 def supervisor_token():
@@ -98,6 +105,42 @@ class OpsTestCase(unittest.TestCase):
         path = self.bin / name
         path.write_text(f'#!/bin/sh\n{body}\n')
         path.chmod(0o755)
+
+    def fake_host(self, sudo, users=()):
+        """Fakes of the host (#497) in the PATH of the scripts, which then never reach the real
+        ``id``, ``getent``, ``getfacl`` or ``sudo``: what a test sees does not depend on the user
+        that runs it nor on the host. They simulate:
+
+        - ``id``: the current user ``ME``, the owner of the temporary files, unprivileged (uid
+          1000) and in ``GROUP``; the users ``users``, each with a group of its own; no other;
+        - ``getent group``: ``GROUP`` and the groups of ``users``;
+        - ``getfacl``, unless the test has its own: no ACL entry for any user;
+        - ``sudo``: ``sudo`` of ``SUDO_FLAVORS``, whose ``--version`` says which; any other call
+          is recorded as a change of the host, as the shims of ``MUTATING`` (``setfacl``
+          among them) are."""
+        known = '|'.join(shlex.quote(u) for u in (ME, *users))
+        groups = '|'.join(shlex.quote(g) for g in (GROUP, *users))
+        self.shim('id', f'''opt=
+case "$1" in -u | -un | -gn | -nG | -G) opt=$1; shift ;; esac
+user=${{1:-{shlex.quote(ME)}}}
+case "$user" in {known}) ;; *) echo "id: '$user': no such user" >&2; exit 1 ;; esac
+if [ "$user" = {shlex.quote(ME)} ]; then uid=1000 group={shlex.quote(GROUP)}
+else uid=1001 group=$user; fi
+case "$opt" in
+    -u) echo "$uid" ;;
+    -un) echo "$user" ;;
+    -gn | -nG) echo "$group" ;;
+    -G) echo "$uid" ;;
+    *) echo "uid=$uid($user) gid=$uid($group) groups=$uid($group)" ;;
+esac''')
+        self.shim('getent', f'''[ "$1" = group ] && [ $# -eq 2 ] || exit 2
+case "$2" in {groups}) echo "$2:x:1000:" ;; *) exit 2 ;; esac''')
+        if not (self.bin / 'getfacl').exists():
+            self.shim('getfacl', 'echo "user::rwx"\necho "group::r-x"\necho "other::---"')
+        self.shim('sudo', f'''if [ "$1" = --version ] || [ "$1" = -V ]; then
+    echo {shlex.quote(SUDO_FLAVORS[sudo])}; exit 0
+fi
+echo "sudo $*" >> "$OPS_TEST_CALLS"''')
 
     def params(self, **overrides):
         values = {
@@ -784,24 +827,47 @@ class DryRunTests(OpsTestCase):
             'LAUNCHER_CMD': f'/usr/bin/python3 {clone}/scripts/devloop-pinned',
             'STATE_PATH': f'{clone}/.ssdlc/devloop',
             'DEVLOOP_PATH': f'{devloop}/.local/bin:/usr/local/bin:/usr/bin:/bin'}))
-        params = self.params(DEVLOOP_USER=ME)
-        for _ in range(2):
-            done = self.run_script('host/setup-devloop.sh', '--dry-run', '--params', str(params))
-            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-            actions = [line for line in done.stdout.splitlines()
-                       if '[dry-run]' in line and 'apt-get' not in line]
-            self.assertEqual(actions, [])
-            self.assertNotIn('da fare a mano', done.stdout)
-            self.assertIn('devloop.service è già aggiornato', done.stdout)
+        # #497: the host is simulated (fake_host): the user of the tests is devloop's, the agent
+        # user and the supervisor are other users, and sudo is sudo-rs or the classic one.
+        params = self.params(DEVLOOP_USER=ME, AGENT_USER=FAKE_AGENT,
+                             SUPERVISOR_USER=FAKE_SUPERVISOR)
+        for sudo in SUDO_FLAVORS:
+            self.fake_host(sudo, users=(FAKE_AGENT, FAKE_SUPERVISOR))
+            for _ in range(2):
+                with self.subTest(sudo):
+                    done = self.run_script('host/setup-devloop.sh', '--dry-run', '--params',
+                                           str(params))
+                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                    actions = [line for line in done.stdout.splitlines()
+                               if '[dry-run]' in line and 'apt-get' not in line]
+                    self.assertEqual(actions, [])
+                    self.assertNotIn('da fare a mano', done.stdout)
+                    self.assertIn(f"ok: l'utente {ME} esiste", done.stdout)
+                    self.assertIn(f'ok: {ME} è nel gruppo {GROUP}', done.stdout)
+                    self.assertIn('devloop.service è già aggiornato', done.stdout)
+                    self.assertIn(f"dell'utente {FAKE_AGENT} (#415)", done.stdout)
         self.assertEqual(self.mutating_calls(), [])
 
     def test_setup_supervisor_dry_run_prints_the_acl_and_the_sudoers(self):
         (self.home / 'devloop').mkdir(parents=True)
-        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER='opsdry-nosup')
+        # #497: the host is simulated (fake_host): the user of the tests is devloop's, the agent
+        # user exists, the supervisor does not yet, no ACL on the home of devloop, and sudo is
+        # sudo-rs or the classic one.
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER='opsdry-nosup',
+                             AGENT_USER=FAKE_AGENT)
         before = self.tree()
+        for sudo in SUDO_FLAVORS:
+            with self.subTest(sudo):
+                self.fake_host(sudo, users=(FAKE_AGENT,))
+                self.check_setup_supervisor(params, before)
+
+    def check_setup_supervisor(self, params, before):
         done = self.run_script('host/setup-supervisor.sh', '--dry-run', '--params', str(params))
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         out = done.stdout
+        self.assertIn(f"ok: l'utente {ME} e {self.home}/devloop esistono", out)
+        self.assertIn(f'[dry-run] useradd --create-home --home-dir {self.home}/supervisor '
+                      '--shell /bin/bash opsdry-nosup', out)
         self.assertIn(f'[dry-run] setfacl -m u:opsdry-nosup:--x {self.home}/devloop', out)
         self.assertIn(f'scriverebbe {self.tmp}/sudoers.d/devloop-supervisor (mode 440', out)
         self.assertIn(f'    | Defaults>{ME} always_set_home, secure_path="{self.home}/devloop/'
@@ -1759,13 +1825,24 @@ class CheckHostTests(OpsTestCase):
         (state / 'current').mkdir(parents=True)
         (state / 'run.log').touch()
         (self.devloop / 'devloop-source/.git').mkdir(parents=True)
-        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=ME, REPO='acme/widget',
-                             DEVLOOP_CLONE=str(self.devloop / 'ssdlc'),
+        # #497: the host is simulated (fake_host, with the ACL of setUp): the user of the tests,
+        # unprivileged, is devloop's and the supervisor, the agent user another one, and sudo is
+        # sudo-rs or the classic one.
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=ME, AGENT_USER=FAKE_AGENT,
+                             REPO='acme/widget', DEVLOOP_CLONE=str(self.devloop / 'ssdlc'),
                              SOURCE_REPO='brushtyler/ssdlc', SOURCE_REF='v1.2.0',
                              STATE_DIR=str(state), LAUNCHER_DIR=str(lib))
+        for sudo in SUDO_FLAVORS:
+            with self.subTest(sudo):
+                self.fake_host(sudo, users=(FAKE_AGENT,))
+                self.check_separate_source(params, state, lib)
+
+    def check_separate_source(self, params, state, lib):
         done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
         out = done.stdout
         self.assertEqual(done.returncode, 1, out + done.stderr)
+        self.assertIn('ATTENZIONE: non eseguito come root', out)
+        self.assertIn(f"ok: l'utente {FAKE_AGENT} esiste", out)
         self.assertIn(f'ERRORE: {lib}/devloop-pinned non esiste (setup-devloop.sh, dal tag '
                       'v1.2.0)', out)
         self.assertIn(f'ok: {self.devloop}/devloop-source è un clone della sorgente', out)
@@ -1773,6 +1850,38 @@ class CheckHostTests(OpsTestCase):
         self.assertIn(f'[dry-run] sudo -u {ME} -H -- env -C {self.devloop}/ssdlc /usr/bin/python3 '
                       f'{lib}/devloop-pinned --state-dir {state} apps', out)
         self.assertEqual(self.mutating_calls(), [])
+
+
+@unittest.skipIf(BASH is None, 'bash is not installed')
+class FakeHostTests(OpsTestCase):
+    """The fakes of ``fake_host`` (#497): the scripts see the simulated host, whoever runs the
+    tests and whatever sudo the host has."""
+
+    def sh(self, command):
+        env = dict(os.environ, PATH=f'{self.bin}:{os.environ.get("PATH", "/usr/bin:/bin")}',
+                   OPS_TEST_CALLS=str(self.calls))
+        return subprocess.run([BASH, '-c', command], capture_output=True, text=True, env=env,
+                              timeout=60)
+
+    def test_the_fakes_simulate_an_unprivileged_user_and_either_sudo(self):
+        for sudo, version in SUDO_FLAVORS.items():
+            with self.subTest(sudo):
+                self.fake_host(sudo, users=(FAKE_AGENT,))
+                for command, out in [('id -u', '1000'), ('id -un', ME), (f'id -gn {ME}', GROUP),
+                                     (f'id -nG {ME}', GROUP), (f'id -u {FAKE_AGENT}', '1001'),
+                                     (f'id -gn {FAKE_AGENT}', FAKE_AGENT),
+                                     (f'getent group {GROUP}', f'{GROUP}:x:1000:'),
+                                     ('sudo --version', version), ('getfacl -p /x', 'user::rwx\n'
+                                                                   'group::r-x\nother::---')]:
+                    done = self.sh(command)
+                    self.assertEqual((done.returncode, done.stdout.strip()), (0, out), command)
+                # A user or a group the simulated host does not have, whatever the real one has.
+                others = [u for u in ('root', 'nobody', 'devloop', 'devloop-agent', 'supervisor')
+                          if u != ME]
+                for command in [f'id -u {u}' for u in others] + ['getent group nogroup']:
+                    self.assertNotEqual(self.sh(command).returncode, 0, command)
+                self.assertEqual(self.sh('sudo -u x -H -- true').returncode, 0)
+        self.assertEqual(self.mutating_calls(), ['sudo -u x -H -- true'] * len(SUDO_FLAVORS))
 
 
 if __name__ == '__main__':

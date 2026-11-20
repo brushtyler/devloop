@@ -80,8 +80,11 @@ CRITICAL = {
     'uncertain_turn': 'turni senza esito da riconciliare con `/devloop reconcile`',
     'attempt': 'tentativo della PR non confermato dal journal, o già concluso',
     'budget': 'turno non coperto dall\'envelope di budget della storia',
+    'host_tests': 'test rossi in locale anche sulla base, verdi nella sua CI',
 }
 UNCERTAIN_TURN = 'uncertain_turn'  # a turn refused by the block on uncertain outcomes (#362)
+# Tests red on the branch and on its base commit, green in the CI of that commit (#497).
+HOST_TESTS = 'host_tests'
 
 # The steps a ``retry`` can run again, and the PR label each one resumes from.
 RETRY_STEPS = ('preflight', 'implement', 'review', 'fix', 'sync')

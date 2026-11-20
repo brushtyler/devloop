@@ -12,17 +12,18 @@ from devloop import markdown
 from devloop.config import LEGACY_NEEDS_OPERATOR
 from devloop.dispatch_base import MAX_CASES_LISTED, BaseBroken, MainAlerts
 from devloop.dispatcher import Dispatcher
-from devloop.github import GitHubError
+from devloop.github import GitHubError, normalize_checks
 from devloop.localtests import Tests, case_modules, failed_cases, module_command
 from devloop.planning import BASE_REPAIRED, Action, Snapshot, plan
+from devloop.ports import summarize_checks
 from devloop.workspace import Workspace
 
-from helpers.devloop_fakes import FakeGH
+from helpers.devloop_fakes import SHA1, FakeGH, SnapshotGH
 from test_devloop import (BASE, CFG, REV, FakeRunner, FakeWS, finding, fixed, implemented, norm,
                           pr, raw_review)
 from test_devloop_preflight import PCFG, IssueGH, checked, gap
-from test_devloop_supervision import (HUMAN, PREFLIGHT_AUTO, SUPER, SUPERVISOR_LOGIN, Case,
-                                      crash)
+from test_devloop_supervision import (AUTO, HUMAN, PREFLIGHT_AUTO, SUPER, SUPERVISOR_LOGIN,
+                                      Case, crash)
 
 WORKING = 'agent:working'
 
@@ -291,14 +292,14 @@ class WaitTests(unittest.TestCase):
     def test_the_issue_waits_while_the_base_stays(self):
         snap, logs = self.snapshot(BASE, [self.broken_comment()])
         self.assertEqual(snap.base_waits, {7: {'holds': True, 'labels': {'agent:working'},
-                                               'preflight': None}})
+                                               'preflight': None, 'ci': ''}})
         self.assertEqual([(a.kind, a.number) for a in plan(snap, CFG)], [])
         self.assertTrue(any('waits for main' in line for line in logs))
 
     def test_the_issue_starts_again_once_the_base_advances(self):
         snap, _ = self.snapshot('e' * 40, [self.broken_comment()])
         self.assertEqual(snap.base_waits, {7: {'holds': False, 'labels': {'agent:working'},
-                                               'preflight': None}})
+                                               'preflight': None, 'ci': ''}})
         actions = plan(snap, CFG)
         self.assertEqual([(a.kind, a.number, a.reason) for a in actions],
                          [('implement', 7, BASE_REPAIRED)])
@@ -668,6 +669,247 @@ class MainAlertTests(unittest.TestCase):
         self.assertEqual(self.gh.comments, [])
         d.tick()
         self.assertEqual([n for n, _ in self.gh.comments], [459])
+
+
+PENDING = [{'name': 'Unit Tests (Python 3.12)', 'bucket': 'pending', 'conclusion': ''}]
+
+
+class HostTestsTests(unittest.TestCase):
+    """#497: tests red on the branch and on its base commit, green in the CI of that commit, are
+    the host's failure (``host_tests``), not the base's (``base_broken``)."""
+
+    LINK = f'https://github.com/{CFG.repo}/commit/{BASE}/checks'
+
+    def implement(self, checks, cfg=CFG, gh=None):
+        """``_do_implement`` of issue 7 whose local tests fail with ``BRANCH`` on the branch and
+        on the base commit ``BASE``, whose CI has ``checks``."""
+        self.gh = gh or MainGH({BASE: checks})
+        self.runner = FakeRunner(implemented(), implemented())
+        self.ws = FakeWS(files=['ssdlc_impact.py'], modules=['test_impact.py'], tests=(False,))
+        self.ws.cases = {'issue-7': BRANCH, 'issue-7-base': BRANCH}
+        Dispatcher(cfg, self.gh, self.ws, self.runner, log=lambda m: None)._do_implement(7)
+
+    def notices(self, number):
+        return [markdown.read_marker(b, 'notice') for n, b in self.gh.comments
+                if n == number and markdown.read_marker(b, 'notice')]
+
+    def basebroken(self, number):
+        return [markdown.read_marker(b, 'basebroken') for n, b in self.gh.comments
+                if n == number and markdown.read_marker(b, 'basebroken')]
+
+    def test_a_green_ci_of_the_base_escalates_host_tests_to_the_operator(self):
+        # Even in merge mode auto: a new class is critical, never the supervisor's.
+        for label, cfg in (('off', CFG), ('auto', AUTO)):
+            with self.subTest(label):
+                self.implement(PASSED, cfg)
+                self.assertIn(BASE, self.gh.reads)
+                # One turn: no other attempt of the agent, no PR, no wait for the base.
+                self.assertEqual(len(self.runner.calls), 1)
+                self.assertEqual(self.gh.created, [])
+                self.assertEqual(self.gh.labels[7], {'agent:needs-operator'})
+                self.assertEqual(self.basebroken(7), [])
+                notice, = self.notices(7)
+                self.assertEqual((notice['class'], notice['critical'], notice['to']),
+                                 ('host_tests', True, 'operator'))
+                self.assertEqual(notice['host_tests'], {
+                    'step': 'implement', 'base': BASE, 'ci': self.LINK, 'count': 2,
+                    'cases': BRANCH})
+                text = self.gh.comments[-1][1]
+                self.assertIn(self.LINK, text)
+                self.assertIn(BASE[:12], text)
+                self.assertIn('`test_x.Case.test_b`', text)
+                self.assertIn('**Classe:** `host_tests`', text)
+                self.assertIn('critica', text)
+
+    def test_a_red_ci_of_the_base_stays_base_broken(self):
+        self.implement(FAILED)
+        self.assertIn(BASE, self.gh.reads)
+        self.assertEqual(len(self.runner.calls), 1)
+        self.assertEqual(self.gh.labels[7], {'agent:working'})
+        self.assertEqual(self.notices(7), [])
+        record, = self.basebroken(7)
+        self.assertEqual((record['step'], record['base'], record['cases']),
+                         ('implement', BASE, BRANCH))
+
+    def test_a_ci_not_known_green_stays_base_broken(self):
+        unreadable = MainGH({})
+
+        def fail(sha):
+            raise GitHubError('HTTP 502')
+        unreadable.check_details = fail
+        for label, checks, gh in (('pending', PENDING, None), ('missing', [], None),
+                                  ('unreadable', None, unreadable)):
+            with self.subTest(label):
+                self.implement(checks, gh=gh)
+                self.assertEqual(self.gh.labels[7], {'agent:working'})
+                self.assertEqual(self.notices(7), [])
+                self.assertEqual(len(self.basebroken(7)), 1)
+
+    def test_a_fix_with_a_green_ci_of_the_base_escalates_without_push(self):
+        first = norm(raw_review('request_changes', [finding()]))
+        for checks, cls in ((PASSED, 'host_tests'), (FAILED, None)):
+            with self.subTest(cls=cls):
+                self.gh = MainGH({BASE: checks})
+                ws = FakeWS(files=['devloop/review.py'], modules=['test_devloop.py'],
+                            tests=(False,))
+                ws.cases = {'pr-100': BRANCH, 'pr-100-base': BRANCH}
+                runner = FakeRunner(fixed(), fixed())
+                item = pr(labels=['agent:changes'], reviews=[first])
+                self.gh.labels[100] = {'agent:changes'}
+                Dispatcher(CFG, self.gh, ws, runner, log=lambda m: None)._do_fix(item)
+                self.assertEqual(len(runner.calls), 1)
+                self.assertEqual(ws.pushes, [])
+                if cls is None:
+                    self.assertEqual(self.gh.labels[100], {'agent:changes'})
+                    self.assertEqual(len(self.basebroken(100)), 1)
+                    continue
+                self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
+                self.assertEqual(self.basebroken(100), [])
+                notice, = self.notices(100)
+                self.assertEqual(notice['class'], 'host_tests')
+                self.assertEqual(notice['host_tests']['step'], 'fix')
+                self.assertEqual(notice['host_tests']['ci'], self.LINK)
+
+    def test_checks_without_a_success_are_not_a_green_ci(self):
+        # As GitHub reports them (``normalize_checks``): a skipped or neutral job counts as
+        # passed for the gates of a PR, but does not prove that the tests ran.
+        def checks(*conclusions):
+            runs = [{'id': i, 'name': f'Unit Tests {i}', 'app_id': 15368, 'status': 'completed',
+                     'conclusion': c} for i, c in enumerate(conclusions)]
+            return normalize_checks(runs, {'statuses': [], 'total_count': 0})
+        self.assertEqual(summarize_checks(checks('skipped'))[0], 'pass')
+        for label, details in (('skipped', checks('skipped')), ('neutral', checks('neutral')),
+                               ('success and skipped', checks('success', 'skipped')),
+                               ('no check run', checks())):
+            with self.subTest(label):
+                self.implement(details)
+                self.assertEqual(self.gh.labels[7], {'agent:working'})
+                self.assertEqual(self.notices(7), [])
+                self.assertEqual(len(self.basebroken(7)), 1)
+        self.implement(checks('success', 'success'))
+        self.assertEqual(self.notices(7)[0]['class'], 'host_tests')
+
+
+class WaitingGH(MainGH):
+    """Issue 7, in ``agent:working`` while its labels have it, with the checks of each commit."""
+
+    def issues_with_label(self, label):
+        if label in self.labels.get(7, ()):
+            return [{'number': 7, 'title': 'Issue 7',
+                     'labels': [{'name': n} for n in sorted(self.labels[7])],
+                     'author': {'login': 'brushtyler'}}]
+        return []
+
+
+class WaitingPRGH(SnapshotGH):
+    """PR #100 at ``SHA1`` (``SnapshotGH``), with the checks of each commit."""
+
+    def __init__(self, checks):
+        super().__init__([])
+        self.by_sha = checks
+        self.reads = []
+
+    check_details = MainGH.check_details
+
+
+class HostTestsDuringTheWaitTests(unittest.TestCase):
+    """#497: a step that waits for the base branch because the CI of the base commit was not
+    known green escalates ``host_tests`` once that CI passes, without a new commit of the base
+    branch: the snapshot reads it again at each tick while the wait holds."""
+
+    def ws(self, **kwargs):
+        """A ``FakeWS`` whose base branch stays at ``BASE``."""
+        ws = FakeWS(**kwargs)
+        ws.base_head = lambda: BASE
+        return ws
+
+    def tick(self, d):
+        return [(a.kind, a.number) for a in d.tick()]
+
+    def notices(self, gh, number):
+        return [markdown.read_marker(b, 'notice') for n, b in gh.comments
+                if n == number and markdown.read_marker(b, 'notice')]
+
+    def waiting(self, gh, d):
+        """Tick ``d`` while the CI of ``BASE`` is pending, then unreadable: the step waits."""
+        number = 100 if isinstance(gh, WaitingPRGH) else 7
+        labels = set(gh.labels[number])
+        for state in ('pending', 'unreadable'):
+            with self.subTest(state):
+                if state == 'unreadable':
+                    def fail(sha):
+                        raise GitHubError('HTTP 502')
+                    gh.check_details = fail
+                self.assertEqual(self.tick(d), [])
+                self.assertEqual(gh.labels[number], labels)
+                self.assertEqual(self.notices(gh, number), [])
+        del gh.check_details
+        gh.reads.clear()
+
+    def test_an_implementation_escalates_once_the_ci_of_the_base_passes(self):
+        gh = WaitingGH({BASE: PENDING})
+        ws = self.ws(files=['ssdlc_impact.py'], modules=['test_impact.py'], tests=(False,))
+        ws.cases = {'issue-7': BRANCH, 'issue-7-base': BRANCH}
+        runner = FakeRunner(implemented())
+        d = Dispatcher(CFG, gh, ws, runner, log=lambda m: None)
+        gh.labels[7] = {WORKING}
+        d._do_implement(7)
+        self.assertEqual(gh.labels[7], {WORKING})
+        self.assertTrue(any(markdown.read_marker(b, 'basebroken') for _, b in gh.comments))
+        self.waiting(gh, d)
+        # The same base commit, its CI now green.
+        gh.by_sha[BASE] = PASSED
+        self.assertEqual(self.tick(d), [('host_tests', 7)])
+        self.assertIn(BASE, gh.reads)
+        self.assertEqual(gh.labels[7], {'agent:needs-operator'})
+        notice, = self.notices(gh, 7)
+        self.assertEqual((notice['class'], notice['critical'], notice['to']),
+                         ('host_tests', True, 'operator'))
+        self.assertEqual(notice['host_tests'], {
+            'step': 'implement', 'base': BASE, 'ci': HostTestsTests.LINK, 'count': 2,
+            'cases': BRANCH})
+        self.assertIn('mentre il passo attendeva', gh.comments[-1][1])
+        # Once: no other turn, no PR, and nothing more to do.
+        self.assertEqual(self.tick(d), [])
+        self.assertEqual(len(runner.calls), 1)
+        self.assertEqual(gh.created, [])
+
+    def test_a_blocked_issue_escalates_once_its_block_is_lifted(self):
+        wait = {'holds': True, 'labels': {WORKING, 'agent:needs-supervisor'}, 'preflight': None,
+                'ci': HostTestsTests.LINK}
+        snap = Snapshot([], [], [7], base_waits={7: wait})
+        self.assertEqual(plan(snap, CFG), [])
+        wait['labels'] = {WORKING}
+        self.assertEqual([(a.kind, a.number) for a in plan(snap, CFG)], [('host_tests', 7)])
+        # It takes no slot.
+        self.assertEqual([a.kind for a in plan(snap, dataclasses.replace(CFG, max_open_prs=0))],
+                         ['host_tests'])
+
+    def test_a_fix_escalates_once_the_ci_of_the_base_passes(self):
+        gh = WaitingPRGH({BASE: PENDING})
+        gh.labels[100] = {'agent:changes'}
+        d = Dispatcher(CFG, gh, self.ws(), FakeRunner(), log=lambda m: None)
+        d._wait_base(100, 'fix', BaseBroken(BASE, BRANCH), SHA1)
+        self.waiting(gh, d)
+        gh.by_sha[BASE] = PASSED
+        self.assertEqual(self.tick(d), [('host_tests', 100)])
+        self.assertEqual(gh.labels[100], {'agent:needs-operator'})
+        notice, = self.notices(gh, 100)
+        self.assertEqual(notice['class'], 'host_tests')
+        self.assertEqual(notice['host_tests']['step'], 'fix')
+        self.assertEqual(notice['host_tests']['ci'], HostTestsTests.LINK)
+        self.assertEqual(self.tick(d), [])
+
+    def test_a_record_with_more_tests_than_listed_keeps_their_count(self):
+        many = [f'test_x.Case.test_{i:03}' for i in range(MAX_CASES_LISTED + 5)]
+        gh = WaitingGH({BASE: PASSED})
+        gh.labels[7] = {WORKING}
+        d = Dispatcher(CFG, gh, self.ws(), FakeRunner(), log=lambda m: None)
+        d._wait_base(7, 'implement', BaseBroken(BASE, many), BASE)
+        self.assertEqual(self.tick(d), [('host_tests', 7)])
+        notice, = self.notices(gh, 7)
+        self.assertEqual(notice['host_tests']['count'], MAX_CASES_LISTED + 5)
+        self.assertIn('… e altri 5', gh.comments[-1][1])
 
 
 if __name__ == '__main__':
