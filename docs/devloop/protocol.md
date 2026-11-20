@@ -537,6 +537,32 @@ the cycle is gone. A `cycle` record counts only from the dispatcher's identity, 
 cycle is reported once on each issue; another cycle on the same issue is reported again. The
 record adds no label and blocks nothing by itself: the open blocks do.
 
+## Base broken records
+
+When every failed test of an implementation or of a fix fails on the base commit of its branch
+too ([Tests red on the base too](guide.md#tests-red-on-the-base-too), #459), the dispatcher writes
+a comment ("Test rossi anche sulla base") on the issue (implement) or on the PR (fix), ending
+with a `basebroken` marker: `step` (`implement` or `fix`), `base` (the base commit, the merge
+base of the branch with `origin/main`), `head` (the commit the step started from: the PR's head
+for a fix), `count` (the failed tests) and `cases` (their identities, at most 30). A record
+counts only from the dispatcher's identity, and only the latest one, while no notice of the
+dispatcher follows it (an escalation, a block) other than one of the readiness check that
+restarts the implementation: an escalation with `step` `preflight` or of class
+`operator_decision` or `preflight_default`, or a handoff to the operator
+(`supervisor_escalated`, `supervisor_refused`, `retry_limit`) of such an escalation to the
+supervisor. Those keep `agent:working` and the wait, and their block holds the restart:
+
+- an issue in `agent:working` without a PR whose latest record is of `implement` is not `stale`:
+  it waits while `origin/main` is at `base`, then starts again as an implementation, unless
+  `agent:needs-operator`, `agent:needs-supervisor` or a label of `blocked_labels` holds it; with
+  `preflight`, through the readiness check of its current request, as a ready issue;
+- a PR whose latest record is of `fix` on its current head runs no fix while `origin/main` is at
+  `base`. A base that cannot be read keeps the wait.
+
+The alert of a [red CI on `main`](guide.md#red-ci-on-main) is a dispatcher comment on
+`[run].alert_issue` without a record; with the outbox its publication covers `main_red:<sha>`, so
+that an uncertain outcome is reconciled and not published twice.
+
 ## Daily summary
 
 The [daily summary](guide.md#daily-summary) (#256) reads only records bound to identities: the

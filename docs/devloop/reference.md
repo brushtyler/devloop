@@ -101,7 +101,9 @@ holds it, whatever its `state_dir`. A value that is not an absolute path (or one
 `~`), or a `repo` that is not `owner/name` with it, stops devloop at startup; a directory that
 does not exist stops `tick` and `run`, and devloop does not create it. Unset, only the lock of
 `state_dir`, as before. It applies at the next start. `[run]` (`alert_issue`, unset by
-default) names the issue of the alert of the [continuous loop](guide.md#continuous-loop); a value that
+default) names the issue of the alert of the [continuous loop](guide.md#continuous-loop) and of
+the other alerts of the dispatcher, such as a [red CI on `main`](guide.md#red-ci-on-main) (#459),
+read at each tick only when it is set; a value that
 is not an issue number (an integer of at least 1), or an unknown key, stops devloop at startup.
 `[report]` (`issue`, unset by default; `interval`, default 15) sets the
 [daily summary](guide.md#daily-summary): the dedicated issue it is published on and the minutes
@@ -425,6 +427,13 @@ When no module is pertinent, for example when only documentation changed, and wi
 no test runs locally and the PR goes on to the CI. `implement_test_retries` applies to the tests
 that ran: a failure goes back to the implementer with the output, and after the last attempt the
 issue or PR goes to `agent:needs-operator`, as with `"full"`.
+
+**Failures of the base.** With `selection = "python-unittest-modules"`, before a failure of an
+implementation or of a fix goes back to the implementer, the dispatcher runs the modules of the
+failed tests, read from the whole output, on the base commit of the branch (#459). When every
+failed test fails there too the step waits for the base branch to advance, without further
+attempts nor escalation ([Tests red on the base too](guide.md#tests-red-on-the-base-too)). Each
+module runs with `test_timeout_seconds`.
 
 **The CI stays the gate.** A defect the local modules miss becomes a CI round. The review may
 start while the CI runs, but an approval leads to `agent:ready-to-merge` only once the CI of the

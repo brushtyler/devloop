@@ -143,6 +143,9 @@ class PullRequest:
     # A trusted user's ``/devloop veto`` of the latest conclave decision on the PR or its issue
     # that the dispatcher has not applied yet (#142): ``{comment, by, reason, conclave}``.
     veto: dict = None
+    # The ``basebroken`` record of a fix of the current head whose failed tests fail on the base
+    # commit too (#459), while the base branch has not moved past that commit: no fix runs.
+    base_broken: dict = None
 
 
 def operator_blocked(labels, lb):
@@ -196,6 +199,12 @@ class Snapshot:
     # With ``review_policy.advisory_reviewer`` (#369), the devloop PRs in agent:needs-operator
     # whose head has no advisory review yet: dicts ``{number, head}``, one action each.
     advisories: list = field(default_factory=list)
+    # The issues of ``working_issues`` without a PR whose implementation failed with tests that
+    # fail on the base commit too (#459): dicts ``{holds, labels, preflight}``, whether each
+    # still waits for the base branch to move past that commit (``holds``), the issue's labels
+    # (a set), and with ``preflight`` configured, the view of its readiness check
+    # (``preflight_state``) once the wait no longer holds, else None (``base_restart``).
+    base_waits: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -484,10 +493,20 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
             free -= 1
         actions.append(Action('supervise', item['number'], f'{item["command"]} by {item["by"]}'))
     for number in snapshot.working_issues:
-        if number not in pr_issues:
-            actions.append(Action('stale', number, 'agent:working without an open devloop PR'))
-        else:
+        if number in pr_issues:
             actions.append(Action('settle', number, 'agent:working but its PR is open'))
+        elif number in snapshot.base_waits:
+            # Its failed tests failed on the base too (#459): it waits for the base branch to
+            # advance, then starts again in a free slot (``base_restart``).
+            if number in busy:
+                continue
+            action = base_restart(number, snapshot.base_waits[number], cfg, free, implement)
+            if action is not None:
+                if action.kind in ('implement', 'preflight'):
+                    free -= 1
+                actions.append(action)
+        else:
+            actions.append(Action('stale', number, 'agent:working without an open devloop PR'))
     for pr in snapshot.prs:
         # The dispatcher's own label of an operator merge (#248) does not stop devloop.
         if lb.needs_supervisor in pr.labels or operator_held(pr, lb):
@@ -572,6 +591,8 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
             actions.append(Action('findings', pr.number, 'CI passed on the head' if ci_green
                                   else 'operator command'))
             continue
+        if pr.fix_requests and pr.base_broken:
+            continue  # the fix waits for the base branch to advance (#459)
         if pr.fix_requests:
             # A fix of the current head asked by a trusted user or the supervisor (#195): no
             # review first, and no round, since it writes no review record.
@@ -598,6 +619,8 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
             elif blind and pr.checks == 'fail':
                 actions.append(Action('ci_failed', pr.number, 'CI failed after the review')
                                if rounds_left else Action('round_limit', pr.number))
+            elif pr.base_broken:
+                continue  # the fix waits for the base branch to advance (#459)
             else:
                 actions.append(Action('fix', pr.number))
         elif lb.review in pr.labels:
@@ -809,6 +832,45 @@ def _plan_preflight(snapshot, cfg, pr_issues, free, urgent='', implement=True):
 
 
 BASE_ADVANCED = 'the base branch advanced since the failed readiness check, whose gaps depend on it'
+# The reason of an implementation that starts again after its failed tests failed on the base
+# too (#459), once the base branch moved past that commit.
+BASE_REPAIRED = 'the base branch moved past the commit where its failed tests failed too'
+
+
+def base_restart(number, wait, cfg, free, implement=True):
+    """The action that starts again issue ``number``, whose implementation waits for the base
+    branch (#459, ``Snapshot.base_waits``), or None. Nothing while the wait ``holds``. The
+    issue's blocks hold its restart as they hold a ready issue: a label of ``blocked_labels``,
+    ``agent:needs-supervisor``, or ``agent:needs-operator`` (under either name, #248). With the
+    readiness check (#114) the restart goes through it as a ready issue does: an issue whose
+    check for its current text passed is implemented, one without a valid check (its text
+    changed during the wait, a new check was asked) is checked first, one whose check failed
+    is blocked again (``preflight_block``); under a block that the check owns, only a check
+    asked by a change of the text runs. An implementation or a check takes a ``free`` slot;
+    without ``implement`` (#342) no implementation is planned."""
+    lb = cfg.labels
+    if wait['holds']:
+        return None
+    labels = set(wait['labels'])
+    if labels & (set(cfg.blocked_labels) | {lb.needs_supervisor}):
+        return None
+    view = wait.get('preflight') if cfg.preflight else None
+    if cfg.preflight and view is None:
+        return None  # nothing is known about its check
+    state, reason = preflight_state(view) if view is not None else ('ready', '')
+    if operator_blocked(labels, lb):
+        if view is not None and view['owned'] and state == 'run' and free > 0:
+            return Action('preflight', number, f'{reason}; {BASE_REPAIRED}')
+        return None
+    if state == 'not_ready':
+        return Action('preflight_block', number, 'the readiness check of the current text failed')
+    if free <= 0:
+        return None
+    if state == 'run':
+        return Action('preflight', number, f'{reason}; {BASE_REPAIRED}')
+    if not implement:
+        return None
+    return Action('implement', number, BASE_REPAIRED)
 
 
 def repository_bound(record):

@@ -195,6 +195,7 @@ from .context import (LABEL_STYLE, _describe_bases, _failure_text, _open_finding
                       label_transition, transition_labels)
 from .dispatch_actions import ActionsMixin, Models, ready_approval, rerun_of
 from .dispatch_advisory import AdvisoryFailures, AdvisoryMixin, AdvisoryResults
+from .dispatch_base import BaseMixin, MainAlerts
 from .dispatch_conclave import ConclaveMixin
 from .dispatch_merge import MergeMixin
 from .dispatch_preflight import PreflightMixin
@@ -614,7 +615,7 @@ def untrusted_change(history, ready_label, trusted_users, admitters=None):
 
 
 class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, ConclaveMixin,
-                 AdvisoryMixin):
+                 AdvisoryMixin, BaseMixin):
     """``gh`` acts as the dispatcher: it implements the ports of ``ports.Backend`` (tracker,
     code review and CI), and the dispatcher uses nothing else of it. ``identities``
     (``apps.Identities``) gives each agent its own GitHub identity; without it every actor uses
@@ -623,8 +624,14 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
     def __init__(self, cfg, gh: Backend, ws, runner, log=print, identities=None, activity=None,
                  ledger=None, merger=None, pinner=None, memory=None, clock=time.time,
-                 advisory_results=None, advisory_failures=None, housekeeping=None):
+                 advisory_results=None, advisory_failures=None, housekeeping=None,
+                 main_alerts=None):
         self.cfg = cfg
+        # The commit of the base branch whose red CI was last alerted (#459, ``MainAlerts``):
+        # in ``state_dir`` from ``devloop``, in memory without it; and the one this process
+        # last logged.
+        self.main_alerts = main_alerts if main_alerts is not None else MainAlerts()
+        self._main_logged = None
         # The cleanup of state_dir (#380, ``housekeeping.Housekeeping``), or None: run at a
         # tick with nothing running (``_housekeeping``).
         self.housekeeping = housekeeping
@@ -1082,6 +1089,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
     def snapshot(self):
         lb = self.cfg.labels
         prs = []
+        # The base branch, fetched at most once per snapshot, for the failed checks that depend
+        # on it (#270) and the steps that wait for it to advance (#459).
+        base_head = functools.cache(lambda: self.ws.base_head())
         for raw in self.gh.open_prs():
             pr = self._devloop_pr(raw)
             if pr is None:
@@ -1089,6 +1099,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             if pr.meta and pr.labels & {lb.review, lb.changes, lb.ready_to_merge}:
                 thread = self._pr_thread(pr.number)
                 self._read_thread(pr, thread)
+                # A fix whose failed tests fail on the base too waits for it to advance (#459).
+                wait = self._base_wait(thread, 'fix', pr.head_sha)
+                if wait is not None and self._base_holds(wait, base_head):
+                    pr.base_broken = wait
+                    self.log(f'  PR #{pr.number}: the fix waits for {self.cfg.base_branch} to '
+                             f'move past {wait["base"][:12]}, where its failed tests fail too')
                 # A veto to apply, or a review block restarted by a conclave (#142).
                 self._conclave_pr_state(pr, thread)
             # In agent:changes CI matters to close an open CI finding, and after a review that
@@ -1174,9 +1190,6 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         # those without an open block (#114), that may start or are blocked by the check.
         candidates = [i for i in ready if 'merged' in i and not i['merged']]
         views = self._dependency_view([i['number'] for i in candidates]) if candidates else {}
-        # The base branch, fetched at most once per snapshot, for the failed checks that depend
-        # on it (#270).
-        base_head = functools.cache(lambda: self.ws.base_head())
         for issue in candidates:
             issue.update(views[issue['number']])
             if issue['cycle']:
@@ -1195,8 +1208,29 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                         and not issue['labels'] & waiting and issue['number'] not in pr_issues):
                     issue['preflight'] = self._preflight_view(issue['number'], issue['labels'],
                                                               base_head)
-        working = [raw['number'] for raw in self.gh.issues_with_label(lb.working)]
-        return Snapshot(prs=prs, ready_issues=ready, working_issues=working,
+        working_raw = self.gh.issues_with_label(lb.working)
+        working = [raw['number'] for raw in working_raw]
+        # An implementation whose failed tests fail on the base too (#459): whether it still
+        # waits for the base branch to advance, the issue's labels, which may hold its restart,
+        # and, with ``preflight``, the view of its readiness check once it may start again.
+        waits = {}
+        for raw in working_raw:
+            number = raw['number']
+            if number in pr_issues:
+                continue
+            wait = self._base_wait(self.gh.issue_comments(number), 'implement')
+            if wait is None:
+                continue
+            labels = label_names(raw.get('labels') or [])
+            holds = self._base_holds(wait, base_head)
+            waits[number] = {'holds': holds, 'labels': labels, 'preflight': None}
+            if not holds and self.cfg.preflight:
+                waits[number]['preflight'] = self._preflight_view(number, labels, base_head)
+            self.log(f'  issue #{number}: the implementation '
+                     + (f'waits for {self.cfg.base_branch} to move past {wait["base"][:12]}'
+                        if holds else f'may start again: {self.cfg.base_branch} moved '
+                        f'past {wait["base"][:12]}'))
+        return Snapshot(prs=prs, ready_issues=ready, working_issues=working, base_waits=waits,
                         supervised=self._supervised_items(prs),
                         conclaves=self._conclave_items(prs),
                         advisories=self._advisory_items(prs))
@@ -1400,6 +1434,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             self._watch_journal()
             self._resume_publications()
             self._signal_dropped()
+            self._watch_main()
         self._transition_labels(dry_run)
         snap = self.snapshot()
         self._flag_incomplete(snap, dry_run)
@@ -1457,6 +1492,7 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         self._watch_journal()
         self._resume_publications()
         self._signal_dropped()
+        self._watch_main()
         self._transition_labels(False)
         snap = self.snapshot()
         prs = {pr.number: pr for pr in snap.prs}
@@ -1903,6 +1939,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 # A readiness check runs again only on an issue with agent:ready: one the
                 # operator may retry keeps it, as a failed check does.
                 remove = [label for label in remove if label != lb.ready]
+            if pr is None and (supervised or retry or {}).get('step') == 'preflight':
+                # The check that restarts an implementation waiting for its base keeps
+                # agent:working (#459): its escalation leaves the wait (``_base_wait``), and a
+                # retry resumes it.
+                remove = [label for label in remove if label != lb.working]
             # A budget refusal on a PR records its head (#396): an advisory review waits only
             # on the refusal of the head it would review (``_advisory_held``).
             extra = ({'category': exc.category,
@@ -2926,8 +2967,11 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                      'prompt')
         return missing
 
-    def _write_turn(self, agent, prompt, schema, path, label, where=None):
+    def _write_turn(self, agent, prompt, schema, path, label, where=None, base_check=False):
         """Run a writing agent, then the local tests (``_verify``); retry with the failures.
+        With ``base_check`` (an implementation or a fix, #459) a failure whose failed tests all
+        fail on the base commit of the branch too is not retried: the reason to escalate is then
+        a ``BaseBroken`` (``dispatch_base``), and the step waits for the base branch to advance.
         ``prompt`` is the text, or a function of the attempt (0 first) that renders it, so that
         each attempt gets what its worktree holds then (#203).
         Returns the output, ``None`` on success or a reason to escalate, the agent configuration
@@ -2967,6 +3011,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             passed, tail, tested, local = self._verify(where, path, attempt + 1)
             if passed:
                 return result, None, used, tested, local
+            broken = self._base_broken(path, tail) if base_check else None
+            if broken is not None:
+                return result, broken, used, None, local
             failures += ('\n\n## Test failures after your previous attempt\n\nThe test command '
                          f'failed. Fix the cause, then finish again.\n\n```text\n{tail}\n```\n')
         return (result, ('I test locali falliscono anche dopo i tentativi di correzione.', tail),

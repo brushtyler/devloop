@@ -544,6 +544,22 @@ def _valid_story(s):
                  and all(isinstance(h, str) for h in hashes) if root else hashes is None))
 
 
+BASE_BROKEN_STEPS = ('implement', 'fix')
+
+
+def _valid_basebroken(b):
+    """A step whose local tests failed only with tests that fail on the base commit of its
+    branch too (#459): the step (``implement`` or ``fix``), that commit (``base``), the head it
+    started from (``head``: the PR's, or the base's for an implementation), how many tests
+    failed (``count``) and the first of them (``cases``). The step waits for the base branch to
+    move past ``base``."""
+    return (b.get('step') in BASE_BROKEN_STEPS
+            and isinstance(b.get('base'), str) and _SHA.fullmatch(b['base']) is not None
+            and isinstance(b.get('head'), str) and _is_int(b.get('count'), 1)
+            and isinstance(b.get('cases'), list) and bool(b['cases'])
+            and all(isinstance(c, str) for c in b['cases']))
+
+
 _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy': _valid_policy,
           'finding': _valid_finding, 'sync': _valid_sync, 'preflight': _valid_preflight,
           'notice': _valid_notice, 'ledger': _valid_ledger, 'merged': _valid_merged,
@@ -551,7 +567,8 @@ _VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr, 'policy':
           'closed': _valid_closed, 'cycle': _valid_cycle, 'recheck': _valid_recheck,
           'report': _valid_report,
           'receipt': _valid_pr_receipt, 'conclave': _valid_conclave,
-          'advisory': _valid_advisory, 'story': _valid_story, 'pin': _valid_pin}
+          'advisory': _valid_advisory, 'story': _valid_story, 'pin': _valid_pin,
+          'basebroken': _valid_basebroken}
 
 
 def read_marker(text, kind):
