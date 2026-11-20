@@ -294,6 +294,9 @@ Before new planning or the first task, the host captures and registers `00-recon
 - A committed controller change is detected even when the checkout is clean.
 - A missing or altered contract blocks execution.
 - The fingerprint ignores global and system Git configuration, so it does not depend on `HOME`.
+  Of the Git configuration in the environment (`GIT_CONFIG_COUNT`/`KEY`/`VALUE`) it keeps only a
+  `safe.directory` equal to the controller's resolved path, so a checkout owned by another user
+  stays readable; `*` or any other directory is never passed to Git.
 
 Keep the executing installation pinned to a reviewed version. When SSDLC develops itself, run that pinned controller against a separate target checkout. A run continues on its pinned controller; changing controller requires an explicit migration (see the [recovery index](recovery.md)).
 

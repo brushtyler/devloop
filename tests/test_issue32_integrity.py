@@ -145,6 +145,66 @@ class PathAndControllerTests(RepositoryTests):
         local.write_text('changed again\n')
         self.assertEqual(ignored, controller_snapshot(self.repo))
 
+    def other_owner_env(self, *safe_directories, key='safe.directory'):
+        """A turn on a repository of another user (#504): git simulates the other owner and the
+        environment gives ``safe.directory`` in command scope, as devloop does (#500)."""
+        env = {'GIT_TEST_ASSUME_DIFFERENT_OWNER': '1', 'GIT_CONFIG_COUNT': str(len(safe_directories))}
+        for index, value in enumerate(safe_directories):
+            env.update({f'GIT_CONFIG_KEY_{index}': key, f'GIT_CONFIG_VALUE_{index}': str(value)})
+        return env
+
+    def require_other_owner(self, root):
+        refused = subprocess.run(['git', 'status'], cwd=root, capture_output=True, text=True,
+                                 env=dict(os.environ, GIT_TEST_ASSUME_DIFFERENT_OWNER='1',
+                                          GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1',
+                                          GIT_CONFIG_COUNT='0'))
+        if 'dubious ownership' not in refused.stderr:
+            self.skipTest('this git does not simulate another owner')
+
+    def assert_dubious(self, env):
+        with patch.dict(os.environ, env):
+            with self.assertRaisesRegex(TaskError, 'dubious ownership'):
+                controller_snapshot(self.repo)
+
+    def test_snapshot_trusts_the_safe_directory_of_its_root_in_a_repository_of_another_user(self):
+        root = self.repo.resolve()
+        before = controller_snapshot(self.repo)
+        self.require_other_owner(root)
+        self.assert_dubious(self.other_owner_env())
+        with patch.dict(os.environ, self.other_owner_env(root)):
+            self.assertEqual(before, controller_snapshot(self.repo))
+        # Among other entries, and with the key spelled in another case.
+        with patch.dict(os.environ, dict(self.other_owner_env(root.parent, root),
+                                         GIT_CONFIG_KEY_1='Safe.Directory')):
+            self.assertEqual(before, controller_snapshot(self.repo))
+
+    def test_snapshot_never_passes_a_wildcard_or_another_safe_directory(self):
+        root = self.repo.resolve()
+        self.require_other_owner(root)
+        for values in (['*'], [root.parent], [f'{root.parent}/*'], [root / 'sub'], [f'{root}/'],
+                       ['*', root.parent]):
+            with self.subTest(values=values):
+                self.assert_dubious(self.other_owner_env(*values))
+        # The root under another key, a count that does not reach it, or a broken count.
+        self.assert_dubious(self.other_owner_env(root, key='safe.directoryx'))
+        self.assert_dubious(dict(self.other_owner_env('*', root), GIT_CONFIG_COUNT='1'))
+        self.assert_dubious(dict(self.other_owner_env(root), GIT_CONFIG_COUNT='one'))
+        # Only the root reaches git, as one command-line entry; nothing else of the environment.
+        seen = []
+        real_run = subprocess.run
+
+        def spy(argv, **kw):
+            seen.append((argv, kw['env']))
+            return real_run(argv, **kw)
+        env = dict(self.other_owner_env('*', root.parent, root), GIT_CONFIG_PARAMETERS="'safe.directory'='*'")
+        with patch.dict(os.environ, env), patch('ssdlc_controller.subprocess.run', spy):
+            controller_snapshot(self.repo)
+        for argv, child in seen:
+            self.assertEqual([argv[i + 1] for i, a in enumerate(argv) if a == '-c' and 'safe.' in argv[i + 1].lower()],
+                             [f'safe.directory={root}'])
+            self.assertEqual({k for k in child if k.startswith('GIT_CONFIG_')},
+                             {'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM'})
+
     def test_only_explicit_progress_reports_count(self):
         from orchestrator import SSDLCOrchestrator
         root = self.repo / '.ssdlc/TKT-1'
