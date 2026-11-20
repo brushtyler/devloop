@@ -191,8 +191,8 @@ from .budget import reserve as budget_reserve
 from .budget import status_lines as budget_status_lines
 from .config import INSTALL_ROOT, LEGACY_NEEDS_OPERATOR, ConfigError, key_role
 from .context import (LABEL_STYLE, _describe_bases, _failure_text, _open_findings_reason,
-                      _render_issue_comments, both_labels_warning, label_transition,
-                      transition_labels)
+                      _render_issue_comments, both_labels_warning, issue_decisions,
+                      label_transition, transition_labels)
 from .dispatch_actions import ActionsMixin, Models, ready_approval, rerun_of
 from .dispatch_advisory import AdvisoryFailures, AdvisoryMixin, AdvisoryResults
 from .dispatch_conclave import ConclaveMixin
@@ -550,18 +550,28 @@ def control_command(body):
     return bool(lines) and lines[0].split()[:1] == ['/devloop']
 
 
-def preflight_hash(title, body, comments, trusted_users, automatic, accepted=None):
+def preflight_hash(title, body, comments, trusted_users, automatic, accepted=None,
+                   decisions=()):
     """The hash that binds a readiness check to the issue text: title, body and the comments of
     trusted users, without devloop's own records (``automatic(comment)``) and without
     ``/devloop`` commands (a supervisor command after the attribution header too, #182). Any
     other trusted comment counts, header or not, and so does a dispatcher record of defaults
-    the supervisor accepted (``accepted(comment)``, #182), as a trusted comment would."""
+    the supervisor accepted (``accepted(comment)``, #182), as a trusted comment would.
+
+    ``decisions``: the comments that may record a decision of the operator (``issue_decisions``,
+    #472), each by its author and its time. Their validity depends on the history of the text,
+    not only on the text: a change of the title or body, undone later, leaves the text as it was
+    but drops them, and with them the hash, so the check that relied on them runs again. Without
+    such comments the hash is the one of before #472."""
     accepted = accepted or (lambda comment: False)
     kept = [[(c.get('author') or {}).get('login'), c.get('body') or ''] for c in comments
             if accepted(c) or ((c.get('author') or {}).get('login') in trusted_users
                                and not automatic(c) and not control_command(c.get('body'))
                                and supervisor_command(c.get('body')) is None)]
-    data = json.dumps([title or '', body or '', kept], ensure_ascii=False, separators=(',', ':'))
+    request = [title or '', body or '', kept]
+    if decisions:
+        request.append([[c['author']['login'], c['created_at']] for c in decisions])
+    data = json.dumps(request, ensure_ascii=False, separators=(',', ':'))
     return hashlib.sha256(data.encode('utf-8')).hexdigest()
 
 
@@ -840,6 +850,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             return set(self.cfg.trusted_users)
         return label_admitters(author, self.cfg.trusted_users, supervisor, self._devloop_logins())
 
+    def _issue_decisions(self, comments, history, taken=False):
+        """``issue_decisions`` of an issue (#472): neither the supervisor's identity nor any
+        other app of devloop decides for the operator."""
+        return issue_decisions(comments, history, self.cfg.trusted_users, self._devloop_logins(),
+                               self.cfg.labels.working, taken=taken)
+
     def _untrusted_change(self, history):
         """``untrusted_change`` of an issue, with the admitters of its author."""
         return untrusted_change(history, self.cfg.labels.ready, self.cfg.trusted_users,
@@ -858,9 +874,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
     def _request_hash(self, history, comments):
         """The hash of an issue's request (``preflight_hash``): what binds a readiness check,
-        and the key of an issue step's retries."""
+        and the key of an issue step's retries. With the comments that may record a decision of
+        the operator as the readiness check reads them (#472): a check whose decision no longer
+        holds is not reused."""
         return preflight_hash(history['title'], history['body'], comments,
-                              self.cfg.trusted_users, self._automatic, self._accepted)
+                              self.cfg.trusted_users, self._automatic, self._accepted,
+                              decisions=self._issue_decisions(comments, history))
 
     def _devloop_author(self, login):
         """Whether an issue opened by ``login`` may have its escalations decided by the
@@ -1910,11 +1929,12 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         accepted = [c for c in listed if self._accepted(c)]
         # ``request``: the hash of the request as read here (#182), part of the key of an
         # implement turn's retries. ``thread``: the comments as read here, where the conclave
-        # records and the vetoes of the issue are (#142).
+        # records and the vetoes of the issue are (#142). ``decisions``: the comments that may
+        # record a decision of the operator for the reviewers (#472), written before the takeover.
         issue = dict(self.gh.issue(number), title=history['title'], body=history['body'],
                      labeled=history['labeled'], admitters=self._admitters(history['author']),
                      accepted=accepted, request=self._request_hash(history, listed),
-                     thread=listed)
+                     thread=listed, decisions=self._issue_decisions(listed, history, taken=True))
         return issue, _render_issue_comments(issue.get('comments') or [], self.cfg.trusted_users,
                                              [read_marker(c['body'], 'supervision')
                                               for c in accepted])

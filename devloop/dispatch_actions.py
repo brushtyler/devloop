@@ -22,8 +22,8 @@ from .budget import BudgetRefused
 from .context import (_failure_text, _format_conflicts, _format_findings, _review_failure,
                       _start_failure, _template, _trusted_comments, docs_diff_section,
                       docs_map_section, docs_review_section, format_ci_summary,
-                      format_fix_requests, format_operator_comments, format_previous_rounds,
-                      owner_assessments, prompt_values)
+                      format_fix_requests, format_operator_comments, format_operator_decisions,
+                      format_previous_rounds, owner_assessments, prompt_values)
 from .github import GitHubError, GitHubUncertain, job_id
 from .hoststep import format_step, render_step
 from .hoststep import latest as latest_host_step
@@ -546,6 +546,7 @@ class ActionsMixin:
                            ci=ci, ci_summary=ci_summary, test_cmd=cfg.test_cmd,
                            issue_number=pr.issue, issue_title=issue['title'],
                            issue_body=without_attribution(issue.get('body')),
+                           operator_decisions=format_operator_decisions(issue['decisions']),
                            pr_body=without_attribution(pr.body),
                            acceptance_criteria=format_criteria(criteria),
                            acceptance_map=format_map(acceptance_map),

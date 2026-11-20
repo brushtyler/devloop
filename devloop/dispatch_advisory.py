@@ -39,7 +39,7 @@ from pathlib import Path
 from .agents import AgentError
 from .apps import REVIEW
 from .budget import BUDGET, BudgetRefused
-from .context import _template, format_previous_rounds, prompt_values
+from .context import _template, format_operator_decisions, format_previous_rounds, prompt_values
 from .dispatch_actions import Models
 from .journal import JournalError, TurnBlocked
 from .ledger import timestamp as ledger_timestamp
@@ -524,6 +524,8 @@ class AdvisoryMixin:
                                issue_number=pr.issue, issue_title=issue['title'],
                                # Blind to the author, as the review (#389).
                                issue_body=without_attribution(issue.get('body')),
+                               operator_decisions=format_operator_decisions(
+                                   issue['decisions']),
                                pr_body=without_attribution(pr.body),
                                diff_stat=self.ws.diff_stat(path),
                                previous=format_previous_rounds(pr.reviews, pr.fixes,

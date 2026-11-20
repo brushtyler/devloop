@@ -51,6 +51,69 @@ def operator_comments(comments, trusted_users):
             and not (c.get('body') or '').lstrip().startswith('> [!NOTE]')]
 
 
+def text_changed_at(history):
+    """When the title or the body of issue ``history`` (``Tracker.issue_history``) last changed:
+    the latest of its body's ``last_edited_at`` and of its ``renamed`` events; None when neither
+    changed since the issue was opened."""
+    times = [history.get('last_edited_at'), *(at for _, at in history.get('renamed') or ())]
+    return max((t for t in times if isinstance(t, str)), default=None)
+
+
+def issue_decisions(comments, history, trusted_users, devloop_logins, working, taken=False):
+    """The comments of an issue that may record a decision of the operator on it (#472), oldest
+    first: those a trusted user wrote in person (``operator_comments``), not from one of
+    ``devloop_logins`` (the supervisor's identity, the agents' and the dispatcher's apps), after
+    the latest change of the issue's text (``text_changed_at``) and before devloop took it on,
+    the first ``labeled`` event of ``working`` after that change. A change of the text after a
+    comment drops it. With ``taken`` (a review) the issue must have been taken on after that
+    change: without such an event no comment counts. The comment is read as it is now, so its
+    latest change (``updated_at``), not only its creation (``created_at``), must come before
+    the takeover: a comment rewritten after it, into an approval or not, does not count. A
+    comment without both times, or written in the same second as a bound, does not count.
+    Whether a comment approves the change is the agents' to judge."""
+    changed = text_changed_at(history)
+    takeovers = sorted(at for label, _, at in history.get('labeled') or ()
+                       if label == working and isinstance(at, str)
+                       and (changed is None or at > changed))
+    bound = takeovers[0] if takeovers else None
+    if taken and bound is None:
+        return []
+    found = []
+    for c in operator_comments(comments, trusted_users):
+        at, edited = c.get('created_at'), c.get('updated_at')
+        if (c['author']['login'] in devloop_logins
+                or not (isinstance(at, str) and at) or not (isinstance(edited, str) and edited)
+                or (changed is not None and at <= changed)
+                or (bound is not None and max(at, edited) >= bound)):
+            continue
+        found.append(c)
+    return found
+
+
+def format_operator_decisions(decisions):
+    """The section "Decisions of the operator on the issue" of a preflight, review or advisory
+    prompt (#472): the comments ``issue_decisions`` keeps, or a line that says there are none."""
+    head = '## Decisions of the operator on the issue\n\n'
+    if not decisions:
+        return head + 'None: no comment on the issue counts as a decision of the operator.'
+    rendered = '\n\n'.join(f'### Comment by {c["author"]["login"]}, {c["created_at"]}\n\n'
+                           f'{c["body"]}' for c in decisions)
+    return (head + 'The comments a trusted user wrote in person on the issue after the latest '
+                   'change of its title or body and before devloop took it on. One that '
+                   'approves the change the issue asks for is a decision of the operator, as '
+                   'one written in the body of the issue: see "Trust policy".\n\n' + rendered)
+
+
+def trust_policy_rule():
+    """The rule on the trust policy the review and the advisory review prompts share (#447),
+    from the "Trust policy" section of the review prompt up to the request of its verdict: the
+    readiness check applies it to the issue (#472)."""
+    text = (PROMPT_DIR / 'review.md').read_text(encoding='utf-8')
+    start = text.index('## Trust policy\n') + len('## Trust policy\n')
+    return text[start:text.index('\nWhen the change needs the operator under this rule', start)
+                ].strip()
+
+
 def requests_rereview(body):
     """Whether a comment asks for a new review: its first line is ``REREVIEW_COMMAND``."""
     lines = (body or '').strip().splitlines()

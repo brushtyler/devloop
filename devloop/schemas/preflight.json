@@ -1,7 +1,7 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["ready", "gaps", "split"],
+  "required": ["ready", "gaps", "split", "trust_policy", "trust_policy_reason"],
   "properties": {
     "ready": {"type": "boolean"},
     "gaps": {
@@ -21,6 +21,8 @@
         }
       }
     },
-    "split": {"type": "string"}
+    "split": {"type": "string"},
+    "trust_policy": {"type": "string", "enum": ["none", "covered", "uncovered"]},
+    "trust_policy_reason": {"type": "string"}
   }
 }

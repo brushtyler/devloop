@@ -285,6 +285,13 @@ before: their failure holds for the hash, the dependency is never inferred from 
 descriptions, and the label added again repeats them too. A failure reused to block the issue
 again keeps the `base` of its record.
 
+Since #472 the marker also records `trust_policy` (`none`, `covered` or `uncovered`) and
+`trust_policy_reason`, the check's declaration on the trust policy. An `uncovered` outcome is
+never ready: its first gap, of kind `operator_decision`, is written by devloop with the question
+"Approvi la modifica della policy di fiducia descritta qui?" followed by the reason, so the class
+of the escalation is `operator_decision`. Records written before #472 lack both fields and are
+read as `none`; a reused outcome keeps them.
+
 The dispatcher removes only a block that belongs to the check. The check owns
 `agent:needs-operator` only if it added the label when the label was absent: its record keeps the
 number of earlier `labeled` events of the label, and the dispatcher must have written the only
@@ -644,11 +651,24 @@ decides the policy, not every change that carries it out
 recorded in an ADR on `main`, which the issue cites and the reviewer cites in its review (file,
 section and point), gets the technical verdict, `approve` or `request_changes`, and nothing in
 the merge changes for it; without the citation, or with a deviation, it is `needs_operator` as
-before. All of it is described in
-[Changes to the trust policy](guide.md#changes-to-the-trust-policy). The rule lives only in the
-prompts: the schema `advisory.json` does not change, `review.json` only gains `operator_reason`
-(#434) for it, and devloop does not check in code whether a verdict should have been
-`needs_operator`. Its residual risks, accepted by the
+before. Since #472 the rule itself is only the "Trust policy" section of the two prompts and the
+conditions that decide when a change needs the operator: a change to `NON_CRITICAL`, to a
+`/devloop` command or to a condition of the merge that a decision names explicitly follows the
+first point, and a comment in which the operator approves the change on the issue counts as a
+decision. devloop lists the comments that may: written in person by a trusted user (no
+attribution header), not by the supervisor's identity nor by an app of devloop, after the latest
+change of the issue's title or body (`lastEditedAt` and the `renamed` events) and before the
+first `labeled` event of `agent:working` after it, each written (`created_at`) after the change
+and last changed (`updated_at`) before the takeover, a bound in the same second excluded, a
+comment without both times excluded too; a reviewer gets none when no such takeover follows the
+latest change. Those comments, by author and `created_at`, enter the hash of the request, so a
+readiness check that relied on one is not reused once a change of the text, even undone,
+drops it. All of
+it is described in [Changes to the trust policy](guide.md#changes-to-the-trust-policy). The rule
+lives only in the prompts: the schema `advisory.json` does not change, `review.json` only gains
+`operator_reason` (#434) for it, `preflight.json` gains `trust_policy` and
+`trust_policy_reason` (#472, see [Readiness check records](#readiness-check-records)), and devloop
+does not check in code whether a verdict should have been `needs_operator`. Its residual risks, accepted by the
 operator, are listed in the guide: the attention of the reviewers at every round, a disguised
 change, the local overlay, with a conclave the reserved perimeter its members recognise, and a
 PR that changes the rule, judged with the prompts of the running installation.
