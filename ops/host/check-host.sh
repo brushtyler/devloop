@@ -4,14 +4,16 @@
 # sudoers, l'utente degli agent (non legge key_dir né state_dir, non scrive .git né le directory
 # che contengono worktree e turni, è nell'overlay, non cambia istruzioni, configurazione e
 # binari delle sue CLI), il lock per repository (directory comune,
-# gruppo, overlay; ADR 0006, R8), servizio, CLI degli agent e `devloop apps`. Con più progetti
-# sullo stesso host si esegue una volta per progetto, con i suoi parametri (--params).
-# Non cambia nulla.
+# gruppo, overlay; ADR 0006, R8), servizio, CLI degli agent (--version, e un `git --version`
+# con il loro strumento di shell, #494) e `devloop apps`. Con più progetti sullo stesso host si
+# esegue una volta per progetto, con i suoi parametri (--params).
+# Non cambia nulla, se non le sessioni e le cache che le CLI degli agent scrivono da sé.
 # Esce con 0 se non trova errori, con 1 altrimenti; gli avvisi non contano come errori.
 # Va eseguito come root (sudo): alcune verifiche leggono file degli altri utenti.
 #
 # --dry-run: fa le verifiche locali in sola lettura e stampa, senza eseguirle, quelle che passano
-# da sudo o dalla rete (--version delle CLI, lettura del log come supervisore, visudo, devloop apps).
+# da sudo o dalla rete (--version e strumento di shell delle CLI, lettura del log come
+# supervisore, visudo, devloop apps).
 
 OPS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=../lib.sh
@@ -288,6 +290,12 @@ for cli in "${AGENT_CLIS[@]}"; do
     check_as "$AGENT_USER" "$AGENT_USER non scrive né sostituisce $AGENT_HOME/.local/bin/$cli e il file a cui porta" \
         /usr/bin/bash -c "$CLI_PROBE" _ bin "$AGENT_HOME/.local/bin/$cli"
 done
+# Le voci che le CLI creano al primo uso (#494): restano dell'utente degli agent, che le scrive.
+for entry in "${AGENT_CLI_WRITABLE[@]}"; do
+    check_as "$AGENT_USER" "$AGENT_USER scrive in $AGENT_HOME/$entry (setup-agent-user.sh)" \
+        /usr/bin/bash -c '[ -d "$1" ] && ! [ -L "$1" ] && [ -w "$1" ] && [ -x "$1" ]' _ \
+        "$AGENT_HOME/$entry"
+done
 
 step "sudoers dell'utente degli agent ($AGENT_SUDOERS_FILE)"
 check_sudoers "$AGENT_SUDOERS_FILE" sudoers-agent setup-agent-user.sh
@@ -372,6 +380,31 @@ if [ -n "$killmode" ] && [ "$killmode" != mixed ]; then
     fail "KillMode=$killmode: deve essere mixed"
 fi
 
+# shell_tool CLI ARG...: la CLI di AGENT_USER, con ARG, esegue come AGENT_USER `git --version`
+# con il suo strumento di shell (#494): un --version non lo avvia, e una CLI che al primo comando
+# vuole creare una voce in una directory sigillata si ferma con `permission denied`. Passa dal
+# modello: ci vuole la rete e il login della CLI. Gira in /tmp, con un limite di 300 secondi.
+SHELL_PROMPT='Run the shell command `git --version` with your shell tool, then reply with its output only.'
+shell_tool() {
+    local cli=$1 out status line
+    shift
+    local -a cmd=(timeout 300 "$AGENT_HOME/.local/bin/$cli" "$@")
+    [ "$(id -un)" = "$AGENT_USER" ] || cmd=(sudo -u "$AGENT_USER" -H -- "${cmd[@]}")
+    if [ "$DRY_RUN" = 1 ]; then
+        run "${cmd[@]}"
+        return 0
+    fi
+    out=$(cd /tmp && "${cmd[@]}" </dev/null 2>&1)
+    status=$?
+    if [ "$status" = 0 ] && grep -q 'git version' <<<"$out"; then
+        ok "$cli come $AGENT_USER esegue git --version con il suo strumento di shell"
+        return
+    fi
+    line=$(grep -i -m1 'permission denied' <<<"$out")
+    [ -n "$line" ] || line=$(grep -v '^[[:space:]]*$' <<<"$out" | tail -n 1)
+    fail "$cli come $AGENT_USER non esegue git --version con il suo strumento di shell (uscita $status): ${line:0:300} (ops/host/migrate.md, una CLI che si ferma con permission denied)"
+}
+
 step 'CLI degli agent'
 for cli in claude codex agy; do
     exe="$AGENT_HOME/.local/bin/$cli"
@@ -380,6 +413,15 @@ for cli in claude codex agy; do
     else
         fail "$exe non trovato (setup-agent-user.sh)"
     fi
+done
+for cli in claude codex agy; do
+    [ -x "$AGENT_HOME/.local/bin/$cli" ] || continue
+    case $cli in
+        claude) shell_tool claude -p "$SHELL_PROMPT" --allowedTools 'Bash(git --version)' ;;
+        codex) shell_tool codex exec --skip-git-repo-check -s read-only "$SHELL_PROMPT" ;;
+        agy) shell_tool agy -p "$SHELL_PROMPT" --output-format json \
+                 --settings '{"permissions": {"allow": ["command(git --version)"]}}' ;;
+    esac
 done
 exe="$SUPERVISOR_HOME/.local/bin/claude"
 if [ -x "$exe" ]; then

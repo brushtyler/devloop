@@ -532,6 +532,41 @@ class RootStepsGuideTests(unittest.TestCase):
         self.assertIn('**come root dal checkout dell\'operatore**', section)
         self.assertIn('manca `ops/params.env`', section)
 
+    def test_the_cli_probe_uses_the_shell_tool_and_the_guide_says_what_to_do(self):
+        # #494: a question without commands does not start the shell tool of agy, which
+        # stopped with permission denied on a directory it creates at its first command.
+        section = self.section(self.SECTIONS[1])
+        commands = self.commands(section, inline=False)
+        script = (OPS / 'host/check-host.sh').read_text(encoding='utf-8')
+        prompt = re.search(r"^SHELL_PROMPT='(.*)'$", script, re.M).group(1)
+        self.assertIn(f"P='{prompt}'", commands)
+        self.assertIn('git --version', prompt)
+        agy = [c for c in commands if c.startswith('sudo -u devloop-agent -H '
+                                                   '/home/devloop-agent/.local/bin/agy -p "$P"')]
+        self.assertEqual(len(agy), 1, commands)
+        self.assertIn('"command(git --version)"', agy[0])
+        for cli in ('claude', 'codex'):
+            self.assertTrue([c for c in commands if c.startswith(
+                f'sudo -u devloop-agent -H /home/devloop-agent/.local/bin/{cli} ') and '"$P"' in c],
+                cli)
+        self.assertNotIn('claude -p ciao', section)
+        # What to do when a CLI stops with permission denied on a sealed directory.
+        start = section.index('\n### Una CLI si ferma con `permission denied`\n')
+        case = section[start:]
+        flat = ' '.join(case.split())
+        setup = f'sudo bash {self.OPERATOR}/ops/host/setup-agent-user.sh'
+        steps = [f'`{setup} --unseal`', 'avviare la CLI come `devloop-agent`', f'`{setup}`',
+                 '`AGENT_CLI_WRITABLE` di `ops/lib.sh`', '`CLI_WRITABLE` di `devloop/agentuser.py`']
+        at = -1
+        for step in steps:
+            with self.subTest(step=step):
+                self.assertIn(step, flat[at + 1:])
+                at = flat.index(step, at + 1)
+        self.assertIn('con una PR', flat)
+        self.assertIn('(#una-cli-si-ferma-con-permission-denied)', section)
+        self.assertIn('(host/migrate.md#una-cli-si-ferma-con-permission-denied)',
+                      (OPS / 'README.md').read_text(encoding='utf-8'))
+
     def test_the_activation_has_every_step_and_the_rollback(self):
         text = self.section(self.ACTIVATION)
         commands = self.commands(text)
@@ -1038,15 +1073,45 @@ class DryRunTests(OpsTestCase):
         self.assertNotIn(f'chmod -R g+rX\\,go-w {agent}/.codex/config.toml', out)
         self.assertEqual(self.mutating_calls(), [])
 
+    def test_setup_agent_user_creates_what_the_clis_create_on_first_use(self):
+        # #494: agy creates ~/.gemini/antigravity-cli/bin at its first shell command, in a
+        # directory of root's: the script creates it as the agent user's, 700.
+        agent = self.home / 'agent'
+        params = self.params(DEVLOOP_USER=ME, AGENT_USER='opsdry-noagent')
+        agy_bin = agent / '.gemini/antigravity-cli/bin'
+        for unseal in ((), ('--unseal',)):
+            with self.subTest(unseal=unseal):
+                done = self.run_script('host/setup-agent-user.sh', '--dry-run', *unseal,
+                                       '--params', str(params))
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                self.assertIn(f'[dry-run] install -d -m 700 -o opsdry-noagent -g opsdry-noagent '
+                              f'{agy_bin}\n', done.stdout)
+        # One that exists, of another owner or mode, becomes the agent user's, 700.
+        agy_bin.mkdir(parents=True)
+        done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params', str(params))
+        self.assertIn(f'[dry-run] chown opsdry-noagent:opsdry-noagent {agy_bin}\n', done.stdout)
+        self.assertIn(f'[dry-run] chmod 700 {agy_bin}\n', done.stdout)
+        self.assertNotIn(f'root:opsdry-noagent {agy_bin}', done.stdout)  # never sealed
+        # A link is never followed by chown: it is reported.
+        agy_bin.rmdir()
+        agy_bin.symlink_to(self.tmp)
+        done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params', str(params))
+        self.assertIn(f'da fare a mano: {agy_bin} è un link: sostituirlo con una directory di '
+                      'opsdry-noagent', done.stdout)
+        self.assertNotIn(f'chown opsdry-noagent:opsdry-noagent {agy_bin}', done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+        self.assertEqual(agentuser.CLI_WRITABLE, ('.gemini/antigravity-cli/bin',))
+        self.assertEqual(agentuser.AGY_BIN, agentuser.CLI_WRITABLE[0])
+
     def test_the_lists_of_the_cli_files_are_those_of_the_startup_check(self):
         lists = subprocess.run(
             [BASH, '-c', f'. {OPS / "lib.sh"}; set +u; '
                          'printf "%s\\n" "${AGENT_CLI_DIRS[*]}" "${AGENT_CLI_SEALED[*]}" '
-                         '"${AGENT_CLIS[*]}"'],
+                         '"${AGENT_CLIS[*]}" "${AGENT_CLI_WRITABLE[*]}"'],
             capture_output=True, text=True, check=True).stdout.splitlines()
         self.assertEqual([line.split() for line in lists],
                          [list(agentuser.CLI_DIRS), list(agentuser.CLI_SEALED),
-                          list(agentuser.CLIS)])
+                          list(agentuser.CLIS), list(agentuser.CLI_WRITABLE)])
 
     def test_the_agent_user_must_differ_from_devloop(self):
         done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params',
@@ -1662,6 +1727,79 @@ class CheckHostTests(OpsTestCase):
         self.assertIn(f'ok: {self.state}/config.local.toml imposta [agent_user] name = "root"',
                       out)
         self.assertEqual(self.mutating_calls(), [])
+
+    def test_the_clis_run_a_command_with_their_shell_tool_as_the_agent_user(self):
+        # #494: --version does not start the shell tool, where agy stopped with permission
+        # denied; check-host has each CLI run git --version with it, as the agent user. And
+        # the agent user writes what the CLIs create on first use.
+        done, errors = self.check()
+        self.assertEqual(errors, [], done.stdout)
+        out = done.stdout
+        def q(text):  # as `run` prints an argument
+            return subprocess.run([BASH, '-c', 'printf %q "$1"', '_', text], check=True,
+                                  capture_output=True, text=True).stdout
+        prompt = q('Run the shell command `git --version` with your shell tool, then reply with '
+                   'its output only.')
+        lines = {cli: [line for line in out.splitlines()
+                       if f'timeout 300 {self.agent}/.local/bin/{cli} ' in line]
+                 for cli in agentuser.CLIS}
+        for cli, found in lines.items():
+            self.assertEqual(len(found), 1, cli)
+            self.assertTrue(found[0].startswith('  [dry-run] sudo -u root -H -- timeout 300 '),
+                            found[0])
+        settings = q('{"permissions": {"allow": ["command(git --version)"]}}')
+        self.assertIn(f'agy -p {prompt} --output-format json --settings {settings}\n',
+                      lines['agy'][0] + '\n')
+        self.assertIn(f'claude -p {prompt} --allowedTools {q("Bash(git --version)")}\n',
+                      lines['claude'][0] + '\n')
+        self.assertIn(f'codex exec --skip-git-repo-check -s read-only {prompt}', lines['codex'][0])
+        self.assertRegex(out, r'\[dry-run\] sudo -u root -H -- /usr/bin/bash -c .*-w.* _ '
+                              + re.escape(f'{self.agent}/.gemini/antigravity-cli/bin') + '\n')
+
+    def test_a_cli_that_cannot_run_a_command_is_an_error(self):
+        # #494, with fakes of the CLIs, run as the current user, the agent user of this check.
+        args = self.tmp / 'agy-args'
+        for cli in ('claude', 'codex'):
+            path = self.agent / '.local/bin' / cli
+            path.write_text('#!/bin/sh\necho "git version 2.47.0"\n')
+        agy = self.agent / '.local/bin/agy'
+        denied = (f'mkdir {self.agent}/.gemini/antigravity-cli/bin: permission denied')
+        agy.write_text(f'#!/bin/sh\n[ "$1" = --version ] && exit 0\n'
+                       f'printf "%s\\n" "$@" > {shlex.quote(str(args))}\n'
+                       f'echo "starting the shell tool"\necho {shlex.quote(denied)} >&2\nexit 1\n')
+        self.fake_host('classic sudo', users=('opsdry-devloop', FAKE_SUPERVISOR))
+        params = self.params(DEVLOOP_USER='opsdry-devloop', SUPERVISOR_USER=FAKE_SUPERVISOR,
+                             AGENT_USER=ME)
+
+        def run():
+            done = self.run_script('host/check-host.sh', '--no-apps', '--params', str(params))
+            return done, [line for line in done.stdout.splitlines()
+                          if 'strumento di shell' in line]
+        done, lines = run()
+        self.assertEqual(done.returncode, 1)
+        self.assertIn(f'  ok: claude come {ME} esegue git --version con il suo strumento di shell',
+                      lines)
+        self.assertIn(f'  ok: codex come {ME} esegue git --version con il suo strumento di shell',
+                      lines)
+        self.assertIn(f'  ERRORE: agy come {ME} non esegue git --version con il suo strumento di '
+                      f'shell (uscita 1): {denied} (ops/host/migrate.md, una CLI che si ferma '
+                      'con permission denied)', lines)
+        self.assertEqual(args.read_text().splitlines()[:2],
+                         ['-p', 'Run the shell command `git --version` with your shell tool, '
+                                'then reply with its output only.'])
+        self.assertIn('{"permissions": {"allow": ["command(git --version)"]}}',
+                      args.read_text().splitlines())
+        # An answer without the output of the command is an error too, whatever the exit.
+        agy.write_text('#!/bin/sh\necho \'{"status": "SUCCESS", "result": "I cannot."}\'\n')
+        done, lines = run()
+        self.assertIn(f'  ERRORE: agy come {ME} non esegue git --version con il suo strumento di '
+                      'shell (uscita 0): {"status": "SUCCESS", "result": "I cannot."} '
+                      '(ops/host/migrate.md, una CLI che si ferma con permission denied)', lines)
+        agy.write_text('#!/bin/sh\necho \'{"status": "SUCCESS", "result": "git version 2.47.0"}\'\n')
+        done, lines = run()
+        self.assertIn(f'  ok: agy come {ME} esegue git --version con il suo strumento di shell',
+                      lines)
+        self.assertEqual([line for line in lines if 'ERRORE' in line], [])
 
     def test_an_overlay_without_the_agent_user_is_an_error(self):
         (self.state / 'config.local.toml').write_text(f'repo_lock_dir = "{self.locks}"\n'
