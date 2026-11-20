@@ -434,11 +434,14 @@ shell_tool() {
     fi
     out=$(cd /tmp && "${cmd[@]}" </dev/null 2>&1)
     status=$?
-    if [ "$status" = 0 ] && grep -q 'git version' <<<"$out"; then
+    # Riuscita: uscita 0, l'output di git --version (la versione, non le sole parole, che una
+    # risposta che descrive il fallimento può contenere) e nessun diniego, anche con uscita 0.
+    if [ "$status" = 0 ] && grep -Eq 'git version [0-9]+\.[0-9]+' <<<"$out" \
+        && ! grep -Eiq 'permission denied|operation not permitted' <<<"$out"; then
         ok "$cli come $AGENT_USER esegue git --version con il suo strumento di shell"
         return
     fi
-    line=$(grep -i -m1 'permission denied' <<<"$out")
+    line=$(grep -Ei -m1 'permission denied|operation not permitted' <<<"$out")
     [ -n "$line" ] || line=$(grep -v '^[[:space:]]*$' <<<"$out" | tail -n 1)
     fail "$cli come $AGENT_USER non esegue git --version con il suo strumento di shell (uscita $status): ${line:0:300} (ops/host/migrate.md, una CLI che si ferma con permission denied)"
 }

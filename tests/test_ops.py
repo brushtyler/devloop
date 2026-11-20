@@ -1795,6 +1795,18 @@ class CheckHostTests(OpsTestCase):
         self.assertIn(f'  ERRORE: agy come {ME} non esegue git --version con il suo strumento di '
                       'shell (uscita 0): {"status": "SUCCESS", "result": "I cannot."} '
                       '(ops/host/migrate.md, una CLI che si ferma con permission denied)', lines)
+        # The words without the version, or an explicit denial, are errors with exit 0 too
+        # (1/codex/R1-1).
+        for result in ('I cannot report the git version: the shell command failed with '
+                       'permission denied.',
+                       'git version 2.47.0, but mkdir bin: Permission denied'):
+            answer = '{"status": "SUCCESS", "result": "' + result + '"}'
+            agy.write_text('#!/bin/sh\necho ' + shlex.quote(answer) + '\n')
+            done, lines = run()
+            self.assertEqual(done.returncode, 1)
+            self.assertIn(f'  ERRORE: agy come {ME} non esegue git --version con il suo strumento '
+                          f'di shell (uscita 0): {answer} (ops/host/migrate.md, una CLI che si '
+                          'ferma con permission denied)', lines)
         agy.write_text('#!/bin/sh\necho \'{"status": "SUCCESS", "result": "git version 2.47.0"}\'\n')
         done, lines = run()
         self.assertIn(f'  ok: agy come {ME} esegue git --version con il suo strumento di shell',
