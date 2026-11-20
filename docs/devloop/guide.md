@@ -890,7 +890,10 @@ second comment. A label the operator removes while the PR stays ready is not add
 
 That label does not stop devloop, which keeps working on the PR as on any ready PR: it
 [syncs](protocol.md#conflicts-with-main) it when it conflicts with `main`, re-checks its CI, and with a new
-commit revokes the readiness and sends the PR back to review. Whenever the readiness decays
+commit revokes the readiness and sends the PR back to review. The review after a sync of the
+approved head, also one whose conflicts the implementer resolved, starts even with no round left
+and, if it approves, spends no round and makes the PR ready again without a `round_limit`
+escalation ([Resync after approval](protocol.md#resync-after-approval), #458). Whenever the readiness decays
 without an escalation (a revocation, a sync, a failed CI round, a stale receipt), the dispatcher
 removes `agent:needs-operator` together with `agent:ready-to-merge`. It recognises its own label
 by the notice of the current promotion: no other notice of the dispatcher and no escalation was

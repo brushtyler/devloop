@@ -1231,7 +1231,10 @@ exception covers only an incomplete round abandoned for the base alone: CI round
 restarted for a new head, a change of policy, level or reviewers, or a `/devloop rereview` keep
 counting. For example, with `max_review_rounds = 3`: round 1 is completed; round 2 is abandoned
 for the base and does not count; round 3 replaces it and counts as the second; one more round,
-number 4, is left.
+number 4, is left. A replaced round that itself did not count, the review of an approved head
+after a sync or after a revocation for the base (#235, #252, #458), passes its `resync` to the
+round that replaces it: the new round records both, and does not count under the same condition
+(after a sync with conflicts, only if it approves).
 
 Promotion recomputes the receipt on the current base, as for any approval. An approval given on
 an earlier base, also when `main` advanced during the last review of a round already complete,
@@ -1240,7 +1243,8 @@ records stay as they are, and the promotion's `policy` record carries `bases` wi
 it relied on. If `main` interfered, the PR conflicts with the current base, or non-interference
 is not proven, the approval is not promoted (a `stale` record lists the checks): a conflict is
 synced first, as usual, and a new round follows. That round does not count when it reviews the
-same head again (#252), or a head only a clean sync moved (#235); otherwise it counts (see
+same head again (#252), or a head only a clean sync moved (#235), or approves a head that a sync
+with conflicts the implementer resolved moved (#458); otherwise it counts (see
 [Resync after approval](protocol.md#resync-after-approval)).
 
 ### Level 0: no review

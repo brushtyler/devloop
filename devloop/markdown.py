@@ -665,15 +665,21 @@ def render_review(review, head, native=None):
                       'fosse dimostrabile: quel round non conta per il limite dei round.']
     # #235: the approved head was synced with the base, without conflicts.
     # #252: the same head again, after the base touching the PR revoked its approval.
+    # #458: the approved head was synced with the base, with conflicts the implementer resolved.
     if review.get('resync'):
+        reason = review['resync'].get('reason')
         why = ('il dispatcher ha revocato quell\'approvazione perché la base è avanzata toccando '
                'file della PR, o senza che la non interferenza fosse dimostrabile, e questo '
                'round rivede lo stesso commit'
-               if review['resync'].get('reason') == 'base_changed'
+               if reason == 'base_changed'
+               else 'il nuovo head ne differisce solo per il merge della base, con conflitti '
+                    'risolti dall\'agent' if reason == 'resync_conflicts'
                else 'il nuovo head ne differisce solo per il merge della base senza conflitti')
+        counts = ('questo round non conta per il limite dei round se approva; se apre finding '
+                  'bloccanti conta' if reason == 'resync_conflicts'
+                  else 'questo round non conta per il limite dei round')
         parts += ['', f'> Il round {review["resync"]["round"]} aveva approvato '
-                      f'`{review["resync"]["from"][:12]}`; {why}: questo round non conta per il '
-                      'limite dei round.']
+                      f'`{review["resync"]["from"][:12]}`; {why}: {counts}.']
     parts +=['', review['summary'].strip()]
     if review['verdict'] == 'needs_operator' and review['human_reason']:
         title = 'Policy di fiducia toccata' if trust else 'Decisione richiesta'

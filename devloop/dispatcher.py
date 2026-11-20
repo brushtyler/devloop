@@ -38,8 +38,9 @@ is replaced by a new one and does not count against ``max_review_rounds`` (``cou
 Resync after approval (#235): when the latest round approved a head and the PR's head differs
 from it only by merges of the base branch that git concludes without conflicts
 (``Workspace.clean_resync``), the review of the new head records ``resync`` and does not count
-either. A sync whose conflicts an agent resolved changes the PR's content: its review counts.
-Nor does the new review of an approved head whose approval a dispatcher ``stale`` policy record
+either. A sync whose conflicts an agent resolved changes the PR's content: its review records ``resync``
+with the reason ``resync_conflicts`` (#458), runs also beyond ``max_review_rounds`` and counts
+only if it does not approve. Nor does the new review of an approved head whose approval a dispatcher ``stale`` policy record
 revoked because the base touched the PR (#252, ``base_revocation``): it records ``resync`` with
 the reason ``base_changed``.
 
@@ -211,8 +212,8 @@ from .activity import iso, restart_line
 from .outbox import SENT as PUBLISHED, describe as outbox_describe
 from .pin import (PREFIX, CheckFailed, PinError, PinHeld, Repinned, ScanFailed, SmokeError,
                   held_prs, public_reason)
-from .planning import (BASE_CHANGED, MERGE_LANE, MERGING, RESYNC_AFTER_APPROVAL, PullRequest,
-                       Snapshot,
+from .planning import (BASE_CHANGED, MERGE_LANE, MERGING, RESYNC_AFTER_APPROVAL,
+                       RESYNC_CONFLICTS, PullRequest, Snapshot,
                        admit, changes_before_ci, ci_unknown, counted_rounds, issue_priority,
                        label_names, numbers_of, operator_blocked, operator_held,
                        pending_reviewers, plan, pr_counts, queue_lines, round_reasons,
@@ -947,7 +948,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         """``PullRequest.resync`` (#235): when the latest round is a complete agent round that
         approved an earlier head, and the PR's head differs from it only by merges of the base
         branch that git concludes without conflicts, ``{reason, round, from}``; otherwise None.
-        A sync whose conflicts an agent resolved, a fix or any other commit gives None.
+        When some of those merges are syncs whose conflicts the implementer resolved, as their
+        ``sync`` markers record (#458), the reason is ``RESYNC_CONFLICTS``: the review runs
+        also beyond the limit and counts only if it does not approve. A merge someone else
+        resolved, a fix or any other commit gives None.
 
         When that round approved the PR's head itself (#252), the reason is ``BASE_CHANGED`` if
         the latest policy record after it, which only the dispatcher writes, revoked the
@@ -964,12 +968,21 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
                 return None
             return {'reason': BASE_CHANGED, 'round': latest[0]['round'], 'from': approved}
         try:
-            if not self.ws.clean_resync(pr.head_ref, pr.head_sha, approved):
-                return None
+            merges = self.ws.resync_merges(pr.head_ref, pr.head_sha, approved)
         except WorkspaceError as exc:
             self.log(f'  resync of #{pr.number} not verifiable: {exc}')
             return None
-        return {'reason': RESYNC_AFTER_APPROVAL, 'round': latest[0]['round'], 'from': approved}
+        if merges is None:
+            return None
+        if not merges:
+            return {'reason': RESYNC_AFTER_APPROVAL, 'round': latest[0]['round'],
+                    'from': approved}
+        # Merges whose conflicts someone resolved (#458): each must be the head of a sync the
+        # implementer recorded, or the content may have changed in other ways.
+        synced = {s.get('head_sha') for s in pr.syncs}
+        if not all(commit in synced for commit in merges):
+            return None
+        return {'reason': RESYNC_CONFLICTS, 'round': latest[0]['round'], 'from': approved}
 
     def _merge_mode(self, pr):
         """The merge mode of ``pr`` now (#172): ``[merge]`` with the override of its review

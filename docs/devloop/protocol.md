@@ -33,12 +33,17 @@ A sync writes no review record, so it does not consume a review round, and it ru
 round is left. The PR goes back to `agent:review`, also from `agent:ready-to-merge`, and the next
 round reviews the new head as usual, also while its CI runs; that round counts against `max_review_rounds`,
 except after an approval (see [Resync after approval](#resync-after-approval)). The sync
-comment says so (#289): after conflicts the implementer resolved, it says that the next review
-(or the review after the fix the sync started) **counts**, which counted round it will be out of
-`max_review_rounds` and how many remain after it, or, with none left, that the next review
-needs an operator's decision. After a merge without conflicts of an approved head it says that
-the review of the new head does not count; otherwise the review counts as it would have without
-the sync, and the comment shows the round in the same way. A
+comment says so (#289): after conflicts the implementer resolved on a head that was not
+approved, it says that the next review (or the review after the fix the sync started)
+**counts**, which counted round it will be out of `max_review_rounds` and how many remain after
+it, or, with none left, that the next review needs an operator's decision. After a merge
+without conflicts of an approved head it says that the review of the new head does not count.
+After conflicts the implementer resolved on an approved head (#458) it says which of the two
+cases applies to the review: it starts even with no round left and does **not count** if it
+approves, so the PR is ready again without a `round_limit` escalation; if it opens blocking
+findings it **counts**, and the comment says which round it would be or, with none left, that
+the PR goes to `round_limit`. Otherwise the review counts as it would have without the sync,
+and the comment shows the round in the same way. A
 sync that fails (the implementer is blocked, tests still fail, markers are left, the merge was
 concluded or aborted by the agent, or the agent run failed) goes to `agent:needs-operator` with a
 comment that lists the files in conflict and their commits.
@@ -80,8 +85,9 @@ and another PR was merged before devloop could merge it, needs a new review of t
 - the new head differs from it only by merges of `origin/main`: walking back from the new head,
   each commit up to the approved one (at most 10) has two parents, the second a commit of
   `main`, and exactly the tree `git merge-tree --write-tree` writes, without conflicts, for those
-  two parents. A merge whose conflicts the implementer resolved, a fix, or any other commit
-  changes the PR's content, and the review counts as before;
+  two parents. A merge whose conflicts the implementer resolved follows the rule of the next
+  paragraph; a fix, or any other commit changes the PR's content, and the review counts as
+  before;
 - the review is not a `/devloop rereview`, and CI did not fail on the new head (a CI round
   counts).
 
@@ -91,6 +97,33 @@ approved round and its head (`from`), and its comment says it does not count. Ev
 after a new approval is free in the same way. The limit stays the same for the implementer's
 changes: a request for changes in that round needs a fix, whose review is a round that counts,
 so with no round left it goes to `agent:needs-operator` at once.
+
+**Sync with conflicts after approval** (#458). A PR approved and waiting only for its merge (by
+devloop, or by the operator) can conflict with a later merge into `main`; the implementer
+resolves the conflicts in a [sync](#conflicts-with-main), and the new head needs a review. The
+round limit stops fix cycles that do not converge, not syncs, so that review **starts even with
+no round left** when, as above, the latest round is complete and approved a head, the same for
+every reviewer, the review is not a `/devloop rereview` and CI did not fail on the new head, and:
+
+- the new head differs from the approved one only by merges of `main` (each commit up to it,
+  at most 10, has two parents, the second a commit of `main`);
+- each of those merges whose tree is not the one git writes without conflicts is the head of a
+  `sync` marker written by the implementer's identity: a merge someone else resolved may change
+  anything, and its review counts as before.
+
+The review records `resync` with the reason `resync_conflicts`, the approved round and its head
+(`from`). It does not count against `max_review_rounds` **only if it approves**: the PR goes back
+to `agent:ready-to-merge` (or to the operator's merge, as before) without a `round_limit`
+escalation, and the round is listed among those that do not count, and in the total of
+`devloop status`. If it opens blocking findings (a request for changes, a CI failure joining it,
+or a request for the operator) it counts: with no round left the PR goes to `round_limit` (or to
+the supervisor as `round_grantable`, with the [rounds delegation](guide.md#granting-a-review-round)),
+as for any round beyond the limit; with rounds left the fix follows as usual. While the round
+waits for its second reviewer at level 2 it does not count yet, unless a reviewer asked for the
+operator, so that the other reviewer can join it. If `main` advances touching the PR before the
+second reviewer, the round that [replaces it](reference.md#when-main-advances-during-a-round)
+records `restarts` and the same `resync` too: it reviews the same change, and does not count
+under the same condition (the same holds for the resyncs of #235 and #252).
 
 The same holds when the head did not move at all (#252). Before promoting or merging, the
 dispatcher recomputes the receipt; when `main` advanced touching a file of the PR (or the
@@ -171,8 +204,9 @@ already recorded is not a new round, and neither is a sync with `main` nor the s
 a round already open. A round that `main` advancing interrupted before it was complete does not
 count either (see [When `main` advances](reference.md#when-main-advances-during-a-round)): the round that
 replaces it counts once. Nor does the review of an approved head that only a sync without
-conflicts moved, nor the new review of an approved head whose approval the base revoked (see
-[Resync after approval](#resync-after-approval)). Round numbers stay progressive, because they also name the findings
+conflicts moved, nor the new review of an approved head whose approval the base revoked, nor
+the approving review of an approved head that a sync with conflicts the implementer resolved
+moved, which also starts beyond the limit (see [Resync after approval](#resync-after-approval)). Round numbers stay progressive, because they also name the findings
 (`round/reviewer/ID`), so the round shown as the limit (`round 4 of at most 4`, `round 4/4`) is
 `max_review_rounds` plus the rounds that did not count. The rounds the supervisor granted to the
 PR with `/devloop grant-round` (#405, [Granting a review round](guide.md#granting-a-review-round))
