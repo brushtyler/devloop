@@ -3,15 +3,17 @@
 # delle app (600, del proprietario giusto, solo quelle attese), ACL sulla home di devloop,
 # sudoers, l'utente degli agent (non legge key_dir né state_dir, non scrive .git né le directory
 # che contengono worktree e turni, è nell'overlay, esegue git nei worktree di devloop, non cambia
-# istruzioni, configurazione e binari delle sue CLI), il lock per repository (directory comune,
-# gruppo, overlay; ADR 0006, R8), servizio, CLI degli agent e `devloop apps`. Con più progetti
-# sullo stesso host si esegue una volta per progetto, con i suoi parametri (--params).
+# istruzioni, configurazione e binari delle sue CLI; l'ambiente dei turni gli arriva con sudo -E,
+# che sudo-rs ignora), il lock per repository (directory comune, gruppo, overlay; ADR 0006, R8),
+# servizio, CLI degli agent e `devloop apps`. Con più progetti sullo stesso host si esegue una
+# volta per progetto, con i suoi parametri (--params).
 # Non cambia nulla.
 # Esce con 0 se non trova errori, con 1 altrimenti; gli avvisi non contano come errori.
 # Va eseguito come root (sudo): alcune verifiche leggono file degli altri utenti.
 #
 # --dry-run: fa le verifiche locali in sola lettura e stampa, senza eseguirle, quelle che passano
-# da sudo o dalla rete (--version delle CLI, lettura del log come supervisore, visudo, devloop apps).
+# da sudo o dalla rete (--version delle CLI, lettura del log come supervisore, visudo, sudo -E verso
+# l'utente degli agent, devloop apps).
 
 OPS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=../lib.sh
@@ -307,6 +309,44 @@ done
 
 step "sudoers dell'utente degli agent ($AGENT_SUDOERS_FILE)"
 check_sudoers "$AGENT_SUDOERS_FILE" sudoers-agent setup-agent-user.sh
+
+# L'ambiente isolato che devloop prepara arriva all'utente degli agent (#496), come al controllo
+# all'avvio di devloop (devloop/agentuser.py): una variabile di prova passata come $DEVLOOP_USER
+# con lo stesso `sudo -n -E` dei turni e letta da /usr/bin/bash. sudo-rs, il default di Ubuntu,
+# ignora -E anche con SETENV: serve sudo 1.9.
+step "Ambiente dei turni: sudo -E come $DEVLOOP_USER verso $AGENT_USER (#496)"
+SUDO_FIX='update-alternatives --set sudo /usr/bin/sudo.ws'
+probe_value="devloop-env-probe-$$-$RANDOM"
+env_cmd=(env DEVLOOP_ENV_PROBE="$probe_value" sudo -n -E -u "$AGENT_USER" --
+         /usr/bin/bash -c 'printf %s "$DEVLOOP_ENV_PROBE"')
+[ "$(id -un)" = "$DEVLOOP_USER" ] || env_cmd=(sudo -u "$DEVLOOP_USER" -H -- "${env_cmd[@]}")
+if [ "$DRY_RUN" = 1 ]; then
+    run sudo --version
+    run "${env_cmd[@]}"
+else
+    sudo_version=$(sudo --version 2>/dev/null | head -n 1)
+    case $sudo_version in
+        sudo-rs*) fail "sudo è $sudo_version: ignora -E e gli agent girerebbero senza l'ambiente che devloop prepara; serve sudo 1.9: $SUDO_FIX" ;;
+        '') warn 'sudo --version non risponde' ;;
+        *) ok "sudo: $sudo_version" ;;
+    esac
+    # Con stderr: un avviso di sudo, come quello di sudo-rs su -E, è già un esito diverso.
+    env_out=$("${env_cmd[@]}" 2>&1)
+    env_status=$?
+    env_detail=$(printf '%s' "${env_out:0:300}" | tr '\n' ' ')
+    if [ "$env_status" = 0 ] && [ "$env_out" = "$probe_value" ]; then
+        ok "l'ambiente arriva a $AGENT_USER con sudo -E"
+    else
+        case $env_detail in
+            *sudo-rs* | *"'-E' is ignored"* | *'not supported'*)
+                reason="sudo-rs ignora -E: $SUDO_FIX" ;;
+            *'preserve the environment'*)
+                reason="manca il tag SETENV nel sudoers ($AGENT_SUDOERS_FILE, setup-agent-user.sh)" ;;
+            *) reason="sudo-rs ignora -E ($SUDO_FIX); con sudo 1.9 serve il tag SETENV nel sudoers" ;;
+        esac
+        fail "l'ambiente non arriva a $AGENT_USER con sudo -E (uscita $env_status): $reason${env_detail:+ [sudo: $env_detail]}"
+    fi
+fi
 
 step "Lock per repository: $REPO_LOCK_DIR (ADR 0006, R8)"
 if [ ! -d "$REPO_LOCK_DIR" ]; then

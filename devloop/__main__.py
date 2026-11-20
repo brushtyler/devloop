@@ -508,9 +508,12 @@ def check_agent_user(cfg, state, local_config, agent_user, log=log, me=None, git
     of the shared one, cannot write the directories of its turns, or cannot run git, with
     ``env`` (the environment of the turns), in a worktree of the dispatcher's user (#500).
     Nothing to check without an agent user; with ``[agent_user] check = false`` a warning in
-    the log."""
+    the log. Before it, also with ``check = false``: an ``AgentUserError`` when the environment
+    devloop passes with ``sudo -E`` does not reach the agent user (sudo-rs, ``SETENV`` missing;
+    #496)."""
     if agent_user is None:
         return
+    agent_user.check_environment()
     if not cfg.agent_user.check:
         log(f'agent_user: the startup check of {agent_user.name} is off ([agent_user] check = '
             'false): for development only')

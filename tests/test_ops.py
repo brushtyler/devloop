@@ -1685,6 +1685,70 @@ class CheckHostTests(OpsTestCase):
         self.assertNotIn('*', line)
         self.assertNotIn('nessun worktree', done.stdout)
 
+    def real_sudo(self, sudo, env_stderr='', env_status=0):
+        """A ``sudo`` whose ``--version`` is that of ``SUDO_FLAVORS``, and whose ``sudo -n -E``
+        runs the command as the current user: sudo-rs with a minimal environment, the classic
+        sudo with the caller's (#496). With ``env_status`` it fails, printing ``env_stderr``.
+        Any other call is recorded, as the shims of ``MUTATING``."""
+        start = ('exec env -i PATH=/usr/bin:/bin "$@"' if sudo == 'sudo-rs' else 'exec "$@"')
+        if env_status:
+            start = f'exit {env_status}'
+        warning = f'printf "%s\\n" {shlex.quote(env_stderr)} >&2' if env_stderr else ':'
+        self.shim('sudo', f'''if [ "$1" = --version ]; then
+    echo {shlex.quote(SUDO_FLAVORS[sudo])}; exit 0
+fi
+if [ "$1" = -n ] && [ "$2" = -E ] && [ "$3" = -u ] && [ "$5" = -- ]; then
+    shift 5
+    {warning}
+    {start}
+fi
+echo "sudo $*" >> "$OPS_TEST_CALLS"''')
+
+    def check_for_real(self):
+        """check-host.sh without --dry-run: the checks through sudo reach the shim of sudo."""
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=ME, AGENT_USER='root')
+        done = self.run_script('host/check-host.sh', '--no-apps', '--params', str(params))
+        return done, [line for line in done.stdout.splitlines() if 'ERRORE' in line]
+
+    def test_sudo_rs_is_an_error_with_the_fix(self):
+        # #496: sudo-rs ignores -E, and the agents ran without the environment devloop prepares.
+        self.real_sudo('sudo-rs', env_stderr="sudo: preserving the entire environment is not "
+                                             "supported, '-E' is ignored")
+        done, errors = self.check_for_real()
+        self.assertEqual(done.returncode, 1)
+        fix = 'update-alternatives --set sudo /usr/bin/sudo.ws'
+        self.assertIn(f"  ERRORE: sudo è {SUDO_FLAVORS['sudo-rs']}: ignora -E e gli agent "
+                      f"girerebbero senza l'ambiente che devloop prepara; serve sudo 1.9: {fix}",
+                      errors)
+        env_errors = [line for line in errors if "l'ambiente non arriva" in line]
+        self.assertEqual(len(env_errors), 1, errors)
+        self.assertIn(f'root con sudo -E (uscita 0): sudo-rs ignora -E: {fix}', env_errors[0])
+        self.assertIn("'-E' is ignored", env_errors[0])
+
+    def test_the_classic_sudo_passes_the_environment(self):
+        self.real_sudo('classic sudo')
+        done, errors = self.check_for_real()
+        self.assertIn(f"  ok: sudo: {SUDO_FLAVORS['classic sudo']}", done.stdout)
+        self.assertIn("  ok: l'ambiente arriva a root con sudo -E", done.stdout)
+        self.assertEqual([line for line in errors if 'sudo' in line and 'sudoers' not in line],
+                         [], done.stdout)
+
+    def test_a_rule_without_setenv_is_an_error(self):
+        self.real_sudo('classic sudo', env_status=1,
+                       env_stderr='sudo: sorry, you are not allowed to preserve the environment')
+        done, errors = self.check_for_real()
+        self.assertEqual(done.returncode, 1)
+        env_errors = [line for line in errors if "l'ambiente non arriva" in line]
+        self.assertEqual(len(env_errors), 1, errors)
+        self.assertIn('(uscita 1): manca il tag SETENV nel sudoers', env_errors[0])
+
+    def test_the_dry_run_prints_the_check_of_the_environment(self):
+        done, errors = self.check()
+        self.assertIn('  [dry-run] sudo --version\n', done.stdout)
+        self.assertRegex(done.stdout, r'\[dry-run\] env DEVLOOP_ENV_PROBE=devloop-env-probe-\S+ '
+                                      r'sudo -n -E -u root -- /usr/bin/bash -c ')
+        self.assertEqual(self.mutating_calls(), [])
+
     def test_an_overlay_without_the_agent_user_is_an_error(self):
         (self.state / 'config.local.toml').write_text(f'repo_lock_dir = "{self.locks}"\n'
                                                       '[merge]\nmode = "off"\n')
