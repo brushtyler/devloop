@@ -2086,8 +2086,9 @@ From the beginning to the end, as root or with `sudo`:
    ```
 
 3. **Agent user and CLIs.** Prepare `devloop-agent` with `ops/host/setup-agent-user.sh`
-   ([Agent user](#agent-user)), then install Claude Code, codex and agy as that user and log in
-   to each one with its logins, as described in [Agent CLIs](#agent-clis).
+   ([Agent user](#agent-user)), then, after `setup-agent-user.sh --unseal`, install Claude Code,
+   codex and agy as that user and log in to each one with its logins, as described in
+   [Agent CLIs](#agent-clis), and run `setup-agent-user.sh` again without `--unseal`.
 
 4. **Overlay.** Write `/home/devloop/ssdlc/.ssdlc/devloop/config.local.toml`, owned by
    `devloop` ([Local config as an overlay](#local-config-as-an-overlay)). It is required: since
@@ -2179,11 +2180,47 @@ dispatcher's user, as before ([reference](reference.md#agent-user)).
   nothing in `.git` nor the directories that hold the worktrees and its turns, and that it can
   write the directories devloop makes for its turns; otherwise it refuses to start and says
   what is wrong. `[agent_user] check = false` skips the check, in development only.
+- One user runs implementers and reviewers, so a turn must not change what later turns use
+  (#438, decision of the operator): the instructions, the configuration and the binaries of the
+  CLIs are root's, and `devloop-agent` writes only its credentials, sessions, caches and logs.
+  Its home is root's and sticky (`1770`, its group): it creates the state and cache entries of
+  the CLIs there (such as `~/.claude.json`, which stays its own) but cannot rename nor remove
+  root's. `~/.claude`, `~/.codex`, `~/.gemini`, `~/.gemini/antigravity-cli` and `~/.local` are
+  root's: it enters them but creates nothing there (an instruction file, an agent, a skill, a
+  hook). What carries instructions, configuration or binaries is root's, of the group of
+  `devloop-agent`, which reads it but cannot write it: `CLI_SEALED` in `devloop/agentuser.py`
+  (`settings.json`, `CLAUDE.md`, `rules`, `agents`, `commands`, `skills`, `hooks`,
+  `output-styles` and `plugins` of `~/.claude`; `config.toml`, `AGENTS.md`,
+  `AGENTS.override.md`, `prompts`, `rules`, `skills` and `packages` of `~/.codex`;
+  `~/.gemini/settings.json`, `~/.gemini/GEMINI.md`, `~/.gemini/antigravity-cli/settings.json`;
+  all of `~/.local`). The startup check above also refuses to start when, as `devloop-agent`, it
+  can write, own (an owner changes the mode), create, rename or remove any of them, or a CLI of
+  `~/.local/bin`, the file it leads to and that file's directory; in a directory above them that
+  it can write, only the sticky bit protects an entry, and only when neither the entry nor the
+  directory is its own. A link along these paths, or inside them, is followed one step at a
+  time, and what it leads to must be protected the same way; a link that cannot be followed (a
+  loop) is refused. It also refuses a file of them that `devloop-agent` cannot read, or a
+  directory it cannot enter. The check runs only the system's tools (`PATH=/usr/bin:/bin`),
+  never those of `~/.local/bin`, which comes first in the PATH of `devloop-agent`.
+- What the CLIs keep writable must not carry instructions into the next turn either. Every
+  claude turn runs with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, whatever the operator's
+  environment says: the auto memory of `~/.claude/projects/<project>/memory`, shared by the
+  worktrees of a repository, is neither loaded nor written. The environment alone would not
+  bind: the `env` of the settings overrides it, and a turn writes `.claude/settings.json` and
+  `.claude/settings.local.json` in its worktree, which the next turns of the pull request read.
+  So the same value, with `autoMemoryEnabled: false`, also comes with `--settings`, whose
+  settings come before those of the project and the local ones (after the managed ones only,
+  which are root's); a `--settings` in the `write_args` or `review_args` of a claude agent, which
+  would replace it, stops devloop at startup. It runs with `--strict-mcp-config`:
+  the MCP servers of `~/.claude.json`, which `devloop-agent` writes, are ignored, and only those
+  of a `--mcp-config` in `write_args` or `review_args` count (`agents.CLAUDE_TURN_ENV`,
+  `agents.CLAUDE_TURN_SETTINGS`, `agents.build_command`).
 
-`ops/host/setup-agent-user.sh` creates the user, its directories, the ACLs and the sudoers rule;
-`ops/host/check-host.sh` verifies them ([ops guide](../../ops/README.md)). Run the setup script
-again after copying files into `state_dir`: the ACL entries of the entries that already exist are
-its own. All agents share this one user, so their CLI logins are not isolated from each other.
+`ops/host/setup-agent-user.sh` creates the user, its directories, the ACLs and the sudoers rule,
+and makes the files of the CLIs root's; `ops/host/check-host.sh` verifies them
+([ops guide](../../ops/README.md)). Run the setup script again after copying files into
+`state_dir`: the ACL entries of the entries that already exist are its own. All agents share
+this one user, so their CLI logins are not isolated from each other.
 
 #### Agent CLIs
 
@@ -2212,9 +2249,12 @@ belong to the `devloop` user and devloop finds them on the `PATH` of the process
 
 - **codex** and **agy**, also in `~/.local/bin` of the agent user.
 
-Log in to each CLI once, in an interactive session of the agent user
-(`sudo -iu devloop-agent`), and check that `claude --version`, `codex --version` and
-`agy --version` answer there.
+Installing them, logging in and updating them need the directories of the CLIs open to the agent
+user: `sudo bash ops/host/setup-agent-user.sh --unseal`, with the loop stopped, gives them back
+to it, and the same script without `--unseal` makes them root's again (#438, [Agent
+user](#agent-user)); until then devloop refuses to start. Log in to each CLI once, in an
+interactive session of the agent user (`sudo -iu devloop-agent`), and check that
+`claude --version`, `codex --version` and `agy --version` answer there.
 
 **Updating them by hand, with the loop stopped** (decision of the operator, 2026-11-17). No turn
 may start while a binary is being replaced, so:
@@ -2222,11 +2262,15 @@ may start while a binary is being replaced, so:
 1. stop the loop with the `STOP` file and wait until `devloop run` has exited
    ([Starting and stopping the loop](#starting-and-stopping-the-loop)): the tick in progress
    and its actions end first;
-2. update the CLI as the agent user, for Claude Code with the same `npm install` as above
+2. open the directories of the CLIs to the agent user with
+   `sudo bash ops/host/setup-agent-user.sh --unseal`;
+3. update the CLI as the agent user, for Claude Code with the same `npm install` as above
    (`@anthropic-ai/claude-code@<version>` for a given version), codex and agy each with its own
    installer;
-3. check the new version with `--version`, as the agent user;
-4. remove `STOP` and start `devloop run` again.
+4. check the new version with `--version`, as the agent user, and start it once, so that it
+   creates the entries it needs;
+5. make them root's again with `sudo bash ops/host/setup-agent-user.sh`;
+6. remove `STOP` and start `devloop run` again.
 
 To go back, install the earlier version the same way, again with the loop stopped.
 

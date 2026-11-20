@@ -24,8 +24,9 @@ ops/
   host/
     setup-devloop.sh         pacchetti, utente devloop, clone, state_dir e log, overlay d'esempio,
                              key_dir e ~/.claude, ~/.codex 700, impostazioni di Claude Code, unità
-    setup-agent-user.sh      utente degli agent (devloop-agent): directory delle CLI, ACL su
-                             state_dir, worktree e sessioni, sudoers dell'avvio degli agent
+    setup-agent-user.sh      utente degli agent (devloop-agent): home, file e binari delle CLI
+                             di root, ACL su state_dir, worktree e sessioni, sudoers dell'avvio
+                             degli agent; --unseal per installare e aggiornare le CLI
     setup-supervisor.sh      utente supervisor, ACL di attraversamento su /home/<devloop>,
                              sudoers, clone, key_dir 700, impostazioni di Claude Code
     devloop.service          unità systemd (con segnaposto @NOME@)
@@ -262,8 +263,51 @@ sudo bash ops/host/setup-agent-user.sh --dry-run
 sudo bash ops/host/setup-agent-user.sh
 ```
 
-Crea l'utente `devloop-agent`, i suoi `~/.claude` e `~/.codex` (700) con
-`~/.claude/settings.json` senza aggiornamenti automatici, e `~/.local/bin`; poi le ACL:
+Crea l'utente `devloop-agent` e rende di root ciò che i turni successivi usano (#438): con un
+solo utente per implementer e reviewer, un turno non deve poter cambiare le istruzioni, la
+configurazione o i binari delle CLI per i turni dopo, per esempio aggiungendo a
+`~/.claude/CLAUDE.md` un'istruzione che fa approvare.
+
+- la home di `devloop-agent` è di root, `1770`, del gruppo di `devloop-agent`, con lo sticky bit:
+  `devloop-agent` vi crea le voci di stato e di cache delle CLI (per esempio `~/.claude.json`), ma
+  non rinomina né rimuove quelle di root;
+- `~/.claude`, `~/.codex`, `~/.gemini`, `~/.gemini/antigravity-cli`, `~/.local` e `~/.local/bin`
+  sono di root, `755`: `devloop-agent` vi entra ma non vi crea nulla (un file di istruzioni, un
+  agent, una skill, un hook);
+- ciò che porta istruzioni, configurazione o binari (`AGENT_CLI_SEALED` di `ops/lib.sh`, come in
+  `devloop/agentuser.py`: `~/.claude/settings.json`, scritto senza aggiornamenti automatici,
+  `~/.claude/CLAUDE.md`, `rules`, `agents`, `commands`, `skills`, `hooks`, `output-styles` e
+  `plugins` di `~/.claude`, `~/.codex/config.toml`, `AGENTS.md`, `AGENTS.override.md`,
+  `prompts`, `rules`, `skills` e `packages` di `~/.codex`, `~/.gemini/settings.json`,
+  `~/.gemini/GEMINI.md`, `~/.gemini/antigravity-cli/settings.json` e tutto `~/.local`) diventa di
+  root, del gruppo di `devloop-agent`, leggibile e attraversabile dal gruppo e senza scrittura
+  per gruppo e altri (`chmod -R g+rX,go-w`): un `settings.json` 600 o una directory 700 restano
+  leggibili da `devloop-agent`, che non li scrive e non ne cambia il modo. Un link che porta
+  fuori da ciò che è sigillato (anche un eseguibile di `~/.local/bin` che porta fuori da
+  `~/.local` e da `~/.codex/packages`), o una directory delle CLI che è un link, è segnalato da
+  rendere di root a mano: `chown -h` cambia il link, non il file a cui porta;
+- restano di `devloop-agent` le altre voci che le CLI hanno creato nelle loro directory:
+  credenziali, sessioni (`~/.claude/projects`, `~/.codex/sessions`, che lo script crea), cache e
+  log. Una CLI che dopo un aggiornamento vuole creare una voce nuova nella sua directory non ci
+  riesce: si apre e si richiude come qui sotto. Ciò che vi resta scrivibile non porta istruzioni
+  ai turni dopo: devloop avvia ogni turno di Claude Code senza la memoria automatica di
+  `~/.claude/projects` (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` nell'ambiente e, perché i settings
+  del progetto nel worktree non la riaccendano, anche in `--settings`) e senza i server MCP di
+  `~/.claude.json` (`--strict-mcp-config`). Un `--settings` nei `write_args` o nei `review_args`
+  di un agent claude nell'overlay ferma devloop all'avvio.
+
+**Installare, aggiornare, fare un login.** A loop fermo, `--unseal` rende a `devloop-agent` le
+directory delle CLI e `~/.local`; dopo l'installazione, il login o l'aggiornamento (e un avvio di
+ogni CLI aggiornata, perché crei le sue voci), si riesegue lo script senza `--unseal`. Finché
+non lo si fa, devloop non parte:
+
+```bash
+sudo bash ops/host/setup-agent-user.sh --unseal
+# CLI e login come devloop-agent (tabella qui sotto)
+sudo bash ops/host/setup-agent-user.sh
+```
+
+Poi le ACL:
 
 - `devloop-agent` attraversa soltanto la home di `devloop` (`--x`) e lo `state_dir` (`--x`), e
   non ha accesso a nessuna voce dello `state_dir` (journal, log, overlay, copie fissate), né a
@@ -289,11 +333,17 @@ Poi l'**overlay** deve avere `[agent_user] name = "devloop-agent"` (lo script lo
 manca; `check-host.sh` lo considera un errore). All'avvio di `tick` e `run` devloop verifica come
 `devloop-agent` che non legga né attraversi `key_dir` e le voci private dello `state_dir`, che non
 legga l'overlay, che non scriva nulla in `.git` né le directory che contengono worktree e turni,
-e che scriva nelle directory dei suoi turni; altrimenti non parte.
+che scriva nelle directory dei suoi turni, e che non possa scrivere, possedere, creare,
+rinominare o rimuovere le directory delle CLI, i file e le directory elencati sopra, gli
+eseguibili di `~/.local/bin` e il file a cui portano, con la sua directory, né ciò a cui porta un
+link lungo questi percorsi o dentro di essi, e che possa leggerli; altrimenti non parte. Il
+controllo, come quello di `check-host.sh`, usa solo gli strumenti del sistema (`/usr/bin`,
+`/bin`), mai quelli di `~/.local/bin`.
 
 Le **CLI** e i loro login non sono automatizzati: il login è interattivo e ogni fornitore ha il
-suo installatore. Tutto come utente `devloop-agent` (`sudo -iu devloop-agent`), con gli
-eseguibili in `~/.local/bin`, che è il primo elemento del `secure_path` del sudoers:
+suo installatore. Tutto come utente `devloop-agent` (`sudo -iu devloop-agent`), dopo
+`setup-agent-user.sh --unseal`, con gli eseguibili in `~/.local/bin`, che è il primo elemento del
+`secure_path` del sudoers; alla fine, `setup-agent-user.sh` senza `--unseal`:
 
 | CLI | Installazione | Eseguibile |
 |---|---|---|
@@ -307,7 +357,8 @@ verifica con `~/.local/bin/<cli> --version`.
 Gli aggiornamenti automatici restano spenti: devloop non deve avviare un turno mentre una CLI
 sostituisce il proprio eseguibile. Per Claude Code, `~/.claude/settings.json` con
 `"autoUpdates": false` e `"env": {"DISABLE_AUTOUPDATER": "1"}` (lo scrive `setup-agent-user.sh`), e il
-launcher esporta `DISABLE_AUTOUPDATER=1`. Le CLI si aggiornano a mano con il loop fermo
+launcher esporta `DISABLE_AUTOUPDATER=1`. Le CLI si aggiornano a mano con il loop fermo, fra
+`--unseal` e la nuova esecuzione dello script senza
 ([docs/devloop/guide.md](../docs/devloop/guide.md#agent-clis)).
 
 ### 6. Overlay e primo pin
@@ -385,7 +436,9 @@ i due sudoers (440, root, accettati da `visudo`, uguali a quelli generati); che 
 legga `key_dir`, lo `state_dir` e l'overlay, non attraversi `key_dir`, non legga né attraversi le
 altre voci dello `state_dir`, entri senza scriverle in `worktrees`, `agent-shared`,
 `agent-shared/schemas`, `agent-shared/turns` e `agent-shared/tmp`, non scriva nulla in `.git`,
-e che l'overlay abbia `[agent_user] name = "devloop-agent"`; il lock per repository (la directory
+e che l'overlay abbia `[agent_user] name = "devloop-agent"`; la home di `devloop-agent` (1770,
+root) e, come `devloop-agent`, i file e i binari delle CLI, come il controllo all'avvio (#438);
+il lock per repository (la directory
 di root, 3770, del gruppo `devloop-repos`; `devloop` nel gruppo, `devloop-agent` e il supervisore
 fuori; `devloop-agent` che non vi entra; il file di `tmpfiles.d`; `repo_lock_dir` nell'overlay);
 l'unità (uguale a quella generata, `KillMode=mixed`; con `PROJECT` l'unità template e la drop-in),
@@ -425,6 +478,10 @@ resta fermo, come descritto in *Continuous loop* della guida di devloop).
 Vedi [host/migrate.md](host/migrate.md): cosa copiare dallo `state_dir` e dal supervisore, cosa
 ricreare (copie fissate, login delle CLI, servizio), come trattare le chiavi delle app e in che
 ordine, senza mai due dispatcher attivi sullo stesso repository.
+
+Un host già attivo prima del #438 fa una volta il passo di
+[host/migrate.md](host/migrate.md#file-delle-cli-di-root-sullutente-degli-agent-438): file e
+binari delle CLI di `devloop-agent` di root, prima del pin della copia che lo controlla.
 
 ### Migrazione di R3 su un host attivo
 

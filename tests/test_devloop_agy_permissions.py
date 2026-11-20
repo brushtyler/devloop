@@ -68,12 +68,15 @@ class AgyArgumentsTests(unittest.TestCase):
                 self.assertNotIn(f'command({bare})', rules)
             self.assertNotIn('command(git add)', rules)
             self.assertNotIn('command(git commit)', rules)
-        # The other CLIs keep their own permission arguments.
+        # The other CLIs keep their own permission arguments: claude's --settings only turns
+        # its auto memory off (#438).
         for key in ('claude', 'codex'):
             argv, _ = agents.build_command(CFG.agent(key), 'review', 'p',
                                            schema_file=schema.schema_path('review'),
                                            out_file='o')
-            self.assertNotIn('--settings', argv)
+            given = [json.loads(argv[i + 1]) for i, a in enumerate(argv) if a == '--settings']
+            self.assertEqual(given, [agents.CLAUDE_TURN_SETTINGS] if key == 'claude' else [])
+            self.assertNotIn('permissions', agents.CLAUDE_TURN_SETTINGS)
 
 
 class AgyConfigTests(unittest.TestCase):
@@ -132,6 +135,22 @@ class AgyConfigTests(unittest.TestCase):
         for key in ('claude', 'codex'):
             with self.subTest(key), self.assertRaises(config.ConfigError):
                 config.parse_config(with_agent(key, review_commands=['git diff']))
+
+    def test_claude_arguments_cannot_replace_the_settings_of_its_turns(self):
+        # #438, 2/codex/R2-1: the last --settings counts, and devloop's turns the auto memory
+        # off over the settings of the project, which a turn writes.
+        for key in ('write_args', 'review_args'):
+            for arg in ('--settings', '--settings={"autoMemoryEnabled": true}'):
+                with self.subTest(key=key, arg=arg), \
+                        self.assertRaisesRegex(config.ConfigError, 'auto memory'):
+                    config.parse_config(with_agent('claude', **{key: [arg]}))
+        argv, _ = agents.build_command(
+            config.parse_config(DATA).agent('claude'), 'write', 'p',
+            schema_file=schema.schema_path('implement'), out_file='out.json')
+        self.assertEqual(argv.count('--settings'), 1)
+        self.assertEqual(json.loads(argv[argv.index('--settings') + 1]),
+                         {'autoMemoryEnabled': False,
+                          'env': {'CLAUDE_CODE_DISABLE_AUTO_MEMORY': '1'}})
 
 
 def with_pool(*keys, **agy):
