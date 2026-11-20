@@ -1494,7 +1494,13 @@ is in the [guide](guide.md#agent-user) and in the [ops guide](../../ops/README.m
   makes in `turns` and in `tmp`, and read a schema devloop writes. The agent user must also
   differ from the dispatcher's. Otherwise devloop exits, naming each path, before taking the
   lock. `[agent_user] check = false` skips the probe and logs that it is off: for development
-  only.
+  only. Before the probe, also with `check = false`, devloop checks that the environment
+  reaches the agent user (#496): a variable with a random value (`DEVLOOP_ENV_PROBE`), passed
+  with the same `sudo -n -E -u <name>` as the turns and printed by `/usr/bin/bash`, must come
+  back. sudo-rs, the default `sudo` of Ubuntu, ignores `-E` (`'-E' is ignored`) also with
+  `SETENV`, and sudo 1.9 refuses `-E` without it: either way devloop exits before taking the
+  lock and says which, with the fix of sudo-rs (`update-alternatives --set sudo
+  /usr/bin/sudo.ws`, as root).
 - **Transcripts.** The stall check and `devloop follow` read the session transcripts in the agent
   user's home.
 

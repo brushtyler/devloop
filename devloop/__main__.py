@@ -506,9 +506,12 @@ def check_agent_user(cfg, state, local_config, agent_user, log=log, me=None, git
     ``$DEVLOOP_APP_KEY_DIR``) or the entries of ``state_dir``, read the local overlay, write
     ``git_dir`` (the repository's ``.git``), the worktrees directory or the fixed directories
     of the shared one, or cannot write the directories of its turns. Nothing to check without
-    an agent user; with ``[agent_user] check = false`` a warning in the log."""
+    an agent user; with ``[agent_user] check = false`` a warning in the log. Before it, also
+    with ``check = false``: an ``AgentUserError`` when the environment devloop passes with
+    ``sudo -E`` does not reach the agent user (sudo-rs, ``SETENV`` missing; #496)."""
     if agent_user is None:
         return
+    agent_user.check_environment()
     if not cfg.agent_user.check:
         log(f'agent_user: the startup check of {agent_user.name} is off ([agent_user] check = '
             'false): for development only')
