@@ -674,25 +674,36 @@ class Workspace:
         conflicts, for its two parents. A merge whose conflicts someone resolved, or any other
         commit, is not. Fetches ``branch`` and the base first. Raises WorkspaceError when git
         cannot tell."""
+        return self.resync_merges(branch, head, approved, limit) == []
+
+    def resync_merges(self, branch, head, approved, limit=10):
+        """The merges between ``approved`` and ``head`` whose tree git does not write by itself
+        (conflicts someone resolved, #458), newest first, when ``head`` differs from
+        ``approved`` only by merges of the base branch: walking back from ``head``, every
+        commit up to ``approved`` (at most ``limit``) has exactly two parents, the second a
+        commit of ``origin/<base>``. ``[]``: every merge is the one git concludes without
+        conflicts (``clean_resync``). None when ``head`` is ``approved``, another commit is in
+        between, or ``approved`` is not reached. Fetches ``branch`` and the base first. Raises
+        WorkspaceError when git cannot tell."""
         self._git('fetch', 'origin', self.base_branch,
                   f'+refs/heads/{branch}:refs/remotes/origin/{branch}')
         base = f'origin/{self.base_branch}'
-        commit = head
+        commit, resolved = head, []
         for _ in range(limit):
             if commit == approved:
-                return commit != head
+                return resolved if commit != head else None
             line = self._git('rev-list', '--parents', '-n1', commit).split()
             if len(line) != 3:
-                return False
+                return None
             first, merged = line[1:]
             if self._git_run('merge-base', '--is-ancestor', merged, base,
                              check=False).returncode:
-                return False
+                return None
             tree, clean, _ = self._merge_tree(first, merged)
             if not clean or tree != self._git('rev-parse', f'{commit}^{{tree}}').strip():
-                return False
+                resolved.append(commit)
             commit = first
-        return False
+        return None
 
     def contains_base(self, path):
         """Whether the branch in ``path`` already contains ``origin/<base>`` as last fetched."""

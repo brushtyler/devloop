@@ -1186,7 +1186,8 @@ records stay as they are, and the promotion's `policy` record carries `bases` wi
 it relied on. If `main` interfered, the PR conflicts with the current base, or non-interference
 is not proven, the approval is not promoted (a `stale` record lists the checks): a conflict is
 synced first, as usual, and a new round follows. That round does not count when it reviews the
-same head again (#252), or a head only a clean sync moved (#235); otherwise it counts (see
+same head again (#252), or a head only a clean sync moved (#235), or approves a head that a sync
+with conflicts the implementer resolved moved (#458); otherwise it counts (see
 [Resync after approval](protocol.md#resync-after-approval)).
 
 ### Level 0: no review

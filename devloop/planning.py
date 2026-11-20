@@ -27,6 +27,10 @@ RESYNC_AFTER_APPROVAL = 'resync_after_approval'
 # And (#252): the round before approved the very head the new one reviews again, after the
 # dispatcher revoked that approval because the base branch touched the PR's files.
 BASE_CHANGED = 'base_changed'
+# And (#458): the round before approved a head that the new one differs from only by merges of
+# the base branch, some with conflicts the implementer resolved in a sync. The round runs also
+# beyond the limit, and does not count only if it approves.
+RESYNC_CONFLICTS = 'resync_conflicts'
 # Actions that take a slot of ``max_actions_per_tick``.
 EXPENSIVE = ('review', 'fix', 'implement', 'sync', 'preflight', 'merge', 'supervise',
              'conclave', 'advisory')
@@ -115,9 +119,10 @@ class PullRequest:
     # ``{comment, by, request}``: one fix of the current head answers all of them.
     fix_requests: list = field(default_factory=list)
     # In agent:review, when the latest round approved an earlier head and the head differs from
-    # it only by clean merges of the base branch (#235), or approved this very head and the
-    # dispatcher then revoked the approval because the base touched the PR (#252):
-    # ``{reason, round, from}``, what the next review records as ``resync``. None otherwise.
+    # it only by clean merges of the base branch (#235), or also by merges whose conflicts the
+    # implementer resolved in a sync (#458), or approved this very head and the dispatcher then
+    # revoked the approval because the base touched the PR (#252): ``{reason, round, from}``,
+    # what the next review records as ``resync``. None otherwise.
     resync: dict = None
     # Re-runs of failed CI jobs the dispatcher recorded (``rerun`` markers, #200), and whether
     # the CI still shows the very failed checks a re-run of the head replaces: the re-run has
@@ -616,7 +621,9 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
             unmapped = replay and verdict == 'approve' and bool(pr.acceptance)
             # A review needed only because a clean sync moved the approved head (#235), or
             # because the base touched the PR after its approval (#252), is not a new round
-            # against the limit; a CI failure or a rereview still is.
+            # against the limit; a CI failure or a rereview still is. After a sync whose
+            # conflicts the implementer resolved (#458) the review starts also beyond the limit,
+            # and counts only if it does not approve (``waived_rounds``).
             resync = pr.resync is not None and not pr.rereview and pr.checks != 'fail'
             if replay and verdict != 'approve':
                 actions.append(Action('apply_review', pr.number, 'verdict already recorded'))
@@ -666,6 +673,9 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
                 reason = ('new review requested by a trusted user' if pr.rereview
                           else 'the approval was revoked because the base touched the PR'
                           if resync and pr.resync['reason'] == BASE_CHANGED
+                          else 'the approved head was synced with the base, with conflicts '
+                               'resolved: the round counts only if it does not approve'
+                          if resync and pr.resync['reason'] == RESYNC_CONFLICTS
                           else 'the approved head was synced with the base' if resync
                           else 'the approval has no matching policy receipt' if unbound
                           else 'the acceptance map does not hold' if unmapped
@@ -879,7 +889,11 @@ def waived_rounds(reviews):
     records say (``restarts``, #160); and each round that reviewed a head differing only by
     clean merges of the base from the head the round just before approved (``resync``,
     #235), or that reviewed again the head the round just before approved, after the dispatcher
-    revoked that approval because the base touched the PR (``resync``, #252)."""
+    revoked that approval because the base touched the PR (``resync``, #252). A round after a
+    sync whose conflicts the implementer resolved (``resync_conflicts``, #458) is waived only
+    while it approves, or still waits for a reviewer without asking for the operator: complete
+    with a request for changes, a CI failure included, or with a request for the operator, it
+    counts."""
     waived = set()
     for record in reviews:
         restart = record.get('restarts')
@@ -887,19 +901,30 @@ def waived_rounds(reviews):
         if (isinstance(number, int) and not isinstance(number, bool) and number < record['round']
                 and pending_reviewers(_round_records(reviews, number))):
             waived.add(number)
-        if _resynced(reviews, record):
+        if _resynced(reviews, record) and (record['resync']['reason'] != RESYNC_CONFLICTS
+                                           or _approving(_round_records(reviews,
+                                                                        record['round']))):
             waived.add(record['round'])
     return waived
 
 
+def _approving(records):
+    """Whether the round ``records`` approves (#458): complete with an approval, or still waiting
+    for a reviewer with no request for the operator, so that whoever joins it does not go
+    beyond the limit."""
+    verdict = round_verdict(records)
+    return verdict == 'approve' or (verdict == 'request_changes'
+                                    and bool(pending_reviewers(records)))
+
+
 def _resynced(reviews, record):
-    """Whether ``record`` reviewed a resync after approval (#235) or the same head after a
-    revocation for the base (#252): its ``resync`` names the round just before its own, a
-    complete agent round that approved the head ``from``; the record reviews another head after
-    a resync, that same head after a revocation."""
+    """Whether ``record`` reviewed a resync after approval (#235, and #458 with conflicts
+    resolved) or the same head after a revocation for the base (#252): its ``resync`` names the
+    round just before its own, a complete agent round that approved the head ``from``; the
+    record reviews another head after a resync, that same head after a revocation."""
     resync = record.get('resync')
-    if not isinstance(resync, dict) or resync.get('reason') not in (RESYNC_AFTER_APPROVAL,
-                                                                    BASE_CHANGED):
+    if not isinstance(resync, dict) or resync.get('reason') not in (
+            RESYNC_AFTER_APPROVAL, RESYNC_CONFLICTS, BASE_CHANGED):
         return False
     number = resync.get('round')
     if isinstance(number, bool) or number != record['round'] - 1:
@@ -999,8 +1024,9 @@ def round_reasons(reviews, fixes=(), syncs=()):
     A counted round is a CI failure, the review of a head an agent's conflict resolution
     produced (``syncs``, the ``sync`` markers), the review after a fix (``fixes``) of the round
     before, the first review, or a new review of the same or of another head. A waived round
-    (``waived_rounds``) is a review after a resync or a revocation for the base, or a round the
-    base interrupted and a later one replaced."""
+    (``waived_rounds``) is a review after a resync or a revocation for the base, an approving
+    review after a sync with conflicts of an approved head (#458), or a round the base
+    interrupted and a later one replaced."""
     waived = waived_rounds(reviews)
     synced = {s.get('head_sha') for s in syncs} - {None}
     fixed = {f.get('round') for f in fixes}
@@ -1012,6 +1038,9 @@ def round_reasons(reviews, fixes=(), syncs=()):
             reason = resync.get('reason') if isinstance(resync, dict) else None
             if reason == RESYNC_AFTER_APPROVAL:
                 why = 'review di un head approvato, spostato solo da una sync senza conflitti'
+            elif reason == RESYNC_CONFLICTS:
+                why = ('review approvata di un head approvato, spostato da una sync con '
+                       'conflitti risolti dall\'agent')
             elif reason == BASE_CHANGED:
                 why = 'nuova review di un head approvato, dopo la revoca per la base'
             else:

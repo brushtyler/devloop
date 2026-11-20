@@ -10,8 +10,8 @@ from unittest import mock
 
 from devloop import markdown
 from devloop.dispatcher import pr_status_line, round_limit_reason
-from devloop.planning import (RESYNC_AFTER_APPROVAL, Action, counted_rounds, round_reasons,
-                              waived_rounds)
+from devloop.planning import (RESYNC_AFTER_APPROVAL, RESYNC_CONFLICTS, Action, counted_rounds,
+                              round_reasons, waived_rounds)
 from devloop.workspace import Workspace, WorkspaceError
 from test_devloop import CFG, SHA1, SHA2, finding, fixed, pr, raw_review, receipt
 from test_devloop_quorum import FIRST, SECOND, Quorum
@@ -36,8 +36,9 @@ class ResyncTests(Quorum):
         self.assertEqual(self.gh.labels[100], {'agent:review'})
         self.gh.head = SHA2
         # What git says of the new head: a clean merge of main, unless an agent resolved
-        # conflicts in it.
+        # conflicts in it: then the merge SHA2, which the sync marker records (#458).
         self.ws.resynced = not conflicts
+        self.ws.resolved = [SHA2] if conflicts else None
 
     def test_a_clean_sync_of_an_approved_pr_is_reviewed_without_spending_a_round(self):
         # The case of #230: approved in the last round allowed, then synced without conflicts.
@@ -87,37 +88,99 @@ class ResyncTests(Quorum):
         self.assertIn('La review del nuovo head **non conterà** come round', body)
         self.assertNotIn('**conterà**', body)
 
-    def test_the_comment_of_a_sync_with_conflicts_says_the_review_counts(self):
-        # #289: with no round left, the comment says the operator decides; with rounds left,
-        # it says which round the review is and how many remain after it.
+    def test_the_comment_of_a_sync_with_conflicts_of_an_approved_head_says_both_cases(self):
+        # #458 (and #289): the review of an approved head synced with conflicts does not count
+        # if it approves; a request for changes counts, and with no round left goes to
+        # round_limit. With rounds left, it says which round it would be.
         self.approved_then_synced(SYNCED, conflicts=('x.py',))
+        body = self.gh.comments[-1][1]
+        self.assertIn('La review del nuovo head parte anche senza round rimasti e **non '
+                      'conterà** come round se approva', body)
+        self.assertIn('approvata, la PR torna pronta per il merge senza un\'escalation per il '
+                      'limite dei round', body)
+        self.assertIn('Se invece apre finding bloccanti **conterà**: contati già 1 round di 1 '
+                      '(`max_review_rounds`), nessuno rimasto: la PR andrà all\'escalation per '
+                      'il limite dei round (`round_limit`)', body)
+        for limit, left in ((2, 'sarà il round 2 di 2 (`max_review_rounds`), l\'ultimo '
+                                'rimasto'),
+                            (4, 'sarà il round 2 di 4 (`max_review_rounds`); dopo questo ne '
+                                'resteranno 2')):
+            with self.subTest(limit=limit):
+                cfg = dataclasses.replace(CFG, max_review_rounds=limit)
+                self.approved_then_synced(SYNCED, conflicts=('x.py',), cfg=cfg)
+                body = self.gh.comments[-1][1]
+                self.assertIn('**non conterà** come round se approva', body)
+                self.assertIn(left, body)
+
+    def test_the_comment_of_a_sync_with_conflicts_of_a_head_not_approved_says_it_counts(self):
+        # #289: no approval before the sync, so the review counts as before.
+        self.make(raw_review('request_changes', [finding()]), SYNCED, cfg=ONE_ROUND,
+                  diff=LEVEL1)
+        self.d.tick()
+        self.gh.labels[100] = {'agent:review'}
+        pr = self.d.snapshot().prs[0]
+        pr.merge_state = 'conflict'
+        self.ws.conflicts = ('x.py',)
+        self.d._do_sync(pr)
         body = self.gh.comments[-1][1]
         self.assertIn('La review successiva **conterà** come round, perché l\'agent ha risolto '
                       'dei conflitti', body)
         self.assertIn('contati già 1 round di 1 (`max_review_rounds`); nessun round rimasto: la '
                       'review successiva richiederà una decisione dell\'operatore', body)
         self.assertNotIn('non conterà', body)
-        for limit, left in ((2, 'round 2 di 2 (`max_review_rounds`), l\'ultimo rimasto'),
-                            (4, 'round 2 di 4 (`max_review_rounds`); dopo questo ne resteranno '
-                                '2')):
-            with self.subTest(limit=limit):
-                cfg = dataclasses.replace(CFG, max_review_rounds=limit)
-                self.approved_then_synced(SYNCED, conflicts=('x.py',), cfg=cfg)
-                self.assertIn(left, self.gh.comments[-1][1])
 
-    def test_a_sync_whose_conflicts_an_agent_resolved_counts(self):
-        # At the limit: the content of the PR changed, so the review is a new round.
-        self.approved_then_synced(SYNCED, conflicts=('x.py',))
-        self.assertEqual(self.planned(), [Action('round_limit', 100)])
+    def test_an_approved_pr_at_the_limit_synced_with_conflicts_is_reviewed_and_ready(self):
+        # #458, the case of PR #449: approved in the last round allowed, then synced with
+        # conflicts the implementer resolved. The review runs without round_limit and, when
+        # it approves, the PR is ready again without spending a round.
+        self.approved_then_synced(SYNCED, raw_review(), conflicts=('x.py',))
+        self.assertEqual(self.planned(), [Action(
+            'review', 100, 'the approved head was synced with the base, with conflicts '
+                           'resolved: the round counts only if it does not approve')])
+        self.assertEqual(self.ws.resync_checks[-1], ('agent/issue-7', SHA2, SHA1))
         self.d.tick()
+        first, second = self.records('review')
+        self.assertEqual((second['round'], second['head_sha']), (2, SHA2))
+        self.assertEqual(second['resync'], {'reason': RESYNC_CONFLICTS, 'round': 1,
+                                            'from': SHA1})
+        self.assertEqual(second['max_rounds'], 2)
+        self.assertIn('se approva; se apre finding bloccanti conta',
+                      self.gh.native[-1][1]['body'])
+        reviews = self.d.snapshot().prs[0].reviews
+        self.assertEqual((waived_rounds(reviews), counted_rounds(reviews)), ({2}, 1))
+        self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
+        self.assertFalse(any('**Classe:**' in body for _, body in self.gh.comments))
+        self.assertEqual(round_reasons(reviews, syncs=self.records('sync'))[-1], (
+            2, 'review approvata di un head approvato, spostato da una sync con conflitti '
+               'risolti dall\'agent', False))
+
+    def test_a_request_for_changes_after_a_sync_with_conflicts_reaches_the_round_limit(self):
+        # #458: the review runs beyond the limit, but its blocking findings would need a fix
+        # beyond it: the round counts, and the PR goes to round_limit as before.
+        self.approved_then_synced(SYNCED, raw_review('request_changes', [finding()]),
+                                  conflicts=('x.py',))
+        self.d.tick()
+        second = self.records('review')[-1]
+        self.assertEqual(second['resync']['reason'], RESYNC_CONFLICTS)
+        reviews = self.records('review')
+        self.assertEqual((waived_rounds(reviews), counted_rounds(reviews)), (set(), 2))
         self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
-        self.assertEqual(len(self.records('review')), 1)
-        # #289: the escalation lists the rounds that count, with their reason.
         body = self.gh.comments[-1][1]
         self.assertIn('**Classe:** `round_limit`', body)
-        self.assertIn('Round contati sul limite (1 di 1, `max_review_rounds`):\n\n'
-                      '- round 1: prima review', body)
+        self.assertIn('Raggiunto il limite di 1 round', body)
+        self.assertIn('- round 1: prima review\n- round 2: review dopo una sync con conflitti '
+                      'risolti dall\'agent', body)
         self.assertIn('alzando `max_review_rounds`', body)
+
+    def test_a_merge_with_conflicts_without_a_sync_marker_counts(self):
+        # #458: a merge someone resolved outside a recorded sync may change anything.
+        self.approved_then_synced(SYNCED, conflicts=('x.py',))
+        self.ws.resolved = ['c' * 40]
+        self.assertEqual(self.planned(), [Action('round_limit', 100)])
+        self.ws.resolved = [SHA2, 'c' * 40]
+        self.assertEqual(self.planned(), [Action('round_limit', 100)])
+        self.ws.resolved = None  # another commit in between
+        self.assertEqual(self.planned(), [Action('round_limit', 100)])
 
     def status(self):
         """The PR lines ``devloop status`` logs, on the real snapshot of the dispatcher."""
@@ -130,8 +193,10 @@ class ResyncTests(Quorum):
 
     def test_status_shows_the_rounds_of_a_pr_stopped_at_the_round_limit(self):
         # #289: escalated to agent:needs-operator the snapshot does not read the thread, yet
-        # ``status`` still shows the rounds that reached the limit.
+        # ``status`` still shows the rounds that reached the limit: a CI failure on the synced
+        # head counts.
         self.approved_then_synced(SYNCED, conflicts=('x.py',))
+        self.gh.ci = 'fail'
         self.d.tick()
         self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         self.assertEqual(self.d.snapshot().prs[0].reviews, [])  # tick still skips the thread
@@ -151,15 +216,25 @@ class ResyncTests(Quorum):
         (line,) = self.status()
         self.assertIn('[agent:needs-operator] rounds=2/2 (+1 not counted) ci=', line)
 
-    def test_a_sync_whose_conflicts_an_agent_resolved_spends_a_round(self):
-        # With rounds left the review runs, and counts, without ``resync``.
-        self.approved_then_synced(SYNCED, raw_review(), conflicts=('x.py',), cfg=CFG)
-        self.assertEqual(self.planned(), [Action('review', 100)])
-        self.d.tick()
-        second = self.records('review')[-1]
-        self.assertEqual(second['round'], 2)
-        self.assertNotIn('resync', second)
-        self.assertEqual(counted_rounds(self.d.snapshot().prs[0].reviews), 2)
+    def test_with_rounds_left_a_sync_with_conflicts_counts_only_without_approval(self):
+        # #458: with rounds left too, the review records ``resync`` and counts only if it does
+        # not approve; a request for changes then goes to the fix as usual.
+        for verdict, waived, counted, labels in (
+                ('approve', {2}, 1, {'agent:ready-to-merge'}),
+                ('request_changes', set(), 2, {'agent:changes'})):
+            with self.subTest(verdict=verdict):
+                findings = [finding()] if verdict == 'request_changes' else []
+                self.approved_then_synced(SYNCED, raw_review(verdict, findings),
+                                          conflicts=('x.py',), cfg=CFG)
+                self.d.tick()
+                second = self.records('review')[-1]
+                self.assertEqual((second['round'], second['resync']['reason']),
+                                 (2, RESYNC_CONFLICTS))
+                self.assertEqual(second['max_rounds'], 4)
+                reviews = self.records('review')
+                self.assertEqual((waived_rounds(reviews), counted_rounds(reviews)),
+                                 (waived, counted))
+                self.assertEqual(self.gh.labels[100], labels)
 
     def test_a_request_for_changes_after_the_resync_keeps_the_limit(self):
         # With one round allowed and spent, a request for changes in the free round reaches
@@ -253,6 +328,30 @@ class CountingTests(unittest.TestCase):
         }.items():
             with self.subTest(name):
                 self.assertEqual(waived_rounds(reviews), set())
+
+    def test_a_round_after_a_sync_with_conflicts_is_waived_only_while_it_approves(self):
+        # #458: complete, it is waived if it approves; still waiting for a reviewer, it is
+        # waived unless one asked for the operator, so that the other reviewer can join it.
+        bound = dict(receipt(), level=2, reviewers=[FIRST, SECOND])
+        conflicts = self.resync(reason=RESYNC_CONFLICTS)
+
+        def second(reviewer, verdict='approve'):
+            return dict(self.record(2, reviewer, verdict, head=SHA2, resync=conflicts),
+                        receipt=bound)
+        approved = [dict(self.record(1, FIRST), receipt=bound),
+                    dict(self.record(1, SECOND), receipt=bound)]
+        for name, round2, waived in (
+                ('approved', [second(FIRST), second(SECOND)], {2}),
+                ('changes', [second(FIRST), second(SECOND, 'request_changes')], set()),
+                ('operator', [second(FIRST), second(SECOND, 'needs_operator')], set()),
+                ('pending approval', [second(FIRST)], {2}),
+                ('pending changes', [second(FIRST, 'request_changes')], {2}),
+                ('pending operator', [second(FIRST, 'needs_operator')], set()),
+                ('ci joined', [second(FIRST), second(SECOND),
+                               dict(self.record(2, 'ci', 'request_changes', head=SHA2),
+                                    source='ci')], set())):
+            with self.subTest(name):
+                self.assertEqual(waived_rounds(approved + round2), waived)
 
     def test_an_incomplete_approval_is_not_a_resync(self):
         bound = dict(receipt(), level=2, reviewers=[FIRST, SECOND])
@@ -374,6 +473,20 @@ class CleanResyncTests(unittest.TestCase):
         self.commit('main changes a', a='main\n')
         head = self.merge_main(resolve='pr\nmain\n')
         self.assertFalse(self.check(head))
+
+    def test_the_merges_with_conflicts_resolved_are_listed(self):
+        # #458: the merges git does not conclude by itself, newest first; a clean one is not.
+        self.commit('main changes a', a='main\n')
+        resolved = self.merge_main(resolve='pr\nmain\n')
+        self.commit('main again', b='again\n')
+        clean = self.merge_main()
+        self.assertEqual(self.ws.resync_merges('pr', clean, self.approved), [resolved])
+        self.assertEqual(self.ws.resync_merges('pr', resolved, self.approved), [resolved])
+        self.assertIsNone(self.ws.resync_merges('pr', self.approved, self.approved))
+        self.git('checkout', '-q', 'pr')
+        fix = self.commit('fix', a='fixed\n')
+        self.git('checkout', '-q', 'main')
+        self.assertIsNone(self.ws.resync_merges('pr', fix, self.approved))
 
     def test_a_merge_with_another_change_or_a_commit_is_not(self):
         self.git('checkout', '-q', 'pr')
