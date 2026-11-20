@@ -1106,7 +1106,8 @@ person, not the supervisor's identity nor an app, after the latest change of the
 and before the takeover (its latest edit too); an approval without the command decides nothing,
 and the history of the issue is read in full, or no command counts. devloop lists those commands
 under "Decisions of the operator on the issue" in the prompts of the readiness check, of the
-reviewers and of the advisory review, and the readiness check answers the ones it refuses. The
+reviewers and of the advisory review, and answers once the ones it refuses: in the comment of the
+next readiness check or, when none is due, in a dispatcher comment (`approve_refused`). The
 quorum and the choice of the reviewers, the checks of `operator_only_paths` and
 `protected_paths`, the names of the labels of hold, of escalation and of merge, `trusted_users`
 and the "Trust policy" section stay with the operator even when a decision prescribes their

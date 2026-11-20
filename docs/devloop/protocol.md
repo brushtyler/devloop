@@ -300,7 +300,8 @@ was removed and applied again, if a comment starting with the attribution header
 identity allowed to write devloop records, came after the check (another escalation, or
 anything that may be one, marker or not; the dispatcher's [ledger records](#evidence-and-telemetry),
 such as the turn of a recheck, and its [supervision traces](#supervision-trace), such as the
-answer to a command that does not apply, and its `recheck` answers do not count, nor, since #468,
+answer to a command that does not apply, and its `recheck` and (#483) `approve` answers do not
+count, nor, since #468,
 a comment of the supervisor's identity that carries neither a `notice` nor a `preflight`
 marker), or if the attribution is uncertain. A comment from
 anyone else, header or not, never touches the attribution. A label already present when the
@@ -694,9 +695,15 @@ history of the issue is read in full, 100 events a page (`GitHub.issue_history`,
 then admits no command. Those commands, by author, `created_at` and text, enter the hash of the
 request, so a readiness check that relied on one is not reused once a change of the text, even
 undone, drops it, nor once the command is rewritten. A `/devloop approve` of an app, one after
-the attribution header, one not on the first line and one without a text are refused, and the
-readiness check that follows them lists them in its comment, with the reason, outside its
-marker; one of an untrusted author is ignored. The prompts list what stays with the operator
+the attribution header, one not on the first line and one without a text are refused and
+answered once, by the id of their comment, on an issue whose readiness check devloop reads: the
+readiness check that runs next lists them in its comment, with the reason, and their ids in the
+`refused` field of its `preflight` marker. When no check is planned for the issue (the command
+of an app changes neither the hash of the request nor anything else), the `approve_refused`
+action answers them with a dispatcher comment ending with an `approve` marker, `comments` being
+the ids it answers. That answer is a devloop record that spends no `/devloop recheck` and
+leaves the readiness hash and the block's attribution as they are; only the dispatcher's
+identity writes it. One of an untrusted author is ignored. The prompts list what stays with the operator
 whatever a decision prescribes (#483): the quorum and the choice of the reviewers, the checks
 of `operator_only_paths` and `protected_paths`, the names of the labels of hold, of escalation
 and of merge, `trusted_users` and the "Trust policy" section. All of it is described in [Changes to the trust policy](guide.md#changes-to-the-trust-policy). The rule

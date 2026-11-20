@@ -514,7 +514,8 @@ class TrustPolicyDocsTest(unittest.TestCase):
                       'an approval written without the command too, is context for the '
                       'implementer and authorizes nothing',
                       'A change of the text after the command drops it',
-                      'are refused: the next readiness check says so in its comment',
+                      'are refused, and devloop answers each once, with the reason: in the '
+                      'comment of the next readiness check, or, when none is due',
                       '**Complete history** (#483)',
                       'Since #483 the prompts list explicitly what point 3 always keeps with the '
                       'operator',

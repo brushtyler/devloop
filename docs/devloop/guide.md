@@ -175,8 +175,9 @@ of every PR:
   the takeover (its `updated_at`), since the agents read it as it is now. The reviewers of a PR
   whose issue was not taken on after the latest change get none. A `/devloop approve` of the
   supervisor or of an app, one after the attribution header, one not on the first line and one
-  without a text are refused: the next readiness check says so in its comment, with the reason.
-  The command of a user outside `trusted_users` is ignored.
+  without a text are refused, and devloop answers each once, with the reason: in the comment of
+  the next readiness check, or, when none is due (a command of an app changes nothing that runs
+  one), in a comment of the dispatcher. The command of a user outside `trusted_users` is ignored.
 - **Complete history** (#483). The bounds above come from the history of the issue, which
   devloop reads in full, 100 events at a time. When the read stops before the last page, no
   command counts.

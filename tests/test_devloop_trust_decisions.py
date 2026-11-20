@@ -237,6 +237,12 @@ class PreflightGH(IssueGH):
     def issue_history(self, number):
         return dict(self.hist)
 
+    def issue_comments(self, number):
+        # Each comment with its id, as GitHub gives it: by its position, since the thread only
+        # grows.
+        return [dict(c, id=c.get('id', 1000 + i))
+                for i, c in enumerate(super().issue_comments(number))]
+
     def say(self, body, who=OPERATOR):
         self.thread.append({'author': {'login': who}, 'body': body, 'created_at': LATER})
 
@@ -501,15 +507,66 @@ class RefusedAnswerTests(unittest.TestCase):
                       'porta l\'intestazione degli agent', body)
         self.assertEqual(body.count('- il commento di '), 2)
         self.assertTrue(any(f'refused `{APPROVE_COMMAND}` by {BOT}' in line for line in logs))
-        # The answer is not part of the record.
+        # The record names the comments it answered, by their ids.
         record = [r for c in gh.thread if (r := markdown.read_marker(c['body'], 'preflight'))]
-        self.assertEqual(set(record[-1]) & {'refused'}, set())
-        # A new check does not answer them again: they came before the latest one.
+        self.assertEqual(record[-1]['refused'], [1000, 1001])
+        # Nothing else answers them, nor does a new check.
+        self.assertEqual(self.planned(d), [])
         gh.say('/devloop recheck')
         runner.outputs.append(checked(True, trust='uncovered'))
         self.assertEqual([a.kind for a in d.tick()], ['preflight'])
         self.assertNotIn('rifiutati', gh.thread[-1]['body'])
         self.assertIn('issue non pronta', gh.thread[-1]['body'])
+
+    @staticmethod
+    def planned(d):
+        return [(a.kind, a.number) for a in plan(d.snapshot(), PCFG)]
+
+    def test_a_command_after_the_check_is_answered_once_without_a_new_check(self):
+        # The case of the review of #484: a check concluded, then an app writes the command.
+        # It changes neither the hash nor anything else, so no check runs to answer it.
+        gh = PreflightGH(hist=history(taken=None))
+        runner = FakeRunner(checked(True, trust='uncovered'))
+        logs = []
+        d = Dispatcher(PCFG, gh, FakeWS(), runner, log=logs.append)
+        self.assertEqual([a.kind for a in d.tick()], ['preflight'])
+        digest = d._preflight_view(7, ())['hash']
+        # The command of a trusted login after the header is part of the request instead: its
+        # check runs again, and answers it.
+        why = 'l\'autore è il supervisore o un\'app'
+        for login in (BOT, SUPERVISOR_LOGIN):
+            with self.subTest(login=login):
+                gh.thread.append(comment(at=LATER, login=login))
+                self.assertEqual(d._preflight_view(7, ())['hash'], digest)
+                self.assertEqual(self.planned(d), [('approve_refused', 7)])
+                del logs[:]
+                self.assertEqual([a.kind for a in d.tick()], ['approve_refused'])
+                answer = gh.thread[-1]
+                self.assertEqual(markdown.read_marker(answer['body'], 'approve'),
+                                 {'comments': [len(gh.thread) - 2 + 1000]})
+                self.assertIn('## `/devloop approve` rifiutati', answer['body'])
+                self.assertIn(f'- il commento di `{login}` del {LATER}: {why}', answer['body'])
+                self.assertTrue(any(f'refused `{APPROVE_COMMAND}` by {login}' in line
+                                    for line in logs))
+                # Answered once: the next ticks do nothing, and the block stays the check's.
+                self.assertEqual([a.kind for a in d.tick()], [])
+                self.assertEqual([a.kind for a in d.tick()], [])
+                self.assertEqual(gh.thread[-1], answer)
+                self.assertEqual(gh.labels[7], {READY, NEEDS_OPERATOR})
+                self.assertTrue(d._preflight_view(7, gh.labels[7])['owned'])
+        # The answer spends no `/devloop recheck`: one before it still runs the check, which
+        # answers the commands not answered yet, and only those.
+        gh.say('/devloop recheck')
+        gh.thread.append(comment(at=LATER, login=BOT))
+        self.assertEqual(d._preflight_view(7, ())['approvals'], 1)
+        self.assertEqual(self.planned(d), [('preflight', 7)])
+        runner.outputs.append(checked(True, trust='uncovered'))
+        self.assertEqual([a.kind for a in d.tick()], ['preflight'])
+        body = gh.thread[-1]['body']
+        self.assertEqual(body.count('- il commento di '), 1)
+        self.assertEqual(markdown.read_marker(body, 'preflight')['refused'],
+                         [len(gh.thread) - 2 + 1000])
+        self.assertEqual(self.planned(d), [])
 
     def test_the_command_of_the_operator_answers_the_question(self):
         gh = PreflightGH(hist=history(taken=None))
