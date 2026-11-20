@@ -80,6 +80,8 @@ Dal supervisore, come utente `supervisor`:
   dà a ogni voce già presente l'ACL che la chiude a `devloop-agent`.
 - **I login delle CLI** (`claude`, `codex`, `agy` per `devloop-agent`; `claude` per
   `supervisor`): interattivi, uno per CLI ([ops/README.md](../README.md#5-utente-degli-agent-e-cli)).
+  Per `devloop-agent` fra `setup-agent-user.sh --unseal` e una nuova esecuzione dello script
+  senza, che rende di root istruzioni, configurazione e binari delle CLI (#438).
 - **Il token di sola lettura del supervisore**: uno nuovo
   ([ops/github/tokens.md](../github/tokens.md)), e si revoca quello della macchina vecchia.
 - **Il servizio**: lo installa `setup-devloop.sh` da `ops/host/devloop.service`; non si copia
@@ -235,19 +237,21 @@ come root legge lo `state_dir` di `devloop` e la copia fissata, e il checkout ag
    | 1 | una riga per differenza, poi `N difference(s): the migration is not equivalent` | niente merge né pin finché non si è capito perché. Di solito: le chiavi del passo 4 mancanti (`config agents.agy.…`), una chiave dell'overlay che sostituisce un valore del file di progetto, un file di progetto copiato da un altro commit. Correggere e rilanciare |
    | 2 | un lato non si carica, o un argomento è sbagliato: il messaggio dice quale (`not an installation of devloop`, `the configuration does not load: …`, `not a file`) | correggere il percorso o il file indicato (per esempio un file di progetto link, con più hard link o con un errore di sintassi) e rilanciare; il confronto non è stato fatto |
 
-6. **Clone di devloop, pin e riavvio.** Prima il clone di devloop, aggiornato con un
-   fast-forward e come `devloop`, perché resti suo; sempre, anche prima del merge, e **prima** del
-   pin e del riavvio:
+6. **Clone di devloop, pin e riavvio.** Prima il clone di devloop, portato su `origin/main` e
+   come `devloop`, perché resti suo; sempre, anche prima del merge, e **prima** del pin e del
+   riavvio. Il clone è in detached HEAD: `pull` non funziona (`You are not currently on a
+   branch`), si fa il checkout di `origin/main`:
 
    ```bash
    sudo -u devloop -H git -C /home/devloop/ssdlc fetch origin
-   sudo -u devloop -H git -C /home/devloop/ssdlc merge --ff-only origin/main
+   sudo -u devloop -H git -C /home/devloop/ssdlc checkout --detach origin/main
+   sudo -u devloop -H git -C /home/devloop/ssdlc status --short
    ```
 
    Il launcher `scripts/devloop-pinned` viene dal clone, non dalla copia fissata: è lui che passa
    `--project-config` alla copia, e quello di un clone vecchio non lo passa, così pin e loop
-   partono senza file di progetto anche dopo i passi 1–5. Se il fast-forward fallisce, il clone ha
-   commit o modifiche locali: vanno capite prima di andare avanti.
+   partono senza file di progetto anche dopo i passi 1–5. Se il checkout fallisce, o `status
+   --short` stampa qualcosa, il clone ha modifiche locali: vanno capite prima di andare avanti.
 
    Prima del merge basta poi `sudo systemctl restart devloop`. Dopo il merge, il pin e il
    riavvio:
@@ -303,6 +307,171 @@ fa riprendere il pin automatico ([docs/devloop/guide.md](../../docs/devloop/guid
 All'avvio, e a ogni rilettura, devloop scrive nel log, e una volta su `[run].alert_issue`, le
 tabelle del file di progetto che la copia in uso conosce e che la configurazione non ha
 (`[prompts]`, `[tests]`).
+
+## File delle CLI di root sull'utente degli agent (#438)
+
+Dal #438 devloop, all'avvio di `tick` e `run`, non parte se `devloop-agent` può scrivere,
+possedere, creare, rinominare o rimuovere le istruzioni, la configurazione o i binari delle sue
+CLI ([ops/README.md](../README.md#5-utente-degli-agent-e-cli)). Un host preparato prima ha la home
+e le directory delle CLI di `devloop-agent`: la copia nuova rifiuterebbe di partire. Il passo si
+fa dopo il merge, prima del pin, a loop fermo; la copia di prima non controlla questi file e
+parte anche dopo il passo:
+
+Gli script di `ops/host/` si eseguono **come root dal checkout dell'operatore**
+(`/root/repos/ssdlc`), mai dal clone di devloop: quel clone è scrivibile da `devloop`, e uno
+script eseguito da lì come root permetterebbe a chi controlla `devloop` di eseguire codice come
+root; e lì manca `ops/params.env`.
+
+1. fermare il loop: `sudo systemctl stop devloop`;
+2. aggiornare il checkout dell'operatore, come root, per avere gli script nuovi, e il clone di
+   devloop, come `devloop`, per avere il launcher nuovo. Il clone di devloop è in detached HEAD:
+   `pull` non funziona, si fa il checkout di `origin/main`:
+
+   ```bash
+   git -C /root/repos/ssdlc fetch origin
+   git -C /root/repos/ssdlc checkout --detach origin/main
+   test -f /root/repos/ssdlc/ops/params.env
+   sudo -u devloop -H git -C /home/devloop/ssdlc fetch origin
+   sudo -u devloop -H git -C /home/devloop/ssdlc checkout --detach origin/main
+   ```
+
+   Un ramo del checkout dell'operatore resta com'è (`git -C /root/repos/ssdlc switch -` per
+   tornarci dopo). Verificare che l'overlay non abbia `--settings` nei `write_args` o nei
+   `review_args` di un agent claude: devloop passa a ogni turno di Claude Code il proprio
+   `--settings`, con la memoria automatica spenta, e rifiuta di partire con un altro;
+3. rendere di root la home di `devloop-agent` e i file delle sue CLI, come root:
+
+   ```bash
+   sudo bash /root/repos/ssdlc/ops/host/setup-agent-user.sh --dry-run
+   sudo bash /root/repos/ssdlc/ops/host/setup-agent-user.sh
+   ```
+
+4. verificare, come root, con
+   `sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps`: nessun errore nel passo
+   `File delle CLI di devloop-agent`. Un link segnalato dallo script perché porta fuori da ciò
+   che è sigillato (per esempio un eseguibile fuori da `~/.local`) va reso di root a mano, o
+   sostituito. I file sigillati restano leggibili da `devloop-agent` tramite il suo gruppo,
+   anche quelli che erano 600 (come il `settings.json` di una versione precedente);
+5. provare una CLI per tipo come `devloop-agent` (`sudo -iu devloop-agent claude -p ciao`, e lo
+   stesso per `codex exec` e `agy -p`): se una non trova una voce che vuole creare nella sua
+   directory, `sudo bash /root/repos/ssdlc/ops/host/setup-agent-user.sh --unseal`, un avvio della
+   CLI, poi di nuovo lo script senza `--unseal`;
+6. il pin a mano (`sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned pin
+   origin/main`) e `sudo systemctl start devloop`.
+
+**Rollback.** La copia di prima parte anche con i file di root. Per riaprirli,
+`sudo bash /root/repos/ssdlc/ops/host/setup-agent-user.sh --unseal`: devloop di #438 però non
+parte finché non si richiudono.
+
+## Attivazione dell'utente degli agent (#415)
+
+Finché l'overlay non imposta `[agent_user] name`, gli agent e i test girano come `devloop`:
+possono leggere le chiavi delle app in `/home/devloop/.ghapps` (anche quella del merger), lo
+`state_dir` e l'overlay, e la protezione della sezione precedente vale per una home che nessuno
+usa. devloop lo segnala a ogni avvio di `tick` e `run` nel log, e una volta su
+`[run].alert_issue` (`Agent senza utente dedicato`), ma non si ferma. `check-host.sh --no-apps`
+lo segnala come errore (`non imposta [agent_user] name = "devloop-agent"`), insieme alle CLI che
+mancano a `devloop-agent` (`…/.local/bin/codex non trovato`).
+
+L'attivazione è dell'operatore, a loop fermo: i login delle CLI sono interattivi. Presuppone
+`devloop-agent` creato da `setup-agent-user.sh` (sezione precedente). Gli script di `ops/host/`
+girano come root dal checkout dell'operatore (`/root/repos/ssdlc`), il clone di devloop si
+aggiorna come `devloop`; ogni comando dice l'utente con cui gira.
+
+1. **Fermare il loop e aggiornare i checkout**, come nella sezione precedente:
+
+   ```bash
+   sudo systemctl stop devloop
+   git -C /root/repos/ssdlc fetch origin
+   git -C /root/repos/ssdlc checkout --detach origin/main
+   test -f /root/repos/ssdlc/ops/params.env
+   sudo -u devloop -H git -C /home/devloop/ssdlc fetch origin
+   sudo -u devloop -H git -C /home/devloop/ssdlc checkout --detach origin/main
+   ```
+
+2. **Le versioni delle CLI di `devloop`**, quelle con cui devloop gira oggi (il `PATH` è quello
+   dell'unità, `DEVLOOP_PATH` di `ops/lib.sh`):
+
+   ```bash
+   for cli in claude codex agy; do
+       sudo -u devloop -H env PATH=/home/devloop/.local/bin:/usr/local/bin:/usr/bin:/bin \
+           "$cli" --version
+   done
+   ```
+
+3. **Aprire le directory delle CLI** a `devloop-agent`, come root:
+
+   ```bash
+   sudo bash /root/repos/ssdlc/ops/host/setup-agent-user.sh --unseal
+   ```
+
+4. **Installare `claude`, `codex` e `agy`** in `/home/devloop-agent/.local/bin`, come
+   `devloop-agent` (`sudo -iu devloop-agent`), **con lo stesso metodo e le stesse versioni** del
+   passo 2: il metodo di ciascuna è nella tabella di
+   [ops/README.md](../README.md#5-utente-degli-agent-e-cli) e, per Claude Code con una versione
+   data, in [docs/devloop/guide.md](../../docs/devloop/guide.md#agent-clis)
+   (`@anthropic-ai/claude-code@<versione>`). Poi la verifica, come `devloop-agent`: ogni
+   versione deve essere quella del passo 2.
+
+   ```bash
+   for cli in claude codex agy; do
+       sudo -u devloop-agent -H /home/devloop-agent/.local/bin/$cli --version
+   done
+   ```
+
+5. **Login di ciascuna CLI** come `devloop-agent`, in una sessione interattiva: ogni CLI avviata
+   una volta chiede il suo login.
+
+   ```bash
+   sudo -iu devloop-agent /home/devloop-agent/.local/bin/claude
+   sudo -iu devloop-agent /home/devloop-agent/.local/bin/codex
+   sudo -iu devloop-agent /home/devloop-agent/.local/bin/agy
+   ```
+
+6. **Richiudere** le directory delle CLI, come root:
+
+   ```bash
+   sudo bash /root/repos/ssdlc/ops/host/setup-agent-user.sh --dry-run
+   sudo bash /root/repos/ssdlc/ops/host/setup-agent-user.sh
+   ```
+
+7. **L'overlay**, come `devloop`, perché resti suo:
+
+   ```bash
+   sudo -u devloop -H "${EDITOR:-vi}" /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml
+   ```
+
+   con la tabella (se l'overlay ha già `[agent_user]`, la chiave va in quella):
+
+   ```toml
+   [agent_user]
+   name = "devloop-agent"
+   ```
+
+8. **Verifica**, come root: esce con 0, senza errori (il passo `devloop apps` è saltato).
+
+   ```bash
+   sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps
+   ```
+
+9. **Riavvio**: `sudo systemctl start devloop`. All'avvio devloop verifica come `devloop-agent`
+   che non legga le chiavi, lo `state_dir` e l'overlay, e che non possa cambiare i file delle sue
+   CLI; se qualcosa non va non parte e dice perché in
+   `/home/devloop/ssdlc/.ssdlc/devloop/run.log` (`sudo tail -n 50
+   /home/devloop/ssdlc/.ssdlc/devloop/run.log`). `[agent_user]` è una chiave di fiducia: il
+   cambio entra nel journal all'avvio.
+
+**Rollback.** A loop fermo, come `devloop`, si toglie `name` da `[agent_user]` (o si lascia
+`name = ""`) e si riavvia:
+
+```bash
+sudo systemctl stop devloop
+sudo -u devloop -H "${EDITOR:-vi}" /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml
+sudo systemctl start devloop
+```
+
+Gli agent tornano a girare come `devloop`, con i login delle CLI di `devloop`, e l'avviso su
+`[run].alert_issue` parte di nuovo, una volta.
 
 ## Dati di ssdlc nei prompt
 
@@ -494,3 +663,50 @@ python3 scripts/devloop-pinned pin <sha12>
 
 Poi, come root, `sudo systemctl start devloop`. `<sha12>` è la copia di prima (`pinned-<sha12>`
 nello `state_dir`).
+
+## Identità di ssdlc nell'overlay
+
+Con l'ADR 0006, R6, `devloop/config.toml` non ha più `repo`, `trusted_users` né `[apps]`: il
+repository gestito, gli utenti fidati e l'insieme di app del progetto sono dell'operatore,
+nell'overlay del suo `state_dir`
+([docs/devloop/reference.md](../../docs/devloop/reference.md#identities-of-a-project)). Gli
+stessi valori che `config.toml` aveva stanno in [`ssdlc/overlay.toml`](ssdlc/overlay.toml). Senza
+`repo` e `trusted_users` nell'overlay la copia di R6 non parte, e il suo pin fallisce lasciando la
+copia di prima (`pin failed, the pinned copy is unchanged`).
+
+La copia di prima accetta già queste chiavi nell'overlay, e con gli stessi valori la
+configurazione effettiva e la versione della policy non cambiano: l'overlay si aggiorna **prima**
+del pin della copia di R6, anche a loop avviato (la rilettura trova gli stessi valori). Come
+utente `devloop`, dal clone:
+
+1. **Le chiavi nell'overlay.** `repo`, `trusted_users` e le tabelle `[apps]` (con `key_dir`) di
+   `ssdlc/overlay.toml` della testa della PR di R6, o di `origin/main` dopo il merge
+   (`git show origin/main:ops/host/ssdlc/overlay.toml`), vanno aggiunte a
+   `.ssdlc/devloop/config.local.toml`. Una chiave che l'overlay ha già resta com'è.
+2. **Verifica dell'equivalenza**, con la copia fissata e un checkout del commit di R6:
+
+   ```bash
+   cd ~/ssdlc && git fetch origin
+   git worktree add --detach /tmp/ssdlc-r6 origin/main
+   python3 -B /tmp/ssdlc-r6/ops/host/ssdlc/check-equivalence.py \
+       --before .ssdlc/devloop/current --before-local .ssdlc/devloop/config.local.toml \
+       --before-project .ssdlc/devloop/project.toml \
+       --after /tmp/ssdlc-r6 --after-local .ssdlc/devloop/config.local.toml \
+       --after-project .ssdlc/devloop/project.toml
+   git worktree remove /tmp/ssdlc-r6
+   ```
+
+   Esce con 0 ed `equivalent: …`; con 2 (`trusted_users` o `repo` nel messaggio) all'overlay
+   manca una chiave del passo 1, e il pin non va fatto.
+3. **Pin della copia di R6**, come ogni pin: dopo un merge con `[pin] auto`, oppure a mano
+   (`python3 scripts/devloop-pinned pin origin/main`, poi stop e avvio del loop). Il pin la
+   verifica con l'overlay del passo 1. `python3 scripts/devloop-pinned apps` nomina per prima
+   cosa il repository e la `key_dir` del progetto (`apps of brushtyler/ssdlc, keys in …`).
+4. **Token.** Dal pin della copia di R6, `python3 scripts/agent-token.py` passa da `devloop token`
+   della copia fissata, con `repo` e `[apps]` dell'overlay; prima, la copia fissata non ha il
+   sottocomando `token`. Il supervisore, dal suo clone aggiornato, aggiunge
+   `--state-dir /home/devloop/ssdlc/.ssdlc/devloop` ai comandi di `scripts/supervisor-token.py`:
+   ne legge l'overlay come legge `run.log`, senza segreti.
+
+**Rollback.** Il pin della copia di prima (`python3 scripts/devloop-pinned pin <sha12>`) basta:
+accetta le stesse chiavi nell'overlay, che possono restare.

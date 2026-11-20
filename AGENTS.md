@@ -59,7 +59,7 @@ Operatore, coordinatore, supervisore, dispatcher, preflight, implementer e revie
 
 ## Identità GitHub degli agent
 
-Sull'host dell'operatore, dove sono configurate le GitHub App di [`devloop/config.toml`](devloop/config.toml) e le loro chiavi, commenti, review, issue e PR si pubblicano con l'app dell'agent, non con il login `gh` dell'operatore (`brushtyler`). Chi lavora su un fork o senza queste app usa il proprio account.
+Sull'host dell'operatore, dove sono configurate le GitHub App del progetto (`[apps]` nell'overlay locale del suo `state_dir`, ADR 0006, R6) e le loro chiavi, commenti, review, issue e PR si pubblicano con l'app dell'agent, non con il login `gh` dell'operatore (`brushtyler`). Chi lavora su un fork o senza queste app usa il proprio account.
 
 **Gli agent avviati da devloop non pubblicano su GitHub** e non usano lo script qui sotto: tutte le scritture le fa il dispatcher, dopo i suoi controlli. Nel loro ambiente lo script non trova le chiavi delle app.
 
@@ -71,7 +71,7 @@ Sull'host dell'operatore, dove sono configurate le GitHub App di [`devloop/confi
 | Supervisore (app di ruolo, qualunque agent lo esegua) | `supervisor`, solo con `scripts/supervisor-token.py` | `brushtyler-devloop-supervisor[bot]` |
 | Implementer (app di ruolo, qualunque agent implementi) | `implementer`, solo devloop | `brushtyler-devloop-implementer[bot]` |
 
-Lo script [`scripts/agent-token.py`](scripts/agent-token.py) esegue un comando con il token dell'app passato in `GH_TOKEN`. Si lancia dal checkout principale, perché usa il pacchetto `devloop` che trova accanto a sé:
+Lo script [`scripts/agent-token.py`](scripts/agent-token.py) esegue un comando con il token dell'app passato in `GH_TOKEN`. È un involucro di `devloop token` (ADR 0006, R6): lo esegue attraverso il launcher, quindi dalla copia fissata e con la configurazione del progetto del suo `state_dir` (per default `.ssdlc/devloop` del checkout principale del clone, anche quando lo script si lancia da un worktree; un altro con `--state-dir DIR`), da cui prende `repo` e l'app dell'actor. Ogni repository ha il suo insieme di app, mai condiviso. Si lancia dal checkout del repository gestito o da un suo worktree; il comando gira nella directory corrente:
 
 ```bash
 python3 scripts/agent-token.py <actor> -- gh pr comment <PR> --body-file <FILE>
@@ -86,7 +86,7 @@ python3 scripts/agent-token.py <actor> --perm pull_requests=write -- \
 - **Push e merge restano azioni dell'operatore.** Un agent non pusha e non fa merge con il token della propria app.
 - **Il token non va mai stampato.** Lo script non lo mostra, e non va esportato in un'assegnazione come `GH_TOKEN=$(…)`: finirebbe nell'output e nelle trascrizioni della sessione.
 - **L'app del dispatcher è riservata a devloop**, che si fida di alcuni marker solo se li ha scritti il dispatcher. Lo script non la espone.
-- **L'app del supervisore non passa da questo script** (ADR 0005, P5-4): nessuna sessione di review o interattiva può scrivere un comando come supervisore. Il supervisore, come utente di sistema `supervisor` e dal proprio clone, usa il percorso dedicato [`scripts/supervisor-token.py`](scripts/supervisor-token.py), che legge solo la sua chiave dalla propria `key_dir` e concede solo `issues` e `pull_requests`: `python3 scripts/supervisor-token.py -- gh issue comment <ISSUE> --body-file <FILE>`. devloop riconosce quell'app come supervisore solo con `[roles.supervisor]` come tabella dell'attore `claude-supervisor`, spenta per default; finché resta spenta, il supervisore firma con l'app dell'agent indicato in `roles.supervisor`.
+- **L'app del supervisore non passa da questo script** (ADR 0005, P5-4): nessuna sessione di review o interattiva può scrivere un comando come supervisore. Il supervisore, come utente di sistema `supervisor` e dal proprio clone, usa il percorso dedicato [`scripts/supervisor-token.py`](scripts/supervisor-token.py), che legge `repo` e `[apps.supervisor]` dall'overlay dello `state_dir` di devloop indicato con `--state-dir`, solo la sua chiave dalla propria `key_dir`, e concede solo `issues` e `pull_requests`: `python3 scripts/supervisor-token.py --state-dir <STATE_DIR> -- gh issue comment <ISSUE> --body-file <FILE>`. devloop riconosce quell'app come supervisore solo con `[roles.supervisor]` come tabella dell'attore `claude-supervisor`, spenta per default; finché resta spenta, il supervisore firma con l'app dell'agent indicato in `roles.supervisor`.
 - **L'app dell'implementer è riservata a devloop** (ADR 0005, P5-3): con essa devloop firma commit, push, PR e record dei fix e delle sync di ogni agent con una chiave `<agent>-implementer` che la dichiara (`app = "implementer"`). Lo script non la espone: nessuna sessione di review o interattiva può scrivere un record come implementer. Finché nessuna chiave la dichiara (le chiavi per ruolo sono spente per default), devloop non ne legge la chiave e l'implementer firma con l'app del proprio agent, come prima. Con le chiavi per ruolo gli actor `claude`, `codex` e `agy` dello script restano le app dei reviewer.
 - **Una review deve venire da un'identità diversa da quella dell'autore della PR.** GitHub non accetta l'approvazione né la richiesta di modifiche da parte dell'autore stesso.
 

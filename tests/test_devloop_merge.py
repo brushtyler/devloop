@@ -1,7 +1,6 @@
 """devloop: merge modes off, strict and auto, with hold and release by the supervisor (#172)."""
 
 import dataclasses
-import importlib.util
 import os
 import tempfile
 import unittest
@@ -10,7 +9,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import devloop.__main__ as devloop_main
-from devloop import apps, config, markdown, review
+from devloop import apps, config, markdown, review, token
 from devloop.config import MergePolicy
 from devloop.dispatch_supervision import merge_command
 from devloop.dispatcher import Dispatcher, ensure_labels
@@ -714,27 +713,23 @@ class MergerDocsTests(unittest.TestCase):
 
 
 class AgentTokenTests(unittest.TestCase):
-    """``scripts/agent-token.py`` never exposes devloop's own apps (#201)."""
-
-    @classmethod
-    def setUpClass(cls):
-        path = Path(__file__).resolve().parents[1] / 'scripts' / 'agent-token.py'
-        spec = importlib.util.spec_from_file_location('agent_token', path)
-        cls.script = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(cls.script)
+    """``devloop token`` (``scripts/agent-token.py``, ADR 0006, R6) never exposes devloop's own
+    apps (#201)."""
 
     def test_the_merger_and_the_dispatcher_are_refused(self):
         for actor in ('merger', 'MERGER', 'dispatcher'):
-            with self.subTest(actor=actor), mock.patch.object(self.script, 'load_config') as load, \
-                    mock.patch.object(self.script.subprocess, 'run') as run:
+            with self.subTest(actor=actor), \
+                    mock.patch.object(devloop_main, 'load') as load, \
+                    mock.patch.object(token.subprocess, 'run') as run:
                 with self.assertRaisesRegex(SystemExit, 'reserved to devloop'):
-                    self.script.main([actor, '--', 'gh', 'pr', 'merge', '1'])
+                    devloop_main.main(['token', actor, '--', 'gh', 'pr', 'merge', '1'])
                 load.assert_not_called()
                 run.assert_not_called()
 
     def test_the_agents_are_still_accepted(self):
-        self.assertEqual(self.script.parse(['codex', '--', 'gh', 'x']),
-                         ('codex', {'issues': 'write', 'pull_requests': 'write'}, ['gh', 'x']))
+        self.assertEqual(token.actor_of('codex'), 'codex')
+        self.assertEqual(token.permissions_of(()),
+                         {'issues': 'write', 'pull_requests': 'write'})
 
     def test_only_the_actors_key_is_read(self):
         # The merger's key lives with devloop: an agent's token needs only the agent's key.
@@ -747,10 +742,10 @@ class AgentTokenTests(unittest.TestCase):
             def fake_run(command, env):
                 seen.update(command=command, token=env['GH_TOKEN'])
                 return SimpleNamespace(returncode=0)
-            with mock.patch.dict(os.environ, {'DEVLOOP_APP_KEY_DIR': tmp}), \
-                    mock.patch.object(self.script.AppAuth, 'token', return_value='codex-tok'), \
-                    mock.patch.object(self.script.subprocess, 'run', fake_run):
-                self.assertEqual(self.script.main(['codex', '--', 'gh', 'x']), 0)
+            with mock.patch.object(token.AppAuth, 'token', return_value='codex-tok'):
+                self.assertEqual(token.run(config.parse_config(DATA), 'codex', token.DEFAULT,
+                                           ['gh', 'x'], environ={'DEVLOOP_APP_KEY_DIR': tmp},
+                                           runner=fake_run), 0)
             self.assertEqual(seen, {'command': ['gh', 'x'], 'token': 'codex-tok'})
 
 

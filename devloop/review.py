@@ -16,7 +16,13 @@ verdict machine-actionable:
   ``decision``. Only a ``decision`` stops the loop at once (``flow_verdict``): a ``trust_policy``
   goes on as a request for changes while blocking findings of its own stay open, and otherwise
   as an approval whose merge is the operator's, unless the same reviewer later approves the
-  latest round as the operator decided on 2026-11-19 (#461, ``trust_policy_parts``).
+  latest round as the operator decided on 2026-11-19 (#461, ``trust_policy_parts``);
+* a blocking finding states its ``evidence`` (#481): the scenario that shows it, or the code and
+  the rule it violates, with the quotation. One the reviewer leaves without evidence is recorded
+  as non-blocking (``without_evidence``) and does not send the PR to the fix, unless it is one of
+  security, which stays blocking: in doubt, devloop fails closed. A ``request_changes`` left with
+  nothing to fix by that alone becomes ``unproven``, a neutral verdict: it does not send the PR
+  to the fix, but it is no approval, neither for the quorum nor for clearing a ``trust_policy``.
 
 Every blocking finding has an owner and an identity, ``round/reviewer/ID`` (``2/codex/R2-1``),
 recorded in the marker. Only its owner closes it, in a later review. A finding of the reviewer
@@ -30,7 +36,13 @@ import re
 from .acceptance import acceptance_findings
 from .schema import load_schema, validate, with_defaults
 
+# The verdicts a reviewer gives: those of the schema.
 VERDICTS = ('approve', 'request_changes', 'needs_operator')
+# The neutral verdict of #481, which only devloop records: a ``request_changes`` whose blocking
+# findings devloop all demoted for lack of evidence. It sends the PR neither to the fix nor to
+# the operator, and it approves nothing: the quorum and ``_trust_cleared`` need an explicit
+# ``approve``. A reviewer cannot give it: the schema does not list it.
+UNPROVEN = 'unproven'
 # Why a reviewer asks for the operator (#434): the PR touches the trust policy, or anything else
 # needs the operator's decision. ``''`` with the other verdicts.
 TRUST_POLICY = 'trust_policy'
@@ -92,6 +104,13 @@ def owner_of(review):
 
 def _with_ids(findings, round_no, start):
     return [dict(f, id=f'R{round_no}-{start + i}') for i, f in enumerate(findings)]
+
+
+def proven(finding):
+    """Whether a blocking finding of a reviewer stays blocking (#481): it states its
+    ``evidence``, or it is one of security, which stays blocking even without one."""
+    evidence = finding.get('evidence')
+    return finding.get('security') is True or (isinstance(evidence, str) and bool(evidence.strip()))
 
 
 def _keys(review):
@@ -190,6 +209,12 @@ def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, 
     ``decision``, the latter also when the reviewer gives none. A ``trust_policy`` with another
     verdict turns it into ``needs_operator``: the merge of a PR that touches the trust policy is
     the operator's whatever the verdict.
+
+    A blocking finding of the reviewer without ``evidence`` (#481), and not of security, is
+    recorded among the non-blocking ones with ``without_evidence``, and the note says so. A
+    ``request_changes`` left with nothing to fix by that alone becomes ``UNPROVEN``: the
+    finding does not send the PR to the fix, and the reviewer, who never approved, gives no
+    approval either.
     """
     # An output without ``operator_reason`` (#434) is read as before: a ``decision``.
     raw = with_defaults('review', raw)
@@ -199,9 +224,17 @@ def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, 
     if derived:
         notes.append(f'devloop ha aggiunto {len(derived)} finding bloccanti dalla mappa di '
                      'copertura dei criteri di accettazione.')
+    unproven = [dict(f, without_evidence=True) for f in raw['blocking_findings'] if not proven(f)]
     blocking = [dict(f, key=finding_key(round_no, reviewer, f['id']))
-                for f in _with_ids(raw['blocking_findings'] + derived, round_no, 1)]
-    non_blocking = _with_ids(raw['non_blocking_findings'], round_no, len(blocking) + 1)
+                for f in _with_ids([f for f in raw['blocking_findings'] if proven(f)] + derived,
+                                   round_no, 1)]
+    non_blocking = _with_ids(unproven + raw['non_blocking_findings'], round_no,
+                             len(blocking) + 1)
+    if unproven:
+        notes.append(f'devloop ha registrato come non bloccanti {len(unproven)} finding che il '
+                     'reviewer indicava come bloccanti senza evidenza ('
+                     + ', '.join(f['id'] for f in non_blocking[:len(unproven)])
+                     + '): non mandano la PR in correzione.')
     ids = [f['id'] for f in previous_open]
     by_ref = {f['id']: f for f in previous_open if ids.count(f['id']) == 1}
     by_ref.update({f['key']: f for f in previous_open})
@@ -236,6 +269,13 @@ def normalize_review(raw, *, previous_open, round_no, max_rounds, head_sha, ci, 
     if verdict == 'approve' and (blocking or own_unresolved):
         verdict = 'request_changes'
         notes.append('Verdetto corretto da approve a request_changes: restano finding bloccanti aperti.')
+    # Another owner's open finding is not the reviewer's to fix (#111): it does not keep the
+    # request for changes alive once its own blocking findings were demoted.
+    elif verdict == 'request_changes' and unproven and not (blocking or own_unresolved):
+        verdict = UNPROVEN
+        notes.append('Verdetto corretto da request_changes a unproven: nessun finding bloccante '
+                     'ha un\'evidenza. Non manda la PR in correzione, ma non è '
+                     'un\'approvazione: non conta per il quorum.')
     elif verdict == 'request_changes' and not (blocking or unresolved):
         verdict = 'needs_operator'
         human_reason = human_reason or 'Il reviewer ha chiesto modifiche senza indicare finding bloccanti.'
@@ -283,10 +323,13 @@ def round_verdict(records):
     """The verdict of a complete round, from the ``flow_verdict`` of each record:
     ``needs_operator`` if any reviewer asked for the operator's decision, else
     ``request_changes`` if any asked for changes, a ``needs_operator`` for the trust policy with
-    findings of its own included (#434), else ``approve``. Whether the merge of an approved PR
-    is the operator's for the trust policy is ``trust_policy_parts``."""
+    findings of its own included (#434), else ``UNPROVEN`` if any reviewer's request for
+    changes had no evidence (#481), else ``approve``. An ``UNPROVEN`` round is not approved: it
+    lacks an explicit approval, and the PR gets a new review, within the round limit. Whether
+    the merge of an approved PR is the operator's for the trust policy is
+    ``trust_policy_parts``."""
     verdicts = {flow_verdict(r) for r in records}
-    for verdict in ('needs_operator', 'request_changes'):
+    for verdict in ('needs_operator', 'request_changes', UNPROVEN):
         if verdict in verdicts:
             return verdict
     return 'approve'

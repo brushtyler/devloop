@@ -29,6 +29,22 @@ OPS_STATE_DIR=.ssdlc/devloop
 # I segnaposto @NOME@ che `render` sostituisce nei file dichiarativi (unità, sudoers).
 OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER DEVLOOP_HOME AGENT_HOME DEVLOOP_CLONE STATE_DIR STATE_PATH LAUNCHER_CMD DEVLOOP_PATH AGENT_PATH SERVICE_NAME REPO_LOCK_DIR REPO_LOCK_GROUP'
 
+# Nella home dell'utente degli agent (#438), come CLI_DIRS, CLI_SEALED e CLIS di
+# devloop/agentuser.py: le directory delle CLI, dove l'utente degli agent non crea nulla e che
+# non rinomina; ciò che porta istruzioni, configurazione o binari, dove non scrive nulla; le CLI
+# di ~/.local/bin. Sono di root, leggibili dall'utente degli agent: un turno non cambia ciò che
+# usano i turni dopo.
+AGENT_CLI_DIRS=(.claude .codex .gemini .gemini/antigravity-cli)
+AGENT_CLI_SEALED=(
+    .claude/settings.json .claude/CLAUDE.md .claude/rules .claude/agents .claude/commands
+    .claude/skills .claude/hooks .claude/output-styles .claude/plugins
+    .codex/config.toml .codex/AGENTS.md .codex/AGENTS.override.md .codex/prompts
+    .codex/rules .codex/skills .codex/packages
+    .gemini/settings.json .gemini/GEMINI.md .gemini/antigravity-cli/settings.json
+    .local
+)
+AGENT_CLIS=(claude codex agy)
+
 say() { printf '%s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }
 ok() { printf '  ok: %s\n' "$*"; }

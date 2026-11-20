@@ -5,11 +5,15 @@ restrictions are in its project file, on the host, of which ``ops/host/ssdlc/pro
 the example, and the agy commands derived from its tests in the overlay
 (``ops/host/ssdlc/overlay.toml``). devloop never reads either from the repository.
 
+Since R6 ssdlc's identities and trust (``repo``, ``trusted_users``, ``[apps]``) are in the
+overlay too, beside the agy commands: ``IDENTITY_KEYS`` of ``ops/host/ssdlc/overlay.toml``.
+
 The tests describe devloop on ssdlc as before R3: ``data()`` is the single file the
-configuration was, the installation's ``config.toml`` with the project file's keys set in it;
-``load()`` parses it, with an overlay when given. ``tests/test_devloop_ssdlc_project.py`` proves
-that it is the configuration devloop composes from the installation, the project file and the
-overlay, apart from the project file's hash in the policy version.
+configuration was, the installation's ``config.toml`` with the project file's keys and the
+overlay's identity keys set in it; ``load()`` parses it, with an overlay when given.
+``tests/test_devloop_ssdlc_project.py`` proves that it is the configuration devloop composes
+from the installation, the project file and the overlay, apart from the project file's hash in
+the policy version.
 """
 
 import json
@@ -24,6 +28,8 @@ from devloop import config
 ROOT = Path(__file__).resolve().parents[2]
 PROJECT = ROOT / 'ops' / 'host' / 'ssdlc' / 'project.toml'
 OVERLAY = ROOT / 'ops' / 'host' / 'ssdlc' / 'overlay.toml'
+# The keys of the overlay that left config.toml with ADR 0006, R6.
+IDENTITY_KEYS = ('repo', 'trusted_users', 'apps')
 
 
 def project():
@@ -31,9 +37,16 @@ def project():
     return config.read_toml(PROJECT, 'project file')
 
 
+def identity():
+    """ssdlc's identities and trust: the ``IDENTITY_KEYS`` of its overlay."""
+    overlay = config.read_toml(OVERLAY, 'local config')
+    return {key: overlay[key] for key in IDENTITY_KEYS}
+
+
 def data():
-    """ssdlc's raw configuration as one file: ``config.toml`` with the project file's keys."""
-    return config._merge(config.read_toml(config.DEFAULT_CONFIG), project())
+    """ssdlc's raw configuration as one file: ``config.toml`` with the project file's keys and
+    the overlay's identity keys."""
+    return config._merge(config.read_toml(config.DEFAULT_CONFIG), {**identity(), **project()})
 
 
 def load(local=None, root=config.INSTALL_ROOT):
@@ -58,8 +71,9 @@ def _value(value):
 
 def text():
     """``data`` as the text of one ``config.toml``: the installation's file with the project
-    file's keys written in it, for the copies of the installation the tests pin. Only the
-    shapes the project file has: values, lists and tables of them."""
+    file's keys and the overlay's identity keys written in it, for the copies of the
+    installation the tests pin. Only the shapes those keys have: values, lists and tables of
+    them."""
     lines = config.DEFAULT_CONFIG.read_text(encoding='utf-8').split('\n')
 
     def put(path, table):
@@ -78,8 +92,29 @@ def text():
             if isinstance(value, dict):
                 put(path + (key,), value)
 
-    put((), project())
+    put((), {**identity(), **project()})
     return '\n'.join(lines)
+
+
+def toml_text(table, path=()):
+    """``table`` as TOML text: its values, then each of its tables under its header. Only the
+    shapes of the configuration: values, lists and tables of them."""
+    lines = [f'{_key(k)} = {_value(v)}' for k, v in table.items() if not isinstance(v, dict)]
+    for key, value in table.items():
+        if isinstance(value, dict):
+            header = '[' + '.'.join(_key(k) for k in path + (key,)) + ']'
+            lines += ['', header, toml_text(value, path + (key,))]
+    return '\n'.join(lines)
+
+
+def identity_overlay(case):
+    """For the test ``case``, an overlay with ssdlc's identity keys only (``identity``), without
+    the agy commands. Returns the file."""
+    tmp = Path(tempfile.mkdtemp())
+    case.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+    overlay = tmp / 'config.local.toml'
+    overlay.write_text(toml_text(identity()) + '\n', encoding='utf-8')
+    return overlay
 
 
 def as_default(case):
@@ -252,6 +287,42 @@ question to the operator and your `trust_policy_reason`, so do not list that gap
 """
 # (#473 made the criterion of point 8 precise: the cases that need a declaration, those that do
 # not, and a superfluous declaration that is not blocking.)
+# #481: the evidence of a blocking finding, and the dispute of one whose evidence does not hold.
+_EVIDENCE_REVIEW = """\
+- **Evidence**: every blocking finding states in `evidence` what shows the defect, so that the
+  implementer can verify it: the scenario you reproduced (a test that fails, a command with its
+  output, a concrete input and the behaviour you observed) or, for a defect that cannot be run,
+  the precise reference to the code and to the rule it violates (the issue, an ADR, a document)
+  with the quotation. Check it yourself before you write it. devloop records a blocking finding
+  with an empty `evidence` as non-blocking, and it does not send the PR to the fix; a finding
+  with `security` set to `true` stays blocking even without evidence, but give it one all the
+  same.
+"""
+_DISPUTE_REVIEW = """\
+  When the implementer disputes one of your findings because its evidence does not hold, and
+  reports how it verified it, check that verification: either withdraw the finding
+  (`withdrawn`), or keep it `unresolved` and give in `note` new evidence that answers the
+  dispute. Keeping it open without new evidence is not enough.
+"""
+_EVIDENCE_FIX = """\
+- Before fixing a finding, verify its evidence (`Evidence` below, when the reviewer gave one,
+  and the `Latest assessment by its owner`, which answers an earlier dispute with new evidence):
+  run its scenario again, or read again the code and the rule it cites. When the evidence does
+  not hold (the scenario does not fail, the code does not do what it says, the rule says
+  something else), dispute the finding (`disputed`) instead of changing the code, and report in
+  the `note` of its response how you verified it and what you observed. Do not fix a finding
+  only because fixing is the shorter way to converge: an unneeded change costs a round and can
+  add a defect. In the next round the reviewer who opened it either withdraws it or answers with
+  new evidence.
+"""
+_UNFOUNDED_ADVISORY = """\
+- `unfounded`: the findings of the reviews below whose evidence does not hold, and the fixes the
+  implementer made that were not needed, shown in the section "Finding senza evidenza o
+  corretti senza necessità". Verify each one: run its scenario again, or read again the code
+  and the rule it cites. The reviews below also list, under "Blocking findings without
+  evidence", those devloop recorded as non-blocking because they had none: include them. Name
+  the finding (`round/reviewer/ID`) and say what you observed; `[]` when you see none.
+"""
 # The changes of the templates since R4, each as ``(anchor, text)``, where ``text`` follows the
 # only occurrence of ``anchor`` in the reference, or as ``Replaced(old, new)``. The frozen files
 # stay as they were; the prompts of now are the reference with these changes, and nothing else.
@@ -262,6 +333,9 @@ SINCE_R4 = {
          _HOST_STEP_IMPLEMENT),
     ),
     'fix': (
+        # #481
+        ('  technical reason (for example, the finding misreads the code or the issue). Do not '
+         'dispute to avoid work.\n', _EVIDENCE_FIX),
         ('  the issue has no recognisable acceptance criteria.\n', _HOST_STEP_FIX),
         ('Current acceptance map of the pull request:\n\n$acceptance_map\n\n',
          '## Step on the host\n\nCurrent declaration of the pull request (`host_step`):\n\n'
@@ -274,8 +348,18 @@ SINCE_R4 = {
          '## Step on the host\n\nLatest declaration of the pull request (`host_step`), from the '
          'implementer or its latest fix:\n\n$host_step\n\n'),
         *_TRUST_POLICY_472,
+        # #481
+        ('  before merge. Style preferences and optional improvements are never blocking.\n',
+         _EVIDENCE_REVIEW),
+        ('  implementer\'s responses below. Accept a reasoned dispute when it is right '
+         '(`withdrawn`).\n', _DISPUTE_REVIEW),
     ),
-    'advisory': _TRUST_POLICY_472,
+    'advisory': (
+        *_TRUST_POLICY_472,
+        # #481: the findings of the quorum without evidence, or fixed without need.
+        ('- `overlooked`: points the reviews below may have missed; `[]` when you see none.\n',
+         _UNFOUNDED_ADVISORY),
+    ),
     'preflight': (
         ('external tool, access or resource can close.\n\n', _TRUST_POLICY_PREFLIGHT),
         ('  implementable in one run; otherwise `""`.\n',

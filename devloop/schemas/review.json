@@ -11,12 +11,13 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["file", "line", "title", "detail", "suggested_fix", "security"],
+        "required": ["file", "line", "title", "detail", "evidence", "suggested_fix", "security"],
         "properties": {
           "file": {"type": "string"},
           "line": {"type": "integer"},
           "title": {"type": "string"},
           "detail": {"type": "string"},
+          "evidence": {"type": "string"},
           "suggested_fix": {"type": "string"},
           "security": {"type": "boolean"}
         }

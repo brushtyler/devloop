@@ -37,9 +37,9 @@ IMPL, REV = CFG.implementer, CFG.reviewer
 IMPL_NAME, REV_NAME = CFG.agent(IMPL).display_name, CFG.agent(REV).display_name
 
 
-def finding(title='bug', file='x.py', line=3, security=False):
-    return {'file': file, 'line': line, 'title': title, 'detail': 'd', 'suggested_fix': 'f',
-            'security': security}
+def finding(title='bug', file='x.py', line=3, security=False, evidence='e'):
+    return {'file': file, 'line': line, 'title': title, 'detail': 'd', 'evidence': evidence,
+            'suggested_fix': 'f', 'security': security}
 
 
 def raw_review(verdict='approve', blocking=(), previous=(), human='', reason='none'):
@@ -1071,6 +1071,17 @@ class FakeWS:
     def run_tests(self, path, command, timeout):
         self.commands.append((path, command))
         return (self.tests.pop(0) if len(self.tests) > 1 else self.tests[0]), 'FAILED test_x'
+
+    # The failed tests of the latest run in a worktree (#459): none identifiable by default; a
+    # dict by worktree name, the base's copy included, to identify them.
+    cases = {}
+
+    def failed_cases(self, path):
+        return self.cases.get(Path(path).name)
+
+    def merge_base_copy(self, path):
+        name = f'{Path(path).name}-base'
+        return name, Path('/wt') / name, self.base
 
     # The worktree's diff against its merge base, recomputed by each call (#169): ``files``.
     def worktree_changes(self, path):

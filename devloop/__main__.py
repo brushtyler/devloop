@@ -1,5 +1,5 @@
 """devloop command line: python3 -m devloop
-{setup,status,apps,tick,run,cleanup,gc,follow,watch,pin,report,fallback}."""
+{setup,status,apps,tick,run,cleanup,gc,follow,watch,pin,report,fallback,token}."""
 
 import argparse
 import fcntl
@@ -12,7 +12,7 @@ import time
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
-from . import activity, follow, pin, report, runloop, unavailability, watch
+from . import activity, follow, pin, report, runloop, token, unavailability, watch
 from .agents import AgentRunner, isolated_env
 from .agentuser import GH_CONFIG, SHARED_DIR, WORKTREES_DIR, AgentUser, AgentUserError, SharedDir
 from .agentuser import check as check_isolation
@@ -22,6 +22,7 @@ from .config import (INSTALL_ROOT, PROJECT_CONFIG, ConfigError, Reloader, compos
                      repo_lock_name)
 from .context import both_labels_warning, label_transition
 from .dispatch_advisory import AdvisoryFailures, AdvisoryResults
+from .dispatch_base import MainAlerts
 from .dispatcher import (Dispatcher, TickLog, Workers, ensure_labels, pr_counts_line,
                          pr_status_line)
 from .github import GitHub, GitHubError
@@ -42,6 +43,8 @@ REPO_LOCK_FD = 'DEVLOOP_REPO_LOCK_FD'
 STATE_ENV = 'DEVLOOP_STATE_DIR'
 # The tables of the project file whose absence was last reported on alert_issue (#462).
 TABLES_ALERTED = 'project-tables-alerted.json'
+# The record that the agents running as the dispatcher's user were reported on alert_issue (#490).
+AGENT_USER_ALERTED = 'agent-user-alerted'
 
 
 def main_checkout():
@@ -222,6 +225,50 @@ def project_tables_warning(alert_issue, state, gh, out=None, copy=None):
         except OSError as exc:
             log(f'config: the alert of the missing tables not recorded, it may repeat: {exc}')
     return warn
+
+
+def agent_user_warning(off, alert_issue, state, gh, out=None):
+    """The warning of the agents running as the dispatcher's user (#490): with
+    ``[agent_user] name`` empty (``off``), at the start of ``tick`` and ``run``, a line in the
+    log each time and a comment on ``alert_issue`` once (``AGENT_USER_ALERTED`` in ``state``;
+    forgotten when an agent user is set, so that a later return to none is reported again).
+    Only a warning: devloop goes on. One attempt; a failure is logged and tried at the next
+    start. ``out`` (default: ``log``) writes the lines."""
+    out = out or log
+    path = Path(state) / AGENT_USER_ALERTED
+    if not off:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            out(f'agent_user: {AGENT_USER_ALERTED} not removed: {exc}')
+        return
+    out('agent_user: [agent_user] name is empty: the agents and the tests run as the '
+        "dispatcher's user, and can read the keys of the apps, state_dir and the overlay")
+    if path.exists():
+        return
+    if not alert_issue:
+        out('agent_user: no [run].alert_issue is configured: no alert for the agent user')
+        return
+    body = publishable(
+        dispatcher_header() + '\n## Agent senza utente dedicato\n\n'
+        '`[agent_user] name` è vuoto: gli agent e il comando dei test girano come l\'utente del '
+        'dispatcher, e possono leggere le chiavi delle GitHub App, lo `state_dir` e '
+        'l\'overlay. devloop continua.\n\nPer attivare l\'utente degli agent (#415): '
+        '`ops/host/migrate.md`, sezione "Attivazione dell\'utente degli agent (#415)". Questo '
+        'avviso non si ripete finché la chiave resta vuota.')
+    try:
+        gh.comment(alert_issue, body)
+    except Exception as exc:  # one attempt only: its class, never its output
+        out(f'agent_user: the alert on #{alert_issue} could not be published '
+            f'({type(exc).__name__})')
+        return
+    out(f'agent_user: alert published on #{alert_issue}')
+    try:
+        path.write_text('alerted\n', encoding='utf-8')
+    except OSError as exc:
+        out(f'agent_user: the alert not recorded, it may repeat: {exc}')
 
 
 def installation_source(cfg, root):
@@ -427,6 +474,7 @@ def build(args):
                             memory=unavailability.Memory(state),
                             advisory_results=AdvisoryResults(state),
                             advisory_failures=AdvisoryFailures(state),
+                            main_alerts=MainAlerts(state),
                             housekeeping=Housekeeping(state, ws, gh, ledger=ledger,
                                                       log=tick_log))
     # What the trace T1 (ADR 0006, K1) records of the start: the files this configuration came
@@ -435,6 +483,8 @@ def build(args):
     dispatcher.config_print = fingerprint(sources, data)
     # The tables of the project file this copy knows and the configuration lacks (#462).
     dispatcher.config_missing = missing_project_tables(data)
+    # The agents run as the dispatcher's user (#490): a warning at the start.
+    dispatcher.agent_user_off = agent_user is None
     return cfg, state, dispatcher
 
 
@@ -588,6 +638,37 @@ def run_pin(args):
         log(f'auto-pin held: the merge commit of {pin.held_prs(unknown)} is not known yet '
             '(devloop reads it on GitHub at its next tick, or the merge outcome is uncertain); '
             'pin by hand again once devloop status shows it')
+
+
+def run_token(args, command):
+    """``devloop token <actor> [--perm NAME=LEVEL ...] -- <command>`` (ADR 0006, R6): run
+    ``command`` with a token of the actor's app, on the ``repo`` and with the ``[apps]`` of the
+    configuration of the project (``token.run``): the installation's, the project file and the
+    overlay of its state_dir, as the launcher passes them. The actor and the permissions are
+    checked before any file is read. Exits with the command's exit code."""
+    try:
+        actor = token.actor_of(args.actor)
+        permissions = token.permissions_of(args.perm or ())
+    except token.TokenError as exc:
+        sys.exit(f'devloop: token: {exc}')
+    if not command:
+        sys.exit('devloop: token: the command goes after --: devloop token <actor> '
+                 '[--perm NAME=LEVEL ...] -- <command> [args...]')
+    try:
+        root = main_checkout()
+    except (OSError, subprocess.CalledProcessError):
+        sys.exit('devloop: token: run it from the checkout of the managed repository, or one of '
+                 'its worktrees')
+    try:
+        cfg = load(args, root)
+        state_path(cfg, root)
+    except ConfigError as exc:
+        sys.exit(f'devloop: invalid config: {exc}')
+    try:
+        code = token.run(cfg, actor, permissions, command)
+    except (token.TokenError, OSError, GitHubError) as exc:
+        sys.exit(f'devloop: token: {exc}')
+    sys.exit(code)
 
 
 def run_watch(parser, args):
@@ -793,7 +874,18 @@ def main(argv=None):
                                                       'unavailable: its next turn starts from '
                                                       'its configured model')
     reset_cmd.add_argument('agent', help='the agent key, as in [agents.<key>]')
+    token_cmd = sub.add_parser('token', help='run a command after -- as an agent\'s GitHub App '
+                                             'of the project, with a token limited to --perm '
+                                             '(default issues=write, pull_requests=write)')
+    token_cmd.add_argument('actor', help=f'one of {", ".join(token.ACTORS)}')
+    token_cmd.add_argument('--perm', action='append', metavar='NAME=LEVEL',
+                           help='a permission of the token; repeat it for more')
     argv = sys.argv[1:] if argv is None else list(argv)
+    # The command of `token` (ADR 0006, R6) is everything after its --, options included.
+    command = None
+    if '--' in argv and 'token' in argv[:argv.index('--')]:
+        split = argv.index('--')
+        argv, command = argv[:split], argv[split + 1:]
     args = parser.parse_args(argv)
 
     if args.command == 'run':
@@ -802,6 +894,8 @@ def main(argv=None):
             log('run: --interval is deprecated, use --idle-timeout')
     if args.command == 'pin':
         return run_pin(args)
+    if args.command == 'token':
+        return run_token(args, command)
     if args.command == 'fallback':
         return run_fallback(args)
     if args.command == 'report':
@@ -843,6 +937,12 @@ def main(argv=None):
         return
     if args.command == 'apps':
         failed = False
+        # The project's set of apps (ADR 0006, D3): those of its repo, with its key_dir.
+        log(f'apps of {cfg.repo}, keys in '
+            f'{os.environ.get("DEVLOOP_APP_KEY_DIR") or cfg.app_key_dir}')
+        if MERGER in cfg.apps and not cfg.merge.enabled():
+            log(f'{MERGER}: [merge] mode is off: the merger app is only for a repository where '
+                'devloop merges (ADR 0006, D3)')
         # Each app once, by the actor of its table: the agents' declared apps, the implementer's
         # role app among them (#407).
         for actor in dict.fromkeys([DISPATCHER, MERGER, *map(cfg.app_of, cfg.agents)]):
@@ -947,6 +1047,10 @@ def main(argv=None):
             # and at each reload of `run`.
             warn = project_tables_warning(cfg.run.alert_issue, state, dispatcher.gh)
             warn(missing)
+        off = getattr(dispatcher, 'agent_user_off', None)
+        if args.command in ('tick', 'run') and isinstance(off, bool):
+            # Without an agent user (#490): a warning, once on alert_issue; devloop goes on.
+            agent_user_warning(off, cfg.run.alert_issue, state, dispatcher.gh)
         if args.command == 'cleanup':
             for name in dispatcher.ws.names():
                 dispatcher.ws.remove(name)

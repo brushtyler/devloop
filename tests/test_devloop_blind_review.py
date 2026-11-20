@@ -104,7 +104,8 @@ class ReviewPromptTests(unittest.TestCase):
         comment = {'author': {'login': 'brushtyler'},
                    'body': '/devloop rereview\n\n' + HEADER + '\nDa rivedere il punto 2.'}
         rounds = [norm(raw_review('request_changes', [{'file': 'x.py', 'line': 1, 'title': 'b',
-                                                       'detail': 'd', 'suggested_fix': '',
+                                                       'detail': 'd', 'evidence': 'e',
+                                                       'suggested_fix': '',
                                                        'security': False}]))]
         fixes = [{'round': 1, 'head_sha': 'a' * 40, 'responses': [
             {'finding_id': 'R1-1', 'action': 'fixed', 'note': HEADER + '\nCorretto in x.py.'}]}]
