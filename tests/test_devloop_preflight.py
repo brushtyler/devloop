@@ -28,9 +28,11 @@ def gap(kind='operator_decision', default='', repository=False):
             'proposed_default': default, 'repository_dependent': repository}
 
 
-def checked(ready=True, gaps=(), split=''):
-    """The structured output of a readiness check."""
-    return {'ready': ready, 'gaps': list(gaps), 'split': split}
+def checked(ready=True, gaps=(), split='', trust='none', reason=''):
+    """The structured output of a readiness check, with its declaration on the trust policy
+    (#472)."""
+    return {'ready': ready, 'gaps': list(gaps), 'split': split, 'trust_policy': trust,
+            'trust_policy_reason': reason}
 
 
 class IssueGH(FakeGH):
@@ -357,7 +359,11 @@ class PreflightTests(unittest.TestCase):
                checked(False, [{k: v for k, v in gap().items() if k != 'proposed_default'}]),
                checked(False, [{k: v for k, v in gap().items()
                                 if k != 'repository_dependent'}]),
-               checked(False, [dict(gap(), repository_dependent='yes')])]
+               checked(False, [dict(gap(), repository_dependent='yes')]),
+               # #472: the declaration on the trust policy is required, from a closed list.
+               checked(trust='maybe'), checked(trust=''), checked(reason=None),
+               {k: v for k, v in checked().items() if k != 'trust_policy'},
+               {k: v for k, v in checked().items() if k != 'trust_policy_reason'}]
         for value in bad:
             with self.subTest(value=value), self.assertRaises(schema.SchemaError):
                 schema.validate(value, s)

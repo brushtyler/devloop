@@ -317,13 +317,23 @@ def _valid_gap(g):
             and isinstance(g.get('repository_dependent', False), bool))
 
 
+# What a readiness check declares about the trust policy (#472): the change the issue asks for
+# does not touch it, a decision of the operator covers it, or none does.
+PREFLIGHT_TRUST = ('none', 'covered', 'uncovered')
+
+
 def _valid_preflight(p):
     """A readiness check (#114): ``ready`` never with ``blocked``, which records that the check
     added ``agent:needs-operator`` after ``labeled`` earlier ``labeled`` events of that label
     (#248: of the label under both its names). ``base`` (#270), the commit of the base branch
-    the check ran on, is missing from the records written before."""
+    the check ran on, is missing from the records written before, and so are ``trust_policy``
+    and ``trust_policy_reason`` (#472) from those written before them; ``uncovered`` is never
+    ``ready``."""
+    trust = p.get('trust_policy', 'none')
     return (all(isinstance(p.get(k), str) for k in ('hash', 'agent', 'split'))
             and isinstance(p.get('base', ''), str)
+            and trust in PREFLIGHT_TRUST and isinstance(p.get('trust_policy_reason', ''), str)
+            and not (trust == 'uncovered' and p.get('ready'))
             and all(isinstance(p.get(k), bool) for k in ('ready', 'blocked'))
             and not (p['ready'] and p['blocked']) and _is_int(p.get('labeled'))
             and isinstance(p.get('gaps'), list) and all(_valid_gap(g) for g in p['gaps']))
@@ -812,6 +822,11 @@ def render_preflight(record, head, note=''):
         if not record['gaps'] and not record['split'].strip():
             parts += ['', 'Il controllo non ha indicato lacune né una suddivisione.']
         parts += ['', PREFLIGHT_RESUME]
+    if record.get('trust_policy') == 'covered':
+        # #472: the decision of the operator the check found for the trust policy, shown.
+        reason = record.get('trust_policy_reason', '').strip()
+        parts += ['', '**Policy di fiducia:** toccata, coperta da una decisione dell\'operatore.'
+                      + (f' {reason}' if reason else '')]
     if note:
         parts += ['', f'> {note}']
     return publishable(head + '\n' + '\n'.join(parts), 'preflight', record)

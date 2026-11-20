@@ -103,24 +103,67 @@ needs the operator when, and only when, at least one of these three things holds
 
 1. it goes beyond or against a decision of the operator, or no decision covers it: a decision
    recorded in the section "Decise dall'operatore" of an ADR approved with the
-   [cycle of the ADRs](../adr/README.md#ciclo-di-un-adr) and present on `main`, or written by the
-   operator in the body of the issue; the points an ADR leaves open are not decisions;
+   [cycle of the ADRs](../adr/README.md#ciclo-di-un-adr) and present on `main`, written by the
+   operator in the body of the issue, or a comment in which the operator approves the change on
+   the issue (#472, see below); the points an ADR leaves open are not decisions;
 2. it weakens a check and no decision of the operator authorizes that weakening;
 3. it changes the rule itself: the "Trust policy" section of the review or the advisory review
-   prompt, or the classes of escalation (`NON_CRITICAL` in `devloop/supervision.py`), even when
-   an ADR asks for it.
+   prompt, or the conditions that decide when a change needs the operator, even when an ADR asks
+   for it.
+
+Since #472 point 3 is the rule alone. A change to the classes of escalation (`NON_CRITICAL` in
+`devloop/supervision.py`), to a `/devloop` command or to a condition of the merge that a decision
+of the operator **prescribes explicitly**, naming the class, the command or the condition, is a
+faithful implementation and follows point 1: adding to `NON_CRITICAL` the class
+`round_grantable` that ADR 0005 names (D2, row P5-1 of its plan) does not go to the operator. What
+the decision does not name, such as another class added beside it, still does, under point 1.
 
 A **faithful implementation** does not need the operator: the issue cites the section of an ADR
-on `main`, and the change carries out its decision with no deviation. The reviewer checks the
-conformity of the whole change to the decision, read on `main` and never in the diff of the PR,
-and cites it in the review (file of the ADR, section and point); its verdict is then the technical
-one, `approve` or `request_changes`, and devloop merges the PR like any other of its level.
-Without the citation the PR needs the operator as before; every deviation found needs the
-operator, with its reason and the decision it departs from. The prompts give an example of each
-case: a conforming implementation of an ADR, a deviation, a weakening without a decision, a
-change of the rule. Unchanged: `operator_only_paths` (`docs/adr/`, `AGENTS.md`, `CLAUDE.md`)
-keeps the merge with the operator whatever the reviewers say, the activations of ADR 0005 (D10)
-are not PRs and stay with the operator, and a `needs_operator` for a `decision` works as below.
+on `main` (or the decision is in the body of the issue or in an approval of the operator on it),
+and the change carries out the decision with no deviation. The reviewer checks the conformity of
+the whole change to the decision, read on `main` and never in the diff of the PR, and cites it in
+the review (file of the ADR, section and point, or the author and time of the operator's
+comment); its verdict is then the technical one, `approve` or `request_changes`, and devloop
+merges the PR like any other of its level. Without the citation the PR needs the operator as
+before; every deviation found needs the operator, with its reason and the decision it departs
+from. The prompts give an example of each case: a conforming implementation of an ADR, a class
+of `NON_CRITICAL` an ADR names, a deviation, a weakening without a decision, a change of the
+rule. Unchanged: `operator_only_paths` (`docs/adr/`, `AGENTS.md`, `CLAUDE.md`) keeps the merge
+with the operator whatever the reviewers say, the activations of ADR 0005 (D10) are not PRs and
+stay with the operator, and a `needs_operator` for a `decision` works as below.
+
+**The decision on the issue, not on the PR** (#472, decided by the operator on 2026-11-19,
+[ADR 0005](../adr/0005-deleghe-e-ruoli-degli-agent.md#4-decisioni-riservate-alloperatore), D10).
+The operator approves the policy once, on the issue, before the implementation, and not the code
+of every PR:
+
+- **Approval in a comment.** A comment on the issue counts as a decision of the operator for
+  point 1 when a user of `trusted_users` wrote it in person (not starting with the attribution
+  header), not from the supervisor's identity nor from any app of devloop, after the latest change
+  of the title or the body of the issue and before devloop took it on (the first `labeled` event
+  of `agent:working` after that change). devloop lists those comments, with author and time,
+  under "Decisions of the operator on the issue" in the prompts of the readiness check, of the
+  reviewers and of the advisory review; only those count, and whether one approves the change is
+  the agents' to judge. A change of the text after the comment drops it; so does a change of the
+  comment itself after the takeover (its `updated_at`), since the agents read it as it is now: a
+  comment rewritten into an approval after the takeover is not a decision taken before it. The
+  reviewers of a PR whose issue was not taken on after the latest change get none.
+- **Readiness check.** With `preflight` configured, the check applies the same rule to the issue
+  and declares in `trust_policy` whether the change the issue asks for touches the policy:
+  `none`, `covered` (a decision of the operator covers it, cited in `trust_policy_reason`) or
+  `uncovered`. An `uncovered` issue is not ready: devloop puts first among its gaps one of kind
+  `operator_decision` with the question "Approvi la modifica della policy di fiducia descritta
+  qui?" and the reason, and the issue goes to `agent:needs-operator` with class
+  `operator_decision`, to the operator also in `auto` mode
+  ([Readiness check before implementation](#readiness-check-before-implementation)). The
+  operator answers with a comment on the issue: the hash of the request changes and the check
+  runs again. The hash also carries the comments that may record a decision, by author and
+  time: a change of the text undone later leaves title and body as they were but drops those
+  comments, so a check that relied on them is not reused and runs again.
+- **The merge.** With that decision, a faithful PR with no open finding and green CI is merged by
+  devloop like any other of its level, except for the paths of `operator_only_paths`. What no
+  decision covers, what goes beyond or against one, an unauthorised weakening and a change of the
+  rule itself stay with the operator as above.
 
 - **Review of the quorum.** A reviewer for whom the change needs the operator gives the verdict
   `needs_operator`, even when the change is correct and the issue asks for it, and writes in
@@ -168,9 +211,11 @@ are not PRs and stay with the operator, and a `needs_operator` for a `decision` 
   of different vendors, but they may both miss a change, and a reviewer of a later round who
   looks only at the latest fix may approve a PR an earlier round flagged; since #461 that
   approval, by the reviewer who flagged it, also gives the merge back to devloop. Since #447
-  they also judge whether a change conforms to the decision it cites. devloop checks nothing
-  of it in code: no file is reserved to the operator for the policy, and `devloop/config.toml` is
-  not in `operator_only_paths`;
+  they also judge whether a change conforms to the decision it cites, and since #472 whether a
+  decision names what the change adds and whether a comment of the operator approves it; the
+  readiness check's `trust_policy` is as good as the attention of its agent. devloop checks
+  nothing of it in code beyond who wrote a comment and when: no file is reserved to the operator
+  for the policy, and `devloop/config.toml` is not in `operator_only_paths`;
 - a change deliberately disguised as something else is not covered;
 - the operator's local overlay (`config.local.toml`) can weaken the policy without any review;
 - with a conclave configured, a change to the policy stays with the operator only if its members
@@ -459,11 +504,20 @@ follows [`devloop/schemas/preflight.json`](../../devloop/schemas/preflight.json)
   a `description`, the `code_refs` that show it, a `proposed_default` (`""` if none) and
   `repository_dependent` (#270), `true` when the gap closes by itself once `main` gains some
   content (a prerequisite not merged yet, a file that does not exist yet), whatever its `kind`;
-- `split`, how to divide an issue too large for one run, `""` if not needed.
+- `split`, how to divide an issue too large for one run, `""` if not needed;
+- `trust_policy` and `trust_policy_reason` (#472): whether the change the issue asks for touches
+  the [trust policy](#changes-to-the-trust-policy), `none`, `covered` or `uncovered`, with the
+  parts touched and the decision of the operator that covers them, or why none does. The check
+  gets the rule of the review prompt, whole, and the comments that may record a decision of the
+  operator on the issue.
 
 An issue is ready only if the agent says so **and** lists no gap and no split: a
 `default_available` gap blocks too, until a trusted comment accepts the proposed default. A
-default the repository or the issue already prescribes is not a gap.
+default the repository or the issue already prescribes is not a gap. An `uncovered` change to the
+trust policy is a gap of kind `operator_decision` that devloop writes itself, first, with the
+question "Approvi la modifica della policy di fiducia descritta qui?": the issue goes to the
+operator, never to the supervisor; a `covered` one is shown in the comment of the check, with
+the decision it cites.
 
 A decision that an ADR on `main` records as taken by the operator ("Decise dall'operatore") counts
 as an operator decision for the issues that cite it (#367): `docs/adr/` is in

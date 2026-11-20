@@ -136,11 +136,125 @@ _HOST_STEP_REVIEW = """\
    none is needed is only a non-blocking finding: devloop merges the PR all the same, and the
    declaration only holds the automatic pin until the operator pins by hand.
 """
+
+
+class Replaced(tuple):
+    """A change of ``SINCE_R4`` that replaces the only occurrence of ``old`` in the reference
+    with ``new``, where adding a text after an anchor is not enough."""
+
+    def __new__(cls, old, new):
+        return super().__new__(cls, (old, new))
+
+
+# #472: the trust policy of the review and the advisory review prompts, narrowed in point 3 and
+# with the comments of the operator on the issue among the decisions of point 1.
+_TRUST_POLICY_472 = (
+    Replaced(
+        '   cycle of `docs/adr/README.md` and present on `main`, or one written by the operator in '
+        'the body\n'
+        '   of the issue. The points an ADR leaves open are not decisions.\n',
+        '   cycle of `docs/adr/README.md` and present on `main`, one written by the operator in '
+        'the body\n'
+        '   of the issue, or a comment of the operator that approves the change, among those '
+        'listed under\n'
+        '   "Decisions of the operator on the issue" below (#472). A comment that section does '
+        'not list\n'
+        '   is not a decision. The points an ADR leaves open are not decisions.\n'),
+    Replaced(
+        '   or the classes of escalation (`NON_CRITICAL` in `devloop/supervision.py`). This holds '
+        'even\n'
+        '   when an ADR asks for the change.\n',
+        '   or the conditions that decide when a change needs the operator. This holds even when '
+        'an ADR\n'
+        '   asks for the change.\n'
+        '\n'
+        'A change to the classes of escalation (`NON_CRITICAL` in `devloop/supervision.py`), to '
+        'a\n'
+        '`/devloop` command or to a condition of the merge is not a change of the rule when a '
+        'decision of\n'
+        'the operator prescribes it explicitly, naming the class, the command or the condition: '
+        'it is a\n'
+        'faithful implementation, and follows point 1. What the decision does not name, such as '
+        'a class\n'
+        'added beside the one it names, needs the operator under point 1.\n'),
+    Replaced(
+        'of the PR. Cite it in your review: the file of the ADR, the section and the point. '
+        'Without that\n'
+        'citation the change needs the operator, as under point 1. Every deviation you find '
+        'needs the\n'
+        'operator, with its reason and the decision it departs from. A change that touches\n'
+        '`operator_only_paths` (such as `docs/adr/` and `AGENTS.md`) is still merged by the '
+        'operator\n'
+        'only, whatever this rule says. Examples:\n',
+        'of the PR. Cite it in your review: the file of the ADR, the section and the point. The '
+        'same holds\n'
+        'for a decision in the body of the issue or in a comment listed under "Decisions of the '
+        'operator\n'
+        'on the issue": cite the comment with its author and its time. Without that citation '
+        'the change\n'
+        'needs the operator, as under point 1. Every deviation you find needs the operator, '
+        'with its\n'
+        'reason and the decision it departs from. A change that touches `operator_only_paths` '
+        '(such as\n'
+        '`docs/adr/` and `AGENTS.md`) is still merged by the operator only, whatever this rule '
+        'says.\n'
+        'Examples:\n'),
+    ('  and the supervisor, as D7 says.\n',
+     '- Faithful implementation, the operator is not needed: the issue cites\n'
+     '  `docs/adr/0005-deleghe-e-ruoli-degli-agent.md`, section 4, D2, which approves the '
+     'delegations\n'
+     '  of its section 3.1, and the row P5-1 of its plan, which names the non-critical class\n'
+     '  `round_grantable`; the change adds `round_grantable` to `NON_CRITICAL` with no '
+     'deviation.\n'),
+    Replaced(
+        '  constant of the code becomes a key of `devloop/config.toml` that can raise it.\n',
+        '  constant of the code becomes a key of `devloop/config.toml` that can raise it; or the '
+        'change\n'
+        '  also adds to `NON_CRITICAL` a class the decision does not name, such as '
+        '`reviewer_decision`.\n'),
+    Replaced(
+        '  `devloop/prompts/review.md` or of `devloop/prompts/advisory.md`, or moves a class of '
+        'escalation\n'
+        '  into or out of `NON_CRITICAL`.\n',
+        '  `devloop/prompts/review.md` or of `devloop/prompts/advisory.md`, even when an ADR or a '
+        'decision\n'
+        '  of the operator asks for it.\n'),
+    ('$issue_body\n\n', '$operator_decisions\n\n'),
+)
+# #472: the readiness check applies the trust policy to the issue and declares it.
+_TRUST_POLICY_PREFLIGHT = """\
+## Trust policy
+
+The operator decides a change to the trust policy on the issue, before anyone implements it, not
+on the pull request (#472). The reviewers of the pull request will apply this rule, from the
+review prompt of devloop; apply it now to the change the issue asks for:
+
+$trust_policy
+
+Declare in `trust_policy`, for the change the issue asks for:
+
+- `none`: it does not touch the trust policy (the closed list of five points above);
+- `covered`: it touches it, and a decision of the operator covers it with no deviation and
+  authorizes every weakening of a check it makes: a decision of an ADR as the rule says, one in
+  the body of the issue, or a comment of the operator that approves the change, listed under
+  "Decisions of the operator on the issue" below. Any other comment, also of a trusted user, is
+  not such a decision;
+- `uncovered`: it touches it, and no decision of the operator covers it, it goes beyond or
+  against one, or it weakens a check that no decision authorizes. A change of the rule itself is
+  `uncovered` too, unless a decision of the operator approves it.
+
+In `trust_policy_reason` list the parts of the trust policy the change touches, each with its
+point of the closed list, and the decision that covers them (the file, the section and the point
+of the ADR, or the author and the time of the comment) or why none does; `""` with `none`. With
+`uncovered` the issue is not ready: devloop adds a gap of kind `operator_decision` with the
+question to the operator and your `trust_policy_reason`, so do not list that gap yourself.
+
+"""
 # (#473 made the criterion of point 8 precise: the cases that need a declaration, those that do
 # not, and a superfluous declaration that is not blocking.)
-# The changes of the templates since R4, each as ``(anchor, text)``: ``text`` follows the only
-# occurrence of ``anchor`` in the reference. The frozen files stay as they were; the prompts of
-# now are the reference with these changes, and nothing else.
+# The changes of the templates since R4, each as ``(anchor, text)``, where ``text`` follows the
+# only occurrence of ``anchor`` in the reference, or as ``Replaced(old, new)``. The frozen files
+# stay as they were; the prompts of now are the reference with these changes, and nothing else.
 SINCE_R4 = {
     # #462: the step on the host, declared by implementer and fixer and checked by the reviewer.
     'implement': (
@@ -159,6 +273,19 @@ SINCE_R4 = {
          '$acceptance_map\n\n',
          '## Step on the host\n\nLatest declaration of the pull request (`host_step`), from the '
          'implementer or its latest fix:\n\n$host_step\n\n'),
+        *_TRUST_POLICY_472,
+    ),
+    'advisory': _TRUST_POLICY_472,
+    'preflight': (
+        ('external tool, access or resource can close.\n\n', _TRUST_POLICY_PREFLIGHT),
+        ('  implementable in one run; otherwise `""`.\n',
+         '- `trust_policy`: `none`, `covered` or `uncovered`, as above.\n'
+         '- `trust_policy_reason`: the parts touched and the decision that covers them, or '
+         '`""`.\n'),
+        Replaced('Write `description`, `proposed_default` and `split` in $language.\n',
+                 'Write `description`, `proposed_default`, `split` and `trust_policy_reason` in '
+                 '$language.\n'),
+        ('$issue_comments\n', '\n$operator_decisions\n'),
     ),
 }
 
@@ -166,10 +293,11 @@ SINCE_R4 = {
 def pre_r4_prompt(name):
     """The template ``name`` of before R4 with the changes made since (``SINCE_R4``)."""
     text = (PRE_R4_PROMPTS / f'{name}.md').read_text(encoding='utf-8')
-    for anchor, added in SINCE_R4.get(name, ()):
-        if text.count(anchor) != 1:
-            raise AssertionError(f'{name}: the anchor {anchor!r} is not once in the reference')
-        text = text.replace(anchor, anchor + added)
+    for change in SINCE_R4.get(name, ()):
+        old, new = change if isinstance(change, Replaced) else (change[0], change[0] + change[1])
+        if text.count(old) != 1:
+            raise AssertionError(f'{name}: the anchor {old!r} is not once in the reference')
+        text = text.replace(old, new)
     return text
 
 
