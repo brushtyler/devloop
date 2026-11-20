@@ -1501,7 +1501,12 @@ is in the [guide](guide.md#agent-user) and in the [ops guide](../../ops/README.m
   `safe.directory` of the worktree, must work (`git status`, without optional locks) in a
   linked worktree of the dispatcher's user that the check makes in a new directory of
   `agent-shared/tmp` and removes: a sudo that drops the environment, or a git that refuses the
-  worktree, stops devloop with git's message (#500). The agent user must also
+  worktree, stops devloop with git's message (#500). That directory is the dispatcher's alone
+  (mode `0700`, the mask of its inherited ACL empty) while devloop's own git commands make the
+  repository there (`core.fsmonitor=false` and no hook on each, no system or global config),
+  and is checked again after `git init`; only then the agent user gets read and search on it,
+  never write. The git probe runs only when the probe above finds nothing, so that the agent
+  user cannot write `agent-shared/tmp` while the dispatcher's git runs. The agent user must also
   differ from the dispatcher's. Otherwise devloop exits, naming each path, before taking the
   lock. `[agent_user] check = false` skips the probe and logs that it is off: for development
   only. Before the probe, also with `check = false`, devloop checks that the environment

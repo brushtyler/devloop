@@ -33,7 +33,8 @@ The mechanism, chosen by the operator on #415:
   it can write the repository's ``.git``, the worktrees directory or the fixed directories of the
   shared one; when it cannot write the directories made for its turns and test runs; and when
   git, run as the agent user with the environment of the turns, refuses a worktree of the
-  dispatcher's user (#500). ``[agent_user] check = false`` turns it off, for development only.
+  dispatcher's user (#500), made by the dispatcher's git in a directory of its own, which the
+  agent user only reads once that git is done. ``[agent_user] check = false`` turns it off, for development only.
   Before it, and also with ``check = false``, ``AgentUser.check_environment`` refuses a ``sudo``
   that does not pass the environment (sudo-rs, a rule without ``SETENV``, #496);
 - the worktrees belong to the dispatcher's user: each turn and test run gets, in git's command
@@ -412,19 +413,21 @@ class SharedDir:
                 handle.write(data)
         return self.path / sub / name
 
-    def new_dir(self, sub, prefix):
+    def new_dir(self, sub, prefix, mode=0o770):
         """A new directory ``sub/<prefix><random>``, mode ``0770``, so that the named entries of
-        the default ACL of ``sub`` apply: the agent user writes there."""
+        the default ACL of ``sub`` apply: the agent user writes there. With ``mode`` ``0700``,
+        a directory of the dispatcher's user alone: the mask of the ACL it inherits is empty,
+        and no named entry applies (#500)."""
         with self._dir(sub, create=True) as fd:
             for _ in range(100):
                 name = f'{prefix}{secrets.token_hex(6)}'
                 try:
-                    os.mkdir(name, 0o770, dir_fd=fd)
+                    os.mkdir(name, mode, dir_fd=fd)
                 except FileExistsError:
                     continue
                 inner = os.open(name, _DIR, dir_fd=fd)
                 try:
-                    os.fchmod(inner, 0o770)  # the umask applies without a default ACL
+                    os.fchmod(inner, mode)  # the umask applies without a default ACL
                 finally:
                     os.close(inner)
                 return self.path / sub / name
@@ -495,17 +498,59 @@ def cli_items(home):
             + [('bin', home / '.local' / 'bin' / cli) for cli in CLIS])
 
 
+def _private(path, what=None):
+    """Raise AgentUserError unless ``path`` (``what`` in it, when given) is a directory, or a
+    regular file, of the dispatcher's user that no one else can reach: ``path`` neither a link
+    nor open to the group class (the mask of its ACL, which bounds its named entries) or to the
+    others."""
+    try:
+        info = os.lstat(path)
+        inner = os.lstat(Path(path) / what) if what else info
+    except OSError as exc:
+        raise AgentUserError(f'the git probe in {path}: {exc}') from exc
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077):
+        raise AgentUserError(f'the git probe in {path}: not a directory of the dispatcher\'s '
+                             f'user alone (mode {stat.S_IMODE(info.st_mode):o}): another user '
+                             'could change what its git commands read')
+    if what and (not stat.S_ISREG(inner.st_mode) or inner.st_uid != os.geteuid()):
+        raise AgentUserError(f'the git probe in {path}: {what} is not a file of the '
+                             'dispatcher\'s user')
+
+
+def _open_to_group(path):
+    """Give the group class of ``path`` and of what it holds (with an ACL, its mask: the agent
+    user's entry inherited from the shared directory) read and search, never write: what the
+    git probe needs (#500). ``path`` last, so nothing in it is in reach before it is read-only."""
+    for top, dirs, files in os.walk(path, topdown=False):
+        for name in files:
+            entry = os.path.join(top, name)
+            info = os.lstat(entry)
+            if stat.S_ISREG(info.st_mode):
+                os.chmod(entry, 0o750 if info.st_mode & 0o100 else 0o640)
+        for name in dirs:
+            entry = os.path.join(top, name)
+            if not os.path.islink(entry):
+                os.chmod(entry, 0o750)
+    os.chmod(path, 0o750)
+
+
 def probe_worktree(path):
-    """Make in ``path`` (a new directory of the dispatcher's user) a repository ``main`` and a
-    linked worktree of it, ``worktree``, laid out as the worktrees of devloop are, and return
-    the worktree (#500). Without the dispatcher's config files and hooks. Raises
-    AgentUserError when git fails."""
+    """Make in ``path``, a new directory of the dispatcher's user alone (mode ``0700``), a
+    repository ``main`` and a linked worktree of it, ``worktree``, laid out as the worktrees of
+    devloop are, and return the worktree (#500). The git commands run as the dispatcher's user
+    read no config the agent user can write: ``path`` is refused unless private, and checked
+    again after ``git init``, with its ``.git/config``; no system or global config, no hook and
+    no fsmonitor program (``core.fsmonitor=false`` on every command). Only then does the group
+    class (the agent user's ACL entry) get read and search on it, never write. Raises
+    AgentUserError when git fails or ``path`` is not private."""
+    _private(path)
     env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
     env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull, LC_ALL='C',
                GIT_AUTHOR_NAME='devloop', GIT_AUTHOR_EMAIL='devloop@localhost',
                GIT_COMMITTER_NAME='devloop', GIT_COMMITTER_EMAIL='devloop@localhost')
     main, worktree = Path(path) / 'main', Path(path) / 'worktree'
-    git = ['git', '-c', f'core.hooksPath={os.devnull}']
+    git = ['git', '-c', f'core.hooksPath={os.devnull}', '-c', 'core.fsmonitor=false']
     for argv in ([*git, 'init', '-q', str(main)],
                  [*git, '-C', str(main), 'commit', '-q', '--allow-empty', '-m', 'probe'],
                  [*git, '-C', str(main), 'worktree', 'add', '-q', '--detach', str(worktree)]):
@@ -514,8 +559,13 @@ def probe_worktree(path):
         except (OSError, subprocess.SubprocessError) as exc:
             raise AgentUserError(f'the git probe in {path}: {exc}') from exc
         if done.returncode != 0:
-            raise AgentUserError(f'the git probe in {path}: {" ".join(argv[3:])}: '
+            raise AgentUserError(f'the git probe in {path}: {" ".join(argv[5:])}: '
                                  f'{(done.stderr or done.stdout).strip()[:500]}')
+        _private(path, 'main/.git/config')
+    try:
+        _open_to_group(path)
+    except OSError as exc:
+        raise AgentUserError(f'the git probe in {path}: {exc}') from exc
     return worktree
 
 
@@ -532,8 +582,9 @@ def check(agent_user, key_dir, state_dir, local_config=None, me=None, git_dir=No
     the CLIs in its home that later turns use (``cli_items``, #438). Git, run as the agent user
     with ``env`` (the environment of the turns, default a minimal one) and the ``safe.directory``
     a turn gets, must work in a linked worktree of the dispatcher's user, made for the check in
-    the shared directory (``probe_worktree``, #500). Raises AgentUserError, listing every
-    problem."""
+    a directory of its own in the shared one (``probe_worktree``, #500); only when the probe
+    above finds nothing, so that the agent user cannot write where the dispatcher's git runs.
+    Raises AgentUserError, listing every problem."""
     me = me if me is not None else pwd.getpwuid(os.geteuid()).pw_name
     if agent_user.name == me:
         raise AgentUserError(f'agent_user.name: {me!r} is the dispatcher\'s own user: agents '
@@ -562,12 +613,18 @@ def check(agent_user, key_dir, state_dir, local_config=None, me=None, git_dir=No
             schema = shared.write(SCHEMAS, f'.check-{secrets.token_hex(6)}.json', b'{}\n')
             made.append((SCHEMAS, schema))
             items.append(('rd', schema))
-            made.append((TMP, shared.new_dir(TMP, '.check-git-')))
         except OSError as exc:
             raise AgentUserError(f'the shared directory {shared.path}: {exc}') from exc
-        worktree = probe_worktree(made[-1][1])
         found = agent_user.probe(items)
-        refused = agent_user.git_probe(worktree, env)
+        refused = None
+        # The git probe only where the agent user cannot write the shared directory: the
+        # repository is made there by the dispatcher's user, in a directory of its own (#500).
+        if not found:
+            try:
+                made.append((TMP, shared.new_dir(TMP, '.check-git-', mode=0o700)))
+            except OSError as exc:
+                raise AgentUserError(f'the shared directory {shared.path}: {exc}') from exc
+            refused = agent_user.git_probe(probe_worktree(made[-1][1]), env)
     finally:
         for sub, path in made:
             try:

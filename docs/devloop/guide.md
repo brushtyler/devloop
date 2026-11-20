@@ -2231,7 +2231,9 @@ a host already in service is in
   nothing in `.git` nor the directories that hold the worktrees and its turns, that it can
   write the directories devloop makes for its turns, and that git, run as `devloop-agent` with
   the environment of the turns, works in a worktree of `devloop` (#500: each turn and test run
-  trusts its own worktree with `safe.directory`, never `*`); otherwise it refuses to start and
+  trusts its own worktree with `safe.directory`, never `*`; devloop makes that worktree with
+  its own git in a directory `devloop-agent` cannot reach, and opens it read-only afterwards,
+  so no config of `devloop-agent` runs as `devloop`); otherwise it refuses to start and
   says what is wrong. `[agent_user] check = false` skips the check, in development only.
 - Before it, also with `check = false`, devloop checks that the environment it builds reaches
   `devloop-agent` through `sudo -E` (#496), and otherwise refuses to start and says why.

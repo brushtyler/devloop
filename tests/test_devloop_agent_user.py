@@ -287,6 +287,79 @@ class SafeDirectoryTests(unittest.TestCase):
         self.assertEqual(list((state / 'agent-shared/tmp').iterdir()), [])
 
 
+class ProbeWorktreeTests(unittest.TestCase):
+    """#500, request of the operator on PR #503: the git commands of the startup probe run as
+    the dispatcher's user, who reads the keys of the apps. They read no config the agent user
+    can write, and run no fsmonitor program, also one written in ``.git/config`` after
+    ``git init``."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='agent-user-probe-')).resolve()
+        self.addCleanup(lambda: subprocess.run(['rm', '-rf', str(self.tmp)]))
+        self.marker = self.tmp / 'fsmonitor-ran'
+        self.monitor = self.tmp / 'fsmonitor'
+        self.monitor.write_text(f'#!/bin/sh\ntouch {self.marker}\nexit 1\n')
+        self.monitor.chmod(0o755)
+        self.probe = self.tmp / 'probe'
+        self.probe.mkdir(mode=0o700)
+
+    def inject_after_init(self, modes):
+        """A ``subprocess.run`` that, after ``git init``, writes an fsmonitor program in the
+        new ``.git/config``, as an agent user that could write there would, and records the
+        mode of the probe directory at each git command."""
+        real = subprocess.run
+
+        def run(argv, **kw):
+            modes.append(stat_mode(self.probe))
+            done = real(argv, **kw)
+            if 'init' in argv:
+                with open(self.probe / 'main/.git/config', 'a', encoding='utf-8') as config:
+                    config.write(f'[core]\n\tfsmonitor = {self.monitor}\n')
+            return done
+        return run
+
+    def test_an_fsmonitor_written_after_init_does_not_run(self):
+        modes = []
+        with mock.patch.object(agentuser.subprocess, 'run', self.inject_after_init(modes)):
+            worktree = agentuser.probe_worktree(self.probe)
+        self.assertEqual(worktree, self.probe / 'worktree')
+        self.assertFalse(self.marker.exists())
+        # Every git command ran in a directory of the dispatcher's user alone.
+        self.assertEqual(modes, [0o700] * 3)
+        # The injected config is real: git without the override runs the program.
+        env = dict(os.environ, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull)
+        subprocess.run(['git', '-C', str(self.probe / 'main'), 'status', '--porcelain'],
+                       capture_output=True, env=env)
+        if not self.marker.exists():
+            self.skipTest('this git does not run core.fsmonitor here')
+
+    def test_the_agent_user_only_reads_the_probe_once_git_is_done(self):
+        agentuser.probe_worktree(self.probe)
+        for top, dirs, files in os.walk(self.probe):
+            for entry in [top, *(os.path.join(top, n) for n in dirs + files)]:
+                if not os.path.islink(entry):
+                    self.assertEqual(stat_mode(entry) & 0o027, 0, entry)  # group: r, x
+                    self.assertTrue(stat_mode(entry) & 0o040, entry)
+        self.assertEqual(stat_mode(self.probe), 0o750)
+
+    def test_a_directory_another_user_can_reach_is_refused(self):
+        for mode in (0o770, 0o750, 0o701):
+            self.probe.chmod(mode)
+            with self.assertRaisesRegex(AgentUserError, 'not a directory of the dispatcher'):
+                agentuser.probe_worktree(self.probe)
+            self.assertEqual(list(self.probe.iterdir()), [], oct(mode))
+        link = self.tmp / 'link'
+        self.probe.chmod(0o700)
+        link.symlink_to(self.probe)
+        with self.assertRaisesRegex(AgentUserError, 'not a directory of the dispatcher'):
+            agentuser.probe_worktree(link)
+        self.assertEqual(list(self.probe.iterdir()), [])
+
+
+def stat_mode(path):
+    return os.lstat(path).st_mode & 0o7777
+
+
 def git(*args, cwd):
     """git for the set-up, without the config of the machine."""
     env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1',
@@ -575,6 +648,10 @@ class StartupCheckTests(unittest.TestCase):
         def run(argv, **kw):
             if 'git-probe' in argv:
                 self.git_probes.append((argv, kw['env']))
+                # What the dispatcher's git made: the agent user writes nothing there (#500).
+                made = Path(argv[-1]).parent
+                self.probe_modes = {str(p): stat_mode(p) for p in [made, *made.rglob('*')]
+                                    if not p.is_symlink()}
                 return SimpleNamespace(returncode=git[0], stdout='', stderr=git[1])
             if 'probe' not in argv:  # the check of the environment
                 self.env_checks.append(argv)
@@ -627,6 +704,9 @@ class StartupCheckTests(unittest.TestCase):
         probed = Path(argv[-1])
         self.assertEqual((probed.parent.parent, probed.name), (shared / 'tmp', 'worktree'))
         self.assertEqual(safe_directories(env), [str(probed)])
+        self.assertTrue(self.probe_modes)
+        self.assertEqual({p: m & 0o027 for p, m in self.probe_modes.items()},
+                         dict.fromkeys(self.probe_modes, 0))
         # What the check made for the probe is gone.
         for sub in ('schemas', 'turns', 'tmp'):
             self.assertEqual(list((shared / sub).iterdir()), [], sub)
@@ -639,6 +719,17 @@ class StartupCheckTests(unittest.TestCase):
             agentuser.check(user, self.keys, self.state, me='devloop')
         for sub in ('turns', 'tmp'):
             self.assertEqual(list((self.state / 'agent-shared' / sub).iterdir()), [], sub)
+
+    def test_no_git_runs_where_the_agent_user_can_write_the_shared_directory(self):
+        # #500: the dispatcher's git would read what the agent user writes there.
+        tmp = self.state / 'agent-shared/tmp'
+        user = self.fake([('w', str(tmp))])
+        with mock.patch.object(agentuser, 'probe_worktree') as made:
+            with self.assertRaisesRegex(AgentUserError, f'can write {tmp}'):
+                agentuser.check(user, self.keys, self.state, me='devloop')
+        made.assert_not_called()
+        self.assertEqual(self.git_probes, [])
+        self.assertEqual(list(tmp.iterdir()), [])
 
     def test_the_git_probe_runs_with_the_environment_of_the_turns(self):
         user = self.fake()
