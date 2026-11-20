@@ -1075,6 +1075,10 @@ one wins; without one, the latest that does not apply is answered.
   the hash of the request (title, body and trusted comments). An issue's key is taken before the
   step runs, from the commit its checkout starts at and the request its prompt gets, so a base
   or a text that changes during the turn already makes the retry refer to a superseded input.
+  The base does not bind the retry of an **implementation** (#475): with automatic merges `main`
+  moves every few minutes, and the step starts again from the current base anyway, with the work
+  its timed-out turn saved reapplied ([timeouts](protocol.md)); only its request binds it, for
+  the refusal and for the count of retries. The base of a readiness check still does.
   The retries are counted per reviewer: when several reviewers fail together and later only
   some of them, each keeps the retries it already had. A retry whose input has changed
   since (a new head, base or request) is refused, and the escalation stays with the supervisor.
@@ -1355,7 +1359,8 @@ no command applies, and the answer gives the manual steps. The commands valid th
   failed this way keeps `agent:ready`, so that the check can run again. The
   class may be critical: a retry runs the step again and bypasses none of its checks. The
   conditions are the supervisor's: the input of the step must still be the one that failed (the
-  same head, base and request), the issue must not be resolved by a merged devloop PR, a blocked
+  same head, base and request; for an implementation the request only, #475), the issue must
+  not be resolved by a merged devloop PR, a blocked
   issue waits, and at most **two** retries run for the same key, the supervisor's and the
   operator's together (so not after `retry_limit`). The readiness check runs again only on an
   issue that still has `agent:ready`, or `agent:working` while its implementation waits for the

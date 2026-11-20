@@ -518,11 +518,41 @@ class Workspace:
     def apply_work(self, path, patch):
         """``(applied, error)``: apply ``patch`` (:meth:`keep_work`, bytes) to the worktree
         ``path``, without staging or committing anything. ``git apply`` applies all of it or
-        nothing."""
+        nothing. A patch that does not apply as it is, because the base moved since it was
+        saved (#475), is merged three ways (``git apply --3way``) in a separate index, from the
+        blobs it records: when the merge is clean its result is applied to ``path``, otherwise
+        nothing is, and the error is the one of the plain ``git apply``."""
         done = self._git_run('apply', '--whitespace=nowarn', '-', cwd=path, stdin=patch,
                              check=False, binary=True)
         out = done.stdout.decode('utf-8', 'replace')
-        return done.returncode == 0, (done.stderr.strip() or out.strip())[:500]
+        error = (done.stderr.strip() or out.strip())[:500]
+        if done.returncode == 0:
+            return True, error
+        merged = self._three_way(path, patch)
+        if merged is None:
+            return False, error
+        again = self._git_run('apply', '--whitespace=nowarn', '-', cwd=path, stdin=merged,
+                              check=False, binary=True)
+        return (True, '') if again.returncode == 0 else (False, error)
+
+    def _three_way(self, path, patch):
+        """``patch`` merged three ways onto the HEAD of ``path`` (#475), as a patch against it
+        that ``git apply`` takes, or None when the merge leaves conflicts or fails. The merge
+        runs in a temporary index: neither the worktree nor its index is touched."""
+        with tempfile.TemporaryDirectory(prefix='devloop-3way-') as tmp:
+            env = {'GIT_INDEX_FILE': str(Path(tmp) / 'index')}
+            if self._git_run('read-tree', 'HEAD', cwd=path, env=env,
+                             check=False).returncode != 0:
+                return None
+            if self._git_run('apply', '--3way', '--cached', '--whitespace=nowarn', '-',
+                             cwd=path, stdin=patch, env=env, check=False,
+                             binary=True).returncode != 0:
+                return None
+            done = self._git_run('diff', '--cached', '--binary', '--full-index', '--no-color',
+                                 '--no-renames', '--no-ext-diff', '--no-textconv',
+                                 '--src-prefix=a/', '--dst-prefix=b/', 'HEAD', cwd=path,
+                                 env=env, check=False, binary=True)
+            return done.stdout if done.returncode == 0 and done.stdout else None
 
     def review_copy(self, path, reviewer=None):
         """``(name, path)`` of a disposable worktree for a reviewer, detached at the HEAD of
