@@ -49,15 +49,16 @@ class Clock:
         self.now = epoch(stamp)
 
 
-def turn(kind, agent, started, *, state='closed', outcome='success', ms=60000, fallback=None):
+def turn(kind, agent, started, *, state='closed', outcome='success', ms=60000, fallback=None,
+         model='m', **extra):
     closed = state == 'closed'
-    return ledger.render({
+    return ledger.render(dict({
         'type': 'turn', 'state': state, 'kind': kind, 'agent': agent, 'identity': None,
-        'mode': 'write', 'model': 'm', 'effort': 'high', 'fallback_for': fallback,
+        'mode': 'write', 'model': model, 'effort': 'high', 'fallback_for': fallback,
         'model_real': None, 'label': None, 'started_at': started,
         'ended_at': started if closed else None, 'duration_ms': ms if closed else None,
         'outcome': outcome if closed else None, 'error': None,
-        'telemetry': {} if closed else None})
+        'telemetry': {} if closed else None}, **extra))
 
 
 def event(name, at, **fields):
@@ -289,9 +290,36 @@ class SummaryTest(unittest.TestCase):
                      '- 17:00 #15: merge di una persona (nessun record di devloop)',
                      '- 14:00 #5: classe `tests_failed`, all\'operatore',
                      '- PR aperte: 1 (#12)', '- PR mergiate: 2 (#12, #15)',
-                     '- Round di review aperti: 2', '- Turni con un modello di fallback: 1'):
+                     '- Round di review aperti: 2', '- Turni con un modello di fallback: 1',
+                     '- Permessi negati per modello: 0'):
             self.assertIn(line, text)
         self.assertNotIn('forged', text)
+
+    def test_the_denied_permissions_are_counted_per_model(self):
+        # #479: the turns stopped on a permission headless agy denied, with or without the
+        # command agy reports, per model; a turn of another day, or a record of another
+        # identity, is not counted, and a failure for another reason is not a denial.
+        gh = ReportGH()
+        day = '2026-11-16'
+        argon, hydrogen = 'gemini-4-argon-high', 'gemini-4-hydrogen-high'
+        for at, model, extra in (
+                (f'{day}T20:51:00Z', argon, {'denied_permission': 'command',
+                                             'denied_command': 'grep -rn x …/devloop'}),
+                (f'{day}T20:52:00Z', argon, {'denied_permission': 'command'}),
+                (f'{day}T20:53:00Z', hydrogen, {'denied_permission': 'command'}),
+                (f'{day}T20:54:00Z', hydrogen, {}),
+                ('2026-11-15T20:53:00Z', hydrogen, {'denied_permission': 'command'})):
+            gh.add(474, DISPATCHER, turn('review', 'agy', at, outcome='failure', model=model,
+                                         **extra), at)
+        gh.add(474, STRANGER, turn('review', 'agy', f'{day}T21:00:00Z', outcome='failure',
+                                   model=argon, denied_permission='command'),
+               f'{day}T21:00:00Z')
+        when = report.parse_day(day)
+        s = report.Records(gh, TRUST, when, when, CFG.agents).summary(when)
+        self.assertEqual(s.denied, {argon: 2, hydrogen: 1})
+        self.assertEqual(len(s.actions), 4)
+        self.assertIn(f'- Permessi negati per modello: 3 (`{argon}`: 2, `{hydrogen}`: 1)',
+                      report.render(s))
 
     def test_the_grants_of_the_supervisor_with_the_caps_left(self):
         # #466 (ADR 0005, section 3.1, rule 4): every grant-round, grant-budget and capacity

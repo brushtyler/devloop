@@ -13,7 +13,7 @@ import time
 from contextlib import nullcontext
 from pathlib import Path
 
-from .agentuser import SHARED_DIR, TMP, SharedDir
+from .agentuser import SHARED_DIR, TMP, SharedDir, with_git_config
 from .localtests import failed_cases
 
 # The opening and closing lines git writes around a conflict (`=======` alone also underlines
@@ -147,20 +147,6 @@ def git_config_env(pairs):
     return env
 
 
-def _with_git_config(env, pairs):
-    """``env`` with ``pairs`` applied after the ``GIT_CONFIG_*`` entries it already has."""
-    try:
-        count = max(int(env.get('GIT_CONFIG_COUNT') or 0), 0)
-    except ValueError:
-        count = 0
-    env = dict(env)
-    for i, (key, value) in enumerate(pairs, start=count):
-        env[f'GIT_CONFIG_KEY_{i}'] = key
-        env[f'GIT_CONFIG_VALUE_{i}'] = value
-    env['GIT_CONFIG_COUNT'] = str(count + len(pairs))
-    return env
-
-
 # Applied to every git command the dispatcher runs in a worktree (#415), over every config file:
 # no hook and no fsmonitor program runs, whatever a config says.
 WORKTREE_GIT_CONFIG = (('core.hooksPath', os.devnull), ('core.fsmonitor', 'false'))
@@ -217,6 +203,12 @@ class Workspace:
         # The identities of the failed tests of the latest run in each worktree (#459,
         # ``failed_cases``), read from its whole output.
         self._failed = {}
+
+    @property
+    def test_env(self):
+        """The environment of the test command and of the agent turns, before the
+        ``safe.directory`` of a worktree (#500); None: the dispatcher's own."""
+        return self._test_env
 
     @property
     def shared_lock(self):
@@ -330,7 +322,7 @@ class Workspace:
             inherited = {k: v for k, v in os.environ.items() if k not in unset}
             kwargs['env'] = dict(inherited, **(env or {}))
             if trusted is not None:
-                kwargs['env'] = _with_git_config(kwargs['env'], WORKTREE_GIT_CONFIG)
+                kwargs['env'] = with_git_config(kwargs['env'], WORKTREE_GIT_CONFIG)
         try:
             with self._shared if args[:1] and args[0] in _SHARED_GIT else nullcontext():
                 if binary:
@@ -518,11 +510,41 @@ class Workspace:
     def apply_work(self, path, patch):
         """``(applied, error)``: apply ``patch`` (:meth:`keep_work`, bytes) to the worktree
         ``path``, without staging or committing anything. ``git apply`` applies all of it or
-        nothing."""
+        nothing. A patch that does not apply as it is, because the base moved since it was
+        saved (#475), is merged three ways (``git apply --3way``) in a separate index, from the
+        blobs it records: when the merge is clean its result is applied to ``path``, otherwise
+        nothing is, and the error is the one of the plain ``git apply``."""
         done = self._git_run('apply', '--whitespace=nowarn', '-', cwd=path, stdin=patch,
                              check=False, binary=True)
         out = done.stdout.decode('utf-8', 'replace')
-        return done.returncode == 0, (done.stderr.strip() or out.strip())[:500]
+        error = (done.stderr.strip() or out.strip())[:500]
+        if done.returncode == 0:
+            return True, error
+        merged = self._three_way(path, patch)
+        if merged is None:
+            return False, error
+        again = self._git_run('apply', '--whitespace=nowarn', '-', cwd=path, stdin=merged,
+                              check=False, binary=True)
+        return (True, '') if again.returncode == 0 else (False, error)
+
+    def _three_way(self, path, patch):
+        """``patch`` merged three ways onto the HEAD of ``path`` (#475), as a patch against it
+        that ``git apply`` takes, or None when the merge leaves conflicts or fails. The merge
+        runs in a temporary index: neither the worktree nor its index is touched."""
+        with tempfile.TemporaryDirectory(prefix='devloop-3way-') as tmp:
+            env = {'GIT_INDEX_FILE': str(Path(tmp) / 'index')}
+            if self._git_run('read-tree', 'HEAD', cwd=path, env=env,
+                             check=False).returncode != 0:
+                return None
+            if self._git_run('apply', '--3way', '--cached', '--whitespace=nowarn', '-',
+                             cwd=path, stdin=patch, env=env, check=False,
+                             binary=True).returncode != 0:
+                return None
+            done = self._git_run('diff', '--cached', '--binary', '--full-index', '--no-color',
+                                 '--no-renames', '--no-ext-diff', '--no-textconv',
+                                 '--src-prefix=a/', '--dst-prefix=b/', 'HEAD', cwd=path,
+                                 env=env, check=False, binary=True)
+            return done.stdout if done.returncode == 0 and done.stdout else None
 
     def review_copy(self, path, reviewer=None):
         """``(name, path)`` of a disposable worktree for a reviewer, detached at the HEAD of
@@ -685,25 +707,36 @@ class Workspace:
         conflicts, for its two parents. A merge whose conflicts someone resolved, or any other
         commit, is not. Fetches ``branch`` and the base first. Raises WorkspaceError when git
         cannot tell."""
+        return self.resync_merges(branch, head, approved, limit) == []
+
+    def resync_merges(self, branch, head, approved, limit=10):
+        """The merges between ``approved`` and ``head`` whose tree git does not write by itself
+        (conflicts someone resolved, #458), newest first, when ``head`` differs from
+        ``approved`` only by merges of the base branch: walking back from ``head``, every
+        commit up to ``approved`` (at most ``limit``) has exactly two parents, the second a
+        commit of ``origin/<base>``. ``[]``: every merge is the one git concludes without
+        conflicts (``clean_resync``). None when ``head`` is ``approved``, another commit is in
+        between, or ``approved`` is not reached. Fetches ``branch`` and the base first. Raises
+        WorkspaceError when git cannot tell."""
         self._git('fetch', 'origin', self.base_branch,
                   f'+refs/heads/{branch}:refs/remotes/origin/{branch}')
         base = f'origin/{self.base_branch}'
-        commit = head
+        commit, resolved = head, []
         for _ in range(limit):
             if commit == approved:
-                return commit != head
+                return resolved if commit != head else None
             line = self._git('rev-list', '--parents', '-n1', commit).split()
             if len(line) != 3:
-                return False
+                return None
             first, merged = line[1:]
             if self._git_run('merge-base', '--is-ancestor', merged, base,
                              check=False).returncode:
-                return False
+                return None
             tree, clean, _ = self._merge_tree(first, merged)
             if not clean or tree != self._git('rev-parse', f'{commit}^{{tree}}').strip():
-                return False
+                resolved.append(commit)
             commit = first
-        return False
+        return None
 
     def contains_base(self, path):
         """Whether the branch in ``path`` already contains ``origin/<base>`` as last fetched."""
@@ -824,13 +857,17 @@ class Workspace:
 
     def run_tests(self, path, command, timeout):
         """``(passed, output_tail)`` for the project test command in ``path``. With an agent
-        user (#415) the command runs as that user. The identities of the failed tests, read from
-        the whole output, are kept for ``failed_cases`` (#459)."""
+        user (#415) the command runs as that user, and git trusts ``path``, which belongs to the
+        dispatcher's user (#500, ``AgentUser.git_env``). The identities of the failed tests,
+        read from the whole output, are kept for ``failed_cases`` (#459)."""
         self._failed[str(path)] = None
-        kwargs = {'env': self._test_env} if self._test_env is not None else {}
+        env = self._test_env
         run = run_in_group if self._run is subprocess.run else self._run
         argv = ['bash', '-c', command]
         user = self.agent_user
+        if user is not None:
+            env = user.git_env(os.environ if env is None else env, path)
+        kwargs = {'env': env} if env is not None else {}
         if user is not None:
             argv = user.shell(command)
             if run is run_in_group:
@@ -839,8 +876,7 @@ class Workspace:
         if self.private_tmp:
             tmp = (self._agent_tmp() if user is not None
                    else tempfile.mkdtemp(prefix='devloop-tests-'))
-            base = os.environ if self._test_env is None else self._test_env
-            kwargs['env'] = dict(base, TMPDIR=tmp)
+            kwargs['env'] = dict(os.environ if env is None else env, TMPDIR=tmp)
         try:
             try:
                 done = run(argv, cwd=path, capture_output=True, text=True, timeout=timeout,

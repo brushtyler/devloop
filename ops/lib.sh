@@ -44,6 +44,11 @@ AGENT_CLI_SEALED=(
     .local
 )
 AGENT_CLIS=(claude codex agy)
+# Le voci che le CLI creano al primo uso dentro AGENT_CLI_DIRS (#494), dove l'utente degli agent
+# non crea nulla: setup-agent-user.sh le crea sue (700), come CLI_WRITABLE di
+# devloop/agentuser.py. Una CLI che si ferma con `permission denied` su una voce nuova di una
+# directory sigillata vuole una voce in più qui (ops/host/migrate.md).
+AGENT_CLI_WRITABLE=(.gemini/antigravity-cli/bin)
 
 say() { printf '%s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }

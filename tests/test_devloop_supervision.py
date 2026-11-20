@@ -538,22 +538,70 @@ class RetryTests(Case):
         self.assertEqual(record['class'], 'tool_failure')
         self.assertFalse(record['critical'])
 
-    def test_an_issue_retry_on_a_new_base_is_refused(self):
+    def test_an_implement_retry_on_a_new_base_is_applied(self):
+        # #475: main advanced while the escalation waited. The implementation starts again
+        # from the current base: the base is not an input the retry is bound to.
+        d = self.make(AUTO, crash(), implemented(), has_pr=False)
+        self.assertEqual(self.tick(d), [('implement', 7)])
+        old = self.escalations(7)[-1]['key']['base']
+        self.ws.base = 'e' * 40
+        self.gh.command(7, '/devloop retry')
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        decision = self.decisions(7)[-1]
+        self.assertEqual((decision['outcome'], decision['attempt']), ('applied', 1))
+        self.assertEqual(decision['key']['base'], old)
+        self.assertEqual(len(self.runner.calls), 2)
+        self.assertEqual(len(self.gh.created), 1)
+        self.assertEqual(self.gh.labels[100], {REVIEW})
+
+    def test_an_implement_retry_on_a_new_text_is_refused(self):
+        # The text of the issue still binds the retry, whatever the base does.
         d = self.make(AUTO, crash(), has_pr=False)
         self.tick(d)
         self.ws.base = 'e' * 40
+        self.gh.say(7, 'brushtyler', 'Anche Y.')
         self.gh.command(7, '/devloop retry')
-        self.tick(d)
+        self.assertEqual(self.tick(d), [('supervise', 7)])
         self.assertEqual(self.gh.labels[7], {SUPER})
         self.assertEqual(self.decisions(7)[-1]['outcome'], 'refused')
+        body = self.gh.threads[7][-1]['body']
+        self.assertIn('(`request`)', body)
+        self.assertIn('input superato', body)
         self.assertEqual(len(self.runner.calls), 1)
 
+    def test_implement_retries_count_across_bases(self):
+        # A base that moves between two timeouts starts no new count of retries.
+        d = self.make(AUTO, crash(), crash(), crash(), has_pr=False)
+        self.assertEqual(self.tick(d), [('implement', 7)])
+        for attempt, base in ((1, 'e' * 40), (2, 'f' * 40)):
+            self.ws.base = base
+            self.gh.command(7, '/devloop retry')
+            self.assertEqual(self.tick(d), [('supervise', 7)])
+            self.assertEqual(self.decisions(7)[-1]['attempt'], attempt)
+            self.assertEqual(self.escalations(7)[-1]['key']['base'], base)
+        self.ws.base = 'd' * 40
+        self.gh.command(7, '/devloop retry')
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        self.assertEqual(self.decisions(7)[-1]['outcome'], 'limit')
+        self.assertEqual(len(self.runner.calls), 3)
+        self.assertEqual(self.gh.labels[7], {HUMAN})
+
+    def test_only_the_base_of_an_implementation_leaves_its_retry_input(self):
+        key = {'step': 'implement', 'base': 'b', 'request': 'r'}
+        self.assertEqual(supervision.changed_input(dict(key, base='c'), key), [])
+        self.assertEqual(supervision.changed_input(dict(key, base='c', request='s'), key),
+                         ['request'])
+        check = {'step': 'preflight', 'base': 'b', 'request': 'r'}
+        self.assertEqual(supervision.changed_input(dict(check, base='c'), check), ['base'])
+        head = {'step': 'fix', 'head': 'h'}
+        self.assertEqual(supervision.changed_input(dict(head, head='i'), head), ['head'])
+
     def test_an_issue_retry_is_bound_to_the_input_the_step_ran_on(self):
-        # The base or the request changes while the step runs: the escalation records the
-        # input the step got, so the retry refers to a superseded input and is refused.
+        # The request changes while the step runs, or the base of a readiness check: the
+        # escalation records the input the step got, so the retry refers to a superseded input
+        # and is refused. The base of an implementation does not bind its retry (#475).
         new_base = 'e' * 40
         changes = {
-            'implement, base': (AUTO, lambda: setattr(self.ws, 'base', new_base), 'base'),
             'implement, request': (AUTO, lambda: self.gh.say(7, 'brushtyler', 'Anche Y.'),
                                    'request'),
             'preflight, base': (PREFLIGHT_AUTO, lambda: setattr(self.ws, 'base', new_base),
@@ -692,6 +740,30 @@ class OperatorCommandTests(Case):
         self.assertEqual(len(self.gh.created), 1)
         self.assertNotIn(HUMAN, self.gh.labels[7])
         self.assertEqual(self.decisions(7)[-1]['outcome'], 'applied')
+
+    def test_an_operator_retry_of_an_implementation_after_main_advanced_runs_it(self):
+        # #475: the operator answers hours later, after several merges on main.
+        d = self.make(STRICT, crash(), implemented(), has_pr=False)
+        self.assertEqual(self.tick(d), [('implement', 7)])
+        self.ws.base = 'e' * 40
+        self.gh.command(7, '/devloop retry', login='brushtyler')
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        self.assertEqual(self.decisions(7)[-1]['outcome'], 'applied')
+        self.assertEqual(len(self.gh.created), 1)
+        self.assertNotIn(HUMAN, self.gh.labels[7])
+
+    def test_an_operator_retry_of_an_implementation_on_a_new_text_is_answered(self):
+        d = self.make(STRICT, crash(), has_pr=False)
+        self.assertEqual(self.tick(d), [('implement', 7)])
+        self.ws.base = 'e' * 40
+        self.gh.say(7, 'brushtyler', 'Anche Y.')
+        self.gh.command(7, '/devloop retry', login='brushtyler')
+        self.assertEqual(self.tick(d), [('supervise', 7)])
+        self.assertEqual(self.gh.labels[7], {HUMAN})
+        body = self.answer(7)
+        self.assertIn('(`request`)', body)
+        self.assertIn('input superato', body)
+        self.assertEqual(len(self.runner.calls), 1)
 
     def test_a_retry_of_a_superseded_head_is_answered(self):
         d = self.make(STRICT, crash())

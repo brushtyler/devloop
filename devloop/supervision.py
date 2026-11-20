@@ -80,12 +80,19 @@ CRITICAL = {
     'uncertain_turn': 'turni senza esito da riconciliare con `/devloop reconcile`',
     'attempt': 'tentativo della PR non confermato dal journal, o già concluso',
     'budget': 'turno non coperto dall\'envelope di budget della storia',
+    'host_tests': 'test rossi in locale anche sulla base, verdi nella sua CI',
 }
 UNCERTAIN_TURN = 'uncertain_turn'  # a turn refused by the block on uncertain outcomes (#362)
+# Tests red on the branch and on its base commit, green in the CI of that commit (#497).
+HOST_TESTS = 'host_tests'
 
 # The steps a ``retry`` can run again, and the PR label each one resumes from.
 RETRY_STEPS = ('preflight', 'implement', 'review', 'fix', 'sync')
 ISSUE_STEPS = ('preflight', 'implement')
+# The fields of a retry key that do not bind a retry of its step (#475): an implementation starts
+# again from the current base, with the work its timed-out turn saved reapplied, so a base branch
+# that moved since the escalation neither supersedes the retry nor starts a new count of retries.
+UNBOUND = {'implement': ('base',)}
 MAX_RETRIES = 2
 # The caps of the supervisor's delegations (#405, ADR 0005, D4): constants of the code, which the
 # configuration and the local overlay may only lower (``[delegations]``), never raise. The rounds
@@ -125,10 +132,25 @@ def critical(cls):
     return cls not in NON_CRITICAL
 
 
+def retry_input(key):
+    """The input a retry of ``key`` is bound to: the key without the fields its step does not
+    depend on (``UNBOUND``, #475)."""
+    unbound = UNBOUND.get(key.get('step'), ())
+    return {k: v for k, v in key.items() if k not in unbound}
+
+
+def changed_input(current, key):
+    """The fields of the retry key ``key`` that its input read now, ``current``, no longer has,
+    sorted: a retry is superseded when there is any. The fields ``retry_input`` leaves out do
+    not count."""
+    now, then = retry_input(current), retry_input(key)
+    return sorted(k for k in set(now) | set(then) if now.get(k) != then.get(k))
+
+
 def _reviewers(key):
-    """``(input, reviewers)`` of a retry key: the key without its reviewer, and the set of the
-    reviewers it names (``{''}`` when it names none)."""
-    rest = {k: v for k, v in key.items() if k != 'reviewer'}
+    """``(input, reviewers)`` of a retry key: its input (``retry_input``) without its reviewer,
+    and the set of the reviewers it names (``{''}`` when it names none)."""
+    rest = {k: v for k, v in retry_input(key).items() if k != 'reviewer'}
     names = {name for name in str(key.get('reviewer') or '').split(',') if name}
     return rest, names or {''}
 

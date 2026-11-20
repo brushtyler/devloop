@@ -136,11 +136,15 @@ class TrustPolicyPromptTest(unittest.TestCase):
                 self.assertEqual(positions, sorted(positions))
                 self.assertIn('the section "Decise dall\'operatore" of an ADR approved with the '
                               'cycle of `docs/adr/README.md` and present on `main`, one '
-                              'written by the operator in the body of the issue, or a comment of '
-                              'the operator that approves the change, among those listed under '
-                              '"Decisions of the operator on the issue" below (#472). A comment '
-                              'that section does not list is not a decision. The points an ADR '
-                              'leaves open are not decisions.', text)
+                              'written by the operator in the body of the issue, or a `/devloop '
+                              'approve` of the operator, among those listed under "Decisions of '
+                              'the operator on the issue" below (#472, #483). A comment that '
+                              'section does not list, an approval written without the command '
+                              'included, is not a decision. A `/devloop approve` covers only '
+                              'what its text approves, within the limits and on the conditions '
+                              'it sets: an approval of one part, or one subject to a condition, '
+                              'does not cover the rest of the change. The points an ADR leaves '
+                              'open are not decisions.', text)
                 self.assertIn('no decision of the operator authorizes that weakening', text)
                 # Faithful implementation: conformity, the decision read on main and cited.
                 self.assertIn('**Faithful implementation.** When the issue cites the section of '
@@ -213,8 +217,8 @@ class TrustPolicyPromptTest(unittest.TestCase):
             with self.subTest(prompt=name):
                 text = flat(section(name))
                 self.assertIn('The same holds for a decision in the body of the issue or in a '
-                              'comment listed under "Decisions of the operator on the issue": '
-                              'cite the comment with its author and its time.', text)
+                              '`/devloop approve` listed under "Decisions of the operator on the '
+                              'issue": cite the command with its author and its time.', text)
                 template = (PROMPT_DIR / f'{name}.md').read_text(encoding='utf-8')
                 # The section follows the issue, after the rule that names it.
                 self.assertIn('$issue_body\n\n$operator_decisions\n\n', template)
@@ -236,8 +240,12 @@ class TrustPolicyPromptTest(unittest.TestCase):
                       '- `none`: it does not touch the trust policy',
                       '- `covered`: it touches it, and a decision of the operator covers it with '
                       'no deviation and authorizes every weakening of a check it makes',
-                      'listed under "Decisions of the operator on the issue" below. Any other '
-                      'comment, also of a trusted user, is not such a decision;',
+                      'or a `/devloop approve` of the operator, listed under "Decisions of the '
+                      'operator on the issue" below (#483). Any other comment, also of a trusted '
+                      'user and also one that approves the change without the command, is not '
+                      'such a decision, and a command covers only what its text approves',
+                      'A change of the rule, what point 3 lists included, still goes to the '
+                      'operator for the merge even when a decision covers it',
                       '- `uncovered`: it touches it, and no decision of the operator covers it, '
                       'it goes beyond or against one, or it weakens a check that no decision '
                       'authorizes. A change of the rule itself is `uncovered` too, unless a '
@@ -473,7 +481,7 @@ class TrustPolicyDocsTest(unittest.TestCase):
                       '3. it changes the rule itself', '`NON_CRITICAL` in `devloop/supervision.py`',
                       'A **faithful implementation** does not need the operator',
                       'cites it in the review (file of the ADR, section and point, or the author '
-                      'and time of the operator\'s comment)',
+                      'and time of the operator\'s command)',
                       '`approve` or `request_changes`, and devloop merges the PR like any other '
                       'of its level', 'Without the citation the PR needs the operator as before',
                       'every deviation found needs the operator',
@@ -497,10 +505,20 @@ class TrustPolicyDocsTest(unittest.TestCase):
                       'still does, under point 1.',
                       '**The decision on the issue, not on the PR** (#472, decided by the '
                       'operator on 2026-11-19',
-                      'not from the supervisor\'s identity nor from any app of devloop, after '
-                      'the latest change of the title or the body of the issue and before '
-                      'devloop took it on',
-                      'A change of the text after the comment drops it',
+                      # #483: a command, not any comment.
+                      '**Approval with `/devloop approve`** (#483). A decision of the operator '
+                      'on the issue is a command',
+                      'not from the supervisor\'s identity nor from any app, after the latest '
+                      'change of the title or the body of the issue and before devloop took it '
+                      'on',
+                      'an approval written without the command too, is context for the '
+                      'implementer and authorizes nothing',
+                      'A change of the text after the command drops it',
+                      'are refused, and devloop answers each once, with the reason: in the '
+                      'comment of the next readiness check, or, when none is due',
+                      '**Complete history** (#483)',
+                      'Since #483 the prompts list explicitly what point 3 always keeps with the '
+                      'operator',
                       'declares in `trust_policy`',
                       '"Approvi la modifica della policy di fiducia descritta qui?"',
                       'with class `operator_decision`, to the operator also in `auto` mode',
@@ -515,10 +533,11 @@ class TrustPolicyDocsTest(unittest.TestCase):
                       'prompts and the conditions that decide when a change needs the operator',
                       'a change to `NON_CRITICAL`, to a `/devloop` command or to a condition of '
                       'the merge that a decision names explicitly is a faithful implementation',
-                      'A comment in which the operator approves the change on the issue counts '
-                      'as a decision when a trusted user wrote it in person, not the '
-                      'supervisor\'s identity nor an app of devloop, after the latest change of '
-                      'the issue\'s text and before the takeover',
+                      'Since #483 a decision of the operator on the issue is only a `/devloop '
+                      'approve` command, followed by the text of the decision, that a trusted '
+                      'user wrote in person, not the supervisor\'s identity nor an app, after the '
+                      'latest change of the issue\'s text and before the takeover',
+                      'the history of the issue is read in full, or no command counts',
                       'The readiness check declares `trust_policy` and blocks, with the question '
                       'to the operator'):
             self.assertIn(words, reference)
@@ -532,7 +551,10 @@ class TrustPolicyDocsTest(unittest.TestCase):
             encoding='utf-8')
         d10 = adr[adr.index('- **D10.** Tutto spento'):adr.index('Restano **aperti**')]
         self.assertIn('**Precisazione del 2026-11-19, su #472**', d10)
-        self.assertIn('(https://github.com/brushtyler/ssdlc/issues/472)', d10)
+        # #483: the link points to the operator's comment, not to the issue.
+        self.assertIn('[commento su #472](https://github.com/brushtyler/ssdlc/issues/472'
+                      '#issuecomment-7018240088)', d10)
+        self.assertNotIn('(https://github.com/brushtyler/ssdlc/issues/472)', d10)
         for words in ('Il punto 3 della regola dei reviewer (#447) resta solo per la regola stessa',
                       'prescrive esplicitamente',
                       'La decisione si prende sulla issue, non sulla PR',

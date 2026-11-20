@@ -19,7 +19,7 @@ from .acceptance import acceptance_criteria, format_criteria, format_map, latest
 from .agents import AgentError
 from .apps import DISPATCHER, IMPLEMENT, PR_COMMENT, RERUN, REVIEW
 from .budget import BudgetRefused
-from .dispatch_base import BaseBroken
+from .dispatch_base import BaseBroken, HostTests
 from .context import (_failure_text, _format_conflicts, _format_findings, _review_failure,
                       _start_failure, _template, _trusted_comments, docs_diff_section,
                       docs_map_section, docs_review_section, format_ci_summary,
@@ -33,10 +33,10 @@ from .localtests import RUN_TESTS_LOG, failed_modules, select_modules, suite_sum
 from .markdown import (dispatcher_header, publishable, render_fix, render_native_review,
                        render_review, without_attribution)
 from .config import foreign, provider_quorum, same_agent
-from .planning import (BASE_CHANGED, FIX_COMMAND, RESYNC_AFTER_APPROVAL, ci_joins_round,
-                       counted_rounds, findings_reviewers, implementer_choice,
-                       pending_reviewers, preflight_state, voided_approval, waived_rounds,
-                       waiting_reviewers)
+from .planning import (BASE_CHANGED, FIX_COMMAND, RESYNC_AFTER_APPROVAL, RESYNC_CONFLICTS,
+                       carried_resync, ci_joins_round, counted_rounds, findings_reviewers,
+                       implementer_choice, pending_reviewers, preflight_state, voided_approval,
+                       waived_rounds, waiting_reviewers)
 from .policy import ZERO_LEVEL, another_model, distinct, independent, profile_of
 from .ports import summarize_checks
 from .review import (FINDINGS_ONLY, ci_failure_review, current_round, findings_only,
@@ -205,6 +205,9 @@ class ActionsMixin:
         if result['status'] == 'blocked':
             return self._blocked(number, used, result['blocked_reason'], remove=[lb.working],
                                  on_pr=False, step='implement', head=start, conclave=decision)
+        if isinstance(failure, HostTests):
+            # The host's failure (#497): to the operator, no wait for the base branch.
+            return self._escalate_host(number, 'implement', failure, remove=[lb.working])
         if isinstance(failure, BaseBroken):
             # The base's failure, not the implementer's (#459): the issue keeps agent:working
             # and starts again once the base branch advances.
@@ -486,7 +489,9 @@ class ActionsMixin:
 
         A new round on a head that a clean sync moved from the approved one (#235,
         ``PullRequest.resync``), or on the approved head after the base touching the PR revoked
-        its approval (#252), records ``resync`` and does not count either."""
+        its approval (#252), records ``resync`` and does not count either. A round replacing one
+        of these only because the base advanced records ``resync`` again (#458,
+        ``carried_resync``), so that it does not count under the same condition."""
         cfg = self.cfg
         receipt, paths = self._current_receipt(pr)
         if receipt is None:
@@ -516,16 +521,33 @@ class ActionsMixin:
             if bases:
                 # Abandoned only because the base advanced: the round does not count.
                 restarts = {'round': latest[0]['round'], 'bases': bases}
-                counted -= 1
+                if latest[0]['round'] not in waived_rounds(pr.reviews):
+                    counted -= 1  # it counted until now; replaced, it does not
                 self.log(f'  round {latest[0]["round"]} restarts: the base touched the PR')
+                # The round it replaces reviewed a resync or a revocation for the base (#458):
+                # this one reviews the same change, records the same resync and does not count
+                # under the same condition (only if it approves, after a sync with conflicts).
+                resync = carried_resync(pr.reviews, latest)
+                if resync:
+                    counted -= 1
+                    self.log(f'  it keeps the resync after round {resync["round"]}: this round '
+                             'does not count'
+                             + (' if it approves' if resync['reason'] == RESYNC_CONFLICTS
+                                else ''))
             elif pr.resync and not pr.rereview:
                 # Only a clean sync moved the approved head (#235), or only the base touching
-                # the PR revoked its approval (#252): this round does not count.
+                # the PR revoked its approval (#252): this round does not count. After a sync
+                # with conflicts the implementer resolved (#458) it starts also beyond the
+                # limit, and counts only if it does not approve.
                 resync = pr.resync
                 counted -= 1
                 why = ('approval was revoked because the base touched the PR'
-                       if resync['reason'] == BASE_CHANGED else 'head was synced with the base')
-                self.log(f'  the {why} after round {resync["round"]}: this round does not count')
+                       if resync['reason'] == BASE_CHANGED
+                       else 'head was synced with the base, with conflicts resolved'
+                       if resync['reason'] == RESYNC_CONFLICTS
+                       else 'head was synced with the base')
+                self.log(f'  the {why} after round {resync["round"]}: this round does not count'
+                         + (' if it approves' if resync['reason'] == RESYNC_CONFLICTS else ''))
         # The limit of this PR: max_review_rounds plus the rounds the supervisor granted (#405).
         limit = cfg.max_review_rounds + pr.granted_rounds
         if counted > limit:
@@ -979,6 +1001,9 @@ class ActionsMixin:
         if result['status'] == 'blocked':
             return self._blocked(pr.number, used, result['blocked_reason'], remove=remove,
                                  on_pr=True, step='fix', head=pr.head_sha, conclave=conclave)
+        if isinstance(failure, HostTests):
+            # The host's failure (#497): to the operator, nothing pushed.
+            return self._escalate_host(pr.number, 'fix', failure, remove=remove)
         if isinstance(failure, BaseBroken):
             # The base's failure, not the fix's (#459): nothing is pushed, the labels stay, and
             # the fix runs again once the base branch advances.
@@ -1083,7 +1108,11 @@ class ActionsMixin:
         """What the comment of a sync of ``pr`` says of the next review (#289): with
         ``conflicts`` an agent resolved, the content of the PR changed and the review counts
         against ``max_review_rounds``, with the rounds left; without, the review of an approved
-        head does not count (#235), and any other review counts as it would have anyway.
+        head does not count (#235), and any other review counts as it would have anyway. With
+        ``conflicts`` on an approved head (#458), or on a head already synced with conflicts
+        after its approval, the review starts also with no round left and counts only if it
+        does not approve: the comment says both outcomes, and the round a request for changes
+        would be.
         ``fix``: a fix waits for the sync, and its review is the next one."""
         # The rounds the supervisor granted (#405) raise the limit of this PR only.
         limit = self.cfg.max_review_rounds + pr.granted_rounds
@@ -1093,11 +1122,31 @@ class ActionsMixin:
         approved = (bool(latest) and latest[0]['source'] == 'agent'
                     and not pending_reviewers(latest) and round_verdict(latest) == 'approve'
                     and all(r['head_sha'] == pr.head_sha for r in latest))
-        resynced = bool(pr.resync) and pr.resync.get('reason') == RESYNC_AFTER_APPROVAL
-        if not conflicts and not fix and not pr.rereview and (approved or resynced):
+        reason = pr.resync.get('reason') if pr.resync else None
+        resynced = reason in (RESYNC_AFTER_APPROVAL, RESYNC_CONFLICTS)
+        after_approval = not fix and not pr.rereview and (approved or resynced)
+        number = counted_rounds(pr.reviews) + 1
+        if after_approval and not conflicts and reason != RESYNC_CONFLICTS:
             return ('La review del nuovo head **non conterà** come round: differisce da quello '
                     'approvato solo per il merge senza conflitti della base (conta invece se la '
                     'CI fallisce o se viene chiesta una nuova review con `/devloop rereview`).')
+        if after_approval:
+            if number > limit:
+                then = (f'contati già {number - 1} round di {limit} ({what}), nessuno rimasto: '
+                        'la PR andrà all\'escalation per il limite dei round (`round_limit`), '
+                        'come per ogni round oltre il limite')
+            elif number == limit:
+                then = f'sarà il round {number} di {limit} ({what}), l\'ultimo rimasto'
+            else:
+                then = (f'sarà il round {number} di {limit} ({what}); dopo questo ne '
+                        f'resteranno {limit - number}')
+            return ('La review del nuovo head parte anche senza round rimasti e **non conterà** '
+                    'come round se approva: differisce da quello approvato solo per il merge '
+                    'della base, con i conflitti risolti dall\'agent; approvata, la PR torna '
+                    'pronta per il merge senza un\'escalation per il limite dei round. Se '
+                    'invece apre finding bloccanti **conterà**: '
+                    f'{then} (conta anche se la CI fallisce o se viene chiesta una nuova review '
+                    'con `/devloop rereview`).')
         which = 'dopo la correzione' if fix else 'successiva'
         if fix:
             why = 'come ogni review dopo una correzione'
@@ -1105,7 +1154,6 @@ class ActionsMixin:
             why = 'perché l\'agent ha risolto dei conflitti e il contenuto della PR è cambiato'
         else:
             why = 'come avrebbe contato senza la sincronizzazione'
-        number = counted_rounds(pr.reviews) + 1
         if number > limit:
             where = (f'contati già {number - 1} round di {limit} ({what}); nessun '
                      f'round rimasto: la review {which} richiederà una decisione dell\'operatore')

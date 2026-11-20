@@ -119,7 +119,8 @@ not a whole number of at least 1, or an unknown key, stops devloop at startup.
 `[agent_user]` sets the [agent user](#agent-user) (#415): `name` (default `""`, off), the system
 user the agent CLIs and the test command run as, and `check` (default `true`), the startup check
 that it cannot read `key_dir` nor `state_dir`, nor change the instructions, the configuration
-and the binaries of its CLIs (#438). Every claude turn, with or without an agent user, gets
+and the binaries of its CLIs (#438), and that it can write what its CLIs create on their first
+use (#494). Every claude turn, with or without an agent user, gets
 `--settings` with the auto memory off (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`,
 `autoMemoryEnabled: false`), over the settings of the project in the worktree; a `--settings` in
 the `write_args` or `review_args` of a claude agent stops devloop at startup. A `name` that is
@@ -440,8 +441,10 @@ issue or PR goes to `agent:needs-operator`, as with `"full"`.
 implementation or of a fix goes back to the implementer, the dispatcher runs the modules of the
 failed tests, read from the whole output, on the base commit of the branch (#459). When every
 failed test fails there too the step waits for the base branch to advance, without further
-attempts nor escalation ([Tests red on the base too](guide.md#tests-red-on-the-base-too)). Each
-module runs with `test_timeout_seconds`.
+attempts nor escalation ([Tests red on the base too](guide.md#tests-red-on-the-base-too)), unless
+the CI of that base commit passed, every check with a success: then the failure is the host's,
+and the step escalates `host_tests` to the operator (#497), also when that CI turns green during
+the wait. Each module runs with `test_timeout_seconds`.
 
 **The CI stays the gate.** A defect the local modules miss becomes a CI round. The review may
 start while the CI runs, but an approval leads to `agent:ready-to-merge` only once the CI of the
@@ -866,6 +869,17 @@ each agy turn its minimal permissions, and treats a stop without output as a fai
   receipts record (`commands`, agy only), and the `review_commands` of the pool's reviewers
   enter the policy version: changing them voids the approvals given with the old ones, also for
   a recorded reviewer no longer in the pool.
+- **The wrapper of the shell tool.** agy writes, each time it starts its shell tool,
+  `~/.gemini/antigravity-cli/bin/agentapi`, a wrapper that runs `~/.local/bin/agy agentapi`.
+  With an [agent user](guide.md#agent-user) that directory is the agent user's (#494), so a turn
+  could leave there something else for the turns after it: before each agy turn devloop reads
+  it as the agent user, and refuses the turn before it starts (`<agent>: turn refused before it
+  started, the shell tool of agy has changed: …`, a `tool_failure`, also in a sync) when it
+  holds any entry but `agentapi`, or an `agentapi` that is not a regular file with exactly
+  `#!/bin/sh` and `exec "<home>/.local/bin/agy" agentapi "$@"` (`agentuser.agy_wrapper`; the
+  final newline may be missing), or cannot be read. The message names the extra entries, or
+  the size and a SHA-256 prefix of the changed wrapper, never its content. Without an agent
+  user there is no check.
 - **Files.** Reads and edits stay inside the turn's working directory, which agy enforces
   without rules; `read_file(...)` rules are not used, since they did not restrict reads in the
   tests on agy 1.5.9.
@@ -907,7 +921,9 @@ each agy turn its minimal permissions, and treats a stop without output as a fai
   not the change's (#180): the same model runs the same turn once more, in the same directory
   and tick, with `-retry` in its log name. devloop's log reports the permission and the last
   action agy's JSON lists in `denied_actions`, or `target non riportato da agy` when there is
-  none. The retry's prompt (#319) adds, before the `## Shell commands` block, a
+  none, preceded by ``command `<command line>`;`` when agy's JSON reports the command line of
+  that action (#479). The same command line, cleaned as below, is in the turn's
+  [ledger record](protocol.md#evidence-and-telemetry) (`denied_command`). The retry's prompt (#319) adds, before the `## Shell commands` block, a
   `## Denied in the previous attempt` block: what was denied (the command line of the last
   denied action, when agy's JSON reports it, cleaned as the [failure comment](protocol.md#failed-agent-turns)
   cleans commands; for a `command` permission without it, `comando non riportato da agy` with
@@ -1102,14 +1118,20 @@ unless the same reviewer then approves the latest round as the operator decided 
 rule itself is only the "Trust policy" section of the two prompts and the conditions that decide
 when a change needs the operator: a change to `NON_CRITICAL`, to a `/devloop` command or to a
 condition of the merge that a decision names explicitly is a faithful implementation, merged
-like any other of its level. A comment in which the operator approves the change on the issue
-counts as a decision when a trusted user wrote it in person, not the supervisor's identity nor
-an app of devloop, after the latest change of the issue's text and before the takeover (its
-latest edit too): devloop
-lists those comments under "Decisions of the operator on the issue" in the prompts of the
-readiness check, of the reviewers and of the advisory review. The readiness check declares
-`trust_policy` and blocks, with the question to the operator, an issue whose change no decision
-covers ([Readiness check before implementation](guide.md#readiness-check-before-implementation)).
+like any other of its level. Since #483 a decision of the operator on the issue is only a
+`/devloop approve` command, followed by the text of the decision, that a trusted user wrote in
+person, not the supervisor's identity nor an app, after the latest change of the issue's text
+and before the takeover (its latest edit too); an approval without the command decides nothing,
+and the history of the issue is read in full, or no command counts. devloop lists those commands
+under "Decisions of the operator on the issue" in the prompts of the readiness check, of the
+reviewers and of the advisory review, and answers once the ones it refuses: in the comment of the
+next readiness check or, when none is due, in a dispatcher comment (`approve_refused`). The
+quorum and the choice of the reviewers, the checks of `operator_only_paths` and
+`protected_paths`, the names of the labels of hold, of escalation and of merge, `trusted_users`
+and the "Trust policy" section stay with the operator even when a decision prescribes their
+change (#483). The readiness check declares `trust_policy` and blocks, with the question to the
+operator, an issue whose change no decision covers ([Readiness check before
+implementation](guide.md#readiness-check-before-implementation)).
 
 The criterion for a sensitive path: **the code that decides permissions, fencing and
 authorizations goes to level 2**, besides devloop itself and the agents' instructions. So
@@ -1231,7 +1253,10 @@ exception covers only an incomplete round abandoned for the base alone: CI round
 restarted for a new head, a change of policy, level or reviewers, or a `/devloop rereview` keep
 counting. For example, with `max_review_rounds = 3`: round 1 is completed; round 2 is abandoned
 for the base and does not count; round 3 replaces it and counts as the second; one more round,
-number 4, is left.
+number 4, is left. A replaced round that itself did not count, the review of an approved head
+after a sync or after a revocation for the base (#235, #252, #458), passes its `resync` to the
+round that replaces it: the new round records both, and does not count under the same condition
+(after a sync with conflicts, only if it approves).
 
 Promotion recomputes the receipt on the current base, as for any approval. An approval given on
 an earlier base, also when `main` advanced during the last review of a round already complete,
@@ -1240,7 +1265,8 @@ records stay as they are, and the promotion's `policy` record carries `bases` wi
 it relied on. If `main` interfered, the PR conflicts with the current base, or non-interference
 is not proven, the approval is not promoted (a `stale` record lists the checks): a conflict is
 synced first, as usual, and a new round follows. That round does not count when it reviews the
-same head again (#252), or a head only a clean sync moved (#235); otherwise it counts (see
+same head again (#252), or a head only a clean sync moved (#235), or approves a head that a sync
+with conflicts the implementer resolved moved (#458); otherwise it counts (see
 [Resync after approval](protocol.md#resync-after-approval)).
 
 ### Level 0: no review
@@ -1442,8 +1468,13 @@ is in the [guide](guide.md#agent-user) and in the [ops guide](../../ops/README.m
 
 - **Start.** `sudo -n -E -u <name> -- <argv>`: `-n` fails at once without a sudo rule, `-E`
   keeps the isolated environment above, which needs the `SETENV` tag. The environment gets the
-  agent user's `HOME`, `USER` and `LOGNAME`, where its CLIs keep their logins, and
-  `safe.directory=*` for git, because the worktrees belong to the dispatcher's user. The test
+  agent user's `HOME`, `USER` and `LOGNAME`, where its CLIs keep their logins. The worktrees
+  belong to the dispatcher's user, and git refuses a repository of another user ("dubious
+  ownership"): each turn and each test run gets, in git's command scope (`GIT_CONFIG_COUNT`,
+  `GIT_CONFIG_KEY_n`, `GIT_CONFIG_VALUE_n`, after the entries above), `safe.directory` for its
+  own worktree only, as given and as resolved, never `*` (#500). In a linked worktree git checks
+  the ownership of the worktree alone, so the main checkout is not trusted, and nothing is
+  written in the agent user's home. The test
   command runs as `/usr/bin/bash -c <test_cmd>` and the CLIs are found on the `secure_path` of
   the sudoers rule.
 - **Stop.** A timeout or a stall `abort` kills the process group of the turn or of the tests as
@@ -1479,10 +1510,26 @@ is in the [guide](guide.md#agent-user) and in the [ops guide](../../ops/README.m
   that it cannot read the keys, the `--local-config` file and `state_dir` (list it), and that it
   can write nothing in the repository's `.git`. It must enter but not write `worktrees`,
   `agent-shared` and its `schemas`, `turns` and `tmp`; it must write a new directory devloop
-  makes in `turns` and in `tmp`, and read a schema devloop writes. The agent user must also
+  makes in `turns` and in `tmp`, and read a schema devloop writes. Git, run as the agent user
+  through the same `sudo -n -E` and with the environment of the turns plus the
+  `safe.directory` of the worktree, must work (`git status`, without optional locks) in a
+  linked worktree of the dispatcher's user that the check makes in a new directory of
+  `agent-shared/tmp` and removes: a sudo that drops the environment, or a git that refuses the
+  worktree, stops devloop with git's message (#500). That directory is the dispatcher's alone
+  (mode `0700`, the mask of its inherited ACL empty) while devloop's own git commands make the
+  repository there (`core.fsmonitor=false` and no hook on each, no system or global config),
+  and is checked again after `git init`; only then the agent user gets read and search on it,
+  never write. The git probe runs only when the probe above finds nothing, so that the agent
+  user cannot write `agent-shared/tmp` while the dispatcher's git runs. The agent user must also
   differ from the dispatcher's. Otherwise devloop exits, naming each path, before taking the
   lock. `[agent_user] check = false` skips the probe and logs that it is off: for development
-  only.
+  only. Before the probe, also with `check = false`, devloop checks that the environment
+  reaches the agent user (#496): a variable with a random value (`DEVLOOP_ENV_PROBE`), passed
+  with the same `sudo -n -E -u <name>` as the turns and printed by `/usr/bin/bash`, must come
+  back. sudo-rs, the default `sudo` of Ubuntu, ignores `-E` (`'-E' is ignored`) also with
+  `SETENV`, and sudo 1.9 refuses `-E` without it: either way devloop exits before taking the
+  lock and says which, with the fix of sudo-rs (`update-alternatives --set sudo
+  /usr/bin/sudo.ws`, as root).
 - **Transcripts.** The stall check and `devloop follow` read the session transcripts in the agent
   user's home.
 

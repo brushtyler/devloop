@@ -165,6 +165,48 @@ class TimeoutWorkTests(unittest.TestCase):
         (used,) = self.logs.glob(f'{EVIDENCE}.used-*')
         self.assertIn('+changed', used.read_text(encoding='utf-8'))
 
+    def test_an_operator_retry_after_main_advanced_reapplies_the_work_on_the_new_base(self):
+        # #475: main moves while the escalation waits, also in the lines around the saved
+        # change; the operator's retry is applied, and the new worktree starts from the
+        # current base with the work merged three ways onto it.
+        (self.repo / 'a.py').write_text('a\nb\nc\nd\ne\nf\n')
+        self.commit('more lines')
+        seen = {}
+
+        def work(path):
+            (path / 'a.py').write_text('changed\nb\nc\nd\ne\nf\n')
+            (path / 'new.py').write_text('new\n')
+            return timed_out()
+
+        def retry(path):
+            seen['a'] = (path / 'a.py').read_text()
+            seen['new'] = (path / 'new.py').read_text()
+            seen['head'] = self.git('rev-parse', 'HEAD', cwd=path)
+            seen['status'] = sorted(self.raw_git('status', '--porcelain', cwd=path).splitlines())
+            return implemented('blocked')
+        self.make(work, retry)
+        self.gh.issue = lambda number: dict(
+            FakeGH.issue(self.gh, number),
+            labels=[{'name': n} for n in sorted(self.gh.labels.get(number, ()))])
+        self.implement()
+        self.assertEqual(self.gh.labels[7], {'agent:needs-operator'})
+        # The saved hunk's context changes: a plain `git apply` refuses it, a three-way merge
+        # does not, since main changed other lines than the saved work.
+        (self.repo / 'a.py').write_text('a\nb\nc\nmain\ne\nf\n')
+        (self.repo / 'c.py').write_text('c\n')
+        moved = self.commit('main moves')
+        patch = (self.logs / EVIDENCE).read_bytes()
+        self.assertNotEqual(subprocess.run(['git', 'apply', '--check', '-'], cwd=self.repo,
+                                           input=patch, capture_output=True).returncode, 0)
+        self.gh.comments.append((7, '/devloop retry'))
+        self.d._do_supervise(7)
+        self.assertEqual(len(self.runner.calls), 2, self.gh.comments[-1][1])
+        self.assertEqual(seen['head'], moved)
+        self.assertEqual(seen['a'], 'changed\nb\nc\nmain\ne\nf\n')
+        self.assertEqual(seen['new'], 'new\n')
+        self.assertEqual(seen['status'], [' M a.py', '?? new.py'])  # nothing staged
+        self.assertIn('They have been reapplied to it', self.runner.calls[1][3])
+
     def test_a_retry_whose_base_conflicts_gets_the_diff_in_the_prompt(self):
         seen = {}
 

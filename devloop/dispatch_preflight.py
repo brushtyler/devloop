@@ -11,12 +11,12 @@ from here, not re-exported by ``devloop/dispatcher.py``.
 
 from .agents import AgentError
 from .apps import DISPATCHER, ISSUE_COMMENT
-from .context import (_render_issue_comments, _template, format_operator_decisions,
-                      prompt_values, trust_policy_rule)
+from .context import (APPROVE_COMMAND, _render_issue_comments, _template,
+                      format_operator_decisions, prompt_values, trust_policy_rule)
 from .dispatch_actions import Models, ready_approval
 from .dispatch_supervision import UntrustedChange
-from .markdown import (carries_record, read_marker, render_escalation, render_preflight,
-                       render_recheck)
+from .markdown import (carries_record, read_marker, render_approve_refused, render_escalation,
+                       render_preflight, render_recheck)
 from .planning import (RECHECK_COMMAND, label_names, operator_blocked, preflight_state,
                        repository_bound)
 from .supervision import ACCEPT_DEFAULTS, DECIDE, PREFLIGHT_DEFAULT, describe, preflight_class
@@ -102,6 +102,31 @@ class PreflightMixin:
         return (read_marker(comment.get('body', ''), 'recheck') is not None
                 and self._signed((comment.get('author') or {}).get('login')))
 
+    def _approve_record(self, comment):
+        """Whether ``comment`` is the dispatcher's answer to the ``/devloop approve`` it
+        refuses (#483), signed by it."""
+        return (read_marker(comment.get('body', ''), 'approve') is not None
+                and self._signed((comment.get('author') or {}).get('login')))
+
+    def _answered_approvals(self, comments, records):
+        """The ids of the comments with a ``/devloop approve`` already answered as refused
+        (#483): those a readiness check of ``records`` (``_preflight_records``) lists in its
+        ``refused``, and those of the dispatcher's ``approve`` answers."""
+        ids = {i for _, record in records for i in record.get('refused', ())}
+        for c in comments:
+            if self._approve_record(c):
+                ids.update(read_marker(c['body'], 'approve')['comments'])
+        return ids
+
+    def _unanswered_approvals(self, comments, records):
+        """The ``/devloop approve`` of ``comments`` that devloop refuses (``_refused_approvals``,
+        #483) and has not answered yet (``_answered_approvals``), oldest first, as ``(comment,
+        reason)``. Each is answered once, by its id: a comment without one is never answered,
+        since nothing could tell that it was."""
+        answered = self._answered_approvals(comments, records)
+        return [(c, why) for c, why in self._refused_approvals(comments)
+                if isinstance(c.get('id'), int) and c['id'] not in answered]
+
     def _supervisor_note(self, comment):
         """Whether ``comment`` is a text of the supervisor's identity (``_supervisor_login``)
         that carries neither an escalation (``notice``) nor a readiness check (#468). Without
@@ -127,8 +152,9 @@ class PreflightMixin:
     def _recheck_request(self, number, comments, log=True):
         """The latest comment ``_recheck_requested`` counts, or None. ``log``: whether to log
         the requests it ignores."""
-        last = max((position for position, c in enumerate(comments) if self._automatic(c)),
-                   default=-1)
+        # The answer to a ``/devloop approve`` refused (#483) answers no request for a check.
+        last = max((position for position, c in enumerate(comments)
+                    if self._automatic(c) and not self._approve_record(c)), default=-1)
         asked = None
         for comment in comments[last + 1:]:
             body = comment.get('body') or ''
@@ -246,10 +272,11 @@ class PreflightMixin:
         # to a recheck that runs no check (#468) are no escalation: they leave the block's
         # attribution as it is. Nor does a comment of the supervisor that carries neither an
         # escalation nor a readiness check (#468), such as its note on a decision for the
-        # operator.
+        # operator, nor its answer to a ``/devloop approve`` refused (#483).
         if not record['blocked'] or any(self._published(c) and not self._ledger_record(c)
                                         and not self._supervision_record(c)
                                         and not self._recheck_record(c)
+                                        and not self._approve_record(c)
                                         and not self._supervisor_note(c)
                                         for c in comments[position + 1:]):
             return False
@@ -264,7 +291,7 @@ class PreflightMixin:
 
     def _preflight_view(self, number, labels, base_head=None):
         """What planning needs about an issue's readiness check, read now from GitHub:
-        ``{hash, record, recheck, owned, relabeled, refused, base}``, ``record`` being the
+        ``{hash, record, recheck, owned, relabeled, refused, approvals, base}``, ``record`` being the
         latest check or None. ``relabeled`` and ``base`` (#270) are those of
         ``preflight_state``: the second is read, with ``base_head`` (``ws.base_head`` by
         default), only for a failure that depends on the base branch (``repository_bound``).
@@ -272,7 +299,9 @@ class PreflightMixin:
         (``_owns_block``) or, on a request of a person, its latest one (``_preflight_block``,
         #468). ``refused``: a request of a person (``_request``) that runs no check, with why,
         until it is answered (``_do_recheck_refused``); None otherwise. On an issue in
-        ``agent:needs-supervisor`` every request runs none (``_supervisor_block``)."""
+        ``agent:needs-supervisor`` every request runs none (``_supervisor_block``).
+        ``approvals``: how many ``/devloop approve`` devloop refuses and has not answered yet
+        (``_unanswered_approvals``, #483)."""
         history = self.gh.issue_history(number)
         comments = self.gh.issue_comments(number)
         records = self._preflight_records(comments)
@@ -304,6 +333,7 @@ class PreflightMixin:
                 'owned': owned,
                 'relabeled': self._relabeled(history, comments, records),
                 'refused': refused,
+                'approvals': len(self._unanswered_approvals(comments, records)),
                 'base': base}
 
     def _relabeled(self, history, comments, records):
@@ -329,7 +359,7 @@ class PreflightMixin:
         return None
 
     def _publish_preflight(self, number, outcome, digest, agent_key, note='', base=None,
-                           used=None, request=None):
+                           used=None, request=None, refused=()):
         """Record a check's outcome on the issue and apply it to ``agent:needs-operator``: add
         the label when the check fails and the label is absent, remove it when the check passes
         and the label belongs to the readiness check, under whichever name it has (#248). A
@@ -339,7 +369,10 @@ class PreflightMixin:
         fallback model's included (#148), for the header; the configured agent by default.
         ``request``: the request of a person (``_request``) pending when the check started, if
         any: the turn's ledger record spends a ``/devloop recheck`` before the outcome is
-        recorded (#468). Escalations and label events are read again here all the same."""
+        recorded (#468). ``refused``: the ``/devloop approve`` the check answers as refused
+        (#483), as ``(comment, reason)``: ``render_preflight`` shows them, and the record names
+        their ids, so that each is answered once. Escalations and label events are read again here all
+        the same."""
         lb = self.cfg.labels
         agent = used or self.cfg.agent(agent_key)
         labels = label_names(self.gh.issue(number).get('labels') or [])
@@ -355,6 +388,10 @@ class PreflightMixin:
         record = dict(outcome, hash=digest, agent=agent_key, blocked=False, labeled=0)
         if base:
             record['base'] = base
+        if refused:
+            record['refused'] = [c['id'] for c, _ in refused]
+        refused = [((c.get('author') or {}).get('login'), c.get('created_at'), why)
+                   for c, why in refused]
         author = self._as(agent_key, ISSUE_COMMENT)
         head = self.runner.header(agent)
         if outcome['ready']:
@@ -365,7 +402,7 @@ class PreflightMixin:
             elif present:
                 note = (f'{shown} resta: non risulta messo dal controllo di prontezza, '
                         'quindi lo rimuove una persona.')
-            author.comment(number, render_preflight(record, head, note))
+            author.comment(number, render_preflight(record, head, note, refused))
             self.log('  ready' + (', block removed' if owned else ''))
             return
         # The class of the escalation (#182): in "auto" gaps that are all defaults go to the
@@ -375,7 +412,7 @@ class PreflightMixin:
             number, cls, 'preflight',
             key=self._issue_key('preflight', base, digest) if base else None)
         if supervised:
-            author.comment(number, render_preflight(record, head, note))
+            author.comment(number, render_preflight(record, head, note, refused))
             self.gh.comment(number, render_escalation(
                 'Il controllo di prontezza ha trovato solo lacune con un default proposto '
                 '(`default_available`): il supervisore può accettarli con '
@@ -395,7 +432,7 @@ class PreflightMixin:
         else:
             record.update(blocked=True, labeled=len(self._operator_labelers(number)))
         # Comment first: if the label is lost, the next tick blocks the issue again.
-        author.comment(number, render_preflight(record, head, note))
+        author.comment(number, render_preflight(record, head, note, refused))
         if record['blocked'] and not owned:
             self.gh.edit_labels(number, add=[lb.needs_operator])
         self.log(f'  not ready: {len(record["gaps"])} gap(s)')
@@ -413,8 +450,12 @@ class PreflightMixin:
         digest = self._request_hash(history, comments)
         # The request of a person that started the check, if any (#468), kept for its outcome:
         # with the ledger on, the turn's record spends a ``/devloop recheck`` before it.
-        request = self._request(number, history, comments, self._preflight_records(comments),
-                                log=False)
+        records = self._preflight_records(comments)
+        request = self._request(number, history, comments, records, log=False)
+        # #483: the ``/devloop approve`` that decide nothing, not answered yet, are answered
+        # with this one.
+        refused = self._unanswered_approvals(comments, records)
+        self._log_refused(number, refused)
         prompt = _template('preflight', **prompt_values(cfg), repo=cfg.repo, base_branch=cfg.base_branch,
                            issue_number=number, issue_title=history['title'],
                            issue_body=history['body'],
@@ -447,7 +488,29 @@ class PreflightMixin:
         finally:
             self.ws.remove(name)
         self._publish_preflight(number, normalize_preflight(raw), digest, agent.key, base=base,
-                                used=used, request=request)
+                                used=used, request=request, refused=refused)
+
+    def _log_refused(self, number, refused):
+        """Log the ``/devloop approve`` ``refused`` (#483), as ``(comment, reason)``."""
+        for c, why in refused:
+            login = (c.get('author') or {}).get('login')
+            self.log(f'  issue #{number}: refused `{APPROVE_COMMAND}` by {login}: {why}')
+
+    def _do_approve_refused(self, number):
+        """Answer, once, the ``/devloop approve`` devloop refuses that no readiness check
+        answered (#483), such as one written after the latest check: it changes neither the
+        hash of the request nor anything else, so no new check runs to answer it. The comments
+        are read again first: commands answered since the snapshot are left alone."""
+        comments = self.gh.issue_comments(number)
+        refused = self._unanswered_approvals(comments, self._preflight_records(comments))
+        if not refused:
+            self.log(f'  the refused `{APPROVE_COMMAND}` were answered since the snapshot')
+            return
+        self._log_refused(number, refused)
+        self.gh.comment(number, render_approve_refused(
+            [c['id'] for c, _ in refused],
+            [((c.get('author') or {}).get('login'), c.get('created_at'), why)
+             for c, why in refused]))
 
     def _do_recheck_refused(self, number):
         """Answer, once, a request of a person for a new check that runs none (#468): the

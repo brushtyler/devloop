@@ -10,7 +10,7 @@
 # istruzioni, configurazione o binari (AGENT_CLI_DIRS, AGENT_CLI_SEALED di ops/lib.sh, ~/.local
 # compreso) diventano di root, così un turno non li cambia per i turni dopo. L'utente degli agent
 # scrive solo credenziali, sessioni, cache e log: le voci che le CLI vi hanno già creato restano
-# sue. --unseal rende all'utente degli agent le directory delle CLI, per installarle, aggiornarle
+# sue, e lo script crea sue quelle che le CLI creano al primo uso (AGENT_CLI_WRITABLE). --unseal rende all'utente degli agent le directory delle CLI, per installarle, aggiornarle
 # o fare un login a loop fermo; devloop non parte finché lo script non viene rieseguito senza.
 # Idempotente: si può rieseguire, fa solo ciò che manca. Non scrive segreti. Le CLI, i loro
 # login e la chiave [agent_user] nell'overlay restano passi manuali (ops/README.md).
@@ -120,6 +120,19 @@ else
         owned "$AGENT_HOME/$dir" 755 root root
     done
 fi
+
+step "Voci che le CLI creano al primo uso: di $AGENT_USER (#494)"
+# Dentro le directory delle CLI l'utente degli agent non crea nulla: le voci che una CLI vi crea
+# al primo uso (AGENT_CLI_WRITABLE di ops/lib.sh, per agy la directory del wrapper del suo
+# strumento di shell) le crea lo script, sue. devloop controlla ciò che vi scrive prima di ogni
+# turno di agy.
+for entry in "${AGENT_CLI_WRITABLE[@]}"; do
+    if [ -L "$AGENT_HOME/$entry" ]; then
+        todo "$AGENT_HOME/$entry è un link: sostituirlo con una directory di $AGENT_USER"
+    else
+        owned "$AGENT_HOME/$entry" 700 "$AGENT_USER" "$AGENT_GROUP"
+    fi
+done
 
 step "Sessioni di $AGENT_USER"
 # ~/.claude/projects e ~/.codex/sessions: le sessioni restano dell'utente degli agent, come i

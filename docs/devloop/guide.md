@@ -113,8 +113,8 @@ needs the operator when, and only when, at least one of these three things holds
 1. it goes beyond or against a decision of the operator, or no decision covers it: a decision
    recorded in the section "Decise dall'operatore" of an ADR approved with the
    [cycle of the ADRs](../adr/README.md#ciclo-di-un-adr) and present on `main`, written by the
-   operator in the body of the issue, or a comment in which the operator approves the change on
-   the issue (#472, see below); the points an ADR leaves open are not decisions;
+   operator in the body of the issue, or a `/devloop approve` of the operator on the issue (#472,
+   #483, see below); the points an ADR leaves open are not decisions;
 2. it weakens a check and no decision of the operator authorizes that weakening;
 3. it changes the rule itself: the "Trust policy" section of the review or the advisory review
    prompt, or the conditions that decide when a change needs the operator, even when an ADR asks
@@ -127,12 +127,20 @@ faithful implementation and follows point 1: adding to `NON_CRITICAL` the class
 `round_grantable` that ADR 0005 names (D2, row P5-1 of its plan) does not go to the operator. What
 the decision does not name, such as another class added beside it, still does, under point 1.
 
+Since #483 the prompts list explicitly what point 3 always keeps with the operator, even when a
+decision of the operator, a `/devloop approve` on the issue included, prescribes it: the quorum
+and the choice of the reviewers, the checks of `operator_only_paths` and `protected_paths`, the
+names of the labels of hold, of escalation and of merge, `trusted_users`, and the "Trust policy"
+section itself. A PR that lowers the quorum of a level, or narrows the `operator_only_paths`
+check, goes to the operator for the merge whatever the issue approves; the prompts give it as an
+example.
+
 A **faithful implementation** does not need the operator: the issue cites the section of an ADR
-on `main` (or the decision is in the body of the issue or in an approval of the operator on it),
-and the change carries out the decision with no deviation. The reviewer checks the conformity of
-the whole change to the decision, read on `main` and never in the diff of the PR, and cites it in
-the review (file of the ADR, section and point, or the author and time of the operator's
-comment); its verdict is then the technical one, `approve` or `request_changes`, and devloop
+on `main` (or the decision is in the body of the issue or in a `/devloop approve` of the operator
+on it), and the change carries out the decision with no deviation. The reviewer checks the
+conformity of the whole change to the decision, read on `main` and never in the diff of the PR,
+and cites it in the review (file of the ADR, section and point, or the author and time of the
+operator's command); its verdict is then the technical one, `approve` or `request_changes`, and devloop
 merges the PR like any other of its level. Without the citation the PR needs the operator as
 before; every deviation found needs the operator, with its reason and the decision it departs
 from. The prompts give an example of each case: a conforming implementation of an ADR, a class
@@ -146,17 +154,33 @@ stay with the operator, and a `needs_operator` for a `decision` works as below.
 The operator approves the policy once, on the issue, before the implementation, and not the code
 of every PR:
 
-- **Approval in a comment.** A comment on the issue counts as a decision of the operator for
-  point 1 when a user of `trusted_users` wrote it in person (not starting with the attribution
-  header), not from the supervisor's identity nor from any app of devloop, after the latest change
-  of the title or the body of the issue and before devloop took it on (the first `labeled` event
-  of `agent:working` after that change). devloop lists those comments, with author and time,
-  under "Decisions of the operator on the issue" in the prompts of the readiness check, of the
-  reviewers and of the advisory review; only those count, and whether one approves the change is
-  the agents' to judge. A change of the text after the comment drops it; so does a change of the
-  comment itself after the takeover (its `updated_at`), since the agents read it as it is now: a
-  comment rewritten into an approval after the takeover is not a decision taken before it. The
-  reviewers of a PR whose issue was not taken on after the latest change get none.
+- **Approval with `/devloop approve`** (#483). A decision of the operator on the issue is a
+  command: a comment whose first line is `/devloop approve`, followed by the text of the decision
+  (on the same line or below), for example:
+
+  ```text
+  /devloop approve
+  Approvo la modifica della policy di fiducia descritta qui, punti 1 e 2.
+  ```
+
+  It counts for point 1 when a user of `trusted_users` wrote it in person (not starting with the
+  attribution header), not from the supervisor's identity nor from any app, after the latest
+  change of the title or the body of the issue and before devloop took it on (the first
+  `labeled` event of `agent:working` after that change). Any other comment, an approval written
+  without the command too, is context for the implementer and authorizes nothing. devloop lists
+  the commands that count, with author and time, under "Decisions of the operator on the issue"
+  in the prompts of the readiness check, of the reviewers and of the advisory review; each covers
+  only what its text approves, on the conditions it sets, and that is the agents' to judge. A
+  change of the text after the command drops it; so does a change of the comment itself after
+  the takeover (its `updated_at`), since the agents read it as it is now. The reviewers of a PR
+  whose issue was not taken on after the latest change get none. A `/devloop approve` of the
+  supervisor or of an app, one after the attribution header, one not on the first line and one
+  without a text are refused, and devloop answers each once, with the reason: in the comment of
+  the next readiness check, or, when none is due (a command of an app changes nothing that runs
+  one), in a comment of the dispatcher. The command of a user outside `trusted_users` is ignored.
+- **Complete history** (#483). The bounds above come from the history of the issue, which
+  devloop reads in full, 100 events at a time. When the read stops before the last page, no
+  command counts.
 - **Readiness check.** With `preflight` configured, the check applies the same rule to the issue
   and declares in `trust_policy` whether the change the issue asks for touches the policy:
   `none`, `covered` (a decision of the operator covers it, cited in `trust_policy_reason`) or
@@ -165,10 +189,10 @@ of every PR:
   qui?" and the reason, and the issue goes to `agent:needs-operator` with class
   `operator_decision`, to the operator also in `auto` mode
   ([Readiness check before implementation](#readiness-check-before-implementation)). The
-  operator answers with a comment on the issue: the hash of the request changes and the check
-  runs again. The hash also carries the comments that may record a decision, by author and
-  time: a change of the text undone later leaves title and body as they were but drops those
-  comments, so a check that relied on them is not reused and runs again.
+  operator answers with a `/devloop approve` on the issue: the hash of the request changes and
+  the check runs again. The hash also carries the commands that record a decision, by author,
+  time and text: a change of the text undone later leaves title and body as they were but drops
+  those commands, so a check that relied on them is not reused and runs again.
 - **The merge.** With that decision, a faithful PR with no open finding and green CI is merged by
   devloop like any other of its level, except for the paths of `operator_only_paths`. What no
   decision covers, what goes beyond or against one, an unauthorised weakening and a change of the
@@ -814,6 +838,18 @@ modules, one at a time, on the base commit of the branch, in a disposable worktr
   `/devloop escalate`) settles them the check runs again; a check that failed with its step
   recorded (a `tool_failure`, for one) resumes with `/devloop retry`, from the supervisor or,
   in `agent:needs-operator`, from a trusted user;
+- **every failed test fails on the base too, and the CI of that base commit is green** (#497):
+  the tests fail only where devloop runs them (its user, the permissions, the programs of the
+  host), and a new commit of `main` would not change that. The step is `host_tests`, a critical
+  escalation to the operator, never to the supervisor, with the failed tests, the base commit
+  and the link to its green CI: no wait for `main`, and nothing is pushed. The issue leaves
+  `agent:working`, the PR its label, as with `tests_failed`. The CI is green only when every
+  check of that commit concluded with a success: a skipped or neutral check does not prove that
+  its tests ran. A CI of the base commit that failed, is still running, has no check, has a
+  check without a success or cannot be read leaves `base_broken`; while that wait holds, devloop
+  reads the CI of the same commit again at each tick, and once it is green the step escalates
+  `host_tests` as above, without waiting for `main` to move (the blocks of the issue hold that
+  escalation as they hold its restart);
 - **a test fails only on the branch**, or the failed tests cannot be identified (a timeout, an
   output without them, a module that does not start, whose id unittest makes up the same whatever
   the error, a project whose `[tests].selection` is not
@@ -895,7 +931,10 @@ second comment. A label the operator removes while the PR stays ready is not add
 
 That label does not stop devloop, which keeps working on the PR as on any ready PR: it
 [syncs](protocol.md#conflicts-with-main) it when it conflicts with `main`, re-checks its CI, and with a new
-commit revokes the readiness and sends the PR back to review. Whenever the readiness decays
+commit revokes the readiness and sends the PR back to review. The review after a sync of the
+approved head, also one whose conflicts the implementer resolved, starts even with no round left
+and, if it approves, spends no round and makes the PR ready again without a `round_limit`
+escalation ([Resync after approval](protocol.md#resync-after-approval), #458). Whenever the readiness decays
 without an escalation (a revocation, a sync, a failed CI round, a stale receipt), the dispatcher
 removes `agent:needs-operator` together with `agent:ready-to-merge`. It recognises its own label
 by the notice of the current promotion: no other notice of the dispatcher and no escalation was
@@ -975,6 +1014,7 @@ next to the review; one for the trust policy gets none (#434, see
 | `review_level`, `level_zero` | Not enough independent reviewers; a level-0 head that cannot be promoted | Yes |
 | `sync_sensitive`, `protected_paths` | A sync conflict on a sensitive or operator-only path; a change to `protected_paths` | Yes |
 | `tests_failed`, `blocked`, `interrupted`, `unattributable`, `lost_meta`, `inconsistent`, `configuration`, `failure` | Tests still failing (or no change), an agent that declared itself blocked, an interrupted implementation, findings without an owner, a lost PR marker, an inconsistent PR state, a configuration to decide, a `gh`, git or dispatcher error | Yes |
+| `host_tests` | Local tests that fail on the base commit of the branch too, but pass in the CI of that commit: a [failure of the host](#tests-red-on-the-base-too), not of `main` | Yes |
 | `receipt_conflict` | The [receipt of the PR](protocol.md#pr-receipt) contradicts the markers at its promotion | Yes |
 | `retry_limit`, `supervisor_escalated`, `supervisor_refused` | The supervisor's retries are spent, it handed the escalation over, or it gave a command the escalation does not admit | Yes |
 | `conclave_veto` | A trusted user annulled the latest decision of a [conclave](#conclave-on-a-block) with `/devloop veto` | Yes |
@@ -1053,6 +1093,10 @@ one wins; without one, the latest that does not apply is answered.
   the hash of the request (title, body and trusted comments). An issue's key is taken before the
   step runs, from the commit its checkout starts at and the request its prompt gets, so a base
   or a text that changes during the turn already makes the retry refer to a superseded input.
+  The base does not bind the retry of an **implementation** (#475): with automatic merges `main`
+  moves every few minutes, and the step starts again from the current base anyway, with the work
+  its timed-out turn saved reapplied ([timeouts](protocol.md)); only its request binds it, for
+  the refusal and for the count of retries. The base of a readiness check still does.
   The retries are counted per reviewer: when several reviewers fail together and later only
   some of them, each keeps the retries it already had. A retry whose input has changed
   since (a new head, base or request) is refused, and the escalation stays with the supervisor.
@@ -1333,7 +1377,8 @@ no command applies, and the answer gives the manual steps. The commands valid th
   failed this way keeps `agent:ready`, so that the check can run again. The
   class may be critical: a retry runs the step again and bypasses none of its checks. The
   conditions are the supervisor's: the input of the step must still be the one that failed (the
-  same head, base and request), the issue must not be resolved by a merged devloop PR, a blocked
+  same head, base and request; for an implementation the request only, #475), the issue must
+  not be resolved by a merged devloop PR, a blocked
   issue waits, and at most **two** retries run for the same key, the supervisor's and the
   operator's together (so not after `retry_limit`). The readiness check runs again only on an
   issue that still has `agent:ready`, or `agent:working` while its implementation waits for the
@@ -1976,8 +2021,11 @@ and writes nothing without `--publish`. The summary lists:
 - the totals: PRs opened and merged that day, review rounds opened that day (each round once,
   on the day of its first review comment or of its [round register](protocol.md#round-register),
   counted once a review turn of the round succeeded or its CI was recorded: the native reviews
-  of the agents with an app are not among the comments the summary reads) and turns run with a
-  fallback model.
+  of the agents with an app are not among the comments the summary reads), turns run with a
+  fallback model, and the permissions headless agy denied, per model (#479): each turn stopped
+  on a denied permission, whether agy reported the command or not, counted under the model it
+  ran with, as in ``Permessi negati per modello: 3 (`<model>`: 2, …)``. Those turns are also
+  among the actions, as failures.
 
 A turn belongs to the day it started, with its whole duration; a merge of devloop to the day
 GitHub reports for it, since its record goes in the comment of the promotion (#338); any other
@@ -2185,9 +2233,19 @@ a host already in service is in
 - At the start of `tick` and `run` devloop checks, as `devloop-agent`, that it can neither read
   nor enter `key_dir` (or `$DEVLOOP_APP_KEY_DIR`) and the entries of `state_dir` other than the
   two above, that it cannot read the keys, `state_dir` and the overlay, that it can write
-  nothing in `.git` nor the directories that hold the worktrees and its turns, and that it can
-  write the directories devloop makes for its turns; otherwise it refuses to start and says
-  what is wrong. `[agent_user] check = false` skips the check, in development only.
+  nothing in `.git` nor the directories that hold the worktrees and its turns, that it can
+  write the directories devloop makes for its turns, and that git, run as `devloop-agent` with
+  the environment of the turns, works in a worktree of `devloop` (#500: each turn and test run
+  trusts its own worktree with `safe.directory`, never `*`; devloop makes that worktree with
+  its own git in a directory `devloop-agent` cannot reach, and opens it read-only afterwards,
+  so no config of `devloop-agent` runs as `devloop`); otherwise it refuses to start and
+  says what is wrong. `[agent_user] check = false` skips the check, in development only.
+- Before it, also with `check = false`, devloop checks that the environment it builds reaches
+  `devloop-agent` through `sudo -E` (#496), and otherwise refuses to start and says why.
+  `sudo` must be sudo 1.9: sudo-rs, the default of Ubuntu, ignores `-E` also with `SETENV`, so
+  the agents would run without the isolated environment. The fix, as root:
+  `update-alternatives --set sudo /usr/bin/sudo.ws`; `check-host.sh` reports sudo-rs as an
+  error.
 - One user runs implementers and reviewers, so a turn must not change what later turns use
   (#438, decision of the operator): the instructions, the configuration and the binaries of the
   CLIs are root's, and `devloop-agent` writes only its credentials, sessions, caches and logs.
@@ -2210,6 +2268,16 @@ a host already in service is in
   loop) is refused. It also refuses a file of them that `devloop-agent` cannot read, or a
   directory it cannot enter. The check runs only the system's tools (`PATH=/usr/bin:/bin`),
   never those of `~/.local/bin`, which comes first in the PATH of `devloop-agent`.
+- What a CLI creates on its first use inside the directories of the CLIs, where `devloop-agent`
+  creates nothing, stays its own (#494): `CLI_WRITABLE` in `devloop/agentuser.py`,
+  `~/.gemini/antigravity-cli/bin`, where agy writes the wrapper of its shell tool. The setup
+  script creates it as `devloop-agent`'s, mode `700`, and the startup check refuses to start
+  when `devloop-agent` cannot write it. Since a turn could leave there an executable for the
+  turns after it, devloop reads it as `devloop-agent` before each agy turn and refuses the turn
+  before it starts, with a `tool_failure`, when it holds anything but `agentapi`, or an
+  `agentapi` that is not a regular file with the content agy writes (`#!/bin/sh` and
+  `exec "<home>/.local/bin/agy" agentapi "$@"`, with or without the final newline:
+  `agentuser.agy_wrapper`). An empty or missing `bin` is accepted.
 - What the CLIs keep writable must not carry instructions into the next turn either. Every
   claude turn runs with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, whatever the operator's
   environment says: the auto memory of `~/.claude/projects/<project>/memory`, shared by the

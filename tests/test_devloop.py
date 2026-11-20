@@ -703,15 +703,18 @@ class GitHubAdapterTests(unittest.TestCase):
     def test_issue_history_is_one_graphql_read(self):
         node = ('{"data":{"repository":{"issue":{"title":"T","body":"B","author":{"login":"a"},'
                 '"lastEditedAt":"2026-11-13T11:00:00Z","editor":{"login":"e"},"timelineItems":'
-                '{"nodes":[{"__typename":"LabeledEvent","createdAt":"t1","actor":{"login":"o"},'
+                '{"pageInfo":{"hasNextPage":false,"endCursor":"c1"},'
+                '"nodes":[{"__typename":"LabeledEvent","createdAt":"t1","actor":{"login":"o"},'
                 '"label":{"name":"agent:ready"}},{"__typename":"RenamedTitleEvent","createdAt":'
                 '"t2","actor":null}]}}}}}')
         gh = self.make([('graphql', (0, node, ''))])
         self.assertEqual(gh.issue_history(7), {
             'title': 'T', 'body': 'B', 'author': 'a', 'last_edited_at': '2026-11-13T11:00:00Z',
-            'editor': 'e', 'labeled': [('agent:ready', 'o', 't1')], 'renamed': [(None, 't2')]})
+            'editor': 'e', 'labeled': [('agent:ready', 'o', 't1')], 'renamed': [(None, 't2')],
+            'complete': True})
         self.assertEqual(len(self.calls), 1)
         self.assertIn('number=7', self.calls[0][0])
+        self.assertNotIn('after=', ' '.join(self.calls[0][0]))
 
     def test_create_pr_leaves_labels_to_the_dispatcher(self):
         gh = self.make([('repos/o/r/pulls', (0, '{"number": 61, "html_url": "u"}', ''))])
@@ -1026,14 +1029,20 @@ class FakeWS:
         return not self.base_conflicts, list(self.base_conflicts)
 
     # Whether the head differs from the approved one only by clean merges of the base (#235):
-    # no by default, or an exception to raise when git cannot tell.
+    # no by default, or an exception to raise when git cannot tell. Otherwise ``resolved``:
+    # the merges with conflicts someone resolved in between (#458), None when another commit
+    # is in between.
     resynced = False
+    resolved = None
 
     def clean_resync(self, branch, head, approved):
+        return self.resync_merges(branch, head, approved) == []
+
+    def resync_merges(self, branch, head, approved):
         self.resync_checks = getattr(self, 'resync_checks', []) + [(branch, head, approved)]
         if isinstance(self.resynced, Exception):
             raise self.resynced
-        return self.resynced
+        return [] if self.resynced else self.resolved
 
     def new_branch(self, name, branch):
         return Path('/wt') / name

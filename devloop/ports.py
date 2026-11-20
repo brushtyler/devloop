@@ -85,7 +85,8 @@ class Tracker(Protocol):
 
     def issue_history(self, number):
         """Title, body and who changed them: ``{title, body, author, last_edited_at, editor,
-        labeled, renamed}`` (see ``GitHub.issue_history``)."""
+        labeled, renamed, complete}``, ``complete`` True only when every event was read (#483,
+        see ``GitHub.issue_history``)."""
 
     def issue_comments(self, number):
         """The comments of an issue, oldest first, as ``{id, author: {login}, body,

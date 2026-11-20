@@ -85,6 +85,20 @@ ops/
 **Ubuntu 26.04 LTS su aarch64**, con `apt`, `systemd` e il Python 3 di sistema (3.14). Su altre
 distribuzioni con `apt` e `systemd` gli script dovrebbero funzionare, ma non sono stati provati.
 
+**`sudo` deve essere sudo 1.9, non sudo-rs** (#496). Ubuntu usa per default sudo-rs, che non
+supporta `sudo -E`: stampa `sudo: preserving the entire environment is not supported, '-E' is
+ignored` e avvia il comando con l'ambiente minimo, anche con il tag `SETENV` nel sudoers. Gli
+agent girerebbero allora senza l'ambiente isolato che devloop prepara. La correzione, come root:
+
+```bash
+update-alternatives --set sudo /usr/bin/sudo.ws
+sudo --version | head -n 1     # "Sudo version 1.9…", non "sudo-rs …"
+```
+
+devloop non parte con `[agent_user]` se l'ambiente non arriva all'utente degli agent, e
+`check-host.sh` lo segnala come errore ([5. Utente degli agent e
+CLI](#5-utente-degli-agent-e-cli)).
+
 ## Da una VM vuota a devloop e supervisore attivi
 
 I comandi si eseguono da un clone del repository dell'operatore (per esempio nella sua home), come
@@ -288,8 +302,14 @@ configurazione o i binari delle CLI per i turni dopo, per esempio aggiungendo a
   rendere di root a mano: `chown -h` cambia il link, non il file a cui porta;
 - restano di `devloop-agent` le altre voci che le CLI hanno creato nelle loro directory:
   credenziali, sessioni (`~/.claude/projects`, `~/.codex/sessions`, che lo script crea), cache e
-  log. Una CLI che dopo un aggiornamento vuole creare una voce nuova nella sua directory non ci
-  riesce: si apre e si richiude come qui sotto. Ciò che vi resta scrivibile non porta istruzioni
+  log. Le voci che una CLI crea al primo uso in una directory sigillata (`AGENT_CLI_WRITABLE` di
+  `ops/lib.sh`, come `CLI_WRITABLE` di `devloop/agentuser.py`: `~/.gemini/antigravity-cli/bin`,
+  dove agy scrive il wrapper del suo strumento di shell) le crea lo script, di `devloop-agent`,
+  `700`; prima di ogni turno di agy devloop rifiuta il turno se `bin` contiene altro che il
+  wrapper che agy vi scrive (#494). Una CLI che dopo un aggiornamento vuole creare una voce nuova
+  nella sua directory non ci riesce e si ferma con `permission denied`: si apre e si richiude come
+  qui sotto, e la voce va aggiunta all'elenco
+  ([host/migrate.md](host/migrate.md#una-cli-si-ferma-con-permission-denied)). Ciò che vi resta scrivibile non porta istruzioni
   ai turni dopo: devloop avvia ogni turno di Claude Code senza la memoria automatica di
   `~/.claude/projects` (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` nell'ambiente e, perché i settings
   del progetto nel worktree non la riaccendano, anche in `--settings`) e senza i server MCP di
@@ -326,7 +346,8 @@ Installa infine il **sudoers** `ops/host/sudoers-agent` in `/etc/sudoers.d/devlo
 averlo validato con `visudo -c`: come `devloop-agent`, l'utente `devloop` può avviare solo le tre
 CLI di `~devloop-agent/.local/bin`, `/usr/bin/bash` (il comando dei test) e `/usr/bin/kill` (il
 gruppo di processi a un timeout), con l'ambiente che devloop prepara (`SETENV`) e senza terminale
-(`!use_pty`). Rieseguire lo script dopo aver copiato file nello `state_dir`
+(`!use_pty`). L'ambiente passa con `sudo -E`, che solo sudo 1.9 rispetta: con sudo-rs serve
+`update-alternatives --set sudo /usr/bin/sudo.ws` ([Piattaforma verificata](#piattaforma-verificata)). Rieseguire lo script dopo aver copiato file nello `state_dir`
 ([host/migrate.md](host/migrate.md)): le ACL delle voci già presenti sono sue.
 
 Poi l'**overlay** deve avere `[agent_user] name = "devloop-agent"` (lo script lo segnala se
@@ -338,7 +359,11 @@ legga l'overlay, che non scriva nulla in `.git` né le directory che contengono 
 che scriva nelle directory dei suoi turni, e che non possa scrivere, possedere, creare,
 rinominare o rimuovere le directory delle CLI, i file e le directory elencati sopra, gli
 eseguibili di `~/.local/bin` e il file a cui portano, con la sua directory, né ciò a cui porta un
-link lungo questi percorsi o dentro di essi, e che possa leggerli; altrimenti non parte. Il
+link lungo questi percorsi o dentro di essi, e che possa leggerli; altrimenti non parte. Prima
+ancora, anche con `[agent_user] check = false`, verifica che l'ambiente arrivi a
+`devloop-agent`: una variabile di prova passata con lo stesso `sudo -n -E` dei turni e letta da
+`/usr/bin/bash`; se non arriva non parte e dice perché (sudo-rs, con la correzione
+`update-alternatives --set sudo /usr/bin/sudo.ws`, o `SETENV` mancante nel sudoers). Il
 controllo, come quello di `check-host.sh`, usa solo gli strumenti del sistema (`/usr/bin`,
 `/bin`), mai quelli di `~/.local/bin`.
 
@@ -438,15 +463,23 @@ i due sudoers (440, root, accettati da `visudo`, uguali a quelli generati); che 
 legga `key_dir`, lo `state_dir` e l'overlay, non attraversi `key_dir`, non legga né attraversi le
 altre voci dello `state_dir`, entri senza scriverle in `worktrees`, `agent-shared`,
 `agent-shared/schemas`, `agent-shared/turns` e `agent-shared/tmp`, non scriva nulla in `.git`,
+esegua git nel primo worktree di `worktrees` (avviato da `devloop` con `sudo -n -E` e il solo
+`safe.directory` di quel worktree, come in un turno; senza worktree un avviso, #500),
 e che l'overlay abbia `[agent_user] name = "devloop-agent"`; la home di `devloop-agent` (1770,
 root) e, come `devloop-agent`, i file e i binari delle CLI, come il controllo all'avvio (#438);
+che `sudo` non sia sudo-rs e che l'ambiente arrivi a `devloop-agent` con `sudo -n -E` come
+`devloop`, come il controllo all'avvio (#496; un errore con la correzione `update-alternatives
+--set sudo /usr/bin/sudo.ws`, o con il `SETENV` mancante);
 il lock per repository (la directory
 di root, 3770, del gruppo `devloop-repos`; `devloop` nel gruppo, `devloop-agent` e il supervisore
 fuori; `devloop-agent` che non vi entra; il file di `tmpfiles.d`; `repo_lock_dir` nell'overlay);
 l'unità (uguale a quella generata, `KillMode=mixed`; con `PROJECT` l'unità template e la drop-in),
 che nessun'altra unità di devloop dell'host gestisca lo stesso repository, e lo stato del
-servizio; `--version` di ogni CLI come
-`devloop-agent`; e `devloop apps`
+servizio; che `devloop-agent` scriva le voci di `AGENT_CLI_WRITABLE`; `--version` di ogni CLI
+come `devloop-agent` e, sempre come `devloop-agent`, un prompt che le fa eseguire `git --version`
+con il loro strumento di shell (#494: passa dal modello, con la rete e il login della CLI; un
+errore se non risponde con `git version`, con la riga del `permission denied` se c'è); e
+`devloop apps`
 (ogni app, la sua installazione e i suoi permessi). Con `--dry-run` stampa, senza eseguirle, le
 verifiche che passano da `sudo` o dalla rete.
 

@@ -41,6 +41,13 @@ MUTATING = ('sudo', 'apt-get', 'useradd', 'setfacl', 'visudo', 'chown', 'chmod',
 # checks (ADR 0006, R8), one the user is a member of.
 GROUP = grp.getgrgid(os.getgid()).gr_name
 LEVEL = {'read': 1, 'write': 2}
+# The users of the host the fakes simulate (``OpsTestCase.fake_host``, #497), never the user that
+# runs the tests: a default of params.env (devloop-agent, supervisor) may be that user.
+FAKE_AGENT = 'opsdry-agent'
+FAKE_SUPERVISOR = 'opsdry-supervisor'
+# What ``sudo --version`` prints for each sudo the fakes simulate: the host moved from sudo-rs to
+# the classic sudo on 2026-11-20, and the scripts behave the same with either.
+SUDO_FLAVORS = {'sudo-rs': 'sudo-rs 0.2.8', 'classic sudo': 'Sudo version 1.9.17p2'}
 
 
 def supervisor_token():
@@ -98,6 +105,42 @@ class OpsTestCase(unittest.TestCase):
         path = self.bin / name
         path.write_text(f'#!/bin/sh\n{body}\n')
         path.chmod(0o755)
+
+    def fake_host(self, sudo, users=()):
+        """Fakes of the host (#497) in the PATH of the scripts, which then never reach the real
+        ``id``, ``getent``, ``getfacl`` or ``sudo``: what a test sees does not depend on the user
+        that runs it nor on the host. They simulate:
+
+        - ``id``: the current user ``ME``, the owner of the temporary files, unprivileged (uid
+          1000) and in ``GROUP``; the users ``users``, each with a group of its own; no other;
+        - ``getent group``: ``GROUP`` and the groups of ``users``;
+        - ``getfacl``, unless the test has its own: no ACL entry for any user;
+        - ``sudo``: ``sudo`` of ``SUDO_FLAVORS``, whose ``--version`` says which; any other call
+          is recorded as a change of the host, as the shims of ``MUTATING`` (``setfacl``
+          among them) are."""
+        known = '|'.join(shlex.quote(u) for u in (ME, *users))
+        groups = '|'.join(shlex.quote(g) for g in (GROUP, *users))
+        self.shim('id', f'''opt=
+case "$1" in -u | -un | -gn | -nG | -G) opt=$1; shift ;; esac
+user=${{1:-{shlex.quote(ME)}}}
+case "$user" in {known}) ;; *) echo "id: '$user': no such user" >&2; exit 1 ;; esac
+if [ "$user" = {shlex.quote(ME)} ]; then uid=1000 group={shlex.quote(GROUP)}
+else uid=1001 group=$user; fi
+case "$opt" in
+    -u) echo "$uid" ;;
+    -un) echo "$user" ;;
+    -gn | -nG) echo "$group" ;;
+    -G) echo "$uid" ;;
+    *) echo "uid=$uid($user) gid=$uid($group) groups=$uid($group)" ;;
+esac''')
+        self.shim('getent', f'''[ "$1" = group ] && [ $# -eq 2 ] || exit 2
+case "$2" in {groups}) echo "$2:x:1000:" ;; *) exit 2 ;; esac''')
+        if not (self.bin / 'getfacl').exists():
+            self.shim('getfacl', 'echo "user::rwx"\necho "group::r-x"\necho "other::---"')
+        self.shim('sudo', f'''if [ "$1" = --version ] || [ "$1" = -V ]; then
+    echo {shlex.quote(SUDO_FLAVORS[sudo])}; exit 0
+fi
+echo "sudo $*" >> "$OPS_TEST_CALLS"''')
 
     def params(self, **overrides):
         values = {
@@ -489,6 +532,41 @@ class RootStepsGuideTests(unittest.TestCase):
         self.assertIn('**come root dal checkout dell\'operatore**', section)
         self.assertIn('manca `ops/params.env`', section)
 
+    def test_the_cli_probe_uses_the_shell_tool_and_the_guide_says_what_to_do(self):
+        # #494: a question without commands does not start the shell tool of agy, which
+        # stopped with permission denied on a directory it creates at its first command.
+        section = self.section(self.SECTIONS[1])
+        commands = self.commands(section, inline=False)
+        script = (OPS / 'host/check-host.sh').read_text(encoding='utf-8')
+        prompt = re.search(r"^SHELL_PROMPT='(.*)'$", script, re.M).group(1)
+        self.assertIn(f"P='{prompt}'", commands)
+        self.assertIn('git --version', prompt)
+        agy = [c for c in commands if c.startswith('sudo -u devloop-agent -H '
+                                                   '/home/devloop-agent/.local/bin/agy -p "$P"')]
+        self.assertEqual(len(agy), 1, commands)
+        self.assertIn('"command(git --version)"', agy[0])
+        for cli in ('claude', 'codex'):
+            self.assertTrue([c for c in commands if c.startswith(
+                f'sudo -u devloop-agent -H /home/devloop-agent/.local/bin/{cli} ') and '"$P"' in c],
+                cli)
+        self.assertNotIn('claude -p ciao', section)
+        # What to do when a CLI stops with permission denied on a sealed directory.
+        start = section.index('\n### Una CLI si ferma con `permission denied`\n')
+        case = section[start:]
+        flat = ' '.join(case.split())
+        setup = f'sudo bash {self.OPERATOR}/ops/host/setup-agent-user.sh'
+        steps = [f'`{setup} --unseal`', 'avviare la CLI come `devloop-agent`', f'`{setup}`',
+                 '`AGENT_CLI_WRITABLE` di `ops/lib.sh`', '`CLI_WRITABLE` di `devloop/agentuser.py`']
+        at = -1
+        for step in steps:
+            with self.subTest(step=step):
+                self.assertIn(step, flat[at + 1:])
+                at = flat.index(step, at + 1)
+        self.assertIn('con una PR', flat)
+        self.assertIn('(#una-cli-si-ferma-con-permission-denied)', section)
+        self.assertIn('(host/migrate.md#una-cli-si-ferma-con-permission-denied)',
+                      (OPS / 'README.md').read_text(encoding='utf-8'))
+
     def test_the_activation_has_every_step_and_the_rollback(self):
         text = self.section(self.ACTIVATION)
         commands = self.commands(text)
@@ -784,24 +862,47 @@ class DryRunTests(OpsTestCase):
             'LAUNCHER_CMD': f'/usr/bin/python3 {clone}/scripts/devloop-pinned',
             'STATE_PATH': f'{clone}/.ssdlc/devloop',
             'DEVLOOP_PATH': f'{devloop}/.local/bin:/usr/local/bin:/usr/bin:/bin'}))
-        params = self.params(DEVLOOP_USER=ME)
-        for _ in range(2):
-            done = self.run_script('host/setup-devloop.sh', '--dry-run', '--params', str(params))
-            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-            actions = [line for line in done.stdout.splitlines()
-                       if '[dry-run]' in line and 'apt-get' not in line]
-            self.assertEqual(actions, [])
-            self.assertNotIn('da fare a mano', done.stdout)
-            self.assertIn('devloop.service è già aggiornato', done.stdout)
+        # #497: the host is simulated (fake_host): the user of the tests is devloop's, the agent
+        # user and the supervisor are other users, and sudo is sudo-rs or the classic one.
+        params = self.params(DEVLOOP_USER=ME, AGENT_USER=FAKE_AGENT,
+                             SUPERVISOR_USER=FAKE_SUPERVISOR)
+        for sudo in SUDO_FLAVORS:
+            self.fake_host(sudo, users=(FAKE_AGENT, FAKE_SUPERVISOR))
+            for _ in range(2):
+                with self.subTest(sudo):
+                    done = self.run_script('host/setup-devloop.sh', '--dry-run', '--params',
+                                           str(params))
+                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                    actions = [line for line in done.stdout.splitlines()
+                               if '[dry-run]' in line and 'apt-get' not in line]
+                    self.assertEqual(actions, [])
+                    self.assertNotIn('da fare a mano', done.stdout)
+                    self.assertIn(f"ok: l'utente {ME} esiste", done.stdout)
+                    self.assertIn(f'ok: {ME} è nel gruppo {GROUP}', done.stdout)
+                    self.assertIn('devloop.service è già aggiornato', done.stdout)
+                    self.assertIn(f"dell'utente {FAKE_AGENT} (#415)", done.stdout)
         self.assertEqual(self.mutating_calls(), [])
 
     def test_setup_supervisor_dry_run_prints_the_acl_and_the_sudoers(self):
         (self.home / 'devloop').mkdir(parents=True)
-        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER='opsdry-nosup')
+        # #497: the host is simulated (fake_host): the user of the tests is devloop's, the agent
+        # user exists, the supervisor does not yet, no ACL on the home of devloop, and sudo is
+        # sudo-rs or the classic one.
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER='opsdry-nosup',
+                             AGENT_USER=FAKE_AGENT)
         before = self.tree()
+        for sudo in SUDO_FLAVORS:
+            with self.subTest(sudo):
+                self.fake_host(sudo, users=(FAKE_AGENT,))
+                self.check_setup_supervisor(params, before)
+
+    def check_setup_supervisor(self, params, before):
         done = self.run_script('host/setup-supervisor.sh', '--dry-run', '--params', str(params))
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         out = done.stdout
+        self.assertIn(f"ok: l'utente {ME} e {self.home}/devloop esistono", out)
+        self.assertIn(f'[dry-run] useradd --create-home --home-dir {self.home}/supervisor '
+                      '--shell /bin/bash opsdry-nosup', out)
         self.assertIn(f'[dry-run] setfacl -m u:opsdry-nosup:--x {self.home}/devloop', out)
         self.assertIn(f'scriverebbe {self.tmp}/sudoers.d/devloop-supervisor (mode 440', out)
         self.assertIn(f'    | Defaults>{ME} always_set_home, secure_path="{self.home}/devloop/'
@@ -972,15 +1073,45 @@ class DryRunTests(OpsTestCase):
         self.assertNotIn(f'chmod -R g+rX\\,go-w {agent}/.codex/config.toml', out)
         self.assertEqual(self.mutating_calls(), [])
 
+    def test_setup_agent_user_creates_what_the_clis_create_on_first_use(self):
+        # #494: agy creates ~/.gemini/antigravity-cli/bin at its first shell command, in a
+        # directory of root's: the script creates it as the agent user's, 700.
+        agent = self.home / 'agent'
+        params = self.params(DEVLOOP_USER=ME, AGENT_USER='opsdry-noagent')
+        agy_bin = agent / '.gemini/antigravity-cli/bin'
+        for unseal in ((), ('--unseal',)):
+            with self.subTest(unseal=unseal):
+                done = self.run_script('host/setup-agent-user.sh', '--dry-run', *unseal,
+                                       '--params', str(params))
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                self.assertIn(f'[dry-run] install -d -m 700 -o opsdry-noagent -g opsdry-noagent '
+                              f'{agy_bin}\n', done.stdout)
+        # One that exists, of another owner or mode, becomes the agent user's, 700.
+        agy_bin.mkdir(parents=True)
+        done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params', str(params))
+        self.assertIn(f'[dry-run] chown opsdry-noagent:opsdry-noagent {agy_bin}\n', done.stdout)
+        self.assertIn(f'[dry-run] chmod 700 {agy_bin}\n', done.stdout)
+        self.assertNotIn(f'root:opsdry-noagent {agy_bin}', done.stdout)  # never sealed
+        # A link is never followed by chown: it is reported.
+        agy_bin.rmdir()
+        agy_bin.symlink_to(self.tmp)
+        done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params', str(params))
+        self.assertIn(f'da fare a mano: {agy_bin} è un link: sostituirlo con una directory di '
+                      'opsdry-noagent', done.stdout)
+        self.assertNotIn(f'chown opsdry-noagent:opsdry-noagent {agy_bin}', done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+        self.assertEqual(agentuser.CLI_WRITABLE, ('.gemini/antigravity-cli/bin',))
+        self.assertEqual(agentuser.AGY_BIN, agentuser.CLI_WRITABLE[0])
+
     def test_the_lists_of_the_cli_files_are_those_of_the_startup_check(self):
         lists = subprocess.run(
             [BASH, '-c', f'. {OPS / "lib.sh"}; set +u; '
                          'printf "%s\\n" "${AGENT_CLI_DIRS[*]}" "${AGENT_CLI_SEALED[*]}" '
-                         '"${AGENT_CLIS[*]}"'],
+                         '"${AGENT_CLIS[*]}" "${AGENT_CLI_WRITABLE[*]}"'],
             capture_output=True, text=True, check=True).stdout.splitlines()
         self.assertEqual([line.split() for line in lists],
                          [list(agentuser.CLI_DIRS), list(agentuser.CLI_SEALED),
-                          list(agentuser.CLIS)])
+                          list(agentuser.CLIS), list(agentuser.CLI_WRITABLE)])
 
     def test_the_agent_user_must_differ_from_devloop(self):
         done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params',
@@ -1597,6 +1728,177 @@ class CheckHostTests(OpsTestCase):
                       out)
         self.assertEqual(self.mutating_calls(), [])
 
+    def test_git_runs_as_the_agent_user_in_a_worktree_with_only_its_safe_directory(self):
+        # #500: as devloop does, through `sudo -n -E` from devloop's user, safe.directory for
+        # that worktree only; without a worktree, a warning.
+        done, errors = self.check()
+        self.assertEqual(errors, [], done.stdout)
+        self.assertIn(f'ATTENZIONE: nessun worktree in {self.state}/worktrees: git come root '
+                      'non verificato', done.stdout)
+        worktree = self.state / 'worktrees/issue-7'
+        worktree.mkdir(parents=True)
+        (worktree / '.git').write_text('gitdir: /elsewhere\n')
+        done, errors = self.check()
+        self.assertEqual(errors, [], done.stdout)
+        line, = [line for line in done.stdout.splitlines() if 'safe.directory' in line]
+        self.assertTrue(line.startswith(
+            f'  [dry-run] sudo -u {ME} -H -- /usr/bin/env GIT_CONFIG_COUNT=1 '
+            f'GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0={worktree} '
+            'sudo -n -E -u root -- /usr/bin/bash -c '), line)
+        self.assertTrue(line.endswith(f' _ {worktree}'), line)
+        self.assertIn('git\\ -C\\ \\"\\$1\\"\\ status', line)
+        self.assertNotIn('*', line)
+        self.assertNotIn('nessun worktree', done.stdout)
+
+    def test_the_clis_run_a_command_with_their_shell_tool_as_the_agent_user(self):
+        # #494: --version does not start the shell tool, where agy stopped with permission
+        # denied; check-host has each CLI run git --version with it, as the agent user. And
+        # the agent user writes what the CLIs create on first use.
+        done, errors = self.check()
+        self.assertEqual(errors, [], done.stdout)
+        out = done.stdout
+        def q(text):  # as `run` prints an argument
+            return subprocess.run([BASH, '-c', 'printf %q "$1"', '_', text], check=True,
+                                  capture_output=True, text=True).stdout
+        prompt = q('Run the shell command `git --version` with your shell tool, then reply with '
+                   'its output only.')
+        lines = {cli: [line for line in out.splitlines()
+                       if f'timeout 300 {self.agent}/.local/bin/{cli} ' in line]
+                 for cli in agentuser.CLIS}
+        for cli, found in lines.items():
+            self.assertEqual(len(found), 1, cli)
+            self.assertTrue(found[0].startswith('  [dry-run] sudo -u root -H -- timeout 300 '),
+                            found[0])
+        settings = q('{"permissions": {"allow": ["command(git --version)"]}}')
+        self.assertIn(f'agy -p {prompt} --output-format json --settings {settings}\n',
+                      lines['agy'][0] + '\n')
+        self.assertIn(f'claude -p {prompt} --allowedTools {q("Bash(git --version)")}\n',
+                      lines['claude'][0] + '\n')
+        self.assertIn(f'codex exec --skip-git-repo-check -s read-only {prompt}', lines['codex'][0])
+        self.assertRegex(out, r'\[dry-run\] sudo -u root -H -- /usr/bin/bash -c .*-w.* _ '
+                              + re.escape(f'{self.agent}/.gemini/antigravity-cli/bin') + '\n')
+
+    def test_a_cli_that_cannot_run_a_command_is_an_error(self):
+        # #494, with fakes of the CLIs, run as the current user, the agent user of this check.
+        args = self.tmp / 'agy-args'
+        for cli in ('claude', 'codex'):
+            path = self.agent / '.local/bin' / cli
+            path.write_text('#!/bin/sh\necho "git version 2.47.0"\n')
+        agy = self.agent / '.local/bin/agy'
+        denied = (f'mkdir {self.agent}/.gemini/antigravity-cli/bin: permission denied')
+        agy.write_text(f'#!/bin/sh\n[ "$1" = --version ] && exit 0\n'
+                       f'printf "%s\\n" "$@" > {shlex.quote(str(args))}\n'
+                       f'echo "starting the shell tool"\necho {shlex.quote(denied)} >&2\nexit 1\n')
+        self.fake_host('classic sudo', users=('opsdry-devloop', FAKE_SUPERVISOR))
+        params = self.params(DEVLOOP_USER='opsdry-devloop', SUPERVISOR_USER=FAKE_SUPERVISOR,
+                             AGENT_USER=ME)
+
+        def run():
+            done = self.run_script('host/check-host.sh', '--no-apps', '--params', str(params))
+            return done, [line for line in done.stdout.splitlines()
+                          if 'strumento di shell' in line]
+        done, lines = run()
+        self.assertEqual(done.returncode, 1)
+        self.assertIn(f'  ok: claude come {ME} esegue git --version con il suo strumento di shell',
+                      lines)
+        self.assertIn(f'  ok: codex come {ME} esegue git --version con il suo strumento di shell',
+                      lines)
+        self.assertIn(f'  ERRORE: agy come {ME} non esegue git --version con il suo strumento di '
+                      f'shell (uscita 1): {denied} (ops/host/migrate.md, una CLI che si ferma '
+                      'con permission denied)', lines)
+        self.assertEqual(args.read_text().splitlines()[:2],
+                         ['-p', 'Run the shell command `git --version` with your shell tool, '
+                                'then reply with its output only.'])
+        self.assertIn('{"permissions": {"allow": ["command(git --version)"]}}',
+                      args.read_text().splitlines())
+        # An answer without the output of the command is an error too, whatever the exit.
+        agy.write_text('#!/bin/sh\necho \'{"status": "SUCCESS", "result": "I cannot."}\'\n')
+        done, lines = run()
+        self.assertIn(f'  ERRORE: agy come {ME} non esegue git --version con il suo strumento di '
+                      'shell (uscita 0): {"status": "SUCCESS", "result": "I cannot."} '
+                      '(ops/host/migrate.md, una CLI che si ferma con permission denied)', lines)
+        # The words without the version, or an explicit denial, are errors with exit 0 too
+        # (1/codex/R1-1).
+        for result in ('I cannot report the git version: the shell command failed with '
+                       'permission denied.',
+                       'git version 2.47.0, but mkdir bin: Permission denied'):
+            answer = '{"status": "SUCCESS", "result": "' + result + '"}'
+            agy.write_text('#!/bin/sh\necho ' + shlex.quote(answer) + '\n')
+            done, lines = run()
+            self.assertEqual(done.returncode, 1)
+            self.assertIn(f'  ERRORE: agy come {ME} non esegue git --version con il suo strumento '
+                          f'di shell (uscita 0): {answer} (ops/host/migrate.md, una CLI che si '
+                          'ferma con permission denied)', lines)
+        agy.write_text('#!/bin/sh\necho \'{"status": "SUCCESS", "result": "git version 2.47.0"}\'\n')
+        done, lines = run()
+        self.assertIn(f'  ok: agy come {ME} esegue git --version con il suo strumento di shell',
+                      lines)
+        self.assertEqual([line for line in lines if 'ERRORE' in line], [])
+
+    def real_sudo(self, sudo, env_stderr='', env_status=0):
+        """A ``sudo`` whose ``--version`` is that of ``SUDO_FLAVORS``, and whose ``sudo -n -E``
+        runs the command as the current user: sudo-rs with a minimal environment, the classic
+        sudo with the caller's (#496). With ``env_status`` it fails, printing ``env_stderr``.
+        Any other call is recorded, as the shims of ``MUTATING``."""
+        start = ('exec env -i PATH=/usr/bin:/bin "$@"' if sudo == 'sudo-rs' else 'exec "$@"')
+        if env_status:
+            start = f'exit {env_status}'
+        warning = f'printf "%s\\n" {shlex.quote(env_stderr)} >&2' if env_stderr else ':'
+        self.shim('sudo', f'''if [ "$1" = --version ]; then
+    echo {shlex.quote(SUDO_FLAVORS[sudo])}; exit 0
+fi
+if [ "$1" = -n ] && [ "$2" = -E ] && [ "$3" = -u ] && [ "$5" = -- ]; then
+    shift 5
+    {warning}
+    {start}
+fi
+echo "sudo $*" >> "$OPS_TEST_CALLS"''')
+
+    def check_for_real(self):
+        """check-host.sh without --dry-run: the checks through sudo reach the shim of sudo."""
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=ME, AGENT_USER='root')
+        done = self.run_script('host/check-host.sh', '--no-apps', '--params', str(params))
+        return done, [line for line in done.stdout.splitlines() if 'ERRORE' in line]
+
+    def test_sudo_rs_is_an_error_with_the_fix(self):
+        # #496: sudo-rs ignores -E, and the agents ran without the environment devloop prepares.
+        self.real_sudo('sudo-rs', env_stderr="sudo: preserving the entire environment is not "
+                                             "supported, '-E' is ignored")
+        done, errors = self.check_for_real()
+        self.assertEqual(done.returncode, 1)
+        fix = 'update-alternatives --set sudo /usr/bin/sudo.ws'
+        self.assertIn(f"  ERRORE: sudo è {SUDO_FLAVORS['sudo-rs']}: ignora -E e gli agent "
+                      f"girerebbero senza l'ambiente che devloop prepara; serve sudo 1.9: {fix}",
+                      errors)
+        env_errors = [line for line in errors if "l'ambiente non arriva" in line]
+        self.assertEqual(len(env_errors), 1, errors)
+        self.assertIn(f'root con sudo -E (uscita 0): sudo-rs ignora -E: {fix}', env_errors[0])
+        self.assertIn("'-E' is ignored", env_errors[0])
+
+    def test_the_classic_sudo_passes_the_environment(self):
+        self.real_sudo('classic sudo')
+        done, errors = self.check_for_real()
+        self.assertIn(f"  ok: sudo: {SUDO_FLAVORS['classic sudo']}", done.stdout)
+        self.assertIn("  ok: l'ambiente arriva a root con sudo -E", done.stdout)
+        self.assertEqual([line for line in errors if 'sudo' in line and 'sudoers' not in line],
+                         [], done.stdout)
+
+    def test_a_rule_without_setenv_is_an_error(self):
+        self.real_sudo('classic sudo', env_status=1,
+                       env_stderr='sudo: sorry, you are not allowed to preserve the environment')
+        done, errors = self.check_for_real()
+        self.assertEqual(done.returncode, 1)
+        env_errors = [line for line in errors if "l'ambiente non arriva" in line]
+        self.assertEqual(len(env_errors), 1, errors)
+        self.assertIn('(uscita 1): manca il tag SETENV nel sudoers', env_errors[0])
+
+    def test_the_dry_run_prints_the_check_of_the_environment(self):
+        done, errors = self.check()
+        self.assertIn('  [dry-run] sudo --version\n', done.stdout)
+        self.assertRegex(done.stdout, r'\[dry-run\] env DEVLOOP_ENV_PROBE=devloop-env-probe-\S+ '
+                                      r'sudo -n -E -u root -- /usr/bin/bash -c ')
+        self.assertEqual(self.mutating_calls(), [])
+
     def test_an_overlay_without_the_agent_user_is_an_error(self):
         (self.state / 'config.local.toml').write_text(f'repo_lock_dir = "{self.locks}"\n'
                                                       '[merge]\nmode = "off"\n')
@@ -1759,13 +2061,24 @@ class CheckHostTests(OpsTestCase):
         (state / 'current').mkdir(parents=True)
         (state / 'run.log').touch()
         (self.devloop / 'devloop-source/.git').mkdir(parents=True)
-        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=ME, REPO='acme/widget',
-                             DEVLOOP_CLONE=str(self.devloop / 'ssdlc'),
+        # #497: the host is simulated (fake_host, with the ACL of setUp): the user of the tests,
+        # unprivileged, is devloop's and the supervisor, the agent user another one, and sudo is
+        # sudo-rs or the classic one.
+        params = self.params(DEVLOOP_USER=ME, SUPERVISOR_USER=ME, AGENT_USER=FAKE_AGENT,
+                             REPO='acme/widget', DEVLOOP_CLONE=str(self.devloop / 'ssdlc'),
                              SOURCE_REPO='brushtyler/ssdlc', SOURCE_REF='v1.2.0',
                              STATE_DIR=str(state), LAUNCHER_DIR=str(lib))
+        for sudo in SUDO_FLAVORS:
+            with self.subTest(sudo):
+                self.fake_host(sudo, users=(FAKE_AGENT,))
+                self.check_separate_source(params, state, lib)
+
+    def check_separate_source(self, params, state, lib):
         done = self.run_script('host/check-host.sh', '--dry-run', '--params', str(params))
         out = done.stdout
         self.assertEqual(done.returncode, 1, out + done.stderr)
+        self.assertIn('ATTENZIONE: non eseguito come root', out)
+        self.assertIn(f"ok: l'utente {FAKE_AGENT} esiste", out)
         self.assertIn(f'ERRORE: {lib}/devloop-pinned non esiste (setup-devloop.sh, dal tag '
                       'v1.2.0)', out)
         self.assertIn(f'ok: {self.devloop}/devloop-source è un clone della sorgente', out)
@@ -1773,6 +2086,38 @@ class CheckHostTests(OpsTestCase):
         self.assertIn(f'[dry-run] sudo -u {ME} -H -- env -C {self.devloop}/ssdlc /usr/bin/python3 '
                       f'{lib}/devloop-pinned --state-dir {state} apps', out)
         self.assertEqual(self.mutating_calls(), [])
+
+
+@unittest.skipIf(BASH is None, 'bash is not installed')
+class FakeHostTests(OpsTestCase):
+    """The fakes of ``fake_host`` (#497): the scripts see the simulated host, whoever runs the
+    tests and whatever sudo the host has."""
+
+    def sh(self, command):
+        env = dict(os.environ, PATH=f'{self.bin}:{os.environ.get("PATH", "/usr/bin:/bin")}',
+                   OPS_TEST_CALLS=str(self.calls))
+        return subprocess.run([BASH, '-c', command], capture_output=True, text=True, env=env,
+                              timeout=60)
+
+    def test_the_fakes_simulate_an_unprivileged_user_and_either_sudo(self):
+        for sudo, version in SUDO_FLAVORS.items():
+            with self.subTest(sudo):
+                self.fake_host(sudo, users=(FAKE_AGENT,))
+                for command, out in [('id -u', '1000'), ('id -un', ME), (f'id -gn {ME}', GROUP),
+                                     (f'id -nG {ME}', GROUP), (f'id -u {FAKE_AGENT}', '1001'),
+                                     (f'id -gn {FAKE_AGENT}', FAKE_AGENT),
+                                     (f'getent group {GROUP}', f'{GROUP}:x:1000:'),
+                                     ('sudo --version', version), ('getfacl -p /x', 'user::rwx\n'
+                                                                   'group::r-x\nother::---')]:
+                    done = self.sh(command)
+                    self.assertEqual((done.returncode, done.stdout.strip()), (0, out), command)
+                # A user or a group the simulated host does not have, whatever the real one has.
+                others = [u for u in ('root', 'nobody', 'devloop', 'devloop-agent', 'supervisor')
+                          if u != ME]
+                for command in [f'id -u {u}' for u in others] + ['getent group nogroup']:
+                    self.assertNotEqual(self.sh(command).returncode, 0, command)
+                self.assertEqual(self.sh('sudo -u x -H -- true').returncode, 0)
+        self.assertEqual(self.mutating_calls(), ['sudo -u x -H -- true'] * len(SUDO_FLAVORS))
 
 
 if __name__ == '__main__':

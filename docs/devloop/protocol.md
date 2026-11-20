@@ -33,12 +33,17 @@ A sync writes no review record, so it does not consume a review round, and it ru
 round is left. The PR goes back to `agent:review`, also from `agent:ready-to-merge`, and the next
 round reviews the new head as usual, also while its CI runs; that round counts against `max_review_rounds`,
 except after an approval (see [Resync after approval](#resync-after-approval)). The sync
-comment says so (#289): after conflicts the implementer resolved, it says that the next review
-(or the review after the fix the sync started) **counts**, which counted round it will be out of
-`max_review_rounds` and how many remain after it, or, with none left, that the next review
-needs an operator's decision. After a merge without conflicts of an approved head it says that
-the review of the new head does not count; otherwise the review counts as it would have without
-the sync, and the comment shows the round in the same way. A
+comment says so (#289): after conflicts the implementer resolved on a head that was not
+approved, it says that the next review (or the review after the fix the sync started)
+**counts**, which counted round it will be out of `max_review_rounds` and how many remain after
+it, or, with none left, that the next review needs an operator's decision. After a merge
+without conflicts of an approved head it says that the review of the new head does not count.
+After conflicts the implementer resolved on an approved head (#458) it says which of the two
+cases applies to the review: it starts even with no round left and does **not count** if it
+approves, so the PR is ready again without a `round_limit` escalation; if it opens blocking
+findings it **counts**, and the comment says which round it would be or, with none left, that
+the PR goes to `round_limit`. Otherwise the review counts as it would have without the sync,
+and the comment shows the round in the same way. A
 sync that fails (the implementer is blocked, tests still fail, markers are left, the merge was
 concluded or aborted by the agent, or the agent run failed) goes to `agent:needs-operator` with a
 comment that lists the files in conflict and their commits.
@@ -80,8 +85,9 @@ and another PR was merged before devloop could merge it, needs a new review of t
 - the new head differs from it only by merges of `origin/main`: walking back from the new head,
   each commit up to the approved one (at most 10) has two parents, the second a commit of
   `main`, and exactly the tree `git merge-tree --write-tree` writes, without conflicts, for those
-  two parents. A merge whose conflicts the implementer resolved, a fix, or any other commit
-  changes the PR's content, and the review counts as before;
+  two parents. A merge whose conflicts the implementer resolved follows the rule of the next
+  paragraph; a fix, or any other commit changes the PR's content, and the review counts as
+  before;
 - the review is not a `/devloop rereview`, and CI did not fail on the new head (a CI round
   counts).
 
@@ -91,6 +97,33 @@ approved round and its head (`from`), and its comment says it does not count. Ev
 after a new approval is free in the same way. The limit stays the same for the implementer's
 changes: a request for changes in that round needs a fix, whose review is a round that counts,
 so with no round left it goes to `agent:needs-operator` at once.
+
+**Sync with conflicts after approval** (#458). A PR approved and waiting only for its merge (by
+devloop, or by the operator) can conflict with a later merge into `main`; the implementer
+resolves the conflicts in a [sync](#conflicts-with-main), and the new head needs a review. The
+round limit stops fix cycles that do not converge, not syncs, so that review **starts even with
+no round left** when, as above, the latest round is complete and approved a head, the same for
+every reviewer, the review is not a `/devloop rereview` and CI did not fail on the new head, and:
+
+- the new head differs from the approved one only by merges of `main` (each commit up to it,
+  at most 10, has two parents, the second a commit of `main`);
+- each of those merges whose tree is not the one git writes without conflicts is the head of a
+  `sync` marker written by the implementer's identity: a merge someone else resolved may change
+  anything, and its review counts as before.
+
+The review records `resync` with the reason `resync_conflicts`, the approved round and its head
+(`from`). It does not count against `max_review_rounds` **only if it approves**: the PR goes back
+to `agent:ready-to-merge` (or to the operator's merge, as before) without a `round_limit`
+escalation, and the round is listed among those that do not count, and in the total of
+`devloop status`. If it opens blocking findings (a request for changes, a CI failure joining it,
+or a request for the operator) it counts: with no round left the PR goes to `round_limit` (or to
+the supervisor as `round_grantable`, with the [rounds delegation](guide.md#granting-a-review-round)),
+as for any round beyond the limit; with rounds left the fix follows as usual. While the round
+waits for its second reviewer at level 2 it does not count yet, unless a reviewer asked for the
+operator, so that the other reviewer can join it. If `main` advances touching the PR before the
+second reviewer, the round that [replaces it](reference.md#when-main-advances-during-a-round)
+records `restarts` and the same `resync` too: it reviews the same change, and does not count
+under the same condition (the same holds for the resyncs of #235 and #252).
 
 The same holds when the head did not move at all (#252). Before promoting or merging, the
 dispatcher recomputes the receipt; when `main` advanced touching a file of the PR (or the
@@ -139,8 +172,11 @@ from the save to `git apply`, so line ends (CRLF) and text that is not UTF-8 com
 only the copy in a prompt is decoded, with replacement characters. The escalation names that
 file and lists its files with the lines added and removed. The retry of the same step (same
 label) recreates the worktree, then, before the agent starts, the dispatcher applies the patch
-with `git apply`, all or nothing, without staging it. If it does not apply, for example because
-the base changed the same lines, the worktree stays as created, and the prompt carries the patch
+with `git apply`, all or nothing, without staging it. A patch that does not apply as it is,
+because the base moved since the turn (#475), is merged three ways (`git apply --3way`) in a
+separate index, from the blobs it records, and applied only when that merge is clean. If it still
+does not apply, for example because the base changed the same lines, the worktree stays as
+created, and the prompt carries the patch
 as text (at most 100,000 characters) with its files. Either way the prompt says that the
 previous turn timed out, that its changes must be examined before going on, and to run the
 targeted tests before any long suite. The patch is taken once: the file is renamed
@@ -171,8 +207,9 @@ already recorded is not a new round, and neither is a sync with `main` nor the s
 a round already open. A round that `main` advancing interrupted before it was complete does not
 count either (see [When `main` advances](reference.md#when-main-advances-during-a-round)): the round that
 replaces it counts once. Nor does the review of an approved head that only a sync without
-conflicts moved, nor the new review of an approved head whose approval the base revoked (see
-[Resync after approval](#resync-after-approval)). Round numbers stay progressive, because they also name the findings
+conflicts moved, nor the new review of an approved head whose approval the base revoked, nor
+the approving review of an approved head that a sync with conflicts the implementer resolved
+moved, which also starts beyond the limit (see [Resync after approval](#resync-after-approval)). Round numbers stay progressive, because they also name the findings
 (`round/reviewer/ID`), so the round shown as the limit (`round 4 of at most 4`, `round 4/4`) is
 `max_review_rounds` plus the rounds that did not count. The rounds the supervisor granted to the
 PR with `/devloop grant-round` (#405, [Granting a review round](guide.md#granting-a-review-round))
@@ -300,7 +337,8 @@ was removed and applied again, if a comment starting with the attribution header
 identity allowed to write devloop records, came after the check (another escalation, or
 anything that may be one, marker or not; the dispatcher's [ledger records](#evidence-and-telemetry),
 such as the turn of a recheck, and its [supervision traces](#supervision-trace), such as the
-answer to a command that does not apply, and its `recheck` answers do not count, nor, since #468,
+answer to a command that does not apply, and its `recheck` and (#483) `approve` answers do not
+count, nor, since #468,
 a comment of the supervisor's identity that carries neither a `notice` nor a `preflight`
 marker), or if the attribution is uncertain. A comment from
 anyone else, header or not, never touches the attribution. A label already present when the
@@ -560,6 +598,15 @@ supervisor. Those keep `agent:working` and the wait, and their block holds the r
 - a PR whose latest record is of `fix` on its current head runs no fix while `origin/main` is at
   `base`. A base that cannot be read keeps the wait.
 
+When those failed tests pass in the CI of the base commit (all its checks concluded with
+`success`; a `skipped` or `neutral` one does not count, #497), the dispatcher writes no
+`basebroken` record: it escalates to the operator with class `host_tests` (critical), whose
+`notice` marker adds `host_tests`: `step`, `base`, `ci` (the link to the checks of the base
+commit), `count` and `cases`, as above. Nothing waits for `main`. While a `basebroken` record
+holds, the dispatcher reads the CI of its `base` again at each tick: once green, the issue or the
+PR escalates `host_tests` the same way, with the `count` and the `cases` of the record (the issue
+unless one of the blocks above holds it).
+
 The alert of a [red CI on `main`](guide.md#red-ci-on-main) is a dispatcher comment on
 `[run].alert_issue` without a record; with the outbox its publication covers `main_red:<sha>`, so
 that an uncertain outcome is reconciled and not published twice.
@@ -577,7 +624,9 @@ move `current`, with `sha`, `ref`, `at` and the `reason` the alert shows, never 
 host), and the `pr` marker of a PR opened by the implementer it names. It reads the comments of the repository,
 not the native reviews: a round whose reviews are native reviews is counted from its
 [round register](#round-register), once a review turn of it succeeded or its CI was recorded. The
-records of a [fix register](#fix-register) are read one by one, and open no round. On `[report] issue` it writes two kinds of
+records of a [fix register](#fix-register) are read one by one, and open no round. The
+permissions denied per model (#479) are the `turn` records of the day with `denied_permission`,
+counted by their `model`; a turn recorded before the field is not counted. On `[report] issue` it writes two kinds of
 `report` record, both with the day (`YYYY-MM-DD`, UTC):
 
 - `today`, at the end of the issue body: the day the body shows. It counts only when the
@@ -681,17 +730,32 @@ the merge changes for it; without the citation, or with a deviation, it is `need
 before. Since #472 the rule itself is only the "Trust policy" section of the two prompts and the
 conditions that decide when a change needs the operator: a change to `NON_CRITICAL`, to a
 `/devloop` command or to a condition of the merge that a decision names explicitly follows the
-first point, and a comment in which the operator approves the change on the issue counts as a
-decision. devloop lists the comments that may: written in person by a trusted user (no
-attribution header), not by the supervisor's identity nor by an app of devloop, after the latest
-change of the issue's title or body (`lastEditedAt` and the `renamed` events) and before the
-first `labeled` event of `agent:working` after it, each written (`created_at`) after the change
-and last changed (`updated_at`) before the takeover, a bound in the same second excluded, a
-comment without both times excluded too; a reviewer gets none when no such takeover follows the
-latest change. Those comments, by author and `created_at`, enter the hash of the request, so a
-readiness check that relied on one is not reused once a change of the text, even undone,
-drops it. All of
-it is described in [Changes to the trust policy](guide.md#changes-to-the-trust-policy). The rule
+first point, and a decision of the operator on the issue counts. Since #483 that decision is a
+command: a comment whose first line is `/devloop approve`, followed by the text of the decision;
+an approval without it decides nothing. devloop lists the commands that count: written in
+person by a trusted user (no attribution header), not by the supervisor's identity nor by an
+app (one of devloop's or any `[bot]` login), after the latest change of the issue's title or
+body (`lastEditedAt` and the `renamed` events) and before the first `labeled` event of
+`agent:working` after it, each written (`created_at`) after the change and last changed
+(`updated_at`) before the takeover, a bound in the same second excluded, a comment without both
+times excluded too; a reviewer gets none when no such takeover follows the latest change. The
+history of the issue is read in full, 100 events a page (`GitHub.issue_history`, whose
+`complete` is True only when its last page says there is no other): a read that stops before
+then admits no command. Those commands, by author, `created_at` and text, enter the hash of the
+request, so a readiness check that relied on one is not reused once a change of the text, even
+undone, drops it, nor once the command is rewritten. A `/devloop approve` of an app, one after
+the attribution header, one not on the first line and one without a text are refused and
+answered once, by the id of their comment, on an issue whose readiness check devloop reads: the
+readiness check that runs next lists them in its comment, with the reason, and their ids in the
+`refused` field of its `preflight` marker. When no check is planned for the issue (the command
+of an app changes neither the hash of the request nor anything else), the `approve_refused`
+action answers them with a dispatcher comment ending with an `approve` marker, `comments` being
+the ids it answers. That answer is a devloop record that spends no `/devloop recheck` and
+leaves the readiness hash and the block's attribution as they are; only the dispatcher's
+identity writes it. One of an untrusted author is ignored. The prompts list what stays with the operator
+whatever a decision prescribes (#483): the quorum and the choice of the reviewers, the checks
+of `operator_only_paths` and `protected_paths`, the names of the labels of hold, of escalation
+and of merge, `trusted_users` and the "Trust policy" section. All of it is described in [Changes to the trust policy](guide.md#changes-to-the-trust-policy). The rule
 lives only in the prompts: the schema `advisory.json` does not change, `review.json` only gains
 `operator_reason` (#434) for it, `preflight.json` gains `trust_policy` and
 `trust_policy_reason` (#472, see [Readiness check records](#readiness-check-records)), and devloop
@@ -1050,7 +1114,7 @@ readiness check, on the PR for review, fix, sync and CI. The turns of a review r
 | Record | When | Content |
 |---|---|---|
 | `request` | The issue goes from `agent:ready` to `agent:working` | SHA-256 of title and body, author and time of the trusted `labeled` event of `agent:ready`, ids of the trusted comments given to the implementer, time of the takeover, and the key of the implementer chosen for the issue (`implementer`, #407: an `impl:<kind>` label, the area map or the default, [the choice of the implementer](reference.md#the-implementer-app-and-the-keys-by-role)). It is a snapshot **at the takeover**, not at the time of the label |
-| `turn` | Every invocation of an agent CLI, retries, fallback models and failures included: implement, fix, sync with an agent, review, readiness check, conclave call, [advisory review](guide.md#advisory-review-for-the-operator) (`advisory`, on the PR, in a comment of its own) | Kind, agent, GitHub identity (none: the operator's `gh` login), configured model and effort (for a fallback, the fallback model and the model it replaces), real model, start, end, duration, outcome (`success`, `failure`, `unavailable`), the error if any, telemetry, and the last command the turn ran or started when the CLI exposes it (`last_command`: only codex, from the `command_execution` items of `--json`; cleaned like the tail of a timeout, on one line, at most 200 characters; absent otherwise), also for a turn that timed out. With `attempt_identity` on, the id of the [attempt](#attempt-identity) the turn belongs to (`attempt`; absent for a turn of no attempt) |
+| `turn` | Every invocation of an agent CLI, retries, fallback models and failures included: implement, fix, sync with an agent, review, readiness check, conclave call, [advisory review](guide.md#advisory-review-for-the-operator) (`advisory`, on the PR, in a comment of its own) | Kind, agent, GitHub identity (none: the operator's `gh` login), configured model and effort (for a fallback, the fallback model and the model it replaces), real model, start, end, duration, outcome (`success`, `failure`, `unavailable`), the error if any, telemetry, and the last command the turn ran or started when the CLI exposes it (`last_command`: only codex, from the `command_execution` items of `--json`; cleaned like the tail of a timeout, on one line, at most 200 characters; absent otherwise), also for a turn that timed out; for an agy turn stopped on a denied permission, the permission as agy names it (`denied_permission`, for example `command`; absent for any other turn) and the command line agy reports as denied (`denied_command`: from the last action of `denied_actions`, cleaned the same way; absent when agy does not report it, #479). With `attempt_identity` on, the id of the [attempt](#attempt-identity) the turn belongs to (`attempt`; absent for a turn of no attempt) |
 | `verification` | Every test command the dispatcher runs after a writing turn (none when the [local tests](reference.md#local-tests) select nothing), and the full suite it runs before a review of a head without CI, or before the promotion of an approval given while no CI was known | Command, outcome, duration, the tree hash before and after the test, and the commit (none before a review) |
 | `event` | The CI of a head (`ci_round`): a failed CI round, the checks a review round saw whatever its verdict (`approve`, `request_changes` or `needs_operator`), or the passing checks read again just before the PR is promoted to `agent:ready-to-merge` (also at level 0); a sync without an agent, or the merge of `main` before a fix (`sync`) | For the CI, the head, the state (`fail`, `pass`, or `none` without checks), the review round (none at level 0) and each check with its outcome, the id of its GitHub Actions run (none for a commit status or a check outside Actions) and its duration in seconds (`duration_s`: none while it runs and for a commit status, #300). Every CI round also records `tests`, the [summary of the suite](reference.md#summary-of-the-ci-in-the-prompts) that the dispatcher reads for the review and fix prompts (read again from the job logs when a promotion records the round, for instance after a review that saw the CI pending): for each job whose log holds the final lines of `scripts/run-tests.py`, its name with `ran` and `slowest`, and for a job whose log could not be read, its name with `log: unavailable`; absent when no job has either, as always when the project declares no format of its CI logs (`[tests] ci_log_format`, ADR 0006, R5: no log is read). The same checks read again for the same head and round are not recorded twice, a new run is. A failure that joined a round that had approved its head carries `voided_approval: true` (#359). For a sync, the merged base commit and the old and new heads |
 

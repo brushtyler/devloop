@@ -31,8 +31,8 @@ from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, CAPACITY, CAPACITY_
                           DESIGN_LABEL, ESCALATE, GRANT_BUDGET, GRANT_ROUND, ISSUE_STEPS,
                           MAX_CAPACITY, MAX_RETRIES, MERGED_ISSUE, PREFLIGHT_DEFAULT, RETRY,
                           RETRY_STEPS, ROUND_GRANTABLE, SYNC_FAILED, TOOL_FAILURE,
-                          capacity_arguments, critical, preflight_class, retries_done,
-                          supervisor_command)
+                          capacity_arguments, changed_input, critical, preflight_class,
+                          retries_done, supervisor_command)
 from .workspace import WorkspaceError
 
 # Hold and release a merge in ``auto`` mode (#172): the first line of a comment, after the
@@ -241,7 +241,8 @@ class SupervisionMixin:
 
     def _current_key(self, number, key, pr):
         """The key ``key`` would have now, for the same step (and reviewer) on issue or PR
-        ``number``: a retry of a superseded input is refused."""
+        ``number``: a retry of a superseded input is refused (``changed_input``, which leaves
+        out the base of an implementation, #475)."""
         if pr is not None:
             current = {'step': key.get('step'), 'head': self.gh.pr_head(number)}
             if 'reviewer' in key:
@@ -405,7 +406,8 @@ class SupervisionMixin:
         - ``grant-budget``: only for a ``budget_grantable`` escalation of an issue or a PR
           (``_grant_budget``, #411).
         - ``retry``: only for ``tool_failure`` and ``sync_failed``, and only while the input of
-          the step is the one that failed (the key of the escalation). A PR goes back to the
+          the step is the one that failed (the key of the escalation; for ``implement`` its
+          request, not its base, #475: ``retry_input``). A PR goes back to the
           label of its step, and the next tick runs it; an issue's step runs now. Retries
           write no review record, so they count no round. A retry of an issue blocked by an
           open issue (#277) waits, unspent, until the last block closes. After
@@ -561,11 +563,13 @@ class SupervisionMixin:
                                      f'supervisore possa ripetere: `/devloop {name}` di `{by}` è '
                                      'stato rifiutato.', 'supervisor_refused', human_remove)
         current = self._current_key(number, key, target if is_pr else None)
+        # The base of an implementation does not bind its retry (#475): the step starts again
+        # from the current base with the saved work of its timed-out turn reapplied.
+        changed = changed_input(current, key)
 
         def superseded():
             return trace('refused', 'rifiutato: l\'input del passo è cambiato dopo '
-                         'l\'escalation (' + ', '.join(f'`{k}`' for k in sorted(current)
-                                                        if current[k] != key.get(k))
+                         'l\'escalation (' + ', '.join(f'`{k}`' for k in changed)
                          + f'), quindi il comando si riferisce a un input superato. {stays}\n\n'
                          + self._supervisor_resume(escalation, is_pr, superseded=True))
 
@@ -577,7 +581,7 @@ class SupervisionMixin:
         # review and policy records the level recorded earlier would be lost. A PR whose head
         # moved is refused first: its merge mode would be the one of another diff.
         if is_pr:
-            if current != key:
+            if changed:
                 return superseded()
             target = self._fresh_pr(target, labels, fresh, comments)
         route, why = self._supervised(number, cls, step, target if is_pr else None,
@@ -588,7 +592,7 @@ class SupervisionMixin:
             return self._to_operator(number, 'Il supervisore non può più decidere questa '
                                      f'escalation: {why}. `/devloop {name}` di `{by}` è stato '
                                      'rifiutato.', 'supervisor_refused', carried_remove, carry)
-        if current != key:
+        if changed:
             return superseded()
 
         def limit(done):
@@ -1431,11 +1435,11 @@ class SupervisionMixin:
                           'ripeterne il passo duplicherebbe il lavoro',
                           'Se è risolta va chiusa; se serve altro lavoro, va aperta una nuova '
                           'issue.')
-        current = self._current_key(number, key, target if is_pr else None)
-        if current != key:
+        # As for the supervisor, the base of an implementation does not bind its retry (#475).
+        changed = changed_input(self._current_key(number, key, target if is_pr else None), key)
+        if changed:
             return refuse('l\'input del passo è cambiato dopo l\'escalation ('
-                          + ', '.join(f'`{k}`' for k in sorted(current)
-                                      if current[k] != key.get(k))
+                          + ', '.join(f'`{k}`' for k in changed)
                           + '), quindi il comando si riferisce a un input superato', RESUME)
 
         def limit(done):
