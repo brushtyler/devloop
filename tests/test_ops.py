@@ -319,11 +319,12 @@ class R3MigrationGuideTests(unittest.TestCase):
 
     def test_the_clone_is_updated_as_devloop_before_the_pin_and_the_restart(self):
         # #455: the launcher comes from devloop's clone, not from the pinned copy; an old clone
-        # does not pass --project-config. A fast-forward, as devloop, before pin and restart.
+        # does not pass --project-config. Updated as devloop, before pin and restart; the clone
+        # is in detached HEAD, so a checkout of origin/main, not a pull (#490).
         commands = self.commands()
         clone = self.CLONE.rstrip('/')
         fetch = f'sudo -u devloop -H git -C {clone} fetch origin'
-        merge = f'sudo -u devloop -H git -C {clone} merge --ff-only origin/main'
+        merge = f'sudo -u devloop -H git -C {clone} checkout --detach origin/main'
         self.assertIn(fetch, commands)
         self.assertIn(merge, commands)
         pins = [i for i, line in enumerate(commands) if line.endswith(' pin origin/main')]
@@ -405,6 +406,141 @@ class R3MigrationGuideTests(unittest.TestCase):
                                ('ALERT: 3 consecutive ticks failed', 'consecutive ticks failed')):
             self.assertIn(quoted, section)
             self.assertIn(source, devloop)
+
+
+class RootStepsGuideTests(unittest.TestCase):
+    """ops/host/migrate.md (#490): the scripts of ops/host run as root from the operator's
+    checkout, never from devloop's clone, which devloop can write; devloop's clone, in detached
+    HEAD, is updated with a checkout of origin/main, never with a pull. And the section that
+    turns on the agent user (#415)."""
+
+    CLONE = '/home/devloop/ssdlc'
+    OPERATOR = '/root/repos/ssdlc'
+    SECTIONS = ('## Migrazione di R3 su un host attivo',
+                '## File delle CLI di root sull\'utente degli agent (#438)',
+                '## Attivazione dell\'utente degli agent (#415)')
+    ACTIVATION = '## Attivazione dell\'utente degli agent (#415)'
+
+    def text(self):
+        return (OPS / 'host/migrate.md').read_text(encoding='utf-8')
+
+    def section(self, heading):
+        text = self.text()
+        start = text.index(f'\n{heading}\n')
+        end = text.find('\n## ', start + 1)
+        return text[start:] if end < 0 else text[start:end]
+
+    @staticmethod
+    def commands(text, inline=True):
+        """The commands of ``text``: the lines of its shell blocks, with their continuation
+        lines joined, and its inline code (with ``inline``)."""
+        lines = []
+        for block in re.findall(r'```bash\n(.*?)```', text, re.S):
+            block = re.sub(r'\\\n\s*', '', block)
+            lines += [line.strip() for line in block.splitlines() if line.strip()]
+        if inline:
+            prose = re.sub(r'```.*?```', '', text, flags=re.S)
+            lines += [' '.join(code.split())
+                      for code in re.findall(r'`([^`\n]+(?:\n[^`\n]+)*)`', prose)]
+        return lines
+
+    def test_no_root_command_runs_a_script_of_devloops_clone(self):
+        for path in ('host/migrate.md', 'README.md'):
+            text = (OPS / path).read_text(encoding='utf-8')
+            for command in self.commands(text):
+                with self.subTest(path=path, command=command):
+                    if command.startswith('sudo -u devloop ') or \
+                            command.startswith('sudo -u devloop-agent '):
+                        continue  # not as root
+                    self.assertNotIn(f'{self.CLONE}/ops/', command)
+
+    def test_no_pull_on_devloops_clone(self):
+        text = self.text()
+        self.assertNotIn('pull --ff-only', text)
+        for command in self.commands(text):
+            if self.CLONE in command and ' git ' in f' {command} ':
+                with self.subTest(command=command):
+                    self.assertNotIn(' pull', command)
+                    self.assertNotIn('merge --ff-only', command)
+
+    def test_the_sections_use_the_operators_checkout_and_a_detached_checkout(self):
+        detach = f'sudo -u devloop -H git -C {self.CLONE} checkout --detach origin/main'
+        fetch = f'sudo -u devloop -H git -C {self.CLONE} fetch origin'
+        for heading in self.SECTIONS:
+            with self.subTest(section=heading):
+                commands = self.commands(self.section(heading))
+                self.assertIn(fetch, commands)
+                self.assertIn(detach, commands)
+                self.assertLess(commands.index(fetch), commands.index(detach))
+                # Every script of ops/host runs from the operator's checkout, by its full path.
+                scripts = [c for c in commands if re.search(r'\bops/host/[\w-]+\.sh\b', c)]
+                for command in scripts:
+                    self.assertTrue(command.startswith(f'sudo bash {self.OPERATOR}/ops/host/'),
+                                    command)
+                if heading != self.SECTIONS[0]:
+                    self.assertTrue(scripts, heading)
+                    for line in (f'git -C {self.OPERATOR} fetch origin',
+                                 f'git -C {self.OPERATOR} checkout --detach origin/main',
+                                 f'test -f {self.OPERATOR}/ops/params.env'):
+                        self.assertIn(line, commands)
+                        # The operator's checkout is updated before its scripts run.
+                        self.assertLess(commands.index(line), commands.index(scripts[0]))
+        section = ' '.join(self.section(self.SECTIONS[1]).split())
+        self.assertIn('**come root dal checkout dell\'operatore**', section)
+        self.assertIn('manca `ops/params.env`', section)
+
+    def test_the_activation_has_every_step_and_the_rollback(self):
+        text = self.section(self.ACTIVATION)
+        commands = self.commands(text)
+        setup = f'sudo bash {self.OPERATOR}/ops/host/setup-agent-user.sh'
+        overlay = ('sudo -u devloop -H "${EDITOR:-vi}" '
+                   '/home/devloop/ssdlc/.ssdlc/devloop/config.local.toml')
+        steps = [
+            'sudo systemctl stop devloop',
+            f'{setup} --unseal',
+            'sudo -iu devloop-agent /home/devloop-agent/.local/bin/claude',
+            'sudo -iu devloop-agent /home/devloop-agent/.local/bin/codex',
+            'sudo -iu devloop-agent /home/devloop-agent/.local/bin/agy',
+            setup,
+            overlay,
+            f'sudo bash {self.OPERATOR}/ops/host/check-host.sh --no-apps',
+            'sudo systemctl start devloop',
+        ]
+        at = -1
+        for step in steps:
+            with self.subTest(step=step):
+                self.assertIn(step, commands[at + 1:])
+                at = commands.index(step, at + 1)
+        # The versions: devloop's before the installation, devloop-agent's after, the same.
+        versions = [c for c in commands if c.endswith('--version')]
+        self.assertEqual(len(versions), 2, versions)
+        self.assertIn('sudo -u devloop -H env PATH=/home/devloop/.local/bin:', versions[0])
+        self.assertIn('sudo -u devloop-agent -H /home/devloop-agent/.local/bin/$cli', versions[1])
+        self.assertLess(commands.index(versions[0]), commands.index(f'{setup} --unseal'))
+        self.assertLess(commands.index(f'{setup} --unseal'), commands.index(versions[1]))
+        self.assertLess(commands.index(versions[1]), commands.index(steps[2]))
+        # The default PATH of the unit is the one the guide uses for devloop's CLIs.
+        lib = (OPS / 'lib.sh').read_text(encoding='utf-8')
+        self.assertIn(': "${DEVLOOP_PATH:=$DEVLOOP_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin}"',
+                      lib)
+        self.assertIn('PATH=/home/devloop/.local/bin:/usr/local/bin:/usr/bin:/bin', versions[0])
+        # The installation is the ops guide's, with the same method and versions.
+        flat = ' '.join(text.split())
+        self.assertIn('(../README.md#5-utente-degli-agent-e-cli)', flat)
+        self.assertIn('**con lo stesso metodo e le stesse versioni**', flat)
+        self.assertIn('### 5. Utente degli agent e CLI', (OPS / 'README.md').read_text())
+        # The key in the overlay, the check and the rollback.
+        self.assertIn('```toml [agent_user] name = "devloop-agent" ```', flat)
+        self.assertIn('**Rollback.**', text)
+        rollback = self.commands(text[text.index('**Rollback.**'):], inline=False)
+        self.assertEqual(rollback, ['sudo systemctl stop devloop', overlay,
+                                    'sudo systemctl start devloop'])
+        script = (OPS / 'host/check-host.sh').read_text(encoding='utf-8')
+        self.assertIn('--no-apps', script)
+        self.assertIn('non imposta [agent_user] name', script)
+        # The ops guide links the section.
+        self.assertIn('(host/migrate.md#attivazione-dellutente-degli-agent-415)',
+                      (OPS / 'README.md').read_text(encoding='utf-8'))
 
 
 class ManifestTests(unittest.TestCase):
