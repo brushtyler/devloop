@@ -605,6 +605,88 @@ class StartupCheckTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs['git_dir'], Path('/repo/.git'))
 
 
+class NoAgentUserWarningTests(unittest.TestCase):
+    """#490: with ``[agent_user] name`` empty devloop warns, once on ``alert_issue``, that the
+    agents run as the dispatcher's user, and goes on."""
+
+    ALERT_ISSUE = 50
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.logs, self.comments = [], []
+        self.gh = SimpleNamespace(comment=lambda n, body: self.comments.append((n, body)))
+
+    def warn(self, off=True, alert_issue=ALERT_ISSUE, gh=None):
+        cli.agent_user_warning(off, alert_issue, self.tmp, gh or self.gh, out=self.logs.append)
+
+    def test_the_warning_is_logged_each_time_and_published_once(self):
+        self.warn()
+        self.warn()
+        self.assertEqual(len([line for line in self.logs if '[agent_user] name is empty' in line]),
+                         2)
+        (number, body), = self.comments
+        self.assertEqual(number, self.ALERT_ISSUE)
+        self.assertIn('## Agent senza utente dedicato', body)
+        self.assertIn('Attivazione dell\'utente degli agent (#415)', body)
+        self.assertNotIn(str(self.tmp), body)
+        self.assertTrue((self.tmp / cli.AGENT_USER_ALERTED).exists())
+        # The section the alert names is in the guide.
+        guide = (Path(__file__).resolve().parent.parent / 'ops/host/migrate.md').read_text(
+            encoding='utf-8')
+        self.assertIn('\n## Attivazione dell\'utente degli agent (#415)\n', guide)
+
+    def test_an_agent_user_forgets_the_alert_and_a_later_return_is_reported_again(self):
+        self.warn()
+        self.warn(off=False)
+        self.assertFalse((self.tmp / cli.AGENT_USER_ALERTED).exists())
+        self.assertEqual(len(self.logs), 2)  # the warning and its publication, nothing more
+        self.warn()
+        self.assertEqual(len(self.comments), 2)
+
+    def test_without_an_alert_issue_or_with_a_failing_comment_it_logs(self):
+        self.warn(alert_issue=0)
+        self.assertEqual(self.comments, [])
+        self.assertIn('agent_user: no [run].alert_issue is configured: no alert for the agent '
+                      'user', self.logs)
+
+        def fail(number, body):
+            raise RuntimeError('ghs_secret')
+        self.warn(gh=SimpleNamespace(comment=fail))
+        self.assertIn(f'agent_user: the alert on #{self.ALERT_ISSUE} could not be published '
+                      '(RuntimeError)', self.logs)
+        self.assertFalse(any('ghs_secret' in line for line in self.logs))
+        self.warn()  # not published: tried again at the next start
+        self.assertEqual(len(self.comments), 1)
+
+    def start(self, *argv, off=True):
+        dispatcher = SimpleNamespace(tick=mock.Mock(return_value=[]), ws=mock.Mock(),
+                                     agent_user_off=off, gh=self.gh)
+        cfg = SimpleNamespace(run=config.RunPolicy(alert_issue=self.ALERT_ISSUE))
+        with mock.patch.object(cli, 'build', return_value=(cfg, self.tmp, dispatcher)), \
+                mock.patch.object(cli, 'log', self.logs.append), \
+                mock.patch.dict('os.environ'):
+            cli.main(list(argv))
+        return dispatcher
+
+    def test_devloop_warns_once_at_the_start_and_goes_on(self):
+        dispatcher = self.start('tick')
+        dispatcher.tick.assert_called_once()
+        self.assertTrue(any('[agent_user] name is empty' in line for line in self.logs),
+                        self.logs)
+        (number, body), = self.comments
+        self.assertEqual(number, self.ALERT_ISSUE)
+        # The next start logs it again and publishes nothing new.
+        self.start('tick').tick.assert_called_once()
+        self.assertEqual(len(self.comments), 1)
+
+    def test_no_warning_with_an_agent_user_nor_from_a_dry_run(self):
+        self.start('tick', off=False)
+        self.start('tick', '--dry-run')
+        self.assertEqual(self.comments, [])
+        self.assertFalse(any('[agent_user] name is empty' in line for line in self.logs))
+
+
 ATTACK = r'''#!/bin/bash
 # A CLI that, in its turn, tries to change what the turns after it use (#438).
 cat >/dev/null
