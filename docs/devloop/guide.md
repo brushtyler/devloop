@@ -2231,6 +2231,12 @@ a host already in service is in
   nothing in `.git` nor the directories that hold the worktrees and its turns, and that it can
   write the directories devloop makes for its turns; otherwise it refuses to start and says
   what is wrong. `[agent_user] check = false` skips the check, in development only.
+- Before it, also with `check = false`, devloop checks that the environment it builds reaches
+  `devloop-agent` through `sudo -E` (#496), and otherwise refuses to start and says why.
+  `sudo` must be sudo 1.9: sudo-rs, the default of Ubuntu, ignores `-E` also with `SETENV`, so
+  the agents would run without the isolated environment. The fix, as root:
+  `update-alternatives --set sudo /usr/bin/sudo.ws`; `check-host.sh` reports sudo-rs as an
+  error.
 - One user runs implementers and reviewers, so a turn must not change what later turns use
   (#438, decision of the operator): the instructions, the configuration and the binaries of the
   CLIs are root's, and `devloop-agent` writes only its credentials, sessions, caches and logs.

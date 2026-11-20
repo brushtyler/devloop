@@ -11,7 +11,10 @@ quando quello vecchio è fermo e non ripartirà.
 
 1. **Preparare la macchina nuova** senza avviare nulla: `setup-devloop.sh`,
    `setup-agent-user.sh` e `setup-supervisor.sh` ([ops/README.md](../README.md)). Il servizio viene installato ma non
-   avviato.
+   avviato. `sudo` deve essere sudo 1.9, non sudo-rs, il default di Ubuntu, che ignora `sudo -E`
+   e farebbe girare gli agent senza l'ambiente che devloop prepara (#496): come root,
+   `update-alternatives --set sudo /usr/bin/sudo.ws`, poi `sudo --version | head -n 1` dice
+   `Sudo version 1.9…` ([ops/README.md](../README.md#piattaforma-verificata)).
 2. **Fermare devloop sulla macchina vecchia** e attendere la fine delle azioni in corso:
 
    ```bash
@@ -454,9 +457,13 @@ aggiorna come `devloop`; ogni comando dice l'utente con cui gira.
    sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps
    ```
 
-9. **Riavvio**: `sudo systemctl start devloop`. All'avvio devloop verifica come `devloop-agent`
-   che non legga le chiavi, lo `state_dir` e l'overlay, e che non possa cambiare i file delle sue
-   CLI; se qualcosa non va non parte e dice perché in
+   Con sudo-rs (`ERRORE: sudo è sudo-rs …`, `ERRORE: l'ambiente non arriva a devloop-agent con
+   sudo -E …`) gli agent girerebbero senza l'ambiente che devloop prepara (#496): come root,
+   `update-alternatives --set sudo /usr/bin/sudo.ws`, poi di nuovo la verifica.
+
+9. **Riavvio**: `sudo systemctl start devloop`. All'avvio devloop verifica che l'ambiente arrivi
+   a `devloop-agent` con `sudo -E` (#496) e, come `devloop-agent`, che non legga le chiavi, lo
+   `state_dir` e l'overlay, e che non possa cambiare i file delle sue CLI; se qualcosa non va non parte e dice perché in
    `/home/devloop/ssdlc/.ssdlc/devloop/run.log` (`sudo tail -n 50
    /home/devloop/ssdlc/.ssdlc/devloop/run.log`). `[agent_user]` è una chiave di fiducia: il
    cambio entra nel journal all'avvio.
