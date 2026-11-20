@@ -58,7 +58,8 @@ MISSING_TEXT = {
     'criteria': 'criteri di accettazione (testo dell\'issue non verificabile)',
 }
 _VERDICT = {'approve': 'approvata', 'request_changes': 'modifiche richieste',
-            'needs_operator': 'decisione dell\'operatore'}
+            'needs_operator': 'decisione dell\'operatore',
+            'unproven': 'nessun finding bloccante con evidenza'}
 _CLOSED = {'resolved': 'risolto', 'withdrawn': 'ritirato'}
 _MAP_STATUS = {'covered': 'coperto', 'not_covered': 'non coperto'}
 # What a receipt keeps of the advisory review of its head (#369).

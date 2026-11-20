@@ -24,7 +24,7 @@ from .context import (_failure_text, _format_conflicts, _format_findings, _revie
                       _start_failure, _template, _trusted_comments, docs_diff_section,
                       docs_map_section, docs_review_section, format_ci_summary,
                       format_fix_requests, format_operator_comments, format_operator_decisions,
-                      format_previous_rounds, prompt_values)
+                      format_previous_rounds, owner_assessments, prompt_values)
 from .github import GitHubError, GitHubUncertain, job_id
 from .hoststep import format_step, render_step
 from .hoststep import latest as latest_host_step
@@ -869,8 +869,9 @@ class ActionsMixin:
             return _template('fix', **prompt_values(cfg), repo=cfg.repo, pr_number=pr.number,
                              issue_number=pr.issue,
                              issue_title=issue['title'], issue_body=issue.get('body') or '',
-                             findings=_format_findings(findings), test_cmd=cfg.test_cmd,
-                             ci_summary=ci_summary,
+                             findings=_format_findings(findings,
+                                                       owner_assessments(pr.reviews)),
+                             test_cmd=cfg.test_cmd, ci_summary=ci_summary,
                              acceptance_criteria=format_criteria(
                                  acceptance_criteria(issue.get('body'))),
                              acceptance_map=format_map(latest_map(pr.meta, pr.fixes)),
@@ -1019,8 +1020,9 @@ class ActionsMixin:
             return _template('fix', **prompt_values(cfg), repo=cfg.repo, pr_number=pr.number,
                              issue_number=pr.issue,
                              issue_title=issue['title'], issue_body=issue.get('body') or '',
-                             findings=_format_findings(findings), test_cmd=cfg.test_cmd,
-                             ci_summary=ci_summary,
+                             findings=_format_findings(findings,
+                                                       owner_assessments(pr.reviews)),
+                             test_cmd=cfg.test_cmd, ci_summary=ci_summary,
                              requests=format_fix_requests(requests),
                              acceptance_criteria=format_criteria(
                                  acceptance_criteria(issue.get('body'))),

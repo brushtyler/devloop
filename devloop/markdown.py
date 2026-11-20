@@ -605,6 +605,8 @@ _VERDICT_TEXT = {
     'approve': 'Approvata',
     'request_changes': 'Modifiche richieste',
     'needs_operator': 'Serve una decisione dell\'operatore',
+    # #481: a request for changes whose blocking findings all lacked evidence.
+    'unproven': 'Nessun finding bloccante con evidenza: non approvata',
 }
 # A ``needs_operator`` for the trust policy (#434).
 _TRUST_TEXT = 'Policy di fiducia: review e merge dell\'operatore'
@@ -624,9 +626,14 @@ def _findings(findings):
     for f in findings:
         # A finding the reviewer marked as one of security (#405, ADR 0005, D5).
         tag = ' *(sicurezza)*' if f.get('security') is True else ''
+        # A blocking finding without evidence, recorded as non-blocking (#481).
+        if f.get('without_evidence') is True:
+            tag += ' *(bloccante senza evidenza: registrato come non bloccante)*'
         lines.append(f'- **{f.get("key") or f["id"]}**{_location(f)}: {f["title"]}{tag}')
         if f['detail']:
             lines.append(f'  {f["detail"]}'.replace('\n', '\n  '))
+        if isinstance(f.get('evidence'), str) and f['evidence'].strip():
+            lines.append(f'  *Evidenza:* {f["evidence"].strip()}'.replace('\n', '\n  '))
         if f['suggested_fix']:
             lines.append(f'  *Correzione suggerita:* {f["suggested_fix"]}'.replace('\n', '\n  '))
     return '\n'.join(lines)
@@ -721,12 +728,15 @@ def fitted(head, text, kind, payload, limit=MAX_BODY):
     return top + neutralize(text)[:room].rstrip('\n') + tail
 
 
-_REVIEW_EVENT = {'approve': 'APPROVE', 'request_changes': 'REQUEST_CHANGES'}
+# ``unproven`` (#481) neither approves nor asks for changes: ``COMMENT``.
+_REVIEW_EVENT = {'approve': 'APPROVE', 'request_changes': 'REQUEST_CHANGES',
+                 'unproven': 'COMMENT'}
 
 
 def native_event(review):
     """The event of the native review that carries ``review``. ``approve`` and
-    ``request_changes`` mirror the verdict. ``needs_operator`` mirrors the reviewer's technical
+    ``request_changes`` mirror the verdict, and ``unproven`` (#481), which does neither, is a
+    ``COMMENT``. ``needs_operator`` mirrors the reviewer's technical
     outcome (#418): ``REQUEST_CHANGES`` while blocking findings of its own stay open, otherwise
     ``APPROVE``, so that its earlier ``REQUEST_CHANGES`` does not block the merge after the
     operator's decision. The body still states the verdict, and devloop keeps the PR with the

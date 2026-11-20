@@ -12,7 +12,8 @@ from dataclasses import dataclass, field, replace
 
 from .config import IMPLEMENTER_LABEL
 from .policy import receipt_of
-from .review import CI, current_round, flow_verdict, open_findings, owner_of, round_verdict
+from .review import (CI, UNPROVEN, current_round, flow_verdict, open_findings, owner_of,
+                     round_verdict)
 from .supervision import BUDGET_GRANTABLE, GRANT_BUDGET, ISSUE_STEPS, RETRY
 
 RECHECK_COMMAND = '/devloop recheck'
@@ -626,8 +627,11 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
         elif lb.review in pr.labels:
             answered = bool(latest) and any(f['round'] == latest[0]['round'] for f in pr.fixes)
             # A trusted user's rereview request voids the recorded verdict for this head.
+            # A round without the explicit approval of a reviewer whose request for changes had
+            # no evidence (#481) is neither replayed nor fixed: the head gets a new review.
+            unproven = verdict == UNPROVEN
             current = (bool(latest) and head == pr.head_sha and not answered
-                       and not pr.rereview and not settled)
+                       and not pr.rereview and not settled and not unproven)
             # A round still waiting for a reviewer continues: it is not a new round.
             partial = current and bool(pending)
             replay = current and not pending
@@ -693,6 +697,8 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
                           else 'the approval has no matching policy receipt' if unbound
                           else 'the acceptance map does not hold' if unmapped
                           else 'every finding of the request for changes is closed' if settled
+                          else 'a reviewer asked for changes without evidence and did not '
+                               'approve' if unproven
                           else 'CI pending: the merge waits for it'
                           if pr.checks == 'pending' or pr.ci_wait
                           else '')

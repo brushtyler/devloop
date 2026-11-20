@@ -44,7 +44,7 @@ ON = dataclasses.replace(CFG, review_policy=dataclasses.replace(CFG.review_polic
 def answer(opinion='dubbi'):
     return {'summary': 'Aggiunge la chiave X.', 'residual_risks': ['La chiave non è validata.'],
             'operator_checks': ['Il default in config.toml.'], 'overlooked': [],
-            'opinion': opinion, 'opinion_reason': 'Manca un test del default.'}
+            'unfounded': [], 'opinion': opinion, 'opinion_reason': 'Manca un test del default.'}
 
 
 class AdvisoryWS(FakeWS):

@@ -1,13 +1,14 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["summary", "residual_risks", "operator_checks", "overlooked", "opinion",
-               "opinion_reason"],
+  "required": ["summary", "residual_risks", "operator_checks", "overlooked", "unfounded",
+               "opinion", "opinion_reason"],
   "properties": {
     "summary": {"type": "string"},
     "residual_risks": {"type": "array", "items": {"type": "string"}},
     "operator_checks": {"type": "array", "items": {"type": "string"}},
     "overlooked": {"type": "array", "items": {"type": "string"}},
+    "unfounded": {"type": "array", "items": {"type": "string"}},
     "opinion": {"type": "string", "enum": ["ok", "dubbi", "contrario"]},
     "opinion_reason": {"type": "string"}
   }
