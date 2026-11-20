@@ -905,7 +905,9 @@ each agy turn its minimal permissions, and treats a stop without output as a fai
   not the change's (#180): the same model runs the same turn once more, in the same directory
   and tick, with `-retry` in its log name. devloop's log reports the permission and the last
   action agy's JSON lists in `denied_actions`, or `target non riportato da agy` when there is
-  none. The retry's prompt (#319) adds, before the `## Shell commands` block, a
+  none, preceded by ``command `<command line>`;`` when agy's JSON reports the command line of
+  that action (#479). The same command line, cleaned as below, is in the turn's
+  [ledger record](protocol.md#evidence-and-telemetry) (`denied_command`). The retry's prompt (#319) adds, before the `## Shell commands` block, a
   `## Denied in the previous attempt` block: what was denied (the command line of the last
   denied action, when agy's JSON reports it, cleaned as the [failure comment](protocol.md#failed-agent-turns)
   cleans commands; for a `command` permission without it, `comando non riportato da agy` with

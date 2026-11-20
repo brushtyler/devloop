@@ -2477,15 +2477,19 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
     def _close_turn(self, entry, outcome, error=None):
         """Close a turn's record with what the CLI attested and the last command its output
-        exposes (#215). A failed write leaves the turn open, and the next tick marks it
+        exposes (#215); for an agy turn stopped on a denied permission, the permission and the
+        command agy reports (#479). A failed write leaves the turn open, and the next tick marks it
         incomplete. If its outcome cannot be written in the journal (#362), with
         ``block_uncertain_turns`` no other turn of its work starts (``_check_turns``): the next
         one of this step, a retry or a fallback, is refused and the step escalates."""
         if entry is None:
             return
+        denied = error if isinstance(error, PermissionDenied) else None
         try:
             self.ledger.close_turn(entry, outcome, getattr(self.runner, 'last_report', None),
-                                   error, getattr(self.runner, 'last_command', None))
+                                   error, getattr(self.runner, 'last_command', None),
+                                   denied.command if denied else None,
+                                   (denied.permission or 'non riportato') if denied else None)
         except GitHubError as exc:
             self.log(f'  turn record on #{entry.number} not closed: {exc}')
 
@@ -2730,10 +2734,13 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
     def _permission_denied(self, candidate, exc, retry):
         """Log an agy turn stopped on a denied permission (``PermissionDenied``, #180) with the
-        permission and its target. Returns None when ``retry``, the turn being run once more;
-        otherwise the error to escalate, which names the permission denied again, the model and
-        what was denied: the command, or ``comando non riportato da agy`` (#319)."""
+        permission and its target, preceded by the command when agy reports it (#479). Returns
+        None when ``retry``, the turn being run once more; otherwise the error to escalate,
+        which names the permission denied again, the model and what was denied: the command, or
+        ``comando non riportato da agy`` (#319)."""
         target = exc.target or 'target non riportato da agy'
+        if exc.command:
+            target = f'command `{exc.command}`; {target}'
         if retry:
             self.log(f'  {candidate.key}: model {candidate.model} denied the '
                      f'"{exc.permission}" permission ({target}); retrying once')

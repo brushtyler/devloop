@@ -1971,8 +1971,11 @@ and writes nothing without `--publish`. The summary lists:
 - the totals: PRs opened and merged that day, review rounds opened that day (each round once,
   on the day of its first review comment or of its [round register](protocol.md#round-register),
   counted once a review turn of the round succeeded or its CI was recorded: the native reviews
-  of the agents with an app are not among the comments the summary reads) and turns run with a
-  fallback model.
+  of the agents with an app are not among the comments the summary reads), turns run with a
+  fallback model, and the permissions headless agy denied, per model (#479): each turn stopped
+  on a denied permission, whether agy reported the command or not, counted under the model it
+  ran with, as in ``Permessi negati per modello: 3 (`<model>`: 2, …)``. Those turns are also
+  among the actions, as failures.
 
 A turn belongs to the day it started, with its whole duration; a merge of devloop to the day
 GitHub reports for it, since its record goes in the comment of the promotion (#338); any other
