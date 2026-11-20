@@ -104,8 +104,8 @@ needs the operator when, and only when, at least one of these three things holds
 1. it goes beyond or against a decision of the operator, or no decision covers it: a decision
    recorded in the section "Decise dall'operatore" of an ADR approved with the
    [cycle of the ADRs](../adr/README.md#ciclo-di-un-adr) and present on `main`, written by the
-   operator in the body of the issue, or a comment in which the operator approves the change on
-   the issue (#472, see below); the points an ADR leaves open are not decisions;
+   operator in the body of the issue, or a `/devloop approve` of the operator on the issue (#472,
+   #483, see below); the points an ADR leaves open are not decisions;
 2. it weakens a check and no decision of the operator authorizes that weakening;
 3. it changes the rule itself: the "Trust policy" section of the review or the advisory review
    prompt, or the conditions that decide when a change needs the operator, even when an ADR asks
@@ -118,12 +118,20 @@ faithful implementation and follows point 1: adding to `NON_CRITICAL` the class
 `round_grantable` that ADR 0005 names (D2, row P5-1 of its plan) does not go to the operator. What
 the decision does not name, such as another class added beside it, still does, under point 1.
 
+Since #483 the prompts list explicitly what point 3 always keeps with the operator, even when a
+decision of the operator, a `/devloop approve` on the issue included, prescribes it: the quorum
+and the choice of the reviewers, the checks of `operator_only_paths` and `protected_paths`, the
+names of the labels of hold, of escalation and of merge, `trusted_users`, and the "Trust policy"
+section itself. A PR that lowers the quorum of a level, or narrows the `operator_only_paths`
+check, goes to the operator for the merge whatever the issue approves; the prompts give it as an
+example.
+
 A **faithful implementation** does not need the operator: the issue cites the section of an ADR
-on `main` (or the decision is in the body of the issue or in an approval of the operator on it),
-and the change carries out the decision with no deviation. The reviewer checks the conformity of
-the whole change to the decision, read on `main` and never in the diff of the PR, and cites it in
-the review (file of the ADR, section and point, or the author and time of the operator's
-comment); its verdict is then the technical one, `approve` or `request_changes`, and devloop
+on `main` (or the decision is in the body of the issue or in a `/devloop approve` of the operator
+on it), and the change carries out the decision with no deviation. The reviewer checks the
+conformity of the whole change to the decision, read on `main` and never in the diff of the PR,
+and cites it in the review (file of the ADR, section and point, or the author and time of the
+operator's command); its verdict is then the technical one, `approve` or `request_changes`, and devloop
 merges the PR like any other of its level. Without the citation the PR needs the operator as
 before; every deviation found needs the operator, with its reason and the decision it departs
 from. The prompts give an example of each case: a conforming implementation of an ADR, a class
@@ -137,17 +145,32 @@ stay with the operator, and a `needs_operator` for a `decision` works as below.
 The operator approves the policy once, on the issue, before the implementation, and not the code
 of every PR:
 
-- **Approval in a comment.** A comment on the issue counts as a decision of the operator for
-  point 1 when a user of `trusted_users` wrote it in person (not starting with the attribution
-  header), not from the supervisor's identity nor from any app of devloop, after the latest change
-  of the title or the body of the issue and before devloop took it on (the first `labeled` event
-  of `agent:working` after that change). devloop lists those comments, with author and time,
-  under "Decisions of the operator on the issue" in the prompts of the readiness check, of the
-  reviewers and of the advisory review; only those count, and whether one approves the change is
-  the agents' to judge. A change of the text after the comment drops it; so does a change of the
-  comment itself after the takeover (its `updated_at`), since the agents read it as it is now: a
-  comment rewritten into an approval after the takeover is not a decision taken before it. The
-  reviewers of a PR whose issue was not taken on after the latest change get none.
+- **Approval with `/devloop approve`** (#483). A decision of the operator on the issue is a
+  command: a comment whose first line is `/devloop approve`, followed by the text of the decision
+  (on the same line or below), for example:
+
+  ```text
+  /devloop approve
+  Approvo la modifica della policy di fiducia descritta qui, punti 1 e 2.
+  ```
+
+  It counts for point 1 when a user of `trusted_users` wrote it in person (not starting with the
+  attribution header), not from the supervisor's identity nor from any app, after the latest
+  change of the title or the body of the issue and before devloop took it on (the first
+  `labeled` event of `agent:working` after that change). Any other comment, an approval written
+  without the command too, is context for the implementer and authorizes nothing. devloop lists
+  the commands that count, with author and time, under "Decisions of the operator on the issue"
+  in the prompts of the readiness check, of the reviewers and of the advisory review; each covers
+  only what its text approves, on the conditions it sets, and that is the agents' to judge. A
+  change of the text after the command drops it; so does a change of the comment itself after
+  the takeover (its `updated_at`), since the agents read it as it is now. The reviewers of a PR
+  whose issue was not taken on after the latest change get none. A `/devloop approve` of the
+  supervisor or of an app, one after the attribution header, one not on the first line and one
+  without a text are refused: the next readiness check says so in its comment, with the reason.
+  The command of a user outside `trusted_users` is ignored.
+- **Complete history** (#483). The bounds above come from the history of the issue, which
+  devloop reads in full, 100 events at a time. When the read stops before the last page, no
+  command counts.
 - **Readiness check.** With `preflight` configured, the check applies the same rule to the issue
   and declares in `trust_policy` whether the change the issue asks for touches the policy:
   `none`, `covered` (a decision of the operator covers it, cited in `trust_policy_reason`) or
@@ -156,10 +179,10 @@ of every PR:
   qui?" and the reason, and the issue goes to `agent:needs-operator` with class
   `operator_decision`, to the operator also in `auto` mode
   ([Readiness check before implementation](#readiness-check-before-implementation)). The
-  operator answers with a comment on the issue: the hash of the request changes and the check
-  runs again. The hash also carries the comments that may record a decision, by author and
-  time: a change of the text undone later leaves title and body as they were but drops those
-  comments, so a check that relied on them is not reused and runs again.
+  operator answers with a `/devloop approve` on the issue: the hash of the request changes and
+  the check runs again. The hash also carries the commands that record a decision, by author,
+  time and text: a change of the text undone later leaves title and body as they were but drops
+  those commands, so a check that relied on them is not reused and runs again.
 - **The merge.** With that decision, a faithful PR with no open finding and green CI is merged by
   devloop like any other of its level, except for the paths of `operator_only_paths`. What no
   decision covers, what goes beyond or against one, an unauthorised weakening and a change of the

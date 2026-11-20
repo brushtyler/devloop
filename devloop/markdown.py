@@ -795,8 +795,10 @@ PREFLIGHT_RESUME = (
     'messo e l\'issue torna in coda.')
 
 
-def render_preflight(record, head, note=''):
-    """The comment of a readiness check (#114): ``record`` is its ``preflight`` marker."""
+def render_preflight(record, head, note='', refused=()):
+    """The comment of a readiness check (#114): ``record`` is its ``preflight`` marker.
+    ``refused``: the ``/devloop approve`` the check did not count as decisions of the operator
+    (#483), as ``(login, time, reason)``, answered here; they are not part of the record."""
     if record['ready']:
         parts = ['## Controllo di prontezza superato', '',
                  'L\'issue è implementabile in una RUN: l\'implementazione può partire.']
@@ -827,6 +829,11 @@ def render_preflight(record, head, note=''):
         reason = record.get('trust_policy_reason', '').strip()
         parts += ['', '**Policy di fiducia:** toccata, coperta da una decisione dell\'operatore.'
                       + (f' {reason}' if reason else '')]
+    if refused:
+        parts += ['', '### `/devloop approve` rifiutati', '',
+                  'Questi comandi non valgono come decisione dell\'operatore:', '']
+        parts += [f'- il commento di `{login}` del {at or "momento non noto"}: {reason}.'
+                  for login, at, reason in refused]
     if note:
         parts += ['', f'> {note}']
     return publishable(head + '\n' + '\n'.join(parts), 'preflight', record)

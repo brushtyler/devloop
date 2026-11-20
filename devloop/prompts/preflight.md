@@ -62,16 +62,20 @@ Declare in `trust_policy`, for the change the issue asks for:
 - `none`: it does not touch the trust policy (the closed list of five points above);
 - `covered`: it touches it, and a decision of the operator covers it with no deviation and
   authorizes every weakening of a check it makes: a decision of an ADR as the rule says, one in
-  the body of the issue, or a comment of the operator that approves the change, listed under
-  "Decisions of the operator on the issue" below. Any other comment, also of a trusted user, is
-  not such a decision;
+  the body of the issue, or a `/devloop approve` of the operator, listed under "Decisions of the
+  operator on the issue" below (#483). Any other comment, also of a trusted user and also one
+  that approves the change without the command, is not such a decision, and a command covers
+  only what its text approves, on the conditions it sets;
 - `uncovered`: it touches it, and no decision of the operator covers it, it goes beyond or
   against one, or it weakens a check that no decision authorizes. A change of the rule itself is
   `uncovered` too, unless a decision of the operator approves it.
 
+A change of the rule, what point 3 lists included, still goes to the operator for the merge
+even when a decision covers it: with `covered`, say so in `trust_policy_reason`.
+
 In `trust_policy_reason` list the parts of the trust policy the change touches, each with its
 point of the closed list, and the decision that covers them (the file, the section and the point
-of the ADR, or the author and the time of the comment) or why none does; `""` with `none`. With
+of the ADR, or the author and the time of the command) or why none does; `""` with `none`. With
 `uncovered` the issue is not ready: devloop adds a gap of kind `operator_decision` with the
 question to the operator and your `trust_policy_reason`, so do not list that gap yourself.
 

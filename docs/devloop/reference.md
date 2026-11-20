@@ -1048,14 +1048,19 @@ unless the same reviewer then approves the latest round as the operator decided 
 rule itself is only the "Trust policy" section of the two prompts and the conditions that decide
 when a change needs the operator: a change to `NON_CRITICAL`, to a `/devloop` command or to a
 condition of the merge that a decision names explicitly is a faithful implementation, merged
-like any other of its level. A comment in which the operator approves the change on the issue
-counts as a decision when a trusted user wrote it in person, not the supervisor's identity nor
-an app of devloop, after the latest change of the issue's text and before the takeover (its
-latest edit too): devloop
-lists those comments under "Decisions of the operator on the issue" in the prompts of the
-readiness check, of the reviewers and of the advisory review. The readiness check declares
-`trust_policy` and blocks, with the question to the operator, an issue whose change no decision
-covers ([Readiness check before implementation](guide.md#readiness-check-before-implementation)).
+like any other of its level. Since #483 a decision of the operator on the issue is only a
+`/devloop approve` command, followed by the text of the decision, that a trusted user wrote in
+person, not the supervisor's identity nor an app, after the latest change of the issue's text
+and before the takeover (its latest edit too); an approval without the command decides nothing,
+and the history of the issue is read in full, or no command counts. devloop lists those commands
+under "Decisions of the operator on the issue" in the prompts of the readiness check, of the
+reviewers and of the advisory review, and the readiness check answers the ones it refuses. The
+quorum and the choice of the reviewers, the checks of `operator_only_paths` and
+`protected_paths`, the names of the labels of hold, of escalation and of merge, `trusted_users`
+and the "Trust policy" section stay with the operator even when a decision prescribes their
+change (#483). The readiness check declares `trust_policy` and blocks, with the question to the
+operator, an issue whose change no decision covers ([Readiness check before
+implementation](guide.md#readiness-check-before-implementation)).
 
 The criterion for a sensitive path: **the code that decides permissions, fencing and
 authorizations goes to level 2**, besides devloop itself and the agents' instructions. So

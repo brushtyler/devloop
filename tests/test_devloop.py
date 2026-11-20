@@ -703,15 +703,18 @@ class GitHubAdapterTests(unittest.TestCase):
     def test_issue_history_is_one_graphql_read(self):
         node = ('{"data":{"repository":{"issue":{"title":"T","body":"B","author":{"login":"a"},'
                 '"lastEditedAt":"2026-11-13T11:00:00Z","editor":{"login":"e"},"timelineItems":'
-                '{"nodes":[{"__typename":"LabeledEvent","createdAt":"t1","actor":{"login":"o"},'
+                '{"pageInfo":{"hasNextPage":false,"endCursor":"c1"},'
+                '"nodes":[{"__typename":"LabeledEvent","createdAt":"t1","actor":{"login":"o"},'
                 '"label":{"name":"agent:ready"}},{"__typename":"RenamedTitleEvent","createdAt":'
                 '"t2","actor":null}]}}}}}')
         gh = self.make([('graphql', (0, node, ''))])
         self.assertEqual(gh.issue_history(7), {
             'title': 'T', 'body': 'B', 'author': 'a', 'last_edited_at': '2026-11-13T11:00:00Z',
-            'editor': 'e', 'labeled': [('agent:ready', 'o', 't1')], 'renamed': [(None, 't2')]})
+            'editor': 'e', 'labeled': [('agent:ready', 'o', 't1')], 'renamed': [(None, 't2')],
+            'complete': True})
         self.assertEqual(len(self.calls), 1)
         self.assertIn('number=7', self.calls[0][0])
+        self.assertNotIn('after=', ' '.join(self.calls[0][0]))
 
     def test_create_pr_leaves_labels_to_the_dispatcher(self):
         gh = self.make([('repos/o/r/pulls', (0, '{"number": 61, "html_url": "u"}', ''))])

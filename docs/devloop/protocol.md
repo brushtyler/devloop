@@ -626,17 +626,26 @@ the merge changes for it; without the citation, or with a deviation, it is `need
 before. Since #472 the rule itself is only the "Trust policy" section of the two prompts and the
 conditions that decide when a change needs the operator: a change to `NON_CRITICAL`, to a
 `/devloop` command or to a condition of the merge that a decision names explicitly follows the
-first point, and a comment in which the operator approves the change on the issue counts as a
-decision. devloop lists the comments that may: written in person by a trusted user (no
-attribution header), not by the supervisor's identity nor by an app of devloop, after the latest
-change of the issue's title or body (`lastEditedAt` and the `renamed` events) and before the
-first `labeled` event of `agent:working` after it, each written (`created_at`) after the change
-and last changed (`updated_at`) before the takeover, a bound in the same second excluded, a
-comment without both times excluded too; a reviewer gets none when no such takeover follows the
-latest change. Those comments, by author and `created_at`, enter the hash of the request, so a
-readiness check that relied on one is not reused once a change of the text, even undone,
-drops it. All of
-it is described in [Changes to the trust policy](guide.md#changes-to-the-trust-policy). The rule
+first point, and a decision of the operator on the issue counts. Since #483 that decision is a
+command: a comment whose first line is `/devloop approve`, followed by the text of the decision;
+an approval without it decides nothing. devloop lists the commands that count: written in
+person by a trusted user (no attribution header), not by the supervisor's identity nor by an
+app (one of devloop's or any `[bot]` login), after the latest change of the issue's title or
+body (`lastEditedAt` and the `renamed` events) and before the first `labeled` event of
+`agent:working` after it, each written (`created_at`) after the change and last changed
+(`updated_at`) before the takeover, a bound in the same second excluded, a comment without both
+times excluded too; a reviewer gets none when no such takeover follows the latest change. The
+history of the issue is read in full, 100 events a page (`GitHub.issue_history`, whose
+`complete` is True only when its last page says there is no other): a read that stops before
+then admits no command. Those commands, by author, `created_at` and text, enter the hash of the
+request, so a readiness check that relied on one is not reused once a change of the text, even
+undone, drops it, nor once the command is rewritten. A `/devloop approve` of an app, one after
+the attribution header, one not on the first line and one without a text are refused, and the
+readiness check that follows them lists them in its comment, with the reason, outside its
+marker; one of an untrusted author is ignored. The prompts list what stays with the operator
+whatever a decision prescribes (#483): the quorum and the choice of the reviewers, the checks
+of `operator_only_paths` and `protected_paths`, the names of the labels of hold, of escalation
+and of merge, `trusted_users` and the "Trust policy" section. All of it is described in [Changes to the trust policy](guide.md#changes-to-the-trust-policy). The rule
 lives only in the prompts: the schema `advisory.json` does not change, `review.json` only gains
 `operator_reason` (#434) for it, `preflight.json` gains `trust_policy` and
 `trust_policy_reason` (#472, see [Readiness check records](#readiness-check-records)), and devloop
