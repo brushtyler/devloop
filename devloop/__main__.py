@@ -43,6 +43,8 @@ REPO_LOCK_FD = 'DEVLOOP_REPO_LOCK_FD'
 STATE_ENV = 'DEVLOOP_STATE_DIR'
 # The tables of the project file whose absence was last reported on alert_issue (#462).
 TABLES_ALERTED = 'project-tables-alerted.json'
+# The record that the agents running as the dispatcher's user were reported on alert_issue (#490).
+AGENT_USER_ALERTED = 'agent-user-alerted'
 
 
 def main_checkout():
@@ -223,6 +225,50 @@ def project_tables_warning(alert_issue, state, gh, out=None, copy=None):
         except OSError as exc:
             log(f'config: the alert of the missing tables not recorded, it may repeat: {exc}')
     return warn
+
+
+def agent_user_warning(off, alert_issue, state, gh, out=None):
+    """The warning of the agents running as the dispatcher's user (#490): with
+    ``[agent_user] name`` empty (``off``), at the start of ``tick`` and ``run``, a line in the
+    log each time and a comment on ``alert_issue`` once (``AGENT_USER_ALERTED`` in ``state``;
+    forgotten when an agent user is set, so that a later return to none is reported again).
+    Only a warning: devloop goes on. One attempt; a failure is logged and tried at the next
+    start. ``out`` (default: ``log``) writes the lines."""
+    out = out or log
+    path = Path(state) / AGENT_USER_ALERTED
+    if not off:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            out(f'agent_user: {AGENT_USER_ALERTED} not removed: {exc}')
+        return
+    out('agent_user: [agent_user] name is empty: the agents and the tests run as the '
+        "dispatcher's user, and can read the keys of the apps, state_dir and the overlay")
+    if path.exists():
+        return
+    if not alert_issue:
+        out('agent_user: no [run].alert_issue is configured: no alert for the agent user')
+        return
+    body = publishable(
+        dispatcher_header() + '\n## Agent senza utente dedicato\n\n'
+        '`[agent_user] name` è vuoto: gli agent e il comando dei test girano come l\'utente del '
+        'dispatcher, e possono leggere le chiavi delle GitHub App, lo `state_dir` e '
+        'l\'overlay. devloop continua.\n\nPer attivare l\'utente degli agent (#415): '
+        '`ops/host/migrate.md`, sezione "Attivazione dell\'utente degli agent (#415)". Questo '
+        'avviso non si ripete finché la chiave resta vuota.')
+    try:
+        gh.comment(alert_issue, body)
+    except Exception as exc:  # one attempt only: its class, never its output
+        out(f'agent_user: the alert on #{alert_issue} could not be published '
+            f'({type(exc).__name__})')
+        return
+    out(f'agent_user: alert published on #{alert_issue}')
+    try:
+        path.write_text('alerted\n', encoding='utf-8')
+    except OSError as exc:
+        out(f'agent_user: the alert not recorded, it may repeat: {exc}')
 
 
 def installation_source(cfg, root):
@@ -437,6 +483,8 @@ def build(args):
     dispatcher.config_print = fingerprint(sources, data)
     # The tables of the project file this copy knows and the configuration lacks (#462).
     dispatcher.config_missing = missing_project_tables(data)
+    # The agents run as the dispatcher's user (#490): a warning at the start.
+    dispatcher.agent_user_off = agent_user is None
     return cfg, state, dispatcher
 
 
@@ -999,6 +1047,10 @@ def main(argv=None):
             # and at each reload of `run`.
             warn = project_tables_warning(cfg.run.alert_issue, state, dispatcher.gh)
             warn(missing)
+        off = getattr(dispatcher, 'agent_user_off', None)
+        if args.command in ('tick', 'run') and isinstance(off, bool):
+            # Without an agent user (#490): a warning, once on alert_issue; devloop goes on.
+            agent_user_warning(off, cfg.run.alert_issue, state, dispatcher.gh)
         if args.command == 'cleanup':
             for name in dispatcher.ws.names():
                 dispatcher.ws.remove(name)

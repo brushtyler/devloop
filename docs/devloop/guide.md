@@ -2151,7 +2151,10 @@ operator): a user that cannot read the private keys of the apps (`key_dir`), `st
 (journal, logs, registers, pinned copies) nor the local overlay. Without it they would run as
 `devloop`, and an agent could read the key of the merger or of the dispatcher with its own file
 tools. `[agent_user] name` in the local overlay turns it on; empty, the default, they run as the
-dispatcher's user, as before ([reference](reference.md#agent-user)).
+dispatcher's user, as before, and devloop says so at each start in the log and once on
+`[run].alert_issue`, without stopping ([reference](reference.md#agent-user)). The activation on
+a host already in service is in
+[ops/host/migrate.md](../../ops/host/migrate.md#attivazione-dellutente-degli-agent-415).
 
 - devloop starts each CLI, the test command and its own startup probe with
   `sudo -n -E -u devloop-agent`. The sudoers rule (`ops/host/sudoers-agent`) allows the `devloop`
