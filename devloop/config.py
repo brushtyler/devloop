@@ -1659,7 +1659,9 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
     conclave = parse_conclave(data, agents)
     trusted =_str_list(data, 'trusted_users', 'config')
     if not trusted:
-        raise ConfigError('trusted_users: at least one GitHub login is required')
+        # The installation has none since ADR 0006, R6: trust is the project's, in the overlay.
+        raise ConfigError('trusted_users: at least one GitHub login is required: set it in the '
+                          'local overlay on the host, <state_dir>/config.local.toml')
     if any(login.endswith('[bot]') for login in trusted):
         raise ConfigError('trusted_users: bots and apps cannot approve work')
     apps_table = dict(data.get('apps') or {})
@@ -1745,6 +1747,10 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
         raise ConfigError('delegations.capacity: needs [report] issue, where the supervisor '
                           'writes `/devloop capacity`')
     merge = parse_merge(data.get('merge', {}), supervisor)
+    if 'repo' not in data:
+        # The installation has none since ADR 0006, R6: the managed repository is the project's.
+        raise ConfigError("config: missing 'repo': set it in the local overlay on the host, "
+                          '<state_dir>/config.local.toml (--local-config; the launcher passes it)')
     return Config(
         repo=_require(data, 'repo', str, 'config'),
         base_branch=data.get('base_branch', 'main'),

@@ -6,7 +6,7 @@ markers and records; the [index](../devloop.md) lists the three pages.
 
 ## Configuration
 
-[`devloop/config.toml`](../../devloop/config.toml) sets the repository, the test command, limits,
+[`devloop/config.toml`](../../devloop/config.toml) sets the defaults of the installation: limits,
 the `implementer` and the `reviewers` pool (none of them a key that implements, none listed twice;
 `reviewer = "<agent>"`, the form before #111, is a pool of one, and setting both is an error),
 the implementers of the area labels (`[roles.implementers]`, #407)
@@ -215,11 +215,12 @@ operator copies to the host. The code has no default of ssdlc for them either: n
 `core/` and the lists of the configuration. The overlay of ssdlc gains `write_commands` and
 `review_commands` of agy ([`ops/host/ssdlc/overlay.toml`](../../ops/host/ssdlc/overlay.toml)):
 the commands agy had by default from the `test_cmd` of `config.toml`, which the overlay alone
-admits now. `repo`, `trusted_users` and `[apps]` stay in `config.toml` until R6, for
-`scripts/agent-token.py` and `scripts/supervisor-token.py`, which read only them, with no
-project file. Without a project file, or a `test_cmd` in the overlay, devloop stops at startup:
-`test_cmd` is required. Since R5 the rules of ssdlc's test selection and the format of its CI
-logs are its project file's `[tests]` too ([Local tests](#local-tests)).
+admits now. Since R6 the overlay holds `repo`, `trusted_users` and `[apps]` too, which
+`config.toml` no longer has ([GitHub identities](#github-identities)): the installation holds
+no value of ssdlc. Without a project file, or a `test_cmd` in the overlay, devloop stops at
+startup: `test_cmd` is required; so it does without `repo` or `trusted_users` in the overlay.
+Since R5 the rules of ssdlc's test selection and the format of its CI logs are its project
+file's `[tests]` too ([Local tests](#local-tests)).
 `ops/host/ssdlc/check-equivalence.py` compares two installations on a
 host (the one of before R3 with its overlay, the one of R3 with the project file and the
 overlay; with `--before-project`, an installation of R3 or later with its project file, as for
@@ -1258,7 +1259,8 @@ checks = [{ name = "unittest", app_id = 15368 }]  # 15368: GitHub Actions
 ## GitHub identities
 
 Each agent and the dispatcher can act on GitHub with its own GitHub App (#65), configured under
-`[apps]` in `config.toml`:
+`[apps]` in the local overlay of the project's `state_dir` (ADR 0006, R6; see
+[Identities of a project](#identities-of-a-project)):
 
 | Actor | Does |
 |---|---|
@@ -1302,9 +1304,9 @@ and only then, the clients' `submit_review` and `create_pr` tell an uncertain ou
 (`GitHub.uncertain_publications`), as `comment` and `edit_comment` always do.
 An app that is configured but whose key is missing (except the
 [supervisor's](#the-supervisor-app), whose key devloop never reads) stops devloop at startup instead of
-silently falling back to the operator's login: remove it from `[apps]` (or use `--config`) to run
+silently falling back to the operator's login: remove it from `[apps]` of the overlay to run
 that actor without it. `python3 -m devloop apps` checks each app, its installation and its
-permissions.
+permissions, and names first the project's `repo` and the `key_dir` it reads.
 
 The apps have no `Workflows` permission, and devloop never pushes changes under
 `protected_paths` (default `.github/`): a workflow or a local action pushed to a branch of this
@@ -1326,6 +1328,52 @@ stops on its own instead of holding the turn for an hour. Values the operator se
 environment are kept. This prevents accidental use of the operator's credentials, not
 deliberate access: code running as the same system user can still read files. The isolation
 comes from the [agent user](#agent-user), which cannot read the keys at all.
+
+### Identities of a project
+
+The identities and the trust of a project are the operator's, in the
+[local overlay](guide.md#local-config-as-an-overlay) of its `state_dir` (ADR 0006, R6): `repo`,
+the managed repository; `trusted_users`; `[apps]`, its set of GitHub Apps with `key_dir`.
+The installation's `config.toml` has none of them, and without `repo` or `trusted_users` in the
+overlay devloop stops at startup, naming the overlay. The
+[project file](#project-file) cannot hold them either. `Identities`, every token devloop mints
+and `python3 -m devloop apps` act on that `repo`, with the keys of that `key_dir`.
+
+Each repository has **its own set of apps**, never shared with another (ADR 0006, D3): an agent
+of a project could otherwise reach the keys of an app valid on the other repositories. The
+operator creates the set from the manifests of `ops/github/apps/` with an `APP_PREFIX` of its
+own, installs it on that repository only (*Only select repositories*), and puts its keys in a
+`key_dir` of that project, readable only by that project's system user. The merger app is
+created and installed only for a repository where devloop merges (`[merge] mode` `"strict"` or
+`"auto"`): with it configured and the mode `"off"`, `devloop apps` says so. Creating and
+installing the apps stay operator actions, since they are credentials.
+
+**`devloop token`.** An interactive session publishes with an agent's app of the project:
+
+```bash
+scripts/devloop-pinned [--state-dir DIR] token <actor> [--perm NAME=LEVEL ...] -- <command> [args...]
+python3 scripts/agent-token.py [--state-dir DIR] <actor> [--perm NAME=LEVEL ...] -- <command> [args...]
+```
+
+It runs from the pinned copy, with the configuration of the project of that `state_dir` (the
+installation's `config.toml`, the project file and the overlay, as the [launcher](guide.md#launcher)
+passes them), never with the `config.toml` beside a checkout: `repo` and `[apps.<actor>]` come
+from the overlay, and only the actor's key is read, from `$DEVLOOP_APP_KEY_DIR` or the project's
+`key_dir`. `scripts/agent-token.py` is a thin wrapper: it runs `scripts/devloop-pinned
+--state-dir <DIR> token ...`, with `DIR` by default `.ssdlc/devloop` of the main checkout of its
+clone (found through git's common directory, also from a linked worktree), and imports nothing
+from the clone. Run either from the checkout of the managed repository or one of its
+worktrees; the command runs in the current directory, and everything after `--` is the
+command's. The actors are `claude`, `codex` and `agy`: the dispatcher's, the merger's and the
+implementer's apps are reserved to devloop, and the supervisor's is not exposed (it uses
+`scripts/supervisor-token.py`, see [The supervisor app](#the-supervisor-app)); the actor and the
+permissions are checked before any file is read. Without `--perm` the token gets
+`issues=write` and `pull_requests=write`; only `issues` and `pull_requests` (read or write) and
+`contents`, `metadata`, `checks`, `statuses` and `actions` (read) may be asked for, so a session
+never pushes nor merges. The token reaches the command through `GH_TOKEN` only, beside none of
+the caller's `GH_TOKEN`, `GITHUB_TOKEN` and `GH_ENTERPRISE_TOKEN`, and is never printed. The
+command's exit code is `devloop token`'s. A pinned copy older than R6 has no `token`: the
+wrapper works once the copy of R6 is pinned.
 
 ### Agent user
 
@@ -1414,7 +1462,8 @@ Developer settings → GitHub Apps → New GitHub App*):
 - **Branch protection.** If a rule of the base branch restricts who can push or merge, add the
   app to those allowed.
 
-Configuring it, in `config.toml` (app id and slug are not secret):
+Configuring it, in the local overlay of the project (app id and slug are not secret), only for
+a repository where devloop merges ([Identities of a project](#identities-of-a-project)):
 
 ```toml
 [apps.merger]
@@ -1438,7 +1487,7 @@ created by the operator with `Issues: Read and write`, `Pull requests: Read and 
 `Metadata: Read-only`, and **no** `Contents`, because the supervisor neither implements nor
 merges. It signs the supervisor's commands on escalations, its labels (`agent:ready`, priorities,
 dependencies), its issues, the diary and its `/devloop fix` and `/devloop hold` requests, whatever
-agent runs the supervisor. `config.toml` declares it:
+agent runs the supervisor. The local overlay of the project declares it:
 
 ```toml
 [apps.supervisor]
@@ -1478,17 +1527,23 @@ model = "claude-opus-5-5"
   since `claude-supervisor` is never an implementer's key.
 - devloop never reads the app's key and never writes with it: the key is in `key_dir` of the
   supervisor's system user, not in devloop's, and `python3 -m devloop apps` does not list it.
-  `scripts/agent-token.py` refuses it, so no review or interactive session can write a command as
-  the supervisor. The supervisor runs, from its own clone and as its own user:
+  `devloop token` and `scripts/agent-token.py` refuse it, so no review or interactive session can
+  write a command as the supervisor. The supervisor runs, from its own clone and as its own user,
+  with `--state-dir` naming devloop's `state_dir` of the project:
 
   ```bash
-  python3 scripts/supervisor-token.py -- gh issue comment <ISSUE> --body-file <FILE>
-  python3 scripts/supervisor-token.py -- gh issue edit <ISSUE> --add-label agent:ready
-  python3 scripts/supervisor-token.py --perm pull_requests=write -- gh pr comment <PR> --body-file <FILE>
+  python3 scripts/supervisor-token.py --state-dir <STATE_DIR> -- gh issue comment <ISSUE> --body-file <FILE>
+  python3 scripts/supervisor-token.py --state-dir <STATE_DIR> -- gh issue edit <ISSUE> --add-label agent:ready
+  python3 scripts/supervisor-token.py --state-dir <STATE_DIR> --perm pull_requests=write -- gh pr comment <PR> --body-file <FILE>
   ```
 
-  The script reads `[apps.supervisor]` from `devloop/config.toml` and only that key, from
-  `$DEVLOOP_APP_KEY_DIR` or `key_dir`. Without `--perm` the token gets `issues=write` and
+  The script reads `repo` and `[apps.supervisor]` from the configuration of the project (ADR
+  0006, R6): the local overlay of that `state_dir` (`config.local.toml`, readable by the
+  supervisor, with no secret) over `devloop/config.toml` of its clone; without `--state-dir`,
+  `.ssdlc/devloop` of its clone, and without an overlay there it stops, saying so. It does not
+  read the project file, which cannot hold those keys. It reads only the supervisor's key, from
+  `$DEVLOOP_APP_KEY_DIR` or `key_dir`: with a `key_dir` of devloop's user in the overlay, the
+  supervisor sets `$DEVLOOP_APP_KEY_DIR` to its own. Without `--perm` the token gets `issues=write` and
   `pull_requests=write`; only `issues` and `pull_requests` (read or write) and `metadata=read`
   may be asked for. The token reaches the command through `GH_TOKEN` only, and is never printed.
 - Without the table (the key of an agent, or no `roles.supervisor`), nothing changes: the app is
@@ -1504,7 +1559,7 @@ rather than widening it.
 The implementer has a role app of its own too (ADR 0005, P5-3, #407):
 `brushtyler-devloop-implementer`, created by the operator with `Contents: Read and write`,
 `Pull requests: Read and write`, `Issues: Read and write` and `Metadata: Read-only`, without
-`Workflows`. `config.toml` declares it:
+`Workflows`. The local overlay of the project declares it:
 
 ```toml
 [apps.implementer]

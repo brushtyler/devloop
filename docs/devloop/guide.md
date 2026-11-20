@@ -1472,7 +1472,7 @@ in `[roles]` of the configuration ([reference](reference.md#configuration)).
 devloop="python3 -m devloop --project-config .ssdlc/devloop/project.toml --local-config .ssdlc/devloop/config.local.toml"
 $devloop setup            # create the agent:* labels, the priority:* labels and the review level labels (reviews:0 only when level 0 is on)
 $devloop status           # running action, devloop PRs (with rounds counted on max_review_rounds, merge state and conflicts), ready issues in start order with their priority, planned actions; with [budget] on, the budget of the stories in progress; a pinned copy behind origin/main in the files of the installation
-$devloop apps             # check the GitHub App of each actor
+$devloop apps             # check the GitHub App of each actor, on the project's repo and with its key_dir
 $devloop tick --dry-run   # print the ready issues in start order and the plan, change nothing (no lock: it runs beside a dispatcher)
 $devloop tick             # run one round
 $devloop run --idle-timeout 900  # tick continuously (see Continuous loop)
@@ -1483,6 +1483,7 @@ $devloop watch --timeout 3600  # wait for the next change on GitHub, for the sup
 $devloop pin origin/main  # pin a commit of origin, after its smoke test (see Run from a pinned installation)
 $devloop report --day 2026-11-16  # print the summary of a UTC day from devloop's records (default: today; --publish: on [report] issue, see Daily summary)
 $devloop fallback reset agy  # forget the models agy remembers unavailable (see Memory of unavailable models)
+$devloop token claude -- gh pr comment 70 --body-file reply.md  # run a command as an agent's app of the project (see GitHub identities; scripts/agent-token.py calls it)
 ```
 
 Run it from any checkout of this repository. Worktrees, agent prompts and logs, and the lock that
@@ -2018,9 +2019,12 @@ From the beginning to the end, as root or with `sudo`:
    sudo -u devloop -H git clone https://github.com/brushtyler/ssdlc.git /home/devloop/ssdlc
    ```
 
-2. **Keys.** The apps are those of `[apps]` in `devloop/config.toml`, created once by the
-   operator ([GitHub identities](reference.md#github-identities), and
-   [The merger app](reference.md#the-merger-app) for the merger). Each private key goes to
+2. **Keys.** The apps are the repository's own set, created once by the operator from the
+   manifests of [`ops/github/apps/`](../../ops/github/apps/) and never shared with another
+   repository ([GitHub identities](reference.md#github-identities), and
+   [The merger app](reference.md#the-merger-app) for the merger). Since ADR 0006, R6 they are
+   declared in `[apps]` of the local overlay (step 4), not in `devloop/config.toml`: ssdlc's are
+   in [`ops/host/ssdlc/overlay.toml`](../../ops/host/ssdlc/overlay.toml). Each private key goes to
    `~/.ghapps` of the `devloop` user, under the name GitHub gives it,
    `<slug>.<date>.private-key.pem`, mode `600`; a configured app whose key is missing stops
    devloop at startup.
@@ -2035,12 +2039,15 @@ From the beginning to the end, as root or with `sudo`:
    to each one with its logins, as described in [Agent CLIs](#agent-clis).
 
 4. **Overlay.** Write `/home/devloop/ssdlc/.ssdlc/devloop/config.local.toml`, owned by
-   `devloop`, with only the keys the operator overrides
-   ([Local config as an overlay](#local-config-as-an-overlay)). Each of these is the operator's
-   choice: the merge mode, `[pin] auto` ([Pin after a merge](#pin-after-a-merge)) and
-   `[run] alert_issue` ([Continuous loop](#continuous-loop)). On this installation it also sets
-   `[agent_user] name = "devloop-agent"` ([Agent user](#agent-user)). Without the file, the
-   configuration of the pinned copy applies as it is.
+   `devloop` ([Local config as an overlay](#local-config-as-an-overlay)). It is required: since
+   ADR 0006, R6 it holds the project's `repo`, `trusted_users` and `[apps]`, with its `key_dir`
+   (step 2), and for ssdlc the agy commands too, all from
+   [`ops/host/ssdlc/overlay.toml`](../../ops/host/ssdlc/overlay.toml). Without the file, or
+   without `repo` and `trusted_users` in it, devloop stops at startup. The other keys are the
+   operator's overrides, each the operator's choice: the merge mode, `[pin] auto`
+   ([Pin after a merge](#pin-after-a-merge)) and `[run] alert_issue`
+   ([Continuous loop](#continuous-loop)). On this installation it also sets
+   `[agent_user] name = "devloop-agent"` ([Agent user](#agent-user)).
 
 5. **Pin.** The first pin runs the clone's devloop; every later command runs the pinned copy,
    through the [launcher](#launcher). The pin applies the overlay and runs the
@@ -2400,9 +2407,12 @@ reports an overlay without it as an error.
 
 #### Local config as an overlay
 
-`.ssdlc/devloop/config.local.toml` holds **only the keys the operator overrides**, for example:
+`.ssdlc/devloop/config.local.toml` holds the project's identities and trust and **the keys the
+operator overrides**, for example:
 
 ```toml
+repo = "brushtyler/ssdlc"
+trusted_users = ["brushtyler"]
 preflight = "codex"
 max_open_prs = 3
 max_review_rounds = 4
@@ -2415,6 +2425,13 @@ auto = true
 
 [run]
 alert_issue = 123
+
+[apps]
+key_dir = "~/.ghapps"
+
+[apps.dispatcher]
+app_id = 5747835
+slug = "brushtyler-devloop-dispatcher"
 ```
 
 devloop applies it over `devloop/config.toml` of the pinned copy: a table merges key by key
@@ -2443,6 +2460,17 @@ Without a project file, or a `test_cmd` in the overlay, devloop stops at startup
 'test_cmd'`), and so does the pin of a copy, whose check loads the configuration. The migration
 of a running host, and the order to follow so that the pin after the merge finds the project
 file, are in [ops/host/migrate.md](../../ops/host/migrate.md#migrazione-di-r3-su-un-host-attivo).
+
+Since ADR 0006, R6 the installation's `config.toml` has no `repo`, `trusted_users` nor `[apps]`
+either: the managed repository, the logins devloop trusts and the project's set of GitHub Apps,
+with its `key_dir`, are the operator's, in the overlay of the project's `state_dir`. Each
+repository has its own set of apps, installed on that repository only and never shared with
+another, and its own `key_dir`; the merger app only where devloop merges (D3,
+[GitHub identities](reference.md#github-identities)). ssdlc's are in
+[`ops/host/ssdlc/overlay.toml`](../../ops/host/ssdlc/overlay.toml). Without `repo` and
+`trusted_users` in the overlay devloop stops at startup, naming the overlay, and so does the pin
+of a copy. The overlay of a host gains them before devloop takes a copy of R6
+([ops/host/migrate.md](../../ops/host/migrate.md#identità-di-ssdlc-nelloverlay)).
 
 #### Changes while the loop runs
 
