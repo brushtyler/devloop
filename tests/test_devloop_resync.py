@@ -14,7 +14,8 @@ from devloop.planning import (RESYNC_AFTER_APPROVAL, RESYNC_CONFLICTS, Action, c
                               round_reasons, waived_rounds)
 from devloop.workspace import Workspace, WorkspaceError
 from test_devloop import CFG, SHA1, SHA2, finding, fixed, pr, raw_review, receipt
-from test_devloop_quorum import FIRST, SECOND, Quorum
+from test_devloop_base_advance import NEW, PR_FILE
+from test_devloop_quorum import CORE, FIRST, SECOND, Quorum
 
 LEVEL1 = [{'path': 'x.py', 'links': []}]  # a diff reviewed at level 1
 ONE_ROUND = dataclasses.replace(CFG, max_review_rounds=1)
@@ -22,11 +23,14 @@ SYNCED = {'status': 'completed', 'summary': 'Kept both sides.', 'blocked_reason'
 
 
 class ResyncTests(Quorum):
-    def approved_then_synced(self, *outputs, conflicts=(), cfg=ONE_ROUND):
+    def approved_then_synced(self, *outputs, conflicts=(), cfg=ONE_ROUND, diff=LEVEL1):
         """Round 1 approves SHA1 and the PR becomes ready; then main conflicts with it, and the
-        sync merges main (``conflicts``: the files an agent resolves) into the new head SHA2."""
-        self.make(raw_review(), *outputs, cfg=cfg, diff=LEVEL1)
+        sync merges main (``conflicts``: the files an agent resolves) into the new head SHA2.
+        With a ``diff`` at level 2, the first of ``outputs`` is the second approval of round 1."""
+        self.make(raw_review(), *outputs, cfg=cfg, diff=diff)
         self.assertEqual(self.d.tick(), [Action('review', 100)])
+        if diff is not LEVEL1:
+            self.d.tick()
         self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
         pr = self.d.snapshot().prs[0]
         pr.merge_state = 'conflict'
@@ -171,6 +175,52 @@ class ResyncTests(Quorum):
         self.assertIn('- round 1: prima review\n- round 2: review dopo una sync con conflitti '
                       'risolti dall\'agent', body)
         self.assertIn('alzando `max_review_rounds`', body)
+
+    def test_a_round_after_a_sync_with_conflicts_restarted_by_the_base_keeps_its_exemption(self):
+        # #458 with #160: at level 2, round 1 approved at the limit, a sync with conflicts, and
+        # the first reviewer approves round 2; main then advances touching the PR before the
+        # second reviewer. Round 3 replaces round 2 and keeps its resync: it does not count if
+        # it approves, so that the quorum completes; a request for changes still counts.
+        changes = raw_review('request_changes', [finding()])
+        for last, waived, counted, labels in (
+                (raw_review(), {2, 3}, 1, {'agent:ready-to-merge'}),
+                (changes, {2}, 2, {'agent:needs-operator'})):
+            with self.subTest(verdict=last['verdict']):
+                self.approved_then_synced(raw_review(), SYNCED, raw_review(), raw_review(), last,
+                                          conflicts=('x.py',), diff=CORE)
+                self.d.tick()  # round 2: the first reviewer approves the synced head
+                self.assertEqual(self.reviewed(), [FIRST, SECOND, FIRST])
+                self.ws.base, self.ws.base_touched = NEW, [PR_FILE]
+                self.d.tick()  # round 3 replaces round 2: the first reviewer again
+                self.assertEqual(self.reviewed(), [FIRST, SECOND, FIRST, FIRST])
+                third = self.records('review')[-1]
+                self.assertEqual((third['round'], third['restarts']['round']), (3, 2))
+                self.assertEqual(third['resync'], {'reason': RESYNC_CONFLICTS, 'round': 1,
+                                                   'from': SHA1})
+                self.assertIn('Il round 2 è stato abbandonato', self.gh.native[-1][1]['body'])
+                self.assertIn('se approva; se apre finding bloccanti conta',
+                              self.gh.native[-1][1]['body'])
+                reviews = self.records('review')
+                self.assertEqual((waived_rounds(reviews), counted_rounds(reviews)), ({2, 3}, 1))
+                self.assertEqual(self.planned(), [
+                    Action('review', 100, f'the round waits for {SECOND}')])
+                self.d.tick()  # the second reviewer joins round 3, no round_limit before it
+                self.assertEqual(self.reviewed(), [FIRST, SECOND, FIRST, FIRST, SECOND])
+                reviews = self.records('review')
+                self.assertEqual((waived_rounds(reviews), counted_rounds(reviews)),
+                                 (waived, counted))
+                self.assertEqual(self.gh.labels[100], labels)
+                escalated = [body for _, body in self.gh.comments if '**Classe:**' in body]
+                if counted == 1:
+                    self.assertEqual(escalated, [])
+                    self.assertEqual(round_reasons(reviews, syncs=self.records('sync'))[1:], [
+                        (2, 'round interrotto dall\'avanzare della base e sostituito dal '
+                            'successivo', False),
+                        (3, 'review approvata di un head approvato, spostato da una sync con '
+                            'conflitti risolti dall\'agent', False)])
+                else:
+                    (body,) = escalated
+                    self.assertIn('**Classe:** `round_limit`', body)
 
     def test_a_merge_with_conflicts_without_a_sync_marker_counts(self):
         # #458: a merge someone resolved outside a recorded sync may change anything.
@@ -352,6 +402,38 @@ class CountingTests(unittest.TestCase):
                                     source='ci')], set())):
             with self.subTest(name):
                 self.assertEqual(waived_rounds(approved + round2), waived)
+
+    def test_a_resync_survives_only_rounds_the_base_interrupted(self):
+        # #458 with #160: a round replacing the round after the approval, only because the base
+        # advanced, keeps its resync; any other round in between breaks the chain.
+        bound = dict(receipt(), level=2, reviewers=[FIRST, SECOND])
+        conflicts = self.resync(reason=RESYNC_CONFLICTS)
+        restarts = {'round': 2, 'bases': []}
+
+        def rec(round_no, reviewer, verdict='approve', head=SHA2, resync=conflicts, **extra):
+            return dict(self.record(round_no, reviewer, verdict, head=head, resync=resync),
+                        receipt=bound, **extra)
+        approved = [rec(1, FIRST, head=SHA1, resync=None),
+                    rec(1, SECOND, head=SHA1, resync=None)]
+        for name, later, waived in (
+                ('replaced, approved', [rec(2, FIRST), rec(3, FIRST, restarts=restarts),
+                                        rec(3, SECOND, restarts=restarts)], {2, 3}),
+                ('replaced, pending', [rec(2, FIRST), rec(3, FIRST, restarts=restarts)], {2, 3}),
+                ('replaced, changes', [rec(2, FIRST), rec(3, FIRST, restarts=restarts),
+                                       rec(3, SECOND, 'request_changes', restarts=restarts)],
+                 {2}),
+                ('twice', [rec(2, FIRST), rec(3, FIRST, restarts=restarts),
+                           rec(4, FIRST, restarts={'round': 3, 'bases': []}),
+                           rec(4, SECOND, restarts={'round': 3, 'bases': []})], {2, 3, 4}),
+                ('complete round between', [rec(2, FIRST), rec(2, SECOND),
+                                            rec(3, FIRST, restarts=restarts),
+                                            rec(3, SECOND, restarts=restarts)], {2}),
+                ('no restart', [rec(2, FIRST), rec(3, FIRST), rec(3, SECOND)], {2}),
+                ('other resync between', [rec(2, FIRST, resync=None),
+                                          rec(3, FIRST, restarts=restarts),
+                                          rec(3, SECOND, restarts=restarts)], {2})):
+            with self.subTest(name):
+                self.assertEqual(waived_rounds(approved + later), waived)
 
     def test_an_incomplete_approval_is_not_a_resync(self):
         bound = dict(receipt(), level=2, reviewers=[FIRST, SECOND])

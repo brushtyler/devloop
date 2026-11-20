@@ -962,18 +962,37 @@ def waived_rounds(reviews):
     while it approves, or still waits for a reviewer without asking for the operator: complete
     with a request for changes, a CI failure included, or with a request for the operator, it
     counts."""
-    waived = set()
+    waived = _replaced_rounds(reviews)
     for record in reviews:
-        restart = record.get('restarts')
-        number = restart.get('round') if isinstance(restart, dict) else None
-        if (isinstance(number, int) and not isinstance(number, bool) and number < record['round']
-                and pending_reviewers(_round_records(reviews, number))):
-            waived.add(number)
         if _resynced(reviews, record) and (record['resync']['reason'] != RESYNC_CONFLICTS
                                            or _approving(_round_records(reviews,
                                                                         record['round']))):
             waived.add(record['round'])
     return waived
+
+
+def _replaced(reviews, record):
+    """The incomplete agent round that ``record``'s round replaced only because the base branch
+    advanced (``restarts``, #160), or None."""
+    restart = record.get('restarts')
+    number = restart.get('round') if isinstance(restart, dict) else None
+    if (isinstance(number, int) and not isinstance(number, bool) and number < record['round']
+            and pending_reviewers(_round_records(reviews, number))):
+        return number
+    return None
+
+
+def _replaced_rounds(reviews):
+    """The rounds a later round replaced only because the base branch advanced (#160)."""
+    return {number for number in (_replaced(reviews, r) for r in reviews) if number is not None}
+
+
+def carried_resync(reviews, records):
+    """The ``resync`` that the round replacing ``records`` only because the base branch advanced
+    (#160) records again (#458): that of ``records``, when it reviewed a resync or the same head
+    after a revocation for the base (``_resynced``); None otherwise. The replacing round reviews
+    the same change, and does not count for the same reason, under the same condition."""
+    return records[0]['resync'] if records and _resynced(reviews, records[0]) else None
 
 
 def _approving(records):
@@ -989,14 +1008,26 @@ def _resynced(reviews, record):
     """Whether ``record`` reviewed a resync after approval (#235, and #458 with conflicts
     resolved) or the same head after a revocation for the base (#252): its ``resync`` names the
     round just before its own, a complete agent round that approved the head ``from``; the
-    record reviews another head after a resync, that same head after a revocation."""
+    record reviews another head after a resync, that same head after a revocation. The rounds in
+    between, if any, were each replaced by the next one only because the base advanced (#160),
+    and record the same ``resync`` (``carried_resync``, #458)."""
     resync = record.get('resync')
     if not isinstance(resync, dict) or resync.get('reason') not in (
             RESYNC_AFTER_APPROVAL, RESYNC_CONFLICTS, BASE_CHANGED):
         return False
     number = resync.get('round')
-    if isinstance(number, bool) or number != record['round'] - 1:
+    if isinstance(number, bool) or not isinstance(number, int):
         return False
+    current = record
+    while current['round'] - 1 != number:
+        # A round the base interrupted (#160) and this one replaced, with the same resync, in
+        # place of the round just before (#458): the chain leads back to the approved round.
+        replaced = _replaced(reviews, current)
+        if replaced is None or replaced != current['round'] - 1 or replaced <= number:
+            return False
+        current = _round_records(reviews, replaced)[0]
+        if current.get('resync') != resync:
+            return False
     approved = _round_records(reviews, number)
     same = record.get('head_sha') == resync.get('from')
     return (bool(approved) and approved[0]['source'] == 'agent'
@@ -1096,6 +1127,7 @@ def round_reasons(reviews, fixes=(), syncs=()):
     review after a sync with conflicts of an approved head (#458), or a round the base
     interrupted and a later one replaced."""
     waived = waived_rounds(reviews)
+    replaced = _replaced_rounds(reviews)
     synced = {s.get('head_sha') for s in syncs} - {None}
     fixed = {f.get('round') for f in fixes}
     reasons, previous = [], None
@@ -1104,6 +1136,8 @@ def round_reasons(reviews, fixes=(), syncs=()):
         if number in waived:
             resync = first.get('resync')
             reason = resync.get('reason') if isinstance(resync, dict) else None
+            if number in replaced:
+                reason = None  # interrupted by the base, whatever it reviewed (#458)
             if reason == RESYNC_AFTER_APPROVAL:
                 why = 'review di un head approvato, spostato solo da una sync senza conflitti'
             elif reason == RESYNC_CONFLICTS:

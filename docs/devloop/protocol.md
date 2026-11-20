@@ -120,7 +120,10 @@ or a request for the operator) it counts: with no round left the PR goes to `rou
 the supervisor as `round_grantable`, with the [rounds delegation](guide.md#granting-a-review-round)),
 as for any round beyond the limit; with rounds left the fix follows as usual. While the round
 waits for its second reviewer at level 2 it does not count yet, unless a reviewer asked for the
-operator, so that the other reviewer can join it.
+operator, so that the other reviewer can join it. If `main` advances touching the PR before the
+second reviewer, the round that [replaces it](reference.md#when-main-advances-during-a-round)
+records `restarts` and the same `resync` too: it reviews the same change, and does not count
+under the same condition (the same holds for the resyncs of #235 and #252).
 
 The same holds when the head did not move at all (#252). Before promoting or merging, the
 dispatcher recomputes the receipt; when `main` advanced touching a file of the PR (or the

@@ -34,7 +34,7 @@ from .markdown import (dispatcher_header, publishable, render_fix, render_native
                        render_review, without_attribution)
 from .config import foreign, provider_quorum, same_agent
 from .planning import (BASE_CHANGED, FIX_COMMAND, RESYNC_AFTER_APPROVAL, RESYNC_CONFLICTS,
-                       ci_joins_round,
+                       carried_resync, ci_joins_round,
                        counted_rounds, implementer_choice, pending_reviewers, preflight_state,
                        voided_approval, waived_rounds, waiting_reviewers)
 from .policy import ZERO_LEVEL, distinct, independent, profile_of
@@ -474,7 +474,9 @@ class ActionsMixin:
 
         A new round on a head that a clean sync moved from the approved one (#235,
         ``PullRequest.resync``), or on the approved head after the base touching the PR revoked
-        its approval (#252), records ``resync`` and does not count either."""
+        its approval (#252), records ``resync`` and does not count either. A round replacing one
+        of these only because the base advanced records ``resync`` again (#458,
+        ``carried_resync``), so that it does not count under the same condition."""
         cfg = self.cfg
         receipt, paths = self._current_receipt(pr)
         if receipt is None:
@@ -504,8 +506,19 @@ class ActionsMixin:
             if bases:
                 # Abandoned only because the base advanced: the round does not count.
                 restarts = {'round': latest[0]['round'], 'bases': bases}
-                counted -= 1
+                if latest[0]['round'] not in waived_rounds(pr.reviews):
+                    counted -= 1  # it counted until now; replaced, it does not
                 self.log(f'  round {latest[0]["round"]} restarts: the base touched the PR')
+                # The round it replaces reviewed a resync or a revocation for the base (#458):
+                # this one reviews the same change, records the same resync and does not count
+                # under the same condition (only if it approves, after a sync with conflicts).
+                resync = carried_resync(pr.reviews, latest)
+                if resync:
+                    counted -= 1
+                    self.log(f'  it keeps the resync after round {resync["round"]}: this round '
+                             'does not count'
+                             + (' if it approves' if resync['reason'] == RESYNC_CONFLICTS
+                                else ''))
             elif pr.resync and not pr.rereview:
                 # Only a clean sync moved the approved head (#235), or only the base touching
                 # the PR revoked its approval (#252): this round does not count. After a sync

@@ -1229,7 +1229,10 @@ exception covers only an incomplete round abandoned for the base alone: CI round
 restarted for a new head, a change of policy, level or reviewers, or a `/devloop rereview` keep
 counting. For example, with `max_review_rounds = 3`: round 1 is completed; round 2 is abandoned
 for the base and does not count; round 3 replaces it and counts as the second; one more round,
-number 4, is left.
+number 4, is left. A replaced round that itself did not count, the review of an approved head
+after a sync or after a revocation for the base (#235, #252, #458), passes its `resync` to the
+round that replaces it: the new round records both, and does not count under the same condition
+(after a sync with conflicts, only if it approves).
 
 Promotion recomputes the receipt on the current base, as for any approval. An approval given on
 an earlier base, also when `main` advanced during the last review of a round already complete,
