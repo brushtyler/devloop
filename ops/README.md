@@ -330,7 +330,9 @@ gruppo di processi a un timeout), con l'ambiente che devloop prepara (`SETENV`) 
 ([host/migrate.md](host/migrate.md)): le ACL delle voci già presenti sono sue.
 
 Poi l'**overlay** deve avere `[agent_user] name = "devloop-agent"` (lo script lo segnala se
-manca; `check-host.sh` lo considera un errore). All'avvio di `tick` e `run` devloop verifica come
+manca; `check-host.sh` lo considera un errore; devloop, senza, avvisa una volta su
+`[run].alert_issue` e continua). Su un host già in servizio i passi sono in [Attivazione
+dell'utente degli agent](host/migrate.md#attivazione-dellutente-degli-agent-415). All'avvio di `tick` e `run` devloop verifica come
 `devloop-agent` che non legga né attraversi `key_dir` e le voci private dello `state_dir`, che non
 legga l'overlay, che non scriva nulla in `.git` né le directory che contengono worktree e turni,
 che scriva nelle directory dei suoi turni, e che non possa scrivere, possedere, creare,

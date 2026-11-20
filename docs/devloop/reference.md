@@ -1433,7 +1433,10 @@ wrapper works once the copy of R6 is pinned.
 With `[agent_user] name` set (#415), the dispatcher starts every agent CLI, its `--version`
 included, and the test command as that system user, so that they cannot read the private keys
 of the apps, `state_dir` nor the local overlay. Without it they run as the dispatcher's user, as
-before. The operator chose the mechanism on #415: one dedicated user for every agent (their CLI
+before, and devloop warns at each start of `tick` and `run` (not `tick --dry-run`): a line in
+the log each time and a comment on `[run].alert_issue` once (`agent-user-alerted` in
+`state_dir`, removed when an agent user is set, so that a later return to none is reported
+again), without stopping (#490). The operator chose the mechanism on #415: one dedicated user for every agent (their CLI
 logins are not isolated from each other); a container would be an alternative. The installation
 is in the [guide](guide.md#agent-user) and in the [ops guide](../../ops/README.md).
 
