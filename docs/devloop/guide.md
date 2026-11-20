@@ -2228,9 +2228,13 @@ a host already in service is in
 - At the start of `tick` and `run` devloop checks, as `devloop-agent`, that it can neither read
   nor enter `key_dir` (or `$DEVLOOP_APP_KEY_DIR`) and the entries of `state_dir` other than the
   two above, that it cannot read the keys, `state_dir` and the overlay, that it can write
-  nothing in `.git` nor the directories that hold the worktrees and its turns, and that it can
-  write the directories devloop makes for its turns; otherwise it refuses to start and says
-  what is wrong. `[agent_user] check = false` skips the check, in development only.
+  nothing in `.git` nor the directories that hold the worktrees and its turns, that it can
+  write the directories devloop makes for its turns, and that git, run as `devloop-agent` with
+  the environment of the turns, works in a worktree of `devloop` (#500: each turn and test run
+  trusts its own worktree with `safe.directory`, never `*`; devloop makes that worktree with
+  its own git in a directory `devloop-agent` cannot reach, and opens it read-only afterwards,
+  so no config of `devloop-agent` runs as `devloop`); otherwise it refuses to start and
+  says what is wrong. `[agent_user] check = false` skips the check, in development only.
 - Before it, also with `check = false`, devloop checks that the environment it builds reaches
   `devloop-agent` through `sudo -E` (#496), and otherwise refuses to start and says why.
   `sudo` must be sudo 1.9: sudo-rs, the default of Ubuntu, ignores `-E` also with `SETENV`, so

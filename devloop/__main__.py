@@ -396,13 +396,12 @@ def agent_environment(cfg, gh_config, agent_user=None):
     limits for Claude Code. A command may ask for up to the test timeout, which the full suite
     needs; one that asks for nothing stops after ``agent_command_timeout_seconds``, so a wait loop
     that never ends does not hold the turn for an hour (issue #96). An operator's own values are
-    kept. With ``agent_user`` (#415): that user's HOME, USER and LOGNAME, and git trusts the
-    worktrees the dispatcher's user owns (``safe.directory``)."""
+    kept. With ``agent_user`` (#415): that user's HOME, USER and LOGNAME. No ``safe.directory``
+    here: each turn and test run trusts only its own worktree (#500, ``AgentUser.git_env``)."""
     if agent_user is None:
         env = isolated_env(gh_config)
     else:
-        env = agent_user.environment(isolated_env(gh_config,
-                                                  git_config=[('safe.directory', '*')]))
+        env = agent_user.environment(isolated_env(gh_config))
     # The pinned copy on PYTHONPATH (#174) is devloop's own: the tests of a worktree import the
     # worktree's code.
     env.pop('PYTHONPATH', None)
@@ -500,15 +499,18 @@ def agent_user_of(cfg, factory=AgentUser):
         raise ConfigError(str(exc)) from exc
 
 
-def check_agent_user(cfg, state, local_config, agent_user, log=log, me=None, git_dir=None):
+def check_agent_user(cfg, state, local_config, agent_user, log=log, me=None, git_dir=None,
+                     env=None):
     """The startup check of the agent user (#415), before ``tick`` and ``run``
     (``agentuser.check``): an ``AgentUserError`` when it can read or enter ``key_dir`` (or
     ``$DEVLOOP_APP_KEY_DIR``) or the entries of ``state_dir``, read the local overlay, write
     ``git_dir`` (the repository's ``.git``), the worktrees directory or the fixed directories
-    of the shared one, or cannot write the directories of its turns. Nothing to check without
-    an agent user; with ``[agent_user] check = false`` a warning in the log. Before it, also
-    with ``check = false``: an ``AgentUserError`` when the environment devloop passes with
-    ``sudo -E`` does not reach the agent user (sudo-rs, ``SETENV`` missing; #496)."""
+    of the shared one, cannot write the directories of its turns, or cannot run git, with
+    ``env`` (the environment of the turns), in a worktree of the dispatcher's user (#500).
+    Nothing to check without an agent user; with ``[agent_user] check = false`` a warning in
+    the log. Before it, also with ``check = false``: an ``AgentUserError`` when the environment
+    devloop passes with ``sudo -E`` does not reach the agent user (sudo-rs, ``SETENV`` missing;
+    #496)."""
     if agent_user is None:
         return
     agent_user.check_environment()
@@ -519,7 +521,7 @@ def check_agent_user(cfg, state, local_config, agent_user, log=log, me=None, git
     for sub in (WORKTREES_DIR, SHARED_DIR):
         (state / sub).mkdir(parents=True, exist_ok=True)
     key_dir = os.environ.get('DEVLOOP_APP_KEY_DIR') or cfg.app_key_dir
-    check_isolation(agent_user, key_dir, state, local_config, me=me, git_dir=git_dir)
+    check_isolation(agent_user, key_dir, state, local_config, me=me, git_dir=git_dir, env=env)
 
 
 def check_keys(dispatcher, log=log):
@@ -1026,7 +1028,8 @@ def main(argv=None):
             if isinstance(agent_user, AgentUser):
                 common = getattr(ws, 'common_dir', None)
                 check_agent_user(cfg, state, args.local_config, agent_user,
-                                 git_dir=common() if callable(common) else None)
+                                 git_dir=common() if callable(common) else None,
+                                 env=getattr(ws, 'test_env', None))
         except AgentUserError as exc:
             sys.exit(f'devloop: {exc}')
     # tick and run, which act on the repository, hold its lock too (ADR 0006, R8): two

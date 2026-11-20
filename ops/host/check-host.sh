@@ -2,11 +2,12 @@
 # Verifica l'installazione di devloop e del supervisore: utenti, directory private (700), chiavi
 # delle app (600, del proprietario giusto, solo quelle attese), ACL sulla home di devloop,
 # sudoers, l'utente degli agent (non legge key_dir né state_dir, non scrive .git né le directory
-# che contengono worktree e turni, è nell'overlay, non cambia istruzioni, configurazione e
-# binari delle sue CLI; l'ambiente dei turni gli arriva con sudo -E, che sudo-rs ignora), il lock
-# per repository (directory comune, gruppo, overlay; ADR 0006, R8), servizio, CLI degli agent
-# (--version, e un `git --version` con il loro strumento di shell, #494) e `devloop apps`. Con più
-# progetti sullo stesso host si esegue una volta per progetto, con i suoi parametri (--params).
+# che contengono worktree e turni, è nell'overlay, esegue git nei worktree di devloop, non cambia
+# istruzioni, configurazione e binari delle sue CLI; l'ambiente dei turni gli arriva con sudo -E,
+# che sudo-rs ignora), il lock per repository (directory comune, gruppo, overlay; ADR 0006, R8),
+# servizio, CLI degli agent (--version, e un `git --version` con il loro strumento di shell,
+# #494) e `devloop apps`. Con più progetti sullo stesso host si esegue una volta per progetto,
+# con i suoi parametri (--params).
 # Non cambia nulla, se non le sessioni e le cache che le CLI degli agent scrivono da sé.
 # Esce con 0 se non trova errori, con 1 altrimenti; gli avvisi non contano come errori.
 # Va eseguito come root (sudo): alcune verifiche leggono file degli altri utenti.
@@ -204,6 +205,22 @@ done
 # I metadati git: chi li scrive fa eseguire a devloop un hook suo quando committa.
 check_as "$AGENT_USER" "$AGENT_USER non scrive nulla in $DEVLOOP_CLONE/.git" \
     /usr/bin/bash -c '[ -z "$(find "$1" -writable -print -quit 2>/dev/null)" ]' _ "$DEVLOOP_CLONE/.git"
+# git come utente degli agent in un worktree di $DEVLOOP_USER (#500): come in un turno, devloop
+# passa con `sudo -n -E` safe.directory per quel worktree soltanto (GIT_CONFIG_*), e git non lo
+# rifiuta per "dubious ownership". Si prova sul primo worktree che c'è, senza scrivervi nulla.
+GIT_PROBE='export PATH=/usr/bin:/bin GIT_OPTIONAL_LOCKS=0; git -C "$1" status --porcelain >/dev/null'
+GIT_WORKTREE=
+for entry in "$STATE"/worktrees/*/; do
+    [ -e "${entry%/}/.git" ] && { GIT_WORKTREE=${entry%/}; break; }
+done
+if [ -n "$GIT_WORKTREE" ]; then
+    check_as "$DEVLOOP_USER" "$AGENT_USER esegue git in $GIT_WORKTREE con il suo safe.directory" \
+        /usr/bin/env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory \
+        "GIT_CONFIG_VALUE_0=$GIT_WORKTREE" \
+        sudo -n -E -u "$AGENT_USER" -- /usr/bin/bash -c "$GIT_PROBE" _ "$GIT_WORKTREE"
+else
+    warn "nessun worktree in $STATE/worktrees: git come $AGENT_USER non verificato (lo verifica devloop all'avvio)"
+fi
 OVERLAY="$STATE/config.local.toml"
 if [ -f "$OVERLAY" ] && python3 - "$OVERLAY" "$AGENT_USER" <<'EOF'
 import sys, tomllib

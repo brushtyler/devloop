@@ -463,6 +463,8 @@ i due sudoers (440, root, accettati da `visudo`, uguali a quelli generati); che 
 legga `key_dir`, lo `state_dir` e l'overlay, non attraversi `key_dir`, non legga né attraversi le
 altre voci dello `state_dir`, entri senza scriverle in `worktrees`, `agent-shared`,
 `agent-shared/schemas`, `agent-shared/turns` e `agent-shared/tmp`, non scriva nulla in `.git`,
+esegua git nel primo worktree di `worktrees` (avviato da `devloop` con `sudo -n -E` e il solo
+`safe.directory` di quel worktree, come in un turno; senza worktree un avviso, #500),
 e che l'overlay abbia `[agent_user] name = "devloop-agent"`; la home di `devloop-agent` (1770,
 root) e, come `devloop-agent`, i file e i binari delle CLI, come il controllo all'avvio (#438);
 che `sudo` non sia sudo-rs e che l'ambiente arrivi a `devloop-agent` con `sudo -n -E` come

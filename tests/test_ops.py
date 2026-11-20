@@ -1728,6 +1728,28 @@ class CheckHostTests(OpsTestCase):
                       out)
         self.assertEqual(self.mutating_calls(), [])
 
+    def test_git_runs_as_the_agent_user_in_a_worktree_with_only_its_safe_directory(self):
+        # #500: as devloop does, through `sudo -n -E` from devloop's user, safe.directory for
+        # that worktree only; without a worktree, a warning.
+        done, errors = self.check()
+        self.assertEqual(errors, [], done.stdout)
+        self.assertIn(f'ATTENZIONE: nessun worktree in {self.state}/worktrees: git come root '
+                      'non verificato', done.stdout)
+        worktree = self.state / 'worktrees/issue-7'
+        worktree.mkdir(parents=True)
+        (worktree / '.git').write_text('gitdir: /elsewhere\n')
+        done, errors = self.check()
+        self.assertEqual(errors, [], done.stdout)
+        line, = [line for line in done.stdout.splitlines() if 'safe.directory' in line]
+        self.assertTrue(line.startswith(
+            f'  [dry-run] sudo -u {ME} -H -- /usr/bin/env GIT_CONFIG_COUNT=1 '
+            f'GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0={worktree} '
+            'sudo -n -E -u root -- /usr/bin/bash -c '), line)
+        self.assertTrue(line.endswith(f' _ {worktree}'), line)
+        self.assertIn('git\\ -C\\ \\"\\$1\\"\\ status', line)
+        self.assertNotIn('*', line)
+        self.assertNotIn('nessun worktree', done.stdout)
+
     def test_the_clis_run_a_command_with_their_shell_tool_as_the_agent_user(self):
         # #494: --version does not start the shell tool, where agy stopped with permission
         # denied; check-host has each CLI run git --version with it, as the agent user. And
