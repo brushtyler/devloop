@@ -417,11 +417,14 @@ class Ledger:
         entry.measure = measure
         return entry
 
-    def close_turn(self, entry, outcome, report=None, error=None, last_command=None):
+    def close_turn(self, entry, outcome, report=None, error=None, last_command=None,
+                   denied_command=None):
         """Close a turn: ``outcome`` is ``success``, ``failure`` or ``unavailable``; ``report``
         the CLI's ``(fields, models)`` (``agents.telemetry``), None when the CLI did not
         complete; ``last_command`` the last command its output exposes, already cleaned
-        (``agents.public_command``), None when it exposes none (#215).
+        (``agents.public_command``), None when it exposes none (#215); ``denied_command`` the
+        command headless agy denied, already cleaned (``agents.denied_command``), None when agy
+        does not report it (#479).
 
         The journal records the outcome first (``returned`` for ``success``, ``failed``
         otherwise); if it cannot, the record stays open and the turn becomes ``uncertain`` at
@@ -431,6 +434,8 @@ class Ledger:
         duration = (int((self._monotonic() - entry.started) * 1000)
                     if entry.started is not None else None)
         changes = {'last_command': last_command} if last_command else {}
+        if denied_command:
+            changes['denied_command'] = denied_command
         if entry.turn is not None:
             self.journal.outcome(entry.turn, JOURNAL_OUTCOME[outcome], error,
                                  usage=observed(fields) if entry.measure else None)
@@ -559,10 +564,12 @@ def _render_turn(r, title=None):
              ('Inizio', r.get('started_at')), ('Fine', r.get('ended_at')),
              ('Durata (ms)', r.get('duration_ms')), ('Esito', r.get('outcome'))]
     parts.append(_rows(rows))
-    if r.get('last_command'):
-        command = ' '.join(str(r['last_command']).split())
-        fence = '`' * (max((len(run) for run in re.findall('`+', command)), default=0) + 1)
-        parts.append(f'- **Ultimo comando (esposto dalla CLI):** {fence} {command} {fence}')
+    for key, label in (('last_command', 'Ultimo comando (esposto dalla CLI)'),
+                       ('denied_command', 'Comando negato (riportato da agy)')):
+        if r.get(key):
+            command = ' '.join(str(r[key]).split())
+            fence = '`' * (max((len(run) for run in re.findall('`+', command)), default=0) + 1)
+            parts.append(f'- **{label}:** {fence} {command} {fence}')
     if r.get('error'):
         parts.append(f'- **Errore:** {" ".join(str(r["error"]).split())}')
     parts += ['', '**Telemetria** (dichiarata dalla CLI, non autenticata):', '',

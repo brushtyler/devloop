@@ -2485,7 +2485,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             return
         try:
             self.ledger.close_turn(entry, outcome, getattr(self.runner, 'last_report', None),
-                                   error, getattr(self.runner, 'last_command', None))
+                                   error, getattr(self.runner, 'last_command', None),
+                                   error.command if isinstance(error, PermissionDenied)
+                                   else None)
         except GitHubError as exc:
             self.log(f'  turn record on #{entry.number} not closed: {exc}')
 
@@ -2730,10 +2732,13 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
 
     def _permission_denied(self, candidate, exc, retry):
         """Log an agy turn stopped on a denied permission (``PermissionDenied``, #180) with the
-        permission and its target. Returns None when ``retry``, the turn being run once more;
-        otherwise the error to escalate, which names the permission denied again, the model and
-        what was denied: the command, or ``comando non riportato da agy`` (#319)."""
+        permission and its target, preceded by the command when agy reports it (#479). Returns
+        None when ``retry``, the turn being run once more; otherwise the error to escalate,
+        which names the permission denied again, the model and what was denied: the command, or
+        ``comando non riportato da agy`` (#319)."""
         target = exc.target or 'target non riportato da agy'
+        if exc.command:
+            target = f'command `{exc.command}`; {target}'
         if retry:
             self.log(f'  {candidate.key}: model {candidate.model} denied the '
                      f'"{exc.permission}" permission ({target}); retrying once')

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from devloop import agents, config, markdown, unavailability
 from devloop.dispatcher import Dispatcher
+from devloop.ledger import Ledger
 from devloop.planning import Action, Snapshot
 from helpers.devloop_fakes import FakeGH
 from test_devloop import CFG, FakeWS, pr
@@ -89,6 +90,51 @@ class Base(unittest.TestCase):
         d.snapshot = lambda: Snapshot([p], [], [])
         self.assertEqual(d.tick(), [Action('review', 100)])
         return self.gh.comments[0][1]
+
+
+class DeniedRecordTests(Base):
+    """The command agy reports as denied reaches the dispatcher's log and the turn's ledger
+    record (#479); without it neither makes one up."""
+
+    def records(self, cli):
+        """The ledger records of the turns of one review tick, as last written, and the log."""
+        self.gh, self.logs = FakeGH(), []
+        self.gh.with_ids = True
+        runner = agents.AgentRunner(Path(self.tmp.name) / 'logs', 10, run=cli, clock=self.clock)
+        d = Dispatcher(CFG, self.gh, FakeWS(), runner, log=self.logs.append,
+                       memory=self.memory(), ledger=Ledger(self.gh))
+        p = pr()
+        p.meta['reviewer'] = 'agy'
+        self.gh.labels[100] = set(p.labels)
+        d.snapshot = lambda: Snapshot([p], [], [])
+        self.assertEqual(d.tick(), [Action('review', 100)])
+        turns = []
+        for _, body in self.gh.comments:  # a review turn is a section of its round's register
+            record = markdown.read_marker(body, 'ledger') or {}
+            turns += [(r, body) for r in [record, *record.get('records', ())]
+                      if r.get('type') == 'turn']
+        return turns, '\n'.join(self.logs)
+
+    def test_the_denied_command_is_in_the_record_and_in_the_log(self):
+        cli = SequenceCLI(gemini_4_argon_high=[(0, COMMAND_ENVELOPE, JETSKI)])
+        turns, log = self.records(cli)
+        self.assertEqual([r['outcome'] for r, _ in turns], ['failure', 'success'])
+        denied, body = turns[0]
+        self.assertEqual(denied['denied_command'], COMMAND)
+        self.assertIn(f'- **Comando negato (riportato da agy):** ` {COMMAND} `', body)
+        self.assertNotIn('denied_command', turns[1][0])  # the retry was not denied
+        target = agents.denied_target('agy', COMMAND_ENVELOPE)
+        self.assertIn(f'agy: model {ARGON} denied the "command" permission (command '
+                      f'`{COMMAND}`; {target}); retrying once', log)
+
+    def test_without_the_command_nothing_is_made_up(self):
+        cli = SequenceCLI(gemini_4_argon_high=[(0, DENIED_ENVELOPE, JETSKI)])
+        turns, log = self.records(cli)
+        self.assertEqual([r['outcome'] for r, _ in turns], ['failure', 'success'])
+        self.assertNotIn('denied_command', turns[0][0])
+        self.assertNotIn('Comando negato', turns[0][1])
+        self.assertIn(f'agy: model {ARGON} denied the "command" permission '
+                      f'({DENIED[1:-1]}); retrying once', log)
 
 
 class RetryPromptTests(Base):
