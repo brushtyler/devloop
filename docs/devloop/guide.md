@@ -2263,6 +2263,16 @@ a host already in service is in
   loop) is refused. It also refuses a file of them that `devloop-agent` cannot read, or a
   directory it cannot enter. The check runs only the system's tools (`PATH=/usr/bin:/bin`),
   never those of `~/.local/bin`, which comes first in the PATH of `devloop-agent`.
+- What a CLI creates on its first use inside the directories of the CLIs, where `devloop-agent`
+  creates nothing, stays its own (#494): `CLI_WRITABLE` in `devloop/agentuser.py`,
+  `~/.gemini/antigravity-cli/bin`, where agy writes the wrapper of its shell tool. The setup
+  script creates it as `devloop-agent`'s, mode `700`, and the startup check refuses to start
+  when `devloop-agent` cannot write it. Since a turn could leave there an executable for the
+  turns after it, devloop reads it as `devloop-agent` before each agy turn and refuses the turn
+  before it starts, with a `tool_failure`, when it holds anything but `agentapi`, or an
+  `agentapi` that is not a regular file with the content agy writes (`#!/bin/sh` and
+  `exec "<home>/.local/bin/agy" agentapi "$@"`, with or without the final newline:
+  `agentuser.agy_wrapper`). An empty or missing `bin` is accepted.
 - What the CLIs keep writable must not carry instructions into the next turn either. Every
   claude turn runs with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, whatever the operator's
   environment says: the auto memory of `~/.claude/projects/<project>/memory`, shared by the

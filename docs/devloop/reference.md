@@ -119,7 +119,8 @@ not a whole number of at least 1, or an unknown key, stops devloop at startup.
 `[agent_user]` sets the [agent user](#agent-user) (#415): `name` (default `""`, off), the system
 user the agent CLIs and the test command run as, and `check` (default `true`), the startup check
 that it cannot read `key_dir` nor `state_dir`, nor change the instructions, the configuration
-and the binaries of its CLIs (#438). Every claude turn, with or without an agent user, gets
+and the binaries of its CLIs (#438), and that it can write what its CLIs create on their first
+use (#494). Every claude turn, with or without an agent user, gets
 `--settings` with the auto memory off (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`,
 `autoMemoryEnabled: false`), over the settings of the project in the worktree; a `--settings` in
 the `write_args` or `review_args` of a claude agent stops devloop at startup. A `name` that is
@@ -866,6 +867,17 @@ each agy turn its minimal permissions, and treats a stop without output as a fai
   receipts record (`commands`, agy only), and the `review_commands` of the pool's reviewers
   enter the policy version: changing them voids the approvals given with the old ones, also for
   a recorded reviewer no longer in the pool.
+- **The wrapper of the shell tool.** agy writes, each time it starts its shell tool,
+  `~/.gemini/antigravity-cli/bin/agentapi`, a wrapper that runs `~/.local/bin/agy agentapi`.
+  With an [agent user](guide.md#agent-user) that directory is the agent user's (#494), so a turn
+  could leave there something else for the turns after it: before each agy turn devloop reads
+  it as the agent user, and refuses the turn before it starts (`<agent>: turn refused before it
+  started, the shell tool of agy has changed: …`, a `tool_failure`, also in a sync) when it
+  holds any entry but `agentapi`, or an `agentapi` that is not a regular file with exactly
+  `#!/bin/sh` and `exec "<home>/.local/bin/agy" agentapi "$@"` (`agentuser.agy_wrapper`; the
+  final newline may be missing), or cannot be read. The message names the extra entries, or
+  the size and a SHA-256 prefix of the changed wrapper, never its content. Without an agent
+  user there is no check.
 - **Files.** Reads and edits stay inside the turn's working directory, which agy enforces
   without rules; `read_file(...)` rules are not used, since they did not restrict reads in the
   tests on agy 1.5.9.

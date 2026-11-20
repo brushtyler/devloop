@@ -302,8 +302,14 @@ configurazione o i binari delle CLI per i turni dopo, per esempio aggiungendo a
   rendere di root a mano: `chown -h` cambia il link, non il file a cui porta;
 - restano di `devloop-agent` le altre voci che le CLI hanno creato nelle loro directory:
   credenziali, sessioni (`~/.claude/projects`, `~/.codex/sessions`, che lo script crea), cache e
-  log. Una CLI che dopo un aggiornamento vuole creare una voce nuova nella sua directory non ci
-  riesce: si apre e si richiude come qui sotto. Ciò che vi resta scrivibile non porta istruzioni
+  log. Le voci che una CLI crea al primo uso in una directory sigillata (`AGENT_CLI_WRITABLE` di
+  `ops/lib.sh`, come `CLI_WRITABLE` di `devloop/agentuser.py`: `~/.gemini/antigravity-cli/bin`,
+  dove agy scrive il wrapper del suo strumento di shell) le crea lo script, di `devloop-agent`,
+  `700`; prima di ogni turno di agy devloop rifiuta il turno se `bin` contiene altro che il
+  wrapper che agy vi scrive (#494). Una CLI che dopo un aggiornamento vuole creare una voce nuova
+  nella sua directory non ci riesce e si ferma con `permission denied`: si apre e si richiude come
+  qui sotto, e la voce va aggiunta all'elenco
+  ([host/migrate.md](host/migrate.md#una-cli-si-ferma-con-permission-denied)). Ciò che vi resta scrivibile non porta istruzioni
   ai turni dopo: devloop avvia ogni turno di Claude Code senza la memoria automatica di
   `~/.claude/projects` (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` nell'ambiente e, perché i settings
   del progetto nel worktree non la riaccendano, anche in `--settings`) e senza i server MCP di
@@ -469,8 +475,11 @@ di root, 3770, del gruppo `devloop-repos`; `devloop` nel gruppo, `devloop-agent`
 fuori; `devloop-agent` che non vi entra; il file di `tmpfiles.d`; `repo_lock_dir` nell'overlay);
 l'unità (uguale a quella generata, `KillMode=mixed`; con `PROJECT` l'unità template e la drop-in),
 che nessun'altra unità di devloop dell'host gestisca lo stesso repository, e lo stato del
-servizio; `--version` di ogni CLI come
-`devloop-agent`; e `devloop apps`
+servizio; che `devloop-agent` scriva le voci di `AGENT_CLI_WRITABLE`; `--version` di ogni CLI
+come `devloop-agent` e, sempre come `devloop-agent`, un prompt che le fa eseguire `git --version`
+con il loro strumento di shell (#494: passa dal modello, con la rete e il login della CLI; un
+errore se non risponde con `git version`, con la riga del `permission denied` se c'è); e
+`devloop apps`
 (ogni app, la sua installazione e i suoi permessi). Con `--dry-run` stampa, senza eseguirle, le
 verifiche che passano da `sudo` o dalla rete.
 
