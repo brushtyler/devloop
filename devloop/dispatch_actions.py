@@ -37,7 +37,7 @@ from .planning import (BASE_CHANGED, FIX_COMMAND, RESYNC_AFTER_APPROVAL, ci_join
                        counted_rounds, findings_reviewers, implementer_choice,
                        pending_reviewers, preflight_state, voided_approval, waived_rounds,
                        waiting_reviewers)
-from .policy import ZERO_LEVEL, distinct, independent, profile_of
+from .policy import ZERO_LEVEL, another_model, distinct, independent, profile_of
 from .ports import summarize_checks
 from .review import (FINDINGS_ONLY, ci_failure_review, current_round, findings_only,
                      last_round, normalize_review, open_findings, owner_of, round_verdict)
@@ -623,15 +623,16 @@ class ActionsMixin:
                     return True
             return allowed
 
-        # The findings-only reviewer (#416): every model it runs is independent of every
-        # author (another identity and another (kind, model, effort)); the rules of the quorum
-        # do not apply to it, since it is not part of the quorum.
+        # The findings-only reviewer (#416): every model it runs, fallbacks included, is
+        # independent of every author and of another model than theirs, whatever the effort
+        # (``another_model``); the rules of the quorum do not apply to it, since it is not
+        # part of the quorum.
         everyone = self._authors(pr) if findings else []
 
         def allowed_findings(key):
             def allowed(candidate):
                 p = self._profile(key, 'review', candidate)
-                return everyone is not None and all(independent(p, a) for a in everyone)
+                return everyone is not None and all(another_model(p, a) for a in everyone)
             return allowed
 
         def allowed_for(key):

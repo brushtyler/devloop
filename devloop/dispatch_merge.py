@@ -34,8 +34,8 @@ from .markdown import (MAX_BODY, dispatcher_header, publishable, read_marker, sp
 from .pin import ScanFailed, merge_known
 from .planning import MERGING, label_names, pending_reviewers, touched_by_base
 from .policy import describe as describe_receipt
-from .policy import (MAX_LISTED_PATHS, ZERO_LEVEL, changes_requested, check_outcome,
-                     check_states, differences, distinct, evaluate, independent, profile_of,
+from .policy import (MAX_LISTED_PATHS, ZERO_LEVEL, another_model, changes_requested,
+                     check_outcome, check_states, differences, distinct, evaluate, independent, profile_of,
                      receipt_of, recorded_level, zero_refused)
 from .config import provider_quorum, same_agent
 from .receipt import CONFLICT as RECEIPT_CONFLICT
@@ -295,8 +295,8 @@ class MergeMixin:
         integration of 2026-11-19, #416), as ``[key]``, or ``[]``. It reviews only when
         ``review_policy.findings_reviewer`` is set, the level is 2, the PR's implementer signs
         with the implementer app (P5-3, #407) and is the same agent in effect as it
-        (``same_agent``), and its profile is independent of every author of the PR
-        (``independent``: another identity and another model). It is never one of the
+        (``same_agent``), and its profile is independent of every author of the PR with a
+        model of another name, whatever the effort (``another_model``). It is never one of the
         reviewers the receipt requires: it adds its findings to their round, and its approval
         never counts for the quorum."""
         cfg, key = self.cfg, self.cfg.review_policy.findings_reviewer
@@ -308,9 +308,9 @@ class MergeMixin:
             return []
         authors = self._authors(pr)
         profile = self._profile(key, 'review')
-        if authors is None or not all(independent(profile, a) for a in authors):
+        if authors is None or not all(another_model(profile, a) for a in authors):
             self.log(f'  findings-only reviewer {key} skipped: not independent of the authors '
-                     'of the PR')
+                     'of the PR, or of the model of one of them')
             return []
         return [key]
 

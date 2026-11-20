@@ -22,6 +22,7 @@ from devloop.review import FINDINGS_ONLY
 from helpers import ssdlc_project
 from helpers.devloop_fakes import FakeGH, FakeIdentities
 from test_devloop import CFG, FakeRunner, FakeWS, finding, fixed, pr, raw_review
+from test_devloop_fallback import unavailable
 from test_devloop_implementer_app import (IMPL_APP, SONNET, RoleIdentities, migrated, parse,
                                           role_meta)
 from test_devloop_quorum import CORE, Identities, Quorum, QuorumGH
@@ -29,6 +30,9 @@ from test_devloop_quorum import CORE, Identities, Quorum, QuorumGH
 DATA = ssdlc_project.data()
 KEY = 'claude-reviewer'
 QUORUM = ['codex-reviewer', 'agy-reviewer']
+# The implementer's model, and an effort allowed for a fallback other than its.
+OPUS = DATA['agents']['claude']['model']
+OTHER_EFFORT = 'max' if DATA['agents']['claude']['effort'] == 'xhigh' else 'xhigh'
 
 
 def findings_data(key=KEY, agents=None, **roles):
@@ -106,6 +110,19 @@ class SelectionTests(unittest.TestCase):
         cfg = parse(findings_data(agents={KEY: dict(SONNET, model='claude-opus-5-5')}))
         self.assertEqual(self.make(cfg)._findings_reviewers(change(cfg), level(2)), [])
         self.assertIn(f'findings-only reviewer {KEY} skipped', '\n'.join(self.logs))
+
+    def test_the_same_model_with_another_effort_is_not_another_model(self):
+        # Independent by (kind, model, effort), but the very model of the implementer: the
+        # issue asks for another model, so it does not review.
+        for effort in ('low', OTHER_EFFORT):
+            with self.subTest(effort=effort):
+                self.logs = []
+                cfg = parse(findings_data(agents={KEY: dict(SONNET, model=OPUS, effort=effort)}))
+                d = self.make(cfg)
+                self.assertNotEqual(d._profile(KEY, 'review')['effort'],
+                                    change(cfg).meta['profile']['effort'])
+                self.assertEqual(d._findings_reviewers(change(cfg), level(2)), [])
+                self.assertIn(f'findings-only reviewer {KEY} skipped', '\n'.join(self.logs))
 
     def test_only_with_the_implementer_app(self):
         # The keys of before: claude implements with its agent's app, not the implementer app.
@@ -346,6 +363,32 @@ class RoundTests(Quorum):
         self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
         (escalated,) = self.records('policy')
         self.assertEqual((escalated['event'], escalated['receipt']['reviewers']), ('level', []))
+
+    def test_its_fallback_is_never_the_implementers_model(self):
+        # Its primary model is unavailable, and its fallback is the implementer's very model with
+        # another effort: independent by (kind, model, effort), but not another model. Without
+        # the ban of P5-6, only the findings-only rule keeps it from running.
+        def cfg_with(fallback):
+            agent = dict(SONNET, fallback_models=[{'model': fallback, 'model_label': 'F',
+                                                   'effort': OTHER_EFFORT}])
+            made = parse(findings_data(agents={KEY: agent}))
+            return dataclasses.replace(made, review_policy=dataclasses.replace(
+                made.review_policy, fallback_provider_ban=False))
+
+        self.make(raw_review(), raw_review(), unavailable(KEY), cfg=cfg_with(OPUS))
+        for _ in range(3):
+            self.d.tick()
+        # The fallback never ran: one call for its primary model only, and the turn failed.
+        self.assertEqual([c[0] for c in self.runner.calls], [*QUORUM, KEY])
+        self.assertEqual(self.gh.labels[100], {'agent:needs-operator'})
+        self.assertIn(f'- `{OPUS}`: not independent', self.gh.comments[-1][1])
+        # Another model as the fallback runs, and its review joins the round.
+        self.make(raw_review(), raw_review(), unavailable(KEY), raw_review(),
+                  cfg=cfg_with('claude-haiku-5-5'))
+        for _ in range(3):
+            self.d.tick()
+        self.assertEqual([c[0] for c in self.runner.calls], [*QUORUM, KEY, KEY])
+        self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
 
     def test_off_nothing_changes(self):
         self.make(raw_review(), raw_review(), cfg=OFF)

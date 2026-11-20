@@ -355,6 +355,14 @@ def independent(reviewer, author):
     return reviewer['identity'] != author['identity'] and _model(reviewer) != _model(author)
 
 
+def another_model(reviewer, author):
+    """Whether the findings-only reviewer (#416) may review code ``author`` wrote: independent
+    of it (``independent``) and with a model of another name, whatever its effort. The issue
+    asks for another model than the implementer's: the same model with another effort has the
+    same blind spots."""
+    return independent(reviewer, author) and reviewer['model'] != author['model']
+
+
 def _is_int(value, low, high=None):
     return (isinstance(value, int) and not isinstance(value, bool) and value >= low
             and (high is None or value <= high))

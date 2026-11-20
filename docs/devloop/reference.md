@@ -1872,8 +1872,9 @@ round besides the quorum, **for its findings only**. **Off by default** (D10):
   with the implementer app ([the keys by role](#the-implementer-app-and-the-keys-by-role)) and is
   the same agent in effect as the key (the same kind, model or provider): claude-reviewer with
   Sonnet on the code of claude-implementer with Opus. Every model its turn runs, fallbacks
-  included, must differ from every author of the PR by GitHub identity and by `(kind, model,
-  effort)`; otherwise it does not review, or its turn fails. With `fallback_provider_ban` its
+  included, must differ from every author of the PR by GitHub identity and by model: the same
+  model with another effort does not count as another model. Otherwise it does not review, or
+  its turn fails. With `fallback_provider_ban` its
   fallbacks on an author's provider never run, as for any reviewer. Its review is blind to the
   author like the others' (#389), and its prompt adds that its role is findings only.
 - **Its round.** A new round names it in the policy receipt of its reviews (`findings`, outside
