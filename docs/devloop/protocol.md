@@ -139,8 +139,11 @@ from the save to `git apply`, so line ends (CRLF) and text that is not UTF-8 com
 only the copy in a prompt is decoded, with replacement characters. The escalation names that
 file and lists its files with the lines added and removed. The retry of the same step (same
 label) recreates the worktree, then, before the agent starts, the dispatcher applies the patch
-with `git apply`, all or nothing, without staging it. If it does not apply, for example because
-the base changed the same lines, the worktree stays as created, and the prompt carries the patch
+with `git apply`, all or nothing, without staging it. A patch that does not apply as it is,
+because the base moved since the turn (#475), is merged three ways (`git apply --3way`) in a
+separate index, from the blobs it records, and applied only when that merge is clean. If it still
+does not apply, for example because the base changed the same lines, the worktree stays as
+created, and the prompt carries the patch
 as text (at most 100,000 characters) with its files. Either way the prompt says that the
 previous turn timed out, that its changes must be examined before going on, and to run the
 targeted tests before any long suite. The patch is taken once: the file is renamed
