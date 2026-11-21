@@ -54,8 +54,21 @@ def _kill_group(proc, kill=None):
         return partial_text(exc.output), partial_text(exc.stderr)
 
 
+class Cancelled(Exception):
+    """The command of ``run_in_group`` was stopped because its ``cancel`` event was set (#521);
+    ``partial_output`` is what it wrote until then, ``(stdout, stderr)``."""
+
+    def __init__(self, partial_output):
+        super().__init__('cancelled')
+        self.partial_output = partial_output
+
+
+# How often ``run_in_group`` checks its ``cancel`` event, in seconds.
+CANCEL_POLL_SECONDS = 1.0
+
+
 def run_in_group(argv, *, timeout=None, input=None, watch=None, watch_interval=30.0, kill=None,
-                 **kwargs):
+                 cancel=None, **kwargs):
     """Like ``subprocess.run(..., capture_output=True, text=True)``, but the command gets its own
     process group, and a timeout kills the whole group: the test runner's workers, or the
     background commands an agent CLI started, do not outlive it. ``kill(pgid)``, if given,
@@ -63,17 +76,26 @@ def run_in_group(argv, *, timeout=None, input=None, watch=None, watch_interval=3
 
     ``watch(pid)``, if given, is called every ``watch_interval`` seconds while the command runs;
     an exception it raises kills the whole group and propagates, with what the command wrote
-    until then in its ``partial_output`` attribute, ``(stdout, stderr)``."""
+    until then in its ``partial_output`` attribute, ``(stdout, stderr)``.
+
+    ``cancel`` (a ``threading.Event``), if given, is checked every ``CANCEL_POLL_SECONDS``
+    while the command runs (#521): once set, the whole group is killed and ``Cancelled`` is
+    raised, with what the command wrote until then."""
     kwargs.pop('capture_output', None)
     kwargs.pop('text', None)
     proc = subprocess.Popen(argv, stdin=subprocess.PIPE if input is not None else None,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                             start_new_session=True, **kwargs)
     deadline = None if timeout is None else time.monotonic() + timeout
+    watched = None if watch is None else time.monotonic() + watch_interval
     while True:
-        wait = None if deadline is None else max(0.0, deadline - time.monotonic())
+        now = time.monotonic()
+        wait = None if deadline is None else max(0.0, deadline - now)
         if watch is not None:
-            wait = watch_interval if wait is None else min(wait, watch_interval)
+            until = max(0.0, watched - now)
+            wait = until if wait is None else min(wait, until)
+        if cancel is not None:
+            wait = CANCEL_POLL_SECONDS if wait is None else min(wait, CANCEL_POLL_SECONDS)
         try:
             # Retrying communicate() after its timeout loses no output and keeps writing the
             # input given to the first call; passing input again raises ValueError.
@@ -81,9 +103,15 @@ def run_in_group(argv, *, timeout=None, input=None, watch=None, watch_interval=3
             out, err = proc.communicate(input=pending, timeout=wait)
             break
         except subprocess.TimeoutExpired:
-            if watch is None or (deadline is not None and time.monotonic() >= deadline):
+            if ((watch is None and cancel is None)
+                    or (deadline is not None and time.monotonic() >= deadline)):
                 out, err = _kill_group(proc, kill)
                 raise subprocess.TimeoutExpired(argv, timeout, output=out, stderr=err) from None
+        if cancel is not None and cancel.is_set():
+            raise Cancelled(_kill_group(proc, kill))
+        if watch is None or time.monotonic() < watched:
+            continue
+        watched = time.monotonic() + watch_interval
         try:
             watch(proc.pid)
         except BaseException as exc:

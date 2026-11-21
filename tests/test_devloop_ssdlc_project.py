@@ -17,7 +17,8 @@ or in the overlay, is a difference from it. A later change to the installation's
 R3's: it updates the frozen ``config.toml`` and ``effective.json`` with it, saying so (``source``
 ``updated`` lists those made so far: the implementer app of #407 and the capacity delegation of
 #412, merged beside R3; the keys by role of #499, which change the policy version too; the
-``[claude_token]`` of #507, off by default).
+``[claude_token]`` of #507, off by default; the ``second_reviewer`` of #521, ``parallel`` by
+default).
 
 ``repo``, ``trusted_users`` and ``[apps]`` left ``devloop/config.toml`` with R6 (#425) for the
 overlay, beside the agy commands (``ops/host/ssdlc/overlay.toml``): ``devloop token``, which

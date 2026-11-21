@@ -11,9 +11,9 @@ these names: import them from here.
 from dataclasses import dataclass, field, replace
 
 from .config import IMPLEMENTER_LABEL
-from .policy import receipt_of
-from .review import (CI, UNPROVEN, current_round, flow_verdict, open_findings, owner_of,
-                     round_verdict)
+from .policy import PARALLEL_CANCEL, SEQUENTIAL, receipt_of
+from .review import (CI, UNPROVEN, current_round, findings_only, flow_verdict, open_findings,
+                     owner_of, round_verdict)
 from .supervision import BUDGET_GRANTABLE, GRANT_BUDGET, ISSUE_STEPS, MERGE, RETRY
 
 RECHECK_COMMAND = '/devloop recheck'
@@ -970,13 +970,31 @@ def findings_reviewers(records):
     return [key for key in keys if isinstance(key, str) and key not in receipt['reviewers']]
 
 
+def closed_by_first(records):
+    """Whether the first reviewer of the agent round ``records`` closed it (#521): its receipt
+    records a ``second_reviewer`` mode other than ``parallel``, and the record of the first
+    reviewer of its quorum does not approve (``flow_verdict``: a request for changes, for a
+    decision of the operator, or without evidence). A ``needs_operator`` for the trust policy
+    without findings of its own approves (#434), and does not close it. Such a round is
+    complete with that verdict alone: it waits for no other reviewer, and lacks no verdict of
+    its quorum (``missing_verdicts``)."""
+    receipt = receipt_of(records[0]) if records and records[0]['source'] == 'agent' else None
+    if (receipt is None or receipt.get('second_reviewer') not in (SEQUENTIAL, PARALLEL_CANCEL)
+            or not receipt['reviewers']):
+        return False
+    first = receipt['reviewers'][0]
+    return any(owner_of(r) == first and not findings_only(r) and flow_verdict(r) != 'approve'
+               for r in records)
+
+
 def pending_reviewers(records):
     """The reviewers an agent round still waits for: those the receipt of its first review
     requires and that have not reviewed yet, and the findings-only reviewer it names (#416),
     whose findings join the round before its verdict counts. A CI round, or a review without a
-    receipt, is complete as it is."""
+    receipt, is complete as it is; so is a round its first reviewer closed (``closed_by_first``,
+    #521)."""
     receipt = receipt_of(records[0]) if records and records[0]['source'] == 'agent' else None
-    if receipt is None:
+    if receipt is None or closed_by_first(records):
         return []
     done = {owner_of(r) for r in records}
     return [key for key in receipt['reviewers'] + findings_reviewers(records) if key not in done]
@@ -999,11 +1017,13 @@ def missing_verdicts(pr):
     receipt of its first review requires that have not reviewed, while that round is an agent
     round of ``pr``'s head not answered by a fix; ``[]`` otherwise. The findings-only reviewer
     (#416) is not of the quorum. With one, the supervisor may ask for a new round with
-    ``/devloop rereview``."""
+    ``/devloop rereview``. A round its first reviewer closed (``closed_by_first``, #521) lacks
+    none: the second reviewer was not asked."""
     latest = current_round(pr.reviews)
     receipt = receipt_of(latest[0]) if latest and latest[0]['source'] == 'agent' else None
     if (receipt is None or latest[0]['head_sha'] != pr.head_sha
-            or any(f['round'] == latest[0]['round'] for f in pr.fixes)):
+            or any(f['round'] == latest[0]['round'] for f in pr.fixes)
+            or closed_by_first(latest)):
         return []
     done = {owner_of(r) for r in latest}
     return [key for key in receipt['reviewers'] if key not in done]

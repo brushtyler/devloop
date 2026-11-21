@@ -14,7 +14,7 @@ from pathlib import Path
 from . import claudetoken
 from .localtests import CI_LOG_FORMATS, SELECTIONS, Tests
 from .localtests import MODES as LOCAL_TESTS_MODES
-from .policy import MAX_LEVEL, MIN_LEVEL, ZERO_LEVEL, ReviewPolicy
+from .policy import MAX_LEVEL, MIN_LEVEL, SECOND_REVIEWER_MODES, ZERO_LEVEL, ReviewPolicy
 from .supervision import (MAX_CAPACITY, MAX_CAPACITY_HOURS, MAX_DAILY_GRANTS,
                           MAX_DELEGATED_MERGES, MAX_GRANTED_ROUNDS)
 from .unavailability import delimited
@@ -935,11 +935,17 @@ def parse_review_policy(table, root, reviewers=(), agents=None):
     ban = default.fallback_provider_ban
     if 'fallback_provider_ban' in table:
         ban = _require(table, 'fallback_provider_ban', bool, where)
+    # When the second reviewer of a level 2 round starts (#521): an unknown mode stops devloop.
+    second = table.get('second_reviewer', default.second_reviewer)
+    if not isinstance(second, str) or second not in SECOND_REVIEWER_MODES:
+        raise ConfigError(f'{where}.second_reviewer: unknown mode {second!r}; expected one of '
+                          + ', '.join(f'"{mode}"' for mode in SECOND_REVIEWER_MODES))
     return ReviewPolicy(default_level=level, label=label, sensitive_paths=paths,
                         sensitive_files=tuple(files), reviewers=tuple(reviewers),
                         zero_label=zero_label, zero_allowlist=allowlist, zero_checks=checks,
                         advisory_reviewer=advisory, findings_reviewer=findings,
-                        provider_quorum=quorum, fallback_provider_ban=ban)
+                        provider_quorum=quorum, fallback_provider_ban=ban,
+                        second_reviewer=second)
 
 
 def _findings_reviewer(table, default, pool, agents):
@@ -2009,7 +2015,8 @@ OVERLAY_KEYS = {
                      'protected_paths')),
     'review_policy': {**dict.fromkeys(('default_level', 'label', 'sensitive_paths',
                                        'sensitive_path_lists', 'advisory_reviewer',
-                                       'findings_reviewer', 'provider_quorum', 'fallback_provider_ban')),
+                                       'findings_reviewer', 'provider_quorum', 'fallback_provider_ban',
+                                       'second_reviewer')),
                       'zero': dict.fromkeys(('label', 'allowlist', 'checks'))},
     'merge': {'mode': None, 'operator_only_paths': None, 'levels': {'*': None}},
     'roles': {**dict.fromkeys(('implementer', 'reviewer', 'reviewers', 'supervisor')),

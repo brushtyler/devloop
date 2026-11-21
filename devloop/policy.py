@@ -65,6 +65,11 @@ EVENTS = ('level', 'stale', 'promoted')
 # version, and a change to its model, effort or arguments must still void its approvals.
 BINDING = ('pr', 'base', 'head', 'policy', 'level', 'reviewers', 'profiles')
 MAX_LISTED_PATHS = 50
+# When the second reviewer of a round with two reviewers starts (#521): together with the first
+# (the default, as before), only after the first approved, or together and stopped as soon as
+# the first asks for changes.
+PARALLEL, SEQUENTIAL, PARALLEL_CANCEL = 'parallel', 'sequential', 'parallel_cancel'
+SECOND_REVIEWER_MODES = (PARALLEL, SEQUENTIAL, PARALLEL_CANCEL)
 
 
 def _norm(entry):
@@ -120,6 +125,11 @@ class ReviewPolicy:
     # and a reviewer of the pool whose fallback is of the provider of an agent that may implement,
     # other than its own model's, stops devloop at startup. Every provider is then declared.
     fallback_provider_ban: bool = False
+    # When the second reviewer of a round with two reviewers starts (#521): ``parallel`` (the
+    # default, as before), ``sequential`` or ``parallel_cancel``. Other than ``parallel`` it is
+    # recorded in the receipt of each such round (``second_reviewer``), where the round reads
+    # it: a request for changes, or for a decision, of the first reviewer closes the round.
+    second_reviewer: str = PARALLEL
 
     def zero_enabled(self):
         return bool(self.zero_allowlist) and bool(self.zero_checks)
@@ -153,6 +163,10 @@ class ReviewPolicy:
         # may have given no longer holds.
         if self.fallback_provider_ban:
             data['fallback_provider_ban'] = True
+        # The mode of the second reviewer (#521) only when not the default, so that with it the
+        # version is the one before.
+        if self.second_reviewer != PARALLEL:
+            data['second_reviewer'] = self.second_reviewer
         if self.zero_enabled():
             data['zero'] = {'label': self.zero_label,
                             'allowlist': sorted({_norm(p) for p in self.zero_allowlist}),
@@ -300,9 +314,13 @@ def evaluate(policy, *, pr, base, head, changes, labelers, trusted_users, previo
         if not why:
             level = ZERO_LEVEL
     reviewers = list(select(level)) if level else []
-    return {'pr': pr, 'base': base, 'head': head, 'policy': policy.version(), 'level': level,
-            'reasons': reasons, 'reviewers': reviewers,
-            'profiles': [profile(key) for key in reviewers]}
+    receipt = {'pr': pr, 'base': base, 'head': head, 'policy': policy.version(), 'level': level,
+               'reasons': reasons, 'reviewers': reviewers,
+               'profiles': [profile(key) for key in reviewers]}
+    if policy.second_reviewer != PARALLEL and len(reviewers) > 1:
+        # The round reads its mode here (#521): the policy version, which covers it, binds it.
+        receipt['second_reviewer'] = policy.second_reviewer
+    return receipt
 
 
 def valid_profile(p):
@@ -424,6 +442,12 @@ def describe(receipt):
                  or ('nessuno (livello 0)' if receipt['level'] == ZERO_LEVEL
                      else 'nessun agent indipendente'))
     lines.append(f'- Reviewer richiesti: {reviewers}.')
+    mode = receipt.get('second_reviewer')
+    if mode in (SEQUENTIAL, PARALLEL_CANCEL):
+        lines.append(f'- Secondo reviewer: `{mode}` ('
+                     + ('parte solo se il primo approva' if mode == SEQUENTIAL else
+                        'parte insieme al primo ed è annullato se il primo non approva')
+                     + ').')
     # The findings-only reviewer (#416): outside the binding fields, never required.
     findings = receipt.get('findings')
     if isinstance(findings, list) and findings:

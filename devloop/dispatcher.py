@@ -184,7 +184,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .agents import (TAIL_LINES, AgentError, ModelsUnavailable, ModelUnavailable, NoOutput,
-                     PermissionDenied, background_unfinished, denied_retry_note)
+                     PermissionDenied, TurnCancelled, background_unfinished, denied_retry_note)
 from .apps import DISPATCHER, ISSUE_COMMENT, PR_COMMENT, SUPERVISOR, app_login
 from .claudetoken import PROCEDURE as TOKEN_PROCEDURE
 from .claudetoken import RotationAlert, TokenRefused
@@ -2948,7 +2948,9 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
         invocation as a turn (#133): written before the CLI starts, closed when it ends; with
         ``role`` (``FINDINGS_ONLY``, #416) the record says the turn is a findings-only review. An
         exception that is not an ``AgentError`` closes it too, ``failure``, and propagates
-        (#381): a turn is never left ``open`` by an error of the dispatcher.
+        (#381): a turn is never left ``open`` by an error of the dispatcher. A turn stopped
+        because its result is no longer needed (``TurnCancelled``, #521) is closed
+        ``cancelled`` and propagates at once: no other model of the chain runs.
 
         With a memory (#151), an agent with fallback models records each model found
         unavailable, and skips a remembered one until its record expires, without running it:
@@ -2985,6 +2987,10 @@ class Dispatcher(SupervisionMixin, PreflightMixin, MergeMixin, ActionsMixin, Con
             entry = self._open_turn(where, candidate, mode, label + suffix, role)
             try:
                 output = self.runner.run(candidate, mode, text, schema, path, label + suffix)
+            except TurnCancelled as exc:
+                # No longer needed (#521): no other model runs, and the turn is not a failure.
+                self._close_turn(entry, 'cancelled', exc)
+                raise
             except ModelUnavailable as exc:
                 self._close_turn(entry, 'unavailable', exc)
                 models.tried.append((candidate.model, f'{exc} ({exc.reason})'))
