@@ -2691,7 +2691,8 @@ state_dir = "/var/lib/devloop/widget"
 
 The facts of the project (`test_cmd`, `[docs.map]`, …) and the restrictions it adds go in the
 [project file](reference.md#project-file) `DIR/project.toml` (ADR 0006, R2), on the host; the
-trust keys stay in the overlay. The prompts and the selection of the tests are still those of
+trust keys stay in the overlay. The whole installation of such a project, step by step, is in the
+[quick start for a new project](quickstart.md). The prompts and the selection of the tests are still those of
 ssdlc.
 
 #### Several projects on one host

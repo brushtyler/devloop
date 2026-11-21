@@ -1,7 +1,7 @@
 # devloop: agent dispatcher for this repository
 
 devloop moves issues through implementation, independent review and fixes. Its documentation is
-split into three pages:
+split into three pages, plus a quick start:
 
 - [Guide](devloop/guide.md), for the operator and the supervisor: the loop, labels and
   `/devloop` commands, merge modes and escalations, the conclave of three agents on a block
@@ -17,6 +17,8 @@ split into three pages:
 - [Protocol](devloop/protocol.md): sync mechanics, rounds, markers and records (receipts, merge
   directives, structured review and findings, attribution, evidence and telemetry, and the
   receipt of a PR promoted to `agent:ready-to-merge`).
+- [Quick start for a new project](devloop/quickstart.md): devloop for a repository other than
+  ssdlc on a host, step by step, from its set of apps to the running service (ADR 0006, R9).
 
 Ports and adapters are in [Pipeline and architecture](architecture.md#ports-and-adapters); roles
 and merge modes in [ADR 0002](adr/0002-ruoli-e-responsabilita.md).
