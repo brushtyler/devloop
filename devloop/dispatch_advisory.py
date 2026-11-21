@@ -9,9 +9,11 @@ of type ``COMMENT`` with the agent's identity, titled ``ADVISORY_TITLE``, with a
 marker. The dispatcher then writes its summary for the operator, with the opinion only, and
 adds it to the current receipt of the same head (#135), if any.
 
-It produces no effect: no round, no finding, no label, no promotion. devloop reads it only to
-know whether a head already has one (``_advisory_done``) and to show its opinion in a receipt:
-never to decide. An action that fails is never escalated: the PR is already the operator's.
+It produces no effect: no round, no finding, no label, no promotion. devloop reads it to know
+whether a head already has one (``_advisory_done``) and to show its opinion in a receipt, and
+for one decision only: with the merge delegated to the supervisor (``[delegations] merge``,
+#486), a ``/devloop merge`` of a head is refused unless its advisory review has the opinion
+``ok`` or ``dubbi`` (``supervision.MERGE_OPINIONS``). It stays out of the quorum. An action that fails is never escalated: the PR is already the operator's.
 Except a turn refused by the block on uncertain turns (``TurnBlocked``, #362): it escalates as
 ``uncertain_turn`` once for the turns that block the work, and the PR gets no advisory action
 while those turns, already escalated, still block it (``_advisory_held``).
@@ -98,6 +100,15 @@ def advisory_record(head, reviewer, opinion=None):
             'opinion': opinion}
 
 
+# What the advisory review decides, in the texts devloop publishes (#486): only whether the
+# supervisor may merge the head, when the operator delegated the merge.
+NO_EFFECT = ('Non conta per il quorum né per il limite dei round, non apre finding e non cambia '
+             'label né promozione. Il parere conta solo per il merge delegato al supervisore, '
+             'quando l\'operatore lo ha attivato (`[delegations] merge`): con `contrario`, o '
+             'senza review consultiva, devloop rifiuta il `/devloop merge` di questo head, e il '
+             'merge resta all\'operatore.')
+
+
 def _bullets(items):
     return [f'- {item}' for item in items] if items else ['_Nessuno indicato._']
 
@@ -108,9 +119,7 @@ def render_advisory_review(advisory, reviewer, head_sha, header):
     parts = [f'## {ADVISORY_TITLE}', '',
              f'**Commit:** `{head_sha[:12]}` · **Agent:** `{reviewer}` · **Parere non '
              f'vincolante:** **{advisory["opinion"]}**', '',
-             '> Questa review è una lettura in più per l\'operatore. Non conta per il quorum né '
-             'per il limite dei round, non apre finding e non cambia label né promozione: '
-             'devloop non la legge per decidere.', '',
+             f'> Questa review è una lettura in più per l\'operatore. {NO_EFFECT}', '',
              '### Riassunto della PR', '', advisory['summary'] or '_Non indicato._', '',
              '### Rischi residui', '', *_bullets(advisory['residual_risks']), '',
              '### Cosa guarderebbe l\'operatore', '', *_bullets(advisory['operator_checks']), '',
@@ -137,9 +146,7 @@ def render_advisory_summary(record, error=''):
     else:
         text = (f'La review consultiva di {who} sul commit {head} non è riuscita'
                 + (f' ({error})' if error else '') + '.')
-    text += ('\n\nNon conta per il quorum né per il limite dei round, non apre finding e non '
-             'cambia label né promozione: devloop non la legge per decidere. Una nuova review '
-             'consultiva arriva solo con un nuovo head.')
+    text += (f'\n\n{NO_EFFECT} Una nuova review consultiva arriva solo con un nuovo head.')
     return publishable(dispatcher_header() + '\n## Review consultiva per l\'operatore\n\n'
                        + text + '\n', 'advisory', record)
 

@@ -22,26 +22,28 @@ from types import SimpleNamespace
 from .acceptance import acceptance_criteria, acceptance_findings, latest_map
 from .apps import MERGER
 from .context import _describe_bases, _open_findings_reason
-from .dispatch_supervision import RELEASE_COMMAND
+from .dispatch_supervision import RELEASE_COMMAND, merge_command
 from . import receipt as pr_receipt
 from .github import GitHubError
 from .hoststep import UNREADABLE as UNREADABLE_STEP
 from .hoststep import latest as latest_host_step
+from .journal import JournalError
 from .ledger import collect as ledger_collect
 from .ledger import timestamp as ledger_timestamp
-from .markdown import (MAX_BODY, dispatcher_header, publishable, read_marker, split_markers,
-                       with_record)
+from .markdown import (MAX_BODY, carries_record, dispatcher_header, publishable, read_marker,
+                       split_markers, with_record)
 from .pin import ScanFailed, merge_known
 from .planning import MERGING, label_names, pending_reviewers, touched_by_base
 from .policy import describe as describe_receipt
 from .policy import (MAX_LISTED_PATHS, ZERO_LEVEL, another_model, changes_requested,
                      check_outcome, check_states, differences, distinct, evaluate, independent, profile_of,
                      receipt_of, recorded_level, zero_refused)
-from .config import provider_quorum, same_agent
+from .config import LEGACY_NEEDS_OPERATOR, provider_quorum, same_agent
 from .receipt import CONFLICT as RECEIPT_CONFLICT
-from .review import (FINDING_COMMAND, current_round, open_findings, round_verdict,
-                     trust_policy_parts)
-from .supervision import MERGED_ISSUE
+from .review import (DECISION, FINDING_COMMAND, current_round, open_findings, owner_of,
+                     round_verdict, trust_policy_parts)
+from .supervision import (ADR_DIR, MAX_MERGE_BUDGET, MERGE, MERGE_BUDGET, MERGE_OPINIONS,
+                          MERGED_ISSUE, adr_paths, adr_problems, merge_arguments, rule_paths)
 from .workspace import WorkspaceError
 
 
@@ -790,6 +792,18 @@ class MergeMixin:
             bases = self._approvals_match(pr, latest, current, paths, step='merge')
             if bases is None:
                 return None
+        self._execute_merge(pr, thread, head, current, mode, paths, bases)
+        return None
+
+    def _execute_merge(self, pr, thread, head, current, mode, paths, bases, delegation=None):
+        """Merge ``head`` of ``pr``, every directive already checked (``_do_merge``, or
+        ``_delegated_merge``, #486), with the merger's app, then record it: the ``merged``
+        record in the comment of the promotion, the issue closed, the auto-pin requested or
+        held. ``delegation``: the command of a delegated merge, ``{command, by, comment,
+        reason}``, recorded in the ``merged`` record and in its text. Returns whether it
+        merged: False when the hold of the auto-pin of a step on the host cannot be recorded."""
+        cfg, lb = self.cfg, self.cfg.labels
+
         # A step on the host declared by the PR (#462) holds the auto-pin before the merge, so
         # that no tick pins the merged base first: a hold that cannot be recorded stops it.
         step = latest_host_step(pr.meta, pr.fixes)
@@ -799,8 +813,9 @@ class MergeMixin:
             try:
                 attempt = self.pinner.hold(pr.number, head, step, pr.meta.get('issue'))
             except OSError as exc:
-                return skip(f'it declares a step on the host and the hold of the auto-pin '
-                            f'could not be recorded: {exc}')
+                self.log(f'  not merged: it declares a step on the host and the hold of the '
+                         f'auto-pin could not be recorded: {exc}')
+                return False
         try:
             self.merger.merge_pr(pr.number, head)
         except BaseException:
@@ -834,18 +849,33 @@ class MergeMixin:
             payload['merged_by'] = merged_by
         if bases:
             payload['bases'] = bases
+        if delegation is not None:
+            payload['delegation'] = dict(delegation)
         # The comment names who wrote to the base (#323): the dispatcher only decides the merge.
         executor = (f'con l\'app `{merged_by.removesuffix("[bot]")}`' if merged_by
                     else 'con il login `gh` locale')
-        section = (
-            '## Mergiata da devloop\n\n'
-            f'devloop ha deciso il merge e l\'ha eseguito {executor}: commit `{head[:12]}` '
-            'con un merge commit, legato a quel '
-            f'head (`--match-head-commit`), in modalità `{mode}`, al livello '
-            f'{current["level"]}. Subito prima ha ricontrollato le direttive di merge: CI '
-            '`pass`, `MERGEABLE` e `CLEAN`, nessun finding aperto, nessuna label '
-            f'`{lb.needs_operator}` o `{lb.merge_hold}`, e le condizioni della promozione con la '
-            'ricevuta di policy ricalcolata. Il branch resta.')
+        if delegation is None:
+            section = (
+                '## Mergiata da devloop\n\n'
+                f'devloop ha deciso il merge e l\'ha eseguito {executor}: commit `{head[:12]}` '
+                'con un merge commit, legato a quel '
+                f'head (`--match-head-commit`), in modalità `{mode}`, al livello '
+                f'{current["level"]}. Subito prima ha ricontrollato le direttive di merge: CI '
+                '`pass`, `MERGEABLE` e `CLEAN`, nessun finding aperto, nessuna label '
+                f'`{lb.needs_operator}` o `{lb.merge_hold}`, e le condizioni della promozione con '
+                'la ricevuta di policy ricalcolata. Il branch resta.')
+        else:
+            section = (
+                '## Mergiata da devloop su delega del supervisore\n\n'
+                f'Il merge spettava all\'operatore. Il supervisore `{delegation["by"]}` l\'ha '
+                f'chiesto con `/devloop {delegation["command"]}` (commento '
+                f'{delegation["comment"]}, delega `[delegations] merge`, #486); devloop ha '
+                'verificato subito prima tutte le condizioni della delega e l\'ha eseguito '
+                f'{executor}: commit `{head[:12]}` con un merge commit, legato a quel head '
+                f'(`--match-head-commit`), al livello {current["level"]}. Il branch resta.\n\n'
+                '**Motivo del supervisore:**\n\n'
+                + '\n'.join(f'> {line}'.rstrip()
+                            for line in delegation['reason'].splitlines()))
         try:
             self._record_merge(pr, thread, head, current, section, payload)
         except GitHubError as exc:
@@ -854,7 +884,7 @@ class MergeMixin:
         self._close_merged_issue(pr, head, mode)
         if step:
             self._alert_host_step(pr, head, step, holding, attempt)
-        return None
+        return True
 
     def _settle_host_steps(self):
         """The holds of the auto-pin whose merge failed with an unknown outcome (#462,
@@ -1150,3 +1180,264 @@ class MergeMixin:
         remove = [lb.ready] if supervised else [lb.ready, lb.needs_supervisor]
         self._escalate(number, reason, remove=remove, cls=MERGED_ISSUE,
                        supervised=supervised, why=why)
+
+    # Delegated merge (#486) ------------------------------------------------------------
+    def _merge_budget_extensions(self, day):
+        """The extensions of the cap of the delegated merges of the UTC ``day`` (#486): the
+        dispatcher's ``supervision`` records of a ``merge-budget`` it granted for that day on
+        ``[report] issue``, as ``[{n, by, reason, comment}]``. None without the issue; when it
+        cannot be read, none (logged): the cap of the configuration applies, never more."""
+        issue = self.cfg.report.issue
+        if not issue:
+            return []
+        try:
+            comments = self.gh.issue_comments(issue)
+        except GitHubError as exc:
+            self.log(f'  the extensions of the delegated merges on #{issue} cannot be read: '
+                     f'{exc}')
+            return []
+        found = []
+        for _, record in self._dispatcher_records(comments, 'supervision'):
+            n = record.get('value')
+            if (record.get('command') == MERGE_BUDGET and record.get('outcome') == 'granted'
+                    and record.get('day') == day and isinstance(n, int)
+                    and not isinstance(n, bool) and 1 <= n <= MAX_MERGE_BUDGET):
+                found.append({'n': n, 'by': record.get('by'), 'reason': record.get('reason'),
+                              'comment': record.get('comment')})
+        return found
+
+    def _trusted_comment(self, number, comment, seen):
+        """Whether comment ``comment`` of issue or PR ``number`` of the repository is by a user
+        of ``trusted_users`` (#486), read with the API now; ``seen`` caches the comments read.
+        A comment that cannot be read is not."""
+        if number not in seen:
+            try:
+                seen[number] = {c.get('id'): (c.get('author') or {}).get('login')
+                                for c in self.gh.issue_comments(number)}
+            except GitHubError as exc:
+                self.log(f'  the comments of #{number} cannot be read: {exc}')
+                seen[number] = {}
+        return seen[number].get(comment) in self.cfg.trusted_users
+
+    @staticmethod
+    def _quorum_records(reviews, reviewers, head):
+        """``{reviewer: record}``: the latest review of ``head`` of each of ``reviewers`` (the
+        quorum of the receipt), from ``reviews``; a reviewer without one is missing."""
+        found = {}
+        for record in reviews:
+            owner = owner_of(record)
+            if owner in reviewers and record.get('head_sha') == head \
+                    and record.get('source') == 'agent':
+                found[owner] = record
+        return found
+
+    def _delegated_merge(self, target, number, comments, command, trace):
+        """Apply ``/devloop merge <sha> <reason>`` of the supervisor's identity on PR
+        ``number``, whose merge is the operator's (#486, ADR 0005, precision of 2026-11-21).
+        ``comments``: the PR's thread read now. Every condition is verified now, mechanically,
+        on ``sha``; when one does not hold, or cannot be verified, the command is refused with
+        why, spent, and the PR stays with the operator (it fails closed):
+
+        - ``[delegations] merge`` on, merge mode ``auto`` with a supervisor, and a command with
+          the full ``sha`` and a reason;
+        - the PR open, in ``agent:ready-to-merge`` with the dispatcher's own
+          ``agent:needs-operator`` of an ``operator_merge`` (the record the command answers),
+          without ``agent:merge-hold`` nor ``agent:needs-supervisor``, and no ``/devloop hold``
+          of the supervisor or a trusted user written after the command;
+        - ``sha`` the PR's head and the head the latest round approved, with the approvals of the
+          quorum matching the receipt recomputed now, no open finding, an acceptance map that
+          holds, ``MERGEABLE`` and ``CLEAN``, and the CI ``pass``;
+        - each reviewer of the quorum, on its latest review of ``sha``, with ``operator_reason``
+          ``none`` or ``decision``, never ``trust_policy``, and no ``trust_policy`` that still
+          holds the merge (``trust_policy_parts``);
+        - an advisory review of ``sha`` (#369) with the opinion ``ok`` or ``dubbi``;
+        - no ``host_step``;
+        - no path of the trust rule nor of the delegations (``supervision.rule_paths``), no work
+          restarted after a conclave, and the merge mode of the PR without its paths under
+          ``docs/adr/`` ``auto``: every other operator-only path, or a level ``off``, stays the
+          operator's;
+        - under ``docs/adr/`` only added lines, each block of them with the link to a comment
+          of this repository by a trusted user, read with the API (``_adr_problem``);
+        - the daily cap of the delegated merges not reached: ``max_merges_per_day`` plus the
+          extensions of the day (``_merge_budget_extensions``), checked and recorded in the
+          turn journal in one step (``TurnJournal.delegated_merge``).
+
+        Then the merge, as an automatic one (``_execute_merge``), whose ``merged`` record
+        carries the command and its reason, and last the ``supervision`` record ``merged``,
+        which spends the command."""
+        cfg, lb, rules = self.cfg, self.cfg.labels, self.cfg.delegations
+        by = command['by']
+        stays = (f'Il comando è speso; la PR resta in `{lb.needs_operator}`, e il merge spetta '
+                 'all\'operatore.')
+
+        def refuse(why):
+            return trace('refused', f'rifiutato: {why}. {stays}')
+
+        if not rules.merge:
+            return refuse('la delega del merge è spenta (`[delegations] merge`)')
+        if cfg.merge.mode != 'auto' or not cfg.supervisor:
+            return refuse(f'la modalità di merge è `{cfg.merge.mode}`, non `auto` con un '
+                          'supervisore')
+        args = merge_arguments(command['reason'])
+        if args is None:
+            return refuse('il comando va scritto come `/devloop merge <sha> <motivo>`, con lo sha '
+                          'completo (40 caratteri) dell\'head della PR e il motivo')
+        sha, reason = args
+        anchor = command['anchor']
+        if anchor.get('kind') != 'notice' or anchor['record'].get('event') != 'operator_merge':
+            return refuse('la PR non aspetta il merge dell\'operatore (`operator_merge`): è '
+                          'all\'operatore per un\'altra ragione')
+        fresh = self.gh.pr_state(number)
+        labels = label_names(fresh.get('labels') or [])
+        head = fresh.get('headRefOid') or ''
+        if fresh.get('state') != 'OPEN':
+            return refuse(f'la PR non è aperta (`{fresh.get("state")}`)')
+        if sha != head:
+            return refuse(f'lo sha del comando (`{sha[:12]}`) non è l\'head attuale della PR '
+                          f'(`{head[:12]}`)')
+        if (lb.ready_to_merge not in labels or lb.needs_operator not in labels
+                or labels & {lb.merge_hold, lb.needs_supervisor, LEGACY_NEEDS_OPERATOR}):
+            return refuse('le label della PR non sono più quelle di un merge dell\'operatore: '
+                          + ', '.join(f'`{n}`' for n in sorted(labels)))
+        pr = self._fresh_pr(target, labels, fresh, comments)
+        if not pr.operator_owned:
+            return refuse(f'`{lb.needs_operator}` non è più la label del dispatcher per il merge '
+                          'dell\'operatore')
+        position = next((i for i, c in enumerate(comments) if c.get('id') == command['comment']),
+                        None)
+        if position is None:
+            return refuse('il commento del comando non è più nella conversazione')
+        held = [c for c in comments[position + 1:]
+                if not carries_record(c.get('body') or '')
+                and (merge_command(c.get('body')) or ('',))[0] == 'hold'
+                and self._may_hold((c.get('author') or {}).get('login'))]
+        if held:
+            return refuse('un `/devloop hold` scritto dopo il comando lo ha annullato')
+        if pr.finding_problems:
+            return refuse('il proprietario di alcuni finding non è ricostruibile')
+        if pr.stale_receipt:
+            return refuse('un record di policy ha trovato superata la ricevuta dell\'approvazione')
+        left = open_findings(pr.reviews, pr.closures)
+        if left:
+            return refuse('restano finding bloccanti aperti: '
+                          + ', '.join(f'`{f["key"]}`' for f in left))
+        latest = current_round(pr.reviews)
+        if not (latest and not pending_reviewers(latest) and round_verdict(latest) == 'approve'
+                and all(r['head_sha'] == sha for r in latest)):
+            return refuse(f'lo sha `{sha[:12]}` non è quello approvato dall\'ultimo round di '
+                          'review')
+        if (fresh.get('mergeable'), fresh.get('mergeStateStatus')) != ('MERGEABLE', 'CLEAN'):
+            return refuse('GitHub non riporta la PR come `MERGEABLE` e `CLEAN` ('
+                          f'`{fresh.get("mergeable")}`, `{fresh.get("mergeStateStatus")}`)')
+        ci, _ = self._read_ci(head)
+        if ci != 'pass':
+            return refuse(f'la CI dell\'head non è verde (`{ci}`)')
+        if self._acceptance_problems(pr):
+            return refuse('la mappa di copertura dei criteri di accettazione non vale per '
+                          'l\'approvazione')
+        try:
+            current, paths = self._receipt_and_paths(pr)
+        except (GitHubError, WorkspaceError) as exc:
+            return refuse(f'la ricevuta di policy non è ricalcolabile ({exc})')
+        if current['head'] != head:
+            return refuse(f'l\'head pubblicato è `{current["head"][:12]}`')
+        touched = rule_paths(paths, rules.merge_trust_paths)
+        if touched:
+            return refuse('la PR tocca la regola di fiducia o le deleghe: '
+                          + ', '.join(f'`{p}`' for p in touched[:MAX_LISTED_PATHS]))
+        unblocked = self._human_merge(pr)
+        if unblocked is not None:
+            return refuse(f'il lavoro della PR è ripartito dopo la decisione del conclave '
+                          f'{unblocked}: il merge resta umano')
+        adr = adr_paths(paths)
+        mode = cfg.merge.mode_for(current['level'], [p for p in paths if p not in adr])
+        if mode != 'auto':
+            return refuse(f'la modalità di merge della PR, fuori da `{ADR_DIR}`, è `{mode}`, non '
+                          '`auto` (percorsi riservati all\'operatore o un override del livello)')
+        if latest_host_step(pr.meta, pr.fixes):
+            return refuse('la PR dichiara un passo sull\'host (`host_step`), che resta '
+                          'all\'operatore')
+        if current['level'] == ZERO_LEVEL or len(current['reviewers']) < current['level']:
+            return refuse('la PR non ha un quorum di reviewer per il suo livello')
+        quorum = self._quorum_records(pr.reviews, current['reviewers'], sha)
+        missing = [k for k in current['reviewers'] if k not in quorum]
+        uncovered = [k for k, r in quorum.items()
+                     if r.get('operator_reason') not in (None, 'none', DECISION)]
+        if missing or uncovered or trust_policy_parts(pr.reviews):
+            return refuse('la modifica non risulta coperta da una decisione dell\'operatore: '
+                          + ('manca la review di ' + ', '.join(f'`{k}`' for k in missing)
+                             + f' su `{sha[:12]}`' if missing else
+                             'un reviewer del quorum dichiara toccata la policy di fiducia '
+                             '(`trust_policy`)'))
+        advisory = self._advisory_record(comments, sha)
+        opinion = (advisory or {}).get('opinion')
+        if opinion not in MERGE_OPINIONS:
+            return refuse(f'la review consultiva di `{sha[:12]}` ' + (
+                'manca' if advisory is None else f'ha parere `{opinion}`'
+                if opinion else 'non ha un parere') + ': serve `ok` o `dubbi`')
+        if adr:
+            problem = self._adr_problem(current, adr)
+            if problem:
+                return refuse(problem)
+        bases = self._approvals_match(pr, latest, current, paths, step='merge')
+        if bases is None:
+            return trace('refused', 'rifiutato: le approvazioni non corrispondono più alla '
+                         'ricevuta di policy ricalcolata, e la PR torna in review.')
+        journal = getattr(self.ledger, 'journal', None)
+        day = ledger_timestamp(self.clock)[:10]
+        extensions = self._merge_budget_extensions(day)
+        cap = rules.max_merges_per_day + sum(e['n'] for e in extensions)
+        try:
+            daily = (None if journal is None else
+                     journal.delegated_merge(number, command['comment'], by, head, cap))
+        except JournalError as exc:
+            self.log(f'  the delegated merge cannot be recorded: {exc}')
+            journal = None
+        if journal is None:
+            return refuse('i merge delegati di oggi non sono verificabili: il journal dei turni '
+                          'non è disponibile o non è leggibile')
+        if daily is None:
+            return refuse(f'oggi i merge delegati hanno già raggiunto il massimo giornaliero '
+                          f'({cap}: `[delegations] max_merges_per_day` = '
+                          f'{rules.max_merges_per_day}, più le estensioni di oggi)')
+        delegation = {'command': MERGE, 'by': by, 'comment': command['comment'],
+                      'reason': reason}
+        try:
+            merged = self._execute_merge(pr, comments, head, current, 'auto', paths, bases,
+                                         delegation)
+        except GitHubError as exc:
+            return refuse(f'il merge non è riuscito ({exc})')
+        if not merged:
+            return refuse('il merge non è stato eseguito')
+        figures = {'head': head, 'daily': daily, 'daily_cap': cap,
+                   'daily_left': cap - daily, 'opinion': opinion}
+        trace('merged', f'PR mergiata su delega, commit `{head[:12]}`, con le condizioni della '
+              f'delega verificate su quello sha; parere della review consultiva: `{opinion}`. '
+              f'Merge delegati di oggi: {daily} di {cap}.\n\n**Motivo:**\n\n'
+              + '\n'.join(f'> {line}'.rstrip() for line in reason.splitlines()), **figures)
+        return None
+
+    def _adr_problem(self, current, adr):
+        """Why the changes of ``adr``, the paths of the PR under ``docs/adr/``, do not only
+        record decisions of the operator already written on GitHub (#486), or ''. Only added
+        lines, as plain text, each block of them with the link to a comment of this repository
+        whose author is in ``trusted_users``, read now with the API. What cannot be read
+        refuses it."""
+        try:
+            files = self.ws.diff_blocks(current['base'], current['head'], ADR_DIR)
+        except WorkspaceError as exc:
+            return f'le modifiche sotto `{ADR_DIR}` non sono leggibili ({exc})'
+        seen = {entry['path'] for entry in files}
+        if any(p not in seen for p in adr):
+            return f'le modifiche sotto `{ADR_DIR}` non sono tutte leggibili come testo'
+        problems, blocks = adr_problems(files, self.cfg.repo)
+        if problems:
+            return (f'sotto `{ADR_DIR}` sono ammesse solo righe aggiunte con il link a una '
+                    'decisione dell\'operatore: ' + '; '.join(problems[:MAX_LISTED_PATHS]))
+        read = {}
+        for path, links in blocks:
+            if not any(self._trusted_comment(n, c, read) for n, c in links):
+                return (f'un blocco aggiunto in `{path}` cita solo commenti che non sono di un '
+                        'utente fidato, o che non si leggono: ' + ', '.join(
+                            f'#{n} ({c})' for n, c in links[:MAX_LISTED_PATHS]))
+        return ''

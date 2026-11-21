@@ -14,7 +14,7 @@ from .config import IMPLEMENTER_LABEL
 from .policy import receipt_of
 from .review import (CI, UNPROVEN, current_round, flow_verdict, open_findings, owner_of,
                      round_verdict)
-from .supervision import BUDGET_GRANTABLE, GRANT_BUDGET, ISSUE_STEPS, RETRY
+from .supervision import BUDGET_GRANTABLE, GRANT_BUDGET, ISSUE_STEPS, MERGE, RETRY
 
 RECHECK_COMMAND = '/devloop recheck'
 # A fix asked by a trusted user or the supervisor (#195): the first line of a comment, after the
@@ -34,7 +34,7 @@ BASE_CHANGED = 'base_changed'
 RESYNC_CONFLICTS = 'resync_conflicts'
 # Actions that take a slot of ``max_actions_per_tick``.
 EXPENSIVE = ('review', 'fix', 'implement', 'sync', 'preflight', 'merge', 'supervise',
-             'conclave', 'advisory')
+             'conclave', 'advisory', 'delegated_merge')
 # Actions that write to the whole repository or to devloop itself (the pin of #174): with
 # ``max_parallel_actions`` above 1 each runs alone, after the actions planned before it and
 # before those planned after it (#176), and in continuous mode only when nothing runs (#227).
@@ -43,8 +43,8 @@ GLOBAL_ACTIONS = frozenset({'pin'})
 # lane of their own (#264): one at a time, alongside the actions on other numbers, since those
 # work in their own worktrees and already handle a base that moves (#160, #235, #250, #252),
 # as they must for a merge made by a person. In a tick's ``schedule`` each is still a phase of
-# its own, as a global action.
-MERGE_LANE = frozenset({'merge'})
+# its own, as a global action. A ``/devloop merge`` of the supervisor (#486) merges too.
+MERGE_LANE = frozenset({'merge', 'delegated_merge'})
 # Priority labels of ready issues (#146) and their rank: the lower, the earlier an issue starts.
 PRIORITY_LABELS = {'priority:high': 'high', 'priority:normal': 'normal', 'priority:low': 'low'}
 PRIORITY_RANK = {'high': 0, 'normal': 1, 'low': 2}
@@ -501,7 +501,11 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
             if item.get('blocked_by') or free <= 0:
                 continue
             free -= 1
-        actions.append(Action('supervise', item['number'], f'{item["command"]} by {item["by"]}'))
+        # A ``/devloop merge`` to apply on a PR (#486) writes to the base branch: it runs in the
+        # merge lane, as a merge.
+        kind = ('delegated_merge' if item['pr'] and item['command'] == MERGE
+                and not item.get('refusal') else 'supervise')
+        actions.append(Action(kind, item['number'], f'{item["command"]} by {item["by"]}'))
     for number in snapshot.working_issues:
         if number in pr_issues:
             actions.append(Action('settle', number, 'agent:working but its PR is open'))
