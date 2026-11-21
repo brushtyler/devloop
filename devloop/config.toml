@@ -320,12 +320,21 @@ enabled = false
 # is back; each grant counts against max_grants_per_day. max_parallel_actions is refused: it
 # needs a restart. When off, a command on [report] issue is refused as not applicable and spent.
 # capacity_max_open_prs, capacity_max_parked_prs and capacity_max_hours may only lower the caps of
-# the code (6, 6 and 24 hours).
+# the code (6, 6 and 24 hours). merge (issue #486): in "auto", `/devloop merge <sha> <reason>` of
+# the supervisor on a ready PR whose merge is the operator's (operator_merge) merges it with the
+# merger's app, only when every condition holds on sha (its head, approved by the quorum with no
+# trust_policy, no open finding, CI green, an advisory review ok or dubbi, no host_step, no path of
+# the trust rule nor of the delegations, under docs/adr/ only added lines that link a comment of
+# a trusted user); it needs review_policy.advisory_reviewer. max_merges_per_day may only lower
+# the cap of the code (5 per UTC day, a cap of its own outside max_grants_per_day);
+# `/devloop merge-budget <N> <reason>` of a trusted user on [report] issue adds N for that day.
+# merge_trust_paths may only add paths to the trust rule of the code.
 [delegations]
 rounds = false
 retry_own_prs = false
 budget = false
 capacity = false
+merge = false
 # max_rounds_per_pr = 2
 # max_grants_per_day = 3
 # capacity_max_open_prs = 6

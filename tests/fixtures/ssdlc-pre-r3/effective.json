@@ -2,7 +2,7 @@
  "source": {
   "commit": "28eaf9455bad6ff52dcbdbc29ecc07d7dde83e2a",
   "how": "dataclasses.asdict(devloop.config.load_config()) and review_policy.version(), computed by the code and the devloop/config.toml of that commit (origin/main before ADR 0006, R3), without overlay nor project file; tuples written as lists",
-  "updated": "later changes of the installation, not R3's, added to config.toml and here with only the values they add (the policy version does not change): [apps.implementer], implementers and agents.*.app (issue #407, PR #442); delegations.capacity and capacity_max_* (issue #412, PR #450); [tests], the selection of the test modules and the format of the CI logs that the code of that commit had built in (devloop/localtests.py), declared since ADR 0006, R5 (issue #424); agents.*.provider, provider of the fallbacks and review_policy.provider_quorum (issue #409); review_policy.fallback_provider_ban (issue #410); delegations.budget (issue #411, PR #449); review_policy.findings_reviewer (issue #416); the keys by role of the agents, claude-implementer, codex-reviewer and agy-reviewer with their app and provider, and claude-reviewer, the third reviewer, last in the pool (issue #499): unlike the others, these change the policy version, which is updated with them"
+  "updated": "later changes of the installation, not R3's, added to config.toml and here with only the values they add (the policy version does not change): [apps.implementer], implementers and agents.*.app (issue #407, PR #442); delegations.capacity and capacity_max_* (issue #412, PR #450); [tests], the selection of the test modules and the format of the CI logs that the code of that commit had built in (devloop/localtests.py), declared since ADR 0006, R5 (issue #424); agents.*.provider, provider of the fallbacks and review_policy.provider_quorum (issue #409); review_policy.fallback_provider_ban (issue #410); delegations.budget (issue #411, PR #449); review_policy.findings_reviewer (issue #416); delegations.merge, max_merges_per_day and merge_trust_paths (issue #486); the keys by role of the agents, claude-implementer, codex-reviewer and agy-reviewer with their app and provider, and claude-reviewer, the third reviewer, last in the pool (issue #499): unlike the others, these change the policy version, which is updated with them"
  },
  "policy_version": "fb6348ad097d27c50d7c8524d993752854699260ba896c1e54ca709ca5625d39",
  "config": {
@@ -438,7 +438,10 @@
    "capacity": false,
    "capacity_max_open_prs": 6,
    "capacity_max_parked_prs": 6,
-   "capacity_max_hours": 24
+   "capacity_max_hours": 24,
+   "merge": false,
+   "max_merges_per_day": 5,
+   "merge_trust_paths": []
   },
   "pin": {
    "auto": false,

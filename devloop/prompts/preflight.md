@@ -43,6 +43,10 @@ default that a comment below has accepted, nor a gap that a decision of the supe
 by devloop below settles. In `code_refs` list the files (`path` or `path:line`)
 that show the gap, or none. Use `proposed_default: ""` when there is no default to propose.
 
+A comment below with a `Permalink:` line carries the link GitHub gives it. When the issue asks to
+cite that comment, a decision of the operator in an ADR for example, the implementer gets the
+same line and cites that link: the missing link is not a gap.
+
 Set `repository_dependent: true` when the gap would close by itself once `$base_branch` gains
 some content, whatever its `kind`: a prerequisite issue or PR not merged yet, a file, module or
 function that does not exist yet. devloop then repeats the check when `$base_branch` advances.

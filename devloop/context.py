@@ -152,15 +152,35 @@ def refused_approvals(comments, trusted_users, devloop_logins):
     return found
 
 
+# The permalink GitHub gives a comment (``html_url``, #506), read as ``url`` by ``gh issue view``
+# and by the REST reads of ``github.GitHub``.
+_PERMALINK = re.compile(r'https://\S+#issuecomment-\d+')
+
+
+def comment_link(comment):
+    """The permalink of ``comment`` (#506), so that an ADR can cite it: its ``url`` when it is
+    one, else ''. It comes from GitHub's read of the comment, never from its text."""
+    url = comment.get('url')
+    return url if isinstance(url, str) and _PERMALINK.fullmatch(url) else ''
+
+
+def _link_line(comment):
+    """The line with the permalink of ``comment`` (``comment_link``) that precedes its text in
+    a prompt, or '' without one."""
+    link = comment_link(comment)
+    return f'Permalink: {link}\n\n' if link else ''
+
+
 def format_operator_decisions(decisions):
     """The section "Decisions of the operator on the issue" of a preflight, review or advisory
-    prompt (#472): the commands ``issue_decisions`` keeps, or a line that says there are none."""
+    prompt (#472): the commands ``issue_decisions`` keeps, each with its permalink (#506), or a
+    line that says there are none."""
     head = '## Decisions of the operator on the issue\n\n'
     if not decisions:
         return head + (f'None: no comment on the issue counts as a decision of the operator. '
                        f'An approval written without `{APPROVE_COMMAND}` is not one.')
     rendered = '\n\n'.join(f'### Comment by {c["author"]["login"]}, {c["created_at"]}\n\n'
-                           f'{c["body"]}' for c in decisions)
+                           f'{_link_line(c)}{c["body"]}' for c in decisions)
     return (head + f'The `{APPROVE_COMMAND}` commands a trusted user wrote in person on the '
                    'issue after the latest change of its title or body and before devloop took '
                    'it on, each followed by the text of the decision. A decision of the '
@@ -192,7 +212,7 @@ def format_operator_comments(comments):
     intro = ('A trusted user asked for a new review of this commit after the previous verdict. '
              if any(requests_rereview(c.get('body')) for c in comments) else '')
     # Without attribution headers (#389): the reviewer does not learn who wrote the change.
-    rendered = '\n\n'.join(f'### Comment by {c["author"]["login"]}\n\n'
+    rendered = '\n\n'.join(f'### Comment by {c["author"]["login"]}\n\n{_link_line(c)}'
                            f'{without_attribution(c["body"])}' for c in comments)
     return ('## Comments from trusted users since the previous verdict\n\n' + intro
             + 'The operator wrote them after the previous round, for example to settle a point '
@@ -394,7 +414,9 @@ def format_fix_requests(requests):
     request}``; empty without any."""
     if not requests:
         return ''
-    rendered = '\n\n'.join(f'### Request by {r["by"]}\n\n{r["request"]}' for r in requests)
+    # Each with the permalink of its comment (#506).
+    rendered = '\n\n'.join(f'### Request by {r["by"]}\n\n{_link_line(r)}{r["request"]}'
+                           for r in requests)
     return ('## Requests from the operator\n\n'
             f'A trusted user or the supervisor asked for this fix with `{FIX_COMMAND}`, without '
             'waiting for a review. Treat each request below as a requirement of this fix, as you '
@@ -482,7 +504,7 @@ def _render_issue_comments(comments, trusted_users, accepted=()):
     """The comments of trusted users as model input, or ''. ``accepted``: the dispatcher's
     records of defaults the supervisor accepted (#182) or of its decisions on the gaps of a
     readiness check (#258), which count as trusted comments."""
-    parts = [f'### Comment by {c["author"]["login"]}\n\n{c["body"]}'
+    parts = [f'### Comment by {c["author"]["login"]}\n\n{_link_line(c)}{c["body"]}'
              for c in _trusted_comments(comments, trusted_users)]
     parts += [_render_acceptance(record) for record in accepted]
     rendered = '\n\n'.join(parts)

@@ -31,6 +31,15 @@ the attribution header:
   or ``<N>m``), within the caps below, then the configured value again. The reason carries the
   analysis of the causes, as for ``grant-round``. A delegation of the operator, off by default
   (``[delegations] capacity``);
+- ``/devloop merge <sha> <reason>``: merge a ready PR whose merge is the operator's (an
+  ``operator_merge``, #248), only from the supervisor's identity and only when every condition
+  of the delegation holds on ``sha``, its head (#486, ADR 0005, precision of 2026-11-21). A
+  delegation of the operator, off by default (``[delegations] merge``), within its own daily cap
+  (``MAX_DELEGATED_MERGES``), separate from the common one;
+- ``/devloop merge-budget <N> <reason>``: only from a trusted user, on the issue of the daily
+  summary (``[report] issue``): ``N`` more delegated merges for the UTC day the command is
+  written, from 1 to ``MAX_MERGE_BUDGET``. The command of the supervisor or of an app does not
+  count;
 - ``/devloop rereview <reason>``: a new review round of a PR whose review failed (#491, a
   decision of the operator recorded in ADR 0005): only on a ``tool_failure`` escalation of a
   review, and only while a reviewer of the quorum of the latest round has no verdict. The new
@@ -45,6 +54,8 @@ mode: ``retry`` of a step it records, critical classes included, and ``accept-de
 ``decide`` on a ``preflight_default`` readiness check. A command that does not apply is always
 answered, with how to resume.
 """
+
+import re
 
 # Non-critical classes: the supervisor decides them in ``auto``.
 TOOL_FAILURE = 'tool_failure'            # the agent or its model produced no result
@@ -118,6 +129,33 @@ BUDGET_TOLERANCE_PERCENT = 25
 MAX_CAPACITY = {'max_open_prs': 6, 'max_parked_prs': 6}
 MAX_CAPACITY_HOURS = 24
 CAPACITY_REFUSED = ('max_parallel_actions',)
+# The delegated merges (#486, ADR 0005, precision of 2026-11-21): at most so many per UTC day, a
+# cap of their own that does not take the common one of ``MAX_DAILY_GRANTS`` (a deliberate
+# exception to it, decided by the operator). A constant of the code, like the caps above: the
+# configuration may only lower it. A trusted user extends the cap of one day with ``/devloop
+# merge-budget <N>``, ``N`` from 1 to ``MAX_MERGE_BUDGET``; the commands of a day add up.
+MAX_DELEGATED_MERGES = 5
+MAX_MERGE_BUDGET = 20
+# The trust rule itself (#486, the operator's decision of 2026-11-21): a delegated merge is
+# refused when the diff touches one of these files, this one included, since it holds the list.
+# A constant of the code: the configuration may only add to it (``[delegations]
+# merge_trust_paths``), and changing it is itself a change of the rule.
+TRUST_RULE_PATHS = ('AGENTS.md', 'CLAUDE.md', 'devloop/prompts/review.md',
+                    'devloop/prompts/advisory.md', 'devloop/prompts/preflight.md',
+                    'devloop/policy.py', 'devloop/supervision.py', 'devloop/context.py',
+                    'ops/host/ssdlc/project.toml')
+# Where the delegations, their caps, ``operator_only_paths`` and the conditions of the merge are
+# set and applied: a delegated merge never changes them either (the same decision). devloop
+# cannot tell from the diff alone whether a change of these files touches them, so it refuses
+# every change of theirs (it fails closed).
+DELEGATION_PATHS = ('devloop/config.py', 'devloop/config.toml', 'devloop/dispatch_merge.py',
+                    'devloop/dispatch_supervision.py')
+# The directory of the ADRs: a delegated merge admits there only added lines, each block of them
+# with the link to a comment of the repository by a trusted user (#486).
+ADR_DIR = 'docs/adr/'
+# The opinions of the advisory review of the head (#369) that admit a delegated merge: never
+# ``contrario``, and never none.
+MERGE_OPINIONS = ('ok', 'dubbi')
 # An issue with this label is in a design phase: its escalations stay critical.
 DESIGN_LABEL = 'phase:design'
 
@@ -125,15 +163,19 @@ RETRY, ACCEPT_DEFAULTS, DECIDE, ESCALATE = 'retry', 'accept-defaults', 'decide',
 GRANT_ROUND = 'grant-round'
 GRANT_BUDGET = 'grant-budget'
 CAPACITY = 'capacity'
+MERGE = 'merge'
+MERGE_BUDGET = 'merge-budget'
 REREVIEW = 'rereview'  # the supervisor's, on a review that failed (#491)
 COMMANDS = (RETRY, ACCEPT_DEFAULTS, DECIDE, ESCALATE, GRANT_ROUND, GRANT_BUDGET, CAPACITY,
-            REREVIEW)
+            MERGE, MERGE_BUDGET, REREVIEW)
 # The commands that need a text: without one they are malformed.
-NEEDS_TEXT = (DECIDE, ESCALATE, GRANT_ROUND, GRANT_BUDGET, CAPACITY, REREVIEW)
+NEEDS_TEXT = (DECIDE, ESCALATE, GRANT_ROUND, GRANT_BUDGET, CAPACITY, MERGE, MERGE_BUDGET,
+              REREVIEW)
 # The commands whose text is the rest of the comment, not only the rest of its first line.
-LONG_TEXT = (DECIDE, GRANT_ROUND, GRANT_BUDGET, CAPACITY, REREVIEW)
+LONG_TEXT = (DECIDE, GRANT_ROUND, GRANT_BUDGET, CAPACITY, MERGE, MERGE_BUDGET, REREVIEW)
 # What a supervision record says happened to a command.
-OUTCOMES = ('applied', 'accepted', 'decided', 'escalated', 'refused', 'limit', 'granted')
+OUTCOMES = ('applied', 'accepted', 'decided', 'escalated', 'refused', 'limit', 'granted',
+            'merged')
 
 
 def critical(cls):
@@ -208,12 +250,14 @@ def supervisor_command(body):
     attribution header is ``/devloop retry``, ``/devloop accept-defaults``, ``/devloop decide
     <text>``, ``/devloop escalate <reason>``, ``/devloop grant-round <reason>``, ``/devloop
     grant-budget <reason>``, ``/devloop capacity <arguments>`` or ``/devloop rereview
-    <reason>``; None when the comment is no such command. The reason of an escalate is the rest
-    of its line; the text of a decide, the reason of a grant-round, a grant-budget or a rereview
-    and the arguments of a capacity are the rest of the comment, from the rest of its first line
-    on (#258; #405, #411, #412 and #491, whose analysis of the causes may take several lines;
-    ``capacity_arguments`` reads those of a capacity). A decide, an escalate, a grant, a
-    capacity or a rereview without a text has None as text, and is malformed."""
+    <reason>``, or ``/devloop merge <arguments>`` and ``/devloop merge-budget <arguments>``
+    (#486, whose arguments ``merge_arguments`` and ``merge_budget_arguments`` read); None when
+    the comment is no such command. The reason of an escalate is the rest of its line; the text
+    of a decide, the reason of a grant-round, a grant-budget or a rereview and the arguments of a
+    capacity are the rest of the comment, from the rest of its first line on (#258; #405, #411,
+    #412 and #491, whose analysis of the causes may take several lines; ``capacity_arguments``
+    reads those of a capacity). A decide, an escalate, a grant, a capacity or a rereview without
+    a text has None as text, and is malformed."""
     lines = (body or '').strip().splitlines()
     while lines and (not lines[0].strip() or lines[0].strip().startswith('>')):
         lines.pop(0)
@@ -269,3 +313,88 @@ def capacity_arguments(text):
     if value is None or minutes is None or not reason:
         return None
     return parts[0], value, minutes, reason
+
+
+# A full commit id, as ``/devloop merge`` names the head it merges (#486): an abbreviated one
+# could name another commit, so it is refused.
+_SHA = re.compile(r'[0-9a-f]{40}')
+
+
+def merge_arguments(text):
+    """``(sha, reason)`` of the text of ``/devloop merge <sha> <reason>`` (#486), as
+    ``supervisor_command`` returns it: ``sha`` the full id of the head, in lower case; the
+    reason, which may take several lines, is the rest of the text. None when either is missing
+    or the id is not a full one."""
+    parts = (text or '').split(None, 1)
+    if len(parts) < 2 or not _SHA.fullmatch(parts[0]) or not parts[1].strip():
+        return None
+    return parts[0], parts[1].strip()
+
+
+def merge_budget_arguments(text):
+    """``(n, reason)`` of the text of ``/devloop merge-budget <N> <reason>`` (#486): ``n`` a
+    whole number in ASCII digits from 1 to ``MAX_MERGE_BUDGET``, the reason the rest of the
+    text. None when a part is missing or out of bounds."""
+    parts = (text or '').split(None, 1)
+    if len(parts) < 2 or not parts[1].strip():
+        return None
+    value = _whole(parts[0])
+    if value is None or not 1 <= value <= MAX_MERGE_BUDGET:
+        return None
+    return value, parts[1].strip()
+
+
+def _under(path, entry):
+    """Whether ``path`` is, or is under, ``entry`` (a file, or a directory with or without its
+    final ``/``), as ``operator_only_paths`` matches."""
+    path, entry = path.strip('/'), entry.strip().strip('/')
+    return bool(entry) and (path == entry or path.startswith(entry + '/'))
+
+
+def rule_paths(paths, extra=()):
+    """The paths of ``paths`` a delegated merge never touches (#486): the trust rule
+    (``TRUST_RULE_PATHS``, with ``extra``, the configuration's additions), and where the
+    delegations, their caps, ``operator_only_paths`` and the merge conditions are set and
+    applied (``DELEGATION_PATHS``)."""
+    entries = (*TRUST_RULE_PATHS, *DELEGATION_PATHS, *extra)
+    return sorted(p for p in paths if any(_under(p, entry) for entry in entries))
+
+
+def adr_paths(paths):
+    """The paths of ``paths`` under ``ADR_DIR``."""
+    return sorted(p for p in paths if _under(p, ADR_DIR))
+
+
+def comment_links(text, repo):
+    """The comments of the repository ``repo`` that ``text`` links to (#486), as ``(number,
+    comment id)``, in order: ``https://github.com/<repo>/issues/<N>#issuecomment-<id>`` or
+    ``.../pull/<N>#issuecomment-<id>``. A link to another repository does not count."""
+    pattern = (r'https://github\.com/' + re.escape(repo)
+               + r'/(?:issues|pull)/([1-9][0-9]{0,9})#issuecomment-([1-9][0-9]{0,19})\b')
+    return [(int(n), int(c)) for n, c in re.findall(pattern, text or '')]
+
+
+def adr_problems(files, repo):
+    """Why the changes of ``docs/adr/`` in ``files`` (``Workspace.diff_blocks``) do not only
+    record decisions of the operator already written on GitHub (#486), as Italian phrases, and
+    the links each block needs verified: ``(problems, blocks)``, ``blocks`` a list of ``(path,
+    links)``. A file that is not plain text, or that loses or changes a line (a deleted line,
+    a removed file, a new mode) has a problem; so has each block of added lines without a link
+    to a comment of ``repo``. Whether each comment linked is by a trusted user is the
+    dispatcher's check, with the API."""
+    problems, blocks = [], []
+    for entry in files:
+        path = entry['path']
+        if entry.get('binary') or entry.get('removed') or entry.get('other'):
+            problems.append(f'`{path}` non ha solo righe aggiunte (righe tolte o modificate, '
+                            'file rimosso o binario, o cambio di modo)')
+            continue
+        for block in entry.get('blocks') or []:
+            links = comment_links(block, repo)
+            if not links:
+                first = next((ln.strip() for ln in block.splitlines() if ln.strip()), '')
+                problems.append(f'un blocco aggiunto in `{path}` non ha il link a un commento '
+                                f'di questo repository («{first[:80]}»)')
+            else:
+                blocks.append((path, links))
+    return problems, blocks

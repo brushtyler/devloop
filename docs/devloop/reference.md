@@ -154,9 +154,19 @@ false, default false, #412) lets the supervisor set a
 `capacity_max_open_prs` (default 6), `capacity_max_parked_prs` (default 6) and
 `capacity_max_hours` (default 24) may only lower the caps of the code, `MAX_CAPACITY` and
 `MAX_CAPACITY_HOURS` in `devloop/supervision.py`. `max_parallel_actions` is not delegated: it
-applies only at a restart. A value that is not a whole number from 0 (from 1 for the `capacity_`
-keys) to its cap, a `rounds`, `retry_own_prs`, `budget` or `capacity` that is not a boolean,
-`capacity` on without `[report] issue`, or an unknown key, stops devloop at startup.
+applies only at a restart. `merge` (true or false, default false, #486) lets the supervisor
+[merge a PR whose merge is the operator's](guide.md#delegated-merge) with `/devloop merge <sha>
+<reason>`, when every condition of the delegation holds; it needs
+`review_policy.advisory_reviewer`. `max_merges_per_day` (default 5) may only lower the cap of the
+code, `MAX_DELEGATED_MERGES` in `devloop/supervision.py`: a cap of its own, outside
+`max_grants_per_day`, that `/devloop merge-budget` of a trusted user on `[report] issue` raises
+for one UTC day. `merge_trust_paths` (a list of paths, files or directories ending in `/`,
+default empty) may only add to the trust rule of the code, `TRUST_RULE_PATHS` in
+`devloop/supervision.py`, whose paths a delegated merge never touches. A value that is not a
+whole number from 0 (from 1 for the `capacity_` keys) to its cap, a `rounds`, `retry_own_prs`,
+`budget`, `capacity` or `merge` that is not a boolean, a `merge_trust_paths` that is not a list
+of paths, `capacity` on without `[report] issue`, `merge` on without
+`review_policy.advisory_reviewer`, or an unknown key, stops devloop at startup.
 `[review_policy]` sets the
 [review level](#review-level-and-policy-receipt): `default_level` (1 or 2, default 1), the level
 `label` (default `reviews:2`), `sensitive_paths` and `sensitive_path_lists`; changing any of them,
@@ -1127,7 +1137,13 @@ and before the takeover (its latest edit too); an approval without the command d
 and the history of the issue is read in full, or no command counts. devloop lists those commands
 under "Decisions of the operator on the issue" in the prompts of the readiness check, of the
 reviewers and of the advisory review, and answers once the ones it refuses: in the comment of the
-next readiness check or, when none is due, in a dispatcher comment (`approve_refused`). The
+next readiness check or, when none is due, in a dispatcher comment (`approve_refused`). Since
+#506 every comment of a trusted user in a prompt (the decisions, the issue comments of the
+readiness check and of the implementer, the comments of the operator to the reviewers, the
+requests of `/devloop fix`) comes with a `Permalink:` line, the `html_url` GitHub gives it: the
+prompts of the readiness check, of the implementer and of the fixer say to cite that link when
+an ADR records the decision, so no second comment has to repeat it; the prompts of review and
+advisory review are unchanged and show it only with the text of the comment. The
 quorum and the choice of the reviewers, the checks of `operator_only_paths` and
 `protected_paths`, the names of the labels of hold, of escalation and of merge, `trusted_users`
 and the "Trust policy" section stay with the operator even when a decision prescribes their

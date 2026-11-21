@@ -5,7 +5,10 @@ Do not edit any file: you only read.
 The PR is in `agent:needs-operator`: $why A person now decides on it. Your review is one more
 reading for that person, published as a GitHub review of type `COMMENT` under the title "Review
 consultiva: non conta per il quorum". It is not binding: it does not count for the quorum nor for
-the round limit, it opens no finding, it changes no label, and devloop never reads it to decide.
+the round limit, it opens no finding and it changes no label. Its opinion decides one thing only:
+when the operator has delegated the merge to the supervisor (`[delegations] merge`), devloop
+refuses a merge the supervisor asks for on this head unless your opinion is `ok` or `dubbi`; with
+`contrario`, or without a review, the merge stays the operator's.
 You are not the author of this change: a separate session (the implementer) wrote it, and you do
 not see its reasoning. Judge it as someone else's code. The repository metadata (`git log`, the
 commit trailers) may name an agent or a model: that does not make you the author.
