@@ -541,7 +541,9 @@ prima del merge** ([host/migrate.md](host/migrate.md#ogni-cambio-con-un-passo-su
 ## Un altro progetto
 
 Per default devloop lavora sul repository che lo contiene: `pin` estrae devloop dallo stesso
-repository di cui crea i worktree. Ci sono due strade.
+repository di cui crea i worktree. Ci sono due strade. La prima, passo per passo con un esempio
+di file di progetto e di overlay, è nella [guida rapida per un nuovo
+progetto](../docs/devloop/quickstart.md) (ADR 0006, R9).
 
 **Sorgente dell'installazione a parte** (ADR 0006, R1). Il repository gestito non contiene
 devloop: `pin` prende il codice da un clone di ssdlc, a un suo tag
