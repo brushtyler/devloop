@@ -571,6 +571,28 @@ class RootStepsGuideTests(unittest.TestCase):
         self.assertNotIn('permission-denied', (OPS / 'host/migrate.md').read_text(
             encoding='utf-8'))
 
+    def test_the_guide_says_how_to_put_agy_back_among_the_reviewers(self):
+        # #525: the operator took agy out of the reviewers while cli.log, a link, was refused;
+        # after the pin of the fix it goes back, with the loop stopped, after check-host.sh.
+        section = self.section(self.SECTIONS[1])
+        start = section.index('\n### Il link `cli.log` di agy (#525)\n')
+        flat = ' '.join(section[start:].split())
+        for phrase in ('`cli.log -> log/cli-<YYYYMMDD_HHMMSS>.log`', '`CLI_LINKS` di',
+                       '`AGENT_CLI_LINKS` di `ops/lib.sh`', 'con `..`',
+                       '`[roles] reviewers = ["codex-reviewer", "claude-reviewer"]`'):
+            self.assertIn(phrase, flat)
+        steps = ['**dopo il pin**', '`sudo systemctl stop devloop`',
+                 'devloop-pinned status`',
+                 f'`sudo bash {self.OPERATOR}/ops/host/check-host.sh --no-apps`',
+                 'rimettere `agy-reviewer` in `[roles] reviewers`',
+                 '/home/devloop/ssdlc/.ssdlc/devloop/config.local.toml',
+                 '`sudo systemctl start devloop`']
+        at = -1
+        for step in steps:
+            with self.subTest(step=step):
+                self.assertIn(step, flat[at + 1:])
+                at = flat.index(step, at + 1)
+
     def test_the_activation_has_every_step_and_the_rollback(self):
         text = self.section(self.ACTIVATION)
         commands = self.commands(text)
@@ -1259,12 +1281,13 @@ esac''')
             [BASH, '-c', f'. {OPS / "lib.sh"}; set +u; '
                          'printf "%s\\n" "${AGENT_CLI_DIRS[*]}" "${AGENT_CLI_SEALED[*]}" '
                          '"${AGENT_CLIS[*]}" "${AGENT_CLI_WRITABLE[*]}" '
-                         '"${AGENT_CLI_ALLOWED[*]}"'],
+                         '"${AGENT_CLI_ALLOWED[*]}" "${AGENT_CLI_LINKS[*]}"'],
             capture_output=True, text=True, check=True).stdout.splitlines()
         self.assertEqual([line.split() for line in lists],
                          [list(agentuser.CLI_DIRS), list(agentuser.CLI_SEALED),
                           list(agentuser.CLIS), list(agentuser.CLI_WRITABLE),
-                          [f'{entry}:{types}' for entry, types in agentuser.CLI_ALLOWED]])
+                          [f'{entry}:{types}' for entry, types in agentuser.CLI_ALLOWED],
+                          [f'{entry}:{inside}' for entry, inside in agentuser.CLI_LINKS]])
 
     def test_the_shell_knows_the_entries_of_the_list_as_devloop_does(self):
         # #517: agent_cli_entry_known of ops/lib.sh, for setup-agent-user.sh and check-host.sh,
@@ -1296,6 +1319,69 @@ esac''')
                 problems = agentuser.cli_state_problems('/h', listing)
                 self.assertEqual(bool(set(problems) - set(baseline)), expected != 0)
 
+    def test_the_shell_knows_the_cleanup_mark_of_claude_as_devloop_does(self):
+        # #525: Claude Code writes ~/.claude/.last-cleanup at each start; a file only.
+        for kind, expected in (('f', 0), ('d', 2), ('l', 2)):
+            with self.subTest(kind=kind):
+                done = subprocess.run(
+                    [BASH, '-c', f'. {OPS / "lib.sh"}; set +e; agent_cli_entry_known "$@"; '
+                                 'echo $?', '_', '.claude', '.last-cleanup', kind],
+                    capture_output=True, text=True, check=True)
+                self.assertEqual(done.stdout.strip(), str(expected))
+                listing = f'D:.claude\0e:{kind}:0:.last-cleanup\0'.encode()
+                baseline = agentuser.cli_state_problems('/h', b'D:.claude\0')
+                problems = agentuser.cli_state_problems('/h', listing)
+                self.assertEqual(bool(set(problems) - set(baseline)), expected != 0)
+
+    def test_the_shell_knows_the_link_of_agy_as_devloop_does(self):
+        # #525: cli.log of agy may be a link, only to a file of log/ next to it.
+        agy = '.gemini/antigravity-cli'
+        cases = [(agy, 'cli.log', 'l', 'log/cli-20261121_132524.log', 0),
+                 (agy, 'cli.log', 'f', '', 0),
+                 (agy, 'cli.log', 'l', '/var/log/cli.log', 3),
+                 (agy, 'cli.log', 'l', '../antigravity-cli/log/cli-1.log', 3),
+                 (agy, 'cli.log', 'l', 'log/../cli-1.log', 3), (agy, 'cli.log', 'l', 'log/..', 3),
+                 (agy, 'cli.log', 'l', 'log/', 3), (agy, 'cli.log', 'l', 'log', 3),
+                 (agy, 'cli.log', 'l', 'log/sub/cli-1.log', 3),
+                 (agy, 'cli.log', 'l', 'brain/cli-1.log', 3),
+                 (agy, 'cli.log', 'l', './log/cli-1.log', 3), (agy, 'cli.log', 'l', '', 3),
+                 (agy, 'cli.log', 'd', '', 2), (agy, 'log', 'l', 'brain', 2),
+                 (agy, 'installation_id', 'l', 'log/cli-1.log', 2),
+                 # 1/codex-reviewer/R1-1: into log/, but not to a regular file there: a link
+                 # again (out of log/ or not), a directory, nothing.
+                 (agy, 'cli.log', 'l', 'log/chained.log', 4),
+                 (agy, 'cli.log', 'l', 'log/inside.log', 4),
+                 (agy, 'cli.log', 'l', 'log/sub', 4), (agy, 'cli.log', 'l', 'log/missing.log', 4)]
+        log = self.home / agy / 'log'
+        log.mkdir(parents=True)
+        (log / 'cli-20261121_132524.log').write_text('started\n')
+        outside = self.tmp / 'outside.log'
+        outside.write_text('x\n')
+        (log / 'chained.log').symlink_to(outside)
+        (log / 'inside.log').symlink_to('cli-20261121_132524.log')
+        (log / 'sub').mkdir()
+        for directory, name, kind, target, expected in cases:
+            with self.subTest(name=name, kind=kind, target=target):
+                done = subprocess.run(
+                    [BASH, '-c', f'. {OPS / "lib.sh"}; set +e; agent_cli_entry_known "$@"; '
+                                 'echo $?', '_', directory, name, kind, target, str(self.home)],
+                    capture_output=True, text=True, check=True)
+                self.assertEqual(done.stdout.strip(), str(expected))
+                entry = f'e:{kind}:0:{name}\0' + (f't:{target}\0' if kind == 'l' else '')
+                regular = (f'F:{directory}/{name}\0'
+                           if (self.home / directory / target).is_file()
+                           and not (self.home / directory / target).is_symlink() else '')
+                problems = agentuser.cli_state_problems(
+                    '/h', f'{regular}D:{directory}\0{entry}'.encode())
+                baseline = agentuser.cli_state_problems('/h', f'D:{directory}\0'.encode())
+                self.assertEqual(bool(set(problems) - set(baseline)), expected != 0)
+        # Without the home the target cannot be checked: the link is refused.
+        done = subprocess.run(
+            [BASH, '-c', f'. {OPS / "lib.sh"}; set +e; agent_cli_entry_known "$@"; echo $?',
+             '_', agy, 'cli.log', 'l', 'log/cli-20261121_132524.log'],
+            capture_output=True, text=True, check=True)
+        self.assertEqual(done.stdout.strip(), '4')
+
     def test_setup_agent_user_reports_the_entries_not_in_the_list(self):
         # #517: devloop refuses every turn while one is there; setup says so, removes nothing.
         agent = self.home / 'agent'
@@ -1304,6 +1390,13 @@ esac''')
         (agent / '.codex/hooks.json').write_text('{}\n')
         (agent / '.claude').mkdir()
         (agent / '.claude/projects').write_text('not a directory\n')
+        # #525: the log link of agy into log/ is accepted, one out of it reported.
+        (agent / '.gemini/antigravity-cli/log').mkdir(parents=True)
+        (agent / '.gemini/antigravity-cli/log/cli-20261121_132524.log').write_text('started\n')
+        (agent / '.gemini/antigravity-cli/cli.log').symlink_to('log/cli-20261121_132524.log')
+        (agent / '.gemini/antigravity-cli/installation_id').symlink_to('/etc/hostname')
+        (agent / '.gemini/config').mkdir()
+        (agent / '.gemini/config/.migrated').symlink_to('../antigravity-cli/log/x')
         params = self.params(DEVLOOP_USER=ME, AGENT_USER='opsdry-noagent')
         done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params', str(params))
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
@@ -1311,10 +1404,31 @@ esac''')
         self.assertIn(f'da fare a mano: {agent}/.codex/hooks.json non è nella lista '
                       'AGENT_CLI_ALLOWED', out)
         self.assertIn(f'da fare a mano: {agent}/.claude/projects è di tipo f', out)
+        self.assertIn(f'da fare a mano: {agent}/.gemini/antigravity-cli/installation_id è di '
+                      'tipo l', out)
+        self.assertIn(f'da fare a mano: {agent}/.gemini/config/.migrated è di tipo l', out)
+        self.assertNotIn('cli.log', out)
         self.assertNotIn('auth.json', out)
         self.assertNotIn('contengono solo voci della lista', out)
         self.assertTrue((agent / '.codex/hooks.json').exists())
         self.assertEqual(self.mutating_calls(), [])
+        (agent / '.gemini/antigravity-cli/cli.log').unlink()
+        (agent / '.gemini/antigravity-cli/cli.log').symlink_to('/var/log/cli.log')
+        done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn(f'da fare a mano: {agent}/.gemini/antigravity-cli/cli.log è un link a '
+                      '/var/log/cli.log, fuori dalla directory che AGENT_CLI_LINKS ammette per '
+                      'quel nome', done.stdout)
+        self.assertTrue((agent / '.gemini/antigravity-cli/cli.log').is_symlink())
+        # 1/codex-reviewer/R1-1: into log/, to a link again that leads out of it.
+        (agent / '.gemini/antigravity-cli/cli.log').unlink()
+        (agent / '.gemini/antigravity-cli/log/cli-1.log').symlink_to('/var/log/cli.log')
+        (agent / '.gemini/antigravity-cli/cli.log').symlink_to('log/cli-1.log')
+        done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn(f'da fare a mano: {agent}/.gemini/antigravity-cli/cli.log è un link a '
+                      'log/cli-1.log, che non è un file regolare (un altro link, che potrebbe '
+                      'uscire dalla directory, o nulla)', done.stdout)
 
     def test_the_agent_user_must_differ_from_devloop(self):
         done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params',
@@ -1890,6 +2004,39 @@ class CheckHostTests(OpsTestCase):
                                   f'rifiuta i turni finché c\'è (rimuoverla come root a loop '
                                   'fermo, o aggiungerla con una PR)'])
         self.assertIn(f'ok: {self.agent}/.codex contiene solo voci della lista', done.stdout)
+
+    def test_the_log_link_of_agy_is_checked_as_devloop_does(self):
+        # #525: cli.log -> log/cli-<data>.log, as agy makes it at each start, is accepted; a
+        # link that leads out of log/ is an error.
+        agy = self.agent / '.gemini/antigravity-cli'
+        (agy / 'log').mkdir(exist_ok=True)
+        (agy / 'log/cli-20261121_132524.log').write_text('started\n')
+        link = agy / 'cli.log'
+        link.symlink_to('log/cli-20261121_132524.log')
+        done, errors = self.check()
+        self.assertEqual(errors, [])
+        self.assertIn(f'ok: {agy} contiene solo voci della lista', done.stdout)
+        for target in ('/etc/passwd', '../antigravity-cli/log/cli-20261121_132524.log',
+                       'brain/cli.log'):
+            with self.subTest(target=target):
+                link.unlink()
+                link.symlink_to(target)
+                done, errors = self.check()
+                self.assertEqual(errors, [f'  ERRORE: {agy}/cli.log è un link a {target}, fuori '
+                                          'dalla directory che AGENT_CLI_LINKS ammette per quel '
+                                          'nome: devloop rifiuta i turni finché c\'è (rimuoverlo '
+                                          'come root a loop fermo)'])
+        # 1/codex-reviewer/R1-1: cli.log -> log/cli-1.log -> a file out of the home.
+        outside = self.tmp / 'outside.log'
+        outside.write_text('x\n')
+        (agy / 'log/cli-1.log').symlink_to(outside)
+        link.unlink()
+        link.symlink_to('log/cli-1.log')
+        done, errors = self.check()
+        self.assertEqual(errors, [f'  ERRORE: {agy}/cli.log è un link a log/cli-1.log, che non '
+                                  'è un file regolare (un altro link, che potrebbe uscire dalla '
+                                  'directory, o nulla): devloop rifiuta i turni finché c\'è '
+                                  '(rimuoverlo come root a loop fermo)'])
 
     def test_the_probe_of_the_cli_files_refuses_what_the_agent_user_can_change(self):
         # The probe of check-host.sh, run as the current user who owns the temporary files.

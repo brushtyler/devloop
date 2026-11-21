@@ -311,8 +311,10 @@ configurazione o i binari delle CLI per i turni dopo, per esempio aggiungendo a
 - restano di `devloop-agent` le altre voci che le CLI creano nelle loro directory: credenziali,
   sessioni (`~/.claude/projects`, `~/.codex/sessions`, che lo script crea), cache, database e
   log. Le directory possono contenere solo le voci della lista del codice, con il loro tipo
-  (#517: `AGENT_CLI_ALLOWED` di `ops/lib.sh`, come `CLI_ALLOWED` di `devloop/agentuser.py`),
-  oltre a quelle sigillate e alle directory delle CLI, di root: devloop lo verifica all'avvio e
+  (#517: `AGENT_CLI_ALLOWED` di `ops/lib.sh`, come `CLI_ALLOWED` di `devloop/agentuser.py`; un
+  link solo per `cli.log` di agy, e solo verso `log/<nome>` accanto a lui, un file regolare e
+  non un altro link, #525:
+  `AGENT_CLI_LINKS`, come `CLI_LINKS`), oltre a quelle sigillate e alle directory delle CLI, di root: devloop lo verifica all'avvio e
   prima di ogni turno, come `devloop-agent`, e una voce sconosciuta rifiuta il turno con
   un'escalation `configuration` che la nomina; `setup-agent-user.sh` e `check-host.sh` la
   segnalano. Una voce nuova di una CLI si aggiunge alla lista con una PR

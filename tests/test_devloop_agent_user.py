@@ -40,14 +40,21 @@ def review():
 def cli_listing(entries=(), dirs=agentuser.CLI_DIRS):
     """The output of the listing of the directories of the CLIs (#517) as the agent user would
     print it: every directory of ``dirs`` there, holding the directories of the CLIs below it
-    and ``entries``, ``(dir, type, uid, name)``."""
-    out = []
+    and ``entries``, ``(dir, type, uid, name)``, or ``(dir, 'l', uid, name, target)`` for a
+    symbolic link (#525), whose target is a regular file (an ``F:`` record first) unless a last
+    ``False`` follows it: ``(dir, 'l', uid, name, target, False)``."""
+    out, regular = [], []
     for d in dirs:
         out.append(f'D:{d}')
         out += [f'e:d:0:{c.rpartition("/")[2]}' for c in agentuser.CLI_DIRS
                 if c.rpartition('/')[0] == d]
-        out += [f'e:{t}:{u}:{n}' for where, t, u, n in entries if where == d]
-    return ''.join(f'{r}\0' for r in [*out, 'E:']).encode()
+        for where, t, u, n, *target in entries:
+            if where == d:
+                out.append(f'e:{t}:{u}:{n}')
+                out += [f't:{x}' for x in target[:1]]
+                if target and target[1:] != [False]:
+                    regular.append(f'F:{d}/{n}')
+    return ''.join(f'{r}\0' for r in [*regular, *out, 'E:']).encode()
 
 
 CODEX_CONFIG = b'model = "gpt-5"\n\n[features]\nmemories = false\n'
