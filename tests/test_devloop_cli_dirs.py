@@ -1,7 +1,7 @@
 """The directories of the CLIs of the agent user (issue #517).
 
-``~/.claude``, ``~/.codex``, ``~/.gemini`` and ``~/.gemini/antigravity-cli`` of the agent user
-are root's, of its group, mode 1770: the agent user creates and replaces its own entries there
+``~/.claude``, ``~/.codex``, ``~/.gemini``, ``~/.gemini/config`` and ``~/.gemini/antigravity-cli``
+of the agent user are root's, of its group, mode 1770: the agent user creates and replaces its own entries there
 (credentials, locks, temporary files), but cannot rename nor remove those of root, and a sealed
 entry that does not exist is a placeholder of root it cannot create. The directories may hold
 only the entries of the list of the code (``agentuser.CLI_ALLOWED``): an unknown one refuses the
@@ -175,7 +175,11 @@ class ListTests(unittest.TestCase):
                    ('.codex', 'f', 1001, 'auth.json.lock'), ('.codex', 'f', 1001, '.auth-Xa12'),
                    ('.codex', 'f', 1001, 'memories_1.sqlite-wal'),
                    ('.codex', 'd', 0, 'plugins'), ('.codex', 'f', 0, 'AGENTS.md'),
-                   ('.gemini', 'f', 0, 'GEMINI.md'), ('.gemini', 'd', 1001, 'config'),
+                   ('.gemini', 'f', 0, 'GEMINI.md'),
+                   ('.gemini/config', 'f', 1001, '.migrated'),
+                   ('.gemini/config', 'f', 0, 'config.json'),
+                   ('.gemini/config', 'f', 0, 'mcp_config.json'),
+                   ('.gemini/config', 'd', 0, 'projects'),
                    ('.gemini/antigravity-cli', 'f', 1001, 'antigravity-oauth-token'),
                    ('.gemini/antigravity-cli', 'f', 1001,
                     'jetbox_summaries_proto.pb.123abc.tmp'),
@@ -192,7 +196,10 @@ class ListTests(unittest.TestCase):
 
     def test_a_sealed_entry_the_agent_user_made_is_refused(self):
         for where, name in (('.claude', 'CLAUDE.md'), ('.codex', 'AGENTS.md'),
-                            ('.gemini', 'GEMINI.md'), ('.codex', 'plugins')):
+                            ('.gemini', 'GEMINI.md'), ('.codex', 'plugins'),
+                            ('.gemini/config', 'config.json'),
+                            ('.gemini/config', 'mcp_config.json'),
+                            ('.gemini/config', 'projects')):
             with self.subTest(name=name):
                 problems = self.problems([(where, 'f', 1001, name)])
                 self.assertEqual(problems, [f"{HOME / where / name} is a sealed entry that is "
@@ -207,20 +214,24 @@ class ListTests(unittest.TestCase):
                       "wants 'f'", problems[1])
 
     def test_a_directory_of_the_clis_the_agent_user_replaced_is_refused(self):
-        records = (b'D:.claude\0D:.codex\0D:.gemini\0e:d:1001:antigravity-cli\0'
-                   b'D:.gemini/antigravity-cli\0E:\0')
+        records = (b'D:.claude\0D:.codex\0D:.gemini\0e:d:1001:config\0'
+                   b'e:d:1001:antigravity-cli\0D:.gemini/config\0D:.gemini/antigravity-cli\0E:\0')
         self.assertEqual(self.problems(records=records),
-                         [f"{HOME}/.gemini/antigravity-cli is a directory of the CLIs that is "
+                         [f"{HOME}/.gemini/config is a directory of the CLIs that is "
+                          "not root's (owner 1001): the agent user made it",
+                          f"{HOME}/.gemini/antigravity-cli is a directory of the CLIs that is "
                           "not root's (owner 1001): the agent user made it"])
 
     def test_a_listing_that_does_not_end_or_misses_a_directory_is_refused(self):
         self.assertEqual(self.problems(records=b'D:.claude\0D:.codex\0'),
                          [f'{HOME}/.gemini was not listed',
+                          f'{HOME}/.gemini/config was not listed',
                           f'{HOME}/.gemini/antigravity-cli was not listed',
                           f'the listing of the directories of the CLIs in {HOME} did not end'])
         self.assertEqual(self.problems(records=b'')[-1],
                          f'the listing of the directories of the CLIs in {HOME} did not end')
-        records = b'L:.claude\0M:.codex\0N:.gemini\0D:.gemini/antigravity-cli\0E:\0'
+        records = (b'L:.claude\0M:.codex\0N:.gemini\0D:.gemini/config\0'
+                   b'D:.gemini/antigravity-cli\0E:\0')
         self.assertEqual(self.problems(records=records),
                          [f'{HOME}/.claude is a symbolic link', f'{HOME}/.codex is missing',
                           f'{HOME}/.gemini is not a directory'])
@@ -246,6 +257,19 @@ class ListTests(unittest.TestCase):
             self.assertIn(entry, allowed)
         self.assertIn('.codex/plugins', agentuser.CLI_SEALED)
         self.assertIn('.codex/memories', agentuser.CLI_SEALED)
+        # agy's configuration: its plugins, MCP servers and projects sealed, only the mark of
+        # its migration the agent user's, and nothing cleared there (it is sealed instead).
+        self.assertIn('.gemini/config', agentuser.CLI_DIRS)
+        self.assertLess(agentuser.CLI_DIRS.index('.gemini'),
+                        agentuser.CLI_DIRS.index('.gemini/config'))
+        for name in ('config.json', 'mcp_config.json', 'projects'):
+            self.assertIn(f'.gemini/config/{name}', agentuser.CLI_SEALED)
+        self.assertEqual({e: t for e, t in agentuser.CLI_ALLOWED
+                          if e.startswith('.gemini/config/')},
+                         {'.gemini/config/.migrated': 'f'})
+        self.assertFalse([p for p in agentuser.CLI_CLEARED if p.startswith('.gemini/config')])
+        self.assertTrue(agentuser.placeholder_is_file('.gemini/config/mcp_config.json'))
+        self.assertFalse(agentuser.placeholder_is_file('.gemini/config/projects'))
         self.assertFalse(agentuser.placeholder_is_file('.codex/plugins'))
         self.assertFalse(agentuser.placeholder_is_file('.local'))
         self.assertTrue(agentuser.placeholder_is_file('.claude/CLAUDE.md'))
@@ -294,9 +318,9 @@ class RealProbeTests(unittest.TestCase):
                   '.codex/auth.json', '.codex/state_5.sqlite',
                   '.gemini/antigravity-cli/conversation_summaries.db',
                   '.gemini/antigravity-cli/jetbox_summaries_proto.pb',
-                  '.gemini/antigravity-cli/antigravity-oauth-token')
+                  '.gemini/antigravity-cli/antigravity-oauth-token', '.gemini/config/.migrated')
         self.make('.gemini/antigravity-cli/brain', '.gemini/antigravity-cli/builtin',
-                  '.gemini/antigravity-cli/conversations', '.gemini/config', directory=True)
+                  '.gemini/antigravity-cli/conversations', directory=True)
         (self.home / '.gemini/antigravity-cli/implicit').symlink_to(outside)
         # A codex turn: the memories of codex go, those of agy stay, and the link left there
         # is refused in the listing.
@@ -306,7 +330,7 @@ class RealProbeTests(unittest.TestCase):
         self.assertFalse((self.home / '.codex/memories_1.sqlite').exists())
         self.assertFalse((self.home / '.codex/memories_1.sqlite-wal').exists())
         for kept in ('.codex/auth.json', '.codex/state_5.sqlite',
-                     '.gemini/antigravity-cli/brain/inside.md', '.gemini/config/inside.md'):
+                     '.gemini/antigravity-cli/brain/inside.md', '.gemini/config/.migrated'):
             self.assertTrue((self.home / kept).exists(), kept)
         # An agy turn: clearing removes the link, never what it leads to.
         self.assertEqual(self.user.cli_state(agentuser.cleared_for('agy')), [])
@@ -314,12 +338,43 @@ class RealProbeTests(unittest.TestCase):
                      'jetbox_summaries_proto.pb'):
             self.assertFalse(os.path.lexists(self.home / '.gemini/antigravity-cli' / gone), gone)
         self.assertTrue((outside / 'keep.md').exists())
-        # ~/.gemini/config, whose content no one verified (1/codex-reviewer/R1-3), goes too.
-        self.assertFalse(os.path.lexists(self.home / '.gemini/config'))
-        self.assertIn('.gemini/config', agentuser.cleared_for('agy'))
+        # ~/.gemini/config is a directory of the CLIs, with its configuration sealed: it stays,
+        # as the mark of agy's migration in it.
+        self.assertTrue((self.home / '.gemini/config/.migrated').exists())
         for kept in ('conversations/inside.md', 'antigravity-oauth-token'):
             self.assertTrue((self.home / '.gemini/antigravity-cli' / kept).exists(), kept)
         self.assertEqual(agentuser.cleared_for('claude'), ())
+
+    def test_the_configuration_of_agy_written_by_the_agent_user_is_refused(self):
+        # ~/.gemini/config: a turn that writes an MCP server or enables a plugin there would
+        # have the agy turns after it load them (#438). Written by the agent user, the turn is
+        # refused before it starts, and so is the start.
+        config_dir = self.home / '.gemini/config'
+        server = {'mcpServers': {'x': {'command': '/tmp/x'}}}
+        (config_dir / 'mcp_config.json').write_text(json.dumps(server))
+        (config_dir / 'config.json').write_text('{"plugins": {"swarm": {"enabled": true}}}')
+        (config_dir / '.migrated').write_text('')
+        found = set(self.user.probe(agentuser.cli_items(self.home)))
+        for name in ('mcp_config.json', 'config.json'):
+            with self.subTest(name=name):
+                self.assertIn(('w', str(config_dir / name)), found)
+                self.assertIn(('o', str(config_dir / name)), found)
+        # Without its placeholder, ``projects`` could be created by the agent user.
+        self.assertIn(('c', str(config_dir / 'projects')), found)
+        self.assertNotIn(('w', str(config_dir / '.migrated')), found)  # not probed: allowed
+        # The listing before each turn: the files are the agent user's, not root's.
+        records = cli_listing([('.gemini/config', 'f', 1001, 'mcp_config.json'),
+                               ('.gemini/config', 'f', 1001, 'config.json'),
+                               ('.gemini/config', 'f', 1001, '.migrated')])
+        problems = agentuser.cli_state_problems(HOME, records)
+        self.assertEqual(problems, [
+            f"{HOME}/.gemini/config/mcp_config.json is a sealed entry that is not root's "
+            "(owner 1001): the agent user made it",
+            f"{HOME}/.gemini/config/config.json is a sealed entry that is not root's "
+            "(owner 1001): the agent user made it"])
+        # Nothing of agy clears them: they stay as root sealed them.
+        self.assertEqual(self.user.cli_state(agentuser.cleared_for('agy')), [])
+        self.assertTrue((config_dir / 'mcp_config.json').exists())
 
     def test_a_failure_to_list_or_clear_is_an_error(self):
         def run(argv, **kw):

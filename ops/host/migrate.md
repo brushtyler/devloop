@@ -568,13 +568,16 @@ salvava il token rinnovato (turni falliti con `401`, #507), codex non potrebbe s
 `auth.json` al primo rinnovo (un `.auth-XXXX` rinominato sopra `auth.json`, con `auth.lock` e
 `auth.json.lock`), agy non scriveva alcuni suoi file. Dal #517, decisione dell'operatore:
 
-- `~/.claude`, `~/.codex`, `~/.gemini` e `~/.gemini/antigravity-cli` sono come la home: di root,
-  del gruppo di `devloop-agent`, `1770`. `devloop-agent` vi crea e sostituisce le proprie voci,
-  ma non rinomina né rimuove quelle di root;
-- ogni voce sigillata (`AGENT_CLI_SEALED` di `ops/lib.sh`, con in più `~/.codex/plugins` e
-  `~/.codex/memories`) che non esiste diventa un segnaposto di root (un file vuoto, `{}` per un
-  `.json`, o una directory vuota), che `devloop-agent` non può creare, scrivere, rinominare né
-  rimuovere;
+- `~/.claude`, `~/.codex`, `~/.gemini`, `~/.gemini/config` e `~/.gemini/antigravity-cli` sono
+  come la home: di root, del gruppo di `devloop-agent`, `1770`. `devloop-agent` vi crea e
+  sostituisce le proprie voci, ma non rinomina né rimuove quelle di root;
+- ogni voce sigillata (`AGENT_CLI_SEALED` di `ops/lib.sh`, con in più `~/.codex/plugins`,
+  `~/.codex/memories` e, in `~/.gemini/config`, `config.json`, `mcp_config.json` e `projects`)
+  che non esiste diventa un segnaposto di root (un file vuoto, `{}` per un `.json`, o una
+  directory vuota), che `devloop-agent` non può creare, scrivere, rinominare né rimuovere. In
+  `~/.gemini/config`, che prima era `700` di `devloop-agent`, `config.json` abilita i plugin di
+  agy e `mcp_config.json` elenca i server MCP che carica: un turno che li scrivesse li darebbe ai
+  turni di agy dopo (#438). Vi resta di `devloop-agent` solo `.migrated`;
 - le directory possono contenere solo le voci della lista del codice (`CLI_ALLOWED` di
   `devloop/agentuser.py`, `AGENT_CLI_ALLOWED` di `ops/lib.sh`), oltre a quelle sigillate e alle
   directory delle CLI, di root. devloop lo verifica all'avvio e prima di ogni turno, come
@@ -582,9 +585,8 @@ salvava il token rinnovato (turni falliti con `401`, #507), codex non potrebbe s
   nomina ([qui sopra](#una-voce-sconosciuta-in-una-directory-delle-cli)). L'overlay può solo
   togliere voci dalla lista (`[agent_user] cli_denied`);
 - le memorie che una CLI rilegge fra un turno e l'altro (`memories_1.sqlite*` di codex; `brain`,
-  `implicit`, `builtin`, `conversation_summaries.db*` e `jetbox_summaries_proto.pb*` di agy, e
-  `~/.gemini/config`, di cui nessuno ha verificato il contenuto) devloop le rimuove prima di ogni
-  turno di quella CLI, e i turni di codex, come quelli di agy, girano uno alla volta anche con le
+  `implicit`, `builtin`, `conversation_summaries.db*` e `jetbox_summaries_proto.pb*` di agy)
+  devloop le rimuove prima di ogni turno di quella CLI, e i turni di codex, come quelli di agy, girano uno alla volta anche con le
   azioni in parallelo; la memoria automatica di Claude Code resta spenta (#438);
 - il token di lunga durata di claude di #507 (`[claude_token]`) è tolto: una configurazione che
   nomina ancora la tabella ferma devloop all'avvio.
@@ -600,33 +602,54 @@ agent](#file-delle-cli-di-root-sullutente-degli-agent-438):
    (`/home/devloop/ssdlc/.ssdlc/devloop/config.local.toml`), rimuovere il file
    (`sudo -u devloop -H rm /home/devloop/.ghapps/claude.<data>.oauth-token`) e revocare il token
    su claude.ai, dalle impostazioni dell'account dove sono elencate le autorizzazioni di Claude
-   Code. Se il login di `devloop-agent` era stato tolto, rifarlo dopo il passo 3, in una sessione
+   Code. Se il login di `devloop-agent` era stato tolto, rifarlo dopo il passo 4, in una sessione
    interattiva di `devloop-agent` (`sudo -iu devloop-agent`): ora la CLI lo salva da sé;
-3. rieseguire lo script dell'utente degli agent, prima in prova:
+3. rileggere, come root, la configurazione di agy che lo script sta per sigillare con il
+   contenuto che ha: finora `devloop-agent`, quindi ogni turno, poteva scriverla.
+
+   ```bash
+   sudo ls -la --time-style=full-iso /home/devloop-agent/.gemini/config \
+       /home/devloop-agent/.gemini/config/projects
+   sudo cat /home/devloop-agent/.gemini/config/config.json \
+       /home/devloop-agent/.gemini/config/mcp_config.json
+   ```
+
+   `mcp_config.json` non deve elencare server MCP che l'operatore non ha messo, `config.json` solo
+   i plugin voluti (oggi `{"plugins": {"swarm": {"enabled": true}}}`), `projects` solo i progetti
+   di agy (`default-cli-project.json`). Ciò che non torna si toglie prima del passo 4, come root.
+   Le date di modifica dicono anche se agy li riscrive a ogni avvio: se coincidono con l'ultimo
+   turno di agy, il primo turno di agy dopo il pin va seguito come al passo 6;
+4. rieseguire lo script dell'utente degli agent, prima in prova:
 
    ```bash
    sudo bash /root/repos/ssdlc/ops/host/setup-agent-user.sh --dry-run
    sudo bash /root/repos/ssdlc/ops/host/setup-agent-user.sh
    ```
 
-   Rende le quattro directory `1770`, di root e del gruppo di `devloop-agent` (in `~/.claude` e
+   Rende le cinque directory `1770`, di root e del gruppo di `devloop-agent` (in `~/.claude` e
    `~/.codex`, che hanno l'ACL di `devloop` di una versione precedente, imposta anche
    `group::rwx`: con un'ACL `chmod` cambia solo la maschera), crea i segnaposto
-   di root delle voci sigillate che mancano, rende di root `~/.codex/plugins` (oggi di
-   `devloop-agent`), e segnala come `da fare a mano` ogni voce che non è nella lista. Una voce
+   di root delle voci sigillate che mancano, rende di root `~/.codex/plugins` e `config.json`,
+   `mcp_config.json` e `projects` di `~/.gemini/config` (oggi di `devloop-agent`), e segnala come
+   `da fare a mano` ogni voce che non è nella lista. Una voce
    segnalata si rimuove come `devloop-agent` (per esempio
    `sudo -u devloop-agent rm -r /home/devloop-agent/.codex/<voce>`), o si aggiunge alla lista
    con una PR, come [qui sopra](#una-voce-sconosciuta-in-una-directory-delle-cli);
-4. verificare, come root: `sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps`,
+5. verificare, come root: `sudo bash /root/repos/ssdlc/ops/host/check-host.sh --no-apps`,
    nessun errore nel passo `File delle CLI di devloop-agent` (le directory `1770 root`, scrivibili
    e con lo sticky bit; le voci sigillate di root; le directory con le sole voci della lista) né
    nel passo `CLI degli agent`;
-5. il pin a mano (`sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned pin
+6. il pin a mano (`sudo -u devloop -H python3 /home/devloop/ssdlc/scripts/devloop-pinned pin
    origin/main`) e `sudo systemctl start devloop`. All'avvio devloop rifà le stesse verifiche.
+   Al primo turno di agy, controllare che non fallisca scrivendo in `~/.gemini/config`
+   (`permission denied` su `config.json`, `mcp_config.json` o `projects` nel log del turno o in
+   `~/.gemini/antigravity-cli/cli.log`). Se agy deve riscriverne uno a ogni avvio, il turno
+   fallisce chiuso: si torna indietro come qui sotto e lo si segnala sull'issue, per una forma
+   più stretta che regga (un controllo del contenuto atteso, come per `bin/agentapi` nel #494).
 
 **Rollback.** La copia di prima rifiuta di partire con le directory delle CLI scrivibili da
 `devloop-agent`. Per tornare al pin precedente, a loop fermo, si richiudono come root
-(`chown root:root` e `chmod 755` su `~/.claude`, `~/.codex`, `~/.gemini` e
+(`chown root:root` e `chmod 755` su `~/.claude`, `~/.codex`, `~/.gemini`, `~/.gemini/config` e
 `~/.gemini/antigravity-cli` di `devloop-agent`), poi il pin a mano; i segnaposto restano, e il
 rinnovo dei login torna quello rotto del #438.
 

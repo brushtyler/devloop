@@ -111,8 +111,10 @@ GH_CONFIG = 'gh-config'
 # configuration, plugins or extensions, and the installed CLIs, where nothing may be writable:
 # each one that does not exist is a placeholder of root (``ops/host/setup-agent-user.sh``; a
 # file when its name has a suffix, ``placeholder_is_file``), so the agent user cannot create
-# it. The CLIs devloop starts from ``.local/bin``.
-CLI_DIRS = ('.claude', '.codex', '.gemini', '.gemini/antigravity-cli')
+# it. The CLIs devloop starts from ``.local/bin``. ``.gemini/config`` is agy's: its
+# ``config.json`` enables plugins, ``mcp_config.json`` lists the MCP servers agy loads and
+# ``projects`` holds its projects, all three sealed; only ``.migrated`` stays the agent user's.
+CLI_DIRS = ('.claude', '.codex', '.gemini', '.gemini/config', '.gemini/antigravity-cli')
 CLI_DIR_MODE = 0o1770
 CLI_SEALED = (
     '.claude/settings.json', '.claude/CLAUDE.md', '.claude/rules', '.claude/agents',
@@ -120,7 +122,9 @@ CLI_SEALED = (
     '.claude/plugins',
     '.codex/config.toml', '.codex/AGENTS.md', '.codex/AGENTS.override.md', '.codex/prompts',
     '.codex/rules', '.codex/skills', '.codex/packages', '.codex/plugins', '.codex/memories',
-    '.gemini/settings.json', '.gemini/GEMINI.md', '.gemini/antigravity-cli/settings.json',
+    '.gemini/settings.json', '.gemini/GEMINI.md', '.gemini/config/config.json',
+    '.gemini/config/mcp_config.json', '.gemini/config/projects',
+    '.gemini/antigravity-cli/settings.json',
     '.local')
 CLIS = ('claude', 'codex', 'agy')
 # The entries the agent user's CLIs may keep in ``CLI_DIRS`` (#517), besides the sealed ones of
@@ -151,7 +155,8 @@ CLI_ALLOWED = (
     ('.codex/sessions', 'd'), ('.codex/shell_snapshots', 'd'), ('.codex/state_5.sqlite*', 'f'),
     ('.codex/thread-writer-locks', 'd'), ('.codex/thread_history_1.sqlite*', 'f'),
     ('.codex/tmp', 'd'),
-    ('.gemini/config', 'fd'),
+    # agy's configuration: only the mark of its migration (the rest is sealed).
+    ('.gemini/config/.migrated', 'f'),
     # agy: the login (rewritten in place), the wrapper of its shell tool (``AGY_BIN``), its
     # state, logs, caches and the temporary files of its summaries.
     ('.gemini/antigravity-cli/antigravity-oauth-token', 'f'),
@@ -169,20 +174,19 @@ CLI_ALLOWED = (
     ('.gemini/antigravity-cli/last_check.timestamp', 'f'), ('.gemini/antigravity-cli/log', 'd'),
     ('.gemini/antigravity-cli/presence', 'd'), ('.gemini/antigravity-cli/updater', 'd'))
 # The entries of ``CLI_ALLOWED`` a CLI may read again, in a later session, as context (#517):
-# the memories of codex and the memories, knowledge and summaries of agy, and ``.gemini/config``,
-# whose content no one verified: whatever it holds does not reach the next turn. Before each
+# the memories of codex and the memories, knowledge and summaries of agy. Before each
 # turn of that CLI they are removed, as the agent user, and the turns of that CLI run one at a
 # time, so that none reads what another one writes there meanwhile (``agents.AgentRunner``):
 # the CLI starts them again empty. The auto memory of Claude Code, in ``.claude/projects``, is
 # off in every claude turn instead (``agents``).
 CLI_CLEARED = (
-    '.codex/memories_1.sqlite*', '.gemini/config',
+    '.codex/memories_1.sqlite*',
     '.gemini/antigravity-cli/brain', '.gemini/antigravity-cli/builtin',
     '.gemini/antigravity-cli/conversation_summaries.db*', '.gemini/antigravity-cli/implicit',
     '.gemini/antigravity-cli/jetbox_summaries_proto.pb',
     '.gemini/antigravity-cli/jetbox_summaries_proto.pb.*.tmp')
 # The CLI each directory of ``CLI_DIRS`` belongs to: what ``CLI_CLEARED`` removes before its turns.
-CLI_OF = {'.claude': 'claude', '.codex': 'codex', '.gemini': 'agy',
+CLI_OF = {'.claude': 'claude', '.codex': 'codex', '.gemini': 'agy', '.gemini/config': 'agy',
           '.gemini/antigravity-cli': 'agy'}
 # The entries the CLIs create on their first use inside the directories of ``CLI_DIRS``, where
 # the agent user creates nothing (#494): ``ops/host/setup-agent-user.sh`` creates them as the

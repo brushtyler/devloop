@@ -1603,20 +1603,21 @@ is in the [guide](guide.md#agent-user) and in the [ops guide](../../ops/README.m
   `SETENV`, and sudo 1.9 refuses `-E` without it: either way devloop exits before taking the
   lock and says which, with the fix of sudo-rs (`update-alternatives --set sudo
   /usr/bin/sudo.ws`, as root).
-- **Directories of the CLIs** (#517). `~/.claude`, `~/.codex`, `~/.gemini` and
-  `~/.gemini/antigravity-cli` of the agent user are root's, of its group, mode `1770`: the probe
-  above wants each a sticky directory it can write but does not own (problem "finds no sticky
-  directory at", "cannot write"), and a placeholder of root for each sealed entry
-  (`CLI_SEALED`) that does not exist. Then, and before every turn of any CLI, devloop lists the
-  four directories as the agent user (`AgentUser.cli_state`, `/usr/bin/bash` with the system's
+- **Directories of the CLIs** (#517). `~/.claude`, `~/.codex`, `~/.gemini`, `~/.gemini/config`
+  and `~/.gemini/antigravity-cli` of the agent user are root's, of its group, mode `1770`: the
+  probe above wants each a sticky directory it can write but does not own (problem "finds no
+  sticky directory at", "cannot write"), and a placeholder of root for each sealed entry
+  (`CLI_SEALED`; in `~/.gemini/config` the `config.json` that enables the plugins of agy, the
+  `mcp_config.json` that lists the MCP servers it loads, and `projects`) that does not exist.
+  Then, and before every turn of any CLI, devloop lists the
+  five directories as the agent user (`AgentUser.cli_state`, `/usr/bin/bash` with the system's
   `find`): each may hold only the entries of `CLI_ALLOWED` less `[agent_user] cli_denied`, with
   their type (`f` a regular file, `d` a directory; a link is never one), the sealed entries and
   the directories of the CLIs, these two root's. Anything else stops devloop at startup, or
   refuses the turn before its CLI starts (`agents.CliStateRefused`), with an escalation of class
   `configuration` that names the entry; so does a listing that fails or does not end. Before
   the listing, the entries of `CLI_CLEARED` of the CLI of the turn (the memories of codex, the
-  memories, knowledge and summaries of agy, and `~/.gemini/config`, whose content was not
-  verified) are removed, without following links. The turns of codex, and those of agy, run one
+  memories, knowledge and summaries of agy) are removed, without following links. The turns of codex, and those of agy, run one
   at a time, also with [parallel actions](#parallel-actions): a turn waits until the one of the
   same CLI that runs in the same process ends, so that no turn reads what another one writes
   there meanwhile, and a turn cancelled while it waits never starts.

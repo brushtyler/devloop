@@ -36,13 +36,17 @@ OPS_TEMPLATE_VARS='REPO DEVLOOP_USER SUPERVISOR_USER AGENT_USER DEVLOOP_HOME AGE
 # dove non scrive nulla, con un segnaposto di root dove non esiste (un file se il nome ha
 # un'estensione, altrimenti una directory); le CLI di ~/.local/bin. Un turno non cambia ciò che
 # usano i turni dopo.
-AGENT_CLI_DIRS=(.claude .codex .gemini .gemini/antigravity-cli)
+# ~/.gemini/config è di agy: config.json abilita i plugin, mcp_config.json elenca i server MCP che
+# carica, projects i suoi progetti, tutti sigillati; resta dell'utente degli agent solo .migrated.
+AGENT_CLI_DIRS=(.claude .codex .gemini .gemini/config .gemini/antigravity-cli)
 AGENT_CLI_SEALED=(
     .claude/settings.json .claude/CLAUDE.md .claude/rules .claude/agents .claude/commands
     .claude/skills .claude/hooks .claude/output-styles .claude/plugins
     .codex/config.toml .codex/AGENTS.md .codex/AGENTS.override.md .codex/prompts
     .codex/rules .codex/skills .codex/packages .codex/plugins .codex/memories
-    .gemini/settings.json .gemini/GEMINI.md .gemini/antigravity-cli/settings.json
+    .gemini/settings.json .gemini/GEMINI.md .gemini/config/config.json
+    .gemini/config/mcp_config.json .gemini/config/projects
+    .gemini/antigravity-cli/settings.json
     .local
 )
 AGENT_CLIS=(claude codex agy)
@@ -63,7 +67,7 @@ AGENT_CLI_ALLOWED=(
     '.codex/memories_1.sqlite*:f' .codex/models_cache.json:f '.codex/queue_1.sqlite*:f'
     .codex/sessions:d .codex/shell_snapshots:d '.codex/state_5.sqlite*:f'
     .codex/thread-writer-locks:d '.codex/thread_history_1.sqlite*:f' .codex/tmp:d
-    .gemini/config:fd
+    .gemini/config/.migrated:f
     .gemini/antigravity-cli/antigravity-oauth-token:f .gemini/antigravity-cli/bin:d
     .gemini/antigravity-cli/brain:d .gemini/antigravity-cli/builtin:d
     .gemini/antigravity-cli/cache:d .gemini/antigravity-cli/cli.log:f

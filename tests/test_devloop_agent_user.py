@@ -1174,6 +1174,7 @@ class CliFilesTests(unittest.TestCase):
             '.claude.json': '{}\n',  # the state of Claude Code, the agent user's
             '.codex/config.toml': 'model = "x"\n',
             '.gemini/antigravity-cli/settings.json': '{}\n',
+            '.gemini/config/mcp_config.json': '{}\n',  # the MCP servers of agy (#517)
             '.local/bin/claude': ATTACK.replace('@OUTPUT@', output),
             '.local/lib/claude-code/cli.js': '// the package\n',
         }
@@ -1419,7 +1420,7 @@ class CliCheckTests(unittest.TestCase):
         kinds = self.kinds()
         home = Path('/home/devloop-agent')
         self.assertEqual(kinds['cli'], [str(home / d) for d in (
-            '.claude', '.codex', '.gemini', '.gemini/antigravity-cli')])
+            '.claude', '.codex', '.gemini', '.gemini/config', '.gemini/antigravity-cli')])
         for name in ('.claude/settings.json', '.claude/CLAUDE.md', '.codex/config.toml',
                      '.gemini/antigravity-cli/settings.json', '.local', '.claude/skills',
                      '.claude/hooks', '.claude/rules', '.codex/AGENTS.md', '.codex/packages'):

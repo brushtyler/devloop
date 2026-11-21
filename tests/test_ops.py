@@ -1046,6 +1046,43 @@ class DryRunTests(OpsTestCase):
         self.assertIn('devloop non parte finché non si riesegue lo script senza --unseal', out)
         self.assertEqual(self.mutating_calls(), [])
 
+    def test_setup_agent_user_seals_the_configuration_of_agy(self):
+        # #517: ~/.gemini/config, 700 of the agent user on the host, holds the plugins agy
+        # enables and the MCP servers it loads: it becomes a directory of the CLIs, root's and
+        # sticky, with config.json, mcp_config.json and projects root's; .migrated stays.
+        agent = self.home / 'agent'
+        config_dir = agent / '.gemini/config'
+        (config_dir / 'projects').mkdir(parents=True)
+        config_dir.chmod(0o700)
+        (config_dir / 'config.json').write_text('{"plugins": {"swarm": {"enabled": true}}}\n')
+        (config_dir / 'mcp_config.json').write_text('{}\n')
+        (config_dir / 'projects/default-cli-project.json').write_text('{}\n')
+        (config_dir / '.migrated').write_text('')
+        params = self.params(DEVLOOP_USER=ME, AGENT_USER='opsdry-noagent')
+        done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        out = done.stdout
+        self.assertIn(f'[dry-run] chown root:opsdry-noagent {config_dir}\n', out)
+        self.assertIn(f'[dry-run] chmod 1770 {config_dir}\n', out)
+        for name in ('config.json', 'mcp_config.json', 'projects'):
+            self.assertIn(f'[dry-run] chown -hR root:opsdry-noagent {config_dir}/{name}\n', out)
+            self.assertIn(f'[dry-run] chmod -R g+rX\\,go-w {config_dir}/{name}\n', out)
+        self.assertNotIn(f'{config_dir}/.migrated', out)
+        self.assertNotIn(f'{config_dir}/config.json non è nella lista', out)
+        # Missing, each one is a placeholder of root.
+        for path in (config_dir / 'config.json', config_dir / 'mcp_config.json',
+                     config_dir / 'projects/default-cli-project.json'):
+            path.unlink()
+        (config_dir / 'projects').rmdir()
+        done = self.run_script('host/setup-agent-user.sh', '--dry-run', '--params', str(params))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        for name in ('config.json', 'mcp_config.json'):
+            self.assertIn(f'[dry-run] install -m 644 -o root -g opsdry-noagent '
+                          f'{OPS}/host/placeholder.json {config_dir}/{name}\n', done.stdout)
+        self.assertIn(f'[dry-run] install -d -m 755 -o root -g opsdry-noagent '
+                      f'{config_dir}/projects\n', done.stdout)
+        self.assertEqual(self.mutating_calls(), [])
+
     def test_setup_agent_user_keeps_the_files_of_the_clis_readable(self):
         # #438: a version before wrote settings.json 600, and a CLI may keep a directory 700:
         # once root's, the agent user still reads them, through its group, without writing.
@@ -1150,7 +1187,7 @@ esac''')
         for name in ('.claude', '.codex'):
             self.assertIn(f'[dry-run] chmod 1770 {agent}/{name}\n', out)
             self.assertIn(f'[dry-run] setfacl -m g::rwx {agent}/{name}\n', out)
-        for name in ('.gemini', '.gemini/antigravity-cli'):  # group::rwx already
+        for name in ('.gemini', '.gemini/config', '.gemini/antigravity-cli'):  # group::rwx
             self.assertNotIn(f'setfacl -m g::rwx {agent}/{name}\n', out)
             self.assertIn(f'ACL di {agent}/{name}: group::rwx', out)
         self.assertEqual(self.mutating_calls(), [])
@@ -1177,8 +1214,13 @@ esac''')
                  ('.codex', 'memories_1.sqlite-shm', 'f', 0), ('.codex', 'plugins', 'd', 0),
                  ('.gemini', 'antigravity-cli', 'd', 0), ('.gemini', 'config', 'd', 0),
                  ('.gemini/antigravity-cli', 'jetbox_summaries_proto.pb.a1.tmp', 'f', 0),
+                 ('.gemini/config', 'config.json', 'f', 0),
+                 ('.gemini/config', 'mcp_config.json', 'f', 0),
+                 ('.gemini/config', 'projects', 'd', 0), ('.gemini/config', '.migrated', 'f', 0),
                  ('.codex', 'hooks.json', 'f', 1), ('.claude', 'agents.bak', 'd', 1),
-                 ('.gemini', 'mcp_config.json', 'f', 1), ('.codex', 'auth.json', 'l', 2),
+                 ('.gemini', 'mcp_config.json', 'f', 1),
+                 ('.gemini/config', 'settings.json', 'f', 1),
+                 ('.gemini/config', '.migrated', 'd', 2), ('.codex', 'auth.json', 'l', 2),
                  ('.claude', 'projects', 'f', 2)]
         for directory, name, kind, expected in cases:
             with self.subTest(name=name):
@@ -1794,6 +1836,15 @@ class CheckHostTests(OpsTestCase):
         # Without its placeholder, a sealed entry can be created in the sticky directory.
         done = run('sealed', self.agent / '.codex/AGENTS.md')
         self.assertIn(f'creabile: {self.agent}/.codex/AGENTS.md', done.stderr)
+        # agy's configuration written by the agent user: an MCP server, a plugin (#517).
+        for name in ('mcp_config.json', 'config.json'):
+            path = self.agent / '.gemini/config' / name
+            path.write_text('{"mcpServers": {"x": {"command": "/tmp/x"}}}\n')
+            done = run('sealed', path)
+            self.assertEqual(done.returncode, 1, name)
+            self.assertIn(f'scrivibile: {path}', done.stderr)
+        done = run('sealed', self.agent / '.gemini/config/projects')
+        self.assertIn(f'creabile: {self.agent}/.gemini/config/projects', done.stderr)
         self.assertEqual(run('sealed', BASH).returncode, 0)
         self.assertEqual(run('bin', BASH).returncode, 0)
         # The tools of the agent user's PATH (~/.local/bin first) are not those the probe runs.

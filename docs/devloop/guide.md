@@ -2441,7 +2441,8 @@ a host already in service is in
   CLIs are root's, and `devloop-agent` writes only its credentials, sessions, caches and logs.
   Its home is root's and sticky (`1770`, its group): it creates the state and cache entries of
   the CLIs there (such as `~/.claude.json`, which stays its own) but cannot rename nor remove
-  root's. `~/.claude`, `~/.codex`, `~/.gemini` and `~/.gemini/antigravity-cli` are the same
+  root's. `~/.claude`, `~/.codex`, `~/.gemini`, `~/.gemini/config` and
+  `~/.gemini/antigravity-cli` are the same
   (#517, decision of the operator): root's, of its group, `1770`, so the CLIs save their logins
   with a temporary file and a `rename` (`.credentials.json` of claude, `auth.json` of codex with
   its `auth.lock`), create their locks, caches and temporary files, but `devloop-agent` neither
@@ -2451,7 +2452,9 @@ a host already in service is in
   `devloop/agentuser.py` (`settings.json`, `CLAUDE.md`, `rules`, `agents`, `commands`, `skills`,
   `hooks`, `output-styles` and `plugins` of `~/.claude`; `config.toml`, `AGENTS.md`,
   `AGENTS.override.md`, `prompts`, `rules`, `skills`, `packages`, `plugins` and `memories` of
-  `~/.codex`; `~/.gemini/settings.json`, `~/.gemini/GEMINI.md`,
+  `~/.codex`; `~/.gemini/settings.json`, `~/.gemini/GEMINI.md`; `config.json`, which enables
+  the plugins of agy, `mcp_config.json`, which lists the MCP servers it loads, and `projects` of
+  `~/.gemini/config`, where only `.migrated` stays `devloop-agent`'s;
   `~/.gemini/antigravity-cli/settings.json`; all of `~/.local`). Each one that does not exist is
   a placeholder of root, made by the setup script (an empty file when the name has a suffix,
   `{}` for a JSON file, an empty directory otherwise), so `devloop-agent` cannot create it. The
@@ -2480,8 +2483,7 @@ a host already in service is in
   (`~/.codex/memories_1.sqlite*`) and the memories, knowledge and summaries of agy (`brain`,
   `implicit`, `builtin`, `conversation_summaries.db*` and `jetbox_summaries_proto.pb*` of
   `~/.gemini/antigravity-cli`) are removed, as `devloop-agent`, before each turn of that CLI
-  (`CLI_CLEARED`). So is `~/.gemini/config`, whose content was not verified: whatever agy keeps
-  there does not reach the next turn. The CLI starts them again empty. Since turns that run
+  (`CLI_CLEARED`). The CLI starts them again empty. Since turns that run
   together share the home, the turns of codex, and those of agy, run one at a time, also with
   [parallel actions](reference.md#parallel-actions): a turn waits until the one of the same CLI
   ends, without a timeout of its own (that turn has one), and a turn cancelled while it waits

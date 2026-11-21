@@ -285,7 +285,8 @@ configurazione o i binari delle CLI per i turni dopo, per esempio aggiungendo a
 - la home di `devloop-agent` è di root, `1770`, del gruppo di `devloop-agent`, con lo sticky bit:
   `devloop-agent` vi crea le voci di stato e di cache delle CLI (per esempio `~/.claude.json`), ma
   non rinomina né rimuove quelle di root;
-- `~/.claude`, `~/.codex`, `~/.gemini` e `~/.gemini/antigravity-cli` sono come la home (#517):
+- `~/.claude`, `~/.codex`, `~/.gemini`, `~/.gemini/config` e `~/.gemini/antigravity-cli` sono
+  come la home (#517):
   di root, del gruppo di `devloop-agent`, `1770`. Le CLI vi salvano i loro login con un file
   temporaneo e un `rename` (`.credentials.json` di claude, `auth.json` di codex con `auth.lock`),
   e vi creano lock, cache e temporanei; `devloop-agent` non vi rinomina né rimuove ciò che è di
@@ -295,7 +296,8 @@ configurazione o i binari delle CLI per i turni dopo, per esempio aggiungendo a
   automatici, `~/.claude/CLAUDE.md`, `rules`, `agents`, `commands`, `skills`, `hooks`,
   `output-styles` e `plugins` di `~/.claude`, `~/.codex/config.toml`, `AGENTS.md`,
   `AGENTS.override.md`, `prompts`, `rules`, `skills`, `packages`, `plugins` e `memories` di
-  `~/.codex`, `~/.gemini/settings.json`, `~/.gemini/GEMINI.md`,
+  `~/.codex`, `~/.gemini/settings.json`, `~/.gemini/GEMINI.md`, `config.json` (i plugin che agy
+  abilita), `mcp_config.json` (i server MCP che agy carica) e `projects` di `~/.gemini/config`,
   `~/.gemini/antigravity-cli/settings.json` e tutto `~/.local`) diventa di root, del gruppo di
   `devloop-agent`, leggibile e attraversabile dal gruppo e senza scrittura per gruppo e altri
   (`chmod -R g+rX,go-w`): un `settings.json` 600 o una directory 700 restano leggibili da
@@ -323,8 +325,8 @@ configurazione o i binari delle CLI per i turni dopo, per esempio aggiungendo a
   che vi resta scrivibile non porta istruzioni ai turni dopo: prima di ogni turno di codex o di
   agy devloop rimuove le memorie che quella CLI rileggerebbe in una sessione successiva
   (`memories_1.sqlite*` di codex; `brain`, `implicit`, `builtin`, `conversation_summaries.db*` e
-  `jetbox_summaries_proto.pb*` di agy, e `~/.gemini/config`, di cui nessuno ha verificato il
-  contenuto), e i turni di codex, come quelli di agy, girano uno alla volta anche con le azioni
+  `jetbox_summaries_proto.pb*` di agy), e i turni di codex, come quelli di agy, girano uno alla
+  volta anche con le azioni
   in parallelo, perché nessuno legga ciò che un altro vi scrive nel frattempo;
   `~/.codex/memories` è sigillata; devloop avvia ogni turno di Claude Code senza la memoria automatica di
   `~/.claude/projects` (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` nell'ambiente e, perché i settings
