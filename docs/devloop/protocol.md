@@ -485,6 +485,16 @@ How devloop merges in the `"strict"` and `"auto"` [merge modes](guide.md#merge-m
   back to `agent:review` for a new review; an open finding sends it to `agent:needs-operator`. A
   PR that is `BLOCKED`, `BEHIND` or `UNSTABLE` stays ready and waits. **No mode, and no agent,
   merges with CI not green, with blocking findings open or without the approvals required.**
+- **Labels at the last moment.** The checks above take time. So, just before the merge call (and
+  before the hold of the auto-pin of a [step on the host](guide.md#step-on-the-host)), devloop
+  reads the labels of the PR again with the API (#519). It never reuses the read the tick or
+  the merge started from, and applies the same label rules to the new read. An
+  `agent:merge-hold` added a few seconds earlier, or another label that holds the merge, stops
+  it: devloop does not merge and writes why in the log and in a "Merge non eseguito" comment
+  on the PR, with the time of that read. In a [delegated merge](guide.md#delegated-merge) the
+  dispatcher's `agent:needs-operator` of the `operator_merge` is the expected one, while
+  `agent:merge-hold` refuses the command. The labels of the linked issue are not checked. The
+  "Mergiata da devloop" section gives the time of that read.
 - **How.** `gh pr merge --merge --match-head-commit <approved head>`: a merge commit, only if
   the head is still the approved one. It runs with the [merger app](reference.md#the-merger-app) when
   `[apps.merger]` is configured, with a token minted at that moment and limited to

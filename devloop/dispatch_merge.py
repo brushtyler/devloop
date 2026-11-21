@@ -47,6 +47,15 @@ from .supervision import (ADR_DIR, MAX_MERGE_BUDGET, MERGE, MERGE_BUDGET, MERGE_
 from .workspace import WorkspaceError
 
 
+class MergeHeld(Exception):
+    """The labels of the PR, read again just before the merge call (#519), hold the merge:
+    ``labels`` as that read gave them, ``at`` its time (``ledger.timestamp``)."""
+
+    def __init__(self, labels, at):
+        super().__init__(f'labels read again at {at}: ' + ', '.join(sorted(labels)))
+        self.labels, self.at = labels, at
+
+
 class MergeMixin:
     """The methods of ``Dispatcher`` for receipts, review levels and merges (#295). They use
     the dispatcher state and its other methods through ``self``."""
@@ -725,8 +734,7 @@ class MergeMixin:
 
         if fresh.get('state') != 'OPEN':
             return skip(f'the PR is {fresh.get("state")}')
-        if lb.ready_to_merge not in labels or labels & (lb.operator() | {lb.merge_hold,
-                                                                         lb.needs_supervisor}):
+        if self._labels_hold_merge(labels):
             return skip('labels changed: ' + ', '.join(sorted(labels)))
         if head != pr.head_sha:
             return skip(f'head moved to {head[:12]}')
@@ -792,8 +800,41 @@ class MergeMixin:
             bases = self._approvals_match(pr, latest, current, paths, step='merge')
             if bases is None:
                 return None
-        self._execute_merge(pr, thread, head, current, mode, paths, bases)
+        try:
+            self._execute_merge(pr, thread, head, current, mode, paths, bases)
+        except MergeHeld as held:
+            skip(str(held))
+            self.gh.comment(pr.number, publishable(
+                dispatcher_header() + '\n## Merge non eseguito\n\n'
+                f'Subito prima della chiamata di merge devloop ha riletto le label della PR, alle '
+                f'{held.at} (UTC), e non permettono il merge: '
+                + ', '.join(f'`{n}`' for n in sorted(held.labels)) + '. '
+                f'Serve `{lb.ready_to_merge}`, senza `{lb.needs_operator}`, `{lb.merge_hold}` né '
+                f'`{lb.needs_supervisor}`. La PR non è mergiata.'))
         return None
+
+    def _labels_hold_merge(self, labels, delegated=False):
+        """Whether the labels ``labels`` of a PR hold its merge: without
+        ``agent:ready-to-merge``, or with ``agent:merge-hold`` or ``agent:needs-supervisor``.
+        ``agent:needs-operator`` holds an automatic merge, while a ``delegated`` one (#486)
+        needs the dispatcher's own, of the ``operator_merge`` the command answers, and is held
+        only by its name before #248."""
+        lb = self.cfg.labels
+        if lb.ready_to_merge not in labels or labels & {lb.merge_hold, lb.needs_supervisor}:
+            return True
+        if delegated:
+            return lb.needs_operator not in labels or LEGACY_NEEDS_OPERATOR in labels
+        return bool(labels & lb.operator())
+
+    def _labels_now(self, number, delegated):
+        """The time of a new read of the labels of PR ``number``, made now with the API just
+        before the merge call (#519), never the read the tick or the merge started from; raises
+        ``MergeHeld`` when they hold the merge (``_labels_hold_merge``)."""
+        labels = label_names(self.gh.pr_state(number).get('labels') or [])
+        at = ledger_timestamp(self.clock)
+        if self._labels_hold_merge(labels, delegated):
+            raise MergeHeld(labels, at)
+        return at
 
     def _execute_merge(self, pr, thread, head, current, mode, paths, bases, delegation=None):
         """Merge ``head`` of ``pr``, every directive already checked (``_do_merge``, or
@@ -801,8 +842,14 @@ class MergeMixin:
         record in the comment of the promotion, the issue closed, the auto-pin requested or
         held. ``delegation``: the command of a delegated merge, ``{command, by, comment,
         reason}``, recorded in the ``merged`` record and in its text. Returns whether it
-        merged: False when the hold of the auto-pin of a step on the host cannot be recorded."""
+        merged: False when the hold of the auto-pin of a step on the host cannot be recorded.
+
+        Just before the merge call, before the hold of the auto-pin too, the labels of the PR
+        are read again with the API (#519): when they hold the merge, as the rules of
+        ``_labels_hold_merge`` say, it raises ``MergeHeld`` and nothing is merged nor held. The
+        ``merged`` comment gives the time of that read."""
         cfg, lb = self.cfg, self.cfg.labels
+        labels_at = self._labels_now(pr.number, delegation is not None)
 
         # A step on the host declared by the PR (#462) holds the auto-pin before the merge, so
         # that no tick pins the merged base first: a hold that cannot be recorded stops it.
@@ -863,7 +910,8 @@ class MergeMixin:
                 f'{current["level"]}. Subito prima ha ricontrollato le direttive di merge: CI '
                 '`pass`, `MERGEABLE` e `CLEAN`, nessun finding aperto, nessuna label '
                 f'`{lb.needs_operator}` o `{lb.merge_hold}`, e le condizioni della promozione con '
-                'la ricevuta di policy ricalcolata. Il branch resta.')
+                'la ricevuta di policy ricalcolata. Le label della PR le ha rilette subito prima '
+                f'della chiamata di merge, alle {labels_at} (UTC). Il branch resta.')
         else:
             section = (
                 '## Mergiata da devloop su delega del supervisore\n\n'
@@ -872,7 +920,9 @@ class MergeMixin:
                 f'{delegation["comment"]}, delega `[delegations] merge`, #486); devloop ha '
                 'verificato subito prima tutte le condizioni della delega e l\'ha eseguito '
                 f'{executor}: commit `{head[:12]}` con un merge commit, legato a quel head '
-                f'(`--match-head-commit`), al livello {current["level"]}. Il branch resta.\n\n'
+                f'(`--match-head-commit`), al livello {current["level"]}. Le label della PR le '
+                f'ha rilette subito prima della chiamata di merge, alle {labels_at} (UTC), senza '
+                f'`{lb.merge_hold}`. Il branch resta.\n\n'
                 '**Motivo del supervisore:**\n\n'
                 + '\n'.join(f'> {line}'.rstrip()
                             for line in delegation['reason'].splitlines()))
@@ -1295,8 +1345,7 @@ class MergeMixin:
         if sha != head:
             return refuse(f'lo sha del comando (`{sha[:12]}`) non è l\'head attuale della PR '
                           f'(`{head[:12]}`)')
-        if (lb.ready_to_merge not in labels or lb.needs_operator not in labels
-                or labels & {lb.merge_hold, lb.needs_supervisor, LEGACY_NEEDS_OPERATOR}):
+        if self._labels_hold_merge(labels, delegated=True):
             return refuse('le label della PR non sono più quelle di un merge dell\'operatore: '
                           + ', '.join(f'`{n}`' for n in sorted(labels)))
         pr = self._fresh_pr(target, labels, fresh, comments)
@@ -1405,6 +1454,11 @@ class MergeMixin:
         try:
             merged = self._execute_merge(pr, comments, head, current, 'auto', paths, bases,
                                          delegation)
+        except MergeHeld as held:
+            self.log(f'  not merged: {held}')
+            return refuse(f'le label della PR, rilette subito prima della chiamata di merge alle '
+                          f'{held.at} (UTC), non sono più quelle di un merge dell\'operatore: '
+                          + ', '.join(f'`{n}`' for n in sorted(held.labels)))
         except GitHubError as exc:
             return refuse(f'il merge non è riuscito ({exc})')
         if not merged:

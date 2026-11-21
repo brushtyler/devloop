@@ -980,7 +980,10 @@ Only in `"auto"`. A PR comment whose first line, after the attribution header if
 
 holds or releases the merge. `hold` adds `agent:merge-hold`: the PR stays ready and is not
 merged. `release` removes the label, and the PR is merged once the directives hold; removing the
-label by hand does the same. A hold needs a reason.
+label by hand does the same. A hold needs a reason. An `agent:merge-hold` added by hand counts up to
+the last moment: devloop reads the labels of the PR again just before the merge call, and a label
+added after the other checks stops the merge (#519,
+[Merge directives and record](protocol.md#merge-directives-and-record)).
 
 The commands count only from the identity of `[roles].supervisor` (the GitHub App of that agent,
 or with `[roles.supervisor]` as a table the role app of
