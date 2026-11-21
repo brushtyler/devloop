@@ -129,6 +129,12 @@ the `write_args` or `review_args` of a claude agent stops devloop at startup. A 
 not a system user name, a `check`
 that is not a boolean, or an unknown key, stops devloop at startup, and so does a `name` the
 system does not know.
+`[claude_token]` sets the [long-lived token of the claude turns](#claude-token) (#507):
+`enabled` (default `false`), `rotate_days` (default 30) and `max_days` (default 90, at most 90,
+a cap of the code that the configuration and the overlay may only lower). An `enabled` that is
+not a boolean, a `rotate_days` or `max_days` that is not a whole number of at least 1, a
+`max_days` beyond 90, a `rotate_days` beyond `max_days`, or an unknown key, stops devloop at
+startup. It applies at the next start.
 `[docs] map` sets the
 [documentation map](#documentation-map). Operator overrides go into the
 [local overlay](guide.md#local-config-as-an-overlay), not into this file. A running
@@ -1428,6 +1434,38 @@ stops on its own instead of holding the turn for an hour. Values the operator se
 environment are kept. This prevents accidental use of the operator's credentials, not
 deliberate access: code running as the same system user can still read files. The isolation
 comes from the [agent user](#agent-user), which cannot read the keys at all.
+
+### Claude token
+
+The agent user's `~/.claude` is root's (#438), so Claude Code cannot save the access token it
+renews. With `[claude_token] enabled = true` (#507) every claude turn, and only those (never the
+test command nor the other agents), gets in its environment `CLAUDE_CODE_OAUTH_TOKEN`, a
+long-lived token the operator generates with `claude setup-token` (`devloop/claudetoken.py`):
+
+- **File.** `claude.<YYYY-MM-DD>.oauth-token` in `key_dir` (`$DEVLOOP_APP_KEY_DIR` or
+  `[apps] key_dir`), which the agent user cannot read nor enter; the date in the name is the
+  day the token was issued (UTC). Read at each claude turn: exactly one such file, a regular
+  file opened without following a link, with a single link, not readable by group or others,
+  holding the token alone on one line.
+- **Age.** From `rotate_days` after the issue the dispatcher publishes one alert on
+  `[run].alert_issue`, with the procedure of the rotation, per token file
+  (`claude-token-alerted.json` in `state_dir`; with the outbox an uncertain alert is only
+  reconciled; without `alert_issue`, a warning in the log once per process). From `max_days`,
+  and for a name without a valid date, a date in the future, no file, more than one, or one
+  that cannot be read as above, every claude turn is refused before its CLI starts
+  (`CredentialRefused`) with an escalation `configuration` to the operator, which names the
+  file and why; the log warns once per process and problem.
+- **Secret.** The token is never in the dispatcher's own environment, a log, a record, a prompt
+  or a comment: devloop replaces it with `[REDACTED]` in the CLI's stdout and stderr before
+  reading them, so the turn's log, its telemetry, the tail and the command of its output, the
+  message of a failed turn (also when cut) and the reason of an unavailable model never hold
+  it, nor a part of it; the message and every text attribute of a failed turn's error, and of
+  the errors it was raised from, are cleaned again before they leave the runner.
+
+Off, Claude Code uses its own login, as before. Creation, rotation and revocation are in
+[ops/host/migrate.md](../../ops/host/migrate.md#token-di-claude-per-lutente-degli-agent-507);
+`ops/host/check-host.sh` shows the age of the token and reports an expired one, and a
+`.credentials.json` left to the agent user.
 
 ### Identities of a project
 

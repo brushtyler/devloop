@@ -381,6 +381,20 @@ suo installatore. Tutto come utente `devloop-agent` (`sudo -iu devloop-agent`), 
 Per ciascuna: login (`claude`, `codex`, `agy` avviati una volta in una sessione interattiva) e
 verifica con `~/.local/bin/<cli> --version`.
 
+**claude: token di lunga durata (#507).** Con `~/.claude` di root Claude Code non salva il token
+che rinnova, e il suo login smette di funzionare alla scadenza. Per i turni di claude l'operatore
+genera quindi con `claude setup-token` un token OAuth di lunga durata e lo mette nella `key_dir`
+di `devloop` come `claude.<AAAA-MM-GG>.oauth-token` (mode 600, la data di emissione nel nome),
+con `[claude_token] enabled = true` nell'overlay: devloop lo passa a ogni turno di claude, e solo
+a quelli, come `CLAUDE_CODE_OAUTH_TOKEN`, e non lo scrive mai in log, record, prompt o output.
+Va **ruotato ogni 1-3 mesi**: da `rotate_days` (default 30) devloop avvisa una volta su
+`[run].alert_issue`, da `max_days` (default 90, al più 90: l'overlay può solo abbassarlo) rifiuta
+i turni di claude con un'escalation `configuration`. A ogni rotazione il token vecchio va
+**revocato** su claude.ai. Con il token, il `~/.claude/.credentials.json` di `devloop-agent` va
+tolto: `check-host.sh` ne segnala la presenza. Creazione, rotazione e revoca, con i comandi, sono
+in [Token di claude per l'utente degli
+agent](host/migrate.md#token-di-claude-per-lutente-degli-agent-507).
+
 Gli aggiornamenti automatici restano spenti: devloop non deve avviare un turno mentre una CLI
 sostituisce il proprio eseguibile. Per Claude Code, `~/.claude/settings.json` con
 `"autoUpdates": false` e `"env": {"DISABLE_AUTOUPDATER": "1"}` (lo scrive `setup-agent-user.sh`), e il
@@ -470,6 +484,9 @@ root) e, come `devloop-agent`, i file e i binari delle CLI, come il controllo al
 che `sudo` non sia sudo-rs e che l'ambiente arrivi a `devloop-agent` con `sudo -n -E` come
 `devloop`, come il controllo all'avvio (#496; un errore con la correzione `update-alternatives
 --set sudo /usr/bin/sudo.ws`, o con il `SETENV` mancante);
+con `[claude_token] enabled`, il token di claude nella `key_dir` (uno solo, 600, di `devloop`)
+con la sua età, un avviso da `rotate_days` e un errore oltre `max_days` o senza una data valida,
+e un errore se resta `~/.claude/.credentials.json` di `devloop-agent` (#507);
 il lock per repository (la directory
 di root, 3770, del gruppo `devloop-repos`; `devloop` nel gruppo, `devloop-agent` e il supervisore
 fuori; `devloop-agent` che non vi entra; il file di `tmpfiles.d`; `repo_lock_dir` nell'overlay);

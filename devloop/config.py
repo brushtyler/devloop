@@ -11,6 +11,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import claudetoken
 from .localtests import CI_LOG_FORMATS, SELECTIONS, Tests
 from .localtests import MODES as LOCAL_TESTS_MODES
 from .policy import MAX_LEVEL, MIN_LEVEL, ZERO_LEVEL, ReviewPolicy
@@ -173,6 +174,17 @@ class AgentUserPolicy:
     default; off only in development)."""
     name: str = ''
     check: bool = True
+
+
+@dataclass(frozen=True)
+class ClaudeTokenPolicy:
+    """``[claude_token]`` (#507): with ``enabled``, every claude turn gets the long-lived token
+    of ``key_dir`` as ``CLAUDE_CODE_OAUTH_TOKEN`` (``claudetoken``); one alert from
+    ``rotate_days`` after its issue, and the turns refused from ``max_days``, at most
+    ``claudetoken.MAX_DAYS``. Off by default: Claude Code uses its own login, as before."""
+    enabled: bool = False
+    rotate_days: int = claudetoken.ROTATE_DAYS
+    max_days: int = claudetoken.MAX_DAYS
 
 
 @dataclass(frozen=True)
@@ -638,6 +650,8 @@ class Config:
     gc: GCPolicy = field(default_factory=GCPolicy)
     # The system user of the agents and of the tests (#415).
     agent_user: AgentUserPolicy = field(default_factory=AgentUserPolicy)
+    # The long-lived token of the claude turns (#507).
+    claude_token: ClaudeTokenPolicy = field(default_factory=ClaudeTokenPolicy)
     # Code paths and their documents, listed in the implement, fix and review prompts (#203).
     docs: DocsMap = field(default_factory=DocsMap)
     # The project's data in the prompts (ADR 0006, R4).
@@ -1227,6 +1241,39 @@ def parse_agent_user(table):
             raise ConfigError('agent_user.check: expected true or false')
         values['check'] = table['check']
     return AgentUserPolicy(**values)
+
+
+def parse_claude_token(table):
+    """``[claude_token]`` (#507): ``enabled``, a boolean (default false); ``rotate_days``
+    (default 30) and ``max_days`` (default 90), whole numbers of at least 1, ``max_days`` at
+    most ``claudetoken.MAX_DAYS``, the cap of the code that the configuration may only lower,
+    and ``rotate_days`` at most ``max_days``."""
+    if not isinstance(table, dict):
+        raise ConfigError('claude_token: expected a table')
+    unknown = set(table) - {f.name for f in dataclasses.fields(ClaudeTokenPolicy)}
+    if unknown:
+        raise ConfigError(f'claude_token: unknown keys {sorted(unknown)}')
+    values = {}
+    if 'enabled' in table:
+        if not isinstance(table['enabled'], bool):
+            raise ConfigError('claude_token.enabled: expected true or false')
+        values['enabled'] = table['enabled']
+    for key, cap in (('rotate_days', None), ('max_days', claudetoken.MAX_DAYS)):
+        if key not in table:
+            continue
+        value = table[key]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ConfigError(f'claude_token.{key}: expected a whole number of days, at least 1')
+        if cap is not None and value > cap:
+            raise ConfigError(f'claude_token.{key}: {value} is beyond {cap}, the cap of the '
+                              'code, which the configuration may only lower')
+        values[key] = value
+    policy = ClaudeTokenPolicy(**values)
+    if policy.rotate_days > policy.max_days:
+        raise ConfigError(f'claude_token.rotate_days: {policy.rotate_days} is beyond max_days '
+                          f'= {policy.max_days}: the alert of the rotation would never come '
+                          'before the turns are refused')
+    return policy
 
 
 def _no_tokens(table, where):
@@ -1877,6 +1924,7 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
         ci=parse_ci(data.get('ci', {})),
         gc=parse_gc(data.get('gc', {})),
         agent_user=parse_agent_user(data.get('agent_user', {})),
+        claude_token=parse_claude_token(data.get('claude_token', {})),
         delegations=delegations,
         docs=parse_docs(data),
         prompts=parse_prompts(data.get('prompts', {}), merge),
@@ -1975,6 +2023,7 @@ OVERLAY_KEYS = {
     'gc': dict.fromkeys(('pins', 'keep_pins', 'worktrees', 'logs', 'log_days',
                          'interval_minutes')),
     'agent_user': dict.fromkeys(('name', 'check')),
+    'claude_token': dict.fromkeys(('enabled', 'rotate_days', 'max_days')),
     'docs': {'map': {'*': None}},
     'tests': {'selection': None, 'source_prefixes': None, 'dir_modules': {'*': None},
               'ci_log_format': None},

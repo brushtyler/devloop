@@ -4,6 +4,7 @@ The scripts run here only with ``--dry-run`` and on temporary directories: a ``P
 records any command that would change the host (``sudo``, ``apt-get``, ``useradd``, …), and the
 tests check that none ran.
 """
+import datetime
 import getpass
 import grp
 import html
@@ -1898,6 +1899,87 @@ echo "sudo $*" >> "$OPS_TEST_CALLS"''')
         self.assertRegex(done.stdout, r'\[dry-run\] env DEVLOOP_ENV_PROBE=devloop-env-probe-\S+ '
                                       r'sudo -n -E -u root -- /usr/bin/bash -c ')
         self.assertEqual(self.mutating_calls(), [])
+
+    def claude_token(self, days_ago, mode=0o600, enabled=True):
+        """With ``[claude_token] enabled`` in the overlay, a token issued ``days_ago`` in the
+        key_dir of devloop (#507). Returns the name of its file."""
+        issued = (datetime.datetime.now(datetime.timezone.utc).date()
+                  - datetime.timedelta(days=days_ago))
+        name = f'claude.{issued.isoformat()}.oauth-token'
+        path = self.devloop / '.ghapps' / name
+        path.write_text('not a token\n')
+        path.chmod(mode)
+        if enabled:
+            overlay = self.state / 'config.local.toml'
+            overlay.write_text(overlay.read_text() + '[claude_token]\nenabled = true\n')
+        return name
+
+    def test_the_claude_token_shows_its_age(self):
+        name = self.claude_token(12)
+        done, errors = self.check()
+        self.assertEqual(errors, [], done.stdout)
+        out = done.stdout
+        self.assertIn(f'ok: {self.devloop}/.ghapps/{name}: 600, {ME}', out)
+        self.assertIn(f'ok: {name}: emesso il {name[7:17]}, 12 giorni fa (rotazione a 30, '
+                      'scadenza a 90)', out)
+        self.assertIn(f'ok: nessun {self.agent}/.claude/.credentials.json', out)
+        self.assertNotIn('not a token', out)
+
+    def test_a_claude_token_to_rotate_is_a_warning_and_an_expired_one_an_error(self):
+        name = self.claude_token(45)
+        done, errors = self.check()
+        self.assertEqual(errors, [])
+        self.assertIn(f'ATTENZIONE: {name}: emesso il {name[7:17]}, 45 giorni fa, da '
+                      'rotate_days = 30: da ruotare prima di max_days = 90', done.stdout)
+        (self.devloop / '.ghapps' / name).unlink()
+        name = self.claude_token(90, enabled=False)
+        done, errors = self.check()
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(errors, [f'  ERRORE: {name}: emesso il {name[7:17]}, 90 giorni fa, oltre '
+                                  'max_days = 90: scaduto, i turni di claude sono rifiutati; '
+                                  'ruotarlo (ops/host/migrate.md)'])
+
+    def test_a_lower_max_days_of_the_overlay_counts(self):
+        name = self.claude_token(40)
+        overlay = self.state / 'config.local.toml'
+        overlay.write_text(overlay.read_text() + 'rotate_days = 20\nmax_days = 40\n')
+        done, errors = self.check()
+        self.assertEqual(len(errors), 1, done.stdout)
+        self.assertIn(f'{name}: emesso il', errors[0])
+        self.assertIn('oltre max_days = 40', errors[0])
+
+    def test_a_claude_token_without_a_valid_date_or_open_is_an_error(self):
+        self.claude_token(3, mode=0o644)
+        bad = self.devloop / '.ghapps' / 'claude.yesterday.oauth-token'
+        bad.write_text('x\n')
+        bad.chmod(0o600)
+        done, errors = self.check()
+        self.assertEqual(errors[0][:len('  ERRORE: 2 token di claude')],
+                         '  ERRORE: 2 token di claude')
+        next(p for p in (self.devloop / '.ghapps').glob('claude.2*')).unlink()
+        done, errors = self.check()
+        self.assertEqual(errors, ['  ERRORE: claude.yesterday.oauth-token: nessuna data di '
+                                  'emissione valida nel nome: devloop lo considera scaduto'])
+
+    def test_a_missing_claude_token_is_an_error_once_enabled(self):
+        overlay = self.state / 'config.local.toml'
+        done, errors = self.check()
+        self.assertEqual(errors, [])
+        self.assertIn('[claude_token] non attivo', done.stdout)
+        overlay.write_text(overlay.read_text() + '[claude_token]\nenabled = true\n')
+        done, errors = self.check()
+        self.assertEqual(len(errors), 1)
+        self.assertIn('nessun token di claude', errors[0])
+
+    def test_the_credentials_left_to_the_agent_user_are_an_error(self):
+        self.claude_token(5)
+        credentials = self.agent / '.claude/.credentials.json'
+        credentials.parent.mkdir()
+        credentials.write_text('{}')
+        done, errors = self.check()
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(errors, [f'  ERRORE: {credentials} c\'è ancora: con il token è un '
+                                  'secondo canale di accesso, va tolto (ops/host/migrate.md)'])
 
     def test_an_overlay_without_the_agent_user_is_an_error(self):
         (self.state / 'config.local.toml').write_text(f'repo_lock_dir = "{self.locks}"\n'

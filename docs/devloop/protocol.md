@@ -197,6 +197,11 @@ in conflict on sensitive paths included. Any other start error is not retried, a
 from depending on an update in progress, see the recommendation under
 [Installation as a dedicated user](guide.md#installation-as-a-dedicated-user).
 
+A claude turn whose long-lived token cannot be used (`[claude_token]`, #507: missing, without a
+valid issue date, beyond `max_days`) is refused before its CLI starts, and is an escalation of
+class `configuration` to the operator whatever the step, a sync included, also after other
+models of the chain were tried ([Claude token](reference.md#claude-token)).
+
 ## Rounds
 
 A round is one evaluation of a head: a CI failure, or the reviews of every reviewer the review

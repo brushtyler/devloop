@@ -46,6 +46,14 @@
 # [run]
 # alert_issue = 123
 
+# Il token di lunga durata dei turni di claude (#507), da `claude setup-token`, in key_dir come
+# claude.<AAAA-MM-GG>.oauth-token: avviso da rotate_days, turni rifiutati da max_days (al più 90).
+# Creazione, rotazione e revoca: ops/host/migrate.md.
+# [claude_token]
+# enabled = true
+# rotate_days = 30
+# max_days = 90
+
 # Issue del riepilogo giornaliero (senza: nessun riepilogo).
 # [report]
 # issue = 124

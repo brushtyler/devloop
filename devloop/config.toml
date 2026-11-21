@@ -230,6 +230,19 @@ interval_minutes = 60
 name = ""
 check = true
 
+# The long-lived token of the claude turns (issue #507, see docs/devloop/reference.md). With
+# enabled = true every claude turn, and only those, gets as CLAUDE_CODE_OAUTH_TOKEN the token the
+# operator generated with `claude setup-token`, from claude.<YYYY-MM-DD>.oauth-token in key_dir
+# (the date: the day it was issued); the agent user's ~/.claude stays sealed. From rotate_days
+# after the issue one alert on [run].alert_issue; from max_days (at most 90, the cap of the code,
+# which the overlay may only lower), or without a valid date, the claude turns are refused with an
+# escalation `configuration`. False: Claude Code uses its own login, as before. Creation,
+# rotation and revocation: ops/host/migrate.md.
+[claude_token]
+enabled = false
+rotate_days = 30
+max_days = 90
+
 # `devloop run` (issue #177): after three consecutive failed ticks the loop stops and the
 # dispatcher posts an alert on this issue; without it the alert goes only to the local log, and
 # the loop stops all the same. Which issue gets it is the operator's choice (local overlay).
