@@ -843,13 +843,24 @@ Come root, con i percorsi dell'installazione attuale: `state_dir`
    sudo systemctl stop devloop
    ```
 
-2. **Copia dell'overlay di prima**, per il rollback, una volta sola:
+2. **Copia dell'overlay di prima e commit della copia in uso**, per il rollback, una volta sola:
+   se ci sono già, sono quelli di prima e non vanno sovrascritti. Il commit va salvato **prima
+   del pin** del passo 6: dopo, `current` indica la copia nuova.
 
    ```bash
    test -e /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml.prima-499 || \
        install -o devloop -m 600 /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml \
            /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml.prima-499
+   test -s /home/devloop/ssdlc/.ssdlc/devloop/commit.prima-499 || \
+       python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["commit"])' \
+           /home/devloop/ssdlc/.ssdlc/devloop/current/pin.json \
+           > /home/devloop/ssdlc/.ssdlc/devloop/commit.prima-499
+   cat /home/devloop/ssdlc/.ssdlc/devloop/commit.prima-499
    ```
+
+   `cat` deve stampare un commit di 40 cifre esadecimali, quello del `pin.json` della copia in
+   uso (`readlink /home/devloop/ssdlc/.ssdlc/devloop/current` dà `pinned-` e le sue prime 12
+   cifre). Se non lo stampa, il file va tolto e il passo ripetuto, prima di andare avanti.
 
 3. **L'overlay**, modificato come `devloop`, perché resti suo:
 
@@ -915,24 +926,33 @@ Come root, con i percorsi dell'installazione attuale: `state_dir`
    Il pin a mano rilascia il blocco del pin automatico. Al primo tick devloop sposta la memoria
    dei modelli non disponibili di `claude`, `codex` e `agy` alle chiavi per ruolo, e lo scrive nel
    log una volta. I pin successivi tornano al launcher.
-7. **Pulizia**: la copia `config.local.toml.prima-499` si cancella quando la copia di #499 gira.
+7. **Pulizia**: `config.local.toml.prima-499` e `commit.prima-499` servono al rollback e restano
+   finché può servire; si cancellano insieme quando la copia di #499 gira e il rollback non serve
+   più.
 
 Le chiavi rinominate cambiano la versione della policy: con la coda vuota non decade nessuna
 approvazione.
 
 **Rollback.** La copia di prima non legge l'overlay rinominato, e quella di #499 non legge
 l'overlay di prima: si torna indietro a loop fermo, con l'overlay di prima e il pin fatto dal
-codice di prima. `<sha>` è il commit della copia di prima (`readlink
-/home/devloop/ssdlc/.ssdlc/devloop/current` ne dà le prime 12 cifre, `pinned-<sha12>`):
+codice di prima. Il commit della copia di prima è quello salvato al passo 2 in
+`commit.prima-499`: dopo il pin `current` indica la copia di #499, e `readlink` non lo dà più.
+
+```bash
+sha=$(cat /home/devloop/ssdlc/.ssdlc/devloop/commit.prima-499) && echo "$sha"
+```
+
+Se non stampa il commit di 40 cifre, ci si ferma: senza il commit salvato il rollback non si fa.
+Altrimenti, nella stessa shell:
 
 ```bash
 sudo systemctl stop devloop
 install -o devloop -m 600 /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml.prima-499 \
     /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml
-sudo -u devloop -H git -C /home/devloop/ssdlc checkout --detach <sha>
+sudo -u devloop -H git -C /home/devloop/ssdlc checkout --detach "$sha"
 cd /home/devloop/ssdlc && sudo -u devloop -H python3 -m devloop \
     --project-config /home/devloop/ssdlc/.ssdlc/devloop/project.toml \
-    --local-config /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml pin <sha>
+    --local-config /home/devloop/ssdlc/.ssdlc/devloop/config.local.toml pin "$sha"
 sudo systemctl start devloop
 ```
 

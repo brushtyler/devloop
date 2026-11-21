@@ -272,6 +272,12 @@ class DocsTests(unittest.TestCase):
                        'sudo systemctl stop devloop', 'config.local.toml.prima-499',
                        'pin origin/main', '**Rollback.**', 'brushtyler-devloop-implementer'):
             self.assertIn(needed, section)
+        # The rollback uses the commit saved before the pin, not the one current points at
+        # after it, and step 2 saves it before the pin of step 6.
+        rollback = section[section.index('**Rollback.**'):]
+        self.assertIn('commit.prima-499', rollback)
+        self.assertIn('pin "$sha"', rollback)
+        self.assertLess(section.index('/current/pin.json'), section.index('pin origin/main'))
         # The anchor the guide links.
         guide = (ROOT / 'docs' / 'devloop' / 'guide.md').read_text(encoding='utf-8')
         self.assertIn('migrate.md#chiavi-per-ruolo-su-un-host-attivo', guide)
@@ -282,6 +288,8 @@ class DocsTests(unittest.TestCase):
         self.assertIn('take a reviewer key too, never an\n  implementer key', reference)
         guide = (ROOT / 'docs' / 'devloop' / 'guide.md').read_text(encoding='utf-8')
         self.assertIn('preflight = "codex-reviewer"', guide)
+        # No example names a key of before: copied into the overlay it would stop devloop.
+        self.assertNotIn('advisory_reviewer = "claude"', guide)
         self.assertIn('Since #499 the installation\'s `config.toml` names its agents by role',
                       guide)
 

@@ -1501,7 +1501,7 @@ overlay before it gets there.
 ### Advisory review for the operator
 
 With `[review_policy] advisory_reviewer` set (#369; empty, and so off, by default: the local
-overlay turns it on, for example `advisory_reviewer = "claude"`), a devloop PR in
+overlay turns it on, for example `advisory_reviewer = "claude-reviewer"`), a devloop PR in
 `agent:needs-operator` gets one more review for the person who decides on it: after an
 escalation to the operator, or when its merge is the operator's
 ([Ready PRs whose merge is the operator's](#ready-prs-whose-merge-is-the-operators): `[merge]`
