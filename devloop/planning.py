@@ -646,7 +646,8 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
                 actions.append(Action('fix', pr.number))
         elif lb.review in pr.labels:
             answered = bool(latest) and any(f['round'] == latest[0]['round'] for f in pr.fixes)
-            # A trusted user's rereview request voids the recorded verdict for this head.
+            # A trusted user's rereview request voids the recorded verdict for this head, and so
+            # does the supervisor's on a round without the verdict of a reviewer (#491).
             # A round without the explicit approval of a reviewer whose request for changes had
             # no evidence (#481) is neither replayed nor fixed: the head gets a new review.
             unproven = verdict == UNPROVEN
@@ -712,7 +713,8 @@ def plan(snapshot, cfg, busy=frozenset(), reserved=0, merging=None, implement=Tr
             elif pr.checks == 'fail':
                 actions.append(Action('ci_failed', pr.number))
             else:
-                reason = ('new review requested by a trusted user' if pr.rereview
+                reason = ('new review requested by a trusted user or the supervisor'
+                          if pr.rereview
                           else 'the approval was revoked because the base touched the PR'
                           if resync and pr.resync['reason'] == BASE_CHANGED
                           else 'the approved head was synced with the base, with conflicts '
@@ -990,6 +992,21 @@ def waiting_reviewers(records, conclave=()):
     if conclave and any(flow_verdict(r) == 'needs_operator' for r in records):
         return []
     return pending_reviewers(records)
+
+
+def missing_verdicts(pr):
+    """The reviewers of the quorum of ``pr``'s latest round without a verdict (#491): those the
+    receipt of its first review requires that have not reviewed, while that round is an agent
+    round of ``pr``'s head not answered by a fix; ``[]`` otherwise. The findings-only reviewer
+    (#416) is not of the quorum. With one, the supervisor may ask for a new round with
+    ``/devloop rereview``."""
+    latest = current_round(pr.reviews)
+    receipt = receipt_of(latest[0]) if latest and latest[0]['source'] == 'agent' else None
+    if (receipt is None or latest[0]['head_sha'] != pr.head_sha
+            or any(f['round'] == latest[0]['round'] for f in pr.fixes)):
+        return []
+    done = {owner_of(r) for r in latest}
+    return [key for key in receipt['reviewers'] if key not in done]
 
 
 def _round_records(reviews, number):
