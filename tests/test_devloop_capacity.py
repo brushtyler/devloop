@@ -287,7 +287,8 @@ class RefusalTests(CapacityCase):
         self.refused('/devloop capacity max_open_prs 4 20m ' + REASON, 'è già trascorsa')
 
     def test_another_command_on_the_summary_issue(self):
-        self.refused('/devloop retry', 'sulla issue del riepilogo vale solo `/devloop capacity`')
+        self.refused('/devloop retry', 'sulla issue del riepilogo valgono solo `/devloop capacity` '
+                     'e `/devloop merge-budget`')
 
     def test_outside_merge_mode_auto(self):
         cfg = dataclasses.replace(ON, merge=config.MergePolicy(mode='strict'))

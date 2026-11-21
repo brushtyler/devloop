@@ -504,7 +504,9 @@ How devloop merges in the `"strict"` and `"auto"` [merge modes](guide.md#merge-m
   comment, when the edited one would exceed the limit of GitHub or when the edit fails, the
   record is a comment of its own, as before #338. The [daily summary](#daily-summary) counts a
   `merged` record on the day GitHub reports for the merge of its PR, when known, not on the day
-  of its comment.
+  of its comment. A [delegated merge](guide.md#delegated-merge) (#486) has the same record, with
+  `delegation`: the command (`merge`), its author (`by`), the id of its comment (`comment`) and
+  its `reason`; its section, "Mergiata da devloop su delega del supervisore", quotes the reason.
 
 ## Supervision trace
 
@@ -513,7 +515,7 @@ and of the [escalations to the operator](guide.md#commands-on-escalations-to-the
 
 **Trace.** Every command applied leaves a dispatcher comment with a `supervision` marker: the
 command, its author, its reason, the id of the comment that carried it, the class and the outcome
-(`applied`, `accepted`, `decided`, `escalated`, `refused`, `limit` or `granted`), with the key
+(`applied`, `accepted`, `decided`, `escalated`, `refused`, `limit`, `granted` or `merged`), with the key
 and the attempt for a retry, the defaults for an acceptance and, for a decision, its text (in
 `reason`) and the gaps it answers. A round granted with `/devloop grant-round` (#405) carries the
 analysis of the causes in `reason`, the `head` it was granted on, the rounds granted to the PR
@@ -552,7 +554,17 @@ set with `/devloop capacity` (#412,
 `daily_cap`, `daily_left`). The latest `granted` record of a key, until its `until`, is the limit
 the dispatcher plans with; the same figures go in a ledger `event` `delegation_grant` with the
 `delegation` `capacity`, after a `grant` event in the turn journal. With the delegation off the
-command gets a `refused` record all the same, which spends it. The record is
+command gets a `refused` record all the same, which spends it. A
+[delegated merge](guide.md#delegated-merge) (#486, `/devloop merge <sha> <reason>`) has its
+record on the PR, under the title "Merge delegato al supervisore", once the merge ran: outcome
+`merged`, with the `head`, the `opinion` of the advisory review, the delegated merges of the UTC
+day with this one (`daily`), the cap of the day (`daily_cap`, extensions included) and what
+remains (`daily_left`), after a `delegated_merge` event in the turn journal; a refusal is
+`refused`, with why. An extension of their cap (`/devloop merge-budget <N> <reason>`) has its
+record on `[report] issue`: `granted` with `N` in `value`, the UTC `day` it is for and the `cap`
+of that day with it, or `refused`; the `granted` records of a day are what raises its cap, and
+the same figures go in a ledger `event` `delegation_grant` with the `delegation`
+`merge_budget`. The record is
 written before the labels change, so a
 lost label change never runs a retry twice. A command that does not apply (#321) gets the same
 record, `refused`, with the reason and how to resume in the comment: it spends the command, which
@@ -617,7 +629,9 @@ The [daily summary](guide.md#daily-summary) (#256) reads only records bound to i
 `ledger`, `merged` and `notice` (escalation) records the dispatcher signed, its
 [`supervision`](#supervision-trace) records of `grant-round`, `grant-budget` and `capacity`
 (#466: the grants of the supervisor of the day, with the caps left their figures record: `left`
-of `cap` for the rounds of the PR, `daily_left` of `daily_cap` for the day), the `review` records
+of `cap` for the rounds of the PR, `daily_left` of `daily_cap` for the day) and of `merge` and
+`merge-budget` (#486: the delegated merges, with `daily` of `daily_cap`, and the extensions of
+their cap, with author, reason, `value`, `day` and `cap`), the `review` records
 of a configured reviewer written with its identity (a CI round with the dispatcher's), the `pin`
 records the dispatcher signed (#453: the alert on `[run].alert_issue` of an auto-pin that did not
 move `current`, with `sha`, `ref`, `at` and the `reason` the alert shows, never a path of the
@@ -1278,7 +1292,13 @@ their format does not change. The journal is append-only, one JSON event per lin
   extension a turn used never lapses. From then
   on the extension does not extend the envelope and the story keeps its one extension; the
   grant still counts against the daily cap of its day, and the same command never applies
-  again. The events of the
+  again.
+- `delegated_merge` (#486): a merge delegated to the supervisor with `/devloop merge`, with the
+  PR `number`, the id of the command's `comment`, its author (`by`) and the `head` it merges.
+  Written once every condition holds and before the merge, under the journal's lock in the same
+  step as the check of the daily cap of the delegated merges, a cap of its own: past it nothing
+  is written and the merge does not run ([Delegated merge](guide.md#delegated-merge)). It never
+  counts against the cap of the `grant` events. The events of the
   [publication outbox](#publication-outbox) start with `publication`.
 - `config` (ADR 0006, R2, trace T1 of K1): the configuration the dispatcher read, at each start
   of `tick` and `run` (`when: start`, before any tick: a start whose record cannot be written

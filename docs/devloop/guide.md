@@ -927,7 +927,9 @@ the label came before, and the promotion it belongs to (how many promotions the 
 records count). There is one comment per head: a head promoted again, after its CI ran again
 for example, gets the label back and its comment edited with the new promotion and count, not a
 second comment. A label the operator removes while the PR stays ready is not added again.
-`agent:merge-hold` is not such a case: there the supervisor decides.
+`agent:merge-hold` is not such a case: there the supervisor decides. With `[delegations] merge`
+on, the supervisor may merge such a PR itself, under the conditions of
+[Delegated merge](#delegated-merge) (#486).
 
 That label does not stop devloop, which keeps working on the PR as on any ready PR: it
 [syncs](protocol.md#conflicts-with-main) it when it conflicts with `main`, re-checks its CI, and with a new
@@ -1335,8 +1337,9 @@ expires the next tick plans with the configured value again, and the log says
 `capacity: <key> back to the configured <value>`. A later command on the same key replaces the
 earlier one, even when it ends sooner. A grant whose value is above a cap the operator lowered
 afterwards stops applying. When the issue cannot be read, the configured values apply. A command
-from anyone but the supervisor's identity or a trusted user is ignored and only logged; any other
-`/devloop` command on the issue is answered as not applicable.
+from anyone but the supervisor's identity or a trusted user is ignored and only logged;
+`/devloop merge-budget` is answered as in [Delegated merge](#delegated-merge), any other
+`/devloop` command on the issue as not applicable.
 
 Each answer is a `supervision` record on the issue (see
 [Supervision trace](protocol.md#supervision-trace)): `refused`, with why, changes nothing; a grant
@@ -1356,6 +1359,94 @@ counters and the `next:` lines with the limits in force, the same a tick plans w
 
 **Revocation.** `capacity = false` revokes the delegation from the next tick: the limits in force
 stop applying, and the commands written from then on are refused as not applicable.
+
+#### Delegated merge
+
+A delegation of the operator to the supervisor (#486, [ADR 0005](../adr/0005-deleghe-e-ruoli-degli-agent.md#4-decisioni-riservate-alloperatore),
+precision of 2026-11-21 to D2 and D10), **off by default**: `[delegations] merge = false`. It lets
+the supervisor merge a ready PR whose merge is the operator's
+([an operator merge](#ready-prs-whose-merge-is-the-operators)) when that merge does not really
+need the operator. It needs `review_policy.advisory_reviewer`: with `merge = true` and no advisory
+reviewer devloop does not start.
+
+With `merge = true`, in merge mode `"auto"`, the supervisor's identity writes, as the first line
+of a comment on such a PR, in `agent:ready-to-merge` with the dispatcher's own
+`agent:needs-operator` and its comment "Il merge spetta all'operatore":
+
+```text
+/devloop merge <sha> <reason>
+```
+
+`<sha>` is the full id (40 characters) of the head to merge; `<reason>` is required and may go
+on in the lines below. The dispatcher plans the command in the [merge lane](#the-merge-lane) and,
+just before merging, verifies every condition on `<sha>`, mechanically, with no other attester.
+When one does not hold, or cannot be verified (a record, a diff or a comment that cannot be
+read), the command is refused, the answer says why, and the PR stays with the operator:
+
+- `<sha>` is the PR's head and the head the latest round approved; the approvals of the quorum
+  match the policy receipt recomputed now, no finding is open, the acceptance map holds, GitHub
+  reports `MERGEABLE` and `CLEAN`, and the CI is `pass`;
+- each reviewer of the quorum, on its latest review of `<sha>`, has `operator_reason` `none` or
+  `decision`; one `trust_policy` (a change no decision of the operator covers), or a
+  `trust_policy` of an earlier round that still holds the merge, refuses it;
+- the [advisory review](#advisory-review-for-the-operator) of `<sha>` has the opinion `ok` or
+  `dubbi`: `contrario`, a failed one, or none refuses it;
+- the PR declares no [step on the host](#step-on-the-host) (`host_step`): a step on the host as
+  root stays the operator's;
+- the diff touches no file of the trust rule: `AGENTS.md`, `CLAUDE.md`,
+  `devloop/prompts/review.md`, `devloop/prompts/advisory.md`, `devloop/prompts/preflight.md`,
+  `devloop/policy.py`, `devloop/supervision.py` (which holds this list), `devloop/context.py`,
+  `ops/host/ssdlc/project.toml` (`TRUST_RULE_PATHS`, a constant of the code that
+  `[delegations] merge_trust_paths` may only lengthen), nor a file where the delegations, their
+  caps, `operator_only_paths` and the merge conditions are set and applied: `devloop/config.py`,
+  `devloop/config.toml`, `devloop/dispatch_merge.py`, `devloop/dispatch_supervision.py`
+  (`DELEGATION_PATHS`). devloop cannot tell from the diff whether a change there touches them,
+  so it refuses every one;
+- the work of the PR did not restart after a [conclave](#after-a-unanimous-decision), and the
+  [merge mode](#merge-modes) of the PR without its paths under `docs/adr/` is `"auto"`: any other
+  operator-only path, or a level overridden to `"off"` or `"strict"`, stays the operator's;
+- under `docs/adr/` the diff has only added lines, as plain text (no line removed or changed, no
+  file removed, binary or with a new mode), and each block of consecutive added lines carries
+  the link to a comment of this repository
+  (`https://github.com/<repo>/issues/<N>#issuecomment-<id>`, or `/pull/<N>`) whose author, read
+  now with the API, is in `trusted_users`: the record of a decision of the operator already
+  written on GitHub, never a new one;
+- no `/devloop hold` of the supervisor or of a trusted user was written after the command: a
+  trusted user cancels a command still waiting this way;
+- the daily cap of the delegated merges is not reached.
+
+With every condition true devloop merges the PR with the merger's app, as an automatic merge:
+the same `merged` record, with the command, its author, its comment and its reason in
+`delegation`, the same receipt, and the issue closed. Then a `supervision` record `merged` on the
+PR spends the command. A refused command is answered with a `refused` record and spent: the
+supervisor writes a new one once the cause is gone. A `/devloop merge` from a trusted user is
+answered as not applicable (the operator merges by hand); from anyone else, an agent's app
+included, it is ignored and only logged; on an escalation to the supervisor it is refused.
+
+**Daily cap.** At most **5** delegated merges per UTC day (`MAX_DELEGATED_MERGES` in
+`devloop/supervision.py`; `[delegations] max_merges_per_day` may only lower it). It is a cap of
+its own: delegated merges do not take the common daily cap of the grants (`max_grants_per_day`,
+3, for rounds, budget and capacity), a deliberate exception decided by the operator. The cap is
+checked and the merge recorded in the [turn journal](protocol.md#turn-journal) in one step,
+before the merge: without a journal that can be read no delegated merge runs. A trusted user, and
+only a trusted user, extends the cap of the current UTC day with a comment on `[report] issue`
+whose first line is
+
+```text
+/devloop merge-budget <N> <reason>
+```
+
+with `N` from 1 to 20 and a reason. The commands of the same day add up; the next day the cap is
+the configured one again. The dispatcher answers each one at the next tick with a `supervision`
+record on that issue, `granted` with `N`, the day and the cap of the day, or `refused`: from the
+supervisor's identity, with the delegation off, malformed, or written on a day that is over. The
+command of an app other than the supervisor's is ignored and only logged. When `[report] issue`
+cannot be read, the cap of the configuration applies, never more. The
+[daily summary](#daily-summary) lists every delegated merge with its reason, and every extension
+with its author and reason.
+
+**Revocation.** `merge = false` revokes the delegation from the next tick: a command waiting is
+refused as not applicable.
 
 ### Commands on escalations to the operator
 
@@ -1395,7 +1486,10 @@ no command applies, and the answer gives the manual steps. The commands valid th
   commands leave the block to the check.
 
 `/devloop escalate` never applies: the escalation is already the operator's. A command of the
-supervisor's identity on an escalation to the operator does not apply either. Every command that
+supervisor's identity on an escalation to the operator does not apply either, except
+`/devloop merge` on an operator merge, with `[delegations] merge` on
+([Delegated merge](#delegated-merge)); a trusted user's `/devloop merge` does not apply: the
+operator merges by hand. Every command that
 does not apply gets a dispatcher comment with the reason and how to resume (the manual steps
 above, `/devloop recheck` for a readiness check, the manual merge for an operator merge), and the
 item stays in `agent:needs-operator`. A command from outside `trusted_users` and the supervisor's
@@ -1957,7 +2051,7 @@ In `devloop run` a merge of a ready PR (#264) starts in the first tick that plan
 slot, alongside the actions running on other issues and PRs: it does not wait for a 40-minute
 implementation or local test suite to end, and while it is planned or running it holds back no
 other action (a review, a readiness check, a fix). Merges have a lane of their own: **one merge
-at a time**. A merge planned while another one runs waits for a later tick, and still keeps its
+at a time**; a [delegated merge](#delegated-merge) (`delegated_merge`, #486) takes the same lane. A merge planned while another one runs waits for a later tick, and still keeps its
 PR and its issue: no other action on them starts meanwhile. A merge takes a slot of
 `max_parallel_actions` like any action. Of `max_actions_per_tick`, a tick spends a slot only on
 the merge that can start: the merges waiting for the lane leave the slots to the other actions.
@@ -2014,6 +2108,11 @@ and writes nothing without `--publish`. The summary lists:
   rounds still grantable to the PR, the story's one budget extension (booked until the turn
   starts) or the capacity limit in force with its expiry, and the grants of the day still
   available across every delegation;
+- the delegated merges (#486, [Delegated merge](#delegated-merge)), in a table of their own:
+  every `/devloop merge` the dispatcher answered that day, merged or refused, with its author and
+  the first line of its reason (which starts with the sha) and, once merged, how many of the
+  day's cap it took; and every `/devloop merge-budget`, with its author, its reason and, once
+  granted, the delegated merges it adds and the cap of its day;
 - the auto-pins that did not move `current` (#453): from the `pin` record of the alert on
   `[run].alert_issue`, one per commit, the UTC time, the commit of `origin/main` the running copy
   stays behind and the reason (the step of the smoke test, or the first line of the failed check;
@@ -2657,12 +2756,13 @@ keys take effect without a restart:
   tick, with a line `config: <key> <old> -> <new> from this tick` in the log. The actions already
   running go on and are not interrupted: a higher `max_open_prs` lets the next tick start an
   issue alongside them.
-- `[delegations]` (#405, #406, #411, #412): a delegation turned off, `rounds`, `retry_own_prs`,
-  `budget` or `capacity`, is revoked from the next tick
+- `[delegations]` (#405, #406, #411, #412, #486): a delegation turned off, `rounds`,
+  `retry_own_prs`, `budget`, `capacity` or `merge`, is revoked from the next tick
   ([Granting a review round](#granting-a-review-round),
   [Extending the budget envelope](#extending-the-budget-envelope),
   [Escalations to the supervisor](#escalations-to-the-supervisor),
-  [Temporary capacity limits](#temporary-capacity-limits)). A temporary capacity limit of the
+  [Temporary capacity limits](#temporary-capacity-limits),
+  [Delegated merge](#delegated-merge)). A temporary capacity limit of the
   supervisor is not a change of the configuration: it applies over the configured value of
   `max_open_prs` or `max_parked_prs` until it expires.
 

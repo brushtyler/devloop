@@ -18,6 +18,9 @@ Days are UTC days:
   records, with the time, the issue or PR, the first line of the reason, the outcome and the
   caps left (per PR, or per story for the one extension of its budget, and per day), so that
   the coordinator verifies them without reading each thread (rule 5);
+- the delegated merges (#486): every ``merge`` and ``merge-budget`` the dispatcher answered
+  that day, from its ``supervision`` records, with the time, the PR or the summary issue, the
+  author, the first line of the reason, the outcome and the cap of the day;
 - the auto-pins that did not move ``current`` (#453): the ``pin`` record of the dispatcher's alert
   on ``[run].alert_issue``, one per commit, with the time, the commit of ``origin/<base_branch>``
   left behind and the reason the alert shows (the step of the smoke test, or the first line of
@@ -45,7 +48,7 @@ from pathlib import Path
 
 from .apps import DISPATCHER
 from .markdown import dispatcher_header, publishable, read_marker
-from .supervision import CAPACITY, GRANT_BUDGET, GRANT_ROUND
+from .supervision import CAPACITY, GRANT_BUDGET, GRANT_ROUND, MERGE, MERGE_BUDGET
 from .watch import failure_class
 
 # In state_dir: the time of the last automatic attempt (``AutoReport``), and the lock that keeps
@@ -63,6 +66,9 @@ _STATE = {'open': 'in corso', 'incomplete': 'incompleto'}
 # The commands of the supervisor's delegations the summary lists (#466), and their outcomes.
 GRANT_COMMANDS = (GRANT_ROUND, GRANT_BUDGET, CAPACITY)
 _GRANT_OUTCOME = {'granted': 'concessa', 'refused': 'rifiutata'}
+# The delegated merges and the extensions of their daily cap (#486), and their outcomes.
+MERGE_COMMANDS = (MERGE, MERGE_BUDGET)
+_MERGE_OUTCOME = {'merged': 'mergiata', 'granted': 'concessa', 'refused': 'rifiutato'}
 REASON_CHARS = 120  # the first line of a reason, at most
 
 
@@ -114,6 +120,9 @@ class Summary:
     ci: list = field(default_factory=list)           # (time, number, text)
     # (time, number, command, reason, outcome, caps left): the grants of the supervisor (#466)
     grants: list = field(default_factory=list)
+    # (time, number, command, author, reason, outcome, cap): the delegated merges and the
+    # extensions of their daily cap (#486)
+    delegated: list = field(default_factory=list)
     # (time, number, ref, commit, reason): the auto-pins that did not move ``current`` (#453)
     pins: list = field(default_factory=list)
     opened: list = field(default_factory=list)       # PR numbers
@@ -126,7 +135,7 @@ class Summary:
 
     def empty(self):
         return not (self.actions or self.merges or self.escalations or self.ci or self.grants
-                    or self.pins or self.opened or self.merged or self.rounds)
+                    or self.delegated or self.pins or self.opened or self.merged or self.rounds)
 
 
 class Records:
@@ -254,6 +263,8 @@ class Records:
             if supervision is not None:
                 if supervision['command'] in GRANT_COMMANDS and _day_of(created) == day:
                     out.grants.append(_grant_row(_hour(created), number, supervision))
+                elif supervision['command'] in MERGE_COMMANDS and _day_of(created) == day:
+                    out.delegated.append(_delegated_row(_hour(created), number, supervision))
                 continue
             notice = read_marker(body, 'notice')
             if (notice is not None and notice.get('event') == 'escalation'
@@ -269,7 +280,8 @@ class Records:
             if _day_of(merged) == day and number not in by_devloop:
                 out.merges.append((_hour(merged), number, None, None))
         out.merged = sorted(merged_numbers | by_devloop)
-        for rows in (out.actions, out.merges, out.escalations, out.ci, out.grants, out.pins):
+        for rows in (out.actions, out.merges, out.escalations, out.ci, out.grants, out.delegated,
+                     out.pins):
             rows.sort(key=lambda row: (row[0], row[1]))
         return out
 
@@ -352,6 +364,20 @@ def _grant_row(at, number, record):
             remaining(record))
 
 
+def _delegated_row(at, number, record):
+    """A row of the delegated merges and of the extensions of their cap (#486), from the
+    dispatcher's ``supervision`` record: the cap of the day as it stood, or the extension."""
+    outcome = _MERGE_OUTCOME.get(record['outcome'], record['outcome'])
+    if record['command'] == MERGE_BUDGET and record['outcome'] == 'granted':
+        cap = (f'+{record.get("value")} il {record.get("day") or NOT_REPORTED}: tetto '
+               f'{record.get("cap")}')
+    else:
+        cap = _count(record, 'daily', 'daily_cap')
+        cap = f'giorno: {cap}' if cap else '—'
+    return (at, number, record['command'], record.get('by') or NOT_REPORTED,
+            first_line(record.get('reason')), outcome, cap)
+
+
 def _cell(value):
     return str(value).replace('|', '\\|').replace('\n', ' ')
 
@@ -398,6 +424,14 @@ def render(summary):
         for at, number, command, reason, outcome, left in summary.grants:
             parts.append(f'| {at} | #{number} | `{command}` | {_cell(reason)} '
                          f'| {_cell(outcome)} | {_cell(left)} |')
+        parts.append('')
+    if summary.delegated:
+        parts += ['### Merge delegati al supervisore', '',
+                  '| Ora (UTC) | Numero | Comando | Autore | Motivo | Esito | Tetto |',
+                  '|---|---|---|---|---|---|---|']
+        for at, number, command, by, reason, outcome, cap in summary.delegated:
+            parts.append(f'| {at} | #{number} | `{command}` | `{_code(by)}` | {_cell(reason)} '
+                         f'| {_cell(outcome)} | {_cell(cap)} |')
         parts.append('')
     if summary.pins:
         parts += ['### Pin automatico non riuscito', '']

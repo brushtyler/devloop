@@ -646,6 +646,50 @@ class Workspace:
             changes += [{'path': p, 'links': links} for p in paths]
         return base, head, changes
 
+    def diff_blocks(self, base, head, prefix):
+        """The changes under ``prefix`` of the diff from ``base`` to ``head`` (from their merge
+        base, as ``review_diff``), for a delegated merge (#486): one ``{path, blocks, removed,
+        binary, other}`` per file, ``blocks`` the text of each run of consecutive added lines
+        (a hunk of ``--unified=0`` with no line removed), ``removed`` whether a line was removed
+        or changed, or the file deleted, ``binary`` a file git shows as binary, ``other`` a
+        change of mode or a path git quotes. Raises WorkspaceError when git cannot tell."""
+        out = self._git('diff', '--unified=0', '--no-renames', '--no-ext-diff', '--no-color',
+                        '--no-textconv', f'{base}...{head}', '--', prefix)
+        files, entry, in_hunk = [], None, False
+        for line in out.splitlines():
+            if line.startswith('diff --git '):
+                rest = line[len('diff --git '):]
+                entry = {'path': rest, 'blocks': [], 'removed': False, 'binary': False,
+                         'other': True}
+                if rest.startswith('a/') and len(rest) % 2 == 1:
+                    half = (len(rest) - 1) // 2  # 'a/<path> b/<path>', the same path twice
+                    old, new = rest[2:half], rest[half + 3:]
+                    if old == new and rest[half:half + 3] == ' b/':
+                        entry.update(path=new, other=False)
+                files.append(entry)
+                in_hunk = False
+            elif entry is None:
+                continue
+            elif line.startswith('@@'):
+                in_hunk = True
+                entry['blocks'].append('')
+            elif in_hunk and line.startswith('+'):
+                entry['blocks'][-1] += line[1:] + '\n'
+            elif in_hunk and line.startswith('-'):
+                entry['removed'] = True
+            elif in_hunk:
+                continue  # '\ No newline at end of file'
+            elif line.startswith('deleted file mode'):
+                entry['removed'] = True
+            elif line.startswith(('old mode', 'new mode')) or (
+                    line.startswith('new file mode') and line.split()[-1] != '100644'):
+                entry['other'] = True  # a mode changed, or a new file that is no plain file
+            elif line.startswith(('Binary files', 'GIT binary patch')):
+                entry['binary'] = True
+        for entry in files:
+            entry['blocks'] = [b for b in entry['blocks'] if b]
+        return files
+
     def base_paths(self, old, new):
         """Every path that a commit of the base branch after ``old``, up to ``new``, changed
         (#160): the union over each commit of the first-parent chain of ``new`` back to ``old``

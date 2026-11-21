@@ -29,10 +29,11 @@ from .policy import ZERO_LEVEL, profile_of
 from .review import finding_state
 from .supervision import (ACCEPT_DEFAULTS, BUDGET_GRANTABLE, CAPACITY, CAPACITY_REFUSED, DECIDE,
                           DESIGN_LABEL, ESCALATE, GRANT_BUDGET, GRANT_ROUND, ISSUE_STEPS,
-                          MAX_CAPACITY, MAX_RETRIES, MERGED_ISSUE, PREFLIGHT_DEFAULT, RETRY,
-                          RETRY_STEPS, ROUND_GRANTABLE, SYNC_FAILED, TOOL_FAILURE,
-                          capacity_arguments, changed_input, critical, preflight_class,
-                          retries_done, supervisor_command)
+                          MAX_CAPACITY, MAX_MERGE_BUDGET, MAX_RETRIES, MERGE, MERGE_BUDGET,
+                          MERGED_ISSUE, PREFLIGHT_DEFAULT, RETRY, RETRY_STEPS, ROUND_GRANTABLE,
+                          SYNC_FAILED, TOOL_FAILURE, capacity_arguments, changed_input, critical,
+                          merge_budget_arguments, preflight_class, retries_done,
+                          supervisor_command)
 from .workspace import WorkspaceError
 
 # Hold and release a merge in ``auto`` mode (#172): the first line of a comment, after the
@@ -52,6 +53,14 @@ CAPACITY_USAGE = (f'Il comando si scrive come `/devloop {CAPACITY} <chiave> <val
                   + ' o '.join(f'`{key}`' for key in MAX_CAPACITY) + ', la durata `<N>h` o '
                   '`<N>m`, il motivo, che può continuare nelle righe successive, riporta o cita '
                   'l\'analisi delle cause.')
+# The titles of the dispatcher's trace of a delegated merge and of an extension of its daily cap
+# (#486), and how the extension is written.
+MERGE_TITLE = 'Merge delegato al supervisore'
+MERGE_BUDGET_TITLE = 'Merge delegati: estensione del tetto giornaliero'
+MERGE_BUDGET_USAGE = (f'Il comando si scrive come `/devloop {MERGE_BUDGET} <N> <motivo>`, come '
+                      'prima riga di un commento di un utente fidato su questa issue: `N` da 1 a '
+                      f'{MAX_MERGE_BUDGET} merge delegati in più per il giorno UTC in cui è '
+                      'scritto, il motivo obbligatorio.')
 
 
 def _epoch(stamp):
@@ -314,7 +323,8 @@ class SupervisionMixin:
         ``agent:needs-operator`` (#321) a command counts after the record that put it there
         (``_operator_anchor``), in any merge mode, from a trusted user; one from the
         supervisor's identity is
-        answered as not applicable. A dispatcher ``supervision`` record spends the command it
+        answered as not applicable, except ``/devloop merge`` (#486), a delegation to the
+        supervisor that ``_operator_command`` applies. A dispatcher ``supervision`` record spends the command it
         handled, whose comment id it carries, and every command before it. Among the commands
         still waiting the latest applicable one wins; without one, the latest not applicable
         (outside ``auto``, a decide or an escalate without a text, the supervisor on an
@@ -349,7 +359,18 @@ class SupervisionMixin:
             login = (comment.get('author') or {}).get('login')
             item = {'command': command, 'reason': reason, 'by': login, 'comment': ident,
                     'step': latest.get('step'), 'anchor': anchor}
-            if operator:
+            if operator and command == MERGE:
+                # A delegation of the operator to the supervisor (#486): the supervisor's
+                # identity writes it on an operator merge, and ``_operator_command`` answers a
+                # trusted user's; anyone else's is ignored.
+                why, refusal = (
+                    ('the author is neither the supervisor nor a trusted user', None)
+                    if not self._may_hold(login)
+                    else (f'malformed, expected `/devloop {command} <sha> <reason>`',
+                          f'manca il testo, il comando va scritto come `/devloop {command} <sha> '
+                          '<motivo>`') if reason is None
+                    else (None, None))
+            elif operator:
                 allowed = login in self.cfg.trusted_users
                 why, refusal = (
                     ('the author is not a trusted user', None) if not allowed
@@ -452,7 +473,8 @@ class SupervisionMixin:
                 record['class'] = cls if isinstance(cls, str) else None
                 self.gh.comment(number, render_supervision(
                     record, f'`/devloop {name}` di `{by}`: {text.strip()}',
-                    OPERATOR_TITLE if operator else SUPERVISOR_TITLE))
+                    MERGE_TITLE if name == MERGE and operator
+                    else OPERATOR_TITLE if operator else SUPERVISOR_TITLE))
                 self.log(f'  {name} by {by}: {outcome}')
             return trace
 
@@ -499,14 +521,19 @@ class SupervisionMixin:
                    else f'Il comando è speso; {where} resta in `{lb.needs_supervisor}`.\n\n'
                    + self._supervisor_resume(escalation, is_pr))
             return trace('refused', f'non applicabile: {command["refusal"]}. {how}')
-        if name == CAPACITY:
-            # A temporary capacity limit is never a decision on an escalation (#412).
+        if name in (CAPACITY, MERGE_BUDGET) or name == MERGE and not operator:
+            # A temporary capacity limit (#412) and an extension of the delegated merges (#486)
+            # are never a decision on an escalation; a delegated merge applies only to a PR
+            # whose merge is the operator's (#486).
             where = 'la PR' if is_pr else 'l\'issue'
             label = lb.needs_operator if operator else lb.needs_supervisor
             resume = (self._operator_resume(command['anchor'], is_pr) if operator
                       else self._supervisor_resume(escalation, is_pr))
-            return trace('refused', f'non applicabile: `/devloop {CAPACITY}` vale solo sulla '
-                         'issue del riepilogo (`[report] issue`), non su un\'escalation. Il '
+            what = ('vale solo su una PR pronta il cui merge spetta all\'operatore, non su '
+                    'un\'escalation al supervisore' if name == MERGE
+                    else 'vale solo sulla issue del riepilogo (`[report] issue`), non su '
+                         'un\'escalation')
+            return trace('refused', f'non applicabile: `/devloop {name}` {what}. Il '
                          f'comando è speso; {where} resta in `{label}`.\n\n{resume}')
         if operator:
             return self._operator_command(target, number, labels, comments, command, trace)
@@ -605,6 +632,11 @@ class SupervisionMixin:
 
         self._apply_retry(number, is_pr, comments, escalation, [lb.needs_supervisor], trace,
                           limit)
+
+    def _do_delegated_merge(self, target):
+        """A ``/devloop merge`` of the supervisor on a PR (#486), planned in the merge lane
+        since it writes to the base branch: applied as any command (``_do_supervise``)."""
+        return self._do_supervise(target)
 
     def _fresh_pr(self, pr, labels, fresh, comments):
         """``pr`` with its ``labels`` and head (``fresh``, its state) read now and with what its
@@ -1196,6 +1228,8 @@ class SupervisionMixin:
         written in the journal of the turns first, which checks the daily cap again and
         records it in one step (as ``_grant_round``); then the ``supervision`` record, which
         makes it apply from this tick until its ``until``; last the ledger ``event``."""
+        if name == MERGE_BUDGET:
+            return self._merge_budget_command(issue, comment, text, by)
         cfg = self.cfg
         rules = cfg.delegations
         ident = comment.get('id')
@@ -1213,7 +1247,8 @@ class SupervisionMixin:
                          f'capacità restano quelli di prima.\n\n{CAPACITY_USAGE}')
 
         if name != CAPACITY:
-            return refuse(f'sulla issue del riepilogo vale solo `/devloop {CAPACITY}`')
+            return refuse(f'sulla issue del riepilogo valgono solo `/devloop {CAPACITY}` e '
+                          f'`/devloop {MERGE_BUDGET}`')
         if not rules.capacity:
             return refuse('la delega dei limiti di capacità è spenta (`[delegations] capacity`): '
                           'i limiti li cambia solo l\'operatore')
@@ -1271,6 +1306,60 @@ class SupervisionMixin:
         if self.ledger is not None:
             self.ledger.event(issue, 'delegation_grant', delegation='capacity', by=by,
                               comment=ident, **figures)
+
+    def _merge_budget_command(self, issue, comment, text, by):
+        """Answer ``/devloop merge-budget <N> <reason>`` of ``by`` in ``comment`` of ``[report]
+        issue`` (#486): ``N`` more delegated merges for the UTC day the command was written.
+        Only a user of ``trusted_users`` extends the cap, never the supervisor's identity nor an
+        app: their command is refused and does not count. It applies with ``[delegations]
+        merge`` on, ``N`` from 1 to ``MAX_MERGE_BUDGET`` and a reason, on a day not over yet;
+        the commands of a day add up, and the next day the cap is the configured one again.
+        Each answer is a ``supervision`` record on the issue: ``granted``, with ``value`` (N),
+        ``day`` and the cap of that day with it (``cap``), is what the delegated merges of the
+        day count (``_merge_budget_extensions``); ``refused`` changes nothing."""
+        cfg, rules = self.cfg, self.cfg.delegations
+        ident = comment.get('id')
+        args = merge_budget_arguments(text)
+
+        def trace(outcome, what, **extra):
+            record = dict(command=MERGE_BUDGET, by=by, comment=ident, outcome=outcome,
+                          reason=args[1] if args else text or '', **extra)
+            self.gh.comment(issue, render_supervision(record, f'`/devloop {MERGE_BUDGET}` di '
+                                                      f'`{by}`: {what.strip()}',
+                                                      MERGE_BUDGET_TITLE))
+            self.log(f'merge budget: {MERGE_BUDGET} by {by}: {outcome}')
+
+        def refuse(why):
+            return trace('refused', f'non applicabile: {why}. Il comando è speso; il tetto dei '
+                         f'merge delegati resta quello di prima.\n\n{MERGE_BUDGET_USAGE}')
+
+        if by not in cfg.trusted_users:
+            return refuse('il tetto dei merge delegati lo estende solo un utente fidato '
+                          '(`trusted_users`), mai il supervisore né un\'app')
+        if not rules.merge:
+            return refuse('la delega del merge è spenta (`[delegations] merge`)')
+        if args is None:
+            return refuse('il comando non è completo o non è ben formato: servono un numero '
+                          f'intero da 1 a {MAX_MERGE_BUDGET} e il motivo')
+        written = _epoch(comment.get('created_at'))
+        if written is None:
+            return refuse('l\'ora del comando non è leggibile, quindi il giorno non è '
+                          'verificabile')
+        day, today = iso(written)[:10], iso(self.clock())[:10]
+        if day < today:
+            return refuse(f'il giorno UTC del comando ({day}) è già finito')
+        n, _ = args
+        before = sum(e['n'] for e in self._merge_budget_extensions(day))
+        cap = rules.max_merges_per_day + before + n
+        trace('granted', f'il {day} (UTC) i merge delegati al supervisore possono essere {n} in '
+              f'più: il tetto del giorno passa a {cap} (`[delegations] max_merges_per_day` = '
+              f'{rules.max_merges_per_day}, più le estensioni del giorno). Il giorno dopo torna '
+              f'quello configurato.\n\n**Motivo:**\n\n'
+              + '\n'.join(f'> {line}'.rstrip() for line in args[1].splitlines()),
+              value=n, day=day, cap=cap)
+        if self.ledger is not None:
+            self.ledger.event(issue, 'delegation_grant', delegation='merge_budget', by=by,
+                              comment=ident, value=n, day=day, cap=cap)
 
     def _apply_retry(self, number, is_pr, comments, escalation, remove, trace, limit):
         """Run again the step of ``escalation`` on issue or PR ``number`` (#182), its input
@@ -1374,7 +1463,9 @@ class SupervisionMixin:
           supervisor's commands (``_accept_defaults``, ``_decide``).
         - ``escalate``: never, the escalation is already the operator's.
         - ``grant-round`` and ``grant-budget``: never, they are delegations to the supervisor
-          (#405, #411)."""
+          (#405, #411).
+        - ``merge``: only from the supervisor's identity, on a PR (``_delegated_merge``, #486);
+          a trusted user's is answered: the operator merges by hand."""
         lb = self.cfg.labels
         is_pr = isinstance(target, PullRequest)
         name, anchor = command['command'], command['anchor']
@@ -1386,6 +1477,17 @@ class SupervisionMixin:
         def refuse(why, resume=how):
             return trace('refused', f'non applicabile: {why}. {stays}\n\n{resume}')
 
+        if name == MERGE:
+            supervisor = self._supervisor_login()
+            if not supervisor or command['by'] != supervisor:
+                # A delegation of the operator to the supervisor (#486): the operator merges a
+                # PR by hand, as before.
+                return refuse(f'`/devloop {MERGE}` è una delega del supervisore; l\'operatore '
+                              'mergia la PR a mano')
+            if not is_pr:
+                return refuse(f'`/devloop {MERGE}` vale solo su una PR pronta il cui merge spetta '
+                              'all\'operatore')
+            return self._delegated_merge(target, number, comments, command, trace)
         if name == ESCALATE:
             return refuse('l\'escalation è già all\'operatore')
         if name == GRANT_ROUND:

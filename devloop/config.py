@@ -14,7 +14,8 @@ from pathlib import Path
 from .localtests import CI_LOG_FORMATS, SELECTIONS, Tests
 from .localtests import MODES as LOCAL_TESTS_MODES
 from .policy import MAX_LEVEL, MIN_LEVEL, ZERO_LEVEL, ReviewPolicy
-from .supervision import MAX_CAPACITY, MAX_CAPACITY_HOURS, MAX_DAILY_GRANTS, MAX_GRANTED_ROUNDS
+from .supervision import (MAX_CAPACITY, MAX_CAPACITY_HOURS, MAX_DAILY_GRANTS,
+                          MAX_DELEGATED_MERGES, MAX_GRANTED_ROUNDS)
 from .unavailability import delimited
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / 'config.toml'
@@ -194,7 +195,12 @@ class DelegationPolicy:
       ``/devloop capacity`` on ``[report] issue``. ``capacity_max_open_prs``,
       ``capacity_max_parked_prs`` and ``capacity_max_hours`` lower the caps of the code
       (``supervision.MAX_CAPACITY`` and ``MAX_CAPACITY_HOURS``), never raise them; every grant
-      counts against ``max_grants_per_day``."""
+      counts against ``max_grants_per_day``.
+    - ``merge`` (#486): the supervisor may merge a ready PR whose merge is the operator's with
+      ``/devloop merge <sha> <reason>``, when every condition of the delegation holds.
+      ``max_merges_per_day`` lowers the cap of the code (``supervision.MAX_DELEGATED_MERGES``),
+      a cap of its own, outside ``max_grants_per_day``; ``merge_trust_paths`` adds paths to the
+      trust rule of the code (``supervision.TRUST_RULE_PATHS``), which it may only lengthen."""
     retry_own_prs: bool = False
     rounds: bool = False
     budget: bool = False
@@ -204,6 +210,9 @@ class DelegationPolicy:
     capacity_max_open_prs: int = MAX_CAPACITY['max_open_prs']
     capacity_max_parked_prs: int = MAX_CAPACITY['max_parked_prs']
     capacity_max_hours: int = MAX_CAPACITY_HOURS
+    merge: bool = False
+    max_merges_per_day: int = MAX_DELEGATED_MERGES
+    merge_trust_paths: tuple = ()
 
     def capacity_cap(self, key):
         """The cap of the temporary value of ``key`` (#412), None for a key the delegation does
@@ -1129,18 +1138,20 @@ def parse_tests(table):
 
 def parse_delegations(table):
     """``[delegations]`` (ADR 0005): ``retry_own_prs`` (#406), ``rounds`` (#405), ``budget``
-    (#411) and ``capacity`` (#412), true or false (default false, D10); ``max_rounds_per_pr`` and
-    ``max_grants_per_day``, whole numbers from 0 to the caps of the code;
-    ``capacity_max_open_prs``, ``capacity_max_parked_prs`` and ``capacity_max_hours``, whole
-    numbers from 1 to the caps of the code. A value above a cap is refused: the configuration
-    and the overlay may only lower the caps (D4)."""
+    (#411), ``capacity`` (#412) and ``merge`` (#486), true or false (default false, D10);
+    ``max_rounds_per_pr``, ``max_grants_per_day`` and ``max_merges_per_day``, whole numbers from
+    0 to the caps of the code; ``capacity_max_open_prs``, ``capacity_max_parked_prs`` and
+    ``capacity_max_hours``, whole numbers from 1 to the caps of the code; ``merge_trust_paths``,
+    a list of paths (files, or directories ending in ``/``) the trust rule of the code gains. A
+    value above a cap is refused: the configuration and the overlay may only lower the caps
+    (D4), and only lengthen the trust rule."""
     if not isinstance(table, dict):
         raise ConfigError('delegations: expected a table')
     unknown = set(table) - {f.name for f in dataclasses.fields(DelegationPolicy)}
     if unknown:
         raise ConfigError(f'delegations: unknown keys {sorted(unknown)}')
     values = {}
-    for key in ('retry_own_prs', 'rounds', 'budget', 'capacity'):
+    for key in ('retry_own_prs', 'rounds', 'budget', 'capacity', 'merge'):
         if key in table:
             if not isinstance(table[key], bool):
                 raise ConfigError(f'delegations.{key}: expected true or false')
@@ -1149,7 +1160,8 @@ def parse_delegations(table):
                           ('max_grants_per_day', 0, MAX_DAILY_GRANTS),
                           ('capacity_max_open_prs', 1, MAX_CAPACITY['max_open_prs']),
                           ('capacity_max_parked_prs', 1, MAX_CAPACITY['max_parked_prs']),
-                          ('capacity_max_hours', 1, MAX_CAPACITY_HOURS)):
+                          ('capacity_max_hours', 1, MAX_CAPACITY_HOURS),
+                          ('max_merges_per_day', 0, MAX_DELEGATED_MERGES)):
         if key in table:
             value = table[key]
             if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= cap:
@@ -1157,6 +1169,14 @@ def parse_delegations(table):
                                   f'{cap}, the cap of the code, which the configuration may only '
                                   'lower')
             values[key] = value
+    if 'merge_trust_paths' in table:
+        paths = table['merge_trust_paths']
+        if (not isinstance(paths, list)
+                or not all(isinstance(p, str) and p.strip().strip('/') for p in paths)):
+            raise ConfigError('delegations.merge_trust_paths: expected a list of paths, each a '
+                              'file or a directory ending in "/"; it may only add to the trust '
+                              'rule of the code')
+        values['merge_trust_paths'] = tuple(paths)
     return DelegationPolicy(**values)
 
 
@@ -1778,6 +1798,10 @@ def parse_config(data, root=INSTALL_ROOT, project='', agent_test_cmd=None):
         # The command of a temporary capacity limit lives on the issue of the summary (#412).
         raise ConfigError('delegations.capacity: needs [report] issue, where the supervisor '
                           'writes `/devloop capacity`')
+    if delegations.merge and not review_policy.advisory_reviewer:
+        # A delegated merge needs the advisory review of the head it merges (#486).
+        raise ConfigError('delegations.merge: needs review_policy.advisory_reviewer: a delegated '
+                          'merge needs an advisory review of the head, `ok` or `dubbi`')
     merge = parse_merge(data.get('merge', {}), supervisor)
     if 'repo' not in data:
         # The installation has none since ADR 0006, R6: the managed repository is the project's.
@@ -1915,7 +1939,8 @@ OVERLAY_KEYS = {
     'prompts': _PROMPTS_KEYS,
     'delegations': dict.fromkeys(('retry_own_prs', 'rounds', 'budget', 'max_rounds_per_pr',
                                   'max_grants_per_day', 'capacity', 'capacity_max_open_prs',
-                                  'capacity_max_parked_prs', 'capacity_max_hours')),
+                                  'capacity_max_parked_prs', 'capacity_max_hours', 'merge',
+                                  'max_merges_per_day', 'merge_trust_paths')),
     # Every key of [budget] (#365) is checked by ``parse_budget``, a token cap with its message.
     'budget': {'*': None},
 }

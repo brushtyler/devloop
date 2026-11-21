@@ -152,9 +152,19 @@ false, default false, #412) lets the supervisor set a
 `capacity_max_open_prs` (default 6), `capacity_max_parked_prs` (default 6) and
 `capacity_max_hours` (default 24) may only lower the caps of the code, `MAX_CAPACITY` and
 `MAX_CAPACITY_HOURS` in `devloop/supervision.py`. `max_parallel_actions` is not delegated: it
-applies only at a restart. A value that is not a whole number from 0 (from 1 for the `capacity_`
-keys) to its cap, a `rounds`, `retry_own_prs`, `budget` or `capacity` that is not a boolean,
-`capacity` on without `[report] issue`, or an unknown key, stops devloop at startup.
+applies only at a restart. `merge` (true or false, default false, #486) lets the supervisor
+[merge a PR whose merge is the operator's](guide.md#delegated-merge) with `/devloop merge <sha>
+<reason>`, when every condition of the delegation holds; it needs
+`review_policy.advisory_reviewer`. `max_merges_per_day` (default 5) may only lower the cap of the
+code, `MAX_DELEGATED_MERGES` in `devloop/supervision.py`: a cap of its own, outside
+`max_grants_per_day`, that `/devloop merge-budget` of a trusted user on `[report] issue` raises
+for one UTC day. `merge_trust_paths` (a list of paths, files or directories ending in `/`,
+default empty) may only add to the trust rule of the code, `TRUST_RULE_PATHS` in
+`devloop/supervision.py`, whose paths a delegated merge never touches. A value that is not a
+whole number from 0 (from 1 for the `capacity_` keys) to its cap, a `rounds`, `retry_own_prs`,
+`budget`, `capacity` or `merge` that is not a boolean, a `merge_trust_paths` that is not a list
+of paths, `capacity` on without `[report] issue`, `merge` on without
+`review_policy.advisory_reviewer`, or an unknown key, stops devloop at startup.
 `[review_policy]` sets the
 [review level](#review-level-and-policy-receipt): `default_level` (1 or 2, default 1), the level
 `label` (default `reviews:2`), `sensitive_paths` and `sensitive_path_lists`; changing any of them,
