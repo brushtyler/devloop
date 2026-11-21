@@ -11,6 +11,7 @@ the place of a missing reviewer.
 
 import dataclasses
 import tempfile
+import tomllib
 import unittest
 from unittest import mock
 
@@ -136,6 +137,78 @@ class SelectionTests(unittest.TestCase):
 
     def test_off(self):
         self.assertEqual(self.make(OFF)._findings_reviewers(change(OFF), level(2)), [])
+
+
+EXAMPLE_KEY = 'claude-findings'
+REFERENCE = ssdlc_project.ROOT / 'docs' / 'devloop' / 'reference.md'
+
+
+def uncommented_config():
+    """The text of ``devloop/config.toml`` with its commented example of the findings-only
+    reviewer uncommented (#512): the line of ``findings_reviewer`` and the table of its key,
+    up to the first line that is not a comment of it."""
+    lines = config.DEFAULT_CONFIG.read_text(encoding='utf-8').split('\n')
+    found = {'line': False, 'table': False}
+    for i, line in enumerate(lines):
+        if line.startswith('# findings_reviewer = '):
+            lines[i] = line[2:]
+            found['line'] = True
+        elif line == f'# [agents.{EXAMPLE_KEY}]':
+            found['table'] = True
+            for j in range(i, len(lines)):
+                if not lines[j].startswith('# '):
+                    break
+                lines[j] = lines[j][2:]
+    if not all(found.values()):
+        raise AssertionError(f'config.toml: the commented example is missing: {found}')
+    return '\n'.join(lines)
+
+
+def reference_example():
+    """The TOML block of the section "Findings-only reviewer" of ``reference.md``."""
+    text = REFERENCE.read_text(encoding='utf-8')
+    section = text[text.index('### Findings-only reviewer'):]
+    block = section[section.index('```toml\n') + len('```toml\n'):]
+    return tomllib.loads(block[:block.index('```')])
+
+
+class ExampleTests(unittest.TestCase):
+    """The examples of ``findings_reviewer`` in config.toml and reference.md (#512): since #499
+    claude-reviewer is in the pool, and an example naming it would stop devloop at startup."""
+
+    def check(self, cfg):
+        self.assertEqual(cfg.review_policy.findings_reviewer, EXAMPLE_KEY)
+        self.assertNotIn(EXAMPLE_KEY, cfg.reviewers)
+        self.assertIn(KEY, cfg.reviewers)
+        self.assertEqual(cfg.implementer, 'claude-implementer')
+        self.assertNotEqual(cfg.agent(EXAMPLE_KEY).model, cfg.agent(cfg.implementer).model)
+        # It reviews a level 2 round of claude-implementer besides the quorum.
+        d = dispatcher(cfg, FakeGH(), FakeWS(), FakeRunner(), lambda _: None)
+        self.assertEqual(d._findings_reviewers(change(cfg), level(2)), [EXAMPLE_KEY])
+
+    def test_the_config_example_uncommented_is_accepted(self):
+        raw = config._merge(tomllib.loads(uncommented_config()),
+                            {**ssdlc_project.identity(), **ssdlc_project.project()})
+        # Its own app, in the overlay as the comment says: [apps.claude] is claude-reviewer's.
+        app = {'apps': {EXAMPLE_KEY: {'app_id': 1234567, 'slug': f'x-{EXAMPLE_KEY}'}}}
+        with self.assertRaises(ConfigError) as ctx:
+            config.parse_config(raw, config.INSTALL_ROOT)
+        self.assertIn(f'no [apps.{EXAMPLE_KEY}] table', str(ctx.exception))
+        self.check(config.parse_config(config.apply_overlay(raw, app), config.INSTALL_ROOT))
+
+    def test_the_reference_example_is_accepted_in_the_overlay(self):
+        example = reference_example()
+        self.assertEqual(example['review_policy']['findings_reviewer'], EXAMPLE_KEY)
+        raw = config.apply_overlay(ssdlc_project.by_role(), example)
+        self.check(config.parse_config(raw, config.INSTALL_ROOT))
+
+    def test_no_example_names_a_key_of_the_pool(self):
+        pool = ssdlc_project.load_by_role().reviewers
+        for where, text in (('config.toml', config.DEFAULT_CONFIG.read_text(encoding='utf-8')),
+                            ('reference.md', REFERENCE.read_text(encoding='utf-8'))):
+            for key in pool:
+                with self.subTest(where=where, key=key):
+                    self.assertNotIn(f'findings_reviewer = "{key}"', text)
 
 
 def dispatcher(cfg, gh, ws, runner, log):

@@ -124,12 +124,16 @@ advisory_reviewer = ""
 # The findings-only reviewer of ADR 0005, D8, integration of 2026-11-19 (issue #416), off by
 # default (D10): turning it on is the operator's decision. At level 2, on a PR whose implementer
 # signs with the implementer app and is the same agent, this reviewer key, outside
-# roles.reviewers and with another model (claude-reviewer with Sonnet beside claude-implementer
-# with Opus), reviews each round besides the quorum. Its findings join the round in progress
-# and go to the fix; the reviewers of the quorum close them. Its approval never counts for the
-# quorum, it never takes the place of a missing reviewer, and it is not part of the policy
-# version.
-# findings_reviewer = "claude-reviewer"
+# roles.reviewers and with another model than the implementer's, reviews each round besides the
+# quorum. Its findings join the round in progress and go to the fix; the reviewers of the quorum
+# close them. Its approval never counts for the quorum, it never takes the place of a missing
+# reviewer, and it is not part of the policy version. Since #499 claude-reviewer is in the pool,
+# and a key of the pool stops devloop at startup here: the findings-only reviewer takes one more
+# key, outside the pool and without a role in its name (a key with a role names agent and role in
+# full, and claude-reviewer is taken), such as claude-findings with Sonnet beside
+# claude-implementer with Opus and its own app: its commented table follows
+# [agents.claude-reviewer].
+# findings_reviewer = "claude-findings"
 # The reviewer rules of ADR 0005, P5-5 (issue #409), off by default (D10): turning them on is the
 # operator's decision, best with no PR close to its merge (the policy version changes). On, every
 # agent and every fallback model declares its `provider` (checked against the prefix of the
@@ -496,6 +500,24 @@ review_args = ["--allowedTools", "Bash(git diff *)", "Bash(git log *)", "Bash(gi
                "Bash(PYTHONPATH=tests python3 -m unittest tests.*)",
                "--disallowedTools", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]
 
+# The findings-only reviewer of review_policy.findings_reviewer (issue #416), off by default: a
+# key outside roles.reviewers, claude with another model than the implementer's. Each app
+# belongs to one actor, and [apps.claude] is claude-reviewer's: it signs with an app of its own,
+# [apps.claude-findings] in the local overlay (#512). With the line of findings_reviewer,
+# turning it on is the operator's decision.
+# [agents.claude-findings]
+# kind = "claude"
+# app = "claude-findings"
+# provider = "anthropic"
+# display_name = "Claude Code"
+# model = "claude-sonnet-5-5"
+# model_label = "Claude Sonnet 5.5"
+# effort = "high"
+# review_args = ["--allowedTools", "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)",
+#                "Bash(python3 -m unittest tests.*)",
+#                "Bash(PYTHONPATH=tests python3 -m unittest tests.*)",
+#                "--disallowedTools", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]
+
 # GitHub Apps (issue #65): one per agent, one for the dispatcher, one for merges (#201), one
 # for the supervisor (#408) and one for the implementers (#407). An agent signs with the table
 # of its key, or with the one it declares with `app`. App
@@ -512,6 +534,8 @@ review_args = ["--allowedTools", "Bash(git diff *)", "Bash(git log *)", "Bash(gi
 # slug = "<prefix>dispatcher"
 # [apps.claude], [apps.codex], [apps.agy]: the agents' apps, which `devloop token`
 #   (scripts/agent-token.py) exposes.
+# [apps.claude-findings]: the app of the findings-only reviewer (issue #512), only when the
+#   overlay turns it on, with the permissions of the agents' apps.
 # [apps.merger]: the app that merges in "strict" and "auto" mode (issue #201), with contents:
 #   write and pull_requests: write. It does nothing else, and `devloop token` does not expose it.
 #   Without it, merges use the local `gh` login.
